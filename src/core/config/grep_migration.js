@@ -5,7 +5,7 @@ import fs from 'node:fs/promises'
 import { getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { withFileLock } from '../util/file_lock.js'
-import { configRecordsPickAnswer, loadConfigFile, prepareLocalConfigWrite } from './schema.js'
+import { configRecordsPickAnswer, isForgedGrepOnlyConfig, loadConfigFile, prepareLocalConfigWrite } from './schema.js'
 
 /**
  * @import { LoadConfigResult } from '../../../src/core/config/types.js'
@@ -97,13 +97,24 @@ export async function loadClientConfigLayers({ configPath, centralConfigPath, mi
  * nothing else). Both seed onboarding from detection today, and a written
  * `plugins` array is indistinguishable from a completed picker run.
  *
+ * A third shape joined them: a local config that is exactly
+ * `{ version, plugins: [] }`. It records an answer, but appending the
+ * compatibility entry to it would mint the very document the readers
+ * classify as forged residue (LLP 0426), so that one append also stays in
+ * memory and the emptied config keeps recording its answer.
+ *
  * @ref LLP 0418#no-forged-answer [implements]: a missing local layer is answer-less in the same way an answer-less one is
  * @ref LLP 0277#answer-less [constrained-by]: the `plugins` key is the pick-answer discriminator this predicate reuses
+ * @ref LLP 0426#no-minting [implements]: the persist lane declines the one write whose output would match the forged shape
  * @param {LoadConfigResult | null} local
  * @returns {boolean}
  */
 function forgesPickAnswer(local) {
-  return !local?.ok || !configRecordsPickAnswer(local.config)
+  if (!local?.ok || !configRecordsPickAnswer(local.config)) return true
+  return isForgedGrepOnlyConfig({
+    ...local.config,
+    plugins: [...(local.config.plugins ?? []), { name: GREP }],
+  })
 }
 
 /** @param {{ local: LoadConfigResult | null, central: LoadConfigResult | null }} layers */

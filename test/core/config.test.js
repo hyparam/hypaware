@@ -4,8 +4,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  configRecordsPickAnswer,
   createConfigRegistry,
   defaultConfigPath,
+  isForgedGrepOnlyConfig,
   parseConfigShape,
 } from '../../src/core/config/schema.js'
 import {
@@ -778,4 +780,33 @@ test('diagnoseV1Config treats ChatGPT as a valid Codex upstream', async () => {
     diagnostics.some((diagnostic) => diagnostic.kind === 'gateway_missing_openai_upstream'),
     false
   )
+})
+
+// The forged-shape predicate is exported, so it must match exactly what its
+// JSDoc and LLP 0426 document even though every current caller pre-filters
+// on `version === 2`: the next caller inherits the predicate, not the
+// callers' filters.
+// @ref LLP 0426#forged-shape [tests]: the match requires version: 2; a version-less or v1 document is not the migration's write
+test('isForgedGrepOnlyConfig requires the version: 2 it documents', () => {
+  assert.equal(isForgedGrepOnlyConfig(/** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/grep' }] })), true)
+  assert.equal(isForgedGrepOnlyConfig(/** @type {any} */ ({ version: 1, plugins: [{ name: '@hypaware/grep' }] })), false)
+  assert.equal(isForgedGrepOnlyConfig(/** @type {any} */ ({ plugins: [{ name: '@hypaware/grep' }] })), false)
+})
+
+// One document, one classification: the status reader asks over
+// `parseConfigShape` output, the pick lane over a raw `JSON.parse` of the
+// same file, and the predicate must answer the same for both shapes.
+// @ref LLP 0426#consequences [tests]: entry keys the parser drops do not defeat the match and parser-kept decorations do, over the raw and parsed document alike
+test('configRecordsPickAnswer classifies the raw and parsed forms of a document identically', () => {
+  const twin = { version: 2, plugins: [{ name: '@hypaware/grep', note: 'mine' }] }
+  const parsedTwin = parseConfigShape(twin)
+  assert.equal(parsedTwin.ok, true)
+  assert.equal(configRecordsPickAnswer(/** @type {any} */ (twin)), false, 'raw near-twin')
+  assert.equal(parsedTwin.ok && configRecordsPickAnswer(parsedTwin.config), false, 'parsed near-twin')
+
+  const decorated = { version: 2, plugins: [{ name: '@hypaware/grep', enabled: false }] }
+  const parsedDecorated = parseConfigShape(decorated)
+  assert.equal(parsedDecorated.ok, true)
+  assert.equal(configRecordsPickAnswer(/** @type {any} */ (decorated)), true, 'raw decorated entry')
+  assert.equal(parsedDecorated.ok && configRecordsPickAnswer(parsedDecorated.config), true, 'parsed decorated entry')
 })

@@ -1592,3 +1592,52 @@ test('runWizardPick: plugins: [] is an answer - detection does not re-seed an em
   assert.notEqual(claudeRow.checked, true)
   assert.match(claudeRow.label, /detected/)
 })
+
+// The forged grep-only document (issue #1892) and its hand-authored
+// near-twin classify answer-less in this lane exactly as they do in
+// `collectHypAwareStatus`, even though this lane reads a raw `JSON.parse`
+// while status reads `parseConfigShape` output: the predicate ignores entry
+// keys the parser drops, so one document gets one classification and the
+// first picker seeds from detection instead of opening every detected row
+// unchecked (the LLP 0277 symptom the carve-out removes).
+// @ref LLP 0426#consequences [tests]: a parser-dropped entry key does not defeat the carve-out, so the raw-reading pick lane agrees with the status reader
+test('runWizardPick: the forged document and its parser-dropped-key near-twin seed from detection', async () => {
+  const docs = [
+    { version: 2, plugins: [{ name: '@hypaware/grep' }] },
+    { version: 2, plugins: [{ name: '@hypaware/grep', note: 'mine' }] },
+  ]
+  for (const doc of docs) {
+    const tmp = await mkTmp()
+    const catalog = await realCatalog()
+    await seedLocalConfig(tmp, doc)
+    const { prompt, state } = capturingPrompt(['claude'])
+    await runWizardPick(/** @type {any} */ ({
+      stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+      detect: async () => new Set(['claude', 'codex']),
+      confirmOverwrite: async () => true,
+    }))
+    const checked = state.question.options
+      .filter((/** @type {any} */ o) => o.checked)
+      .map((/** @type {any} */ o) => o.value)
+      .sort()
+    assert.deepEqual(checked, ['claude', 'codex'], JSON.stringify(doc))
+  }
+})
+
+// A decoration the parser keeps (`enabled`) defeats the carve-out in this
+// lane just as it does at the status reader: the document records an answer,
+// so detection labels but does not re-check (LLP 0183).
+test('runWizardPick: a decorated grep entry still reads as a recorded answer', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, { version: 2, plugins: [{ name: '@hypaware/grep', enabled: false }] })
+  const { prompt, state } = capturingPrompt(['claude'])
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(['claude']),
+    confirmOverwrite: async () => true,
+  }))
+  const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
+  assert.notEqual(claudeRow.checked, true)
+  assert.match(claudeRow.label, /detected/)
+})

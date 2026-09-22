@@ -141,6 +141,69 @@ test('an enrolled machine that never picked keeps no pick answer and seeds init 
   assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'codex'])
 })
 
+// The population the pre-fix central-only lane left behind (issue #1892): the
+// machine already holds the document that lane wrote, so `needsGrep` is false
+// and the migration never looks at it again. The heal is at the readers: the
+// exact forged document is classified answer-less (LLP 0426), so status stops
+// calling the machine a returning install and its first `hyp init` seeds the
+// picker from detection. Nothing rewrites the file; the user's own confirmed
+// init replaces it, with the usual backup.
+// @ref LLP 0426#forged-shape [tests]: a machine the v1.36.0 lane forged reads as never-picked, with the file untouched
+test('a machine holding the forged grep-only config records no pick answer and seeds init from detection', async (t) => {
+  const f = await fixture(t)
+  // Byte-identical to the pre-fix lane's write: JSON.stringify(raw, null, 2)
+  // plus a trailing newline, mode 0o600 (`git show d6ca7749`, the v1.36.0
+  // publish commit).
+  await fs.writeFile(f.configPath,
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/grep' }] }, null, 2) + '\n',
+    { mode: 0o600 })
+  await f.central({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://example.invalid', identity: {} } } },
+  })
+  const before = await fs.readFile(f.configPath, 'utf8')
+
+  const resolved = await resolveLayeredConfigForDaemon(f)
+  assert.equal(resolved.effective?.plugins?.some((p) => p.name === grep.name), true, 'search stays active')
+  assert.equal(await fs.readFile(f.configPath, 'utf8'), before, 'boot rewrites nothing')
+
+  const report = await collectHypAwareStatus({ env: f.env })
+  assert.equal(report.layered?.hasCentral, true, 'enrolled')
+  assert.equal(report.configRecordsAnswer, false, 'the forged document is not an answer')
+
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt(['claude', 'codex'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), catalog, prompt,
+    env: { ...f.env, HOME: f.hypHome, HYP_NO_TUI: '1' },
+    detect: async () => new Set(['claude', 'codex']),
+    confirmOverwrite: async () => true,
+  }))
+  const checked = state.question.options
+    .filter((/** @type {any} */ o) => o.checked)
+    .map((/** @type {any} */ o) => o.value)
+  assert.deepEqual(checked.sort(), ['claude', 'codex'], 'detection seeds the picker, not the forged config')
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'codex'])
+})
+
+// Appending grep to a config that is exactly `{ version, plugins: [] }` would
+// mint the same document the pre-fix lane forged, which the readers classify
+// as answer-less, so the persist lane declines and the entry stays in memory.
+// A deliberately emptied install keeps its recorded answer that way.
+// @ref LLP 0426#no-minting [tests]: the migration never writes a document matching the forged shape
+test('the migration does not mint the forged shape from an emptied config', async (t) => {
+  const f = await fixture(t)
+  await f.local({ version: 2, plugins: [] })
+  await f.central({ version: 2, plugins: [] })
+  const before = await fs.readFile(f.configPath, 'utf8')
+  const result = await f.migrate()
+  assert.deepEqual(result.local?.ok && result.local.config.plugins, [grep], 'search still applies in memory')
+  assert.equal(await fs.readFile(f.configPath, 'utf8'), before, 'the file keeps recording its emptied answer')
+  assert.equal((await fs.readdir(f.hypHome)).some((name) => name.includes('.bak-')), false)
+  assert.equal(configRecordsPickAnswer(JSON.parse(before)), true)
+})
+
 test('existing enabled and disabled entries in either layer are untouched', async (t) => {
   for (const layer of ['local', 'central']) {
     for (const enabled of [true, false]) {
@@ -159,7 +222,9 @@ test('existing enabled and disabled entries in either layer are untouched', asyn
 
 test('read-only config retains search without modifying disk or making backups', async (t) => {
   const f = await fixture(t)
-  await f.local({ version: 2, plugins: [] })
+  // `auto_update` keeps the fixture on the persist lane (LLP 0426 #no-minting
+  // would otherwise keep the entry in memory before the write is attempted).
+  await f.local({ version: 2, plugins: [], auto_update: false })
   await fs.chmod(f.configPath, 0o400)
   t.after(() => fs.chmod(f.configPath, 0o600).catch(() => {}))
   const before = await fs.readFile(f.configPath, 'utf8')
@@ -199,7 +264,7 @@ test('an answer-less config keeps search without gaining a pick answer', async (
 
 test('concurrent migrations produce one entry and one backup', async (t) => {
   const f = await fixture(t)
-  await f.local({ version: 2, plugins: [] })
+  await f.local({ version: 2, plugins: [], auto_update: false })
   await Promise.all(Array.from({ length: 6 }, () => loadClientConfigLayers({
     configPath: f.configPath, centralConfigPath: null, migrateGrep: true,
   })))
@@ -209,7 +274,7 @@ test('concurrent migrations produce one entry and one backup', async (t) => {
 
 test('a disable written while migration waits for the lock wins', { timeout: 5000 }, async (t) => {
   const f = await fixture(t)
-  await f.local({ version: 2, plugins: [] })
+  await f.local({ version: 2, plugins: [], auto_update: false })
   // Hold the real migration lock until a second process-equivalent reader
   // has read the old file and tried to acquire it.
   const waiting = Promise.withResolvers()
