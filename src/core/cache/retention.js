@@ -113,9 +113,14 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
   }
 
   /**
-   * Both whole-directory paths below remove the one thing that can ever reach
-   * this partition's cleanup journal again, so they drop it in the same
-   * critical section. A failure here is not the eviction's failure: the rows
+   * Both whole-directory paths below destroy every generation this
+   * partition's cleanup journal names, so they drop it in the same critical
+   * section. They are not the only sites where a partition directory stops
+   * existing - `migrate.js`'s `retirePartition` renames one aside, keeping
+   * its generations - only the sites where the rows go with it. Everything
+   * else is `sweepEvictedCacheCleanups`'s to reclaim.
+   *
+   * A failure here is not the eviction's failure: the rows
    * are already gone and the journal now names nothing, so it is left for
    * `sweepEvictedCacheCleanups` to take on a later maintenance tick rather
    * than turned into a retention error that would retry the removal forever.

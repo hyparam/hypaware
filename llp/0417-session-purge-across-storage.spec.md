@@ -237,10 +237,14 @@ directory is absent. Both are needed: the eviction is the only moment a
 leaked journal can be told from a live one, because a partition recreated at
 the same path hashes to the same cleanup id and its fresh generation carries
 a name the old journal already lists; the sweep is what reclaims the journals
-an earlier release or an interrupted eviction left behind. An invalid journal blocks that partition's
-maintenance, its compaction and snapshot expiry included, but not admission:
-the next purge of that partition rebuilds the journal from the partition's own
-generations, restarting its grace, rather than failing every later purge of it.
+an earlier release, a migration that renamed a partition aside, or an
+interrupted eviction left behind. A job reclaimed either way then reports
+`unverified` rather than `completed`, which is what is true of it: the
+partition that would certify the reclamation is no longer there to ask.
+An invalid journal blocks that partition's maintenance, its
+compaction and snapshot expiry included, but not admission: the next purge of
+that partition rebuilds the journal from the partition's own generations,
+restarting its grace, rather than failing every later purge of it.
 A journal whose bytes could not be fetched at all (an I/O or permission
 failure), as opposed to one whose content is unusable, is not rebuilt: it may
 still be readable later with its grace clock intact, so admission fails closed

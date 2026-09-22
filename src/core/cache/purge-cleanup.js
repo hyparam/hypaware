@@ -131,8 +131,11 @@ async function directoryPresent(directory) {
 
 /**
  * Drop the journal of a partition directory the caller is removing whole.
- * Caller owns the partition mutation lock and has already removed the
- * directory, so no writer can have recreated it underneath.
+ * Caller owns the partition mutation lock and has already removed every
+ * generation the journal names, which is what makes the drop safe rather
+ * than the directory's absence: a concurrent spool append recreates a bare
+ * partition directory under its own write lock, not this one, and brings no
+ * generation back with it.
  *
  * The retirement sweep reaches a journal only by walking its partition, so a
  * journal whose partition retention evicted is otherwise never visited again.
@@ -159,11 +162,13 @@ export async function discardCacheCleanup(cacheRoot, partitionDir) {
 export async function sweepEvictedCacheCleanups(cacheRoot) {
   /** @type {string[]} */
   let names
+  // Fail soft the way `walkForRetired` does: reclamation is best effort, and
+  // an unreadable journal store must not take the rest of the tick's
+  // compaction and retirement work with it.
   try {
     names = await fs.readdir(path.join(cacheRoot, '.purge-cleanup'))
-  } catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return
-    throw error
+  } catch {
+    return
   }
   for (const name of names) {
     if (!name.endsWith('.json')) continue
@@ -175,16 +180,18 @@ export async function sweepEvictedCacheCleanups(cacheRoot) {
     const job = await readCacheCleanup(cacheRoot, id).catch(() => null)
     if (!job) continue
     const partitionDir = path.join(cacheRoot, job.partition)
-    if (await directoryPresent(partitionDir)) continue
     try {
+      if (await directoryPresent(partitionDir)) continue
       await withPartitionMutationLock(partitionDir, async () => {
-        // Re-checked under the lock a writer must hold to recreate the
-        // partition, so a journal admitted against a partition that came back
-        // between the two checks is never the one unlinked.
+        // Re-checked under the lock every admission holds (`purge.js` wraps
+        // `queueCacheCleanup` in it), so a journal admitted for a partition
+        // that came back between the two checks is never the one unlinked.
+        // Not the lock that creates the directory - a spool append makes a
+        // bare one without it - but the one that writes what is unlinked.
         if (await directoryPresent(partitionDir)) return
         await fs.rm(journalPath(cacheRoot, id), { force: true })
       })
-    } catch { /* A busy partition or a failed unlink retries on the next tick. */ }
+    } catch { /* A busy partition, an unreadable path or a failed unlink retries next tick. */ }
   }
 }
 
