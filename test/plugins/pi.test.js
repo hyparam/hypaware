@@ -487,6 +487,57 @@ test('Pi live positions agree with recovery when the session_tree snapshot lags 
   } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
 })
 
+test('Pi live positions agree with recovery when session_start reports a null leaf over a non-empty snapshot', async () => {
+  const originalFetch = globalThis.fetch
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return new Response('{}') }
+  const hooks = new Map()
+  const raw = copy()
+  raw.entries = []
+  /** @type {string | null} */
+  let head = null
+  // Resume with counted history while Pi transiently reports no leaf at all.
+  // Entries root at parentId null, so accepting that null would let the next
+  // walk run to the root and re-append the whole counted chain, shifted.
+  let leafNull = false
+  const byId = new Map()
+  const ctx = { mode: 'print', sessionManager: {
+    getEntries: () => raw.entries.slice(), getLeafId: () => leafNull ? null : head,
+    getEntry: id => byId.get(id), getHeader: () => raw.session, getSessionFile: () => '/session.jsonl',
+  } }
+  const append = (type = 'message') => {
+    const entry = { type, id: `live-${raw.entries.length}`, parentId: head, timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, raw.entries.length)).toISOString(), message: { role: 'user', content: 'text' } }
+    raw.entries.push(entry)
+    byId.set(entry.id, entry)
+    head = entry.id
+  }
+  try {
+    append()
+    append()
+    extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
+    leafNull = true
+    hooks.get('session_start')({}, ctx)
+    leafNull = false
+    append()
+    hooks.get('turn_end')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    await hooks.get('session_shutdown')({}, ctx)
+    const recoveredProjection = projectPiEntries(raw)
+    assert.ok(recoveredProjection)
+    const recovered = aiGatewayRowsFromProjectedExchange(recoveredProjection)
+    const byPart = new Map(recovered.map(row => [row.part_id, row.message_index]))
+    const live = sent.flatMap(batch => {
+      const projection = projectPiEntries(batch)
+      assert.ok(projection)
+      return aiGatewayRowsFromProjectedExchange(projection)
+    })
+    assert.ok(live.length >= 1)
+    for (const row of live) assert.equal(row.message_index, byPart.get(row.part_id))
+    assert.equal(new Set(live.map(row => row.message_index)).size, live.length)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+})
+
 test('Pi live positions survive a turn whose session file is transiently unavailable', async () => {
   const originalFetch = globalThis.fetch
   const sent = []

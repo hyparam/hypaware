@@ -122,9 +122,12 @@ export default function hypawarePi(pi) {
     // This snapshot is what gets counted, so `leaf` may only stop a later
     // walk at an entry it holds. Pi can name a navigation summary as the leaf
     // before its entry list is rebuilt to hold it, and stopping there would
-    // skip an entry nothing counted and shift every later position.
+    // skip an entry nothing counted and shift every later position. A null
+    // leaf over a non-empty snapshot is the same hazard: entries root at
+    // parentId null, so a later walk would stop at the root and re-append the
+    // whole counted chain. Only an empty snapshot may accept it.
     const head = ctx.sessionManager.getLeafId()
-    leaf = head == null || holdsEntry(entries, head) ? head : STALE_LEAF
+    leaf = (head == null && entries.length === 0) || holdsEntry(entries, head) ? head : STALE_LEAF
     if (entries.length > MAX_SESSION_ENTRIES || (deliver && entries.length < nextEntry)) {
       enabled = false
       lastStatus = 'session changed or exceeds entry limit; live capture disabled'
