@@ -599,6 +599,59 @@ test('Pi live positions agree with recovery when session_start reports a null le
   } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
 })
 
+test('Pi live capture refuses a snapshot tail that carries no id of its own', async () => {
+  const originalFetch = globalThis.fetch
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return new Response('{}') }
+  const hooks = new Map()
+  const raw = copy()
+  raw.entries = []
+  /** @type {string | null} */
+  let head = null
+  const byId = new Map()
+  // Pi's list ends in an entry with no id of its own, over a session whose
+  // root carries no parentId key at all. Accepting that tail as the
+  // checkpoint would leave `leaf` null or undefined, and a later walk reaches
+  // both at the root, reading as a successful walk over the counted prefix.
+  /** @type {any} */
+  let tail = { type: 'model_change', timestamp: new Date(Date.UTC(2026, 8, 17, 10, 1, 0)).toISOString() }
+  const ctx = { mode: 'print', sessionManager: {
+    getEntries: () => [...raw.entries, tail], getLeafId: () => head,
+    getEntry: id => byId.get(id), getHeader: () => raw.session, getSessionFile: () => '/session.jsonl',
+  } }
+  const append = () => {
+    /** @type {any} */
+    const entry = { type: 'message', id: `live-${raw.entries.length}`, timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, raw.entries.length)).toISOString(), message: { role: 'user', content: 'text' } }
+    if (head) entry.parentId = head
+    raw.entries.push(entry)
+    byId.set(entry.id, entry)
+    head = entry.id
+  }
+  try {
+    for (let i = 0; i < 4; i++) append()
+    extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
+    hooks.get('session_start')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    await hooks.get('session_shutdown')({}, ctx)
+    const delivered = sent.flatMap(batch => batch.entries.map(entry => entry?.id))
+    const counted = ['live-0', 'live-1', 'live-2', 'live-3']
+    assert.deepEqual(delivered.filter(id => counted.includes(id)), [], `counted prefix re-appended: ${delivered.join(',')}`)
+    const ids = delivered.filter(id => typeof id === 'string')
+    assert.equal(new Set(ids).size, ids.length)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+  // The same tail as a hole in the array is not an error the hook may throw
+  // into Pi: a snapshot it cannot check out reconciles on the next walk.
+  try {
+    tail = null
+    const restart = new Map()
+    extension({ on(name, fn) { restart.set(name, fn) }, registerCommand() {} })
+    restart.get('session_start')({}, ctx)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+})
+
 test('Pi live positions survive a turn whose session file is transiently unavailable', async () => {
   const originalFetch = globalThis.fetch
   const sent = []

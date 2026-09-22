@@ -7,6 +7,7 @@ const MAX_BYTES = 512 * 1024
 const QUEUE_BYTES = 4 * 1024 * 1024
 const MAX_ENTRIES = 4096
 const MAX_SESSION_ENTRIES = 100000
+const STALE_LEAF = Symbol('hypaware.pi-extension.stale-leaf')
 
 /** Pi supplies the API at runtime; no Pi runtime dependency is installed. @param {any} pi */
 export default function hypawarePi(pi) {
@@ -124,7 +125,11 @@ export default function hypawarePi(pi) {
     // and a reported null stops the next walk at the root and re-appends the
     // whole counted chain. The counted tail is an entry every later walk can
     // find, so a leaf that stays ahead costs deltas, not a snapshot per turn.
-    leaf = entries.length ? entries[entries.length - 1].id : null
+    // A tail carrying no id of its own is not a value a walk may stop at:
+    // null reaches the root and undefined reaches a root with no parentId
+    // key, and either one reads as a successful walk over a counted prefix.
+    const tail = entries.length ? entries[entries.length - 1]?.id : null
+    leaf = entries.length && typeof tail !== 'string' ? STALE_LEAF : tail
     if (entries.length > MAX_SESSION_ENTRIES || (deliver && entries.length < nextEntry)) {
       enabled = false
       lastStatus = 'session changed or exceeds entry limit; live capture disabled'
