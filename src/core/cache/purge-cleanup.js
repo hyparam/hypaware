@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { tryReadCursorSync } from './partition.js'
+import { tryReadCursorSync, withPartitionMutationLock } from './partition.js'
 
 /** @import { CachePurgeCleanupJob } from '../../../src/core/cache/types.js' */
 export const CACHE_PURGE_GRACE_MS = 24 * 60 * 60 * 1000
@@ -116,6 +116,76 @@ export async function finishCacheCleanup(cacheRoot, id) {
   if (!job) return
   if (await remainingGenerations(path.join(cacheRoot, job.partition), job.generations)) return
   await fs.rm(journalPath(cacheRoot, id), { force: true })
+}
+
+/** @param {string} directory */
+async function directoryPresent(directory) {
+  try {
+    await fs.lstat(directory)
+    return true
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+/**
+ * Drop the journal of a partition directory the caller is removing whole.
+ * Caller owns the partition mutation lock and has already removed the
+ * directory, so no writer can have recreated it underneath.
+ *
+ * The retirement sweep reaches a journal only by walking its partition, so a
+ * journal whose partition retention evicted is otherwise never visited again.
+ * It does not merely leak: a partition recreated at the same path hashes to
+ * the same cleanup id, and a fresh source-table generation is named `table`,
+ * a name the old journal already lists, so the successor is forced through a
+ * full-generation rewrite for a purge with no rows left to reach. Once the
+ * partition is back, nothing in a journal tells it apart from one the
+ * successor admitted itself, so the eviction is where the two are told apart.
+ * @ref LLP 0417#cache-reclamation [implements]: a journal names outstanding work, and an evicted partition has none
+ * @param {string} cacheRoot @param {string} partitionDir
+ */
+export async function discardCacheCleanup(cacheRoot, partitionDir) {
+  await fs.rm(journalPath(cacheRoot, cacheCleanupId(cacheRoot, partitionDir)), { force: true })
+}
+
+/**
+ * Sweep journals whose partition directory is absent: the recovery half of
+ * {@link discardCacheCleanup}, covering journals left behind by releases that
+ * evicted without dropping them and by an eviction that failed or crashed
+ * between the directory removal and the unlink.
+ * @param {string} cacheRoot
+ */
+export async function sweepEvictedCacheCleanups(cacheRoot) {
+  /** @type {string[]} */
+  let names
+  try {
+    names = await fs.readdir(path.join(cacheRoot, '.purge-cleanup'))
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return
+    throw error
+  }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const id = name.slice(0, -'.json'.length)
+    if (!/^[a-f0-9]{64}$/.test(id)) continue
+    // Bytes that cannot be read, or that fail the shape check, keep the
+    // journal: its partition path is exactly what is not trustworthy here,
+    // and rebuilding a corrupt journal is the next purge's job.
+    const job = await readCacheCleanup(cacheRoot, id).catch(() => null)
+    if (!job) continue
+    const partitionDir = path.join(cacheRoot, job.partition)
+    if (await directoryPresent(partitionDir)) continue
+    try {
+      await withPartitionMutationLock(partitionDir, async () => {
+        // Re-checked under the lock a writer must hold to recreate the
+        // partition, so a journal admitted against a partition that came back
+        // between the two checks is never the one unlinked.
+        if (await directoryPresent(partitionDir)) return
+        await fs.rm(journalPath(cacheRoot, id), { force: true })
+      })
+    } catch { /* A busy partition or a failed unlink retries on the next tick. */ }
+  }
 }
 
 /**

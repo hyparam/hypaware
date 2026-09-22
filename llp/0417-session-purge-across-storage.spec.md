@@ -230,7 +230,14 @@ later sweep removes it under the partition mutation lock, so the journal
 directory stays proportional to outstanding cleanups rather than to the
 number of partitions ever purged. The sweep that reclaims the last named
 generation still leaves the journal behind, so a status check taken right
-after it certifies completion. An invalid journal blocks that partition's
+after it certifies completion. Retention evicting a whole partition also
+finishes its journal, dropping it in the same locked section that removes the
+directory, and maintenance separately sweeps journals whose partition
+directory is absent. Both are needed: the eviction is the only moment a
+leaked journal can be told from a live one, because a partition recreated at
+the same path hashes to the same cleanup id and its fresh generation carries
+a name the old journal already lists; the sweep is what reclaims the journals
+an earlier release or an interrupted eviction left behind. An invalid journal blocks that partition's
 maintenance, its compaction and snapshot expiry included, but not admission:
 the next purge of that partition rebuilds the journal from the partition's own
 generations, restarting its grace, rather than failing every later purge of it.

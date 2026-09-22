@@ -16,6 +16,7 @@ import { cacheCleanupId, cachePurgeCleanupStatus, CACHE_PURGE_GRACE_MS, queueCac
 import { appendRowsToTable, deleteMatchingRows, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { writeCursor, withPartitionMutationLock } from '../../src/core/cache/partition.js'
+import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
@@ -498,4 +499,63 @@ test('a journal that cannot be read at all fails admission closed instead of bei
   assert.equal(await queueCacheCleanup(cacheRoot, partition), id)
   assert.equal(/** @type {CachePurgeCleanupJob} */ (await readCacheCleanup(cacheRoot, id)).requestedAt, admitted,
     'the grace clock of the work that was already admitted survives')
+})
+
+test('a retention-evicted partition leaves no journal to rewrite its successor', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-evicted-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [
+    { session_id: 'target', org: 'a', body: 'synthetic sensitive' },
+    { session_id: 'keep', org: 'a', body: 'surviving neighbor' },
+  ])
+  await storage.flushTable(partition, { force: true })
+  const purged = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })
+  const id = /** @type {string} */ (purged.cacheCleanup?.[0])
+  assert.ok(await readCacheCleanup(cacheRoot, id), 'the purge admitted a journal')
+
+  // Retention removes the whole partition directory, so nothing that walks a
+  // partition can reach this journal again.
+  const evicted = await createRetentionEnforcer({ cacheRoot, config: { default_days: 1 } })
+    .tick({ now: new Date(Date.now() + 400 * 24 * 60 * 60 * 1000) })
+  assert.equal(evicted.sourceTableResults.length, 1)
+  await assert.rejects(fs.stat(partition), { code: 'ENOENT' }, 'retention evicted the partition')
+  assert.equal(await readCacheCleanup(cacheRoot, id), null, 'the journal went with its partition')
+
+  // The source writes again at the same path: same cleanup id, and a fresh
+  // source-table generation is named `table`, which the old journal listed.
+  await storage.appendRows(partition, columns, [{ session_id: 'fresh', org: 'a', body: 'after eviction' }])
+  await storage.flushTable(partition, { force: true })
+  assert.equal(cacheCleanupId(cacheRoot, partition), id, 'the recreated partition hashes to the same id')
+  const live = resolveIcebergDir(partition)
+  const maintained = await maintainCache({ cacheRoot })
+  assert.equal(maintained.totalFailed, 0, JSON.stringify(maintained))
+  assert.equal(maintained.totalCompacted, 0, 'nobody purged this partition, so nothing forces a rewrite')
+  assert.equal(resolveIcebergDir(partition), live, 'the live generation is untouched')
+  assert.deepEqual((await rows(live)).map(row => row.session_id), ['fresh'])
+})
+
+test('maintenance sweeps a journal whose partition directory is gone', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-orphan-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [{ session_id: 'target', org: 'a', body: 'synthetic sensitive' }])
+  await storage.flushTable(partition, { force: true })
+  const id = await queueCacheCleanup(cacheRoot, partition)
+  const journal = path.join(cacheRoot, '.purge-cleanup', `${id}.json`)
+  // Whatever removed the directory - an eviction that crashed before it got
+  // to the journal, an older release, an operator - the journal is now
+  // unreachable by any walk of `datasets/`.
+  await fs.rm(partition, { recursive: true, force: true })
+  await maintainCache({ cacheRoot })
+  await assert.rejects(fs.stat(journal), { code: 'ENOENT' }, 'the orphaned journal is swept')
+
+  // A journal whose partition is still there is outstanding work and stays.
+  await storage.appendRows(partition, columns, [{ session_id: 'target', org: 'a', body: 'again' }])
+  await storage.flushTable(partition, { force: true })
+  assert.equal(await queueCacheCleanup(cacheRoot, partition), id)
+  await maintainCache({ cacheRoot })
+  assert.ok(await readCacheCleanup(cacheRoot, id), 'a live partition keeps its journal')
 })
