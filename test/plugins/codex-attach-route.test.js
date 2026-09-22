@@ -58,12 +58,63 @@ for (const authFile of [
 }
 
 /**
+ * Issue #2072: `--dry-run` exists to tell an operator what a real attach would
+ * do, so its `changed` has to come from the install and not from a constant.
+ * The pin is the pair: the planned answer equals the applied one, and the plan
+ * leaves the disk as it found it.
+ */
+test('a gateway dry-run reports the changed a real attach would, and writes nothing', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-codex-dryrun-'))
+  try {
+    const codexHome = path.join(home, '.codex')
+    await fs.mkdir(codexHome, { recursive: true })
+
+    const planned = JSON.parse((await runAttach(home, { dryRun: true, json: true })).stdout)
+    // Side-effect free: the plan neither created config.toml nor left a temp
+    // file from the atomic write behind.
+    assert.deepEqual(await fs.readdir(codexHome), [])
+
+    const applied = JSON.parse((await runAttach(home, { json: true })).stdout)
+    assert.equal(applied.changed, true, 'a real attach on an unattached install changes it')
+    assert.equal(planned.changed, applied.changed)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The same pin on an install that already carries a `model_provider` of its
+ * own, where a stray write would destroy the user's setting rather than just
+ * create a file.
+ */
+test('a gateway dry-run leaves an existing config.toml byte-identical', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-codex-dryrun-'))
+  try {
+    const codexHome = path.join(home, '.codex')
+    await fs.mkdir(codexHome, { recursive: true })
+    const configPath = path.join(codexHome, 'config.toml')
+    const before = 'model_provider = "openai"\n'
+    await fs.writeFile(configPath, before)
+
+    const planned = JSON.parse((await runAttach(home, { dryRun: true, json: true })).stdout)
+    assert.equal(await fs.readFile(configPath, 'utf8'), before)
+    assert.deepEqual(await fs.readdir(codexHome), ['config.toml'])
+
+    const applied = JSON.parse((await runAttach(home, { json: true })).stdout)
+    assert.equal(planned.changed, applied.changed)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/**
  * Run the codex adapter's real registered `attach()` against a staged HOME.
  *
  * @param {string} home
+ * @param {{ dryRun?: boolean, json?: boolean }} [opts]
  * @returns {Promise<{ config: string, stdout: string }>}
  */
-async function runAttach(home) {
+async function runAttach(home, opts = {}) {
   const state = createGatewayState()
   const api = createAiGatewayApi(state)
   await activateCodex(stubContext(api, home))
@@ -73,9 +124,13 @@ async function runAttach(home) {
   let stdout = ''
   await client.attach(/** @type {any} */ ({
     endpoint: 'http://127.0.0.1:4388',
+    dryRun: opts.dryRun === true,
+    json: opts.json === true,
     stdout: { write: (/** @type {string} */ chunk) => { stdout += chunk } },
   }))
-  const config = await fs.readFile(path.join(home, '.codex', 'config.toml'), 'utf8')
+  const config = await fs
+    .readFile(path.join(home, '.codex', 'config.toml'), 'utf8')
+    .catch(() => '')
   return { config, stdout }
 }
 

@@ -201,10 +201,27 @@ export async function activate(ctx) {
         },
         async (span) => {
           if (attachCtx.dryRun) {
+            const port = safeEndpointPort(attachCtx.endpoint)
+            // Plan against the install on disk instead of answering from a
+            // constant: `--dry-run` is the surface an operator reads to learn
+            // whether a real attach would change this config. With no
+            // resolvable endpoint there is no attach to plan.
+            let route
+            /** @type {{ changed: boolean }} */
+            let planned = { changed: false }
+            if (port !== undefined) {
+              route = codexProviderRoute(port)
+              planned = await attach({
+                port,
+                version: ctx.plugin.version,
+                configPath,
+                baseUrl: route.baseUrl,
+                providerName: route.providerName,
+                dryRun: true,
+              })
+            }
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            const port = safeEndpointPort(attachCtx.endpoint)
-            const route = port === undefined ? undefined : codexProviderRoute(port)
             writeAttachOutput(attachCtx, {
               status: 'ok',
               client: CLIENT_NAME,
@@ -212,7 +229,7 @@ export async function activate(ctx) {
               configPath,
               port,
               baseUrl: route?.baseUrl,
-              changed: false,
+              changed: planned.changed,
             })
             return
           }
