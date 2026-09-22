@@ -684,7 +684,10 @@ function firstPartyClientDescriptors() {
         settings_file: '.codex/config.toml',
         marker_header: '[model_providers.hypaware]',
       },
-      requiredUpstreams: ['openai', 'chatgpt'],
+      // No `requiredUpstreams`: the manifest dropped them when capture left the
+      // inference path, and this fallback must not warn about upstreams a
+      // default transcript install has no use for.
+      // @ref LLP 0429#default [constrained-by]: onboarding composes no inference upstream for Codex
     }],
   ]))
 }

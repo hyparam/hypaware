@@ -25,6 +25,21 @@ test('capture mode and sweep cadence are validated', () => {
   assert.equal(validateCodexConfig({ backfill: { sweep_cron: 'nonsense' } }).ok, false)
 })
 
+// `allowSweep` admits the key AND validates its value in the same place.
+// `@hypaware/opencode` imports this helper, so a check split out into
+// validateCodexConfig would hand the next allowSweep caller an unvalidated
+// cron that reaches the scheduler.
+test('the shared backfill helper validates sweep_cron wherever it admits it', () => {
+  assert.deepEqual(validateBackfillSection({ sweep_cron: '*/5 * * * *' }, '/backfill', true), [])
+  assert.deepEqual(validateBackfillSection({ sweep_cron: 'nonsense' }, '/backfill', true), [
+    { pointer: '/backfill/sweep_cron', message: 'backfill.sweep_cron must be a valid 5-field cron expression' },
+  ])
+  // Without allowSweep the key itself is still rejected, as before.
+  assert.deepEqual(validateBackfillSection({ sweep_cron: '*/5 * * * *' }, '/backfill'), [
+    { pointer: '/backfill/sweep_cron', message: "unknown backfill key 'sweep_cron'" },
+  ])
+})
+
 test('validateCodexConfig accepts a full backfill block', () => {
   assert.deepEqual(
     validateCodexConfig({ backfill: { on_join: true, window_days: 30 } }),

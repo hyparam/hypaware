@@ -52,3 +52,35 @@ export function readAttachPolicy(entry) {
         : false
   return { onJoin }
 }
+
+/** The one client whose attach contract depends on how it captures. */
+export const CODEX_PLUGIN_NAME = '@hypaware/codex'
+
+/**
+ * Codex's capture mode, the third thing that decides whether an attach has
+ * anything to write. `gateway` writes the managed `[model_providers.hypaware]`
+ * block its `attach_probe` reads back; `transcript` (the default) *removes*
+ * that block and writes no marker at all, so the probe can never find one.
+ *
+ * Shared for the same reason as `readAttachPolicy` above: the reconciler
+ * (`action_attach.js`, deciding whether a marker is stale) and the status
+ * surface (`status.js`, deciding whether attach state is even a state for
+ * this client) must not disagree. They did: with the probe still declared and
+ * no marker ever written, status reported `client_attach_missing` forever and
+ * its repair (`hyp client attach codex`) was a no-op that could never clear
+ * it. That is precisely the wrong-negative LLP 0229 exists to stop, so a
+ * transcript-mode codex is *unattachable*, not *unattached*.
+ *
+ * @param {PluginConfigInstance[] | undefined} plugins  The config's plugin list
+ * @returns {'gateway' | 'transcript'}
+ * @ref LLP 0429#default [implements]: absent or `transcript` is file capture; only `gateway` selects the provider writer
+ * @ref LLP 0229#status-derives-by-the-same-gate [constrained-by]: a client with no marker to write is n/a, not "not attached"
+ */
+export function readCodexCaptureMode(plugins) {
+  const config = plugins?.find((entry) => entry.name === CODEX_PLUGIN_NAME)?.config
+  const mode =
+    config && typeof config === 'object' && !Array.isArray(config)
+      ? /** @type {Record<string, unknown>} */ (config).capture_mode
+      : undefined
+  return mode === 'gateway' ? 'gateway' : 'transcript'
+}

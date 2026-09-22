@@ -805,8 +805,10 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   }
 
   // Which client surfaces have actually produced rows, and when (LLP 0164).
-  // This is the line that answers "did Codex Desktop traffic arrive?" and
-  // "did Claude Desktop's 3p route land?" without a query. Rendered only when
+  // This is the line that answers "did Claude Desktop's 3p route land?"
+  // without a query. It counts gateway entrypoints, so it names only clients
+  // whose traffic crosses the gateway: Codex left that path in LLP 0429 and
+  // Claude Code in LLP 0262, and neither appears here any more. Rendered only when
   // the daemon recorded something, so an install that has never captured
   // keeps the V1 text surface unchanged; the entrypoint strings are printed
   // verbatim because they are the client's to choose, and they are the exact

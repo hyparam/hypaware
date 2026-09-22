@@ -48,13 +48,6 @@ export function validateCodexConfig(value) {
   if (raw.capture_mode !== undefined && raw.capture_mode !== 'transcript' && raw.capture_mode !== 'gateway') {
     errors.push({ pointer: '/capture_mode', message: 'capture_mode must be transcript or gateway' })
   }
-  const backfill = raw.backfill
-  if (backfill && typeof backfill === 'object' && !Array.isArray(backfill)) {
-    const cron = /** @type {Record<string, unknown>} */ (backfill).sweep_cron
-    if (cron !== undefined && (typeof cron !== 'string' || !isCronExpression(cron))) {
-      errors.push({ pointer: '/backfill/sweep_cron', message: 'backfill.sweep_cron must be a valid 5-field cron expression' })
-    }
-  }
   if (errors.length > 0) return { ok: false, errors }
   return { ok: true }
 }
@@ -90,6 +83,18 @@ export function validateBackfillSection(value, pointer, allowSweep = false) {
       errors.push({
         pointer: `${pointer}/window_days`,
         message: 'backfill.window_days must be a positive integer',
+      })
+    }
+  }
+  // Validated where the key is admitted, not by the caller: `opencode`
+  // imports this helper too, so a split check would hand the next
+  // `allowSweep` caller an unvalidated cron.
+  if (allowSweep && raw.sweep_cron !== undefined) {
+    const cron = raw.sweep_cron
+    if (typeof cron !== 'string' || !isCronExpression(cron)) {
+      errors.push({
+        pointer: `${pointer}/sweep_cron`,
+        message: 'backfill.sweep_cron must be a valid 5-field cron expression',
       })
     }
   }

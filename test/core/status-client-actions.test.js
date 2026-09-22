@@ -114,7 +114,28 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
     report.clientActions.actions.filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
   )
   assert.equal(attach.get('claude')?.state, 'pending')
-  assert.equal(attach.get('codex')?.state, 'pending') // no `attach` block → default-on
+  // A transcript-mode codex writes no marker, so the reconciler will never
+  // leave one and `pending` would be permanent - the same #544 rule the
+  // probe-less descriptors get. Gateway mode does write one, so it is a real
+  // pending target; both halves are pinned so the gate cannot quietly invert.
+  // @ref LLP 0429#default [tests]: only gateway capture has a marker to wait for
+  assert.equal(attach.get('codex')?.state, 'n/a')
+
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      { name: '@hypaware/claude', config: { backfill: { on_join: true, window_days: 30 } } },
+      { name: '@hypaware/codex', config: { capture_mode: 'gateway', backfill: { on_join: false } } },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  const gatewayReport = await collectHypAwareStatus({ env: env(hypHome) })
+  const gatewayAttach = new Map(
+    (gatewayReport.clientActions?.actions ?? []).filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
+  )
+  assert.equal(gatewayAttach.get('codex')?.state, 'pending')
 })
 
 test('a malformed on_join block renders n/a (not pending) on a joined host', async () => {

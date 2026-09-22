@@ -127,22 +127,39 @@ export function createCodexBackfillProvider(opts) {
     plugin: pluginName,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Codex session rollouts into ai_gateway_messages',
+    // Gateway mode selects the provider writer, so it registers no sweep:
+    // running both lanes forever would be permanent unpaid work for a route
+    // the operator explicitly opted out of.
     // @ref LLP 0429#sweep [implements]: ordinary capture rides the existing background queue, including Desktop
-    ...(readBackfillPolicy({ name: pluginName, config }).onJoin !== false ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } } : {}),
+    ...(config?.capture_mode !== 'gateway' && readBackfillPolicy({ name: pluginName, config }).onJoin !== false
+      ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } }
+      : {}),
     async *run(ctx) {
       // Scheduled work is the daemon-only migration seam, including local
       // installs without a fleet attach marker. Manual queries/imports never
       // change client settings. Failure is retried by the next sweep.
+      //
+      // Releasing the old route is cleanup, not capture: an unreadable or
+      // unwritable config.toml must not cost the sweep its rows, or one
+      // bad permission bit silently stops Codex recording altogether.
       // @ref LLP 0429#migration [implements]
       if (ctx.sweep && !ctx.dryRun && config?.capture_mode !== 'gateway') {
-        const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml') })
-        if (result.changed) ctx.log.info('codex.capture.route_released', {
-          component: COMPONENT, operation: 'capture.migrate', status: 'ok',
-          mode: 'transcript', restart_required: true,
-        })
-        if ('warning' in result && result.warning) ctx.log.warn('codex.capture.route_warning', {
-          component: COMPONENT, operation: 'capture.migrate', warning: result.warning,
-        })
+        try {
+          const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml') })
+          if (result.changed) ctx.log.info('codex.capture.route_released', {
+            component: COMPONENT, operation: 'capture.migrate', status: 'ok',
+            mode: 'transcript', restart_required: true,
+          })
+          if ('warning' in result && result.warning) ctx.log.warn('codex.capture.route_warning', {
+            component: COMPONENT, operation: 'capture.migrate', warning: result.warning,
+          })
+        } catch (err) {
+          ctx.log.error('codex.capture.route_release_failed', {
+            component: COMPONENT, operation: 'capture.migrate', status: 'failed',
+            error_kind: err instanceof Error ? err.name : 'unknown',
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
       yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, ignoredSessions: opts.ignoredSessions })
     },
@@ -247,6 +264,7 @@ async function* runCodexBackfill(args) {
   let messagesProjected = 0
   let filesRead = 0
   let filesUnchanged = 0
+  let sessionsDeferred = 0
   const files = await listRolloutFiles(sessionsDir)
   const present = new Set(files)
   for (const filePath of args.fingerprints.keys()) {
@@ -317,15 +335,22 @@ async function* runCodexBackfill(args) {
         continue
       }
 
+      // Native lifecycle events delimit an unfinished model response. Do
+      // not persist its assistant row before a later token_count can stamp
+      // usage: durable dedupe would otherwise keep the usage-less version.
+      // A suffix left unsettled by a crashed client is never revisited by the
+      // sweep (the file stops changing, so its fingerprint keeps matching), so
+      // count it: the log line is the only thing that can tell an operator a
+      // manual import is owed.
+      // @ref LLP 0429#content [implements]
+      const settled = ctx.sweep && session.settledItemCount !== undefined
+        ? session.items.slice(0, session.settledItemCount)
+        : session.items
+      if (settled.length < session.items.length) sessionsDeferred += 1
+
       const exchange = projectedExchangeFromSession({
         session,
-        // Native lifecycle events delimit an unfinished model response. Do
-        // not persist its assistant row before a later token_count can stamp
-        // usage: durable dedupe would otherwise keep the usage-less version.
-        // @ref LLP 0429#content [implements]
-        items: filterByWindow(ctx.sweep && session.settledItemCount !== undefined
-          ? session.items.slice(0, session.settledItemCount)
-          : session.items, window),
+        items: filterByWindow(settled, window),
         clientName,
       })
       if (!exchange) continue
@@ -361,6 +386,7 @@ async function* runCodexBackfill(args) {
     files_seen: filesSeen,
     files_read: filesRead,
     files_unchanged: filesUnchanged,
+    sessions_deferred: sessionsDeferred,
     sessions_projected: sessionsProjected,
     sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,

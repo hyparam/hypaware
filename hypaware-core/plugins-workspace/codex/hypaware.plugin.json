@@ -20,11 +20,7 @@
   },
   "contributes": {
     "commands": [
-      {
-        "name": "codex-hook classify-cwd",
-        "summary": "Internal Codex hook: nag to classify an unclassified folder on an enrolled machine",
-        "hidden": true
-      }
+      { "name": "codex-hook classify-cwd", "summary": "Internal Codex hook: nag to classify an unclassified folder on an enrolled machine", "hidden": true }
     ],
     "client": {
       "name": "codex",
@@ -34,50 +30,24 @@
         "settings_file": ".codex/config.toml",
         "marker_header": "[model_providers.hypaware]"
       },
-      "launch": {
-        "bin": "codex",
-        "args": [
-          "{prompt}"
-        ],
-        "label": "Codex"
-      }
+      "launch": { "bin": "codex", "args": ["{prompt}"], "label": "Codex" }
     },
     "picker": [
       {
         "name": "codex",
         "label": "Codex",
         "summary": "Records Codex CLI and Desktop from local session files, and adds query skills. Removes an old managed gateway route. Full tool definitions are unavailable. Storage opens a local port.",
-        "detect": {
-          "settings_file": ".codex/config.toml"
-        },
+        "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
-          "plugin": {
-            "name": "@hypaware/codex",
-            "config": {}
-          },
+          "plugin": { "name": "@hypaware/codex", "config": {} },
           "requires_gateway": true
         }
       }
     ],
     "skills": [
-      {
-        "name": "hypaware-query",
-        "clients": [
-          "codex"
-        ]
-      },
-      {
-        "name": "hypaware-reference",
-        "clients": [
-          "codex"
-        ]
-      },
-      {
-        "name": "hypaware-privacy",
-        "clients": [
-          "codex"
-        ]
-      }
+      { "name": "hypaware-query", "clients": ["codex"] },
+      { "name": "hypaware-reference", "clients": ["codex"] },
+      { "name": "hypaware-privacy", "clients": ["codex"] }
     ],
     "config_sections": [
       {

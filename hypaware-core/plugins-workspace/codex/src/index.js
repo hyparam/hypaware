@@ -206,7 +206,7 @@ export async function activate(ctx) {
             dry_run: attachCtx.dryRun === true,
           },
           async (span) => {
-            const result = attachCtx.dryRun ? { changed: false } : await detach({ configPath })
+            const result = await detach({ configPath, dryRun: attachCtx.dryRun === true })
             if ('warning' in result && result.warning) attachCtx.stderr?.write(result.warning + '\n')
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', result.changed === true)

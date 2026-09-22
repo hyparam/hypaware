@@ -143,3 +143,50 @@ test('a marker mode carrying terminal control bytes is stripped before it is pri
   // empty parenthesis.
   assert.match(text, /- codex {2}\[configured, attached\]/)
 })
+
+/**
+ * Codex's `attach_probe` reads the managed `[model_providers.hypaware]` block,
+ * and the default `transcript` capture mode *removes* that block rather than
+ * writing one. Status must therefore report attach as n/a, not missing: a
+ * `client_attach_missing` warning here would stand forever and its repair
+ * (`hyp client attach codex`) is a no-op that cannot clear it. That is the
+ * wrong-negative LLP 0229 exists to stop.
+ *
+ * @ref LLP 0429#default [tests]: transcript capture writes no marker
+ * @ref LLP 0229#status-derives-by-the-same-gate [tests]: no marker to write means unattachable, not unattached
+ */
+test('a transcript-mode codex is attach-n/a, and gateway mode still demands its marker', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-codex-mode-'))
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-codex-home-'))
+  try {
+    await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+    const baseEnv = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HOME: home }
+
+    /** @param {Record<string, unknown>} codexConfig */
+    const collect = async (codexConfig) => {
+      await fs.writeFile(
+        defaultConfigPath(hypHome),
+        JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex', config: codexConfig }] }) + '\n'
+      )
+      const report = await collectHypAwareStatus({ env: baseEnv })
+      return {
+        row: report.clients.find((c) => c.name === 'codex'),
+        missing: report.diagnostics.filter(
+          (d) => d.kind === 'client_attach_missing' && d.message.includes('codex')
+        ),
+      }
+    }
+
+    const transcript = await collect({})
+    assert.ok(transcript.row, 'codex is still listed as a client')
+    assert.equal(transcript.row?.attachable, false, 'no marker is written, so attach state is n/a')
+    assert.deepEqual(transcript.missing, [], 'no permanent warning whose repair does nothing')
+
+    const gateway = await collect({ capture_mode: 'gateway' })
+    assert.equal(gateway.row?.attachable, true, 'gateway mode does write the marker its probe reads')
+    assert.equal(gateway.missing.length, 1, 'and an un-run attach is still reported')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

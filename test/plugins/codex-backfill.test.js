@@ -230,6 +230,75 @@ test('provider advertises a stable contribution shape', async () => {
   assert.equal(typeof provider.run, 'function')
   assert.equal(provider.sweep?.cron, '* * * * *')
   assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { backfill: { on_join: false } } }).sweep, undefined)
+  // Gateway mode selects the provider writer, so the rollout sweep must not
+  // also run: both lanes forever is permanent unpaid work on a route the
+  // operator explicitly opted out of.
+  // @ref LLP 0429#sweep [tests]: the scheduled lane belongs to transcript capture
+  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { capture_mode: 'gateway' } }).sweep, undefined)
+})
+
+// The migration undo is cleanup, not capture. A config.toml the daemon cannot
+// read must not cost the sweep its rows, or one bad permission bit silently
+// stops Codex recording altogether and retries that failure every minute.
+// @ref LLP 0429#migration [tests]: a failed settings write fails visibly, it does not disable capture
+test('a config.toml the sweep cannot read is reported, and capture still runs', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-readonly.jsonl', modernConversation('readonly'))
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+    await fs.chmod(configPath, 0o000)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 1, 'rollout rows are captured despite the settings failure')
+    const failed = entries.find((e) => e.message === 'codex.capture.route_release_failed')
+    assert.ok(failed, 'the failed undo is reported rather than swallowed')
+    assert.equal(failed?.fields?.status, 'failed')
+  } finally {
+    await fs.chmod(path.join(env.homeDir, '.codex', 'config.toml'), 0o600).catch(() => {})
+    await env.cleanup()
+  }
+})
+
+// A suffix left unsettled by a crashed client is deferred to a manual import
+// (LLP 0429 #content), and the sweep never revisits it: the file stops
+// changing, so its fingerprint keeps matching. The scan record is therefore
+// the only thing that can tell an operator an import is owed.
+// @ref LLP 0429#content [tests]: deferral is visible, not silent
+test('a deferred unfinished response is counted in the scan record', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-crashed.jsonl', {
+      meta: { id: 'crashed', originator: 'codex-tui' },
+      items: [
+        { type: 'event_msg', payload: { type: 'task_started' } },
+        { payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'q' }] } },
+        { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 4, output_tokens: 1 } } } },
+        { payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'never settled' }] } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    await collect(provider.run(ctx))
+    const scan = entries.findLast((e) => e.message === 'codex.backfill.scan_complete')
+    assert.equal(scan?.fields?.sessions_deferred, 1)
+    // A fully settled file reports none, so the counter means what it says.
+    const clean = await stageEnv()
+    try {
+      await writeModernRollout(clean, 'rollout-clean.jsonl', modernConversation('clean'))
+      const { ctx: ctx2, entries: entries2 } = runContext()
+      ctx2.sweep = true
+      await collect(createCodexBackfillProvider({ homeDir: clean.homeDir }).run(ctx2))
+      assert.equal(entries2.findLast((e) => e.message === 'codex.backfill.scan_complete')?.fields?.sessions_deferred, 0)
+    } finally {
+      await clean.cleanup()
+    }
+  } finally {
+    await env.cleanup()
+  }
 })
 
 test('scheduled capture migrates the route, skips unchanged files, and retries failed consumption', async () => {

@@ -178,7 +178,23 @@ client supports them. Never claim the fixture smoke proves upstream formats.
 5. Append another real turn in each client and verify the next sweep imports it
    exactly once. Restart the daemon and verify the cold rescan adds no duplicate
    rows. Confirm a session opt-out prevents recording its subsequent turns.
-6. For the optional gateway mode, set the Codex plugin's
+6. Confirm the app container is flagged, not silently skipped, and that the
+   flag still says what carries those conversations instead. The event rides
+   the structured log stream, not a command result, so read the JSONL:
+
+   ```sh
+   HYP_DEV_TELEMETRY=1 hyp client history import codex --dry-run --json >/dev/null
+   grep -h unsupported_location "${HYP_HOME:-$HOME/.hyp}"/hypaware/dev-telemetry/logs-*.jsonl | tail -3
+   ```
+
+   Pass condition: if `~/Library/Application Support/Codex` exists, a
+   `codex_desktop_app` record carries `covered_by: "codex_sessions_rollout"` -
+   the one route that does capture this client under the default. This is the
+   boundary check: HypAware must say what it does *not* parse and what carries
+   those conversations instead ([LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md#unsupported-boundary)).
+   In gateway mode (step 7) the same record must read
+   `gateway_live,codex_sessions_rollout`. (`--dry-run` writes no rows.)
+7. For the optional gateway mode, set the Codex plugin's
    `capture_mode: "gateway"`, run `hyp client attach codex`, restart clients,
    and run `codex_login_switch_reroute`. Restore `transcript`, reattach and
    restart afterward. This optional route is separate from default acceptance.
@@ -187,6 +203,27 @@ Record the versions, native originators, row counts, usage totals, stopped-daemo
 inference result and migration result in release notes. Real acceptance remains
 a human release gate; `backfill_codex_fixture` is hermetic evidence only.
 
+### If it fails
+
+- Rows arrive but `entrypoint` is null: the rollout carried no `originator`.
+  Capture worked; attribution did not. File that as its own issue with the
+  observed `session_meta`, and do not paper over it by matching on
+  `client_name` alone.
+- Step 3 finds no rollout for a session you just held: the client wrote its
+  history somewhere other than `$CODEX_HOME/sessions`. That invalidates the
+  premise this whole procedure rests on
+  ([LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)),
+  and needs a doc correction, not a code workaround.
+- Rows for the last turn are missing and the next sweep does not add them:
+  check `codex.backfill.scan_complete` for `sessions_deferred > 0`. A response
+  the client never settled is held back by design
+  ([LLP 0429](../llp/0429-codex-capture-leaves-inference.spec.md#content));
+  `hyp client history import codex` recovers it.
+- `hyp status` names no recent Codex client: expected, and not a failure.
+  That line counts gateway entrypoints, and default capture does not cross the
+  gateway. Step 3's query is the check that means something.
+
+---
 
 ## `opencode_cli_desktop_capture`
 

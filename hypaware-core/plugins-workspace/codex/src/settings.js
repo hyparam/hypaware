@@ -56,14 +56,17 @@ export async function attach(opts) {
  * @returns {Promise<CodexDetachResult>}
  */
 export async function detach(opts = {}) {
-  const { configPath = defaultConfigPath() } = opts
+  const { configPath = defaultConfigPath(), dryRun = false } = opts
   const { content, existed, mtimeMs } = await readConfig(configPath)
   if (!existed) return { changed: false }
 
   const prepared = prepareDetach(content)
   if (!prepared.changed) return { changed: false }
 
-  await writeAtomic(configPath, prepared.content, mtimeMs)
+  // A dry run reports the same answer it would act on: `changed: false` on
+  // an install that does have a managed block tells the operator the
+  // opposite of the truth, on the one command whose job is to inspect.
+  if (!dryRun) await writeAtomic(configPath, prepared.content, mtimeMs)
 
   /** @type {CodexDetachResult} */
   const result = { changed: true }

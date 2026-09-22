@@ -29,6 +29,10 @@ for (const initial of [undefined, 'model_provider = "custom"\nmodel = "test"\n']
       let stdout = ''
       const attachCtx = /** @type {any} */ ({ json: true, stdout: { write: (/** @type {string} */ s) => { stdout += s } } })
       await client.attach({ ...attachCtx, dryRun: true })
+      // The dry run writes nothing AND reports what it would have done: on an
+      // install carrying a managed block, `changed: false` would tell the
+      // operator the opposite of the truth on the one command that inspects.
+      assert.equal(JSON.parse(stdout).changed, initial ? true : false)
       if (initial) assert.match(await fs.readFile(configPath, 'utf8'), /model_providers.hypaware/)
       stdout = ''
       await client.attach(attachCtx)
