@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { argvToParams } from '../../src/core/cli/verb_codec.js'
+import { createMcpServer } from '../../src/core/mcp/server.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createActivationContext, createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { temporaryDirectory } from '../helpers/temp_dir.js'
@@ -606,17 +608,21 @@ test('rewriting the stored run of a neighbour\'s command does not put a plugin\'
  * @param {{ verbs: any }} owner the activation context registering it
  * @param {string} name
  * @param {string} tool
+ * @param {Record<string, unknown>} [over] extra declared fields, for the cases
+ *   that need a verb declaring aliases of its own
  */
-function contributeVerb(owner, name, tool) {
-  /** @type {{ ran: string[] }} */
-  const seen = { ran: [] }
+function contributeVerb(owner, name, tool, over) {
+  /** @type {{ ran: string[], params: Record<string, unknown>[] }} */
+  const seen = { ran: [], params: [] }
   owner.verbs.register(/** @type {any} */ ({
     name,
     tool,
     summary: 'fixture verb',
     inputSchema: { type: 'object', properties: {}, required: [], positional: [] },
-    async operation() { seen.ran.push('owner'); return { ok: true } },
+    /** @param {Record<string, unknown>} params */
+    async operation(params) { seen.ran.push('owner'); seen.params.push(params); return { ok: true } },
     render: () => ({ stdout: 'owner\n' }),
+    ...over,
   }))
   return seen
 }
@@ -718,6 +724,81 @@ test('a plugin cannot rewrite or release a core verb', async (t) => {
   const home = temporaryDirectory('hyp-verb-body-')
   await invoke(staged, ['query', 'sql', 'select 1'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
   assert.equal(hijacked, false, 'a plugin\'s function ran behind hyp query sql')
+})
+
+// `narrowView` refused *rebinding* `inputSchema` and `aliases` on a
+// neighbour's registration and nothing refused a write inside the object it
+// answered with, so a plugin holding a view edited the live declaration: the
+// argv codec reads `inputSchema` at dispatch and `tools/list` advertises it
+// (issue #1985).
+
+test('a plugin cannot edit a neighbour\'s verb inputSchema or aliases through a narrowed view', async () => {
+  const staged = await stage()
+  const seen = contributeVerb(staged.ctxA, 'owner verb', 'owner_verb', { aliases: ['owner-alias'] })
+  const live = /** @type {any} */ (staged.kernel.verbs.get('owner verb'))
+
+  const held = [
+    staged.ctxB.verbs.get('owner verb'),
+    staged.ctxB.verbs.getByTool('owner_verb'),
+    ...staged.ctxB.verbs.list().filter((verb) => verb.tool === 'owner_verb'),
+  ]
+  for (const view of /** @type {any[]} */ (held)) {
+    refusal(() => { view.inputSchema.properties.evil = { type: 'boolean', default: true } })
+    refusal(() => { view.inputSchema.required.push('nothing-you-can-type') })
+    refusal(() => { view.inputSchema.properties = { evil: {} } })
+    refusal(() => { view.aliases.push('stolen-alias') })
+  }
+
+  assert.deepEqual(Object.keys(live.inputSchema.properties), [], 'a plugin added a property to a neighbour\'s live schema')
+  assert.deepEqual(live.inputSchema.required, [], 'a plugin added a required field to a neighbour\'s live schema')
+  assert.deepEqual(live.aliases, ['owner-alias'], 'a plugin edited a neighbour\'s live alias list')
+
+  const { code, stdout } = await invoke(staged, ['owner', 'verb'])
+  assert.equal(code, 0)
+  assert.equal(stdout, 'owner\n')
+  assert.deepEqual(seen.params, [{}], 'a plugin\'s parameter reached a neighbour\'s operation')
+})
+
+test('a plugin cannot flip a core verb\'s local-only default or break its parsing', async (t) => {
+  const staged = await stage()
+  const core = /** @type {any} */ (staged.kernel.verbs.get('query sql'))
+  // Core's registration is a module singleton every kernel in this process
+  // shares, so a write that does land has to be undone before the next case.
+  const properties = { ...core.inputSchema.properties }
+  const required = [...core.inputSchema.required]
+  t.after(() => {
+    core.inputSchema.properties = properties
+    core.inputSchema.required = required
+  })
+
+  const held = /** @type {any} */ (staged.ctxB.verbs.get('query sql'))
+  refusal(() => { held.inputSchema.properties['include-local-only'] = { type: 'boolean', default: true } })
+  refusal(() => { held.inputSchema.required.push('nothing-you-can-type') })
+
+  // The CLI surface: the exact call `runVerbCommand` makes on the live schema
+  // when a user types `hyp query sql "select 1"` with no flag at all.
+  const parsed = argvToParams(core.inputSchema, ['select 1'])
+  assert.equal(parsed.ok, true, parsed.ok ? '' : parsed.error)
+  assert.equal(
+    parsed.ok && parsed.params['include-local-only'],
+    false,
+    'a plain hyp query sql handed core\'s operation include-local-only: true'
+  )
+
+  // The MCP surface, from the kernel's own registry, the way `hyp mcp` builds it.
+  const server = createMcpServer({
+    verbs: staged.kernel.verbs,
+    query: staged.kernel.query,
+    runTool: async () => ({ rows: [], columns: [] }),
+  })
+  const advertised = /** @type {any} */ (server.listTools().find((entry) => entry.name === 'query_sql'))
+  const flag = advertised?.inputSchema?.properties?.['include-local-only']
+  assert.equal(flag?.default, false, 'listTools advertised a flipped include-local-only default')
+  assert.match(String(flag?.description), /enters the transcript/, 'the advertised flag lost the warning it carries')
+
+  const home = temporaryDirectory('hyp-verb-schema-')
+  const { stderr } = await invoke(staged, ['query', 'sql', 'select 1'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
+  assert.doesNotMatch(stderr, /nothing-you-can-type/, 'a plugin made every later hyp query sql exit 2')
 })
 
 test('a plugin-owned command body reaches the verb table through its own facade', async () => {

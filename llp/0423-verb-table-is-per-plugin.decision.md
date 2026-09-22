@@ -166,6 +166,11 @@ unchanged from LLP 0420 #split.
   taken once per view, so it is not per-call work, or a freeze of the
   registrant's own object) each trade something this decision has no
   measurement for, and `narrowView` is where that measurement belongs.
+  **Closed as issue #1985:** `narrowView` answers for both members with a
+  frozen structural copy, taken on the first read of the field and kept for
+  the life of the view, so neither the argv codec's rules nor the advertised
+  tool schema is a neighbour's to edit. This bullet records what this decision
+  left open and is no longer the current behavior.
 - **`hyp mcp`'s `runTool` still reads `verb.operation` off the registration.**
   The MCP host holds the kernel's raw registry and `hyp mcp` is a core
   command, so no plugin reaches that property through a facade any more and
