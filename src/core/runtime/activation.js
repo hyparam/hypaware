@@ -1085,30 +1085,64 @@ const SINK_GUARDED_FIELDS = ['supports']
  * original would be a write into the registrant's own object.
  *
  * `seen` carries the copies made so far, so a schema pointing back at itself
- * costs one pass rather than a stack overflow.
+ * costs one pass rather than an unterminated walk.
+ *
+ * The walk is iterative rather than one call per level, because how deeply a
+ * registrant nests its own declaration is the registrant's to choose and
+ * nothing validates it: recursing it made a schema nested past V8's frame
+ * budget a `RangeError` raised in whichever *neighbour* first read the field,
+ * the registration itself having returned fine (issue #2049). An empty shell
+ * is made and recorded in `seen` the moment its parent references it, so the
+ * parent's slot fills straight away and a cycle still resolves to one copy;
+ * the shell is filled and frozen when it comes back off `pending`, by which
+ * point every own property it has is assigned.
  *
  * @param {unknown} value
  * @param {WeakMap<object, unknown>} seen
  * @returns {unknown}
  */
 function frozenCopy(value, seen) {
-  if (value === null || typeof value !== 'object') return value
-  const already = seen.get(value)
-  if (already !== undefined) return already
-  if (Array.isArray(value)) {
-    /** @type {unknown[]} */
-    const copy = []
-    seen.set(value, copy)
-    for (const entry of value) copy.push(frozenCopy(entry, seen))
-    return Object.freeze(copy)
+  /**
+   * The shells still to be filled, as flat `source, copy` pairs, so what is
+   * held is the frontier of the walk rather than the whole copy.
+   *
+   * @type {(Record<string, unknown> | unknown[])[]}
+   */
+  const pending = []
+  /**
+   * What `entry` is copied as: itself when it is not a thing this copies, the
+   * copy already made for it, or a fresh empty shell queued for filling.
+   *
+   * @param {unknown} entry
+   * @returns {unknown}
+   */
+  const shell = (entry) => {
+    if (entry === null || typeof entry !== 'object') return entry
+    const already = seen.get(entry)
+    if (already !== undefined) return already
+    const array = Array.isArray(entry)
+    if (!array) {
+      const proto = Object.getPrototypeOf(entry)
+      if (proto !== Object.prototype && proto !== null) return entry
+    }
+    /** @type {Record<string, unknown> | unknown[]} */
+    const copy = array ? [] : {}
+    seen.set(entry, copy)
+    pending.push(/** @type {Record<string, unknown> | unknown[]} */ (entry), copy)
+    return copy
   }
-  const proto = Object.getPrototypeOf(value)
-  if (proto !== Object.prototype && proto !== null) return value
-  /** @type {Record<string, unknown>} */
-  const copy = {}
-  seen.set(value, copy)
-  for (const [key, entry] of Object.entries(value)) copy[key] = frozenCopy(entry, seen)
-  return Object.freeze(copy)
+  const root = shell(value)
+  while (pending.length > 0) {
+    const copy = /** @type {Record<string, unknown> | unknown[]} */ (pending.pop())
+    const source = /** @type {Record<string, unknown> | unknown[]} */ (pending.pop())
+    if (Array.isArray(source)) {
+      for (const entry of source) /** @type {unknown[]} */ (copy).push(shell(entry))
+    } else {
+      for (const [key, entry] of Object.entries(source)) /** @type {Record<string, unknown>} */ (copy)[key] = shell(entry)
+    }
+    Object.freeze(copy)
+  }
+  return root
 }
 
 /**

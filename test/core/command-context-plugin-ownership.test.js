@@ -759,6 +759,59 @@ test('a plugin cannot edit a neighbour\'s verb inputSchema or aliases through a 
   assert.deepEqual(seen.params, [{}], 'a plugin\'s parameter reached a neighbour\'s operation')
 })
 
+// `frozenCopy` walked a registration one call per level, so an `inputSchema`
+// nested past V8's frame budget turned every neighbour's first read of the
+// field into a `RangeError` raised in the *reader's* stack: the registration
+// returns fine and the damage lands next door (issue #2049).
+
+test('a neighbour can read a verb inputSchema nested past any stack budget', async () => {
+  const staged = await stage()
+  // Deep enough that no plausible frame budget reaches the bottom: the
+  // recursive walk overflowed near depth 2000 on the default stack, so this
+  // fixture cannot pass by being too shallow to trigger anything.
+  const depth = 20000
+  /** @type {any} */
+  let node = { type: 'string' }
+  for (let i = 0; i < depth; i += 1) node = { type: 'object', properties: { nest: node } }
+  const deep = { type: 'object', properties: { root: node }, required: [], positional: [] }
+  contributeVerb(staged.ctxA, 'owner deep', 'owner_deep', { inputSchema: deep })
+
+  const held = [
+    staged.ctxB.verbs.get('owner deep'),
+    staged.ctxB.verbs.getByTool('owner_deep'),
+    ...staged.ctxB.verbs.list().filter((verb) => verb.tool === 'owner_deep'),
+  ]
+  assert.equal(held.length, 3, 'the fixture verb stopped reaching all three reads')
+  for (const view of /** @type {any[]} */ (held)) {
+    // The read itself, which is where the RangeError used to arrive.
+    const copy = view.inputSchema
+    assert.notEqual(copy, deep, 'a neighbour was handed the live schema by reference')
+    // Walked rather than compared whole: a deepEqual would recurse as far
+    // inside the assertion as the read used to.
+    let mine = copy.properties.root
+    let theirs = deep.properties.root
+    let walked = 0
+    while (theirs.type === 'object') {
+      assert.ok(Object.isFrozen(mine), `a copied level was left writable at depth ${walked}`)
+      assert.notEqual(mine, theirs, `a copied level was the live object at depth ${walked}`)
+      mine = mine.properties.nest
+      theirs = theirs.properties.nest
+      walked += 1
+    }
+    // The bottom is reachable, so the copy is the whole declaration rather
+    // than a truncation claiming to be one.
+    assert.equal(walked, depth, 'the copy stopped short of the declared depth')
+    assert.equal(mine.type, 'string', 'the deepest declared node never arrived')
+    assert.ok(Object.isFrozen(mine), 'the deepest copied node was left writable')
+  }
+  assert.ok(!Object.isFrozen(deep), 'the kernel froze the registrant\'s own declaration')
+
+  // The owner's own verb still dispatches after the deep read.
+  const { code, stdout } = await invoke(staged, ['owner', 'deep'])
+  assert.equal(code, 0)
+  assert.equal(stdout, 'owner\n')
+})
+
 test('a plugin cannot flip a core verb\'s local-only default or break its parsing', async (t) => {
   const staged = await stage()
   const core = /** @type {any} */ (staged.kernel.verbs.get('query sql'))
