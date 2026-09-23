@@ -517,6 +517,30 @@ test('the shared read is released on every exit path of loadSpooledBodies', asyn
         fsp.unlink = realUnlink
       }
     })
+    // Decoding threw: a body past the runtime's maximum string length leaves
+    // the loop without reaching any of the releases below it.
+    await probeAfter('undecodable', async (file) => {
+      await fsp.writeFile(file, 'not json at all', 'utf8')
+      // Throws only while the drive runs, so a leaked entry shows up as the
+      // probe reusing it rather than as the same error thrown twice.
+      let decodable = false
+      fsp.readFile = /** @type {any} */ (async (/** @type {string} */ target) => {
+        if (target !== file) return realReadFile(target)
+        return {
+          length: 1,
+          toString() {
+            if (!decodable) throw new Error('string too long')
+            return 'not json at all'
+          },
+        }
+      })
+      try {
+        await assert.rejects(loadSpooledBodies(eventsFor(file), { spoolDir: root }))
+      } finally {
+        fsp.readFile = realReadFile
+        decodable = true
+      }
+    })
     // Unparseable, on the `removing.has(file)` early continue: the two callers
     // that are not the removal's owner take that branch and release nothing,
     // and the owner's `finally` still clears the entry.

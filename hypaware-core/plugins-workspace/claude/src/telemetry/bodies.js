@@ -178,7 +178,18 @@ export async function loadSpooledBodies(events, opts) {
       missing += 1
       continue
     }
-    const body = parseMaybeJson(raw.toString('utf8'))
+    /** @type {unknown} */
+    let body
+    try {
+      body = parseMaybeJson(raw.toString('utf8'))
+    } catch (err) {
+      // Decoding throws for a body past the runtime's maximum string length,
+      // and that throw leaves the loop without reaching any release below. The
+      // entry would then outlive the call for the life of the process, holding
+      // its buffer and handing the same bytes to every later caller.
+      releaseRead(file, pending)
+      throw err
+    }
     if (!isPlainObject(body)) {
       unparseable += 1
       // An overlapping read already owns this removal (see `removing`): it
