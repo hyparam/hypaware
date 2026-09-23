@@ -5,7 +5,7 @@ import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { sinkInstanceName } from '../registry/sinks.js'
+import { sinkInstanceConfig, sinkInstanceName } from '../registry/sinks.js'
 import { effectiveRemotes, sameServer } from '../remote/builtin_remotes.js'
 import { previewPendingRows } from '../sinks/pending.js'
 import {
@@ -719,8 +719,18 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  * printed a name no receipt line and no `hyp sync <name>` answers to
  * (issue #2087). No placeholder guards an empty name: these handles all come
  * from `listHandles()`, whose keys are the non-empty strings `instantiate`
- * validated and recorded beside the handle. `text` and `offMachine` stay off
- * the live config, the separate unguarded-read class issue #2059 tracks.
+ * validated and recorded beside the handle.
+ *
+ * The config is the registry's record too, and for a harder reason than the
+ * name: `offMachine` does not merely label a row, it decides whether the row
+ * is printed at all. Off the live `handle.config`, an owner claiming a local
+ * `dir` for an instance configured with a remote `url` reported
+ * `offMachine: false`, and `displayedDestinations` drops exactly those rows
+ * as soon as any destination is genuinely off-machine - so the destination
+ * left the plan, the counts, the progress display and the receipts while the
+ * driver kept exporting to it, exit 0 (issue #2095). `handle.plugin` in the
+ * last line is still a live read, in the separate unguarded-read class
+ * issue #2059 tracks.
  *
  * @ref LLP 0100#requirements [constrained-by]: R1a's reason - name the server, never its URL - applied to the consent prompt R1a's text does not reach
  * @param {ExtendedSinkHandle} handle
@@ -729,7 +739,7 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  */
 function describeDestination(handle, remotes) {
   const instance = sinkInstanceName(handle)
-  const config = /** @type {Record<string, unknown>} */ (handle.config ?? {})
+  const config = /** @type {Record<string, unknown>} */ (sinkInstanceConfig(handle))
   const url = config.url
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
     return { instance, text: nameServer(url, remotes), offMachine: true }
