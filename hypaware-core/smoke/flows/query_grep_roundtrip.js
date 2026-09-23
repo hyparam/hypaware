@@ -79,7 +79,12 @@ export async function run({ harness, expect }) {
   registerCoreCommands(registry)
   const kernel = await step('upgrade_config', async () => {
     const configPath = defaultConfigPath(harness.hypHome)
-    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    // @ref LLP 0426#no-minting [tests]: a picker-shaped config exercises persistence; bare { version, plugins: [] } stays in memory
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins: [],
+      query: { cache: { retention: { default_days: 30 } } },
+    }))
     const boot = await bootKernel({
       hypHome: harness.hypHome, configPath, commandRegistry: registry,
       cacheRoot, runId: harness.devRunId, env: process.env,
