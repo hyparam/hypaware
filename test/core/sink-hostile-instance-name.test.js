@@ -35,6 +35,8 @@ import { writePidFile } from '../../src/core/daemon/pid.js'
 // first: an escape there takes the honest neighbour's row and export with it.
 
 const OWNER = '@fixture/sink-owner'
+/** Retained rows every capable destination reports and replays. */
+const HISTORY_ROWS = 3
 const HOSTILE_INSTANCE = 'a-hostile'
 const HEALTHY_INSTANCE = 'z-healthy'
 
@@ -46,6 +48,14 @@ function fixtureSink() {
   /** @type {Array<{ batchId: string }>} */
   const exports = []
   /**
+   * The instance name each `--history` replay ran under, taken from the live
+   * `Sink`'s own `SinkCreateContext`, so a history case can compare the plan
+   * it printed against the destinations that actually received rows.
+   *
+   * @type {string[]}
+   */
+  const replays = []
+  /**
    * The `SinkCreateContext` each instance was built with. `sinkCtx.name` and
    * `sinkCtx.paths` are what every shipped sink builds its export watermark
    * store from, so holding the context lets a case advance a watermark the way
@@ -56,6 +66,7 @@ function fixtureSink() {
   const contexts = new Map()
   return {
     exports,
+    replays,
     contexts,
     contribution: /** @type {any} */ ({
       name: 'central',
@@ -68,6 +79,15 @@ function fixtureSink() {
           async exportBatch(batch) {
             exports.push({ batchId: String(batch.batchId) })
             return { status: 'exported', partitionsExported: 0, bytesWritten: 0 }
+          },
+          // Declaring both is what makes an instance `capable` in
+          // `hyp sync --history` (LLP 0345 #sink-capability).
+          async previewSourceHistory() {
+            return { rows: HISTORY_ROWS, withheldRows: 0 }
+          },
+          async replaySourceHistory() {
+            replays.push(String(sinkCtx.name))
+            return { status: 'exported', rowsReplayed: HISTORY_ROWS, bytesWritten: 0 }
           },
           async close() {},
         }
@@ -379,12 +399,11 @@ for (const [label, beHostile] of [
   })
 }
 
-// The two tests below carry an accepted name all the way to the driver, and
-// `lying` is the only variant that gets there: past the gate the plan renderer
-// pads `dest.instance`, which is still the display lane's own read of the live
-// property, so a non-string name ends the run there whether or not the gate let
-// it through (it already does on a plain `hyp sync`). Only the selection is
-// fixed, so the selection is all these assert.
+// The two tests below carry an accepted name all the way to the driver.
+// `lying` is the variant they need: the selection and the display lane now
+// answer to the same key, so what is left to isolate is a rename that crashes
+// nothing and reads as honest everywhere. The display lane's own cases are at
+// the end of this file.
 
 test('hyp sync <instance> drives the sink the driver matches with a lying instanceName accessor', async (t) => {
   const staged = await stage(lyingInstanceName)
@@ -433,7 +452,7 @@ test('hyp sync refuses a name only the owner\'s accessor answers to', async (t) 
 // whole history), and the same read corrects it. A throwing accessor never
 // reaches `countForHandle` at all: `previewPendingRows` dereferences the live
 // property to key its own result map and rejects before the count, which is
-// the unguarded-read class issue #2059 scopes out to its own pass.
+// issue #2092's own pass over this file.
 
 /** Rows in the fixture partition, all of them already exported. */
 const CACHED_ROWS = 12
@@ -499,8 +518,8 @@ test('the sync preview counts from the watermark the export advanced, with a lyi
   })
 
   // Taken by position, not by name: the map is still keyed by the live
-  // property, the plan's own display lane (issue #2087). Under test is the
-  // number the prompt discloses, not the key it is filed under.
+  // property (issue #2092). Under test is the number the prompt discloses, not
+  // the key it is filed under.
   assert.equal(volumes.size, 1)
   const volume = /** @type {any} */ ([...volumes.values()][0])
   assert.deepEqual(
@@ -509,3 +528,109 @@ test('the sync preview counts from the watermark the export advanced, with a lyi
     'the consent prompt counted against a watermark directory the export never advances'
   )
 })
+
+// The display lane is the other half of the same key, and the half a consent
+// prompt cannot afford to get wrong: `hyp sync` prints the destinations and
+// asks before it sends, so the name beside "what would leave" has to be the
+// name that will receive it. `describeDestination` read the live property, so
+// both renderers padded `dest.instance` off whatever the owner's accessor
+// answered. A non-string one ended the command at `dest.instance.padEnd is not
+// a function` before a character of the plan printed, on a plain `hyp sync` and
+// on `hyp sync <registry-key>` alike; a lying one printed a name no receipt
+// line and no `hyp sync <name>` would ever answer to (issue #2087).
+//
+// `throwing` is absent from the ordinary-lane cases below and present in the
+// history ones on purpose. The ordinary lane counts pending rows first, and
+// `previewPendingRows` re-dereferences the live property inside the `catch`
+// that exists to recover from it, so a throwing accessor still ends that lane
+// ahead of these renderers (issue #2092, which predicts exactly this). The
+// history lane never calls the preview, so it pins all three variants.
+
+/** The plan's destination names, in the order it printed them. */
+function planInstances(/** @type {string} */ stdout) {
+  return stdout
+    .split('\n')
+    .map((line) => /^ {2}(\S+) {2}\S/.exec(line)?.[1])
+    .filter((name) => name === HOSTILE_INSTANCE || name === HEALTHY_INSTANCE || name === LIE)
+}
+
+for (const [label, beHostile] of [
+  ['non-string', nonStringInstanceName],
+  ['lying', lyingInstanceName],
+]) {
+  test(`hyp sync renders a plan naming the registry's keys with a ${label} instanceName accessor`, async (t) => {
+    const staged = await stage(/** @type {any} */ (beHostile))
+    const { ctx } = await syncCtx(t, staged.registry)
+
+    const code = await runSync(['--yes'], ctx)
+
+    assert.equal(code, 0)
+    // The whole point of the prompt: the destinations it named are the
+    // destinations the driver then handed batches to, in that order.
+    assert.deepEqual(
+      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      'the plan named a destination by something other than the key the driver matches'
+    )
+    assert.deepEqual(
+      staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
+      planInstances(ctx.stdout.text),
+      'the destinations that received data are not the ones the plan showed'
+    )
+    assert.doesNotMatch(ctx.stdout.text, new RegExp(LIE), 'the plan offered a name only the owner answers to')
+  })
+
+  test(`hyp sync <instance> renders a plan naming the registry's key with a ${label} instanceName accessor`, async (t) => {
+    const staged = await stage(/** @type {any} */ (beHostile))
+    const { ctx, stderr } = await syncCtx(t, staged.registry)
+
+    const code = await runSync([HOSTILE_INSTANCE, '--yes'], ctx)
+
+    assert.equal(code, 0)
+    assert.doesNotMatch(stderr.text, /no sink named/, 'the registry key the driver matches was gated at the command')
+    assert.deepEqual(
+      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE],
+      'a scoped plan named the one destination by something other than the driver\'s key'
+    )
+    assert.deepEqual(
+      staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
+      [HOSTILE_INSTANCE],
+      'a scoped run sent to a destination the plan did not show'
+    )
+  })
+}
+
+for (const [label, beHostile] of [
+  ['throwing', throwingInstanceName],
+  ['non-string', nonStringInstanceName],
+  ['lying', lyingInstanceName],
+]) {
+  test(`hyp sync --history renders a plan naming the registry's keys with a ${label} instanceName accessor`, async (t) => {
+    const staged = await stage(/** @type {any} */ (beHostile))
+    const { ctx, stderr } = await syncCtx(t, staged.registry)
+
+    const code = await runSync(['--history', 'claude', '--yes'], ctx)
+
+    assert.equal(code, 0, stderr.text)
+    assert.deepEqual(
+      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      'the history plan named a destination by something other than the registry\'s key'
+    )
+    // `previews.get(destination.instance)` is the join the renderer makes
+    // between the plan's rows and the counts under them: keyed apart, it reads
+    // `undefined.rows` or silently drops the row to "not replayed".
+    assert.equal(
+      (ctx.stdout.text.match(new RegExp(`${HISTORY_ROWS} rows retained and eligible`, 'g')) ?? []).length,
+      2,
+      'a destination lost the row count printed under it'
+    )
+    assert.doesNotMatch(ctx.stdout.text, /not replayed/, 'a capable destination was reported as unsupported')
+    assert.deepEqual(
+      staged.sink.replays,
+      planInstances(ctx.stdout.text),
+      'the destinations that replayed history are not the ones the plan showed'
+    )
+  })
+}
