@@ -341,11 +341,12 @@ export async function run({ harness, expect }) {
   // exclude set claims is a half-landed plugin: the directory landed, the
   // kernel's declaration of it did not. It gets its own assertion rather than
   // joining the roster below, because boot never pools such a manifest
-  // (`selectBootPlugins` pools `loaded` + `excluded`), so it is neither
-  // activated nor skip-logged: counting it into `expectedSkipped` would demand
-  // boot skip a name it cannot see, failing the smoke on a correct kernel and
-  // blaming the skip count for it (issue #2085). Sorted so the names the
-  // failure prints are stable.
+  // (`selectBootPlugins` pools `loaded` + `excluded` + the unshadowed
+  // installed plugins, and an unknown manifest is in none of the three), so it
+  // is neither activated nor skip-logged: counting it into `expectedSkipped`
+  // would demand boot skip a name it cannot see, failing the smoke on a
+  // correct kernel and blaming the skip count for it (issue #2085). Sorted so
+  // the names the failure prints are stable.
   const { unknown } = await discoverBundledPlugins()
   expect.that(
     'bundled: every shipped manifest is claimed by the allowlist or the exclude set',
