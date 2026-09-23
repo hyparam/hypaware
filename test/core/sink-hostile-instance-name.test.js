@@ -10,6 +10,7 @@ import process from 'node:process'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
 import { createActivationContext } from '../../src/core/runtime/activation.js'
 import { createSinkDriver } from '../../src/core/sinks/driver.js'
+import { runSync } from '../../src/core/commands/sync.js'
 import { collectSinkSnapshots } from '../../src/core/daemon/runtime.js'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
@@ -282,3 +283,121 @@ for (const [label, beHostile] of [
     )
   })
 }
+
+// `hyp sync [instance]` is the other half of the same key: it filters the live
+// handles for the user-typed positional, then hands that same string to the
+// driver, which matches it against the registry's record. Selecting by one key
+// and driving by another gates an instance the driver would drive, offers the
+// refusal a name the driver will not match, or throws out of the filter before
+// the driver's guarded read (issue #2066).
+//
+// `lying` is the variant the other two cannot show: a rename to another plain
+// string crashes nothing and reads as honest everywhere, so it isolates the
+// divergence from the accessor's rudeness.
+
+const LIE = 'm-lie'
+
+/** @param {ExtendedSinkHandle} handle */
+function lyingInstanceName(handle) {
+  Object.defineProperty(handle, 'instanceName', {
+    configurable: true,
+    get() { return LIE },
+  })
+}
+
+function captureStream() {
+  let text = ''
+  return {
+    isTTY: false,
+    write(/** @type {string} */ chunk) { text += String(chunk); return true },
+    get text() { return text },
+  }
+}
+
+/**
+ * A run context for `hyp sync` over the staged registry. The storage has no
+ * `readRowsSince`, so the pending preview reports every destination as
+ * `unknown` rather than reaching the cache, and `--yes` answers the send
+ * confirmation without a terminal.
+ *
+ * @param {TestContext} t
+ * @param {ExtendedSinkRegistry} registry
+ */
+async function syncCtx(t, registry) {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-hostile-instance-sync-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+  const stderr = captureStream()
+  const ctx = /** @type {any} */ ({
+    stdout: captureStream(),
+    stderr,
+    env: { HYP_HOME: hypHome, HYP_CONFIG: '' },
+    cwd: '/home/u',
+    config: { version: 2 },
+    query: { listDatasets: () => [] },
+    storage: { cacheRoot: path.join(hypHome, 'cache'), tableExists: () => false },
+    sinks: registry,
+  })
+  return { ctx, stderr }
+}
+
+for (const [label, beHostile] of [
+  ['throwing', throwingInstanceName],
+  ['non-string', nonStringInstanceName],
+  ['lying', lyingInstanceName],
+]) {
+  test(`hyp sync's refusal offers the names the driver matches with a ${label} instanceName accessor`, async (t) => {
+    const staged = await stage(/** @type {any} */ (beHostile))
+    const { ctx, stderr } = await syncCtx(t, staged.registry)
+
+    const code = await runSync(['no-such-sink'], ctx)
+
+    assert.equal(code, 1)
+    assert.match(stderr.text, /no sink named 'no-such-sink' was instantiated/)
+    assert.match(
+      stderr.text,
+      new RegExp(`^ {2}available: ${HOSTILE_INSTANCE}, ${HEALTHY_INSTANCE}$`, 'm'),
+      'the refusal offered a name `hyp sync <name>` and the driver would not both accept'
+    )
+    assert.deepEqual(staged.sink.exports, [], 'a refused name must not export')
+  })
+}
+
+// The two tests below carry an accepted name all the way to the driver, and
+// `lying` is the only variant that gets there: past the gate the plan renderer
+// pads `dest.instance`, which is still the display lane's own read of the live
+// property, so a non-string name ends the run there whether or not the gate let
+// it through (it already does on a plain `hyp sync`). Only the selection is
+// fixed, so the selection is all these assert.
+
+test('hyp sync <instance> drives the sink the driver matches with a lying instanceName accessor', async (t) => {
+  const staged = await stage(lyingInstanceName)
+  const { ctx, stderr } = await syncCtx(t, staged.registry)
+
+  const code = await runSync([HOSTILE_INSTANCE, '--yes'], ctx)
+
+  assert.equal(code, 0)
+  assert.doesNotMatch(stderr.text, /no sink named/, 'the registry key the driver matches was gated at the command')
+  // `<instance>-<iso>-<seq>`, so the name the driver stamped a batch with is
+  // everything before the timestamp.
+  assert.deepEqual(
+    staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
+    [HOSTILE_INSTANCE],
+    'the instance the command selected is not the one the driver drove'
+  )
+})
+
+test('hyp sync refuses a name only the owner\'s accessor answers to', async (t) => {
+  const staged = await stage(lyingInstanceName)
+  const { ctx, stderr } = await syncCtx(t, staged.registry)
+
+  // The complement of the test above, and the one that shows why a silent
+  // divergence is worse than a loud one: selecting on the owner's name let the
+  // command accept a string `driver.tick` matches against nothing, so it
+  // confirmed a send, ticked, exported nothing and exited 0.
+  const code = await runSync([LIE, '--yes'], ctx)
+
+  assert.equal(code, 1)
+  assert.match(stderr.text, new RegExp(`no sink named '${LIE}' was instantiated`))
+  assert.deepEqual(staged.sink.exports, [], 'a name the driver cannot match confirmed a send and exported nothing')
+})
