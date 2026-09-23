@@ -136,9 +136,13 @@ export async function startGithubSource() {
    * here would hide that authorization from the read that already handles it.
    *
    * Only ever shortens. Leaving a delay already inside the backlog cadence
-   * alone is also what keeps a repository that keeps failing on the ordinary
-   * cadence: every tick closes by writing this very sidecar, so a source that
-   * re-armed off its own output would pin itself at the backlog cadence.
+   * alone also keeps a repository that keeps failing on the ordinary cadence,
+   * because a failing source is already armed at that cadence. It is not what
+   * stops a self-re-arm: every tick closes by writing this very sidecar, and
+   * on a source armed a full interval out those events clear this guard. What
+   * keeps the source off its own output there is the `seenImports` snapshot
+   * in {@link stagedImportPending}, already consumed by the tick's own
+   * end-of-tick read of the same write.
    */
   // @ref LLP 0409#one-time-imports [implements]: an authorization committed before the network work also reaches a daemon asleep on an armed timer, not only a tick in flight
   // @ref LLP 0360#cadence [constrained-by]: a repository that keeps failing retries on the ordinary cadence
@@ -151,12 +155,16 @@ export async function startGithubSource() {
     clearTimeout(handle)
     handle = null
     const delayMs = nextDelayMs()
+    // Re-arm before logging: between the clearTimeout above and this call the
+    // source has no timer at all, and the stderr mirror behind `log.info` may
+    // throw (LLP 0329#stderr-mirror), which from a watch callback would leave
+    // the source permanently dead while status() reports the cancelled timer.
+    schedule(delayMs, generation)
     runtime.log.info('github.backlog_rearmed', {
       operation: 'poll',
       deferred_ms: deferredMs,
       delay_ms: delayMs,
     })
-    schedule(delayMs, generation)
   }
 
   /**
