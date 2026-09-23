@@ -22,7 +22,8 @@ import { withFileLock } from '../../../../src/core/util/file_lock.js'
  * @import { CursorState, GithubCommitTask, GithubPullTask, GithubRepoWork, RepoCursor } from './types.js'
  */
 
-const STATE_FILE = 'github-cursors.json'
+/** The sidecar filename, exported so a watcher can recognise its own writes. */
+export const STATE_FILE = 'github-cursors.json'
 const SCHEMA_VERSION = 1
 export const MAX_BOUNDARY_IDS = 1000
 

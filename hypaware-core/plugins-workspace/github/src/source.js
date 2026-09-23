@@ -1,7 +1,9 @@
 // @ts-check
 
+import fs from 'node:fs'
+
 import { parseInterval } from './config.js'
-import { authorizedImports, readCursors } from './cursors.js'
+import { STATE_FILE, authorizedImports, readCursors } from './cursors.js'
 import { requireGithubRuntime } from './runtime.js'
 import { runCaptureTick } from './tick.js'
 
@@ -35,6 +37,8 @@ export async function startGithubSource() {
   let lastInventoryRepos = 0
   let rowsWritten = 0
   let backlogPending = false
+  /** @type {fs.FSWatcher | null} */
+  let sidecarWatcher = null
   /** @type {Set<string>} */
   let seenImports = new Set()
   /** @type {string | undefined} */
@@ -119,6 +123,88 @@ export async function startGithubSource() {
     return fresh
   }
 
+  /**
+   * Shorten an *already-armed* delay for work another process staged.
+   * {@link stagedImportPending} runs at the end of a tick, so on its own it
+   * only changes the delay a *completing* tick chooses; the ordinary case is
+   * the daemon asleep on a timer armed hours ago while `hyp github backfill`
+   * commits its authorization in another process and exits.
+   *
+   * A tick in flight owns the decision instead: its closing write is what
+   * adopts an authorization staged while it ran, and
+   * {@link stagedImportPending} consumes the freshness snapshot, so answering
+   * here would hide that authorization from the read that already handles it.
+   *
+   * Only ever shortens. Leaving a delay already inside the backlog cadence
+   * alone is also what keeps a repository that keeps failing on the ordinary
+   * cadence: every tick closes by writing this very sidecar, so a source that
+   * re-armed off its own output would pin itself at the backlog cadence.
+   */
+  // @ref LLP 0409#one-time-imports [implements]: an authorization committed before the network work also reaches a daemon asleep on an armed timer, not only a tick in flight
+  // @ref LLP 0360#cadence [constrained-by]: a repository that keeps failing retries on the ordinary cadence
+  function rearmForStagedBacklog() {
+    if (inFlight !== null || handle === null || nextTickAt === null) return
+    const deferredMs = Date.parse(nextTickAt) - Date.now()
+    if (!(deferredMs > BACKLOG_RETRY_MS)) return
+    if (!stagedImportPending()) return
+    backlogPending = true
+    clearTimeout(handle)
+    handle = null
+    const delayMs = nextDelayMs()
+    runtime.log.info('github.backlog_rearmed', {
+      operation: 'poll',
+      deferred_ms: deferredMs,
+      delay_ms: delayMs,
+    })
+    schedule(delayMs, generation)
+  }
+
+  /**
+   * Watch the state dir so a sidecar another process commits is heard rather
+   * than waited out. `fs.watch`, not a re-check interval: this exists for a
+   * command a user runs by hand, and waking an otherwise idle daemon to stat a
+   * file every few seconds for the rest of its uptime costs more than the wait
+   * it saves. Non-persistent, so the watch never holds the process open, and
+   * the directory rather than the file, because the sidecar is committed by
+   * tmp+rename and a file watch follows the inode the rename replaces.
+   *
+   * A watch that never arrives is the status quo rather than a new failure
+   * mode: the end-of-tick read this supplements is untouched, so an
+   * unavailable or dead watcher is named in the log and the source keeps
+   * polling on its ordinary cadence.
+   */
+  function watchSidecar() {
+    try {
+      sidecarWatcher = fs.watch(runtime.stateDir, { persistent: false }, (_event, filename) => {
+        // The lock and tmp files the commit goes through share the prefix, and
+        // a platform that reports no name at all gets the read.
+        if (typeof filename === 'string' && !filename.startsWith(STATE_FILE)) return
+        rearmForStagedBacklog()
+      })
+      sidecarWatcher.on('error', (err) => {
+        noteWatchUnavailable(err)
+        closeSidecarWatch()
+      })
+    } catch (err) {
+      noteWatchUnavailable(err)
+    }
+  }
+
+  /** @param {unknown} err */
+  function noteWatchUnavailable(err) {
+    runtime.log.warn('github.cursor_watch_unavailable', {
+      operation: 'poll',
+      error: err instanceof Error ? err.message : String(err),
+      error_kind: 'github_cursor_watch_unavailable',
+    })
+  }
+
+  function closeSidecarWatch() {
+    if (!sidecarWatcher) return
+    sidecarWatcher.close()
+    sidecarWatcher = null
+  }
+
   /** @param {number} delayMs @param {number} ownGeneration */
   function schedule(delayMs, ownGeneration) {
     nextTickAt = new Date(Date.now() + delayMs).toISOString()
@@ -161,6 +247,7 @@ export async function startGithubSource() {
   }
 
   startTimer()
+  watchSidecar()
 
   return {
     async status() {
@@ -190,6 +277,7 @@ export async function startGithubSource() {
       startTimer()
     },
     async stop() {
+      closeSidecarWatch()
       stopTimer()
       if (inFlight) await inFlight.catch(() => {})
     },

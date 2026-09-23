@@ -487,3 +487,150 @@ test('a capture that throws keeps its own error, not the closing write failure',
 
   await assert.rejects(runCaptureTick(runtime, { mode: 'poll' }), /inventory refused/)
 })
+
+/**
+ * A runtime whose inventory is empty and whose sidecar nothing but the test
+ * writes: the first tick settles immediately, so everything after it reads a
+ * daemon asleep on an armed timer rather than a tick in progress.
+ *
+ * @param {string} stateDir
+ * @param {{ ignore: string[], token_env: string, poll_interval: string, inventory: string }} config
+ */
+function idleSourceRuntime(stateDir, config) {
+  return /** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config,
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => fakeClient({}),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows() {},
+    },
+    log: { info() {}, error() {} },
+  })
+}
+
+/**
+ * Poll `source.status()` until `done` accepts its details, or give up. The
+ * returned details are whatever the last poll read, so a caller that needed a
+ * transition asserts on it rather than trusting the wait.
+ *
+ * @param {{ status?: () => Promise<{ details?: Record<string, unknown> | null }> }} source
+ * @param {(details: any) => boolean} done
+ * @param {number} deadlineMs
+ * @returns {Promise<any>}
+ */
+async function waitForDetails(source, done, deadlineMs) {
+  const until = Date.now() + deadlineMs
+  /** @type {any} */
+  let details = {}
+  for (;;) {
+    details = (await source.status?.())?.details ?? {}
+    if (done(details) || Date.now() >= until) return details
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+// @ref LLP 0409#one-time-imports [tests]: an authorization staged while the daemon sleeps reaches the backlog cadence without waiting out the armed timer
+test('an authorization staged while the poll timer is armed re-arms it instead of waiting out the interval', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-armed-rearm-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'session_repos' }
+  setGithubRuntime(idleSourceRuntime(stateDir, config))
+
+  const source = await startGithubSource()
+  // The first delay was already armed off the 10ms interval; widening it now
+  // means the tick that fires settles on a 30-minute timer.
+  config.poll_interval = '30m'
+  t.after(() => source.stop())
+
+  const asleep = await waitForDetails(source, (d) => d.last_tick_at && d.next_tick_at && d.in_flight === false, 2000)
+  // The fixture only proves anything if it really reached "asleep on a long
+  // timer": a harness that never armed one would pass the re-arm assertion
+  // below for free.
+  assert.ok(asleep.next_tick_at, 'the first tick never settled, so no timer was ever armed')
+  assert.equal(asleep.in_flight, false)
+  assert.equal(asleep.backlog_pending, false)
+  const armedMs = Date.parse(asleep.next_tick_at) - Date.now()
+  assert.ok(armedMs > 25 * 60_000, `the armed delay is ${armedMs}ms, expected the full 30-minute poll interval`)
+
+  // Another process (`hyp github backfill o/r`) commits its authorization.
+  await writeCursors(stateDir, /** @type {any} */ ({
+    schema_version: 1,
+    repos: { 'o/r': { one_time_import: true, work: { mode: 'backfill', phase: 'issues' } } },
+  }))
+
+  const rearmed = await waitForDetails(source, (d) => d.next_tick_at !== asleep.next_tick_at, 2000)
+  assert.notEqual(rearmed.next_tick_at, asleep.next_tick_at,
+    `next_tick_at is unchanged at ${rearmed.next_tick_at}, so the armed timer never heard about the staged work`)
+  assert.equal(rearmed.in_flight, false, 'the re-arm shortens the pending delay, it does not run a tick inline')
+  assert.equal(rearmed.backlog_pending, true)
+  const rearmedMs = Date.parse(rearmed.next_tick_at) - Date.now()
+  assert.ok(rearmedMs <= BACKLOG_RETRY_MS, `the re-armed delay is ${rearmedMs}ms, not the backlog cadence`)
+})
+
+// @ref LLP 0409#one-time-imports [tests]: bare continuations stay outside the detection, so nothing reports backlog no tick can retire
+test('a bare work continuation another process leaves does not re-arm the armed poll timer', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-armed-bare-work-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'session_repos' }
+  setGithubRuntime(idleSourceRuntime(stateDir, config))
+
+  const source = await startGithubSource()
+  config.poll_interval = '30m'
+  t.after(() => source.stop())
+
+  const asleep = await waitForDetails(source, (d) => d.last_tick_at && d.next_tick_at && d.in_flight === false, 2000)
+  assert.ok(asleep.next_tick_at, 'the first tick never settled, so no timer was ever armed')
+  const armedMs = Date.parse(asleep.next_tick_at) - Date.now()
+  assert.ok(armedMs > 25 * 60_000, `the armed delay is ${armedMs}ms, expected the full 30-minute poll interval`)
+
+  // What `hyp github sync` leaves behind: a continuation with no
+  // authorization. Nothing prunes one whose repository has left the inventory
+  // (LLP 0360#cursoring), so counting it would report backlog no tick retires.
+  await writeCursors(stateDir, /** @type {any} */ ({
+    schema_version: 1,
+    repos: { 'o/r': { work: { mode: 'backfill', phase: 'issues' } } },
+  }))
+  const still = await waitForDetails(source, () => false, 300)
+  assert.equal(still.next_tick_at, asleep.next_tick_at, 'a bare continuation must not shorten the armed delay')
+  assert.equal(still.backlog_pending, false)
+
+  // ...and the window above was not simply deaf: an authorization written the
+  // same way, over the same watch, does re-arm.
+  await writeCursors(stateDir, /** @type {any} */ ({
+    schema_version: 1,
+    repos: { 'o/r': { one_time_import: true, work: { mode: 'backfill', phase: 'issues' } } },
+  }))
+  const rearmed = await waitForDetails(source, (d) => d.next_tick_at !== asleep.next_tick_at, 2000)
+  assert.notEqual(rearmed.next_tick_at, asleep.next_tick_at,
+    'the negative window proves nothing unless an authorization written the same way is heard')
+  assert.equal(rearmed.backlog_pending, true)
+})
+
+test('a staged authorization never pushes an armed delay that is already shorter than the backlog cadence further out', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-armed-short-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'session_repos' }
+  setGithubRuntime(idleSourceRuntime(stateDir, config))
+
+  const source = await startGithubSource()
+  // Shorter than the backlog cadence, so re-arming to it would defer the tick
+  // rather than bring it forward.
+  config.poll_interval = '2m'
+  t.after(() => source.stop())
+
+  const asleep = await waitForDetails(source, (d) => d.last_tick_at && d.next_tick_at && d.in_flight === false, 2000)
+  assert.ok(asleep.next_tick_at, 'the first tick never settled, so no timer was ever armed')
+  const armedMs = Date.parse(asleep.next_tick_at) - Date.now()
+  assert.ok(armedMs > 60_000 && armedMs < BACKLOG_RETRY_MS,
+    `the armed delay is ${armedMs}ms, expected the 2-minute poll interval this test needs`)
+
+  await writeCursors(stateDir, /** @type {any} */ ({
+    schema_version: 1,
+    repos: { 'o/r': { one_time_import: true, work: { mode: 'backfill', phase: 'issues' } } },
+  }))
+  const still = await waitForDetails(source, () => false, 300)
+  assert.equal(still.next_tick_at, asleep.next_tick_at, 'the re-arm only ever shortens a pending delay')
+})
