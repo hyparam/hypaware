@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { render } from '../../../../src/core/cli/tui/render.js'
+import { countPhysicalRows } from '../../../../src/core/cli/tui/runtime.js'
 
 const COLOR_RE = /\x1b\[\d{1,3}(;\d{1,3})*m/
 
@@ -373,4 +374,69 @@ test('render: a state without items renders exactly as it does today', () => {
   const lines = render(state, { color: false }).split('\n')
   assert.equal(lines[0], 'Pick one')
   assert.match(lines[1], /enter pick/)
+})
+
+/**
+ * The picker `hyp report fix` builds (LLP 0414 #listing-is-the-picker): one
+ * option per listed report, label and summary each, boxed. The only select
+ * whose height is set by server data rather than by the code.
+ *
+ * @param {number} count
+ * @param {number} cursor
+ * @returns {any}
+ */
+function reportPicker(count, cursor) {
+  return {
+    kind: 'select',
+    box: true,
+    title: 'Which report?',
+    options: Array.from({ length: count }, (_, i) => ({
+      value: `r${String(i).padStart(2, '0')}`,
+      label: `rec-${String(i).padStart(2, '0')}`,
+      summary: `2026-09-01  team/weekly  3 recommendations (${i})`,
+    })),
+    cursor,
+    status: 'active',
+  }
+}
+
+test('select: a frame taller than the terminal is windowed to fit it', () => {
+  for (const rows of [24, 40]) {
+    const frame = render(reportPicker(60, 0), { color: false, columns: 80, rows })
+    const drawn = countPhysicalRows(frame, 80)
+    assert.ok(drawn <= rows, `frame of ${drawn} rows must fit a terminal of ${rows}`)
+    // Not windowed to nothing: the terminal's height is what it fills.
+    assert.ok(drawn > rows / 2, `frame of ${drawn} rows uses the terminal of ${rows}`)
+  }
+})
+
+test('select: the option under the cursor stays drawn as the cursor leaves the window', () => {
+  for (const cursor of [0, 7, 30, 58, 59]) {
+    const frame = render(reportPicker(60, cursor), { color: false, columns: 80, rows: 24 })
+    const label = `rec-${String(cursor).padStart(2, '0')}`
+    assert.ok(
+      frame.split('\n').some((l) => l.includes(`> ${label}`)),
+      `cursor row ${label} is drawn`,
+    )
+    assert.ok(countPhysicalRows(frame, 80) <= 24, `cursor ${cursor} keeps the frame inside the terminal`)
+  }
+})
+
+test('select: a windowed frame says which options it is showing', () => {
+  const frame = render(reportPicker(60, 0), { color: false, columns: 80, rows: 24 })
+  assert.match(frame, /showing 1-\d+ of 60/)
+})
+
+test('select: options that all fit render whole, with no window line', () => {
+  const frame = render(reportPicker(4, 0), { color: false, columns: 80, rows: 24 })
+  assert.equal(frame, render(reportPicker(4, 0), { color: false, columns: 80 }))
+  assert.doesNotMatch(frame, /showing/)
+})
+
+test('select: an unknown terminal height renders every option, as before', () => {
+  const frame = render(reportPicker(60, 0), { color: false, columns: 80 })
+  for (let i = 0; i < 60; i++) {
+    assert.ok(frame.includes(`rec-${String(i).padStart(2, '0')}`), `option ${i} is drawn`)
+  }
+  assert.doesNotMatch(frame, /showing/)
 })

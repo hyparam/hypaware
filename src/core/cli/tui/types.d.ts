@@ -168,6 +168,14 @@ export interface RenderOpts {
    * suppresses one.
    */
   columns?: number
+  /**
+   * Terminal height, when the caller knows it. A select whose options do
+   * not all fit is windowed around the cursor so the frame stays inside
+   * the terminal; omitted means "unknown" (a pipe, a test double), which
+   * windows nothing and renders every option, as it did before this
+   * field existed.
+   */
+  rows?: number
 }
 
 export interface RunOpts {

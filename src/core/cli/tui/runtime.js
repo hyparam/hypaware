@@ -3,7 +3,7 @@
 import process from 'node:process'
 import readline from 'node:readline'
 
-import { visibleWidth } from '../style.js'
+import { lineRows } from '../style.js'
 import { reduce } from './keypress.js'
 import { render } from './render.js'
 
@@ -90,7 +90,8 @@ export async function run(initialState, io) {
     // reach both the renderer (which drops a box that no longer fits) and
     // the row count below it, or the two disagree about the same frame.
     const columns = terminalColumns(stdout)
-    const frame = render(state, { color, columns })
+    const rows = terminalRows(stdout)
+    const frame = render(state, { color, columns, ...(rows !== undefined ? { rows } : {}) })
     buf += frame
     previousLineCount = countPhysicalRows(frame, columns)
     stdout.write(buf)
@@ -183,6 +184,20 @@ function terminalColumns(stdout) {
 }
 
 /**
+ * Resolve the terminal height in rows, or `undefined` when the stream does
+ * not expose a usable `.rows` (a pipe, a test double). Unlike width there
+ * is no safe default to invent: the renderer treats an unknown height as
+ * "no limit" and draws every row, which is what it did before it could ask.
+ *
+ * @param {NodeJS.WriteStream} stdout
+ * @returns {number | undefined}
+ */
+function terminalRows(stdout) {
+  const rows = stdout.rows
+  return typeof rows === 'number' && rows > 0 ? rows : undefined
+}
+
+/**
  * Count the number of *physical* terminal rows a frame occupies. The
  * runtime uses this to know how far to move the cursor up before
  * clearing the previous frame. A naive newline count is wrong whenever
@@ -200,14 +215,10 @@ function terminalColumns(stdout) {
  * @returns {number}
  */
 export function countPhysicalRows(frame, columns) {
-  const width = columns > 0 ? columns : 80
   const lines = frame.split('\n')
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
   let rows = 0
-  for (const line of lines) {
-    const len = visibleWidth(line)
-    rows += len === 0 ? 1 : Math.ceil(len / width)
-  }
+  for (const line of lines) rows += lineRows(line, columns)
   return rows
 }
 
