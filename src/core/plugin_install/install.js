@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import path from 'node:path'
 
 import {
   Attr,
@@ -9,6 +10,7 @@ import {
   SpanStatusCode,
   withSpan,
 } from '../observability/index.js'
+import { isWithinDir } from '../runtime/contribution_names.js'
 
 import { fetchPlugin } from './fetch.js'
 import { provenanceFromUrl, redactRawSource } from './git_source.js'
@@ -388,7 +390,16 @@ export async function removePlugin({ name, stateDir }) {
       const installDir = typeof entry?.install_dir === 'string' && entry.install_dir.length > 0
         ? entry.install_dir
         : pluginInstallDir(stateDir, name)
-      await fs.rm(installDir, { recursive: true, force: true })
+      // Neither source is guaranteed to name a directory under the plugins
+      // root: both are hand-editable text, and a row keyed `../../victim`
+      // makes the fallback join resolve two levels above it. `hyp status`
+      // prints this very command as the repair for such a row, so still clear
+      // the row, and delete only a directory strictly beneath the root
+      // (issue #1967).
+      const pluginsRoot = pluginInstallDir(stateDir, '')
+      if (isWithinDir(installDir, pluginsRoot) && path.resolve(installDir) !== path.resolve(pluginsRoot)) {
+        await fs.rm(installDir, { recursive: true, force: true })
+      }
       const nextLock = removeLockEntry(lock, name)
       await writeLock(stateDir, nextLock)
       // Zero the gauge so a downstream consumer doesn't show a

@@ -90,6 +90,18 @@ async function writeFixtureLock(hypHome, entries) {
   await writeLock(stateDir, { schema_version: 1, plugins })
 }
 
+/**
+ * @param {string} dir
+ * @returns {Promise<boolean>}
+ */
+async function dirExists(dir) {
+  try {
+    return (await fs.stat(dir)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 function bufferWriter() {
   let out = ''
   return {
@@ -777,6 +789,143 @@ test('hyp plugin remove clears a lock row that is not an object, so the diagnost
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
     })
     assert.equal(report.diagnostics.some((d) => d.kind === 'plugin_lock_entry_invalid'), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A lock key is a map key, not a validated plugin name, and `hyp status`
+// prints `hyp plugin remove <key>` as the repair for a malformed row, so a
+// key containing `..` turned the printed repair into a recursive delete
+// outside `<stateDir>/plugins` (issue #1967). Everything these tests can
+// delete is staged inside their own temp HYP_HOME.
+test('hyp plugin remove leaves a directory outside the plugins root alone and still clears the row', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-traversal-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '../../victim',
+      {}
+    )
+    const stateDir = path.join(hypHome, 'hypaware')
+    const victimDir = path.join(hypHome, 'victim')
+    // The traversal lands on the victim, and the victim is inside this test's
+    // own temp root: proven before the name reaches a recursive delete.
+    assert.equal(path.resolve(stateDir, 'plugins', '../../victim'), victimDir)
+    await fs.mkdir(victimDir, { recursive: true })
+    await fs.writeFile(path.join(victimDir, 'keep.txt'), 'precious\n')
+
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
+    const stdout = bufferWriter()
+    const stderr = bufferWriter()
+    const exitCode = await dispatch(['plugin', 'remove', '../../victim'], {
+      env,
+      stdout,
+      stderr,
+      cwd: hypHome,
+      workspaceDir: path.join(hypHome, 'no-bundled'),
+    })
+    assert.equal(exitCode, 0, stderr.text())
+    assert.deepEqual(await fs.readdir(victimDir), ['keep.txt'])
+
+    // And the repair the diagnostic prints still does its job: the row is gone
+    // and the error-severity diagnostic with it.
+    const after = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    assert.deepEqual(Object.keys(after.plugins), ['@third-party/healthy'])
+    const report = await collectHypAwareStatus({ env })
+    assert.equal(report.diagnostics.some((d) => d.kind === 'plugin_lock_entry_invalid'), false)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('hyp plugin remove deletes neither an escaping install_dir nor the plugins root itself', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-escape-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const stateDir = path.join(hypHome, 'hypaware')
+    const outsideDir = path.join(hypHome, 'outside')
+    await fs.mkdir(outsideDir, { recursive: true })
+    await fs.writeFile(path.join(outsideDir, 'keep.txt'), 'precious\n')
+    const lockPath = await writeHandEditedLock(
+      hypHome,
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      '@third-party/escaping',
+      { name: '@third-party/escaping', version: '1.0.0', install_dir: outsideDir }
+    )
+    // An absolute `install_dir` outside the root is the other way in: the
+    // fallback join is not the only unvalidated source of the directory.
+    const escaped = await removePlugin({
+      name: /** @type {any} */ ('@third-party/escaping'),
+      stateDir,
+    })
+    assert.equal(escaped.ok, true)
+    assert.deepEqual(await fs.readdir(outsideDir), ['keep.txt'])
+
+    // '.' resolves to the plugins root itself, which would take every
+    // installed plugin with it.
+    const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    lock.plugins['.'] = {}
+    await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
+    const dot = await removePlugin({ name: /** @type {any} */ ('.'), stateDir })
+    assert.equal(dot.ok, true)
+    assert.equal(await dirExists(installDir), true)
+    const after = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    assert.deepEqual(Object.keys(after.plugins), ['@third-party/healthy'])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('hyp plugin remove still deletes exactly the directory a contained entry names', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-entry-legit-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/healthy',
+      version: '0.1.0',
+    })
+    const other = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/neighbour',
+      version: '0.1.0',
+    })
+    await writeFixtureLock(hypHome, [
+      { name: '@third-party/healthy', version: '0.1.0', installDir },
+      { name: '@third-party/neighbour', version: '0.1.0', installDir: other.installDir },
+    ])
+    const stateDir = path.join(hypHome, 'hypaware')
+    const removed = await removePlugin({
+      name: /** @type {any} */ ('@third-party/healthy'),
+      stateDir,
+    })
+    assert.equal(removed.ok, true)
+    assert.equal(await dirExists(installDir), false)
+    assert.equal(await dirExists(other.installDir), true)
+
+    // A key that normalizes back inside the root is still a contained delete.
+    const nestedDir = path.join(stateDir, 'plugins', 'nested')
+    await fs.mkdir(nestedDir, { recursive: true })
+    const lockPath = path.join(stateDir, 'plugin-lock.json')
+    const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    lock.plugins['elsewhere/../nested'] = {}
+    await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
+    const normalized = await removePlugin({
+      name: /** @type {any} */ ('elsewhere/../nested'),
+      stateDir,
+    })
+    assert.equal(normalized.ok, true)
+    assert.equal(await dirExists(nestedDir), false)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
