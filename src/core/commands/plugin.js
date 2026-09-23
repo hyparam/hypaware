@@ -371,14 +371,6 @@ export async function runPluginList(argv, ctx) {
     const plugins = []
     const unusableSet = new Set(unusableLockKeys)
     for (const name of Array.from(allNames).sort()) {
-      // The lock key and the flag named after the `plugin_lock_entry_invalid`
-      // diagnostic `hyp status` raises for the same row. Nothing else: an
-      // unreadable row has no version to report, and the empty string says so
-      // rather than inventing one.
-      if (unusableSet.has(name)) {
-        plugins.push({ name, version: '', source: 'installed', active: false, lock_entry_invalid: true })
-        continue
-      }
       const inst = installedByName.get(name)
       const act = activeByName.get(name)
       // Undefined for every entry that already resolved, so those keep the
@@ -408,6 +400,16 @@ export async function runPluginList(argv, ctx) {
         // not here, or the reverse.
         ...(copy ? { unavailable: true } : {}),
         ...(shadowed ? { shadowed: true } : {}),
+        // A flag on the row the loop already built, never a row of its own: a
+        // lock key can also be a bundled name this boot activated, and a
+        // synthesized `active: false` row for it would have the `--json`
+        // branch contradict the text branch about a plugin that is running,
+        // which is the contradiction `unavailable` is filtered to avoid above.
+        // Named after the `plugin_lock_entry_invalid` diagnostic, but not a
+        // promise that `hyp status` raises that one for every row marked here:
+        // a row carrying an `install_dir` and no usable `name` is unreadable
+        // to a renderer and reaches `hyp status` through `failed[]` instead.
+        ...(unusableSet.has(name) ? { lock_entry_invalid: true } : {}),
         ...(inst ? { installed_at: inst.installed_at } : {}),
         ...(inst?.update !== undefined ? { update: inst.update } : {}),
       })

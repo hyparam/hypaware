@@ -35,7 +35,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
   if (!stateDir) throw new Error('discoverInstalledPlugins: stateDir is required')
 
   const lock = await loadLock(stateDir)
-  // Keys, not `listEntries`: the lock key is the name every other install
+  // Keys, not `partitionEntries`: the lock key is the name every other install
   // surface indexes by (`getEntry`, `hyp plugin remove <name>`), and it is the
   // only identity a malformed entry still has, since an entry that is not an
   // object carries no `name` field to read.

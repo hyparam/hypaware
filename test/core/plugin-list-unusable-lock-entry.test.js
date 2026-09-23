@@ -123,3 +123,45 @@ test('plugin outdated reports the healthy entry instead of dying on an unusable 
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })
+
+// A lock key is not only ever an idle installed row: it can also name a
+// bundled plugin this boot activated, whose installed shadow was the row that
+// got hand-edited. Marking the row must not cost the listing what it knows
+// about the copy that is running, and the two output forms of one command must
+// not contradict each other about it, which is the contradiction `unavailable`
+// is already filtered to avoid.
+test('an unreadable lock row does not erase the running copy of the same name', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-plugin-list-unusable-active-'))
+  try {
+    const stateDir = path.join(hypHome, 'hypaware')
+    await fs.mkdir(stateDir, { recursive: true })
+    await fs.writeFile(pluginLockPath(stateDir), JSON.stringify({
+      schema_version: 1,
+      plugins: { '@hypaware/otel': null },
+    }) + '\n')
+    const ctx = /** @type {any} */ ({
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      stdout: makeBuf(),
+      stderr: makeBuf(),
+      plugins: [{ name: '@hypaware/otel', version: '1.4.0', rootDir: path.join(hypHome, 'bundled', 'otel') }],
+    })
+
+    assert.equal(await runPluginList([], ctx), 0)
+    const text = ctx.stdout.text()
+    assert.match(text, /^ {2}@hypaware\/otel@1\.4\.0 {2}\(bundled\)$/m)
+    assert.match(text, /^ {2}@hypaware\/otel {2}\(unreadable lock entry; hyp plugin remove @hypaware\/otel\)$/m)
+
+    ctx.stdout = makeBuf()
+    assert.equal(await runPluginList(['--json'], ctx), 0)
+    const json = JSON.parse(ctx.stdout.text())
+    const row = json.plugins.find((/** @type {{ name: string }} */ p) => p.name === '@hypaware/otel')
+    // The flag rides on the row the listing already had, so `--json` says the
+    // same thing the text form does about the copy that is running.
+    assert.equal(row.lock_entry_invalid, true)
+    assert.equal(row.active, true)
+    assert.equal(row.version, '1.4.0')
+    assert.equal(row.source, 'bundled')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
