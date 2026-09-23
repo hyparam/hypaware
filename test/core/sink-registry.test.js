@@ -212,12 +212,15 @@ test('register touches the Map only after every plugin property has been read', 
   assert.deepEqual(reg.listContributions().map((e) => e.supports), [['queryable']])
 })
 
-test('instantiate attributes its span, its handle and its counter from one read of plugin', async () => {
+test('instantiate attributes its span, its handle and its counter from the owner the kernel resolved', async () => {
   // `instantiate` read `contribution.plugin` once per use, seven times on
-  // this path: both `sink.*` records name it twice each, and the span, the
-  // handle and the `hyp_sinks_registered` counter once. One instantiation
-  // could be spanned under one plugin, counted under another and returned as
-  // a third.
+  // this path, so one instantiation could be spanned under one plugin,
+  // counted under another and returned as a third (issue #1553). The count is
+  // zero now: every label comes from `args.plugin`, so a contribution
+  // renaming itself after `register` moves nothing (issue #1562). This is the
+  // one caller in the repo that passed an `args.plugin` deliberately
+  // differing from the contribution's, and it passed a bare string where
+  // `InstantiateArgs` declares an `ActivePlugin`.
   const reg = createSinkRegistry()
   let reads = 0
   const contribution = /** @type {any} */ ({
@@ -234,14 +237,40 @@ test('instantiate attributes its span, its handle and its counter from one read 
     instanceName: 'inst',
     contribution,
     config: {},
-    plugin: '@third-party/drifting-plugin',
+    plugin: { name: '@third-party/drifting-plugin', version: '1.0.0' },
     paths: { rootDir: '/', stateDir: '/', cacheDir: '/', tempDir: '/' },
     log: { info() {}, warn() {}, error() {}, debug() {} },
   }))
 
-  assert.equal(reads, 1, 'instantiate read the plugin\'s `plugin` more than once')
-  assert.equal(handle.plugin, 'R1')
-  assert.notEqual(contribution.plugin, 'R1', 'the fixture stopped drifting')
+  assert.equal(reads, 0, 'instantiate read the contribution\'s `plugin` at all')
+  assert.equal(handle.plugin, '@third-party/drifting-plugin')
+  assert.equal(reg.ownerOf('inst'), '@third-party/drifting-plugin', 'the owner record and the handle disagree')
+  assert.equal(contribution.plugin, 'R1', 'the fixture stopped drifting, so nothing was proved')
+  await reg.closeAll()
+})
+
+test('an instantiation with no resolved owner is unattributed rather than attributed to the contribution', async () => {
+  // `InstantiateArgs` requires `plugin`, so this is a caller outside the
+  // contract. With no `ActivePlugin` to resolve, the kernel has nothing to
+  // attribute the instance to, and answering `''` is the fail-closed reading
+  // `sinkInstanceName` and the facade's `shownName` already give: repeating a
+  // claim the kernel cannot check is how #1562 read in the first place.
+  const reg = createSinkRegistry()
+  const handle = await reg.instantiate(/** @type {any} */ ({
+    kind: 'request',
+    instanceName: 'orphan',
+    contribution: {
+      name: 'a-sink',
+      plugin: '@third-party/self-declared',
+      supports: [],
+      async create() { return { async exportBatch() { return {} }, async close() {} } },
+    },
+    config: {},
+    paths: { rootDir: '/', stateDir: '/', cacheDir: '/', tempDir: '/' },
+    log: { info() {}, warn() {}, error() {}, debug() {} },
+  }))
+  assert.equal(handle.plugin, '')
+  assert.equal(reg.ownerOf('orphan'), undefined)
   await reg.closeAll()
 })
 
