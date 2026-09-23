@@ -57,8 +57,8 @@ const UNUSABLE = [
   '@third-party/no-install-dir',
   '@third-party/no-name',
   '@third-party/nulled',
-  '@third-party/numeric-name',
   '@third-party/numbered',
+  '@third-party/numeric-name',
   '@third-party/stringed',
 ]
 
@@ -82,10 +82,7 @@ test('plugin list lists the healthy entry and marks every unusable lock row', as
     // The point of the fix: the healthy row is actually printed.
     assert.match(text, /^ {2}@third-party\/echo@0\.2\.0 {2}\(update available\)$/m)
     for (const name of UNUSABLE) {
-      assert.match(
-        text,
-        new RegExp(`^ {2}${name.replace('/', '\\/')} {2}\\(unreadable lock entry; hyp plugin remove ${name.replace('/', '\\/')}\\)$`, 'm')
-      )
+      assert.match(text, new RegExp(`^ {2}${name} {2}\\(unreadable lock entry; hyp plugin remove ${name}\\)$`, 'm'))
     }
 
     // The JSON branch says the same thing, and never reports a fabricated name.
@@ -99,7 +96,8 @@ test('plugin list lists the healthy entry and marks every unusable lock row', as
       assert.equal(byName.get(name)?.lock_entry_invalid, true, name)
       assert.equal(byName.get(name)?.version, '', name)
     }
-    assert.equal(byName.has('undefined'), false)
+    // No row invents an identity: the lock key carries every one of them.
+    for (const row of json.plugins) assert.equal(typeof row.name === 'string' && row.name.length > 0, true)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

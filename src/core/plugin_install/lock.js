@@ -149,11 +149,9 @@ export function isUsableEntry(entry) {
  * still has.
  *
  * One clause stricter than `isUsableEntry` alone, because a renderer
- * dereferences one field the manifest walk does not: an object carrying an
- * `install_dir` and no usable `name` crashes nothing, but it printed
- * `undefined@0.1.0` and put a `--json` row with no `name` key at all in front
- * of a consumer. It has a lock key like every other unreadable row, so it is
- * reported as one.
+ * dereferences one field the manifest walk does not: a row with an
+ * `install_dir` and no usable `name` renders as `undefined@<version>`, and as
+ * a `--json` row with no `name` key at all.
  *
  * @param {PluginLockFile} lock
  * @returns {{ entries: PluginLockEntry[], unusable: PluginName[] }}

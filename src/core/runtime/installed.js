@@ -52,8 +52,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
   // promises for a manifest that will not load (issue #1958). `install_dir` is
   // the only field this walk dereferences into anything that can throw: `name`
   // is compared and logged, and an entry whose name disagrees with its manifest
-  // already lands in `failed[]` below. The predicate is `isUsableEntry`, shared
-  // with the CLI listing so the two surfaces call the same rows unusable.
+  // already lands in `failed[]` below.
   /** @type {PluginLockEntry[]} */
   const entries = []
   /** @type {PluginName[]} */
