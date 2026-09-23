@@ -664,8 +664,13 @@ function contributionKey(plugin, name) {
 /**
  * The name off the `ActivePlugin` the materializer resolved out of the config
  * row (`src/core/sinks/materialize.js`). The loader builds that record from
- * the manifest it validated, so `name` is a plain string on an object no
- * plugin holds.
+ * the manifest it validated (`src/core/runtime/loader.js`), so it is the
+ * kernel's own rather than a property of the contribution the instance came
+ * from. It is not out of a plugin's reach: `ctx.plugin` is that very object,
+ * unfrozen, so an activated plugin can still rewrite the name the kernel
+ * resolves it under (issue #2130). Reading it once, here, is what keeps one
+ * instantiation's labels, span, counter and owner record from disagreeing
+ * whatever it answers.
  *
  * A record without a usable `name` answers `''` rather than falling back to
  * the contribution's claim, which `InstantiateArgs` makes unreachable for a
