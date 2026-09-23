@@ -812,6 +812,71 @@ test('a neighbour can read a verb inputSchema nested past any stack budget', asy
   assert.equal(stdout, 'owner\n')
 })
 
+// `frozenCopy` filled a copy with `copy[key] =`, and a [[Set]] of an own
+// "__proto__" key copies nothing: it rewrites the copy's prototype to a
+// registrant-controlled object. With parents frozen before their children
+// fill, a child's own assignment could then land on an inherited read-only
+// slot and throw a TypeError into the reader (issue #2049's class, one key
+// over), and an inherited registrant setter ran with `this` bound to the
+// half-built copy, injecting keys and sharing live writable state with the
+// neighbour. The key is defined as plain data instead, so the copy's
+// prototype is never the registrant's to pick and no registrant code runs
+// during the fill.
+
+test('a schema declaring an own __proto__ key reads as data in a neighbour, not as the copy\'s prototype', async () => {
+  const staged = await stage()
+  // A nested child whose own "__proto__" names an ancestor carrying a
+  // conflicting `type`: a [[Set]]-built copy inherits that ancestor's frozen
+  // read-only `type` slot before its own is assigned, and the read throws.
+  const ancestor = /** @type {any} */ ({ type: 'object', properties: {} })
+  const child = /** @type {any} */ ({})
+  Object.defineProperty(child, '__proto__', { value: ancestor, enumerable: true, writable: true, configurable: true })
+  child.type = 'string'
+  ancestor.child = child
+  contributeVerb(staged.ctxA, 'owner proto', 'owner_proto', { inputSchema: ancestor })
+  const copied = /** @type {any} */ (staged.ctxB.verbs.get('owner proto')).inputSchema
+  assert.equal(copied.child.type, 'string', 'the child\'s own type never arrived')
+  assert.ok(Object.isFrozen(copied.child), 'the copied child was left writable')
+
+  // The same key needs no defineProperty to declare: any schema loaded from
+  // JSON with a "__proto__" member carries it as an own enumerable entry.
+  const parsed = JSON.parse('{"__proto__":{"type":"stolen"},"type":"object","required":[]}')
+  contributeVerb(staged.ctxA, 'owner json', 'owner_json', { inputSchema: parsed })
+  const copy = /** @type {any} */ (staged.ctxB.verbs.get('owner json')).inputSchema
+  assert.equal(copy.type, 'object', 'the declaration\'s own type never arrived')
+  assert.equal(Object.getPrototypeOf(copy), Object.prototype, 'the copy\'s prototype was the registrant\'s to pick')
+  const entry = Object.getOwnPropertyDescriptor(copy, '__proto__')
+  assert.ok(entry !== undefined && 'value' in entry, 'the declared __proto__ entry vanished from the copy')
+  assert.equal(/** @type {any} */ (entry.value).type, 'stolen', 'the __proto__ entry\'s value never arrived')
+  assert.ok(Object.isFrozen(entry.value), 'the copied __proto__ entry was left writable')
+})
+
+test('a registrant setter smuggled through __proto__ never runs in a neighbour\'s read', async () => {
+  const staged = await stage()
+  const held = { registrantOwned: true, secret: 'PLACEHOLDER-SECRET' }
+  let setterRan = 0
+  class Smuggler {
+    /** @param {unknown} _value */
+    set positional(_value) {
+      setterRan += 1
+      try { /** @type {any} */ (this).properties.injected = true } catch {}
+      try { /** @type {any} */ (this).properties.live = held } catch {}
+      try { /** @type {any} */ (this).leak = held } catch {}
+    }
+  }
+  const schema = /** @type {any} */ ({ type: 'object' })
+  Object.defineProperty(schema, '__proto__', { value: new Smuggler(), enumerable: true, writable: true, configurable: true })
+  schema.properties = { real: { type: 'string' } }
+  schema.positional = []
+  contributeVerb(staged.ctxA, 'owner smuggle', 'owner_smuggle', { inputSchema: schema })
+  const copy = /** @type {any} */ (staged.ctxB.verbs.get('owner smuggle')).inputSchema
+  assert.equal(setterRan, 0, 'registrant code ran inside the neighbour\'s read')
+  assert.deepEqual(Object.keys(copy.properties), ['real'], 'the copy carried keys the declaration does not have')
+  assert.equal(copy.leak, undefined, 'a live registrant object reached the neighbour')
+  assert.equal(Object.getPrototypeOf(copy), Object.prototype, 'the copy\'s prototype was the registrant\'s to pick')
+  assert.equal(held.secret, 'PLACEHOLDER-SECRET', 'the neighbour\'s read reached the registrant\'s own state')
+})
+
 test('a plugin cannot flip a core verb\'s local-only default or break its parsing', async (t) => {
   const staged = await stage()
   const core = /** @type {any} */ (staged.kernel.verbs.get('query sql'))

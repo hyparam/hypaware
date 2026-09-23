@@ -1138,7 +1138,22 @@ function frozenCopy(value, seen) {
     if (Array.isArray(source)) {
       for (const entry of source) /** @type {unknown[]} */ (copy).push(shell(entry))
     } else {
-      for (const [key, entry] of Object.entries(source)) /** @type {Record<string, unknown>} */ (copy)[key] = shell(entry)
+      for (const [key, entry] of Object.entries(source)) {
+        // An own "__proto__" key is defined rather than assigned: a [[Set]] of
+        // that key copies nothing and instead rewrites the copy's prototype to
+        // a registrant-controlled object, after which every later assignment
+        // in the walk runs whatever setters or non-writable slots that
+        // prototype carries, inside the reader's call - the class issue #2049
+        // closes, reopened one key over. Defined as an own data property, the
+        // key survives as the plain entry the source declared and the copy's
+        // prototype stays Object.prototype, so no registrant code runs during
+        // the fill and no inherited slot can refuse it.
+        if (key === '__proto__') {
+          Object.defineProperty(copy, key, { value: shell(entry), writable: true, enumerable: true, configurable: true })
+        } else {
+          /** @type {Record<string, unknown>} */ (copy)[key] = shell(entry)
+        }
+      }
     }
     Object.freeze(copy)
   }
