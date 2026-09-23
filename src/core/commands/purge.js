@@ -217,6 +217,12 @@ export async function runPurge(argv, ctx) {
     const sweepError = swept.failed > 0 ? `${swept.failed} capture spool file(s) could not be removed` : undefined
     const localIncomplete = localFailed || skippedError !== undefined || sweepError !== undefined
     const localErrorMessage = localError ?? skippedError ?? sweepError
+    // Keyed on the boolean the exit code is, never on the message: a reason
+    // that came back empty must not be able to drop the error field, or - off
+    // the session path, where the block's absence is the shape of a clean run
+    // - the whole block. The fallback repeats the throw site's so the claim
+    // does not rest on a non-emptiness guarantee made a hundred lines away.
+    const localErrorField = localIncomplete ? { error: localErrorMessage || 'unknown error' } : {}
     ctx.stdout.write(JSON.stringify({
       rowsDeleted: localFailed ? null : summary.rowsDeleted,
       partitionsAffected: localFailed ? null : summary.partitionsAffected,
@@ -231,7 +237,7 @@ export async function runPurge(argv, ctx) {
         containment: localIncomplete ? 'incomplete' : 'completed', physical_cleanup: { status: summary.cacheCleanup?.length ? 'incomplete' : 'not_implemented' },
         cache_cleanup: (summary.cacheCleanup ?? []).map(job_id => ({ job_id, scope: 'cache_generations', status: 'pending' })),
         retained: ['historical_snapshots', 'original_data_and_metadata_files', 'search_sidecars', 'derived_copies_without_session_lineage', 'native_transcripts_and_backups'],
-        ...(localErrorMessage ? { error: localErrorMessage } : {}) } } : localErrorMessage ? { local: { status: 'incomplete', error: localErrorMessage } } : {}),
+        ...localErrorField } } : localIncomplete ? { local: { status: 'incomplete', ...localErrorField } } : {}),
       ...(remotes.size ? { remotes: Object.fromEntries(remoteResults) } : {}),
       ...(parsed.remote ? { remote: remoteResults.get(parsed.remote) } : {}),
     }) + '\n')

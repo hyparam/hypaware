@@ -558,11 +558,17 @@ for (const { shape, thrown, named } of [
   test(`a local failure with ${shape} still fails and claims nothing`, async t => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-opaque-failure-'))
     t.after(() => fs.rm(root, { recursive: true, force: true }))
-    /** @param {ReturnType<typeof fixture>} made */
-    const failing = (made) => {
+    // A session purge drains the spool before it deletes, so the throw lands in
+    // `flushAll`; `--all` skips that step, so there it lands on the cache root
+    // the run reads next.
+    /**
+     * @param {ReturnType<typeof fixture>} made
+     * @param {string} [trap]
+     */
+    const failing = (made, trap = 'flushAll') => {
       made.ctx.storage = new Proxy(made.storage, {
         get(target, key) {
-          if (key === 'flushAll') return async () => thrown()
+          if (key === trap) return key === 'flushAll' ? async () => thrown() : thrown()
           const value = Reflect.get(target, key)
           return typeof value === 'function' ? value.bind(target) : value
         },
@@ -587,6 +593,23 @@ for (const { shape, thrown, named } of [
     assert.equal(receipt.rowsDeleted, null, 'an aborted run reports no row total')
     assert.equal(receipt.local.status, 'incomplete')
     assert.equal(receipt.local.error, named, 'the receipt names a failure even with no message to name it by')
+
+    // #2065: presence, not just the message. The equality above still holds
+    // when the message is the only thing holding the block up, so this is the
+    // assertion that pins the claim to the boolean rather than to the chain.
+    assert.equal(typeof receipt.local.error, 'string', 'an incomplete local purge always carries an error field')
+    assert.ok(receipt.local.error.length > 0, 'and that field always names a reason')
+
+    // Off the session path the whole `local` block is conditional and its
+    // absence is the shape of a clean run, so a claim keyed on the message
+    // does not merely lose the reason, it loses the failure (#2065).
+    const all = failing(fixture(path.join(root, 'all')), 'cacheRoot')
+    await seed(all.storage)
+    assert.equal(await runPurge(['--all', '--yes', '--json'], all.ctx), 1)
+    const allReceipt = JSON.parse(all.output())
+    assert.equal(allReceipt.local?.status, 'incomplete', 'a failed non-session purge still reports a local block')
+    assert.equal(typeof allReceipt.local?.error, 'string', 'and an error field in it')
+    assert.ok(allReceipt.local.error.length > 0, 'and that field always names a reason')
 
     // The point of the exit code: the row the user asked to be gone is still here.
     const rows = []
