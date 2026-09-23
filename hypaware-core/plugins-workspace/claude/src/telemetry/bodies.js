@@ -196,10 +196,18 @@ export async function loadSpooledBodies(events, opts) {
       // reports the bytes, or reports nothing if the file would not go, and it
       // is also the one that releases the shared read. Releasing here would
       // reopen the window with that owner's `unlink` still in flight, and it
-      // cannot strand the entry: `removing` holds the file only between the
-      // owner's `add` and the `finally` that clears both.
+      // cannot strand the entry: an owner takes the map entry back along with
+      // the removal (below), so whatever the map holds while `removing` holds
+      // the file is the owner's to release.
       if (removing.has(file)) continue
       removing.add(file)
+      // Take the map entry back along with the removal. This call can reach
+      // here holding a promise the map has already let go of (it claimed the
+      // entry while a previous owner was still removing, and resumed after
+      // that owner cleared it), and the entry sitting in the map then belongs
+      // to a caller that will concede to this one and release nothing. Owning
+      // the entry is what makes the release below match it.
+      reading.set(file, pending)
       try {
         // `unlink`, not `fs.rm(..., { force: true })`: a forced remove RESOLVES
         // for a path that is already gone, and the bytes below are only ours to

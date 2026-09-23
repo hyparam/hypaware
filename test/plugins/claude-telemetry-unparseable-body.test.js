@@ -564,3 +564,75 @@ test('the shared read is released on every exit path of loadSpooledBodies', asyn
     await fsp.rm(root, { recursive: true, force: true })
   }
 })
+
+// `releaseRead` matches on promise identity, so an arm releases the entry only
+// while the map still hands that promise out. A caller can take the removal
+// holding a promise the map has already let go of: it claimed the entry while
+// an earlier owner was still removing, then resumed after that owner's
+// `finally` cleared it. Whatever a later caller puts in the map concedes to
+// that owner and releases nothing, and the owner's own release matches nothing,
+// so the entry outlives every caller and its bytes are handed out forever
+// (#2053). The alignment is one microtask wide, so the second call is scheduled
+// off the same promise the first owner's removal waits on and its depth in that
+// chain is swept, which orders the two without depending on how many turns
+// anything else takes.
+test('an owner holding a promise the map let go of still leaves the map empty', async () => {
+  const realReadFile = fsp.readFile
+  const realUnlink = fsp.unlink
+  /** @param {string} file */
+  const eventsFor = (file) => /** @type {any} */ ([{
+    name: 'api_request_body',
+    timestamp: '2026-08-17T19:31:00.000Z',
+    attributes: { body_ref: file, request_id: REQUEST_ID },
+  }])
+  const settle = async () => {
+    for (let turn = 0; turn < 20; turn++) await new Promise((resolve) => setImmediate(resolve))
+  }
+  for (let depth = 0; depth <= 8; depth++) {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-stale-'))
+    try {
+      const file = path.join(root, 'broken.request.json')
+      await fsp.writeFile(file, 'not json at all', 'utf8')
+      let reads = 0
+      fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+        if (target === file) reads += 1
+        return realReadFile(target)
+      })
+      let removals = 0
+      /** @type {(value?: unknown) => void} */
+      let releaseFirst = () => {}
+      const firstHeld = new Promise((resolve) => { releaseFirst = resolve })
+      /** @type {(value?: unknown) => void} */
+      let releaseSecond = () => {}
+      const secondHeld = new Promise((resolve) => { releaseSecond = resolve })
+      // Every removal fails and the file stays, which is what lets a later
+      // caller read real bytes while an earlier one still owns the removal.
+      fsp.unlink = /** @type {any} */ (async (/** @type {string} */ target) => {
+        if (target !== file) return realUnlink(target)
+        removals += 1
+        if (removals === 1) await firstHeld
+        if (removals === 2) await secondHeld
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' })
+      })
+      const first = loadSpooledBodies(eventsFor(file), { spoolDir: root })
+      await settle()
+      /** @type {Promise<unknown>} */
+      let chain = firstHeld
+      for (let hop = 0; hop < depth; hop++) chain = chain.then(() => {})
+      const second = chain.then(() => loadSpooledBodies(eventsFor(file), { spoolDir: root }))
+      releaseFirst()
+      await settle()
+      const third = loadSpooledBodies(eventsFor(file), { spoolDir: root })
+      await settle()
+      releaseSecond()
+      await Promise.all([first, second, third])
+      reads = 0
+      await loadSpooledBodies(eventsFor(file), { spoolDir: root })
+      assert.equal(reads, 1, `a promise the map let go of was left in it (depth ${depth})`)
+    } finally {
+      fsp.readFile = realReadFile
+      fsp.unlink = realUnlink
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  }
+})
