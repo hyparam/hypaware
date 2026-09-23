@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-14
 **Related:** LLP 0044 (#status-surface: the attach-on-join loop and the surface this constrains), LLP 0045 (the attach design `desired()` implements), LLP 0115 (#no-attach-on-join: Claude Desktop, the probe-less client this is derived from), LLP 0139 (#repair-must-be-runnable: the repair rule this leaves standing), LLP 0224 (#repair-surface: why the `client_attach_missing` diagnostic is deliberately outside this gate), LLP 0143 (superseded; made the same observation about OpenClaw, before LLP 0169 gave OpenClaw a probe back), LLP 0169 (the attach surface OpenClaw regained), [#544](https://github.com/hyparam/hypaware/issues/544)
-**Extended-by:** LLP 0358 (#diagnostic-is-out-of-scope is retired: Desktop capture no longer depends on attach, so the probe-less gate now covers the `client_attach_missing` diagnostic too), LLP 0379 (the backfill twin: status derives backfill state by the reconciler's provider gate, declared on the client block as `backfill_provider: false`)
+**Extended-by:** LLP 0358 (#diagnostic-is-out-of-scope is retired: Desktop capture no longer depends on attach, so the probe-less gate now covers the `client_attach_missing` diagnostic too), LLP 0379 (the backfill twin: status derives backfill state by the reconciler's provider gate, declared on the client block as `backfill_provider: false`), LLP 0429 (#status: a declared probe whose marker the current capture mode can never write is unattachable too, so the gate reads one config key beside the descriptor)
 
 > `hyp status` and the attach reconciler answered "is this client an attach
 > target?" by two different rules, so a client the reconciler will never act on
@@ -107,6 +107,14 @@ and keep the full `not attached` / `pending` / `client_attach_missing` trio. An
 unresolvable probe is a real negative that a user can act on; the absence of a
 probe is not. Collapsing the two would suppress exactly the warning the surface
 exists to raise.
+
+> **Extended-by:** [LLP 0429](./0429-codex-capture-leaves-inference.spec.md#status).
+> A third case: the probe resolves, finds no marker, and no marker can ever
+> exist, because the client's current capture mode is the one that *removes*
+> the block its `attach_probe` reads. That is unactionable in the same way the
+> absent probe is, so the gate widens by exactly one config key. The reason
+> above is unchanged: an unresolvable probe stays a real negative, and the
+> gate still keys on nothing the probe returned.
 
 <a id="the-rule-outlives-its-clients"></a>**The rule is stated over the
 manifest, not over a client roster.** Which clients are probe-less is a fact

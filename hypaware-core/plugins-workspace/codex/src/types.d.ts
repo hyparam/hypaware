@@ -45,10 +45,14 @@ export interface CodexRolloutSession {
   model?: string
   /** Configured upstream provider (`session_meta.model_provider`). */
   modelProvider?: string
+  /** Base instructions recorded by Codex, not a reconstruction of every request. */
+  systemText?: string
   /** Launch source label, e.g. `vscode` (`session_meta.source`). */
   source?: string
   /** Ordered response items recovered from the rollout. */
   items: CodexRolloutItem[]
+  /** Stable prefix through the last usage/completion event when native lifecycle events exist. */
+  settledItemCount?: number
 }
 
 /** One recovered rollout response item plus its envelope timestamp. */
@@ -130,6 +134,8 @@ export type CodexAttachResult = { changed: true; prevValue?: string }
 
 export interface CodexDetachOptions {
   configPath?: string
+  /** Report what the undo would do without writing it. */
+  dryRun?: boolean
 }
 
 export type CodexDetachResult =

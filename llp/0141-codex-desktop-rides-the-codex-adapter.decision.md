@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-07-28
 **Related:** LLP 0012, LLP 0083, LLP 0115, LLP 0130, LLP 0133, LLP 0151
+**Extended-by:** LLP 0429 (native rollout capture is the default; gateway routing is explicit opt-in)
 
 > Names a coverage fact that was already true in code and nowhere in the
 > product surface. Nothing about capture changes here; the picker copy, the
@@ -90,6 +91,12 @@ the same conversation is captured live through the gateway and re-importable
 from `~/.codex/sessions`. The `unsupported_location` event therefore carries
 a `covered_by` attribute naming both routes, so the flag cannot be read as
 "Codex Desktop is unsupported".
+
+> **Extended-by:** [LLP 0429](./0429-codex-capture-leaves-inference.spec.md).
+> Under the default capture mode the rollout route is the only one that runs,
+> so `covered_by` names `codex_sessions_rollout` alone. The boundary decision
+> is unchanged: the token still names every route that does cover the
+> container. `gateway_live` returns with `capture_mode: "gateway"`.
 
 ## Consequences
 

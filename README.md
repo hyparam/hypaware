@@ -320,8 +320,8 @@ hyp unattach <client>
 Both commands support `--dry-run` and `--json` for inspection and
 scripting. Each adapter writes only HypAware-managed settings to its
 client's own config file (for example `~/.claude/settings.json` for
-Claude, a `hypaware` provider entry in `~/.codex/config.toml` for
-Codex); unrelated keys in every file are preserved.
+Claude). Codex defaults to rollout capture and removes any old managed
+provider entry from `~/.codex/config.toml`; unrelated settings are preserved.
 
 ### Claude Code attaches by telemetry, not by proxy
 
@@ -431,16 +431,31 @@ Two things to know before turning it on:
   "config": { "proxy_mode": true, "upstream_proxy": "http://proxy.corp:8080" } }
 ```
 
-Codex is unaffected and keeps using the base-URL mechanism.
+Codex uses native rollout capture by default. Explicit gateway capture still
+uses the base-URL mechanism.
 
 ### Desktop apps
 
 **Codex Desktop needs no separate setup.** `hyp client attach codex` covers the
-Codex CLI and Codex Desktop together, because the two share the file it
-writes (`~/.codex/config.toml`, or `$CODEX_HOME/config.toml`) and the
-history it backfills (`~/.codex/sessions/**`). Rows from either surface land
+Codex CLI and Codex Desktop together. The daemon reads their shared native
+rollouts (`$CODEX_HOME/sessions/**`, default `~/.codex/sessions/**`) every
+minute, skipping unchanged files. Inference connects directly to the provider.
+Attach removes an old HypAware-managed provider route; restart running Codex
+clients to reload it. Rows from either surface land
 in `ai_gateway_messages`; the `entrypoint` column carries Codex's
 `originator`, which is what tells a Desktop session from a terminal one.
+Base instructions, developer messages, tool calls/results and usage recorded
+in the native files are imported. Full submitted tool definitions are unavailable.
+Modern responses still awaiting a usage/completion event are imported on a later
+sweep; manual history import can recover a crashed unfinished response.
+
+The Codex plugin's optional `capture_mode: "gateway"` restores explicit proxy
+capture after `hyp client attach codex` and a client restart. Its default is
+`"transcript"`. `backfill.sweep_cron` changes the one-minute schedule;
+`backfill.on_join: false` disables automatic imports, and `window_days` bounds
+the sweep as well as join-time history. Manual `hyp client history import codex`
+remains available. Old local installs migrate on the next scheduled sweep;
+installs with automatic import disabled migrate when explicitly attached.
 
 **Claude Desktop needs no attach.** Select it in `hyp init` and HypAware imports
 its local JSONL transcripts on the daemon's five-minute schedule (LLP 0358).
@@ -463,8 +478,8 @@ What HypAware does **not** do for Codex Desktop: it never parses the app's
 own container at `~/Library/Application Support/Codex`. That store is
 opaque and undocumented, so `hyp client history import codex` flags it as an
 `unsupported_location` and moves on. It is not the only copy of those
-conversations, so nothing is lost: live traffic is captured through the
-gateway, and past sessions come back from `~/.codex/sessions`. The same
+conversations: current and past sessions are captured from
+`~/.codex/sessions`. The same
 applies to the ChatGPT desktop app and browser storage, which HypAware does
 not capture at all.
 

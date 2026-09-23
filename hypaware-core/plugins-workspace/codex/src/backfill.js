@@ -14,6 +14,8 @@ import {
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
 import { redactRemoteUserinfo } from './git-remote.js'
+import { detach } from './settings.js'
+import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
   copyNumberAlias,
   firstString,
@@ -97,6 +99,8 @@ const COMPONENT = 'plugin.codex.backfill'
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
  *   ignoredSessions?: Set<string>,
+ *   config?: JsonObject,
+ *   configPath?: string,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -105,7 +109,20 @@ export function createCodexBackfillProvider(opts) {
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
   const codexHome = opts.codexHome ?? defaultCodexHome(opts.homeDir)
   const sessionsDir = opts.sessionsDir ?? path.join(codexHome, 'sessions')
-  const unsupportedLocations = opts.unsupportedLocations ?? defaultUnsupportedLocations(opts.homeDir)
+  const unsupportedLocations = opts.unsupportedLocations
+    ?? defaultUnsupportedLocations(opts.homeDir, opts.config?.capture_mode === 'gateway')
+  const config = opts.config
+  const backfill = isPlainObject(config?.backfill) ? config.backfill : {}
+  /** @type {Map<string, { ino: number, size: number, mtimeMs: number }>} */
+  const fingerprints = new Map()
+  // How many sessions each file is still holding back, so `sessions_deferred`
+  // is a level rather than a one-tick edge: the fingerprint skip below returns
+  // a deferred file to the loop unread, and an operator reading the latest
+  // scan record would otherwise be told nothing is owed. Keyed and pruned
+  // exactly like `fingerprints`, and only holds files that defer something,
+  // so it is bounded by disk and normally empty.
+  /** @type {Map<string, number>} */
+  const deferrals = new Map()
   // One `.hypignore` resolver per backfill run, holding its per-cwd cache for
   // the whole scan (LLP 0049 R6).
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
@@ -118,8 +135,41 @@ export function createCodexBackfillProvider(opts) {
     plugin: pluginName,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Codex session rollouts into ai_gateway_messages',
+    // Gateway mode selects the provider writer, so it registers no sweep:
+    // running both lanes forever would be permanent unpaid work for a route
+    // the operator explicitly opted out of.
+    // @ref LLP 0429#sweep [implements]: ordinary capture rides the existing background queue, including Desktop
+    ...(config?.capture_mode !== 'gateway' && readBackfillPolicy({ name: pluginName, config }).onJoin !== false
+      ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } }
+      : {}),
     async *run(ctx) {
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, ignoredSessions: opts.ignoredSessions })
+      // Scheduled work is the daemon-only migration seam, including local
+      // installs without a fleet attach marker. Manual queries/imports never
+      // change client settings. Failure is retried by the next sweep.
+      //
+      // Releasing the old route is cleanup, not capture: an unreadable or
+      // unwritable config.toml must not cost the sweep its rows, or one
+      // bad permission bit silently stops Codex recording altogether.
+      // @ref LLP 0429#migration [implements]
+      if (ctx.sweep && !ctx.dryRun && config?.capture_mode !== 'gateway') {
+        try {
+          const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml') })
+          if (result.changed) ctx.log.info('codex.capture.route_released', {
+            component: COMPONENT, operation: 'capture.migrate', status: 'ok',
+            mode: 'transcript', restart_required: true,
+          })
+          if ('warning' in result && result.warning) ctx.log.warn('codex.capture.route_warning', {
+            component: COMPONENT, operation: 'capture.migrate', warning: result.warning,
+          })
+        } catch (err) {
+          ctx.log.error('codex.capture.route_release_failed', {
+            component: COMPONENT, operation: 'capture.migrate', status: 'failed',
+            error_kind: err instanceof Error ? err.name : 'unknown',
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, deferrals, ignoredSessions: opts.ignoredSessions })
     },
   }
 }
@@ -133,17 +183,19 @@ export function defaultCodexHome(homeDir) {
  * Which routes still capture Codex Desktop when HypAware declines to parse
  * the Codex Desktop app container. Named on the event itself because the
  * flag is otherwise read as a verdict on the client rather than on one
- * directory: Codex Desktop routes through the same gateway as the CLI and
- * writes the same rollout tree, so nothing is actually lost by leaving the
- * container alone.
+ * directory: Codex Desktop writes the same rollout tree as the CLI (and, in
+ * gateway mode, routes through the same gateway), so nothing is actually
+ * lost by leaving the container alone.
  *
- * Two short tokens, not prose, so the attribute stays queryable like every
+ * Short tokens, not prose, so the attribute stays queryable like every
  * other attribute on the event. The explanation lives where prose belongs:
  * LLP 0141 `#unsupported-boundary` and the README.
  *
  * @ref LLP 0141#unsupported-boundary [implements]: the boundary is one opaque directory, not a client, and the event has to say so
+ * @ref LLP 0429#content [constrained-by]: the default runs one route, so the token names one; `gateway_live` returns with gateway mode
  */
-const CODEX_DESKTOP_COVERED_BY = 'gateway_live,codex_sessions_rollout'
+const CODEX_DESKTOP_COVERED_BY = 'codex_sessions_rollout'
+const CODEX_DESKTOP_COVERED_BY_GATEWAY = `gateway_live,${CODEX_DESKTOP_COVERED_BY}`
 
 /**
  * Codex/ChatGPT app + browser storage we DETECT but never parse in V1.
@@ -157,16 +209,17 @@ const CODEX_DESKTOP_COVERED_BY = 'gateway_live,codex_sessions_rollout'
  * app's does not, and its flag stays bare on purpose.
  *
  * @param {string} homeDir
+ * @param {boolean} [gatewayCapture]  Gateway mode runs the live route too, so the token names it.
  * @returns {Array<{ kind: string, path: string, coveredBy?: string }>}
  */
-function defaultUnsupportedLocations(homeDir) {
+function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
   return [
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, 'Library', 'Application Support', 'ChatGPT') },
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, '.config', 'ChatGPT') },
     {
       kind: 'codex_desktop_app',
       path: path.join(homeDir, 'Library', 'Application Support', 'Codex'),
-      coveredBy: CODEX_DESKTOP_COVERED_BY,
+      coveredBy: gatewayCapture ? CODEX_DESKTOP_COVERED_BY_GATEWAY : CODEX_DESKTOP_COVERED_BY,
     },
   ]
 }
@@ -186,6 +239,8 @@ function defaultUnsupportedLocations(homeDir) {
  *   clientName: string,
  *   resolver: UsagePolicyResolver,
  *   ignoredSessions?: Set<string>,
+ *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
+ *   deferrals: Map<string, number>,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
@@ -216,13 +271,38 @@ async function* runCodexBackfill(args) {
   let sessionsProjected = 0
   let sessionsIgnored = 0
   let messagesProjected = 0
+  let filesRead = 0
+  let filesUnchanged = 0
+  let sessionsDeferred = 0
+  const files = await listRolloutFiles(sessionsDir)
+  const present = new Set(files)
+  for (const filePath of args.fingerprints.keys()) {
+    if (!present.has(filePath)) args.fingerprints.delete(filePath)
+  }
+  for (const filePath of args.deferrals.keys()) {
+    if (!present.has(filePath)) args.deferrals.delete(filePath)
+  }
 
-  for (const filePath of await listRolloutFiles(sessionsDir)) {
+  for (const filePath of files) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
     /** @type {CodexRolloutSession[]} */
     let sessions
+    let fingerprint
+    const failedBefore = ctx.itemsFailed ?? 0
     try {
+      if (ctx.sweep) {
+        const stat = await fs.stat(filePath)
+        fingerprint = { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs }
+        const prior = args.fingerprints.get(filePath)
+        if (prior && prior.ino === stat.ino && prior.size === stat.size && prior.mtimeMs === stat.mtimeMs) {
+          filesUnchanged += 1
+          // Unread, but still owing whatever it owed when it was last read.
+          sessionsDeferred += args.deferrals.get(filePath) ?? 0
+          continue
+        }
+      }
+      filesRead += 1
       sessions = await parseRolloutFile(filePath)
     } catch (err) {
       log.warn('codex.backfill.rollout_read_failed', {
@@ -236,6 +316,7 @@ async function* runCodexBackfill(args) {
       continue
     }
 
+    let fileDeferred = 0
     for (const session of sessions) {
       // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
       if (args.ignoredSessions?.has(session.sessionId)) {
@@ -269,9 +350,23 @@ async function* runCodexBackfill(args) {
         continue
       }
 
+      // Native lifecycle events delimit an unfinished model response. Do
+      // not persist its assistant row before a later token_count can stamp
+      // usage: durable dedupe would otherwise keep the usage-less version.
+      // A suffix left unsettled by a crashed client is never revisited by the
+      // sweep (the file stops changing, so its fingerprint keeps matching), so
+      // count it: the scan record is the only thing that can tell an operator a
+      // manual import is owed. Carried in `deferrals` so the count survives the
+      // fingerprint skip and reads as a standing level, not a one-tick edge.
+      // @ref LLP 0429#content [implements]
+      const settled = ctx.sweep && session.settledItemCount !== undefined
+        ? session.items.slice(0, session.settledItemCount)
+        : session.items
+      if (settled.length < session.items.length) fileDeferred += 1
+
       const exchange = projectedExchangeFromSession({
         session,
-        items: filterByWindow(session.items, window),
+        items: filterByWindow(settled, window),
         clientName,
       })
       if (!exchange) continue
@@ -295,12 +390,27 @@ async function* runCodexBackfill(args) {
         native_id: session.threadId,
       })
     }
+    sessionsDeferred += fileDeferred
+    // Remember what this file still owes, so the next tick's fingerprint skip
+    // can report it without re-reading. Deleted when it settles, so a file
+    // that finished is not counted forever.
+    if (ctx.sweep) {
+      if (fileDeferred > 0) args.deferrals.set(filePath, fileDeferred)
+      else args.deferrals.delete(filePath)
+    }
+    // @ref LLP 0429#sweep [implements]: retry failed writes, and reread files changed during consumption on the next pass
+    if (ctx.sweep && !ctx.dryRun && fingerprint && (ctx.itemsFailed ?? 0) === failedBefore) {
+      args.fingerprints.set(filePath, fingerprint)
+    }
   }
 
   log.info('codex.backfill.scan_complete', {
     component: COMPONENT,
     operation: 'backfill.scan',
     files_seen: filesSeen,
+    files_read: filesRead,
+    files_unchanged: filesUnchanged,
+    sessions_deferred: sessionsDeferred,
     sessions_projected: sessionsProjected,
     sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,
@@ -486,6 +596,8 @@ function parseJsonlRollout(text, filePath) {
   /** @type {CodexRolloutItem[]} */
   const items = []
   let sawRecord = false
+  let tracksLifecycle = false
+  let settledItemCount = 0
 
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
@@ -508,6 +620,7 @@ function parseJsonlRollout(text, filePath) {
     } else if (type === 'response_item' && payload) {
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
     } else if (type === 'event_msg' && payload) {
+      if (payload.type === 'task_started') tracksLifecycle = true
       // The one event_msg we keep: token_count. It is NOT a message: it is a
       // turn-boundary marker carrying that turn's normalized usage. Its slot in
       // the items stream is preserved (so the projector can attribute it to the
@@ -515,12 +628,16 @@ function parseJsonlRollout(text, filePath) {
       const usageAttributes = codexUsageFromTokenCount(payload)
       if (usageAttributes) {
         items.push({ payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes })
+        settledItemCount = items.length
       }
+      if (payload.type === 'task_complete' || payload.type === 'turn_aborted') settledItemCount = items.length
     }
   }
 
   if (!sawRecord) return undefined
-  return buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
+  const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
+  if (tracksLifecycle) session.settledItemCount = settledItemCount
+  return session
 }
 
 /**
@@ -584,6 +701,9 @@ function buildSession(args) {
     parentThreadId: stringValue(metaPayload.parent_thread_id),
     model: firstTurnString(turnPayloads, 'model'),
     modelProvider: stringValue(metaPayload.model_provider),
+    systemText: isPlainObject(metaPayload.base_instructions)
+      ? stringValue(metaPayload.base_instructions.text)
+      : stringValue(metaPayload.base_instructions),
     source: stringValue(metaPayload.source),
     items,
   }
@@ -669,6 +789,8 @@ function projectedExchangeFromSession(args) {
   if (session.threadSource !== undefined) exchange.is_sidechain = session.threadSource === 'subagent'
   if (session.parentThreadId) exchange.parent_thread_id = session.parentThreadId
   if (session.model) exchange.model = session.model
+  // @ref LLP 0429#content [implements]: native base instructions are evidence; missing full tool definitions stay null
+  if (session.systemText) exchange.system_text = session.systemText
   return exchange
 }
 
@@ -892,4 +1014,3 @@ function boolValue(value) {
 function firstBool(...values) {
   return values.find((value) => typeof value === 'boolean')
 }
-

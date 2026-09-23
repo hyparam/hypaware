@@ -13,6 +13,7 @@ import {
   aiGatewayBackfillMaterializer,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspace/codex/src/backfill.js'
+import { prepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -227,6 +228,169 @@ test('provider advertises a stable contribution shape', async () => {
   assert.equal(provider.plugin, '@hypaware/codex')
   assert.deepEqual(provider.datasets, ['ai_gateway_messages'])
   assert.equal(typeof provider.run, 'function')
+  assert.equal(provider.sweep?.cron, '* * * * *')
+  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { backfill: { on_join: false } } }).sweep, undefined)
+  // Gateway mode selects the provider writer, so the rollout sweep must not
+  // also run: both lanes forever is permanent unpaid work on a route the
+  // operator explicitly opted out of.
+  // @ref LLP 0429#sweep [tests]: the scheduled lane belongs to transcript capture
+  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { capture_mode: 'gateway' } }).sweep, undefined)
+})
+
+// The migration undo is cleanup, not capture. A config.toml the daemon cannot
+// read must not cost the sweep its rows, or one bad permission bit silently
+// stops Codex recording altogether and retries that failure every minute.
+// @ref LLP 0429#migration [tests]: a failed settings write fails visibly, it does not disable capture
+test('a config.toml the sweep cannot read is reported, and capture still runs', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-readonly.jsonl', modernConversation('readonly'))
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+    await fs.chmod(configPath, 0o000)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 1, 'rollout rows are captured despite the settings failure')
+    const failed = entries.find((e) => e.message === 'codex.capture.route_release_failed')
+    assert.ok(failed, 'the failed undo is reported rather than swallowed')
+    assert.equal(failed?.fields?.status, 'failed')
+  } finally {
+    await fs.chmod(path.join(env.homeDir, '.codex', 'config.toml'), 0o600).catch(() => {})
+    await env.cleanup()
+  }
+})
+
+// A suffix left unsettled by a crashed client is deferred to a manual import
+// (LLP 0429 #content), and the sweep never revisits it: the file stops
+// changing, so its fingerprint keeps matching. The scan record is therefore
+// the only thing that can tell an operator an import is owed - and it has to
+// keep saying so, because the very skip that strands the file is what would
+// otherwise reset the count to zero on the next tick.
+// @ref LLP 0429#content [tests]: deferral is visible, not silent
+test('a deferred unfinished response is counted in the scan record', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-crashed.jsonl', {
+      meta: { id: 'crashed', originator: 'codex-tui' },
+      items: [
+        { type: 'event_msg', payload: { type: 'task_started' } },
+        { payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'q' }] } },
+        { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 4, output_tokens: 1 } } } },
+        { payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'never settled' }] } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    await collect(provider.run(ctx))
+    const scan = entries.findLast((e) => e.message === 'codex.backfill.scan_complete')
+    assert.equal(scan?.fields?.sessions_deferred, 1)
+
+    // It is a level, not an edge. The second tick skips the file on its
+    // unchanged fingerprint and must still report the debt: an operator who
+    // greps the latest scan record is the reader this signal exists for, and
+    // a one-tick edge tells them nothing is owed for as long as it is true.
+    const second = runContext()
+    second.ctx.sweep = true
+    await collect(provider.run(second.ctx))
+    const rescan = second.entries.findLast((e) => e.message === 'codex.backfill.scan_complete')
+    assert.equal(rescan?.fields?.files_unchanged, 1, 'the file really was skipped unread')
+    assert.equal(rescan?.fields?.files_read, 0)
+    assert.equal(rescan?.fields?.sessions_deferred, 1, 'and still reports what it owes')
+
+    // It clears when the client comes back and settles the turn, so the level
+    // cannot latch on forever.
+    await fs.appendFile(
+      path.join(env.sessionsDir, 'rollout-crashed.jsonl'),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }) + '\n'
+    )
+    const third = runContext()
+    third.ctx.sweep = true
+    await collect(provider.run(third.ctx))
+    assert.equal(
+      third.entries.findLast((e) => e.message === 'codex.backfill.scan_complete')?.fields?.sessions_deferred,
+      0,
+      'a settled turn stops being owed'
+    )
+
+    // A fully settled file reports none, so the counter means what it says.
+    const clean = await stageEnv()
+    try {
+      await writeModernRollout(clean, 'rollout-clean.jsonl', modernConversation('clean'))
+      const { ctx: ctx2, entries: entries2 } = runContext()
+      ctx2.sweep = true
+      await collect(createCodexBackfillProvider({ homeDir: clean.homeDir }).run(ctx2))
+      assert.equal(entries2.findLast((e) => e.message === 'codex.backfill.scan_complete')?.fields?.sessions_deferred, 0)
+    } finally {
+      await clean.cleanup()
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('scheduled capture migrates the route, skips unchanged files, and retries failed consumption', async () => {
+  const env = await stageEnv()
+  try {
+    const doc = modernConversation('scheduled')
+    doc.meta.base_instructions = { text: 'native base instructions' }
+    const file = await writeModernRollout(env, 'rollout-scheduled.jsonl', doc)
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const first = await collect(provider.run(ctx))
+    assert.equal(first.items.length, 1)
+    assert.equal(value(first.items[0]).system_text, 'native base instructions')
+    assert.equal(value(first.items[0]).tools, undefined)
+    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "custom"\n')
+    assert.ok(entries.some((e) => e.message === 'codex.capture.route_released'))
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    assert.equal(entries.at(-1)?.fields?.files_read, 0)
+    assert.equal(entries.at(-1)?.fields?.files_unchanged, 1)
+    await fs.appendFile(file, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'new turn' }] } }) + '\n')
+    for await (const item of provider.run(ctx)) {
+      if (item.type !== 'event') ctx.itemsFailed = (ctx.itemsFailed ?? 0) + 1
+    }
+    assert.equal((await collect(provider.run(ctx))).items.length, 1, 'a failed materialization is retried')
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    ctx.sweep = false
+    assert.equal((await collect(provider.run(ctx))).items.length, 1, 'manual import bypasses fingerprints')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('scheduled capture waits for delayed usage before committing an active assistant response', async () => {
+  const env = await stageEnv()
+  try {
+    const file = await writeModernRollout(env, 'rollout-active.jsonl', {
+      meta: { id: 'active', originator: 'codex-tui' },
+      items: [
+        { type: 'event_msg', payload: { type: 'task_started' } },
+        { payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx } = runContext()
+    ctx.sweep = true
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    await fs.appendFile(file, JSON.stringify({ type: 'event_msg', payload: {
+      type: 'token_count', info: { last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 3 } },
+    } }) + '\n')
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 1)
+    const rows = await materialize(items[0])
+    const attrs = typeof rows[0].attributes === 'string' ? JSON.parse(rows[0].attributes) : rows[0].attributes
+    assert.equal(attrs.usage.input_tokens, 15)
+    assert.equal(attrs.usage.output_tokens, 3)
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+  } finally {
+    await env.cleanup()
+  }
 })
 
 test('modern rollout projects into canonical ai_gateway_messages rows', async () => {

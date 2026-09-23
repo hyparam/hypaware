@@ -1,5 +1,7 @@
 // @ts-check
 
+import { isCronExpression } from '../../../../src/core/config/validate.js'
+
 /**
  * Config validation for the `@hypaware/codex` plugin's own `config`
  * block. v1 validates the optional `backfill` sub-object that drives
@@ -40,9 +42,12 @@ export function validateCodexConfig(value) {
   }
   const raw = /** @type {Record<string, unknown>} */ (value)
   const errors = [
-    ...validateBackfillSection(raw.backfill, '/backfill'),
+    ...validateBackfillSection(raw.backfill, '/backfill', true),
     ...validateAttachSection(raw.attach, '/attach'),
   ]
+  if (raw.capture_mode !== undefined && raw.capture_mode !== 'transcript' && raw.capture_mode !== 'gateway') {
+    errors.push({ pointer: '/capture_mode', message: 'capture_mode must be transcript or gateway' })
+  }
   if (errors.length > 0) return { ok: false, errors }
   return { ok: true }
 }
@@ -57,9 +62,10 @@ export function validateCodexConfig(value) {
  *
  * @param {unknown} value
  * @param {string} pointer  JSON-pointer prefix for the `backfill` object
+ * @param {boolean} [allowSweep] Codex owns the sweep cadence; other consumers keep their existing contract.
  * @returns {ValidationError[]}
  */
-export function validateBackfillSection(value, pointer) {
+export function validateBackfillSection(value, pointer, allowSweep = false) {
   /** @type {ValidationError[]} */
   const errors = []
   if (value === undefined) return errors
@@ -80,8 +86,20 @@ export function validateBackfillSection(value, pointer) {
       })
     }
   }
+  // Validated where the key is admitted, not by the caller: `opencode`
+  // imports this helper too, so a split check would hand the next
+  // `allowSweep` caller an unvalidated cron.
+  if (allowSweep && raw.sweep_cron !== undefined) {
+    const cron = raw.sweep_cron
+    if (typeof cron !== 'string' || !isCronExpression(cron)) {
+      errors.push({
+        pointer: `${pointer}/sweep_cron`,
+        message: 'backfill.sweep_cron must be a valid 5-field cron expression',
+      })
+    }
+  }
   for (const key of Object.keys(raw)) {
-    if (key !== 'on_join' && key !== 'window_days') {
+    if (key !== 'on_join' && key !== 'window_days' && !(allowSweep && key === 'sweep_cron')) {
       errors.push({ pointer: `${pointer}/${key}`, message: `unknown backfill key '${key}'` })
     }
   }

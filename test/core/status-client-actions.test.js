@@ -114,7 +114,33 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
     report.clientActions.actions.filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
   )
   assert.equal(attach.get('claude')?.state, 'pending')
-  assert.equal(attach.get('codex')?.state, 'pending') // no `attach` block → default-on
+  // A transcript-mode codex is a REAL pending attach target, not `n/a`: the
+  // settings block it declines to write is not the marker this surface reads.
+  // `desired()` names it (it declares an `attach_probe`), the attach removes
+  // the managed provider block and succeeds, and the reconciler's own `done`
+  // marker lands - so `pending` resolves. Reporting `n/a` here would say the
+  // reconciler is a no-op over exactly the migration this release performs.
+  // @ref LLP 0229#status-derives-by-the-same-gate [tests]: status names the target the reconciler names, and no other
+  assert.equal(attach.get('codex')?.state, 'pending')
+
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      { name: '@hypaware/claude', config: { backfill: { on_join: true, window_days: 30 } } },
+      { name: '@hypaware/codex', config: { capture_mode: 'gateway', backfill: { on_join: false } } },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  const gatewayReport = await collectHypAwareStatus({ env: env(hypHome) })
+  const gatewayAttach = new Map(
+    (gatewayReport.clientActions?.actions ?? []).filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
+  )
+  // Both halves pinned at `pending`: `capture_mode` decides what the attach
+  // writes, never whether the reconciler has an attach to run. A gate that
+  // reads capture mode here would show one of these two as `n/a`.
+  assert.equal(gatewayAttach.get('codex')?.state, 'pending')
 })
 
 test('a malformed on_join block renders n/a (not pending) on a joined host', async () => {

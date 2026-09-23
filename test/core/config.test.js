@@ -356,16 +356,20 @@ test('diagnoseV1Config falls back to first-party client descriptors', () => {
   })
   assert.deepEqual(claudeNeedsNoProxyUpstream.map((diagnostic) => diagnostic.kind), [])
 
-  const codexStillNeedsAnUpstream = diagnoseV1Config({
+  // Codex needs no inference upstream either since capture left the
+  // inference path: the picker composes `upstreams: []` for a codex pick, so
+  // a warning here would fire on every default install. The fallback
+  // descriptor has to agree with the manifest, which dropped
+  // `required_upstreams` in the same change.
+  // @ref LLP 0429#default [tests]: onboarding composes no inference upstream for Codex
+  const codexNeedsNoUpstream = diagnoseV1Config({
     version: 2,
     plugins: [
       { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/codex' },
     ],
   })
-  assert.deepEqual(codexStillNeedsAnUpstream.map((diagnostic) => diagnostic.kind), [
-    'gateway_missing_openai_upstream',
-  ])
+  assert.deepEqual(codexNeedsNoUpstream.map((diagnostic) => diagnostic.kind), [])
 })
 
 test('diagnoseV1Config emits descriptor-derived upstream diagnostic kinds', () => {
@@ -434,7 +438,7 @@ test('buildPluginCatalog extracts client descriptors from manifests', async () =
   assert.equal(codex?.skillDir, '.codex/skills')
   assert.equal(codex?.agentDir, undefined)
   assert.equal(codex?.attachProbe?.format, 'toml')
-  assert.deepEqual(codex?.requiredUpstreams, ['openai', 'chatgpt'])
+  assert.equal(codex?.requiredUpstreams, undefined)
 })
 
 test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed by row name', () => {

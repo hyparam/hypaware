@@ -10,7 +10,7 @@ import { readConfigControlStatus, resolveCentralLayerPath } from '../config/appl
 import { readClientActionStatus } from '../config/action_reconciler.js'
 import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../config/client_detach_disk.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
-import { readAttachPolicy } from '../config/attach_policy.js'
+import { readAttachPolicy, readCodexCaptureMode } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
 import {
   isOtlpHeadersOverride,
@@ -1058,6 +1058,20 @@ export function daemonHeartbeatAgeMs(status, nowMs) {
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
+ * Whether an otherwise-probe-declaring client writes no marker in its current
+ * configuration, so its attach state is "n/a" rather than "not attached".
+ * Codex is the only such client: `capture_mode: "gateway"` writes the managed
+ * provider block, and the default `transcript` mode removes it.
+ *
+ * @param {string} clientName
+ * @param {HypAwareV2Config | null | undefined} config
+ * @returns {boolean}
+ */
+function attachWritesNoMarker(clientName, config) {
+  return clientName === 'codex' && readCodexCaptureMode(config?.plugins) === 'transcript'
+}
+
+/**
  * Collect everything `hyp status` shows. Reads config from disk,
  * probes daemon install + runtime state, walks the kernel runtime
  * for source/sink contributions when available, and probes client
@@ -2004,11 +2018,23 @@ export async function collectHypAwareStatus(opts = {}) {
     // `client_attach_missing` diagnostic just below now follows the same gate:
     // LLP 0358 made Desktop's probe-less transcript lane complete without any
     // setup marker.
+    //
+    // Codex reaches the same gate by a second route: its probe reads the
+    // managed provider block, and in the default `transcript` mode attach
+    // *removes* that block and writes no marker. The probe is declared but
+    // can never be satisfied, so without this the warning below would stand
+    // forever with a repair that does nothing.
+    //
+    // The probe still runs, though. It is the only thing that finds a marker
+    // a previous mode left behind, which is what
+    // `client_attached_not_configured` reads: suppressing the read would
+    // strand that marker silently. Only the *verdict* narrows.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less client is unattachable, not unattached
-    const attachable = !!descriptor.attachProbe
-    const probe = attachable
+    // @ref LLP 0429#status [implements]: a probe whose marker this capture mode can never write is n/a, not missing
+    const probe = descriptor.attachProbe
       ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
       : { attached: false }
+    const attachable = !!descriptor.attachProbe && !attachWritesNoMarker(clientName, config)
     clients.push({
       name: clientName,
       plugin: descriptor.plugin,
@@ -2848,6 +2874,17 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     // will ever appear and `pending` would be permanent (#544). Same shape as
     // the `readAttachPolicy` sharing above: status must not derive a target the
     // reconciler would never name.
+    //
+    // Codex does NOT reach this gate, even in transcript mode. The marker
+    // `attachWritesNoMarker` speaks about is the client's own settings block;
+    // the marker THIS surface reads is the reconciler's action record, and a
+    // transcript attach earns one: `desired()` gates only on `attachProbe`
+    // (which codex declares), `perform()` removes the managed provider block
+    // and returns `status: ok`, so the `done` marker lands. `pending` is
+    // transient here, exactly as for every other client. Calling it `n/a`
+    // would report "the reconciler is a no-op" over precisely the migration
+    // this release performs, recreating - inverted - the status/reconciler
+    // disagreement the paragraph above exists to forbid.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less attach target is n/a, never pending
     const inert = !descriptor.attachProbe
     const raw = entry.config?.attach

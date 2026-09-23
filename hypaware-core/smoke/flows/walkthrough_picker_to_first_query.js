@@ -704,10 +704,11 @@ async function goldenPickerConfig(hypHome) {
     {
       name: '@hypaware/ai-gateway',
       config: {
-        upstreams: [
-          { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
-          { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
-        ],
+        // Empty since Codex left the inference path: no bundled picker row
+        // composes an inference upstream any more, but the gateway is still
+        // the shared writer every client's rows land through.
+        // @ref LLP 0429#default [tests]: onboarding composes no inference upstream for Codex
+        upstreams: [],
         // No `proxy_mode`: no bundled picker row declares proxy attach since
         // the claude client went otel-only, so the wizard composes a gateway
         // that mints no CA.
@@ -724,10 +725,7 @@ async function goldenPickerConfig(hypHome) {
     { name: '@hypaware/local-fs' },
     { name: '@hypaware/format-parquet' },
     { name: '@hypaware/claude' },
-    {
-      name: '@hypaware/codex',
-      config: { proxy: '@hypaware/ai-gateway' },
-    },
+    { name: '@hypaware/codex', config: {} },
   ]
 
   // Riders land after every picked plugin, in the order the composer folds
