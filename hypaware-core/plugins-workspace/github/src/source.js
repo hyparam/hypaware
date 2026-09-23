@@ -71,6 +71,14 @@ export async function startGithubSource() {
         duration_ms: Date.now() - started,
       })
     } catch (err) {
+      // A tick that threw sized no backlog, and leaving the last tick's report
+      // standing latches it: a source whose every tick throws then keeps
+      // retrying at BACKLOG_RETRY_MS for the whole outage instead of once per
+      // configured interval. Nothing is lost by clearing it - `runCaptureTick`
+      // persists its cursors before rethrowing, so the next tick that returns
+      // sizes the work again and earns the backlog cadence back.
+      // @ref LLP 0360#cadence [implements]: a failure retries on the ordinary cadence rather than in a busy loop
+      backlogPending = false
       lastError = err instanceof Error ? err.message : String(err)
       runtime.log.error('github.poll_tick_failed', {
         operation: 'poll',
