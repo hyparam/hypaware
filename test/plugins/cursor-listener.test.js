@@ -419,6 +419,11 @@ test('back-to-back recovery passes share one decode thread, released once the so
   const f = await fixture({ recoveryDelayMs: 10, decoderIdleMs: 120 })
   const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
   const spawns = () => f.events.filter((event) => event === 'cursor.decoder.started').length
+  // The idle-release timer is deliberately unref'd (it must not hold a
+  // stopping daemon open), so a wait for it to fire needs its own keep-alive
+  // the same way the poll-tick wait in test/plugins/github-source.test.js
+  // does: nothing else refs the loop while this test only polls for it.
+  const keepAlive = setInterval(() => {}, 1000)
   try {
     // Hooks arrive throughout an agent run, so passes are back to back over a
     // graph the fingerprint answers `unchanged`. An isolate per pass costs
@@ -433,9 +438,12 @@ test('back-to-back recovery passes share one decode thread, released once the so
     }
     assert.equal(spawns(), 1, 'a decode thread was respawned for a pass the fingerprint already answered')
     // A daemon between agent runs still holds no decode thread: the release
-    // fires once passes stop, and the next pass spawns a fresh one.
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    // fires once passes stop, and the next pass spawns a fresh one. Wait on
+    // the release's own log line, backstopped by waitFor's deadline, instead
+    // of guessing how long the idle window plus teardown takes under load -
+    // a fixed sleep here raced the internal timer and intermittently lost.
+    await waitFor(() => f.events.includes('cursor.decoder.released'))
     await hook()
     await waitFor(() => spawns() === 2)
-  } finally { native.close(); await f.cleanup() }
+  } finally { clearInterval(keepAlive); native.close(); await f.cleanup() }
 })
