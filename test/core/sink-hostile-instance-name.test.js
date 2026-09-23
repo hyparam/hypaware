@@ -811,3 +811,131 @@ for (const [label, beHostile] of [
     )
   })
 }
+
+// One route to that disappearance needs no handle at all. The kernel's
+// record is `{ ...config }`, an ordinary `Object.prototype`-inheriting
+// object, so `Object.prototype.dir`, set by any in-process plugin, turned
+// every destination carrying neither `url` nor `dir` into `offMachine: false`
+// and `displayedDestinations` dropped it, while the driver went on exporting
+// to it, exit 0 (issue #2098). The class is shipped: `@hypaware/s3`
+// configures an instance on `bucket`/`region`, so an S3 destination beside
+// any `url` destination is exactly this machine.
+
+/**
+ * The hostile instance's config carries neither `url` nor `dir`, the shape
+ * `@hypaware/s3` validates; the neighbour is genuinely off-machine, so the
+ * filter is live and dropping the hostile row is a real disappearance.
+ *
+ * @param {string} instanceName
+ */
+function nullClassConfig(instanceName) {
+  return instanceName === HOSTILE_INSTANCE
+    ? { schedule: '* * * * *', bucket: 'b', region: 'us-east-1' }
+    : { schedule: '* * * * *', url: 'https://central.example' }
+}
+
+/** @param {ExtendedSinkHandle} _handle */
+function pollutePrototypeDir(_handle) {
+  // Set after both instances are live, the way an in-process plugin reaches
+  // it: nothing is written to the handle or to the kernel's record.
+  Object.defineProperty(Object.prototype, 'dir', { configurable: true, value: CLAIMED_DIR })
+}
+
+test('hyp sync plans a destination that carries no url or dir with Object.prototype.dir set', async (t) => {
+  try {
+    const staged = await stage(pollutePrototypeDir, '/nowhere', { property: 'dir', configFor: nullClassConfig })
+    const { ctx } = await syncCtx(t, staged.registry)
+
+    const code = await runSync(['--yes'], ctx)
+
+    assert.equal(code, 0)
+    assert.deepEqual(
+      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      'a destination classified local by an inherited `dir` was dropped from the plan the user consents to'
+    )
+    // The acceptance condition, stated as the set it is: what the plan showed
+    // is what received data.
+    assert.deepEqual(
+      staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
+      planInstances(ctx.stdout.text),
+      'the destinations that received data are not the ones the plan showed'
+    )
+    assert.doesNotMatch(
+      ctx.stdout.text,
+      new RegExp(CLAIMED_DIR),
+      'the plan named a directory no destination is configured to write to'
+    )
+  } finally {
+    // A leaked prototype property poisons every later test in this process.
+    delete (/** @type {any} */ (Object.prototype).dir)
+  }
+})
+
+// `url` is guarded for the same reason and costs something different. What
+// an inherited `url` takes from the machine below is not a row but a name:
+// every local destination classified `offMachine: true`, so the filter kept
+// them all and the plan named a server none of them reaches - and
+// `describeScope` feeds that same text to the "Send now to" prompt. That is
+// the misnaming half of #2095, reached through the prototype chain.
+//
+// It is not the only half. #2098 recorded `url` as fail-safe because the
+// pollution only ever produces `offMachine: true`, but a destination
+// carrying an own non-`http` `url` beside its `dir` keeps classifying
+// `false` while a sibling flips to `true`, which arms the filter that was
+// inert and drops it. One guard closes both, so this case pins the shape a
+// bundled plugin actually configures.
+
+/** The local directory each destination is genuinely configured to write to. */
+const CONFIGURED_DIR = '/var/backups/hyp'
+
+/**
+ * Both destinations are local directories, the shape `@hypaware/local-fs`
+ * validates, so nothing is genuinely off-machine and the plan is unfiltered:
+ * what an inherited `url` costs here is a row naming the wrong destination
+ * rather than a dropped row.
+ *
+ * @param {string} instanceName
+ */
+function localDirConfig(instanceName) {
+  return { schedule: '* * * * *', dir: `${CONFIGURED_DIR}/${instanceName}` }
+}
+
+/** @param {ExtendedSinkHandle} _handle */
+function pollutePrototypeUrl(_handle) {
+  Object.defineProperty(Object.prototype, 'url', { configurable: true, value: 'https://exfil.example' })
+}
+
+test('hyp sync plans local destinations by their directories with Object.prototype.url set', async (t) => {
+  try {
+    const staged = await stage(pollutePrototypeUrl, '/nowhere', { property: 'url', configFor: localDirConfig })
+    const { ctx } = await syncCtx(t, staged.registry)
+
+    const code = await runSync(['--yes'], ctx)
+
+    assert.equal(code, 0)
+    assert.deepEqual(
+      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      'a local destination was dropped from the plan the user consents to'
+    )
+    assert.deepEqual(
+      staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
+      planInstances(ctx.stdout.text),
+      'the destinations that received data are not the ones the plan showed'
+    )
+    assert.doesNotMatch(
+      ctx.stdout.text,
+      /exfil\.example/,
+      'the plan named a server no destination is configured to reach'
+    )
+    assert.match(
+      ctx.stdout.text,
+      new RegExp(`${CONFIGURED_DIR}/${HOSTILE_INSTANCE}`),
+      'the plan stopped naming the directory the destination writes to'
+    )
+  } finally {
+    // A leaked prototype property poisons every later test in this process.
+    delete (/** @type {any} */ (Object.prototype).url)
+  }
+})
