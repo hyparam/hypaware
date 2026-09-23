@@ -80,10 +80,20 @@ export async function previewPendingRows(args) {
   const now = args.now ?? (() => Date.now())
   const start = now()
 
+  // Keyed by the registry's record of each instance's name, for the reason
+  // the watermark join below reads it: a handle is a live object its owner
+  // still holds through `ctx.sinks.get`, so `handle.instanceName` is the
+  // owner's to replace with an accessor, and the `catch` below re-reads its
+  // key to decide what still needs backfilling - so the live property made
+  // the recovery path that produces `unknown` the one that raised, against
+  // rule 3 above (issue #2092). The record keys better too: `instantiate`
+  // validated it and the registry is keyed by it, so every handle this kernel
+  // built gets its own entry where two accessors answering alike collapse
+  // into one.
   /** @type {Map<string, PendingVolume>} */
   const out = new Map()
   if (!query?.listDatasets || !storage?.readRowsSince) {
-    for (const handle of handles) out.set(handle.instanceName, unknownVolume('no cache reader is available'))
+    for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('no cache reader is available'))
     return out
   }
 
@@ -96,7 +106,7 @@ export async function previewPendingRows(args) {
   try {
     const discovered = await discoverCountablePartitions({ query, storage, config })
     if (discovered.partitions.length === 0 && discovered.failures > 0) {
-      for (const handle of handles) out.set(handle.instanceName, unknownVolume('the cache partitions could not be listed'))
+      for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('the cache partitions could not be listed'))
       return out
     }
 
@@ -145,14 +155,15 @@ export async function previewPendingRows(args) {
       // @ref LLP 0325#spent-is-spent [implements]: a budget discovery already overran puts every deadline in the past at every n, not only where the share survives rounding
       const deadline = Math.min(scanStart + remaining * (i + 1) / handles.length, start + budgetMs)
       out.set(
-        handle.instanceName,
+        sinkInstanceName(handle),
         await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })
       )
     }
   } catch (err) {
     const reason = `the count failed: ${describeError(err)}`
     for (const handle of handles) {
-      if (!out.has(handle.instanceName)) out.set(handle.instanceName, unknownVolume(reason))
+      const name = sinkInstanceName(handle)
+      if (!out.has(name)) out.set(name, unknownVolume(reason))
     }
   }
   return out
