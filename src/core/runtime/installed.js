@@ -4,7 +4,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { loadLock } from '../plugin_install/install.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { loadManifest } from '../manifest.js'
-import { isPlainObject } from '../util/json_util.js'
+import { isUsableEntry } from '../plugin_install/lock.js'
 
 /**
  * @import { PluginLockEntry, PluginName } from '../../../hypaware-plugin-kernel-types.js'
@@ -35,7 +35,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
   if (!stateDir) throw new Error('discoverInstalledPlugins: stateDir is required')
 
   const lock = await loadLock(stateDir)
-  // Keys, not `listEntries`: the lock key is the name every other install
+  // Keys, not `partitionEntries`: the lock key is the name every other install
   // surface indexes by (`getEntry`, `hyp plugin remove <name>`), and it is the
   // only identity a malformed entry still has, since an entry that is not an
   // object carries no `name` field to read.
@@ -59,7 +59,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
   const malformed = []
   for (const name of names) {
     const entry = lock.plugins[name]
-    if (isPlainObject(entry) && typeof entry.install_dir === 'string' && entry.install_dir.length > 0) {
+    if (isUsableEntry(entry)) {
       entries.push(entry)
     } else {
       malformed.push(name)

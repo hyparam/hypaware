@@ -17,7 +17,7 @@ import { provenanceFromUrl, redactRawSource } from './git_source.js'
 import {
   emptyLock,
   getEntry,
-  listEntries,
+  partitionEntries,
   readLock,
   removeEntry as removeLockEntry,
   upsertEntry,
@@ -425,13 +425,18 @@ export async function loadLock(stateDir) {
 }
 
 /**
- * List installed plugins in stable name order.
+ * List installed plugins in stable name order, split into the rows a caller
+ * may dereference and the keys of the rows it may not. Returning every lock
+ * value raw made `hyp plugin list` and `hyp plugin outdated` read `.name` and
+ * `.update` off a hand-edited `null`, exiting 1 and listing nothing at all,
+ * the healthy entries included (issue #1966).
+ *
  * @param {string} stateDir
- * @returns {Promise<PluginLockEntry[]>}
+ * @returns {Promise<{ entries: PluginLockEntry[], unusable: PluginName[] }>}
  */
 export async function listInstalledPlugins(stateDir) {
   const lock = await safeReadLock(stateDir)
-  return listEntries(lock)
+  return partitionEntries(lock)
 }
 
 /** @param {string} stateDir */
