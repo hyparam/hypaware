@@ -7,6 +7,10 @@ import process from 'node:process'
 import { installObservability } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
+import {
+  V1_BUNDLED_PLUGIN_ALLOWLIST,
+  discoverBundledPlugins,
+} from '../../../src/core/runtime/bundled.js'
 
 /**
  * Phase 2 V1 smoke (finish-v1.md §Phase 2). Drives the unified
@@ -334,20 +338,22 @@ export async function run({ harness, expect }) {
     (/** @type {any} */ s) => s.attributes?.boot_profile === 'config'
   )
   expect.that(
-    'traces: at least one config-profile boot reports plugins_activated=8',
+    `traces: at least one config-profile boot reports plugins_activated=${expectedActive.length}`,
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_activated),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 8)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === expectedActive.length)
   )
-  // Skipped = allowlist plugins this flow's config does not name (the
-  // excluded-from-default set never reaches the skip loop). Bumps
-  // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST without joining
-  // this flow's config: currently format-jsonl, s3, format-iceberg,
-  // context-graph, ai-gateway-graph, hermes, opencode, and cursor (8). Grep
-  // is not among them: the boot migration puts it in this flow's config.
+  // Skipped = every default-surface bundled plugin this flow's config does
+  // not name (the excluded-from-default set never reaches the skip loop).
+  // Derived rather than pinned as a literal, which drifts the moment a plugin
+  // joins the default surface (issue #2079).
+  const expectedSkipped = [...await defaultSurfaceRoster()]
+    .filter((n) => !expectedActive.includes(n))
+    .sort()
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=8',
+    `traces: at least one config-profile boot reports plugins_skipped=${expectedSkipped.length}` +
+      ` (${expectedSkipped.join(',')})`,
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 8)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === expectedSkipped.length)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')
@@ -402,6 +408,28 @@ export async function run({ harness, expect }) {
     skippedPlugins.has('@hypaware/format-iceberg'),
     (v) => v === true
   )
+}
+
+/**
+ * Every bundled plugin the shipped tree puts on the default activation
+ * surface: the names the allowlist declares, plus any the workspace ships
+ * that neither the allowlist nor the excluded-from-default set claims.
+ *
+ * The union, not the intersection `discoverBundledPlugins()` returns as
+ * `loaded` and boot then skips from. An intersection moves with either side,
+ * so a plugin declared but no longer shipped (or shipped but no longer
+ * declared) would shrink the expectation by exactly what it shrinks the run
+ * by, and the assertion would agree with the regression instead of catching
+ * it. The union does not move, so either disagreement fails.
+ *
+ * @returns {Promise<Set<string>>}
+ */
+async function defaultSurfaceRoster() {
+  const { unknown } = await discoverBundledPlugins()
+  /** @type {Set<string>} */
+  const names = new Set(V1_BUNDLED_PLUGIN_ALLOWLIST)
+  for (const { manifest } of unknown) names.add(manifest.name)
+  return names
 }
 
 /**
