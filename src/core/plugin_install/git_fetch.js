@@ -8,7 +8,7 @@ import path from 'node:path'
 import { loadManifest } from '../manifest.js'
 import { Attr, withSpan } from '../observability/index.js'
 import { provenanceFromUrl } from './git_source.js'
-import { pluginInstallDir } from './paths.js'
+import { installDirIsContained, pluginInstallDir } from './paths.js'
 import { sha256Hex } from '../util/json_util.js'
 
 /**
@@ -110,6 +110,19 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
     const validateResult = await runValidateArtifactSpan(tmpRepo)
     if (validateResult.ok === false) return validateResult
     const manifest = validateResult.manifest
+
+    // Ahead of the prompt, so the name is named as the reason rather
+    // than the refusal arriving as a declined confirmation, and ahead
+    // of the rename swap that deletes whatever sits at the destination.
+    if (!installDirIsContained(stateDir, manifest.name)) {
+      return {
+        ok: false,
+        errorKind: 'manifest_name_unsafe',
+        message:
+          `plugin install: refused, manifest name '${manifest.name}' does not resolve to a ` +
+          `directory inside the plugin install root; nothing was installed and nothing was removed`,
+      }
+    }
 
     // Compute hashes from the staged source tree (skipping `.git` and
     // friends, same set as `copyArtifactTree`) so the `beforeCommit`
