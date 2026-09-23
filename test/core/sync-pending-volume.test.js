@@ -945,6 +945,121 @@ test('previewPendingRows never rejects on an Error whose message refuses to be d
   }
 })
 
+// Rule 3 says `previewPendingRows` never rejects, and three reads used to sit
+// *above* the `try` that makes it true: the clock call that anchors the
+// budget, and the two capability probes on `query` and `storage`. Each is a
+// value its caller or a plugin owns - `activation.js` hands `ctx.query` and
+// `ctx.storage` to plugins raw and unfaceted, and the loader imports plugin
+// entrypoints into this same realm, so an accessor redefined on either is
+// reachable - and each raised out of the function instead of into its
+// recovery, taking the consent prompt down with it (issue #2096). The same
+// throw one frame later, out of the *call* rather than out of the read, was
+// caught all along. The three cases below pin each read inside the guard; the
+// fourth pins the plan that is the point of the guard still rendering.
+
+test('previewPendingRows never rejects on a clock that throws before the first count', async () => {
+  const hypHome = await makeHome('hostile-clock')
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: [{ seq: 1 }] })),
+    stateRoot: stateDir(hypHome),
+    // Anchoring the budget is the first thing the preview does, and it did it
+    // before the guard, so a clock that refuses took the whole preview with
+    // it. Every later reading of the same clock was already caught.
+    now: () => { throw new Error('the clock refused') },
+  })
+
+  assert.deepEqual([...volumes.keys()], ['central'])
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+  assert.equal(typeof volume.reason, 'string')
+})
+
+test('previewPendingRows never rejects on a listDatasets accessor that throws', async () => {
+  const hypHome = await makeHome('hostile-listdatasets')
+  const query = fakeQuery(hypHome)
+  // A plugin's reach, not a test's: `ctx.query` is the kernel's own registry
+  // object, shared unfaceted with every activated plugin, so redefining the
+  // method the preview probes for is a property write away.
+  Object.defineProperty(query, 'listDatasets', {
+    configurable: true,
+    get() { throw new Error('the registry refused') },
+  })
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: [{ seq: 1 }] })),
+    stateRoot: stateDir(hypHome),
+  })
+
+  assert.deepEqual([...volumes.keys()], ['central'])
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+  assert.equal(typeof volume.reason, 'string')
+})
+
+test('previewPendingRows never rejects on a readRowsSince accessor that throws', async () => {
+  const hypHome = await makeHome('hostile-readrowssince')
+  const storage = fakeStorage({ hypHome, entries: [{ seq: 1 }] })
+  // The same reach on the other contract object: a throwing `readRowsSince`
+  // *call* is already counted as a partition that could not be read, so a
+  // throwing read of the same name has no business being louder.
+  Object.defineProperty(storage, 'readRowsSince', {
+    configurable: true,
+    get() { throw new Error('storage refused') },
+  })
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+  })
+
+  assert.deepEqual([...volumes.keys()], ['central'])
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown')
+  assert.equal(volume.rows, 0)
+  assert.equal(typeof volume.reason, 'string')
+})
+
+test('a plan still renders when the capability probe itself throws, and nothing is sent', async () => {
+  const hypHome = await makeHome('hostile-probe')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({ hypHome, entries: TWELVE_ROWS }),
+  })
+  Object.defineProperty(ctx.query, 'listDatasets', {
+    configurable: true,
+    get() { throw new Error('the registry refused') },
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  // The end-to-end half, and the half a unit case cannot state: the verb still
+  // exits, the plan still prints, and it prints the destination as an admitted
+  // gap rather than as nothing pending. A `reason` that refuses string
+  // coercion survives the preview and kills `renderVolume` instead, so a
+  // rendered line is also what proves the reason is printable (#2093); a
+  // non-string that coerces renders harmlessly and is pinned by the unit
+  // cases' `typeof` assertions instead.
+  assert.equal(code, 0)
+  assert.match(stdout.text, /central/)
+  assert.match(stdout.text, /pending volume unknown/)
+  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.doesNotMatch(stdout.text, /rows pending/)
+  // Fail-closed: a resolved preview is not a release. `--dry-run` stops short
+  // of the confirmation, and the run says so.
+  assert.match(stdout.text, /nothing was sent/)
+})
+
 test('a truncated count never claims a resume point it did not survey', async () => {
   const hypHome = await makeHome('resume')
   // Two partitions. The first is enormous and carries a recent watermark; the
