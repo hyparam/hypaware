@@ -529,7 +529,7 @@ test('runtime: a select longer than the terminal never draws past its last row',
   const frames = chunks.filter((c) => c.includes('Which report?'))
   assert.ok(frames.length >= 2, 'expected a first frame and at least one redraw')
   for (const frame of frames) {
-    assert.ok(countPhysicalRows(frame, 80) <= 24, 'frame fits the terminal')
+    assert.ok(countPhysicalRows(frame, 80) <= 23, 'frame fits the terminal, with the cursor row left free')
     assert.ok(cursorUpCount(frame) <= 24, 'rewind stays inside the terminal')
   }
   // The frame that drew the cursor's final row is the one the user sees.

@@ -404,7 +404,10 @@ test('select: a frame taller than the terminal is windowed to fit it', () => {
   for (const rows of [24, 40]) {
     const frame = render(reportPicker(60, 0), { color: false, columns: 80, rows })
     const drawn = countPhysicalRows(frame, 80)
-    assert.ok(drawn <= rows, `frame of ${drawn} rows must fit a terminal of ${rows}`)
+    // One row under the terminal, not level with it: the frame ends in a
+    // newline, so a frame that filled the height exactly would scroll its own
+    // top row away before the runtime's cursor-up could reach it.
+    assert.ok(drawn <= rows - 1, `frame of ${drawn} rows must fit a terminal of ${rows}`)
     // Not windowed to nothing: the terminal's height is what it fills.
     assert.ok(drawn > rows / 2, `frame of ${drawn} rows uses the terminal of ${rows}`)
   }
@@ -418,7 +421,7 @@ test('select: the option under the cursor stays drawn as the cursor leaves the w
       frame.split('\n').some((l) => l.includes(`> ${label}`)),
       `cursor row ${label} is drawn`,
     )
-    assert.ok(countPhysicalRows(frame, 80) <= 24, `cursor ${cursor} keeps the frame inside the terminal`)
+    assert.ok(countPhysicalRows(frame, 80) <= 23, `cursor ${cursor} keeps the frame inside the terminal`)
   }
 })
 
