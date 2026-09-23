@@ -9,7 +9,10 @@ import process from 'node:process'
 
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
 import { createActivationContext } from '../../src/core/runtime/activation.js'
+import { pluginStateDir } from '../../src/core/runtime/paths.js'
 import { createSinkDriver } from '../../src/core/sinks/driver.js'
+import { createInstanceWatermarkStore } from '../../src/core/sinks/incremental.js'
+import { previewPendingRows } from '../../src/core/sinks/pending.js'
 import { runSync } from '../../src/core/commands/sync.js'
 import { collectSinkSnapshots } from '../../src/core/daemon/runtime.js'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
@@ -42,13 +45,24 @@ const HEALTHY_INSTANCE = 'z-healthy'
 function fixtureSink() {
   /** @type {Array<{ batchId: string }>} */
   const exports = []
+  /**
+   * The `SinkCreateContext` each instance was built with. `sinkCtx.name` and
+   * `sinkCtx.paths` are what every shipped sink builds its export watermark
+   * store from, so holding the context lets a case advance a watermark the way
+   * an export does rather than by spelling the path out itself.
+   *
+   * @type {Map<string, any>}
+   */
+  const contexts = new Map()
   return {
     exports,
+    contexts,
     contribution: /** @type {any} */ ({
       name: 'central',
       plugin: OWNER,
       supports: [],
-      async create() {
+      async create(/** @type {any} */ sinkCtx) {
+        contexts.set(sinkCtx.name, sinkCtx)
         return {
           /** @param {any} batch */
           async exportBatch(batch) {
@@ -70,8 +84,10 @@ function fixtureSink() {
  *
  * @param {(handle: ExtendedSinkHandle) => void} beHostile Applied to the
  *   instance that sorts first, after both are live.
+ * @param {string} [stateDir] The plugin state directory every instance is
+ *   created with, for the one case that advances a real watermark through it.
  */
-async function stage(beHostile) {
+async function stage(beHostile, stateDir = '/nowhere') {
   const runtime = /** @type {any} */ ({
     sinks: createSinkRegistry(),
     sources: { register() {}, get() {}, list() { return [] } },
@@ -81,7 +97,7 @@ async function stage(beHostile) {
   const ctx = createActivationContext({
     runtime,
     plugin: /** @type {any} */ ({ name: OWNER, version: '1.0.0', manifest: { name: OWNER, permissions: [] }, rootDir: '/nowhere' }),
-    paths: /** @type {any} */ ({ stateDir: '/nowhere', cacheDir: '/nowhere', tmpDir: '/nowhere' }),
+    paths: /** @type {any} */ ({ stateDir, cacheDir: '/nowhere', tmpDir: '/nowhere' }),
     config: {},
     env: {},
   })
@@ -400,4 +416,96 @@ test('hyp sync refuses a name only the owner\'s accessor answers to', async (t) 
   assert.equal(code, 1)
   assert.match(stderr.text, new RegExp(`no sink named '${LIE}' was instantiated`))
   assert.deepEqual(staged.sink.exports, [], 'a name the driver cannot match confirmed a send and exported nothing')
+})
+
+// The consent preview is the third reader of this key, and the one where the
+// divergence costs the most: `hyp sync` prints what would leave *before* it
+// asks, so a wrong number is a consent given to something other than what was
+// shown. The preview read `handle.instanceName` while every shipped sink
+// advances its export store under `sinkCtx.name`, so a rename sent the reader
+// to `<plugin>/sink-instances/m-lie` while the writer kept advancing
+// `<plugin>/sink-instances/a-hostile`: no cursor where the preview looked, so
+// a caught-up destination discloses the whole retained history as pending
+// (issue #2089).
+//
+// `lying` is the variant this pins. A truthy non-string name reached the same
+// wrong number before the fix (`7` resolved `sink-instances/7` and counted the
+// whole history), and the same read corrects it. A throwing accessor never
+// reaches `countForHandle` at all: `previewPendingRows` dereferences the live
+// property to key its own result map and rejects before the count, which is
+// the unguarded-read class issue #2059 scopes out to its own pass.
+
+/** Rows in the fixture partition, all of them already exported. */
+const CACHED_ROWS = 12
+
+/**
+ * A cache holding {@link CACHED_ROWS} rows in one partition, plus the state
+ * root the preview derives its watermark directory from. The preview resolves
+ * `<stateRoot>/plugins/<plugin>`, so staging the instances with that same path
+ * as their `paths.stateDir` is what puts the fixture's export store and the
+ * preview's reader on one join.
+ *
+ * @param {TestContext} t
+ */
+async function previewFixture(t) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-hostile-instance-preview-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const stateRoot = path.join(home, 'hypaware')
+  const cacheRoot = path.join(home, 'cache')
+  const tablePath = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
+  const storage = /** @type {any} */ ({
+    cacheRoot,
+    tableExists: (/** @type {string} */ p) => p === tablePath,
+    hasPendingSync: () => false,
+    async *readRowsSince(/** @type {string} */ p, /** @type {any} */ opts = {}) {
+      if (p !== tablePath) return
+      const since = opts.since ? Number(opts.since.seq) : 0
+      for (let seq = 1; seq <= CACHED_ROWS; seq++) {
+        if (seq <= since) continue
+        yield { row: { id: seq }, after: { v: 1, seq: String(seq) } }
+      }
+    },
+  })
+  const query = /** @type {any} */ ({
+    listDatasets: () => [{
+      name: 'ai_gateway_messages',
+      discoverPartitions: () => [
+        { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath },
+      ],
+    }],
+  })
+  return { stateRoot, cacheRoot, tablePath, storage, query }
+}
+
+// @ref LLP 0040#watermark-contract [tests]: the preview reads the same per-(sink instance, partition) watermark the export advances, so the two must name the instance identically
+test('the sync preview counts from the watermark the export advanced, with a lying instanceName accessor', async (t) => {
+  const fixture = await previewFixture(t)
+  const staged = await stage(lyingInstanceName, pluginStateDir(fixture.stateRoot, OWNER))
+
+  // The destination is caught up, said the way a sink says it: its own
+  // `SinkCreateContext`, through the kernel helper every shipped sink calls.
+  const sinkCtx = staged.sink.contexts.get(HOSTILE_INSTANCE)
+  const watermarks = createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name })
+  await watermarks.write(watermarks.keyFor(fixture.cacheRoot, fixture.tablePath), {
+    continuation: { v: 1, seq: String(CACHED_ROWS) },
+    exportedRowCount: CACHED_ROWS,
+  })
+
+  const volumes = await previewPendingRows({
+    handles: [/** @type {any} */ (staged.registry.get(HOSTILE_INSTANCE))],
+    query: fixture.query,
+    storage: fixture.storage,
+    stateRoot: fixture.stateRoot,
+  })
+
+  // Taken by position, not by name: the map is still keyed by the live
+  // property, the plan's own display lane (issue #2087). Under test is the
+  // number the prompt discloses, not the key it is filed under.
+  assert.equal(volumes.size, 1)
+  const volume = /** @type {any} */ ([...volumes.values()][0])
+  assert.deepEqual(
+    { status: volume.status, rows: volume.rows, resume: volume.resume.kind },
+    { status: 'counted', rows: 0, resume: 'since' },
+    'the consent prompt counted against a watermark directory the export never advances'
+  )
 })
