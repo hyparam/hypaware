@@ -484,14 +484,19 @@ export async function run({ harness, expect }) {
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
-    // 10 bundled picker rows: claude, codex, cursor, opencode, claude-desktop,
-    // openclaw, hermes, raw-anthropic, raw-openai, otel.
+    // Derived from the manifests rather than restated as a literal: a
+    // hardcoded count drifts the moment a plugin adds or drops a picker row
+    // (issue #2075 - a bundled `pi` row shipped with no update here). Reads
+    // `contributes.picker` off the same loaded+excluded buckets the catalog
+    // this run builds draws its descriptor map from, so it stays a check on
+    // the manifests rather than a rerun of the code under test.
+    const expectedSourcesAvailable = await totalPickerRowCount()
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available=10',
+      `traces: wizard.pick.start span emitted with sources_available=${expectedSourcesAvailable} (the shipped picker row count)`,
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 10
+        v.sources_available === expectedSourcesAvailable
     )
 
     const writeSpans = traces.filter(
@@ -661,6 +666,33 @@ async function composedRiders(picked) {
     }
   }
   return riders
+}
+
+/**
+ * Count every picker row the bundled workspace ships, across both the
+ * default-activated and excluded-from-default manifest buckets. That is the
+ * discovery scope (`[...loaded, ...excluded]`) both catalog builders use:
+ * `loadWizardCatalog` (`src/core/cli/wizard/index.js`), which is the one
+ * `hyp setup` reaches through `runInitWizard` and therefore the one this
+ * smoke drives, and `loadPickerCatalog` (`src/core/cli/walkthrough.js`) on
+ * the legacy path. A row like `claude-desktop`'s stays a picker source
+ * (selectable, just not default-activated) even though its plugin sits in
+ * the excluded bucket, so counting only `loaded` would land back on 10.
+ *
+ * Reads `contributes.picker` off the manifests directly rather than calling
+ * either catalog builder or `buildPluginCatalog`: an expectation built from
+ * the code under test would assert nothing (see `composedRiders` above for
+ * the same reasoning applied to riders).
+ *
+ * @returns {Promise<number>}
+ */
+async function totalPickerRowCount() {
+  const { loaded, excluded } = await discoverBundledPlugins()
+  let total = 0
+  for (const { manifest } of [...loaded, ...excluded]) {
+    total += manifest.contributes?.picker?.length ?? 0
+  }
+  return total
 }
 
 /**
