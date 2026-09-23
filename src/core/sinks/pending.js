@@ -499,20 +499,33 @@ function unknownVolume(reason) {
 /**
  * The reason text rule 3 puts on a destination, derived from a value the
  * failing plugin chose. Guarded, because this is called from inside the
- * `catch` that implements rule 3 and is therefore the last thing in
- * `previewPendingRows` that may raise: `String(err)` runs the thrown value's
- * own `toString`, and `err instanceof Error` runs a proxy's own
- * `getPrototypeOf`. A value that refuses coercion made the recovery path the
- * one that raised and the whole preview reject, which is issue #2092's shape
- * one hop further out: `handle.sink` is read outside `countForHandle`'s own
- * guard, so an owner's accessor throws the owner's value straight in here.
+ * `catch` that implements rule 3, so a raise here is a raise out of the
+ * recovery itself and there is nothing further out to catch it: `String(err)`
+ * runs the thrown value's own `toString`, and `err instanceof Error` runs a
+ * proxy's own `getPrototypeOf`. A value that refuses coercion made the
+ * recovery path the one that raised and the whole preview reject, which is
+ * issue #2092's shape one hop further out: `handle.sink` is read outside
+ * `countForHandle`'s own guard, so an owner's accessor throws the owner's
+ * value straight in here.
+ *
+ * The coercion happens *inside* the guard, on `err.message` too, because
+ * returning the message unexamined only moved the raise one frame out.
+ * `message` is a writable own property on every `Error`, so a plugin can
+ * throw an `Error` (passing `instanceof`) whose `message` is the value that
+ * refuses to be described, and then this returned a non-string against its own
+ * annotation and the caller's "the count failed" template did the coercion
+ * outside any guard. The other caller is worse, not better: it stores the
+ * result as a `reason` and resolves, so the raise lands in `renderVolume` and
+ * the plan dies at print time with the preview reporting success. Coercing
+ * inside makes the annotation true by construction: `String` either yields a
+ * string or throws, and a throw is caught.
  *
  * @param {unknown} err
  * @returns {string}
  */
 function describeError(err) {
   try {
-    return err instanceof Error ? err.message : String(err)
+    return String(err instanceof Error ? err.message : err)
   } catch {
     return 'the error could not be described'
   }

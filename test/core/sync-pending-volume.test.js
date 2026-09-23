@@ -901,6 +901,50 @@ test('previewPendingRows never rejects on a thrown value that refuses to be desc
   assert.equal(volume.rows, 0)
 })
 
+test('previewPendingRows never rejects on an Error whose message refuses to be described', async () => {
+  // The same refusal one frame further in. `message` is a writable own
+  // property on every `Error`, so a plugin can throw a value that passes
+  // `instanceof Error` and still carries the undescribable part: the reason
+  // text is built from `err.message`, and the destination's line is built by
+  // interpolating that reason. Describing the outer value but handing the
+  // inner one back unexamined moves the raise out of the guard rather than
+  // removing it, and the second caller moves it as far as the printer.
+  const unprintable = [
+    { toString() { throw new Error('unprintable') } },
+    Symbol('unprintable'),
+  ]
+  for (const message of unprintable) {
+    const hypHome = await makeHome('unprintable-message')
+    const handle = fakeSink('central', {}, '@hypaware/central')
+    Object.defineProperty(handle, 'sink', {
+      get() {
+        const err = new Error('outer')
+        // Defined rather than assigned only to get past `Error.message` being
+        // declared `string`, which is itself why nothing upstream had to
+        // examine it. An own data property is what a plugin would leave here.
+        Object.defineProperty(err, 'message', { value: message })
+        throw err
+      },
+    })
+
+    const volumes = await previewPendingRows({
+      handles: /** @type {any[]} */ ([handle]),
+      query: /** @type {any} */ (fakeQuery(hypHome)),
+      storage: /** @type {any} */ (fakeStorage({ hypHome, entries: [{ seq: 1 }] })),
+      stateRoot: stateDir(hypHome),
+    })
+
+    assert.deepEqual([...volumes.keys()], ['central'])
+    const volume = /** @type {any} */ (volumes.get('central'))
+    assert.equal(volume.status, 'unknown')
+    assert.equal(volume.rows, 0)
+    // A reason the plan can print. The other caller stores this one verbatim,
+    // and `renderVolume` interpolates it, so a non-string here is the same
+    // reject relocated to the printer.
+    assert.equal(typeof volume.reason, 'string')
+  }
+})
+
 test('a truncated count never claims a resume point it did not survey', async () => {
   const hypHome = await makeHome('resume')
   // Two partitions. The first is enormous and carries a recent watermark; the
