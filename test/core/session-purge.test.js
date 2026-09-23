@@ -547,45 +547,50 @@ test('a non-busy failure after a busy skip still names the skipped partition', a
   }
 })
 
-// Dropping `runPurge`'s no-remotes early return (#2044) left `localError`'s
-// truthiness as the only thing between a failed local purge and the success
-// line, so an Error carrying an empty message read as a clean run: exit 0, a
-// `purged 0 rows` claim, and a receipt saying `completed`.
-test('a local failure with an empty error message still fails and claims nothing', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-empty-message-'))
-  t.after(() => fs.rm(root, { recursive: true, force: true }))
-  /** @param {ReturnType<typeof fixture>} made */
-  const failing = (made) => {
-    made.ctx.storage = new Proxy(made.storage, {
-      get(target, key) {
-        if (key === 'flushAll') return async () => { throw new Error('') }
-        const value = Reflect.get(target, key)
-        return typeof value === 'function' ? value.bind(target) : value
-      },
-    })
-    return made
-  }
-  const seed = async (/** @type {any} */ storage) => {
-    await storage.appendRowsToPartition('events', ['source=a'], columns, [{ session_id: 'delete', body: 'secret' }])
-    await storage.flushAll({ force: true })
-  }
+// A thrown value's display string is not evidence that nothing was thrown:
+// `new Error('')` reads as no error at all when a gate takes its message for
+// truth (#2044), and so does an Error with no name either once `err.name` is
+// the fallback (#2064). Both shapes must exit 1 over the surviving row.
+for (const { shape, thrown, named } of [
+  { shape: 'an empty error message', thrown: () => { throw new Error('') }, named: 'Error' },
+  { shape: 'neither a message nor a name', thrown: () => { const err = new Error(''); err.name = ''; throw err }, named: 'unknown error' },
+]) {
+  test(`a local failure with ${shape} still fails and claims nothing`, async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-opaque-failure-'))
+    t.after(() => fs.rm(root, { recursive: true, force: true }))
+    /** @param {ReturnType<typeof fixture>} made */
+    const failing = (made) => {
+      made.ctx.storage = new Proxy(made.storage, {
+        get(target, key) {
+          if (key === 'flushAll') return async () => thrown()
+          const value = Reflect.get(target, key)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+      return made
+    }
+    const seed = async (/** @type {any} */ storage) => {
+      await storage.appendRowsToPartition('events', ['source=a'], columns, [{ session_id: 'delete', body: 'secret' }])
+      await storage.flushAll({ force: true })
+    }
 
-  const plain = failing(fixture(root))
-  await seed(plain.storage)
-  assert.equal(await runPurge(['--session', 'delete', '--yes'], plain.ctx), 1, 'a failed purge exits 1')
-  assert.doesNotMatch(plain.output(), /purged \d+ row/, 'nothing claims a completed deletion')
-  assert.match(plain.error(), /purge failed: \S/, 'the failure is still named on stderr')
+    const plain = failing(fixture(root))
+    await seed(plain.storage)
+    assert.equal(await runPurge(['--session', 'delete', '--yes'], plain.ctx), 1, 'a failed purge exits 1')
+    assert.doesNotMatch(plain.output(), /purged \d+ row/, 'nothing claims a completed deletion')
+    assert.ok(plain.error().includes(`purge failed: ${named}\n`), 'the failure is still named on stderr')
 
-  const json = failing(fixture(path.join(root, 'json')))
-  await seed(json.storage)
-  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], json.ctx), 1)
-  const receipt = JSON.parse(json.output())
-  assert.equal(receipt.rowsDeleted, null, 'an aborted run reports no row total')
-  assert.equal(receipt.local.status, 'incomplete')
-  assert.ok(receipt.local.error, 'the receipt names a failure even with no message to name it by')
+    const json = failing(fixture(path.join(root, 'json')))
+    await seed(json.storage)
+    assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], json.ctx), 1)
+    const receipt = JSON.parse(json.output())
+    assert.equal(receipt.rowsDeleted, null, 'an aborted run reports no row total')
+    assert.equal(receipt.local.status, 'incomplete')
+    assert.equal(receipt.local.error, named, 'the receipt names a failure even with no message to name it by')
 
-  // The point of the exit code: the row the user asked to be gone is still here.
-  const rows = []
-  for await (const row of scanRowsFromTable(resolveIcebergDir(json.storage.cacheTablePath('events', ['source=a'])))) rows.push(row.body)
-  assert.deepEqual(rows, ['secret'], 'targeted rows survived, so no channel may report success')
-})
+    // The point of the exit code: the row the user asked to be gone is still here.
+    const rows = []
+    for await (const row of scanRowsFromTable(resolveIcebergDir(json.storage.cacheTablePath('events', ['source=a'])))) rows.push(row.body)
+    assert.deepEqual(rows, ['secret'], 'targeted rows survived, so no channel may report success')
+  })
+}

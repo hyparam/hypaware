@@ -87,6 +87,13 @@ export async function runPurge(argv, ctx) {
 
   /** @type {PurgeSummary} */
   let summary = { rowsDeleted: 0, partitionsAffected: 0, partitionsSkipped: [], purgedCwds: [], retainedAliasRows: 0, retainedAliasCwds: [] }
+  // A failed local purge is decided by the catch having run, never by what the
+  // throw was worth saying about it: a display string derived from a thrown
+  // value can come out empty (an Error carrying neither message nor name), and
+  // a gate reading one for truth calls that run clean - exit 0, a success line,
+  // and the targeted rows still on disk. `localFailed` decides, `localError`
+  // only describes.
+  let localFailed = false
   let localError
   try {
     if (target.kind === 'session') {
@@ -111,12 +118,11 @@ export async function runPurge(argv, ctx) {
       { component: 'cache' }
     )
   } catch (err) {
-    // An Error may carry an empty message, and `localError` is what gates the
-    // success line, the receipt's nulls and the exit code below. Without the
-    // no-remotes early return to catch that run regardless, an empty message
-    // would read as no error at all: exit 0 over rows still on disk.
+    localFailed = true
+    // Each fallback is a weaker description than the last and the final one is
+    // always non-empty, so every channel reporting the failure can name it.
     const thrown = err instanceof Error ? err.message : String(err)
-    const message = thrown || (err instanceof Error ? err.name : 'unknown error')
+    const message = thrown || (err instanceof Error ? err.name : '') || 'unknown error'
     localError = message
     // The abort replaced the summary, so the skips it had already recorded
     // reach the operator only from here. A skipped partition may still hold
@@ -189,7 +195,7 @@ export async function runPurge(argv, ctx) {
     // on stderr, so a smoke could assert the user-visible result without any
     // internal signal that the spelling predicate actually ran the branch.
     retained_alias_rows: summary.retainedAliasRows,
-    status: localError || skippedError || remoteError || swept.failed > 0 ? 'incomplete' : 'ok',
+    status: localFailed || skippedError || remoteError || swept.failed > 0 ? 'incomplete' : 'ok',
   })
 
   // Resurrection warning (LLP 0104 §resurrection): any purged directory that
@@ -204,16 +210,16 @@ export async function runPurge(argv, ctx) {
   const retainedAliases = [...summary.retainedAliasCwds].sort()
 
   if (parsed.json) {
-    // A spool sweep failure alone (no `localError`) still exits 1 below, so
+    // A spool sweep failure alone (no `localFailed`) still exits 1 below, so
     // the receipt must not claim `completed`/no `local` block while that
     // holds: fold it into the same incomplete/error reporting as a local
     // failure, preferring the local failure's own message when both apply.
     const sweepError = swept.failed > 0 ? `${swept.failed} capture spool file(s) could not be removed` : undefined
-    const localIncomplete = Boolean(localError) || skippedError !== undefined || sweepError !== undefined
+    const localIncomplete = localFailed || skippedError !== undefined || sweepError !== undefined
     const localErrorMessage = localError ?? skippedError ?? sweepError
     ctx.stdout.write(JSON.stringify({
-      rowsDeleted: localError ? null : summary.rowsDeleted,
-      partitionsAffected: localError ? null : summary.partitionsAffected,
+      rowsDeleted: localFailed ? null : summary.rowsDeleted,
+      partitionsAffected: localFailed ? null : summary.partitionsAffected,
       // Not nulled with the counts above: a total from an aborted run is a
       // number nobody finished computing, while a skip is one this run saw.
       partitionsSkipped: summary.partitionsSkipped,
@@ -230,7 +236,7 @@ export async function runPurge(argv, ctx) {
       ...(parsed.remote ? { remote: remoteResults.get(parsed.remote) } : {}),
     }) + '\n')
   } else {
-    if (!localError) ctx.stdout.write(
+    if (!localFailed) ctx.stdout.write(
       `purged ${summary.rowsDeleted} row${summary.rowsDeleted === 1 ? '' : 's'} ` +
       `from ${summary.partitionsAffected} partition${summary.partitionsAffected === 1 ? '' : 's'}\n`
     )
@@ -305,7 +311,7 @@ export async function runPurge(argv, ctx) {
     ctx.stderr.write("tip: mark them ignored first with 'hyp privacy set <path> ignore' so the purge is durable\n")
   }
 
-  return localError || skippedError || remoteError || swept.failed > 0 ? 1 : 0
+  return localFailed || skippedError || remoteError || swept.failed > 0 ? 1 : 0
 }
 
 /**
