@@ -20,7 +20,7 @@
 // used to carry their own copy, which is how the CLI ended up with a red
 // that only prompts knew about and no yellow anywhere.
 // @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
-import { ANSI, boxed, paint } from '../style.js'
+import { ANSI, boxed, lineRows, paint } from '../style.js'
 
 /**
  * Open a frame with the prompt's chrome: the optional position line
@@ -169,16 +169,96 @@ function renderSelect(state, opts) {
   const lines = chromeLines(state, opts)
   lines.push(paint(state.hint ?? defaultHint(state), ANSI.dim, opts.color))
   lines.push('')
-  state.options.forEach((o, i) => {
+  const blocks = state.options.map((o, i) => {
     const cursor = i === state.cursor
     const pointer = cursor ? '>' : ' '
     const row = `${pointer} ${o.label}`
-    lines.push(cursor ? paint(row, `${ANSI.bold}${ANSI.cyan}`, opts.color) : paint(row, ANSI.dim, opts.color))
+    const block = [cursor ? paint(row, `${ANSI.bold}${ANSI.cyan}`, opts.color) : paint(row, ANSI.dim, opts.color)]
     if (o.summary && o.summary !== o.label) {
-      lines.push(paint(`    ${o.summary}`, ANSI.dim, opts.color))
+      block.push(paint(`    ${o.summary}`, ANSI.dim, opts.color))
     }
+    return block
   })
+  const [start, end] = selectWindow(state, lines, blocks, opts)
+  for (let i = start; i < end; i++) lines.push(...blocks[i])
+  if (start > 0 || end < blocks.length) {
+    // A window that hid rows says so: a picker that renders some of its
+    // options without saying so lies about how many there are.
+    lines.push(paint(`  showing ${start + 1}-${end} of ${blocks.length}`, ANSI.dim, opts.color))
+  }
   return lines
+}
+
+/**
+ * Which slice of a select's option blocks to draw: a window over the list
+ * that always contains the cursor and always leaves the frame inside the
+ * terminal.
+ *
+ * Every select caller but one passes a short fixed set. `hyp report fix`
+ * passes one option per listed report, so its frame is sized by how many
+ * reports a server published, and a frame taller than the terminal is not
+ * merely long: the terminal has already scrolled by the time it lands, the
+ * runtime's cursor-up cannot reach the frame's top row any more, and every
+ * later keystroke redraws over whatever is left on screen. Bounding the
+ * frame here rather than capping the option list at the call site is what
+ * keeps the next data-sized caller from rediscovering that.
+ *
+ * The window is a pure function of the cursor, not remembered scroll
+ * state: it grows outward from the cursor's own block, alternating sides
+ * so the cursor sits near the middle of the window and the ends of the
+ * list fill it. The measure is physical rows, matching what the runtime
+ * counts back over, so a wrapped label costs what it actually costs.
+ *
+ * One row of the terminal is left for the cursor: frames end with a
+ * newline, so a frame that filled the terminal exactly would push its own
+ * first row off the top.
+ *
+ * @ref LLP 0414#listing-is-the-picker [constrained-by]: the picker offers one row per listed report, so its height is the server's to set
+ *
+ * @param {SelectState} state
+ * @param {string[]} head
+ * @param {string[][]} blocks
+ * @param {RenderOpts} opts
+ * @returns {[number, number]} half-open range of block indices to draw
+ */
+function selectWindow(state, head, blocks, opts) {
+  /** @type {[number, number]} */
+  const all = [0, blocks.length]
+  const height = opts.rows
+  if (typeof height !== 'number' || blocks.length === 0) return all
+  const cost = (/** @type {string[]} */ ls) => ls.reduce((n, l) => n + lineRows(l, opts.columns), 0)
+  const limit = Math.max(1, height - 1)
+  // A box costs its two border rows; when it is suppressed for width the
+  // frame simply comes out two rows under budget.
+  const chrome = cost(head) + (state.box ? 2 : 0)
+  const sizes = blocks.map(cost)
+  if (chrome + sizes.reduce((a, b) => a + b, 0) <= limit) return all
+  // Windowed, so the "showing x-y of n" row below the options is charged
+  // for - at what it actually measures, not a flat row. On a narrow
+  // terminal that row wraps, and a budget that assumed one row puts the
+  // frame back level with the terminal, which is the whole off-by-one the
+  // reserved row above exists to avoid. Charged at its widest form (every
+  // number the block count) so the charge cannot depend on the window it
+  // is being used to choose; the most that costs is one option fewer.
+  const legend = lineRows(`  showing ${blocks.length}-${blocks.length} of ${blocks.length}`, opts.columns)
+  const budget = limit - chrome - legend
+  const cursor = Math.min(Math.max(state.cursor, 0), blocks.length - 1)
+  let start = cursor
+  let end = cursor + 1
+  let used = sizes[cursor]
+  for (;;) {
+    const below = end < blocks.length && used + sizes[end] <= budget
+    const above = start > 0 && used + sizes[start - 1] <= budget
+    if (!below && !above) break
+    if (below && (!above || end - cursor <= cursor - start + 1)) {
+      used += sizes[end]
+      end += 1
+    } else {
+      start -= 1
+      used += sizes[start]
+    }
+  }
+  return [start, end]
 }
 
 /**

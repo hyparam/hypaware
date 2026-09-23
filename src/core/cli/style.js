@@ -69,6 +69,27 @@ export function visibleWidth(line) {
   return stripSgr(line).length
 }
 
+/**
+ * How many *physical* terminal rows one logical line occupies. A line
+ * wider than the terminal soft-wraps onto further rows, and an empty line
+ * still occupies one. `columns` omitted means "do not know", which falls
+ * back to the 80 the rest of the CLI assumes.
+ *
+ * Shared rather than local so the two places that have to agree about one
+ * frame's height - the renderer deciding how many option rows fit, and the
+ * runtime deciding how far to move the cursor back up - measure it the
+ * same way.
+ *
+ * @param {string} line - a single line, without its trailing newline
+ * @param {number} [columns]
+ * @returns {number}
+ */
+export function lineRows(line, columns) {
+  const width = typeof columns === 'number' && columns > 0 ? columns : 80
+  const len = visibleWidth(line)
+  return len === 0 ? 1 : Math.ceil(len / width)
+}
+
 /** The one frame shape: rounded, single-ruled, to match the dim `─` rules. */
 const BOX = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' }
 

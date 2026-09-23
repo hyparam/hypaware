@@ -492,3 +492,46 @@ test('runtime: overlapping prompts are rejected', async () => {
   await feed(first.stdin, ['\r'])
   assert.equal(await promise, 'a')
 })
+
+test('runtime: a select longer than the terminal never draws past its last row', async () => {
+  // The runtime rewinds by the frame's own row count, so a frame taller
+  // than the terminal has already scrolled its top row away by the time
+  // the cursor-up is written: the redraw then lands mid-frame and every
+  // later keystroke paints over what is left. The height has to reach the
+  // renderer for that not to happen.
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  Object.defineProperty(stdin, 'isTTY', { value: true })
+  Object.defineProperty(stdout, 'isTTY', { value: true })
+  Object.defineProperty(stdout, 'columns', { value: 80 })
+  Object.defineProperty(stdout, 'rows', { value: 24 })
+  Object.defineProperty(stdin, 'isRaw', { value: false, writable: true })
+  // @ts-expect-error: PassThrough has no setRawMode; the runtime probes for it.
+  stdin.setRawMode = (enabled) => { /** @type {any} */ (stdin).isRaw = enabled }
+  /** @type {string[]} */
+  const chunks = []
+  stdout.on('data', (chunk) => chunks.push(String(chunk)))
+
+  const promise = select({
+    title: 'Which report?',
+    box: true,
+    options: Array.from({ length: 60 }, (_, i) => ({
+      value: `r${i}`,
+      label: `rec-${String(i).padStart(2, '0')}`,
+      summary: `2026-09-01  team/weekly  3 recommendations (${i})`,
+    })),
+    stdin,
+    stdout,
+  })
+  await feed(stdin, ['\x1b[B', '\x1b[B', '\x1b[B', '\r'])
+  assert.equal(await promise, 'r3')
+
+  const frames = chunks.filter((c) => c.includes('Which report?'))
+  assert.ok(frames.length >= 2, 'expected a first frame and at least one redraw')
+  for (const frame of frames) {
+    assert.ok(countPhysicalRows(frame, 80) <= 23, 'frame fits the terminal, with the cursor row left free')
+    assert.ok(cursorUpCount(frame) <= 24, 'rewind stays inside the terminal')
+  }
+  // The frame that drew the cursor's final row is the one the user sees.
+  assert.ok(frames[frames.length - 1].includes('> rec-03'), 'the picked row is on screen')
+})
