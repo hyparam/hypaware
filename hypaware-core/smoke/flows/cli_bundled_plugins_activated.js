@@ -337,11 +337,32 @@ export async function run({ harness, expect }) {
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_activated),
     (rows) => Array.isArray(rows) && rows.some((n) => n === expectedActive.length)
   )
+  // A manifest the workspace ships under a name neither the allowlist nor the
+  // exclude set claims is a half-landed plugin: the directory landed, the
+  // kernel's declaration of it did not. It gets its own assertion rather than
+  // joining the roster below, because boot never pools such a manifest
+  // (`selectBootPlugins` pools `loaded` + `excluded`), so it is neither
+  // activated nor skip-logged: counting it into `expectedSkipped` would demand
+  // boot skip a name it cannot see, failing the smoke on a correct kernel and
+  // blaming the skip count for it (issue #2085). Sorted so the names the
+  // failure prints are stable.
+  const { unknown } = await discoverBundledPlugins()
+  expect.that(
+    'bundled: every shipped manifest is claimed by the allowlist or the exclude set',
+    unknown.map((m) => m.manifest.name).sort(),
+    (v) => Array.isArray(v) && v.length === 0
+  )
   // Skipped = every default-surface bundled plugin this flow's config does
   // not name (the excluded-from-default set never reaches the skip loop).
   // Derived rather than pinned as a literal, which drifts the moment a plugin
   // joins the default surface (issue #2079).
-  const expectedSkipped = [...await defaultSurfaceRoster()]
+  //
+  // The allowlist, not the `loaded` bucket boot skips from: that bucket is
+  // declared intersected with shipped, so it moves with the run, and a plugin
+  // declared but no longer shipped would shrink the expectation by exactly
+  // what it shrinks the run by. The allowlist does not move, so that
+  // disagreement still fails.
+  const expectedSkipped = [...V1_BUNDLED_PLUGIN_ALLOWLIST]
     .filter((n) => !expectedActive.includes(n))
     .sort()
   expect.that(
@@ -413,28 +434,6 @@ export async function run({ harness, expect }) {
       (v) => v === true
     )
   }
-}
-
-/**
- * Every bundled plugin the shipped tree puts on the default activation
- * surface: the names the allowlist declares, plus any the workspace ships
- * that neither the allowlist nor the excluded-from-default set claims.
- *
- * The union, not the intersection `discoverBundledPlugins()` returns as
- * `loaded` and boot then skips from. An intersection moves with either side,
- * so a plugin declared but no longer shipped (or shipped but no longer
- * declared) would shrink the expectation by exactly what it shrinks the run
- * by, and the assertion would agree with the regression instead of catching
- * it. The union does not move, so either disagreement fails.
- *
- * @returns {Promise<Set<string>>}
- */
-async function defaultSurfaceRoster() {
-  const { unknown } = await discoverBundledPlugins()
-  /** @type {Set<string>} */
-  const names = new Set(V1_BUNDLED_PLUGIN_ALLOWLIST)
-  for (const { manifest } of unknown) names.add(manifest.name)
-  return names
 }
 
 /**
