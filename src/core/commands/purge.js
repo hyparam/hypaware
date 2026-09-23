@@ -182,8 +182,12 @@ export async function runPurge(argv, ctx) {
     [Attr.COMPONENT]: 'cmd-purge',
     [Attr.OPERATION]: 'purge.result',
     target_kind: target.kind,
-    rows_deleted: summary.rowsDeleted,
-    partitions_affected: summary.partitionsAffected,
+    // Nulled on the same boolean the receipt nulls its counts on: an abort
+    // leaves the default zeros in `summary`, and logging those states a total
+    // over a run that did delete rows in the partitions it reached first. The
+    // attribute contract drops a null, so the record omits both keys.
+    rows_deleted: localFailed ? null : summary.rowsDeleted,
+    partitions_affected: localFailed ? null : summary.partitionsAffected,
     // A count, not the paths: a partition path is a local path (LLP 0080
     // #telemetry), and the operator gets the list on stderr.
     partitions_skipped: skippedCount,
