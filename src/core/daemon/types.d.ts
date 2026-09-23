@@ -279,6 +279,7 @@ export type StatusDiagnosticKind =
   | 'plugin_activate_failed'
   | 'plugin_requires_unsatisfied'
   | 'plugin_manifest_unloadable'
+  | 'plugin_lock_entry_invalid'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the

@@ -24,6 +24,7 @@ import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
 import { clientAssetStateRoot, digestClientAsset } from '../../src/core/runtime/client_asset_ledger.js'
 import { materializeClientAssets, removeClientAssets } from '../../src/core/runtime/client_assets.js'
+import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
  * A fresh kernel + command registry, the way a new process would boot one. Each
@@ -987,6 +988,123 @@ test('a skill the boot profile withheld is never read as retired', async () => {
   assert.ok(
     await exists(path.join(gascitySkill, 'SKILL.md')),
     'a skill this boot profile withheld must survive: the next attach would only put it back'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+
+/**
+ * Stage a third-party plugin the way `hyp plugin install` leaves one: a real
+ * install directory contributing one skill, and a `plugin-lock.json` row
+ * pointing at it.
+ *
+ * @param {{ hypHome: string, name: string, skill: string }} args
+ * @returns {Promise<{ installDir: string, lockPath: string }>}
+ */
+async function writeInstalledPluginWithSkill({ hypHome, name, skill }) {
+  const stateDir = path.join(hypHome, 'hypaware')
+  const installDir = path.join(stateDir, 'plugins', name)
+  await fs.mkdir(path.join(installDir, 'skills', skill), { recursive: true })
+  await fs.writeFile(path.join(installDir, 'skills', skill, 'SKILL.md'), `${skill} body\n`, 'utf8')
+  await fs.writeFile(
+    path.join(installDir, 'hypaware.plugin.json'),
+    JSON.stringify({
+      schema_version: 1,
+      name,
+      version: '1.0.0',
+      hypaware_api: '^1.0.0',
+      runtime: 'node',
+      entrypoint: './index.js',
+      contributes: { skills: [{ name: skill, clients: ['claude'] }] },
+    })
+  )
+  await fs.writeFile(
+    path.join(installDir, 'index.js'),
+    "import path from 'node:path'\n" +
+      "import { fileURLToPath } from 'node:url'\n" +
+      'export async function activate(ctx) {\n' +
+      '  ctx.skills.register({\n' +
+      `    name: ${JSON.stringify(skill)},\n` +
+      `    plugin: ${JSON.stringify(name)},\n` +
+      "    clients: ['claude'],\n" +
+      `    sourceDir: path.join(path.dirname(fileURLToPath(import.meta.url)), 'skills', ${JSON.stringify(skill)}),\n` +
+      '  })\n' +
+      '}\n'
+  )
+  await writeLock(stateDir, {
+    schema_version: 1,
+    plugins: {
+      [name]: {
+        name: /** @type {any} */ (name),
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: installDir, path: installDir },
+        install_dir: installDir,
+        content_hash: 'a'.repeat(64),
+        manifest_hash: 'b'.repeat(64),
+        installed_at: '2026-05-21T00:00:00.000Z',
+      },
+    },
+  })
+  return { installDir, lockPath: path.join(stateDir, 'plugin-lock.json') }
+}
+
+test('a lock entry with no install_dir is a boot that came up short, so its client assets survive', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-prune-lock-entry-'))
+  const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const workspaceDir = await writeBundledWorkspace(home)
+  const installed = '@third-party/assets'
+  const { lockPath } = await writeInstalledPluginWithSkill({
+    hypHome: path.join(home, '.hyp'),
+    name: installed,
+    skill: 'probe-skill',
+  })
+  const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/claude', config: {} }, { name: installed, config: {} }],
+    })
+  )
+
+  const bootArgs = /** @type {const} */ ({
+    hypHome: path.join(home, '.hyp'),
+    configPath,
+    workspaceDir,
+    mode: 'smoke',
+    env,
+  })
+
+  // The installed plugin's skill lands and is ledgered with a matching digest.
+  const first = await bootKernel({ ...bootArgs, runId: 'prune-lock-entry-1' })
+  await materializeFromBoot({ boot: first, home, env })
+  const dest = path.join(home, '.claude', 'skills', 'probe-skill')
+  assert.ok(await exists(path.join(dest, 'SKILL.md')), 'the installed plugin\'s skill must land first')
+
+  // The lock is hand-edited and the row loses its `install_dir`. Discovery
+  // cannot attempt a manifest for it, so it is in neither `loaded` nor
+  // `failed`, nothing threw in `activate()`, and no profile withheld it: this
+  // is a fifth door onto the same shortfall, and the copy under `~/.claude`
+  // is now missing from the plan for a reason that is not a retirement.
+  // `@hypaware/claude` still contributes, so the client stays in scope and the
+  // copied-nothing guard does not cover this.
+  const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+  delete lock.plugins[installed].install_dir
+  await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
+
+  const second = await bootKernel({ ...bootArgs, runId: 'prune-lock-entry-2' })
+  assert.deepEqual(
+    second.activations.filter((/** @type {any} */ r) => r.ok === false),
+    [],
+    'nothing threw, so an activation-only stand-down sees no reason to stand down'
+  )
+  const outcome = await materializeFromBoot({ boot: second, home, env })
+
+  assert.deepEqual(outcome.pruned, [], 'a boot that came up short deletes nothing')
+  assert.ok(
+    await exists(path.join(dest, 'SKILL.md')),
+    'a hand-edited lock row must not delete the plugin\'s skill out of the user\'s home'
   )
   await fs.rm(home, { recursive: true, force: true })
 })

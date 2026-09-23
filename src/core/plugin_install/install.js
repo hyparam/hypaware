@@ -367,7 +367,13 @@ export async function removePlugin({ name, stateDir }) {
     async (span) => {
       const lock = await safeReadLock(stateDir)
       const entry = getEntry(lock, name)
-      if (!entry) {
+      // Whether the lock has a row for this name, not whether the row parsed
+      // into anything useful: `plugin-lock.json` is hand-editable, and a row
+      // whose value is not an object is still a row saying this plugin is
+      // installed. Answering "not installed" left it unremovable, and it is
+      // exactly the row `hyp status` names with `hyp plugin remove` as the
+      // repair (issue #1958).
+      if (!Object.hasOwn(lock.plugins, name)) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: 'plugin_not_installed' })
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'plugin_not_installed')
@@ -377,7 +383,11 @@ export async function removePlugin({ name, stateDir }) {
           message: `plugin not installed: ${name}`,
         }
       }
-      const installDir = entry.install_dir ?? pluginInstallDir(stateDir, name)
+      // Same fallback as before for an entry that carries no directory, widened
+      // to an entry that is not an object to read one off at all.
+      const installDir = typeof entry?.install_dir === 'string' && entry.install_dir.length > 0
+        ? entry.install_dir
+        : pluginInstallDir(stateDir, name)
       await fs.rm(installDir, { recursive: true, force: true })
       const nextLock = removeLockEntry(lock, name)
       await writeLock(stateDir, nextLock)

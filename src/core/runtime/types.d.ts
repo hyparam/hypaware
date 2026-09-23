@@ -174,8 +174,16 @@ export interface DiscoverInstalledResult {
   loaded: LoadedManifest[]
   /** Lock entries whose `install_dir` manifest failed to load. */
   failed: FailedManifest[]
-  /** All lock entries that were considered (loaded + failed). */
+  /** All well-formed lock entries that were considered (loaded + failed). */
   lockEntries: PluginLockEntry[]
+  /**
+   * Lock entries the loader could not use at all: not an object, or no
+   * usable `install_dir` to load a manifest from. Named by lock key, which
+   * is the only identity such an entry still has, and kept out of `failed`
+   * because a `FailedManifest` is a directory plus a reason and these carry
+   * no directory.
+   */
+  malformed: PluginName[]
 }
 
 // --- activation ---
