@@ -581,6 +581,15 @@ test('the shared read is released on every exit path of loadSpooledBodies', asyn
 // state at least once: the state is a second owner that took the removal having
 // issued no read of its own, which it can only have done by holding the promise
 // the first owner put in the map.
+//
+// Both waits are keyed on events, not on a fixed number of macrotask turns:
+// the first call's `readFile` is real threadpool I/O, and on a loaded box it
+// can outlive any fixed window (the full suite runs test files in parallel,
+// and 20 turns was not enough there), which released the first owner before
+// it ever reached its removal and starved every depth of the state under
+// test. Waiting for the removal to actually start, and sampling once the
+// second call has either finished or started its own removal, keeps the
+// schedule the depth chain orders without betting on how long the I/O takes.
 test('an owner holding a promise the map let go of still leaves the map empty', async () => {
   const realReadFile = fsp.readFile
   const realUnlink = fsp.unlink
@@ -611,23 +620,35 @@ test('an owner holding a promise the map let go of still leaves the map empty', 
       /** @type {(value?: unknown) => void} */
       let releaseSecond = () => {}
       const secondHeld = new Promise((resolve) => { releaseSecond = resolve })
+      /** @type {(value?: unknown) => void} */
+      let signalFirstRemoval = () => {}
+      const firstRemovalStarted = new Promise((resolve) => { signalFirstRemoval = resolve })
+      /** @type {(value?: unknown) => void} */
+      let signalSecondRemoval = () => {}
+      const secondRemovalStarted = new Promise((resolve) => { signalSecondRemoval = resolve })
       // Every removal fails and the file stays, which is what lets a later
       // caller read real bytes while an earlier one still owns the removal.
       fsp.unlink = /** @type {any} */ (async (/** @type {string} */ target) => {
         if (target !== file) return realUnlink(target)
         removals += 1
-        if (removals === 1) await firstHeld
-        if (removals === 2) await secondHeld
+        if (removals === 1) { signalFirstRemoval(); await firstHeld }
+        if (removals === 2) { signalSecondRemoval(); await secondHeld }
         throw Object.assign(new Error('EPERM'), { code: 'EPERM' })
       })
       const first = loadSpooledBodies(eventsFor(file), { spoolDir: root })
-      await settle()
+      // Not a settle: the first call's read is real I/O, so wait for the call
+      // to have entered its removal (and so registered on `firstHeld` ahead of
+      // the chain below) rather than for a turn count to have elapsed.
+      await firstRemovalStarted
       /** @type {Promise<unknown>} */
       let chain = firstHeld
       for (let hop = 0; hop < depth; hop++) chain = chain.then(() => {})
       const second = chain.then(() => loadSpooledBodies(eventsFor(file), { spoolDir: root }))
       releaseFirst()
-      await settle()
+      // The second call either takes the removal (and blocks on `secondHeld`
+      // inside it) or concedes and finishes: whichever happens, this settles,
+      // where a fixed turn count could sample before the call got that far.
+      await Promise.race([second, secondRemovalStarted])
       // Sampled before the third call and before the probe resets the counter.
       if (removals >= 2 && reads === 1) sawStaleOwner = true
       const third = loadSpooledBodies(eventsFor(file), { spoolDir: root })
