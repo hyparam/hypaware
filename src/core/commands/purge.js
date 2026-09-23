@@ -9,7 +9,7 @@ import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { purgeCache, purgeSkipsFrom } from '../cache/purge.js'
+import { purgeCache, purgeCleanupFrom, purgeSkipsFrom } from '../cache/purge.js'
 import { createSessionPurgeStore } from '../cache/session-purges.js'
 import { BUILTIN_ORIGIN_ALIASES, effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, readCredentials, remoteTokenEnvVar, resolveAccessJwt } from '../remote/credentials.js'
@@ -124,11 +124,14 @@ export async function runPurge(argv, ctx) {
     const thrown = err instanceof Error ? err.message : String(err)
     const message = thrown || (err instanceof Error ? err.name : '') || 'unknown error'
     localError = message
-    // The abort replaced the summary, so the skips it had already recorded
-    // reach the operator only from here. A skipped partition may still hold
-    // the rows the user asked to be gone, so the run below reports them and
-    // fails, exactly as a completed run with skips does.
-    summary = { ...summary, partitionsSkipped: purgeSkipsFrom(err) }
+    // The abort replaced the summary, so the skips and the cleanup jobs it had
+    // already recorded reach the operator only from here. A skipped partition
+    // may still hold the rows the user asked to be gone, so the run below
+    // reports them and fails, exactly as a completed run with skips does; an
+    // admitted cleanup job is a durable journal that still runs, and a receipt
+    // naming none of them states there is no background work pending when
+    // there is.
+    summary = { ...summary, partitionsSkipped: purgeSkipsFrom(err), cacheCleanup: purgeCleanupFrom(err) }
     ctx.stderr.write(`error: purge failed: ${message}\n`)
   }
 
