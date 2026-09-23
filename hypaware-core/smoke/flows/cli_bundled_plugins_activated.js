@@ -9,6 +9,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import {
   V1_BUNDLED_PLUGIN_ALLOWLIST,
+  V1_EXCLUDED_FROM_DEFAULT,
   discoverBundledPlugins,
 } from '../../../src/core/runtime/bundled.js'
 
@@ -26,20 +27,23 @@ import {
  *     (same shape), and `hyp client attach openclaw --dry-run`
  *     reaches the OpenClaw adapter against a seeded OPENCLAW_HOME.
  *  4. `hyp status --json` emits a stable JSON document listing the
- *     configured sources, sinks, clients, and active plugins. Because
- *     none of `@hypaware/central`, `@hypaware/gascity`, or
- *     `@hypaware/github` is in this config, they must not appear as they are excluded from default
- *     activation but remain discoverable through the plugin catalog and
+ *     configured sources, sinks, clients, and active plugins. This
+ *     config names none of `V1_EXCLUDED_FROM_DEFAULT`, so no member of
+ *     that set may appear: they are excluded from default activation
+ *     but remain discoverable through the plugin catalog and
  *     activatable via explicit config or init presets.
  *
  * Telemetry contract (per bead):
  *  - One `kernel.boot` root span per dispatch boot.
  *  - One `plugin.activate` child span per active plugin per boot.
  *  - One `plugin.skipped` log row per bundled-but-not-selected plugin
- *    with `status=skipped` and `hyp_reason=not_configured`. The
- *    selected set here covers six of the nine V1-bundled plugins so
- *    `@hypaware/format-jsonl`, `@hypaware/s3`, and
- *    `@hypaware/format-iceberg` land on the skipped path.
+ *    with `status=skipped` and `hyp_reason=not_configured`. The config
+ *    below names a subset of the default activation surface, so every
+ *    other plugin on that surface lands on the skipped path.
+ *
+ * The rosters here are derived from the shipped allowlist, exclude set,
+ * and manifests, because a pinned one goes stale the moment a plugin
+ * joins or leaves the tree (issues #2079, #2081).
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -51,13 +55,11 @@ export async function run({ harness, expect }) {
     )
   }
 
-  // Stage a v2 config that selects seven of the V1-bundled plugins.
-  // `@hypaware/format-jsonl`, `@hypaware/s3`, `@hypaware/format-iceberg`,
-  // `@hypaware/context-graph`, and `@hypaware/ai-gateway-graph` are
-  // intentionally omitted so the smoke can assert the "skipped" log
-  // surface. `@hypaware/central`, `@hypaware/gascity`, and
-  // `@hypaware/github` are not in this config, they are excluded from
-  // default activation but activatable via explicit config.
+  // Stage a v2 config naming a proper subset of the default activation
+  // surface, so the rest of that surface lands on the "skipped" log path the
+  // assertions below derive. Nothing in `V1_EXCLUDED_FROM_DEFAULT` is named,
+  // so none of it activates: that set never reaches the skip loop either, it
+  // is activatable only via explicit config.
   const configPath = defaultConfigPath(harness.hypHome)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, JSON.stringify({
@@ -154,14 +156,12 @@ export async function run({ harness, expect }) {
     (listed.plugins ?? []).filter((/** @type {any} */ p) => p.active),
     (rows) => Array.isArray(rows) && rows.every((/** @type {any} */ r) => r.source === 'bundled')
   )
+  // The whole exclude set, so a name joining it is covered the moment it
+  // joins. A pinned subset of it just stops covering the rest (issue #2081).
   expect.that(
-    'plugins: unconfigured opt-in plugins absent from active list',
+    'plugins: no excluded-from-default plugin appears in hyp plugin list',
     (listed.plugins ?? []).map((/** @type {any} */ p) => p.name),
-    (v) =>
-      Array.isArray(v) &&
-      !v.includes('@hypaware/central') &&
-      !v.includes('@hypaware/gascity') &&
-      !v.includes('@hypaware/github')
+    (v) => Array.isArray(v) && !v.some((/** @type {any} */ n) => V1_EXCLUDED_FROM_DEFAULT.has(n))
   )
 
   // ----- 2. hyp client attach claude --dry-run -----
@@ -268,7 +268,8 @@ export async function run({ harness, expect }) {
     statusStderr.text(),
     (v) => typeof v === 'string' && v.length === 0
   )
-  const status = parseJson(statusStdout.text())
+  const statusText = statusStdout.text()
+  const status = parseJson(statusText)
   expect.that('stdout: status --json parses', status, (v) => v && typeof v === 'object')
   expect.that(
     'status: active_plugins enumerates the configured set',
@@ -296,21 +297,15 @@ export async function run({ harness, expect }) {
       typeof v.running === 'boolean' &&
       typeof v.state === 'string'
   )
-  expect.that(
-    'status: unconfigured @hypaware/central absent from status JSON',
-    statusStdout.text(),
-    (v) => typeof v === 'string' && !v.includes('@hypaware/central')
-  )
-  expect.that(
-    'status: unconfigured @hypaware/gascity absent from status JSON',
-    statusStdout.text(),
-    (v) => typeof v === 'string' && !v.includes('@hypaware/gascity')
-  )
-  expect.that(
-    'status: unconfigured @hypaware/github absent from status JSON',
-    statusStdout.text(),
-    (v) => typeof v === 'string' && !v.includes('@hypaware/github')
-  )
+  // Same derivation as the `hyp plugin list` check, over the whole rendered
+  // document rather than the parsed plugin rows.
+  for (const name of V1_EXCLUDED_FROM_DEFAULT) {
+    expect.that(
+      `status: unconfigured ${name} absent from status JSON`,
+      statusText,
+      (v) => typeof v === 'string' && !v.includes(name)
+    )
+  }
 
   await obs.shutdown()
 
@@ -379,35 +374,45 @@ export async function run({ harness, expect }) {
       )
   )
 
+  // Scoped to the boots under test by `spanId`, which `plugin.skipped` carries
+  // because it is logged inside the `kernel.boot` span. These dispatches also
+  // produce an `explicit:0` boot that selects nothing and so skips the whole
+  // default surface: an unfiltered scan therefore holds every bundled name,
+  // and a name check against it is true no matter which boot skipped it, so it
+  // cannot fail (issue #2081).
+  const configBootSpanIds = new Set(configBoots.map((/** @type {any} */ s) => s.spanId))
   const skippedLogs = logs.filter(
     (/** @type {any} */ l) =>
       l.body === 'plugin.skipped' &&
       l.attributes?.hyp_reason === 'not_configured' &&
-      l.attributes?.status === 'skipped'
+      l.attributes?.status === 'skipped' &&
+      configBootSpanIds.has(l.spanId)
   )
   const skippedPlugins = new Set(
     skippedLogs.map((/** @type {any} */ l) => l.attributes?.hyp_plugin).filter(Boolean)
   )
   expect.that(
-    'logs: cursor emitted a plugin.skipped log with hyp_reason=not_configured',
-    skippedPlugins.has('@hypaware/cursor'),
-    (v) => v === true
+    'logs: config-profile boots skipped exactly the default-surface plugins this' +
+      ` config omits (${expectedSkipped.join(',')})`,
+    [...skippedPlugins].sort(),
+    (v) => Array.isArray(v) && v.join(',') === expectedSkipped.join(',')
   )
-  expect.that(
-    'logs: format-jsonl emitted a plugin.skipped log with hyp_reason=not_configured',
-    skippedPlugins.has('@hypaware/format-jsonl'),
-    (v) => v === true
-  )
-  expect.that(
-    'logs: s3 emitted a plugin.skipped log with hyp_reason=not_configured',
-    skippedPlugins.has('@hypaware/s3'),
-    (v) => v === true
-  )
-  expect.that(
-    'logs: format-iceberg emitted a plugin.skipped log with hyp_reason=not_configured',
-    skippedPlugins.has('@hypaware/format-iceberg'),
-    (v) => v === true
-  )
+  // Named, where the set above is derived, and that is the point: the
+  // derivation moves with `expectedActive`, so re-scoping this config to
+  // activate one of these would carry the expectation along and prove nothing.
+  // These four are the flow's own claim about the skipped path it covers.
+  for (const name of [
+    '@hypaware/cursor',
+    '@hypaware/format-jsonl',
+    '@hypaware/s3',
+    '@hypaware/format-iceberg',
+  ]) {
+    expect.that(
+      `logs: ${name} emitted a plugin.skipped log with hyp_reason=not_configured`,
+      skippedPlugins.has(name),
+      (v) => v === true
+    )
+  }
 }
 
 /**
