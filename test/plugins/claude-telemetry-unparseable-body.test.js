@@ -223,3 +223,42 @@ test('two overlapping reads of one unparseable body report its bytes once', asyn
     await fsp.rm(dir, { recursive: true, force: true })
   }
 })
+
+// Nothing the callers return can tell the shared read from its absence: reads
+// issued in one tick all resolve before any `unlink`, so the counts and the
+// bytes agree either way. Counting `readFile` is what distinguishes them, and
+// it is the assertion that fails both when the dedup is deleted and when its
+// `reading.set` moves behind an `await` (which narrows the window instead of
+// closing it: the next caller then arrives before the read has been claimed).
+test('overlapping loadSpooledBodies calls for one body_ref issue exactly one readFile', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dedup-'))
+  const realReadFile = fsp.readFile
+  try {
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, 'not json at all', 'utf8')
+    const events = [{
+      name: 'api_request_body',
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    }]
+    let reads = 0
+    // The reader and this test hold the same `node:fs/promises` module object,
+    // and the reader looks `readFile` up at call time, so counting its calls
+    // needs no hook in the production path.
+    fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+      if (target === file) reads += 1
+      return realReadFile(target)
+    })
+    // Started in one tick, so all three overlap: each runs synchronously as far
+    // as its first `await`, which is where the shared read has to be claimed.
+    await Promise.all([
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+    ])
+    assert.equal(reads, 1, 'three overlapping callers share one read of the file')
+  } finally {
+    fsp.readFile = realReadFile
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
