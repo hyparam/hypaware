@@ -22,7 +22,7 @@ import { discoverSpoolTables, QUERY_FLUSH_FAILURE_COOLDOWN_MS, readFlushFailure 
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
-import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { discoverInstalledPlugins, unloadableInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
@@ -3602,35 +3602,6 @@ async function discoverStatusManifests({ stateDir }) {
     installed = await discoverInstalledPlugins({ stateDir })
   } catch { /* installed discovery failure is non-fatal */ }
   return { bundled, installed }
-}
-
-/**
- * Installed plugins the kernel cannot see: a lock entry whose `install_dir`
- * manifest `discoverInstalledPlugins` rejected (corrupt, unparseable, failing
- * schema validation, or naming a different plugin). Keyed by the lock entry's
- * name and valued by its directory, because the name is the only trustworthy
- * one available - a manifest that did not parse has none, which is why the
- * sibling `plugin_manifest_unloadable` diagnostic (issue #1576) is
- * directory-shaped throughout. The lock is also exactly what `hyp plugin list`
- * calls installed, so the two surfaces stop contradicting each other.
- *
- * Derived by subtracting the manifests that loaded from the lock, rather than
- * by matching `failed[]` back to a directory: `FailedManifest` carries no
- * name, and the subtraction also catches the name-mismatch rejection, whose
- * manifest parsed under someone else's name.
- *
- * @param {Awaited<ReturnType<typeof discoverStatusManifests>>['installed']} installed
- * @returns {Map<string, string>} plugin name -> install directory
- */
-function unloadableInstalledPlugins(installed) {
-  /** @type {Map<string, string>} */
-  const out = new Map()
-  const loaded = new Set(installed.loaded.map((m) => m.manifest.name))
-  for (const entry of installed.lockEntries) {
-    if (loaded.has(entry.name)) continue
-    out.set(entry.name, entry.install_dir)
-  }
-  return out
 }
 
 /**

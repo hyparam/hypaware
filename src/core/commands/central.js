@@ -109,6 +109,7 @@ export async function runJoin(argv, ctx) {
   const validation = await validateConfig(seed, {
     knownPlugins: catalogCtx.knownPlugins,
     knownDatasets: catalogCtx.knownDatasets,
+    unloadablePlugins: catalogCtx.unloadablePlugins,
   })
   if (!validation.ok) {
     for (const err of validation.errors) {

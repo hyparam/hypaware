@@ -181,3 +181,90 @@ test('a plugin that loads raises no config error, whether or not its activate() 
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })
+
+// Issue #1954. `hyp status` learned to tell the two states apart; the other
+// surfaces that validate a config against the CLI plugin catalog did not, so
+// on one install, at one moment, `hyp config validate` said the plugin was not
+// installed while `hyp status`, `hyp plugin list` and `hyp plugin info` said it
+// was. The contradiction is the defect, so these assert the surfaces agree
+// rather than only that a new sentence appeared: a fix that made them disagree
+// differently would pass a message-only check.
+
+/** @param {string} text @returns {string | undefined} */
+function errorKindIn(text) {
+  return text.match(/\[([a-z_]+)\] \/plugins\/0\/name:/)?.[1]
+}
+
+test('config validate reports the same kind as status for an installed plugin whose manifest will not load', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-validate-unloadable-'))
+  try {
+    const name = '@acme/corrupt'
+    const installDir = await stageInstalled(hypHome, name, '{"schema_version":1,"name":"@acme/corrupt",')
+    const configPath = defaultConfigPath(hypHome)
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name }] }) + '\n')
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
+
+    const validateErr = makeBuf()
+    const validateCode = await dispatch(['config', 'validate'], { stdout: makeBuf(), stderr: validateErr, env })
+    // Still an error: the plugin captures nothing either way.
+    assert.equal(validateCode, 1)
+    // The claim the issue is about.
+    assert.doesNotMatch(validateErr.text(), /is not installed/)
+
+    // The agreement, read off both surfaces rather than compared to a literal.
+    const report = await collectHypAwareStatus({ env })
+    const statusDiag = configErrorAt(report, '/plugins/0/name')
+    assert.ok(statusDiag, 'status still reports the entry')
+    const statusKind = errorKindIn(statusDiag.message)
+    const validateKind = errorKindIn(validateErr.text())
+    assert.ok(validateKind, `config validate named no kind: ${validateErr.text()}`)
+    assert.equal(validateKind, statusKind)
+    assert.equal(validateKind, 'plugin_installed_unloadable')
+
+    // The other two surfaces in the contradiction, on the same fixture.
+    const listOut = makeBuf()
+    assert.equal(await dispatch(['plugin', 'list'], { stdout: listOut, stderr: makeBuf(), env }), 0)
+    assert.match(listOut.text(), /@acme\/corrupt@1\.0\.0/)
+    const infoOut = makeBuf()
+    assert.equal(await dispatch(['plugin', 'info', name], { stdout: infoOut, stderr: makeBuf(), env }), 0)
+    assert.ok(infoOut.text().includes(`install_dir:   ${installDir}`), infoOut.text())
+
+    // The sibling caller of the same catalog build, which validates an
+    // operator-supplied file and had the identical defect.
+    const setupErr = makeBuf()
+    await dispatch(['setup', '--from-file', configPath], { stdout: makeBuf(), stderr: setupErr, env })
+    assert.equal(errorKindIn(setupErr.text()), statusKind)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('config validate still calls a name nothing on the machine matches unknown', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-validate-unknown-'))
+  try {
+    await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+    await fs.writeFile(
+      defaultConfigPath(hypHome),
+      JSON.stringify({ version: 2, plugins: [{ name: '@acme/typo' }] }) + '\n'
+    )
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
+
+    const stderr = makeBuf()
+    assert.equal(await dispatch(['config', 'validate'], { stdout: makeBuf(), stderr, env }), 1)
+    // Byte for byte what it said before the two states were told apart.
+    assert.match(
+      stderr.text(),
+      /\[plugin_unknown\] \/plugins\/0\/name: plugin '@acme\/typo' is not a known first-party plugin and is not installed/
+    )
+
+    // And it agrees with status here too, which is the half a fix that
+    // weakened the unknown arm would break.
+    const report = await collectHypAwareStatus({ env })
+    const statusDiag = configErrorAt(report, '/plugins/0/name')
+    assert.ok(statusDiag)
+    assert.equal(errorKindIn(stderr.text()), errorKindIn(statusDiag.message))
+    assert.equal(errorKindIn(stderr.text()), 'plugin_unknown')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})

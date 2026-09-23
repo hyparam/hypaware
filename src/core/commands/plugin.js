@@ -8,7 +8,7 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { discoverInstalledPlugins, unloadableInstalledPlugins } from '../runtime/installed.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import {
@@ -60,14 +60,23 @@ export function pluginStateDir(ctx) {
  * keeps working when the lock is missing or any installed manifest is
  * corrupt; the underlying discovery layer logs its own diagnostics.
  *
+ * `unloadablePlugins` rides along because the catalog cannot answer the
+ * question it settles: a plugin whose manifest was rejected is absent from
+ * `knownPlugins` for the same reason a typo is. Without it every caller that
+ * validates a config against this catalog tells the operator an installed
+ * plugin "is not installed" (issues #1936, #1954). It is derived here, off the
+ * discovery pass this function already runs, so no caller can forget to ask.
+ *
  * @param {CommandRunContext} ctx
- * @returns {Promise<{ knownPlugins: Map<PluginName, PluginMetadata>, knownDatasets: Set<string> }>}
+ * @returns {Promise<{ knownPlugins: Map<PluginName, PluginMetadata>, knownDatasets: Set<string>, unloadablePlugins: Set<PluginName> }>}
  */
 export async function buildKnownPluginsForCtx(ctx) {
   /** @type {LoadedManifest[]} */
   let bundledLoaded = []
   /** @type {LoadedManifest[]} */
   let installedLoaded = []
+  /** @type {Set<PluginName>} */
+  let unloadablePlugins = new Set()
   try {
     const bundled = await discoverBundledPlugins()
     bundledLoaded = [...bundled.loaded, ...bundled.excluded]
@@ -76,9 +85,10 @@ export async function buildKnownPluginsForCtx(ctx) {
     const stateDir = pluginStateDir(ctx)
     const installed = await discoverInstalledPlugins({ stateDir })
     installedLoaded = installed.loaded
+    unloadablePlugins = new Set(unloadableInstalledPlugins(installed).keys())
   } catch { /* installed discovery failure is non-fatal */ }
   const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
-  return { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets }
+  return { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets, unloadablePlugins }
 }
 
 /**
