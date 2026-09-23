@@ -35,8 +35,8 @@ export async function runConfigValidate(argv, ctx) {
     return 1
   }
 
-  const { knownPlugins, knownDatasets } = await buildKnownPluginsForCtx(ctx)
-  const result = await validateConfig(loadResult.config, { knownPlugins, knownDatasets })
+  const { knownPlugins, knownDatasets, unloadablePlugins } = await buildKnownPluginsForCtx(ctx)
+  const result = await validateConfig(loadResult.config, { knownPlugins, knownDatasets, unloadablePlugins })
   if (!result.ok) {
     ctx.stderr.write(
       `hyp config validate: ${result.errors.length} error(s) in ${loadResult.configPath}\n`

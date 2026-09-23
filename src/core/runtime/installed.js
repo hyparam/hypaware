@@ -124,3 +124,37 @@ export async function discoverInstalledPlugins({ stateDir }) {
 
   return { loaded, failed, lockEntries: entries, malformed }
 }
+
+/**
+ * Installed plugins the kernel cannot see: a lock entry whose `install_dir`
+ * manifest this walk rejected (corrupt, unparseable, failing schema
+ * validation, or naming a different plugin). Keyed by the lock entry's name
+ * and valued by its directory, because the name is the only trustworthy one
+ * available - a manifest that did not parse has none, which is why the sibling
+ * `plugin_manifest_unloadable` diagnostic (issue #1576) is directory-shaped
+ * throughout. The lock is also exactly what `hyp plugin list` calls installed,
+ * so the surfaces that read this stop contradicting each other.
+ *
+ * Derived by subtracting the manifests that loaded from the lock, rather than
+ * by matching `failed[]` back to a directory: `FailedManifest` carries no
+ * name, and the subtraction also catches the name-mismatch rejection, whose
+ * manifest parsed under someone else's name.
+ *
+ * It lives beside the walk it subtracts over rather than inside either reader:
+ * `hyp status` and the CLI catalog build both need it, and two predicates for
+ * "installed but unloadable" could disagree, which is the contradiction those
+ * readers exist to remove (issues #1936, #1954).
+ *
+ * @param {DiscoverInstalledResult} installed
+ * @returns {Map<string, string>} plugin name -> install directory
+ */
+export function unloadableInstalledPlugins(installed) {
+  /** @type {Map<string, string>} */
+  const out = new Map()
+  const loaded = new Set(installed.loaded.map((m) => m.manifest.name))
+  for (const entry of installed.lockEntries) {
+    if (loaded.has(entry.name)) continue
+    out.set(entry.name, entry.install_dir)
+  }
+  return out
+}

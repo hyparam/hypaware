@@ -379,7 +379,7 @@ async function runInitFromFile(flags, ctx) {
     return 1
   }
   const catalogCtx = await buildKnownPluginsForCtx(ctx)
-  const validation = await validateConfig(/** @type {any} */ (parsed), { knownPlugins: catalogCtx.knownPlugins, knownDatasets: catalogCtx.knownDatasets })
+  const validation = await validateConfig(/** @type {any} */ (parsed), { knownPlugins: catalogCtx.knownPlugins, knownDatasets: catalogCtx.knownDatasets, unloadablePlugins: catalogCtx.unloadablePlugins })
   if (!validation.ok) {
     for (const err of validation.errors) {
       ctx.stderr.write(
