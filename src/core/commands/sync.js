@@ -100,8 +100,10 @@ export async function runSync(argv, ctx) {
   // `handle.instanceName` here selects by a second key: an owner that renames
   // it gates an instance the driver would drive, offers the refusal a name the
   // driver will not match, or throws out of the filter before the driver's own
-  // guarded read (issue #2066). Only the name is fixed here: the plan's
-  // destination lines below still read the live property.
+  // guarded read (issue #2066). The display lane below is keyed the same way,
+  // for a reason of its own: the plan is a consent surface, so the name it
+  // prints beside "what would leave" has to be the name that receives it
+  // (issue #2087).
   const handles = instance ? allHandles.filter((h) => sinkInstanceName(h) === instance) : allHandles
   if (instance && handles.length === 0) {
     ctx.stderr.write(`hyp sync: no sink named '${instance}' was instantiated\n`)
@@ -233,7 +235,7 @@ export async function runSync(argv, ctx) {
       label: 'Counting pending rows...',
     },
     () => previewPendingRows({
-      handles: handles.filter((handle) => displayedInstances.has(handle.instanceName)),
+      handles: handles.filter((handle) => displayedInstances.has(sinkInstanceName(handle))),
       query: ctx.query,
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       stateRoot: stateDir,
@@ -517,6 +519,7 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   const previews = new Map()
   const previewStartedAt = Date.now()
   for (const handle of capable) {
+    const instance = sinkInstanceName(handle)
     try {
       // A full scan of the client's retained history, once per destination,
       // and like the ordinary plan's count it runs before anything is on
@@ -526,15 +529,15 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
           stdout: ctx.stdout,
           env: ctx.env,
           quietWhenPlain: true,
-          label: `Counting retained '${source}' history on ${handle.instanceName}...`,
+          label: `Counting retained '${source}' history on ${instance}...`,
         },
         async () => handle.sink.previewSourceHistory?.({ source })
       )
       if (!preview) throw new Error('history preview became unavailable')
-      previews.set(handle.instanceName, preview)
+      previews.set(instance, preview)
     } catch (err) {
       ctx.stderr.write(
-        `hyp sync --history: could not preview '${handle.instanceName}' (${err instanceof Error ? err.message : String(err)})\n` +
+        `hyp sync --history: could not preview '${instance}' (${err instanceof Error ? err.message : String(err)})\n` +
         '  Nothing was sent.\n'
       )
       return 1
@@ -566,7 +569,7 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     hyp_withheld_rows: totalWithheld,
   })
 
-  const capableNames = new Set(capable.map((handle) => handle.instanceName))
+  const capableNames = new Set(capable.map(sinkInstanceName))
   const selectedDestinations = destinations.filter((destination) => capableNames.has(destination.instance))
   const unsupported = destinations.filter((destination) => !capableNames.has(destination.instance))
   ctx.stdout.write(renderHistoryPlan({ source, destinations: selectedDestinations, previews, unsupported }))
@@ -621,26 +624,27 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
 
   let failed = false
   for (const handle of capable) {
+    const instance = sinkInstanceName(handle)
     let result
     try {
       result = await withSpinner(
-        { stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${handle.instanceName}...` },
+        { stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${instance}...` },
         async () => handle.sink.replaySourceHistory?.({ source })
       )
     } catch (err) {
       failed = true
       ctx.stdout.write(
-        `${handle.instanceName}: failed (${err instanceof Error ? err.message : String(err)})\n`
+        `${instance}: failed (${err instanceof Error ? err.message : String(err)})\n`
       )
       continue
     }
     if (!result) {
       failed = true
-      ctx.stdout.write(`${handle.instanceName}: failed (history replay became unavailable)\n`)
+      ctx.stdout.write(`${instance}: failed (history replay became unavailable)\n`)
       continue
     }
     ctx.stdout.write(
-      `${handle.instanceName}: ${result.status} (rows=${result.rowsReplayed}, bytes=${result.bytesWritten}${
+      `${instance}: ${result.status} (rows=${result.rowsReplayed}, bytes=${result.bytesWritten}${
         result.error ? `, error=${result.error}` : ''
       })\n`
     )
@@ -705,22 +709,36 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  * collect the same dead-link click. An origin with no configured name falls
  * back to its host, which is still not a URL a terminal will linkify.
  *
+ * The name is the registry's key, because it is the one field of the row that
+ * is not description: the plan is read as "these destinations will receive
+ * data", and what receives data is what the driver matches, which is that
+ * record (`sinkInstance` against `sinkInstanceName`,
+ * `src/core/sinks/driver.js`). Off the live `handle.instanceName` the row was
+ * named by a second key its owner can move: a non-string accessor ended the
+ * command at `dest.instance.padEnd` before the plan printed, and a lying one
+ * printed a name no receipt line and no `hyp sync <name>` answers to
+ * (issue #2087). No placeholder guards an empty name: these handles all come
+ * from `listHandles()`, whose keys are the non-empty strings `instantiate`
+ * validated and recorded beside the handle. `text` and `offMachine` stay off
+ * the live config, the separate unguarded-read class issue #2059 tracks.
+ *
  * @ref LLP 0100#requirements [constrained-by]: R1a's reason - name the server, never its URL - applied to the consent prompt R1a's text does not reach
  * @param {ExtendedSinkHandle} handle
  * @param {Record<string, { url?: string }>} remotes configured targets, name to URL
  * @returns {{ instance: string, text: string, offMachine: boolean | null }}
  */
 function describeDestination(handle, remotes) {
+  const instance = sinkInstanceName(handle)
   const config = /** @type {Record<string, unknown>} */ (handle.config ?? {})
   const url = config.url
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
-    return { instance: handle.instanceName, text: nameServer(url, remotes), offMachine: true }
+    return { instance, text: nameServer(url, remotes), offMachine: true }
   }
   const dir = config.dir
   if (typeof dir === 'string' && dir.length > 0) {
-    return { instance: handle.instanceName, text: dir, offMachine: false }
+    return { instance, text: dir, offMachine: false }
   }
-  return { instance: handle.instanceName, text: handle.plugin ?? 'unknown destination', offMachine: null }
+  return { instance, text: handle.plugin ?? 'unknown destination', offMachine: null }
 }
 
 /**
