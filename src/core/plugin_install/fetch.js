@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import { loadManifest } from '../manifest.js'
 import { fetchGitSource } from './git_fetch.js'
-import { pluginInstallDir } from './paths.js'
+import { installDirIsContained, pluginInstallDir } from './paths.js'
 import { sha256Hex } from '../util/json_util.js'
 
 /**
@@ -116,6 +116,16 @@ async function fetchLocalDir({ source, stateDir }) {
       ok: false,
       errorKind: 'manifest_name_mismatch',
       message: `plugin install: manifest name '${manifest.name}' does not match requested '${source.name}'`,
+    }
+  }
+
+  if (!installDirIsContained(stateDir, manifest.name)) {
+    return {
+      ok: false,
+      errorKind: 'manifest_name_unsafe',
+      message:
+        `plugin install: refused, manifest name '${manifest.name}' does not resolve to a ` +
+        `directory inside the plugin install root; nothing was installed and nothing was removed`,
     }
   }
 
