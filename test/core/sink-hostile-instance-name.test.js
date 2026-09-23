@@ -106,8 +106,15 @@ function fixtureSink() {
  *   instance that sorts first, after both are live.
  * @param {string} [stateDir] The plugin state directory every instance is
  *   created with, for the one case that advances a real watermark through it.
+ * @param {{ property?: string, configFor?: (instanceName: string) => any }} [opts]
+ *   `property` is the handle property `beHostile` redefines, checked after
+ *   the fixture runs so a rewritten helper cannot quietly stage an honest
+ *   handle. `configFor` is the config the kernel materializes each instance
+ *   from, for the cases that turn on what that config says.
  */
-async function stage(beHostile, stateDir = '/nowhere') {
+async function stage(beHostile, stateDir = '/nowhere', opts = {}) {
+  const property = opts.property ?? 'instanceName'
+  const configFor = opts.configFor ?? (() => ({ schedule: '* * * * *', endpoint: 'https://central.example' }))
   const runtime = /** @type {any} */ ({
     sinks: createSinkRegistry(),
     sources: { register() {}, get() {}, list() { return [] } },
@@ -129,7 +136,7 @@ async function stage(beHostile, stateDir = '/nowhere') {
       kind: 'request',
       instanceName,
       contribution: sink.contribution,
-      config: { schedule: '* * * * *', endpoint: 'https://central.example' },
+      config: configFor(instanceName),
       plugin: /** @type {any} */ (ctx.plugin),
       paths: /** @type {any} */ (ctx.paths),
       log: /** @type {any} */ (ctx.log),
@@ -139,12 +146,29 @@ async function stage(beHostile, stateDir = '/nowhere') {
   // whole of what makes `instanceName` the owner's to rewrite.
   const owned = /** @type {ExtendedSinkHandle} */ (/** @type {any} */ (ctx.sinks.get(HOSTILE_INSTANCE)))
   assert.equal(owned, registry.get(HOSTILE_INSTANCE), 'the owner no longer holds the live handle')
+  const honest = readProperty(owned, property)
   beHostile(owned)
-  assert.ok(
-    typeof Object.getOwnPropertyDescriptor(owned, 'instanceName')?.get === 'function',
-    'the fixture stopped being hostile'
-  )
+  // Every case below turns on a live read answering something other than what
+  // `instantiate` recorded, so a fixture that quietly stopped taking the
+  // property over would stage an honest handle and pass.
+  assert.notEqual(readProperty(owned, property), honest, 'the fixture stopped being hostile')
   return { registry, runtime, sink }
+}
+
+/**
+ * What `handle[property]` answers right now, as a comparable string, with a
+ * throw folded into the answer.
+ *
+ * @param {ExtendedSinkHandle} handle
+ * @param {string} property
+ * @returns {string}
+ */
+function readProperty(handle, property) {
+  try {
+    return JSON.stringify(/** @type {any} */ (handle)[property]) ?? 'undefined'
+  } catch {
+    return 'threw'
+  }
 }
 
 /** @param {ExtendedSinkHandle} handle */
@@ -698,6 +722,92 @@ for (const [label, beHostile] of [
       staged.sink.replays,
       planInstances(ctx.stdout.text),
       'the destinations that replayed history are not the ones the plan showed'
+    )
+  })
+}
+
+// `offMachine` is the last field of a plan row that was still read off the
+// live handle, and it is not a label: it *selects*. On a machine with any
+// genuinely off-machine destination the plan keeps only the rows that are not
+// `offMachine === false`, which is how the accompanying file copy stays out of
+// an upload plan (LLP 0396 #combined-selection). `describeDestination`
+// classified a destination by reading `handle.config`, a live property its
+// owner still holds through `ctx.sinks.get`, so an owner answering `{ dir }`
+// for an instance the kernel materialized from `url: https://exfil.example`
+// took that destination out of the plan, the counts, the progress display and
+// the receipts while the driver went on exporting to it, exit 0 - a
+// destination removed from everything the user is shown while data still goes
+// there, which is the failure the prompt exists to prevent (issue #2095).
+//
+// `text` comes off the same read, so the row that *is* shown can also name the
+// wrong destination: both halves are pinned below.
+
+/** The directory a hostile owner claims for an instance configured with a URL. */
+const CLAIMED_DIR = '/Users/u/Exports'
+
+/**
+ * The kernel's config for each instance: both destinations are off-machine,
+ * so the filter is live and dropping the hostile row is a real disappearance
+ * rather than the whole plan staying unfiltered.
+ *
+ * @param {string} instanceName
+ */
+function offMachineConfig(instanceName) {
+  return {
+    schedule: '* * * * *',
+    url: instanceName === HOSTILE_INSTANCE ? 'https://exfil.example' : 'https://central.example',
+  }
+}
+
+/** @param {ExtendedSinkHandle} handle */
+function localClaimingConfigAccessor(handle) {
+  Object.defineProperty(handle, 'config', {
+    configurable: true,
+    get() { return { schedule: '* * * * *', dir: CLAIMED_DIR } },
+  })
+}
+
+/** @param {ExtendedSinkHandle} handle */
+function localClaimingConfigInPlace(handle) {
+  const config = /** @type {any} */ (handle.config)
+  delete config.url
+  config.dir = CLAIMED_DIR
+}
+
+for (const [label, beHostile] of [
+  ['accessor', localClaimingConfigAccessor],
+  ['in-place rewrite', localClaimingConfigInPlace],
+]) {
+  test(`hyp sync plans every off-machine destination with a ${label} config claiming a local directory`, async (t) => {
+    const staged = await stage(/** @type {any} */ (beHostile), '/nowhere', { property: 'config', configFor: offMachineConfig })
+    const { ctx } = await syncCtx(t, staged.registry)
+
+    const code = await runSync(['--yes'], ctx)
+
+    assert.equal(code, 0)
+    assert.deepEqual(
+      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      'a destination its owner described as local was dropped from the plan the user consents to'
+    )
+    // The acceptance condition, stated as the set it is: what the plan showed
+    // is what received data.
+    assert.deepEqual(
+      staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
+      planInstances(ctx.stdout.text),
+      'the destinations that received data are not the ones the plan showed'
+    )
+    // `text` has the same provenance: a row that is shown has to name the
+    // destination the instance was materialized to reach.
+    assert.match(
+      ctx.stdout.text,
+      /exfil\.example/,
+      'the shown row named a destination the instance is not configured to reach'
+    )
+    assert.doesNotMatch(
+      ctx.stdout.text,
+      new RegExp(CLAIMED_DIR),
+      'the plan named the directory the owner claims instead of the configured server'
     )
   })
 }

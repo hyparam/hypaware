@@ -68,7 +68,14 @@ export function createStartCursorSource(deps = {}) {
         // Only a pass reads `decoder`, and a pass clears this timer before it
         // does, so nothing is in flight here. Closing on the recovery chain
         // keeps the teardown inside what `stop()` already awaits.
-        if (idle) recoverySerial = recoverySerial.then(() => idle.close()).catch(() => {})
+        if (idle) {
+          // The signal a test (or an operator reading the daemon's own log)
+          // has for "the next pass spawns a fresh thread rather than reusing
+          // this one" - the state flip that matters is this synchronous
+          // clear, not `idle.close()` settling.
+          ctx.log.info('cursor.decoder.released', { [Attr.OPERATION]: 'recovery.read' })
+          recoverySerial = recoverySerial.then(() => idle.close()).catch(() => {})
+        }
       }, deps.decoderIdleMs ?? 15000)
       decoderIdleTimer.unref()
     }

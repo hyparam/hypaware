@@ -4,7 +4,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { PluginName, SinkContribution, SinkCreateContext, SinkEncoder, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginName, SinkContribution, SinkCreateContext, SinkEncoder, SinkInstanceConfig, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -30,6 +30,24 @@ import { compareStrings } from '../util/compare_strings.js'
  * @type {WeakMap<object, string>}
  */
 const instanceNames = new WeakMap()
+
+/**
+ * The validated `config.sinks.<name>.config` row each live handle was
+ * materialized from, written at the `handles.set` beside its name.
+ *
+ * A copy, for the reason `register` copies `supports`: the same object goes
+ * to `create()` as `SinkCreateContext.config`, so the owner holds a reference
+ * and is free to edit it in place after this registry read it. Shallow is all
+ * the readers need, since every field they classify on is a top-level scalar,
+ * and it keeps the copy bounded by the row once per instantiation.
+ *
+ * Weak and module-scoped for the reasons `instanceNames` is: an entry goes
+ * when its handle does, and a handle belongs to the one registry that built
+ * it.
+ *
+ * @type {WeakMap<object, SinkInstanceConfig>}
+ */
+const instanceConfigs = new WeakMap()
 
 /**
  * The instance name this module keyed `handle` under: the string
@@ -58,6 +76,36 @@ export function sinkInstanceName(handle) {
     return typeof declared === 'string' ? declared : ''
   } catch {
     return ''
+  }
+}
+
+/**
+ * The config this module materialized `handle` from, out of the kernel's own
+ * record rather than off the handle, whose `config` its owner is as free to
+ * replace with an accessor as it is `instanceName`. What `hyp sync` derives
+ * from that config is not a label but a filter: an owner claiming a local
+ * `dir` for an instance configured with a remote `url` took its destination
+ * out of the consent plan, the counts, the progress display and the receipts
+ * while the driver went on exporting to it (issue #2095,
+ * `describeDestination` in `src/core/commands/sync.js`).
+ *
+ * A handle this module did not build - a host registry's, a test double's -
+ * has no record here, so its own `config` is read, guarded the way
+ * `sinkInstanceName` guards a declared name: one that cannot be read, or that
+ * is not an object, answers an empty config rather than raising into the
+ * caller.
+ *
+ * @param {ExtendedSinkHandle} handle
+ * @returns {SinkInstanceConfig}
+ */
+export function sinkInstanceConfig(handle) {
+  const recorded = instanceConfigs.get(handle)
+  if (recorded !== undefined) return recorded
+  try {
+    const declared = handle?.config
+    return declared !== null && typeof declared === 'object' ? declared : {}
+  } catch {
+    return {}
   }
 }
 
@@ -371,6 +419,8 @@ export function createSinkRegistry() {
     if (!contribution) {
       throw new Error(`SinkRegistry.instantiate: contribution required for '${instanceName}'`)
     }
+    // The record's copy, taken before `create()` is handed the same object.
+    const recordedConfig = /** @type {SinkInstanceConfig} */ ({ ...config })
     // One read of the contribution's `plugin`: a second answer splits a single
     // instantiation across the two records, the span, the counter, and the
     // handle's own `plugin` and `destination`.
@@ -429,6 +479,7 @@ export function createSinkRegistry() {
         }
         handles.set(instanceName, handle)
         instanceNames.set(handle, instanceName)
+        instanceConfigs.set(handle, recordedConfig)
         recordOwner(instanceName, args.plugin)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
@@ -470,6 +521,8 @@ export function createSinkRegistry() {
         `SinkRegistry.instantiate: table-format sink '${instanceName}' requires a BlobStore destination`
       )
     }
+    // The record's copy, taken before `createSink` is handed the same object.
+    const recordedConfig = /** @type {SinkInstanceConfig} */ ({ ...config })
     // One read of the provider's `format`, so the two records and the handle
     // cannot name different table formats for one instantiation.
     const format = tableFormat.format
@@ -532,6 +585,7 @@ export function createSinkRegistry() {
         }
         handles.set(instanceName, handle)
         instanceNames.set(handle, instanceName)
+        instanceConfigs.set(handle, recordedConfig)
         recordOwner(instanceName, args.plugin)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
