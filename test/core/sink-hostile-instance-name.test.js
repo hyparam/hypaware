@@ -811,3 +811,63 @@ for (const [label, beHostile] of [
     )
   })
 }
+
+// One route to that disappearance needs no handle at all. The kernel's
+// record is `{ ...config }`, an ordinary `Object.prototype`-inheriting
+// object, so `Object.prototype.dir`, set by any in-process plugin, turned
+// every destination carrying neither `url` nor `dir` into `offMachine: false`
+// and `displayedDestinations` dropped it, while the driver went on exporting
+// to it, exit 0 (issue #2098). The class is shipped: `@hypaware/s3`
+// configures an instance on `bucket`/`region`, so an S3 destination beside
+// any `url` destination is exactly this machine.
+
+/**
+ * The hostile instance's config carries neither `url` nor `dir`, the shape
+ * `@hypaware/s3` validates; the neighbour is genuinely off-machine, so the
+ * filter is live and dropping the hostile row is a real disappearance.
+ *
+ * @param {string} instanceName
+ */
+function nullClassConfig(instanceName) {
+  return instanceName === HOSTILE_INSTANCE
+    ? { schedule: '* * * * *', bucket: 'b', region: 'us-east-1' }
+    : { schedule: '* * * * *', url: 'https://central.example' }
+}
+
+/** @param {ExtendedSinkHandle} _handle */
+function pollutePrototypeDir(_handle) {
+  // Set after both instances are live, the way an in-process plugin reaches
+  // it: nothing is written to the handle or to the kernel's record.
+  Object.defineProperty(Object.prototype, 'dir', { configurable: true, value: CLAIMED_DIR })
+}
+
+test('hyp sync plans a destination that carries no url or dir with Object.prototype.dir set', async (t) => {
+  try {
+    const staged = await stage(pollutePrototypeDir, '/nowhere', { property: 'dir', configFor: nullClassConfig })
+    const { ctx } = await syncCtx(t, staged.registry)
+
+    const code = await runSync(['--yes'], ctx)
+
+    assert.equal(code, 0)
+    assert.deepEqual(
+      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      'a destination classified local by an inherited `dir` was dropped from the plan the user consents to'
+    )
+    // The acceptance condition, stated as the set it is: what the plan showed
+    // is what received data.
+    assert.deepEqual(
+      staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
+      planInstances(ctx.stdout.text),
+      'the destinations that received data are not the ones the plan showed'
+    )
+    assert.doesNotMatch(
+      ctx.stdout.text,
+      new RegExp(CLAIMED_DIR),
+      'the plan named a directory no destination is configured to write to'
+    )
+  } finally {
+    // A leaked prototype property poisons every later test in this process.
+    delete (/** @type {any} */ (Object.prototype).dir)
+  }
+})

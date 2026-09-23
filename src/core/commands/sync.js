@@ -732,6 +732,15 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  * last line is still a live read, in the separate unguarded-read class
  * issue #2059 tracks.
  *
+ * Both reads are own-property reads because none of the objects they run on
+ * is proof against `Object.prototype`: the record is a plain `{ ...config }`
+ * and the answer for a handle this module did not build is `handle.config`
+ * or `{}`. A plugin setting `Object.prototype.dir` turned every destination
+ * carrying neither key into `offMachine: false` and the filter dropped it,
+ * the same disappearance (issue #2098), and that class is populated:
+ * `@hypaware/s3` configures an instance on `bucket`/`region`. Guarding the
+ * reads rather than the record is what reaches the fallback path as well.
+ *
  * @ref LLP 0100#requirements [constrained-by]: R1a's reason - name the server, never its URL - applied to the consent prompt R1a's text does not reach
  * @param {ExtendedSinkHandle} handle
  * @param {Record<string, { url?: string }>} remotes configured targets, name to URL
@@ -740,11 +749,11 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
 function describeDestination(handle, remotes) {
   const instance = sinkInstanceName(handle)
   const config = /** @type {Record<string, unknown>} */ (sinkInstanceConfig(handle))
-  const url = config.url
+  const url = Object.hasOwn(config, 'url') ? config.url : undefined
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
     return { instance, text: nameServer(url, remotes), offMachine: true }
   }
-  const dir = config.dir
+  const dir = Object.hasOwn(config, 'dir') ? config.dir : undefined
   if (typeof dir === 'string' && dir.length > 0) {
     return { instance, text: dir, offMachine: false }
   }
