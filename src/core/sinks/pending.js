@@ -1,6 +1,7 @@
 // @ts-check
 
 import { instanceWatermarkStateDir } from './incremental.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 import { pluginStateDir } from '../runtime/paths.js'
 import { createSinkWatermarkStore } from './watermarks.js'
 
@@ -307,8 +308,21 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
   /** @type {ReturnType<typeof createSinkWatermarkStore>} */
   let watermarks
   try {
+    // The instance name comes from the registry's record, because that is the
+    // key the *writer* uses: every shipped sink builds its export store as
+    // `createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName:
+    // sinkCtx.name })`, and `sinkCtx.name` is the name `instantiate` validated
+    // and keyed the handle under. A handle is a live object its owner still
+    // holds through `ctx.sinks.get`, so `handle.instanceName` is a second
+    // spelling of the join `instanceWatermarkStateDir` exists to keep single:
+    // the preview reads a directory the export never advances, so a caught-up
+    // destination discloses the machine's whole retained history as pending,
+    // and a rename onto a live neighbour reads that neighbour's cursor and
+    // understates instead (issue #2089). `handle.plugin` beside it is the
+    // owner-rewritable field class tracked by issue #2059; the registry keeps
+    // no record to answer it from.
     watermarks = createSinkWatermarkStore({
-      stateDir: instanceWatermarkStateDir(pluginStateDir(stateRoot, handle.plugin), handle.instanceName),
+      stateDir: instanceWatermarkStateDir(pluginStateDir(stateRoot, handle.plugin), sinkInstanceName(handle)),
     })
   } catch (err) {
     return unknownVolume(describeError(err))
