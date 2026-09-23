@@ -80,10 +80,20 @@ export async function previewPendingRows(args) {
   const now = args.now ?? (() => Date.now())
   const start = now()
 
+  // Keyed by the registry's record of each instance's name, for the reason
+  // the watermark join below reads it: a handle is a live object its owner
+  // still holds through `ctx.sinks.get`, so `handle.instanceName` is the
+  // owner's to replace with an accessor, and the `catch` below re-reads its
+  // key to decide what still needs backfilling - so the live property made
+  // the recovery path that produces `unknown` the one that raised, against
+  // rule 3 above (issue #2092). The record keys better too: `instantiate`
+  // validated it and the registry is keyed by it, so every handle this kernel
+  // built gets its own entry where two accessors answering alike collapse
+  // into one.
   /** @type {Map<string, PendingVolume>} */
   const out = new Map()
   if (!query?.listDatasets || !storage?.readRowsSince) {
-    for (const handle of handles) out.set(handle.instanceName, unknownVolume('no cache reader is available'))
+    for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('no cache reader is available'))
     return out
   }
 
@@ -96,7 +106,7 @@ export async function previewPendingRows(args) {
   try {
     const discovered = await discoverCountablePartitions({ query, storage, config })
     if (discovered.partitions.length === 0 && discovered.failures > 0) {
-      for (const handle of handles) out.set(handle.instanceName, unknownVolume('the cache partitions could not be listed'))
+      for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('the cache partitions could not be listed'))
       return out
     }
 
@@ -145,14 +155,15 @@ export async function previewPendingRows(args) {
       // @ref LLP 0325#spent-is-spent [implements]: a budget discovery already overran puts every deadline in the past at every n, not only where the share survives rounding
       const deadline = Math.min(scanStart + remaining * (i + 1) / handles.length, start + budgetMs)
       out.set(
-        handle.instanceName,
+        sinkInstanceName(handle),
         await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })
       )
     }
   } catch (err) {
     const reason = `the count failed: ${describeError(err)}`
     for (const handle of handles) {
-      if (!out.has(handle.instanceName)) out.set(handle.instanceName, unknownVolume(reason))
+      const name = sinkInstanceName(handle)
+      if (!out.has(name)) out.set(name, unknownVolume(reason))
     }
   }
   return out
@@ -486,9 +497,36 @@ function unknownVolume(reason) {
 }
 
 /**
+ * The reason text rule 3 puts on a destination, derived from a value the
+ * failing plugin chose. Guarded, because this is called from inside the
+ * `catch` that implements rule 3, so a raise here is a raise out of the
+ * recovery itself and there is nothing further out to catch it: `String(err)`
+ * runs the thrown value's own `toString`, and `err instanceof Error` runs a
+ * proxy's own `getPrototypeOf`. A value that refuses coercion made the
+ * recovery path the one that raised and the whole preview reject, which is
+ * issue #2092's shape one hop further out: `handle.sink` is read outside
+ * `countForHandle`'s own guard, so an owner's accessor throws the owner's
+ * value straight in here.
+ *
+ * The coercion happens *inside* the guard, on `err.message` too, because
+ * returning the message unexamined only moved the raise one frame out.
+ * `message` is a writable own property on every `Error`, so a plugin can
+ * throw an `Error` (passing `instanceof`) whose `message` is the value that
+ * refuses to be described, and then this returned a non-string against its own
+ * annotation and the caller's "the count failed" template did the coercion
+ * outside any guard. The other caller is worse, not better: it stores the
+ * result as a `reason` and resolves, so the raise lands in `renderVolume` and
+ * the plan dies at print time with the preview reporting success. Coercing
+ * inside makes the annotation true by construction: `String` either yields a
+ * string or throws, and a throw is caught.
+ *
  * @param {unknown} err
  * @returns {string}
  */
 function describeError(err) {
-  return err instanceof Error ? err.message : String(err)
+  try {
+    return String(err instanceof Error ? err.message : err)
+  } catch {
+    return 'the error could not be described'
+  }
 }

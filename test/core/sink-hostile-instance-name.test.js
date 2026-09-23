@@ -449,10 +449,10 @@ test('hyp sync refuses a name only the owner\'s accessor answers to', async (t) 
 //
 // `lying` is the variant this pins. A truthy non-string name reached the same
 // wrong number before the fix (`7` resolved `sink-instances/7` and counted the
-// whole history), and the same read corrects it. A throwing accessor never
-// reaches `countForHandle` at all: `previewPendingRows` dereferences the live
-// property to key its own result map and rejects before the count, which is
-// issue #2092's own pass over this file.
+// whole history), and the same read corrects it. A throwing accessor used not
+// to reach `countForHandle` at all, because the result map was keyed off the
+// live property and the call rejected before the count; the case below pins
+// that (issue #2092).
 
 /** Rows in the fixture partition, all of them already exported. */
 const CACHED_ROWS = 12
@@ -517,9 +517,10 @@ test('the sync preview counts from the watermark the export advanced, with a lyi
     stateRoot: fixture.stateRoot,
   })
 
-  // Taken by position, not by name: the map is still keyed by the live
-  // property (issue #2092). Under test is the number the prompt discloses, not
-  // the key it is filed under.
+  // Taken by position, not by name: under test here is the number the prompt
+  // discloses, not the key it is filed under. Both keys are the registry's
+  // record now, the map's (issue #2092) and the plan's own display lane
+  // (issue #2087), and the cases at the end of this file pin each.
   assert.equal(volumes.size, 1)
   const volume = /** @type {any} */ ([...volumes.values()][0])
   assert.deepEqual(
@@ -528,6 +529,69 @@ test('the sync preview counts from the watermark the export advanced, with a lyi
     'the consent prompt counted against a watermark directory the export never advances'
   )
 })
+
+// The same seam, one rule further in. `previewPendingRows` documents a
+// never-rejects contract in its own header (rule 3): the plan is the consent
+// surface, so a preview that cannot run discloses `unknown` rather than taking
+// the prompt down with it. Keying the result map off the live property broke
+// that: the loop body's read was swallowed by the function's own outer `try`,
+// and the `catch` re-read the same property, so the recovery path that exists
+// to produce `unknown` was itself what raised and the call rejected before a
+// row was read (issue #2092). Keyed off the kernel's record the registry
+// knows this instance's name, so the destination is counted and disclosed
+// under it; `nonString` is the other half, where `7` keyed a
+// `Map<string, PendingVolume>` under a number no caller can look up.
+for (const [label, beHostile] of [
+  ['throwing', throwingInstanceName],
+  ['nonString', nonStringInstanceName],
+]) {
+  test(`the sync preview resolves and discloses every destination with a ${label} instanceName accessor`, async (t) => {
+    const fixture = await previewFixture(t)
+    const staged = await stage(/** @type {any} */ (beHostile), pluginStateDir(fixture.stateRoot, OWNER))
+
+    // The honest neighbour is caught up, said the way a sink says it, so a
+    // false zero on its line is distinguishable from a true one.
+    const healthyCtx = staged.sink.contexts.get(HEALTHY_INSTANCE)
+    const healthyMarks = createInstanceWatermarkStore({ paths: healthyCtx.paths, instanceName: healthyCtx.name })
+    await healthyMarks.write(healthyMarks.keyFor(fixture.cacheRoot, fixture.tablePath), {
+      continuation: { v: 1, seq: String(CACHED_ROWS) },
+      exportedRowCount: CACHED_ROWS,
+    })
+
+    const volumes = await previewPendingRows({
+      handles: [
+        /** @type {any} */ (staged.registry.get(HOSTILE_INSTANCE)),
+        /** @type {any} */ (staged.registry.get(HEALTHY_INSTANCE)),
+      ],
+      query: fixture.query,
+      storage: fixture.storage,
+      stateRoot: fixture.stateRoot,
+    })
+
+    // One entry per handle, each filed under the name the registry keyed the
+    // handle under rather than whatever the owner's accessor answers.
+    assert.deepEqual([...volumes.keys()], [HOSTILE_INSTANCE, HEALTHY_INSTANCE])
+
+    const hostile = /** @type {any} */ (volumes.get(HOSTILE_INSTANCE))
+    const healthy = /** @type {any} */ (volumes.get(HEALTHY_INSTANCE))
+    // Nothing has ever been exported to the hostile destination, so its whole
+    // retained history is pending. A destination missing from the map, or
+    // standing at `0 pending`, understates the egress on the one line consent
+    // is given from.
+    assert.deepEqual(
+      { status: hostile.status, rows: hostile.rows, resume: hostile.resume.kind },
+      { status: 'counted', rows: CACHED_ROWS, resume: 'beginning' },
+      'the hostile destination was not disclosed with the history it would forward'
+    )
+    assert.deepEqual(
+      { status: healthy.status, rows: healthy.rows, resume: healthy.resume.kind },
+      { status: 'counted', rows: 0, resume: 'since' },
+      'the honest neighbour lost its own count to its neighbour'
+    )
+    // The preview is a read: resolving instead of rejecting buys no export.
+    assert.deepEqual(staged.sink.exports, [], 'the consent preview exported')
+  })
+}
 
 // The display lane is the other half of the same key, and the half a consent
 // prompt cannot afford to get wrong: `hyp sync` prints the destinations and
@@ -539,12 +603,14 @@ test('the sync preview counts from the watermark the export advanced, with a lyi
 // on `hyp sync <registry-key>` alike; a lying one printed a name no receipt
 // line and no `hyp sync <name>` would ever answer to (issue #2087).
 //
-// `throwing` is absent from the ordinary-lane cases below and present in the
-// history ones on purpose. The ordinary lane counts pending rows first, and
-// `previewPendingRows` re-dereferences the live property inside the `catch`
-// that exists to recover from it, so a throwing accessor still ends that lane
-// ahead of these renderers (issue #2092, which predicts exactly this). The
-// history lane never calls the preview, so it pins all three variants.
+// All three variants reach these renderers. The ordinary lane counts pending
+// rows first, and `previewPendingRows` used to re-dereference the live
+// property inside the `catch` that exists to recover from it, so a throwing
+// accessor ended that lane ahead of the renderers; keyed off the registry's
+// record it resolves and the plan prints (issue #2092). That is also what puts
+// the volume line back under a renamed destination: the preview files its
+// counts under the same key `renderPlan` looks them up by, so a lying
+// accessor no longer separates the number from the line it belongs to.
 
 /** The plan's destination names, in the order it printed them. */
 function planInstances(/** @type {string} */ stdout) {
@@ -555,6 +621,7 @@ function planInstances(/** @type {string} */ stdout) {
 }
 
 for (const [label, beHostile] of [
+  ['throwing', throwingInstanceName],
   ['non-string', nonStringInstanceName],
   ['lying', lyingInstanceName],
 ]) {
