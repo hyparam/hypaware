@@ -319,8 +319,10 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
     // destination discloses the machine's whole retained history as pending,
     // and a rename onto a live neighbour reads that neighbour's cursor and
     // understates instead (issue #2089). `handle.plugin` beside it is the
-    // owner-rewritable field class tracked by issue #2059; the registry keeps
-    // no record to answer it from.
+    // owner-rewritable field class tracked by issue #2059: the registry does
+    // record it, as `ownerOf(instanceName)`, but that record is registry-scoped
+    // and this function is handed a handle and a `stateRoot`, never the
+    // registry.
     watermarks = createSinkWatermarkStore({
       stateDir: instanceWatermarkStateDir(pluginStateDir(stateRoot, handle.plugin), sinkInstanceName(handle)),
     })

@@ -428,9 +428,12 @@ test('hyp sync refuses a name only the owner\'s accessor answers to', async (t) 
 // a caught-up destination discloses the whole retained history as pending
 // (issue #2089).
 //
-// `lying` is the only variant that reaches it. A throwing or non-string
-// accessor degrades to `unknown` through `countForHandle`'s own try/catch, and
-// an admitted gap is not a wrong number.
+// `lying` is the variant this pins. A truthy non-string name reached the same
+// wrong number before the fix (`7` resolved `sink-instances/7` and counted the
+// whole history), and the same read corrects it. A throwing accessor never
+// reaches `countForHandle` at all: `previewPendingRows` dereferences the live
+// property to key its own result map and rejects before the count, which is
+// the unguarded-read class issue #2059 scopes out to its own pass.
 
 /** Rows in the fixture partition, all of them already exported. */
 const CACHED_ROWS = 12
