@@ -356,51 +356,100 @@ test('a caller arriving while an unparseable body is being removed still calls i
   }
 })
 
+// How many whole macrotasks a `loadSpooledBodies` call survives is not a
+// property of this code, and not a property of the scheduler either: it is a
+// wall-clock race between the call's two `fs` operations and the turns an
+// otherwise-empty loop spins while they are in flight, and both sides move
+// independently. Measured on one box the pair settles in about 68us on Node 26
+// against about 110us on Node 22, while an empty `setImmediate` turn costs
+// about 2.4us on both, so the same call spans roughly 28 turns on one and 44 on
+// the other. Machine speed and whatever else is running move it just as far,
+// and it drifts within a single run.
+//
+// So the separations are not a fixed schedule and not a measured one either.
+// Trial `n` waits for the number of trailing 1 bits in `n`, which is 0 for
+// every second trial, 1 for every fourth, 2 for every eighth, and so on. That
+// spreads the second call geometrically over the first call's lifetime without
+// anyone having to know how long that lifetime is, and it puts exactly half the
+// trials at a separation that cannot fail to overlap, because no `await` runs
+// between the statement that issues the first call and the one that issues the
+// second.
+/**
+ * @param {number} n
+ * @returns {number}
+ */
+function tickOffset(n) {
+  let ticks = 0
+  while ((n & 1) === 1) {
+    ticks += 1
+    n >>= 1
+  }
+  return ticks
+}
+
 // The same defect measured the way it was found: a second call separated from
 // the first by whole macrotasks, so it lands wherever the first call's read and
 // removal happen to be. A trial only counts when the second call was issued
 // before the first returned - a second call that starts after the first has
 // fully finished overlaps nothing and proves nothing - so the overlapping count
-// is asserted too, or a slow machine could pass this vacuously.
+// is asserted too, or a machine could pass this vacuously. Both halves of that
+// are asserted: the total, which the previous fixed separations of
+// [0, 5, 10, 20] could not hold once Node 26 retired the read and the unlink in
+// fewer turns than Node 22 did, and the share of it contributed by trials that
+// actually waited, so a run where the second call only ever overlapped
+// trivially fails too.
 test('macrotask-separated overlapping callers never miscount one unparseable body', async () => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-sep-'))
   try {
     const content = 'not json at all'
-    const separations = [0, 5, 10, 20]
-    const perSeparation = 75
+    const trials = 300
+    let waited = 0
     let overlapping = 0
+    let overlappingWaited = 0
     let miscounts = 0
     let badBytes = 0
-    for (const separation of separations) {
-      for (let trial = 0; trial < perSeparation; trial++) {
-        const file = path.join(root, `broken.${separation}.${trial}.request.json`)
-        await fsp.writeFile(file, content, 'utf8')
-        const events = [{
-          name: 'api_request_body',
-          timestamp: '2026-08-17T19:31:00.000Z',
-          attributes: { body_ref: file, request_id: REQUEST_ID },
-        }]
-        let firstReturned = false
-        const first = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: root })
-          .then((result) => { firstReturned = true; return result })
-        for (let tick = 0; tick < separation; tick++) {
-          await new Promise((resolve) => setImmediate(resolve))
-        }
-        // Sampled and used in one synchronous run, after the tick loop drained
-        // the microtask queue, so it is exact at the instant the second call
-        // claims (or fails to claim) the shared read.
-        const overlapped = !firstReturned
-        const second = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: root })
-        const [a, b] = await Promise.all([first, second])
-        if (!overlapped) continue
-        overlapping += 1
-        if (a.unparseable + b.unparseable !== 2 || a.missing + b.missing !== 0) miscounts += 1
-        if (a.unparseableBytes + b.unparseableBytes !== content.length) badBytes += 1
+    for (let trial = 0; trial < trials; trial++) {
+      const separation = tickOffset(trial)
+      if (separation > 0) waited += 1
+      const file = path.join(root, `broken.${trial}.request.json`)
+      await fsp.writeFile(file, content, 'utf8')
+      const events = [{
+        name: 'api_request_body',
+        timestamp: '2026-08-17T19:31:00.000Z',
+        attributes: { body_ref: file, request_id: REQUEST_ID },
+      }]
+      let firstReturned = false
+      const first = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: root })
+        .then((result) => { firstReturned = true; return result })
+      for (let tick = 0; tick < separation; tick++) {
+        await new Promise((resolve) => setImmediate(resolve))
       }
+      // Sampled and used in one synchronous run, after the tick loop drained
+      // the microtask queue, so it is exact at the instant the second call
+      // claims (or fails to claim) the shared read.
+      const overlapped = !firstReturned
+      const second = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: root })
+      const [a, b] = await Promise.all([first, second])
+      if (!overlapped) continue
+      overlapping += 1
+      if (separation > 0) overlappingWaited += 1
+      if (a.unparseable + b.unparseable !== 2 || a.missing + b.missing !== 0) miscounts += 1
+      if (a.unparseableBytes + b.unparseableBytes !== content.length) badBytes += 1
     }
+    // The floor it always had, half of every trial run, and it is now met by
+    // construction rather than by luck: the half of the trials that wait no
+    // ticks at all overlap unless overlapping itself has stopped happening,
+    // which is the one thing this is here to catch.
     assert.ok(
-      overlapping >= separations.length * perSeparation / 2,
-      `too few genuinely-overlapping trials to prove anything (${overlapping})`
+      overlapping >= trials / 2,
+      `too few genuinely-overlapping trials to prove anything (${overlapping} of ${trials})`
+    )
+    // Meeting the floor with the free half alone would prove only that a call
+    // cannot return before the statement after it runs. The trials that waited
+    // at least one macrotask have to have landed inside the first call too.
+    assert.ok(
+      overlappingWaited >= waited / 2,
+      `too few of the trials that waited actually overlapped (${overlappingWaited} of ${waited})`
     )
     assert.equal(miscounts, 0, `${miscounts} of ${overlapping} overlapping trials miscounted`)
     assert.equal(badBytes, 0, `${badBytes} of ${overlapping} overlapping trials misreported bytes`)
