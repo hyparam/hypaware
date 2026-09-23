@@ -295,13 +295,18 @@ test('instantiate resolves supports from one read of the encoder', async () => {
     writerPlugin: '@hypaware/format-parquet',
     encoder,
     config: {},
-    plugin: '@hypaware/local-fs',
+    plugin: { name: '@hypaware/local-fs', version: '1.0.0' },
     paths: { rootDir: '/', stateDir: '/', cacheDir: '/', tempDir: '/' },
     log: { info() {}, warn() {}, error() {}, debug() {} },
   }))
 
   assert.equal(reads, 1, 'resolveSupports read the encoder\'s `supports` more than once')
   assert.deepEqual(handle.supports, ['queryable'])
+  // The `ActivePlugin` `InstantiateArgs` declares, not the bare string this
+  // fixture carried: with no resolvable owner a blob handle labels itself
+  // `''` for both fields and nothing here would have noticed.
+  assert.equal(handle.plugin, '@hypaware/local-fs')
+  assert.equal(handle.destination, '@hypaware/local-fs')
   assert.deepEqual(encoder.supports, [], 'the fixture stopped drifting')
   await reg.closeAll()
 })
@@ -620,7 +625,7 @@ test('the shipped sink contributions resolve the supports they declare', async (
       writerPlugin: '@hypaware/format-parquet',
       encoder: { format: 'parquet', supports: encoderSupports, async encodePartition() { return {} } },
       config: { dir: path.join(dir, 'exports') },
-      plugin: '@hypaware/local-fs',
+      plugin: { name: '@hypaware/local-fs', version: '1.0.0' },
       paths: { rootDir: dir, stateDir: dir, cacheDir: dir, tempDir: dir },
       log: { info() {}, warn() {}, error() {}, debug() {} },
     })
