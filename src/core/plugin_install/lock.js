@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { isPlainObject, stringValue } from '../util/json_util.js'
 import { pluginLockPath } from './paths.js'
 
 /**
@@ -117,9 +118,57 @@ export function getEntry(lock, name) {
   return Object.hasOwn(lock.plugins, name) ? lock.plugins[name] : undefined
 }
 
-/** @param {PluginLockFile} lock */
-export function listEntries(lock) {
-  return Object.keys(lock.plugins).sort().map((name) => lock.plugins[name])
+/**
+ * True for a lock row the install surfaces can read at all: a plain object
+ * carrying a non-empty `install_dir`. `plugin-lock.json` is hand-editable and
+ * `readLock` validates the container and nothing inside it, so a row can be
+ * `null`, a string, a number, `true`, an array, or an object with the field
+ * removed, and two separate surfaces then have to decide what to do with it.
+ * This is the one place that decides: `discoverInstalledPlugins` routes the
+ * rest into `malformed[]` for `hyp status` to report as
+ * `plugin_lock_entry_invalid`, and `partitionEntries` keeps them out of the
+ * entry list the CLI renders from, so the two cannot drift apart.
+ *
+ * @param {unknown} entry
+ * @returns {entry is PluginLockEntry}
+ */
+export function isUsableEntry(entry) {
+  return isPlainObject(entry)
+    && typeof entry.install_dir === 'string'
+    && entry.install_dir.length > 0
+}
+
+/**
+ * Split the lock into the entries a caller may dereference and the keys of the
+ * rows it may not, both in stable name order. Callers used to get every value
+ * raw, so one hand-edited row took down the whole listing (issue #1966).
+ *
+ * The unusable half is keys, not values, for the reason
+ * `discoverInstalledPlugins` walks keys: the lock key is the name every install
+ * surface indexes by, and it is the only identity a row that is not an object
+ * still has.
+ *
+ * One clause stricter than `isUsableEntry` alone, because a renderer
+ * dereferences one field the manifest walk does not: an object carrying an
+ * `install_dir` and no usable `name` crashes nothing, but it printed
+ * `undefined@0.1.0` and put a `--json` row with no `name` key at all in front
+ * of a consumer. It has a lock key like every other unreadable row, so it is
+ * reported as one.
+ *
+ * @param {PluginLockFile} lock
+ * @returns {{ entries: PluginLockEntry[], unusable: PluginName[] }}
+ */
+export function partitionEntries(lock) {
+  /** @type {PluginLockEntry[]} */
+  const entries = []
+  /** @type {PluginName[]} */
+  const unusable = []
+  for (const name of Object.keys(lock.plugins).sort()) {
+    const entry = lock.plugins[name]
+    if (isUsableEntry(entry) && stringValue(entry.name) !== undefined) entries.push(entry)
+    else unusable.push(name)
+  }
+  return { entries, unusable }
 }
 
 /** @param {PluginLockFile} lock */

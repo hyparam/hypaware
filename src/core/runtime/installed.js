@@ -4,7 +4,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { loadLock } from '../plugin_install/install.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { loadManifest } from '../manifest.js'
-import { isPlainObject } from '../util/json_util.js'
+import { isUsableEntry } from '../plugin_install/lock.js'
 
 /**
  * @import { PluginLockEntry, PluginName } from '../../../hypaware-plugin-kernel-types.js'
@@ -52,14 +52,15 @@ export async function discoverInstalledPlugins({ stateDir }) {
   // promises for a manifest that will not load (issue #1958). `install_dir` is
   // the only field this walk dereferences into anything that can throw: `name`
   // is compared and logged, and an entry whose name disagrees with its manifest
-  // already lands in `failed[]` below.
+  // already lands in `failed[]` below. The predicate is `isUsableEntry`, shared
+  // with the CLI listing so the two surfaces call the same rows unusable.
   /** @type {PluginLockEntry[]} */
   const entries = []
   /** @type {PluginName[]} */
   const malformed = []
   for (const name of names) {
     const entry = lock.plugins[name]
-    if (isPlainObject(entry) && typeof entry.install_dir === 'string' && entry.install_dir.length > 0) {
+    if (isUsableEntry(entry)) {
       entries.push(entry)
     } else {
       malformed.push(name)

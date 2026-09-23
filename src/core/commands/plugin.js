@@ -317,7 +317,15 @@ export async function runPluginList(argv, ctx) {
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
   const stateDir = pluginStateDir(ctx)
-  const installed = await listInstalledPlugins(stateDir)
+  // The lock is hand-editable, so a row can be anything: the partition keeps
+  // the rows this renderer dereferences apart from the keys of the rows it
+  // cannot, which used to arrive raw and take the whole listing down with them
+  // (issue #1966). They are rendered, not dropped, for the reason a shadowed
+  // entry is: `hyp status` names the row, and this listing is the other half of
+  // that pair, so it does not go quiet about a row the lock file holds.
+  // @ref LLP 0380#surfaced-not-fatal: the status posture this borrows, applied
+  // to a row that is unreadable rather than shadowed
+  const { entries: installed, unusable: unusableLockKeys } = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
   const bundledManifests = (await discoverBundledManifests()).manifests
   const installedByName = new Map(installed.map((e) => [e.name, e]))
@@ -358,10 +366,20 @@ export async function runPluginList(argv, ctx) {
       ...installedByName.keys(),
       ...activeByName.keys(),
       ...unavailable,
+      ...unusableLockKeys,
     ])
-    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, unavailable?: true, shadowed?: true, installed_at?: string, update?: unknown}>} */
+    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, unavailable?: true, shadowed?: true, lock_entry_invalid?: true, installed_at?: string, update?: unknown}>} */
     const plugins = []
+    const unusableSet = new Set(unusableLockKeys)
     for (const name of Array.from(allNames).sort()) {
+      // A row with no readable install record has no version and no source to
+      // report, so it carries the lock key and the flag named after the
+      // `plugin_lock_entry_invalid` diagnostic `hyp status` raises for it, and
+      // nothing this command would have to make up.
+      if (unusableSet.has(name)) {
+        plugins.push({ name, version: '', source: 'installed', active: false, lock_entry_invalid: true })
+        continue
+      }
       const inst = installedByName.get(name)
       const act = activeByName.get(name)
       // Undefined for every entry that already resolved, so those keep the
@@ -399,7 +417,7 @@ export async function runPluginList(argv, ctx) {
     return 0
   }
 
-  if (active.length === 0 && installed.length === 0 && unavailable.size === 0) {
+  if (active.length === 0 && installed.length === 0 && unavailable.size === 0 && unusableLockKeys.length === 0) {
     ctx.stdout.write('No plugins active or installed.\n')
     return 0
   }
@@ -417,7 +435,7 @@ export async function runPluginList(argv, ctx) {
       ctx.stdout.write(`  ${p.name}@${p.version}  (${source})\n`)
     }
   }
-  if (installed.length > 0) {
+  if (installed.length > 0 || unusableLockKeys.length > 0) {
     ctx.stdout.write('Installed plugins:\n')
     for (const entry of installed) {
       const available = entry.update?.available ? '  (update available)' : ''
@@ -432,6 +450,12 @@ export async function runPluginList(argv, ctx) {
         ? '  (did not activate in this boot)'
         : ''
       ctx.stdout.write(`  ${entry.name}@${entry.version}${available}${shadowed}${failed}\n`)
+    }
+    // No version, because the row holds nothing this command can trust. The
+    // lock key is the whole identity it has left, and it is also what the
+    // repair takes, so the two agree with `hyp status`'s repair line.
+    for (const name of unusableLockKeys) {
+      ctx.stdout.write(`  ${name}  (unreadable lock entry; hyp plugin remove ${name})\n`)
     }
   }
   if (unavailable.size > 0) {
@@ -588,7 +612,10 @@ export async function runPluginOutdated(argv, ctx) {
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
   const stateDir = pluginStateDir(ctx)
-  const entries = await listInstalledPlugins(stateDir)
+  // The entries half only: a row with no readable install record carries no
+  // version to compare, and `hyp plugin list` and `hyp status` are the two
+  // surfaces that name it (issue #1966).
+  const { entries } = await listInstalledPlugins(stateDir)
   const outdated = entries.filter((e) => e.update?.available === true)
   if (json) {
     ctx.stdout.write(
