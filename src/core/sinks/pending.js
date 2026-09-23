@@ -497,9 +497,23 @@ function unknownVolume(reason) {
 }
 
 /**
+ * The reason text rule 3 puts on a destination, derived from a value the
+ * failing plugin chose. Guarded, because this is called from inside the
+ * `catch` that implements rule 3 and is therefore the last thing in
+ * `previewPendingRows` that may raise: `String(err)` runs the thrown value's
+ * own `toString`, and `err instanceof Error` runs a proxy's own
+ * `getPrototypeOf`. A value that refuses coercion made the recovery path the
+ * one that raised and the whole preview reject, which is issue #2092's shape
+ * one hop further out: `handle.sink` is read outside `countForHandle`'s own
+ * guard, so an owner's accessor throws the owner's value straight in here.
+ *
  * @param {unknown} err
  * @returns {string}
  */
 function describeError(err) {
-  return err instanceof Error ? err.message : String(err)
+  try {
+    return err instanceof Error ? err.message : String(err)
+  } catch {
+    return 'the error could not be described'
+  }
 }
