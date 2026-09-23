@@ -233,8 +233,15 @@ function selectWindow(state, head, blocks, opts) {
   const chrome = cost(head) + (state.box ? 2 : 0)
   const sizes = blocks.map(cost)
   if (chrome + sizes.reduce((a, b) => a + b, 0) <= limit) return all
-  // Windowed, so the "showing x-y of n" row below the options is charged for.
-  const budget = limit - chrome - 1
+  // Windowed, so the "showing x-y of n" row below the options is charged
+  // for - at what it actually measures, not a flat row. On a narrow
+  // terminal that row wraps, and a budget that assumed one row puts the
+  // frame back level with the terminal, which is the whole off-by-one the
+  // reserved row above exists to avoid. Charged at its widest form (every
+  // number the block count) so the charge cannot depend on the window it
+  // is being used to choose; the most that costs is one option fewer.
+  const legend = lineRows(`  showing ${blocks.length}-${blocks.length} of ${blocks.length}`, opts.columns)
+  const budget = limit - chrome - legend
   const cursor = Math.min(Math.max(state.cursor, 0), blocks.length - 1)
   let start = cursor
   let end = cursor + 1

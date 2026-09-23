@@ -436,6 +436,40 @@ test('select: options that all fit render whole, with no window line', () => {
   assert.doesNotMatch(frame, /showing/)
 })
 
+test('select: the window line is charged at the rows it takes, not a flat one', () => {
+  // On a narrow terminal 'showing 11-13 of 20' wraps onto two rows.
+  // Charging it a flat one put the frame back level with the terminal,
+  // which is the exact height the reserved cursor row exists to stay
+  // under: the runtime then rewinds by the whole terminal height after it
+  // has scrolled, and the cursor-up clamps inside the frame again.
+  //
+  // Only frames that drop more than nothing are in scope. A frame whose
+  // chrome plus one option already exceeds the height has no window to
+  // choose and is over whatever the legend costs.
+  let checked = 0
+  for (const columns of [16, 18, 20, 24, 30]) {
+    for (const rows of [10, 12, 14]) {
+      const frame = render(
+        {
+          kind: 'select',
+          title: 'Pick',
+          options: Array.from({ length: 20 }, (_, i) => ({ value: `v${i}`, label: `L${i}` })),
+          cursor: 10,
+          status: 'active',
+        },
+        { color: false, columns, rows },
+      )
+      const shown = /showing (\d+)-(\d+) of 20/.exec(frame)
+      assert.ok(shown, `${columns}x${rows} is windowed`)
+      if (Number(shown[2]) - Number(shown[1]) + 1 < 2) continue
+      checked += 1
+      const drawn = countPhysicalRows(frame, columns)
+      assert.ok(drawn <= rows - 1, `${columns}x${rows}: frame of ${drawn} rows must leave the cursor row free`)
+    }
+  }
+  assert.ok(checked >= 5, `expected several windowed frames to check, got ${checked}`)
+})
+
 test('select: an unknown terminal height renders every option, as before', () => {
   const frame = render(reportPicker(60, 0), { color: false, columns: 80 })
   for (let i = 0; i < 60; i++) {
