@@ -575,7 +575,12 @@ test('the shared read is released on every exit path of loadSpooledBodies', asyn
 // (#2053). The alignment is one microtask wide, so the second call is scheduled
 // off the same promise the first owner's removal waits on and its depth in that
 // chain is swept, which orders the two without depending on how many turns
-// anything else takes.
+// anything else takes. Only the depth that lands the second call between the
+// first owner's claim and its `finally` proves anything, and which depth that is
+// is not a property of this code, so the sweep is asserted to have reached that
+// state at least once: the state is a second owner that took the removal having
+// issued no read of its own, which it can only have done by holding the promise
+// the first owner put in the map.
 test('an owner holding a promise the map let go of still leaves the map empty', async () => {
   const realReadFile = fsp.readFile
   const realUnlink = fsp.unlink
@@ -588,6 +593,7 @@ test('an owner holding a promise the map let go of still leaves the map empty', 
   const settle = async () => {
     for (let turn = 0; turn < 20; turn++) await new Promise((resolve) => setImmediate(resolve))
   }
+  let sawStaleOwner = false
   for (let depth = 0; depth <= 8; depth++) {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-stale-'))
     try {
@@ -622,6 +628,8 @@ test('an owner holding a promise the map let go of still leaves the map empty', 
       const second = chain.then(() => loadSpooledBodies(eventsFor(file), { spoolDir: root }))
       releaseFirst()
       await settle()
+      // Sampled before the third call and before the probe resets the counter.
+      if (removals >= 2 && reads === 1) sawStaleOwner = true
       const third = loadSpooledBodies(eventsFor(file), { spoolDir: root })
       await settle()
       releaseSecond()
@@ -635,4 +643,5 @@ test('an owner holding a promise the map let go of still leaves the map empty', 
       await fsp.rm(root, { recursive: true, force: true })
     }
   }
+  assert.ok(sawStaleOwner, 'no depth put a second owner on a promise it never read, so the sweep proved nothing')
 })
