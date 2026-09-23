@@ -67,16 +67,29 @@ const removing = new Set()
  * same bytes or the exact same rejection, decided once, before `removing`
  * ever needs to arbitrate anything.
  *
- * What it does not do is make the whole path race-free. An entry is dropped
- * as soon as its read settles, which is before the first caller's `unlink`
- * is even issued, so a caller that arrives inside that gap finds no entry,
- * reads for itself, and can still see ENOENT and count `missing`. That
- * caller never overlapped the read, and the gap it has to land in is the
- * `unlink`'s own duration rather than the whole read's. Entries leave the
- * map once the read settles, so it never outgrows the reads in flight.
+ * An entry outlives its own read: it is released by the arm that classified
+ * the bytes, once that arm is done with the file, which for an unparseable
+ * body is after its `unlink` has settled. Releasing at read-settle instead
+ * leaves the read-to-removal window uncovered, and a caller landing inside it
+ * finds no entry, reads for itself, and sees ENOENT for a file that was never
+ * legitimately missing. Entries leave the map once their classification is
+ * done, so it never outgrows the reads in flight.
  * @type {Map<string, Promise<Buffer>>}
  */
 const reading = new Map()
+
+/**
+ * Drop this caller's shared read, if it is still the one the map is handing
+ * out. Keyed on the promise rather than on who created it: whichever caller
+ * finishes classifying the file last releases it, and every later one is a
+ * no-op, so no exit path depends on being the call that issued the `readFile`.
+ *
+ * @param {string} file
+ * @param {Promise<Buffer>} pending
+ */
+function releaseRead(file, pending) {
+  if (reading.get(file) === pending) reading.delete(file)
+}
 
 /**
  * Read the spooled body files a batch of events references.
@@ -140,20 +153,14 @@ export async function loadSpooledBodies(events, opts) {
     if (!pending) {
       pending = fs.readFile(file)
       reading.set(file, pending)
-      // A rejection (a missing file is the common case) is still handled by
-      // the caller below via its own `await pending`; this derived promise
-      // exists only for the cleanup side effect, so its own rejection is
-      // swallowed to avoid an unhandledRejection for a failure already
-      // being handled.
-      pending.finally(() => {
-        if (reading.get(file) === pending) reading.delete(file)
-      }).catch(() => {})
     }
     /** @type {Buffer} */
     let raw
     try {
       raw = await pending
     } catch {
+      // Nothing was read, so nothing will be removed: the shared read ends here.
+      releaseRead(file, pending)
       // Already projected, already evicted, or never written: the
       // content is recoverable from the transcript either way.
       // @ref LLP 0253#eviction-degrades [implements]: an evicted body is not an
@@ -165,7 +172,11 @@ export async function loadSpooledBodies(events, opts) {
     if (!isPlainObject(body)) {
       unparseable += 1
       // An overlapping read already owns this removal (see `removing`): it
-      // reports the bytes, or reports nothing if the file would not go.
+      // reports the bytes, or reports nothing if the file would not go, and it
+      // is also the one that releases the shared read. Releasing here would
+      // reopen the window with that owner's `unlink` still in flight, and it
+      // cannot strand the entry: `removing` holds the file only between the
+      // owner's `add` and the `finally` that clears both.
       if (removing.has(file)) continue
       removing.add(file)
       try {
@@ -186,6 +197,9 @@ export async function loadSpooledBodies(events, opts) {
         // transcript backfill.
       } finally {
         removing.delete(file)
+        // Released only now, with the file off the disk, so every caller that
+        // overlapped the removal classified the same bytes the same way.
+        releaseRead(file, pending)
       }
       continue
     }
@@ -196,6 +210,9 @@ export async function loadSpooledBodies(events, opts) {
     })
     consumedFiles.push(file)
     consumedBytes += raw.length
+    // A projected body is removed later, by `deleteSpooledBodies` once the
+    // batch is written, so there is no removal here for the read to outlive.
+    releaseRead(file, pending)
   }
 
   return { bodies, consumedFiles, consumedBytes, missing, unparseable, unparseableBytes, refused }
