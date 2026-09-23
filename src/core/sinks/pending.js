@@ -54,7 +54,11 @@ const CLOCK_CHECK_EVERY = 512
  *    throwing: the plan is the consent surface, so a preview that could not run
  *    at all resolves to `unknown` for every destination rather than propagating
  *    and taking the whole prompt down with it. `previewPendingRows` never
- *    rejects.
+ *    rejects. Every input it reads - the clock, both contract objects, the
+ *    options - is read *inside* that recovery: a value somebody else owns can
+ *    refuse to be read at all, not only to answer (issue #2096).
+ *    `args.handles` is the exception, read before it, because the recovery is
+ *    a backfill over the destinations.
  *
  * Nothing here writes: no flush, no mkdir, no watermark move. An un-flushed
  * spool therefore holds rows this cannot see, which is why a partition with
@@ -74,11 +78,10 @@ const CLOCK_CHECK_EVERY = 512
  * @returns {Promise<Map<string, PendingVolume>>}
  */
 export async function previewPendingRows(args) {
-  const { handles, query, storage, stateRoot, config } = args
-  const rowLimit = args.rowLimit ?? DEFAULT_ROW_LIMIT
-  const budgetMs = args.budgetMs ?? DEFAULT_BUDGET_MS
-  const now = args.now ?? (() => Date.now())
-  const start = now()
+  // Read outside the guard below, because that guard's recovery is a backfill
+  // over the destinations and has nothing to fill without them. Everything
+  // else `args` carries is read inside it.
+  const { handles } = args
 
   // Keyed by the registry's record of each instance's name, for the reason
   // the watermark join below reads it: a handle is a live object its owner
@@ -92,10 +95,6 @@ export async function previewPendingRows(args) {
   // into one.
   /** @type {Map<string, PendingVolume>} */
   const out = new Map()
-  if (!query?.listDatasets || !storage?.readRowsSince) {
-    for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('no cache reader is available'))
-    return out
-  }
 
   // Rule 3 taken to its conclusion. Everything below reaches into plugin-owned
   // registries and on-disk state, so "it threw" is a live outcome, and the
@@ -103,7 +102,28 @@ export async function previewPendingRows(args) {
   // count reached, then backfill the rest as `unknown`: a destination with no
   // answer is disclosed as having none, never omitted from the plan and never
   // rendered as zero.
+  //
+  // It opens above the inputs, not below them: anchoring the budget (`now()`)
+  // and probing the two contract objects for the methods the count needs are
+  // themselves reads of values somebody else owns. `activation.js` hands
+  // `ctx.query` and `ctx.storage` to plugins raw and unfaceted and the loader
+  // imports plugin entrypoints into this same realm, so
+  // `Object.defineProperty(ctx.query, 'listDatasets', { get() { throw } })` is
+  // a property write away, and a read that refuses is the same outcome as the
+  // call that refuses one frame later - which this already reports as a cache
+  // it could not list (issue #2096).
   try {
+    const { query, storage, stateRoot, config } = args
+    const rowLimit = args.rowLimit ?? DEFAULT_ROW_LIMIT
+    const budgetMs = args.budgetMs ?? DEFAULT_BUDGET_MS
+    const now = args.now ?? (() => Date.now())
+    const start = now()
+
+    if (!query?.listDatasets || !storage?.readRowsSince) {
+      for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('no cache reader is available'))
+      return out
+    }
+
     const discovered = await discoverCountablePartitions({ query, storage, config })
     if (discovered.partitions.length === 0 && discovered.failures > 0) {
       for (const handle of handles) out.set(sinkInstanceName(handle), unknownVolume('the cache partitions could not be listed'))
