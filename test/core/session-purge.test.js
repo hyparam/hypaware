@@ -547,6 +547,49 @@ test('a non-busy failure after a busy skip still names the skipped partition', a
   }
 })
 
+// Until hyparam/hypaware#2062 the cleanup ids lived only in `purgeCache`'s
+// return value in the same way, so an aborted run's receipt read
+// `cache_cleanup: []` over durable journals already on disk: a positive
+// statement that no background work is pending when some is, and it still runs.
+test('an aborted session purge names the cleanup jobs it had already queued', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-cleanup-abort-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { storage, ctx, output, error } = fixture(root)
+  for (const source of ['a', 'b', 'c']) {
+    await storage.appendRowsToPartition('events', [`source=${source}`], columns, [
+      { session_id: 'delete', body: `secret ${source}` }, { session_id: 'keep', body: `neighbor ${source}` },
+    ])
+  }
+  await storage.flushAll({ force: true })
+
+  // Walk order decides which partitions are purged, and so admit a cleanup
+  // journal, before the abort: read it rather than assume the filesystem's.
+  const partitions = (await discoverCachePartitions(storage.cacheRoot)).map(part => part.path)
+  assert.equal(partitions.length, 3)
+  const corrupt = partitions[partitions.length - 1]
+  // A published generation with no table metadata: not a busy guard, so it
+  // aborts the run after the partitions ahead of it have queued their cleanup.
+  const metadata = path.join(resolveIcebergDir(corrupt), 'metadata')
+  for (const name of await fs.readdir(metadata)) {
+    if (name.endsWith('.metadata.json')) await fs.rm(path.join(metadata, name))
+  }
+
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 1)
+  assert.match(error(), /purge failed: Purge found a published generation without table metadata/)
+
+  const journals = (await fs.readdir(path.join(storage.cacheRoot, '.purge-cleanup'))).map(name => name.replace(/\.json$/, '')).sort()
+  assert.deepEqual(journals, partitions.slice(0, -1).map(part => cacheCleanupId(storage.cacheRoot, part)).sort(),
+    'every partition purged before the abort admitted a durable cleanup journal')
+
+  const receipt = JSON.parse(output())
+  assert.equal(receipt.local.status, 'incomplete')
+  assert.deepEqual(
+    [...receipt.local.cache_cleanup].sort((/** @type {any} */ a, /** @type {any} */ b) => a.job_id.localeCompare(b.job_id)),
+    journals.map(job_id => ({ job_id, scope: 'cache_generations', status: 'pending' })),
+    'the receipt names the cleanup journals that are on disk')
+  assert.equal(receipt.local.physical_cleanup.status, 'incomplete', 'queued cleanup is incomplete, not unimplemented')
+})
+
 // A thrown value's display string is not evidence that nothing was thrown:
 // `new Error('')` reads as no error at all when a gate takes its message for
 // truth (#2044), and so does an Error with no name either once `err.name` is

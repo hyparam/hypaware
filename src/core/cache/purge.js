@@ -50,8 +50,9 @@ import { Attr, getLogger } from '../observability/index.js'
  * A partition whose mutation guard another process holds is recorded in
  * `partitionsSkipped` and the run continues; the caller owes the operator that
  * list and a failure, because those partitions may still hold matching rows.
- * A later non-busy failure still aborts the run, and carries the skips
- * recorded so far out with it; read them back with {@link purgeSkipsFrom}.
+ * A later non-busy failure still aborts the run, and carries out with it both
+ * the skips recorded so far ({@link purgeSkipsFrom}) and the cleanup jobs
+ * admitted so far ({@link purgeCleanupFrom}).
  *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
  * @param {{ cacheRoot: string, target: PurgeTarget, onCleanupQueued?: (id: string) => Promise<void>, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
@@ -131,11 +132,15 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
       // with its tables (LLP 0333 #every-table-before-failure). Any other
       // failure still aborts the run.
       if (!isPartitionMutationBusy(error)) {
-        // The skip list is returned on completion alone, so this throw is
-        // about to discard its only copy. Carry it out on the error: those
-        // partitions may still hold matching rows, and the caller owes the
-        // operator that whether the run finished or not.
-        if (error instanceof Error) /** @type {{ partitionsSkipped?: { partition: string, error: string }[] }} */ (error).partitionsSkipped = partitionsSkipped
+        // The skip list and the cleanup ids are returned on completion alone,
+        // so this throw is about to discard their only copy. Carry both out on
+        // the error: those partitions may still hold matching rows, and the
+        // cleanup jobs admitted before the abort are durable and still run.
+        if (error instanceof Error) {
+          const carried = /** @type {{ partitionsSkipped?: { partition: string, error: string }[], cacheCleanup?: string[] }} */ (error)
+          carried.partitionsSkipped = partitionsSkipped
+          carried.cacheCleanup = [...cacheCleanup]
+        }
         throw error
       }
       partitionsSkipped.push({ partition: part.path, error: error.message })
@@ -172,6 +177,19 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
 export function purgeSkipsFrom(error) {
   const skipped = /** @type {{ partitionsSkipped?: unknown } | null | undefined} */ (error)?.partitionsSkipped
   return Array.isArray(skipped) ? skipped : []
+}
+
+/**
+ * The cache cleanup jobs a {@link purgeCache} run had already admitted when a
+ * non-busy failure aborted it, empty for any other thrown value. Their
+ * journals are durable, so the aborted run still owes the operator this list.
+ *
+ * @param {unknown} error
+ * @returns {string[]}
+ */
+export function purgeCleanupFrom(error) {
+  const cleanup = /** @type {{ cacheCleanup?: unknown } | null | undefined} */ (error)?.cacheCleanup
+  return Array.isArray(cleanup) ? cleanup : []
 }
 
 /**
