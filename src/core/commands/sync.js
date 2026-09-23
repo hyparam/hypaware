@@ -5,6 +5,7 @@ import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 import { effectiveRemotes, sameServer } from '../remote/builtin_remotes.js'
 import { previewPendingRows } from '../sinks/pending.js'
 import {
@@ -91,10 +92,20 @@ export async function runSync(argv, ctx) {
   const deadline = await readFirstSyncDeadline({ stateDir })
 
   const allHandles = /** @type {ExtendedSinkRegistry} */ (ctx.sinks).listHandles?.() ?? []
-  const handles = instance ? allHandles.filter((h) => h.instanceName === instance) : allHandles
+  // The name a positional selects by, and the names the refusal offers, come
+  // from the registry's record rather than off the handle, because the driver
+  // this verb hands `instance` to matches on that record (`sinkInstance`
+  // against `sinkInstanceName`, `src/core/sinks/driver.js`). A handle is a live
+  // object its owner still holds through `ctx.sinks.get`, so reading
+  // `handle.instanceName` here selects by a second key: an owner that renames
+  // it gates an instance the driver would drive, offers the refusal a name the
+  // driver will not match, or throws out of the filter before the driver's own
+  // guarded read (issue #2066). Only the name is fixed here: the plan's
+  // destination lines below still read the live property.
+  const handles = instance ? allHandles.filter((h) => sinkInstanceName(h) === instance) : allHandles
   if (instance && handles.length === 0) {
     ctx.stderr.write(`hyp sync: no sink named '${instance}' was instantiated\n`)
-    const available = allHandles.map((h) => h.instanceName)
+    const available = allHandles.map(sinkInstanceName)
     if (available.length > 0) ctx.stderr.write(`  available: ${available.join(', ')}\n`)
     return 1
   }
