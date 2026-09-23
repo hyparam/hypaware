@@ -263,6 +263,46 @@ test('overlapping loadSpooledBodies calls for one body_ref issue exactly one rea
   }
 })
 
+// One call, two events naming the SAME unparseable ref. Deduping on
+// `bodies.has(ref)` missed it, because an unparseable ref never lands in
+// `bodies`: the second event read the file again after the first event had
+// deleted it, saw ENOENT, and counted `missing`, so one result called one ref
+// both `unparseable` and `missing`. The shared `reading` entry does not
+// cover it: this call releases it as its own classification finishes, which
+// for a body it deleted is still before the loop reaches the second event.
+test('one batch naming an unparseable body_ref twice counts it once, never missing', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dup-'))
+  const realReadFile = fsp.readFile
+  try {
+    const content = 'not json at all'
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, content, 'utf8')
+    let reads = 0
+    fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+      if (target === file) reads += 1
+      return realReadFile(target)
+    })
+    /** @param {string} name */
+    const event = (name) => ({
+      name,
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    })
+    const loaded = await loadSpooledBodies(
+      /** @type {any} */ ([event('api_request_body'), event('api_response_body')]),
+      { spoolDir: dir }
+    )
+    assert.equal(loaded.missing, 0, 'a ref this call just deleted is not also missing')
+    assert.equal(loaded.unparseable, 1, 'one file, classified once')
+    assert.equal(loaded.unparseableBytes, content.length, 'one deletion, sized once')
+    assert.equal(reads, 1, 'the second event reuses the first classification, not a fresh read')
+    await assert.rejects(fsp.stat(file))
+  } finally {
+    fsp.readFile = realReadFile
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 // A shared read dropped the moment it settles leaves the window between the
 // read and the `unlink` uncovered: a caller arriving inside it finds no entry,
 // reads the file for itself, sees ENOENT for a body that was never legitimately

@@ -133,17 +133,27 @@ export async function loadSpooledBodies(events, opts) {
   let unparseableBytes = 0
   /** @type {string[]} */
   const refused = []
+  // Every in-spool ref this call has already classified. `bodies` cannot be the
+  // dedup on its own: a ref that does not parse never lands there, so a batch
+  // naming one twice reads it again after this call's own `unlink` took it off
+  // the disk, and counts `missing` for the very ref the same result calls
+  // `unparseable`. The shared `reading` entry does not cover it either: this
+  // call releases it as its own classification finishes, so the entry is gone
+  // by the time the loop reaches the second event naming the same ref.
+  /** @type {Set<string>} */
+  const seen = new Set()
 
   const spoolRoot = path.resolve(opts.spoolDir)
   for (const event of events) {
     if (!BODY_EVENT_NAMES.includes(event.name)) continue
     const ref = stringValue(event.attributes.body_ref)
-    if (!ref || bodies.has(ref)) continue
+    if (!ref || seen.has(ref)) continue
     const file = path.resolve(ref)
     if (!file.startsWith(spoolRoot + path.sep)) {
       refused.push(ref)
       continue
     }
+    seen.add(ref)
     // Claimed synchronously, before any `await`: whichever overlapping call
     // for this `file` runs first creates and stores the read; a second call
     // arriving before it resolves finds the same promise already in the map
