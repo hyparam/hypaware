@@ -7,9 +7,12 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { temporaryDirectory } from '../helpers/temp_dir.js'
+import { renderStatusJson } from '../../src/core/commands/status.js'
+import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
-import { writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { DEFAULT_TELEMETRY_PORT } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import {
   runSessionIgnore,
   runSessionStatus,
@@ -239,6 +242,52 @@ test('an advertisement naming the gateway\'s own endpoint is not addressed twice
   assert.equal(hits, 1, 'one POST reached the shared endpoint')
 })
 
+/**
+ * Issue #1626: what a single-recorder receipt does NOT establish. A listener
+ * missing from `recorders` was not addressed, and that is two different
+ * machines - one where nothing is capturing this session, one where something
+ * is - which is why the privacy skill's Step 1 cannot stop on the absence
+ * alone and reads `hyp status` before it decides.
+ *
+ * Both worlds are built here and the receipt is required to be the same in
+ * each, so the premise is measured rather than asserted; the capture-health
+ * cross-check is then required to tell them apart.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: a listener that is not running is
+ * not a failure - it is recording nothing - so only a live one that was
+ * skipped is.
+ */
+test('a gateway-only receipt cannot say whether the listener is down, and capture health can', async () => {
+  const gatewaySet = /** @type {Set<string>} */ (new Set())
+  await withControlServer(gatewaySet, async (gatewayBase) => {
+    // Nothing registered the listener (an `@hypaware/ai-gateway` with no
+    // record seam does exactly this), then: the listener running, and still
+    // not addressable because it advertises no control route.
+    for (const listenerStartedAt of [undefined, new Date(Date.now() - 60_000).toISOString()]) {
+      const hypHome = daemonHome({ gatewayBase, listenerStartedAt })
+      const homeDir = otelAttachedClaude(hypHome)
+      const ctx = fakeCtx({ env: { HYP_HOME: hypHome, CLAUDE_CODE_SESSION_ID: SESSION } })
+
+      assert.equal(await runSessionIgnore(['--json'], ctx.ctx), 0)
+      const out = JSON.parse(ctx.stdout())
+      assert.equal(out.status, 'ok')
+      assert.deepEqual(
+        out.recorders.map((/** @type {any} */ r) => r.recorder),
+        ['gateway'],
+        'the receipt is the single-recorder one either way, so the stop cannot be read off it'
+      )
+
+      const health = await captureHealth({ hypHome, homeDir })
+      assert.equal(health?.client, 'claude')
+      assert.equal(
+        health?.listener_started_at,
+        listenerStartedAt ?? null,
+        'and the second observation is what separates them'
+      )
+    }
+  })
+})
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
@@ -296,10 +345,16 @@ async function withRefusingServer(fn) {
  * the session-ignore control route at its own bound listener - the exact
  * shape the daemon writes.
  *
- * @param {{ gatewayBase: string, listenerBase?: string }} args
+ * `listenerStartedAt` is the other half of that source, the one `hyp status`
+ * reads: a listener the running daemon started. The two are independent
+ * because they can genuinely differ - a listener with no advertisement is
+ * running and unaddressable, which is one of the two absences issue #1626 is
+ * about.
+ *
+ * @param {{ gatewayBase: string, listenerBase?: string, listenerStartedAt?: string }} args
  * @returns {string}
  */
-function daemonHome({ gatewayBase, listenerBase }) {
+function daemonHome({ gatewayBase, listenerBase, listenerStartedAt }) {
   const gatewayUrl = new URL(gatewayBase)
   const hypHome = temporaryDirectory('hyp-session-both-')
   const stateRoot = path.join(hypHome, 'hypaware')
@@ -313,16 +368,17 @@ function daemonHome({ gatewayBase, listenerBase }) {
       details: { host: gatewayUrl.hostname, port: Number(gatewayUrl.port) },
     },
   ]
-  if (listenerBase) {
-    const listenerUrl = new URL(listenerBase)
+  if (listenerBase || listenerStartedAt) {
+    const listenerUrl = listenerBase ? new URL(listenerBase) : undefined
     sources.push({
       name: 'claude-telemetry',
       plugin: '@hypaware/claude',
       state: 'ready',
       details: /** @type {any} */ ({
-        listen_host: listenerUrl.hostname,
-        listen_port: Number(listenerUrl.port),
-        control_routes: ['ignore/session'],
+        listen_host: listenerUrl?.hostname ?? '127.0.0.1',
+        listen_port: listenerUrl ? Number(listenerUrl.port) : DEFAULT_TELEMETRY_PORT,
+        ...(listenerBase ? { control_routes: ['ignore/session'] } : {}),
+        ...(listenerStartedAt ? { last_event_at: null, listener_started_at: listenerStartedAt } : {}),
       }),
     })
   }
@@ -348,4 +404,64 @@ function fakeCtx(args) {
     },
   }
   return { ctx: /** @type {any} */ (ctx), stdout: () => out, stderr: () => err }
+}
+
+/**
+ * A `$HOME` whose Claude Code settings carry an otel attach marker, beside a
+ * config enabling both plugins in `hypHome`: what `hyp status` requires
+ * before it reports capture health for a client at all.
+ *
+ * @param {string} hypHome
+ * @returns {string}
+ */
+function otelAttachedClaude(hypHome) {
+  fs.writeFileSync(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [
+      {
+        name: '@hypaware/ai-gateway',
+        config: {
+          listen: '127.0.0.1:8787',
+          upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' }],
+        },
+      },
+      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+    ],
+  }) + '\n')
+  const homeDir = temporaryDirectory('hyp-session-client-')
+  fs.mkdirSync(path.join(homeDir, '.claude'), { recursive: true })
+  fs.writeFileSync(path.join(homeDir, '.claude', 'settings.json'), JSON.stringify({
+    _hypaware: {
+      attached_at: new Date(Date.now() - 3_600_000).toISOString(),
+      version: '2.0.0',
+      port: DEFAULT_TELEMETRY_PORT,
+      mode: 'otel',
+      managed: { env: {}, hooks: [] },
+    },
+    env: {},
+  }) + '\n')
+  return homeDir
+}
+
+/**
+ * The claude entry of the `capture_health` array `hyp status --json` prints,
+ * through the real collector and renderer, so the keys the privacy skill
+ * names are the ones the command actually carries.
+ *
+ * @param {{ hypHome: string, homeDir: string }} args
+ */
+async function captureHealth({ hypHome, homeDir }) {
+  const report = await collectHypAwareStatus({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    homeDir,
+    platform: 'darwin',
+    isLaunchAgentInstalled: () => false,
+  })
+  const json = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  return json.capture_health.find((/** @type {any} */ entry) => entry.client === 'claude')
 }

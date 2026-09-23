@@ -406,6 +406,79 @@ test('the claude privacy skill names the recorder id the listener reports', () =
 })
 
 /**
+ * Issue #1626: the stop above fires on ABSENCE, and absence has two causes the
+ * receipt cannot tell apart. A recorder missing from `recorders` was not
+ * addressed, which is either a running listener the verb did not reach or a
+ * listener that is not running at all - and the second is the ordinary reading
+ * (LLP 0256 #cli-posts-to-both: a listener that is not running is not a
+ * failure, it is recording nothing). It is reachable in shipped code: an
+ * `@hypaware/ai-gateway` with no `recordProjectedExchange` leaves the listener
+ * unregistered (`claude.telemetry.capability_too_old`), so an unconditional
+ * stop tells a user whose machine is capturing nothing that the review session
+ * is still being recorded.
+ *
+ * The answer is to condition the stop on a second observation, not to delete
+ * it, so both directions are pinned here: a live listener still stops the
+ * review, no live listener says plainly that nothing is capturing, and a
+ * cross-check that cannot be read fails closed.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: only a running recorder that was
+ * skipped or refused is a failure.
+ */
+test('the claude privacy skill stops on a missing claude-telemetry entry only while that listener is live', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
+  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
+  const rest = step1.slice(at)
+  const end = rest.search(/\n\s*\n/)
+  const stopList = end < 0 ? rest : rest.slice(0, end)
+
+  // The condition rides the list item itself, before the comma that ends it:
+  // an agent acting on the list must not be able to reach the stop without
+  // reading it. The clause carries no regex metacharacter, so it is its own
+  // pattern.
+  const clause = `no \`${CLAUDE_TELEMETRY_SOURCE}\` entry in \`"recorders"\``
+  assert.ok(stopList.includes(clause), `"${clause}" must still be one of the stop conditions`)
+  assert.match(
+    stopList,
+    new RegExp(clause + '[^,]{0,200}\\b(?:live|running)\\b'),
+    'and it must carry its own liveness condition: absence alone is also what a listener that is not running looks like'
+  )
+
+  // The second observation, and both of its answers.
+  const opener = `**Cross-check a missing \`${CLAUDE_TELEMETRY_SOURCE}\` entry`
+  const from = step1.indexOf(opener)
+  assert.ok(from >= 0, `Step 1 must settle the two readings, opening "${opener}"`)
+  const to = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
+  assert.ok(to > from, 'and must do it before it routes the ambiguous id')
+  const crossCheck = step1.slice(from, to)
+
+  assert.match(crossCheck, /hyp status --json/, 'the cross-check must name the command that answers it')
+  // The keys that command really carries, proven against the collector and
+  // renderer in test/plugins/ai-gateway-session-both-recorders.test.js.
+  assert.ok(
+    crossCheck.includes('capture_health') && crossCheck.includes('listener_started_at'),
+    'and the keys it reads: capture_health.listener_started_at'
+  )
+  assert.match(
+    crossCheck,
+    /non-null[\s\S]{0,400}still being recorded/,
+    'a listener the daemon started is one that was skipped, so the stop must still fire on it'
+  )
+  assert.match(
+    crossCheck,
+    /listener is not running, so nothing is capturing this session/,
+    'and where nothing is running the user must be told that, not told they are still being recorded'
+  )
+  assert.match(
+    crossCheck,
+    /(?:cannot read|do not recognise|nonzero)[\s\S]{0,200}\bstop\b/,
+    'an observation that could not be made is not an answer, so it must fail closed'
+  )
+})
+
+/**
  * Where Step 1 sends the one id-resolution refusal that happens with
  * `CLAUDE_CODE_SESSION_ID` set: a second client stating an id too, so the verb
  * will not guess. The answer is the same verb with the id stated, which still
