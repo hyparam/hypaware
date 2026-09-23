@@ -539,6 +539,14 @@ test('a non-busy failure after a busy skip still names the skipped partition', a
   // `incomplete` is off the fixed status set, so the attribute contract
   // normalizes it (LLP 0021 #the-attribute-contract).
   assert.equal(purgeResult[0].attributes.status, 'failed')
+  // The log states no total either, matching the receipt's nulled counts
+  // above: the middle partition below proves the abort's default zeros would
+  // be a count over a run that deleted rows.
+  assert.equal(purgeResult[0].attributes.rows_deleted, undefined, 'a failed run logs no row total')
+  assert.equal(purgeResult[0].attributes.partitions_affected, undefined, 'a failed run logs no partition total')
+  const survivors = []
+  for await (const row of scanRowsFromTable(resolveIcebergDir(partitions[1]))) survivors.push(row.body)
+  assert.equal(survivors.length, 1, 'the partition reached before the abort lost its matching row')
   const skipWarn = records.filter((/** @type {any} */ record) => record.body === 'purge.partition_skipped')
   assert.equal(skipWarn.length, 1)
   assert.equal(skipWarn[0].attributes[Attr.ERROR_KIND], PARTITION_MUTATION_BUSY_ERROR_KIND)
