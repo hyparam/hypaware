@@ -57,8 +57,9 @@ const CLOCK_CHECK_EVERY = 512
  *    rejects. Every input it reads - the clock, both contract objects, the
  *    options - is read *inside* that recovery: a value somebody else owns can
  *    refuse to be read at all, not only to answer (issue #2096).
- *    `args.handles` is the exception, read before it, because the recovery is
- *    a backfill over the destinations.
+ *    `args.handles` is the exception, read before the guard and iterated
+ *    inside its recovery, because the recovery is a backfill over the
+ *    destinations and has nothing to fill without them.
  *
  * Nothing here writes: no flush, no mkdir, no watermark move. An un-flushed
  * spool therefore holds rows this cannot see, which is why a partition with
@@ -112,6 +113,7 @@ export async function previewPendingRows(args) {
   // a property write away, and a read that refuses is the same outcome as the
   // call that refuses one frame later - which this already reports as a cache
   // it could not list (issue #2096).
+  // @ref LLP 0420#split [constrained-by]: ctx.query and ctx.storage are the raw registries on the activation context by decision, not oversight, so a hostile accessor on either is reachable and the guard must open above these reads
   try {
     const { query, storage, stateRoot, config } = args
     const rowLimit = args.rowLimit ?? DEFAULT_ROW_LIMIT

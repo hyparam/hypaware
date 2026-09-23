@@ -1045,9 +1045,11 @@ test('a plan still renders when the capability probe itself throws, and nothing 
 
   // The end-to-end half, and the half a unit case cannot state: the verb still
   // exits, the plan still prints, and it prints the destination as an admitted
-  // gap rather than as nothing pending. A `reason` that is not a string
-  // survives the preview and kills `renderVolume` instead, so a rendered line
-  // is also what proves the reason is printable (#2093).
+  // gap rather than as nothing pending. A `reason` that refuses string
+  // coercion survives the preview and kills `renderVolume` instead, so a
+  // rendered line is also what proves the reason is printable (#2093); a
+  // non-string that coerces renders harmlessly and is pinned by the unit
+  // cases' `typeof` assertions instead.
   assert.equal(code, 0)
   assert.match(stdout.text, /central/)
   assert.match(stdout.text, /pending volume unknown/)
