@@ -519,6 +519,7 @@ export async function activate(ctx) {
     'hypaware-query',
     'hypaware-reference',
     'hypaware-privacy',
+    'hypaware-report',
   ]) {
     ctx.skills.register({
       name: skillName,

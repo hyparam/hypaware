@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/codex",
   "version": "2.0.0",
-  "description": "Codex CLI and Desktop capture from local rollout files. Inference connects directly to the provider by default; gateway capture is an explicit option. Includes query and privacy skills.",
+  "description": "Codex CLI and Desktop capture from local rollout files. Inference connects directly to the provider by default; gateway capture is an explicit option. Includes query, privacy, and report skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -47,7 +47,8 @@
     "skills": [
       { "name": "hypaware-query", "clients": ["codex"] },
       { "name": "hypaware-reference", "clients": ["codex"] },
-      { "name": "hypaware-privacy", "clients": ["codex"] }
+      { "name": "hypaware-privacy", "clients": ["codex"] },
+      { "name": "hypaware-report", "clients": ["codex"] }
     ],
     "config_sections": [
       {
