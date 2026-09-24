@@ -365,18 +365,15 @@ export function createSinkRegistry() {
   }
 
   /**
-   * Record which plugin the kernel built an instance from, taken off the
-   * `ActivePlugin` the materializer resolved from the config row rather than
-   * off the contribution: `handle.plugin` is a live read of a plugin-written
-   * property, and a facade bracketing on it would bracket on the one party the
-   * kernel must not ask (issue #1961).
+   * Record which plugin the kernel built an instance from. `owner` is the
+   * name its caller resolved through `ownerName`, so this record and every
+   * label on the same instance come from one read (issue #1961).
    *
    * @param {string} instanceName
-   * @param {{ name?: unknown } | undefined} plugin
+   * @param {string} owner
    */
-  function recordOwner(instanceName, plugin) {
-    const owner = plugin?.name
-    if (typeof owner === 'string' && owner.length > 0) owners.set(instanceName, /** @type {PluginName} */ (owner))
+  function recordOwner(instanceName, owner) {
+    if (owner !== '') owners.set(instanceName, /** @type {PluginName} */ (owner))
   }
 
   function listHandles() {
@@ -421,10 +418,14 @@ export function createSinkRegistry() {
     }
     // The record's copy, taken before `create()` is handed the same object.
     const recordedConfig = /** @type {SinkInstanceConfig} */ ({ ...config })
-    // One read of the contribution's `plugin`: a second answer splits a single
-    // instantiation across the two records, the span, the counter, and the
-    // handle's own `plugin` and `destination`.
-    const contributionPlugin = contribution.plugin
+    // Every label below comes from the owner the kernel resolved, never from
+    // `contribution.plugin`. That field is a live property which only had to
+    // agree with its registrar at `register`, so a contribution answering a
+    // neighbour's name afterwards moved the instance's whole attribution:
+    // both `sink.*` records, the span, `hyp_sinks_registered`, and through
+    // `handle.plugin` the driver's `sink.export` spans, its per-tick record
+    // and `hyp sync`'s destination line (issue #1562).
+    const owner = ownerName(args.plugin)
     const supports = resolveSupports(registeredSupports(contribution), args.kind === 'blob' ? args.encoder : undefined)
     // Emit `sink.resolved` ahead of the destination's `create()` so the
     // resolved writer+destination+supports tuple lands in logs even when
@@ -432,11 +433,11 @@ export function createSinkRegistry() {
     // attributes mirror the post-create `sink.register` log so consumers
     // can correlate the two by instance name.
     log.info('sink.resolved', {
-      [Attr.PLUGIN]: contributionPlugin,
+      [Attr.PLUGIN]: owner,
       [Attr.SINK_INSTANCE]: instanceName,
       hyp_sink_kind: args.kind,
       hyp_sink_writer: args.kind === 'blob' ? args.writerPlugin : '',
-      hyp_sink_destination: contributionPlugin,
+      hyp_sink_destination: owner,
       hyp_sink_supports: supports.join(','),
     })
 
@@ -445,7 +446,7 @@ export function createSinkRegistry() {
       {
         [Attr.COMPONENT]: 'sinks',
         [Attr.OPERATION]: 'sink.register',
-        [Attr.PLUGIN]: contributionPlugin,
+        [Attr.PLUGIN]: owner,
         [Attr.SINK_INSTANCE]: instanceName,
         hyp_sink_kind: args.kind,
         status: 'ok',
@@ -470,28 +471,28 @@ export function createSinkRegistry() {
         const handle = {
           name: instanceName,
           instanceName,
-          plugin: contributionPlugin,
+          plugin: owner,
           supports,
           sink,
           kind: args.kind,
           config,
-          ...(args.kind === 'blob' ? { writer: args.writerPlugin, destination: contributionPlugin, encoder: args.encoder } : {}),
+          ...(args.kind === 'blob' ? { writer: args.writerPlugin, destination: owner, encoder: args.encoder } : {}),
         }
         handles.set(instanceName, handle)
         instanceNames.set(handle, instanceName)
         instanceConfigs.set(handle, recordedConfig)
-        recordOwner(instanceName, args.plugin)
+        recordOwner(instanceName, owner)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: args.kind,
-          [Attr.PLUGIN]: contributionPlugin,
+          [Attr.PLUGIN]: owner,
         })
         log.info('sink.register', {
-          [Attr.PLUGIN]: contributionPlugin,
+          [Attr.PLUGIN]: owner,
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: args.kind,
           hyp_sink_writer: args.kind === 'blob' ? args.writerPlugin : '',
-          hyp_sink_destination: contributionPlugin,
+          hyp_sink_destination: owner,
           hyp_sink_supports: supports.join(','),
         })
         return handle
@@ -526,6 +527,11 @@ export function createSinkRegistry() {
     // One read of the provider's `format`, so the two records and the handle
     // cannot name different table formats for one instantiation.
     const format = tableFormat.format
+    // This shape labels from `args.writerPlugin` / `args.destinationPlugin`,
+    // kernel-supplied strings rather than properties of a live contribution,
+    // so #1562 never reached it; the owner record is resolved the same way as
+    // the other shape's so both write it from one place.
+    const owner = ownerName(args.plugin)
     // `resolveSupports` intersects the table-format provider's tags
     // with the encoder's tags, mirroring the encoder-writer rule
     // (queryable only when both sides claim it).
@@ -586,7 +592,7 @@ export function createSinkRegistry() {
         handles.set(instanceName, handle)
         instanceNames.set(handle, instanceName)
         instanceConfigs.set(handle, recordedConfig)
-        recordOwner(instanceName, args.plugin)
+        recordOwner(instanceName, owner)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: 'table-format',
@@ -653,6 +659,31 @@ export function createSinkRegistry() {
  */
 function contributionKey(plugin, name) {
   return `${plugin}::${name}`
+}
+
+/**
+ * The name off the `ActivePlugin` the materializer resolved out of the config
+ * row (`src/core/sinks/materialize.js`). The loader builds that record from
+ * the manifest it validated (`src/core/runtime/loader.js`), so it is the
+ * kernel's own rather than a property of the contribution the instance came
+ * from. It is not out of a plugin's reach: `ctx.plugin` is that very object,
+ * unfrozen, so an activated plugin can still rewrite the name the kernel
+ * resolves it under (issue #2130). Reading it once, here, is what keeps one
+ * instantiation's labels, span, counter and owner record from disagreeing
+ * whatever it answers.
+ *
+ * A record without a usable `name` answers `''` rather than falling back to
+ * the contribution's claim, which `InstantiateArgs` makes unreachable for a
+ * caller honouring the contract: with no resolved owner there is nothing to
+ * attribute the instance to, and repeating a claim the kernel cannot check is
+ * how #1562 read in the first place.
+ *
+ * @param {{ name?: unknown } | undefined} plugin
+ * @returns {string}
+ */
+function ownerName(plugin) {
+  const name = plugin?.name
+  return typeof name === 'string' && name.length > 0 ? name : ''
 }
 
 /**
