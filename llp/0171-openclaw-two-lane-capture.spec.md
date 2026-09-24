@@ -76,7 +76,7 @@ reversed by R5 below, R12 is replaced by R11 below, and R13 is retired
   reader, and backfill projection MUST be unchanged by this change set;
   the projector's gate keeps reading `x-hypaware-upstream`, now
   config-sourced (LLP 0168).
-- **R11.** `docs/ACCEPTANCE.md` `openclaw_capture` MUST be rewritten
+- **R11.** The manual `openclaw_capture` procedure MUST be rewritten
   per LLP 0167#deletion-inventory: attach-flow steps, a sweep step in
   which a turn on a non-overridden provider lands within the interval,
   a zero-duplicate assertion for a turn both lanes captured, and
@@ -97,4 +97,3 @@ correlation.
 
 - LLP 0167 (rationale and verified facts), LLP 0168, LLP 0169, LLP 0170
 - LLP 0157 (carried-over requirements), issue #543 (prerequisite fix)
-- `docs/ACCEPTANCE.md`

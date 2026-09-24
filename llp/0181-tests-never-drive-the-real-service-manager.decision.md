@@ -84,9 +84,9 @@ Three consequences are deliberate:
   `installLaunchAgent`'s best-effort `bootout` attach a `.catch()` to the
   returned promise, which a synchronous throw would sail past.
 - **It binds to the test runner only.** The hermetic smokes
-  (`hyp smoke ...`) and the packaged CLI match none of the three shapes, so the
-  acceptance tier that is *supposed* to install and start a real daemon
-  (`docs/ACCEPTANCE.md`) is untouched, and needs no opt-in.
+  (`hyp smoke ...`) and the packaged CLI match none of the three shapes, so a manual
+  run that is *supposed* to install and start a real daemon is untouched, and
+  needs no opt-in.
 
 The opt-in exists for a hypothetical test that genuinely means to drive this
 machine's service manager. No test may use it to reach a real service manager:

@@ -484,8 +484,7 @@ applies to the ChatGPT desktop app and browser storage, which HypAware does
 not capture at all.
 
 See [LLP 0141](llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)
-for the reasoning, and [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) for the
-manual check that Desktop traffic is actually landing.
+for the reasoning.
 
 ## Controlling what is recorded and forwarded
 
@@ -732,7 +731,6 @@ User-facing guides include:
 - [`docs/HEADLESS.md`](./docs/HEADLESS.md): headless deploys on CI runners and servers with a pre-minted token
 - [`docs/PRIVACY.md`](./docs/PRIVACY.md): what HypAware records and how to control it
 - [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md): how to write a plugin (`hyp dev plugin new` / `hyp dev plugin doctor`)
-- [`docs/ACCEPTANCE.md`](./docs/ACCEPTANCE.md): opt-in, manual pre-release checks that need a real client (e.g. Codex Desktop)
 
 Contributor material (repository layout, release checklist, test model)
 lives in [`AGENTS.md`](./AGENTS.md).

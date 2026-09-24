@@ -29,8 +29,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * synthetic: it is issued by this file against a local fake upstream, with
  * no Codex Desktop involved. It proves the gateway and projector handle
  * that shape, not that a real Codex Desktop routes through HypAware. The
- * end-to-end claim needs a human and a real app: see the
- * `codex_desktop_capture` procedure in `docs/ACCEPTANCE.md`
+ * end-to-end claim needs a human and a real app
  * (@ref LLP 0141#one-adapter).
  *
  * Bead `hy-bbyi` assertions:

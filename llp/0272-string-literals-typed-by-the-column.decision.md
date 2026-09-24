@@ -46,8 +46,8 @@ returned; this under-returns to exactly zero.
 
 ### Why zero rows is worse than an error {#why-silent}
 
-`docs/ACCEPTANCE.md` bounds six release-gate steps on `message_created_at`.
-Run against this defect, `claude_otel_shape_check` step 6, whose whole job is
+The manual acceptance procedures bounded six steps on `message_created_at`.
+Run against this defect, `claude_otel_shape_check` step 6, whose whole job was
 to prove captured rows landed with their columns filled, reports "no rows" on
 a healthy capture path. The written procedure then reads as a capture failure,
 and the reader debugs code that is fine. The defect cost real diagnosis time
@@ -108,9 +108,8 @@ timestamp literal means.
   argument, so a bound written on the call is a bound on the column underneath:
   `having max(ts) >= '...'` types exactly as `ts >= '...'` does. This is not a
   corner: `HAVING` almost always holds an aggregate rather than a bare
-  reference, and `max(message_created_at)` is the idiom `docs/ACCEPTANCE.md`
-  itself uses, so leaving it out would have left the release gate reading a
-  healthy capture as empty. Argument *positions* are declared per function
+  reference, and `max(message_created_at)` is a common idiom, so leaving it out
+  would read a healthy capture as empty. Argument *positions* are declared per function
   (`min_by(value, key)` takes only `value`'s type, `date_trunc(unit, date)`
   only `date`'s), because typing a literal from the wrong argument returns
   wrong rows. Calls that change the type (`epoch`, `extract`, `date_diff`,
@@ -150,7 +149,7 @@ reintroduce the silent empty result through the front door.
 
 - `since`-style queries work as written, in both spellings, and a bare string
   bound now prunes row groups exactly as its typed twin does.
-- `docs/ACCEPTANCE.md` keeps the trailing `Z`. The old text stripped it
+- Bounds keep the trailing `Z`. The old acceptance text stripped it
   (`SINCE_SQL=${SINCE%Z}`) with a note that the zone-less form "compares
   cleanly", which was never true; worse, `new Date('...T21:00:00')` without a
   zone is *local* time, so on any non-UTC host the zone-less form silently

@@ -164,7 +164,7 @@ the warning ledger.
 
 ## Acceptance {#acceptance}
 
-`docs/ACCEPTANCE.md` gains an `openclaw_capture` procedure mirroring the
+A manual `openclaw_capture` procedure is written, mirroring the
 `codex_desktop_capture` structure (what it proves / does not prove /
 requires / steps with pass conditions / if it fails). It proves an
 OpenClaw conversation reaches `ai_gateway_messages` by **both** routes:
@@ -262,5 +262,4 @@ Named by the decisions as verify-before-relying-on:
 - LLP 0143, 0144, 0145, 0146, 0147, 0148, 0149, 0152 (the Accepted set)
 - LLP 0158, 0159 (companion backfill decisions)
 - LLP 0016, 0027, 0037, 0049, 0103 (house constraints cited above)
-- `docs/ACCEPTANCE.md` (`codex_desktop_capture`, the acceptance template)
 - PR #475, #486 (the decision set's verified-facts record)

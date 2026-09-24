@@ -174,9 +174,8 @@ invite reading the value as a query bound it is not.
 - **A restart clears the list.** The tracker is in-memory, so a daemon that
   restarts after a conversation reports no recent client for it even though
   the rows are in the cache. This is the price of not adding a durable store
-  for a diagnostic, and it is documented as an expected outcome in
-  [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md)'s `codex_desktop_capture`
-  step 4 and its failure notes. The query remains the durable check.
+  for a diagnostic, and it is an expected outcome. The query remains the
+  durable check.
 - **Row counts are per daemon process, not per install.** `rows` in the
   status output counts what this process committed. It is an activity
   signal; `select count(*) from ai_gateway_messages` is the number.

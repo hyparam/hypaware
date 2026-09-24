@@ -126,10 +126,8 @@ the CLI suggests when a daemon will not start) it would downgrade the
 operator's global install and then exit with nothing to relaunch it.
 
 The launchd half rests on a value no test in this repository can falsify:
-every fixture asserts the `XPC_SERVICE_NAME` the fixture itself wrote. It is
-confirmed instead against a real installed LaunchAgent by the
-`launchd_supervisor_env` procedure in `docs/ACCEPTANCE.md`, which a release
-touching this gate runs and whose observed value it records as the baseline.
+every fixture asserts the `XPC_SERVICE_NAME` the fixture itself wrote. Only a
+real installed LaunchAgent can confirm it.
 
 <a id="restart-exit-is-bounded"></a>
 ## A restart exit is bounded

@@ -156,4 +156,4 @@ Primary documentation and installed implementation evidence were examined Septem
 [^11]: Cursor, [Network configuration](https://cursor.com/docs/enterprise/network-configuration).
 [^12]: Cursor, [Bring your own API key](https://cursor.com/docs/settings/api-keys).
 [^13]: Cursor, [CLI ACP](https://cursor.com/docs/cli/acp) and [output format](https://cursor.com/docs/cli/reference/output-format).
-[^14]: HypAware, existing [SQLite adapter](../../hypaware-core/plugins-workspace/hermes/src/state_db.js), [OTLP listener](../../src/core/otlp/server.js), and [Cursor capture evidence](../../docs/cursor-capture-evidence.md).
+[^14]: HypAware, existing [SQLite adapter](../../hypaware-core/plugins-workspace/hermes/src/state_db.js), [OTLP listener](../../src/core/otlp/server.js), and [Cursor capture evidence](EVIDENCE.md).

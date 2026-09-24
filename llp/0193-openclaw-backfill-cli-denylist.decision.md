@@ -152,9 +152,7 @@ countable, with `covered_by` naming the sibling route when one is known.
 - **Open, pre-acceptance-run:** one OpenClaw turn on a codex backend,
   confirming its session-file record stamps `api: "cli"` (either rung
   already excludes it if `provider` starts with `codex`; the probe pins the
-  mechanism marker). The probe's durable home is `docs/ACCEPTANCE.md`
-  `openclaw_capture` step 8, so it runs with every release that touches
-  this adapter, not only when someone reads this list. Record the binary
+  mechanism marker). Record the binary
   version with the result here or in
   the acceptance notes.
 - After upgrading an affected install, one `hyp backfill openclaw` run (or

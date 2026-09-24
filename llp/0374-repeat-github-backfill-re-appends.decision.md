@@ -112,13 +112,10 @@ its own answer to all three.
 
 ## Operator contract {#operator-contract}
 
-`docs/ACCEPTANCE.md` carries the operator-facing half:
-[`github_since_inclusivity`](../docs/ACCEPTANCE.md#github_since_inclusivity)
-states the row growth as the expected result of a repeat backfill, so a release
-reviewer measuring `count(*)` across two runs does not file it again. The same
-procedure is where the still-unconfirmed half of #1284's acceptance condition
-gets settled: whether GitHub's issues-family `since` really is inclusive of the
-boundary second. That answer needs a real token, no fixture can supply it, and
+Row growth is the expected result of a repeat backfill, so a reviewer
+measuring `count(*)` across two runs should not file it again. The other half
+of #1284's acceptance condition is still unconfirmed: whether GitHub's
+issues-family `since` really is inclusive of the boundary second. That answer needs a real token, no fixture can supply it, and
 the boundary floor is correct either way.
 
 ## Consequences {#consequences}

@@ -727,7 +727,7 @@ touched by this change set:
 
 ## 8. Acceptance and onboarding rewrites {#acceptance-onboarding}
 
-### 8.1 `docs/ACCEPTANCE.md`'s `openclaw_capture` (R11 of LLP 0171)
+### 8.1 The manual `openclaw_capture` procedure (R11 of LLP 0171)
 
 The current procedure (lines 173 onward) requires linking and enabling the
 steering plugin from the checkout under test
@@ -836,4 +836,4 @@ rather than newly discovered here:
   json_path retirement, reversed here), LLP 0144 (shadow-provider-per-shape
   rationale, carried over as Lane A's rationale)
 - LLP 0044, LLP 0045 (attach/detach design)
-- `docs/ACCEPTANCE.md`, issue #543 (PR #552), issue #544 (PR #553)
+- Issue #543 (PR #552), issue #544 (PR #553)

@@ -1322,8 +1322,7 @@ function clientConfigHome(settingsPath, settingsFile) {
  *
  * Ownership is decided per row, with the same signature the settings undo
  * trusts: the caches carry each provider entry forward wholesale, headers
- * included (LLP 0167 verify item 3; `docs/ACCEPTANCE.md` greps these very
- * files for the marker header as the residue test), so a row whose marker
+ * included (LLP 0167 verify item 3), so a row whose marker
  * header names its own key is ours and is purged whenever it is seen. A row
  * with no marker is purged only when this run deleted the matching settings
  * entry (the row is then derived from a value that was proven ours); any

@@ -309,6 +309,5 @@ exists.
   `test/plugins/codex-attach-route.test.js`,
   `test/plugins/ai-gateway-proxy-routing.test.js`,
   `test/plugins/gateway-openai-upstream-slot.test.js`
-- `docs/ACCEPTANCE.md` (`codex_login_switch_reroute`)
 - LLP 0099 (superseded by this document), LLP 0157 (extended by it),
   LLP 0161 (the `openai` preset slot), LLP 0234 (`record_prefix`)

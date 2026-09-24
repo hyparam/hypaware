@@ -235,7 +235,7 @@ set:
   files), `test/`, `openclaw.plugin.json`, `package.json`. 2,080 lines.
 - **Delete `test/plugins/openclaw-steering-plugin.test.js`** (the suite
   wrapper, 24 lines).
-- **Rewrite `docs/ACCEPTANCE.md` `openclaw_capture`**: the
+- **Rewrite the manual `openclaw_capture` procedure**: the
   `openclaw plugins install --link` / `plugins enable` steps become
   `hyp attach --client openclaw` plus a config-content check; the
   "shadow providers registered and steering" assertion becomes "override
@@ -352,9 +352,8 @@ implementation; each maps to an acceptance step:
 ### Verification results (2026-07-31, live install) {#verify-results}
 
 All six items were executed against the real install on this machine
-(binary 2026.3.13, source checkout 2026.4.2 for code reading; note
-`docs/ACCEPTANCE.md` floors `openclaw_capture` at 2026.4.24+, so the
-acceptance run must re-confirm items 1, 3, and 4 on a current binary).
+(binary 2026.3.13, source checkout 2026.4.2 for code reading; items
+1, 3, and 4 should be re-confirmed on a current binary).
 Method: config edits on the live `~/.openclaw/openclaw.json` (backed up
 and restored), one-turn probes against a local logging listener, an
 isolated `--profile` install for gateway tests, and a hermetic

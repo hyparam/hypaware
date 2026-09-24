@@ -195,8 +195,7 @@ rollout tree, keyed on the rollout's session id.
   that needs the `x-openai-subagent` decision above.
 - The Codex-source facts here are a snapshot of an upstream HypAware does not
   control. The mitigation is `lineage_source` and `lineage_conflict`
-  ([#lineage-conflict](#lineage-conflict)) plus the acceptance check in
-  [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md), not a pinned literal.
+  ([#lineage-conflict](#lineage-conflict)), not a pinned literal.
 
 ## References
 

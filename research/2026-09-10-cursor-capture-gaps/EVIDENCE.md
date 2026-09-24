@@ -1,7 +1,7 @@
 # Cursor capture implementation evidence
 
 Status: **Native recovery implemented; release acceptance still required.**
-Date: 2026-09-10. Design: [LLP 0399](../llp/0399-cursor-native-session-recovery.decision.md).
+Date: 2026-09-10. Design: [LLP 0399](../../llp/0399-cursor-native-session-recovery.decision.md).
 
 Cursor's local saved sessions now supply user messages, assistant segments,
 full tool results and tool outcomes. Native hooks trigger bounded recovery and
@@ -17,7 +17,7 @@ were authorized; sign-in used Cursor's supported login flow. No credentials
 were extracted or staged, and the global HypAware installation is unchanged.
 
 Detailed research, source links and reproducible probes:
-[Cursor capture gaps](../research/2026-09-10-cursor-capture-gaps/REPORT.md).
+[Cursor capture gaps](REPORT.md).
 Sanitized hook fixtures remain under `test/fixtures/cursor/`.
 
 The hooks deliberately summarize tiny Read/Grep results, mislabel Glob as
@@ -72,7 +72,7 @@ It checks receive, storage, recovery and privacy telemetry. Passing run:
 Final verification: `npm test` passed 6,570 tests with three skips. Type
 checking, the `cursor_capture` smoke, file hygiene and LLP reference checks
 passed. Synthetic fixtures pin the researched schema; they do not replace
-the real-client acceptance procedure.
+testing against a real client.
 
 ## Fresh candidate CLI acceptance, September 10
 
@@ -125,7 +125,7 @@ and the disposable workspace hook file restored byte-for-byte afterward.
 
 ## Remaining limits
 
-[Release acceptance](ACCEPTANCE.md#cursor_editor_cli_capture) still covers
+Untested against a real client:
 installed handler behavior, editor/interactive/headless modes, interruption,
 resume, regeneration, upstream format drift and sustained resource measurements.
 Native storage is an internal version-specific interface, not a public API.

@@ -329,7 +329,7 @@ with deliberate file or hunk selection.
 
 ## Remaining release boundary
 
-The manual `claude_otel_shape_check` in `docs/ACCEPTANCE.md` remains pending.
+The manual `claude_otel_shape_check` remains pending.
 It requires a real Claude Code 2.1.214 or newer and cannot be substituted with
 the hermetic fixture smoke. Before releasing Claude adapter changes, run it and
 record the observed Claude version and complete event-name list in the release

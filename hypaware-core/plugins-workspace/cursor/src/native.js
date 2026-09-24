@@ -331,7 +331,7 @@ export function readCursorSession(session, previousRoot) {
       // Typed field 5 suppresses the prompt. Its meaning is inferred from the
       // inspected stores, not documented, so only the exact varint 1 is read
       // that way: any other value keeps the prompt. A prompt missing from a
-      // real client is the signal to recheck this (docs/ACCEPTANCE.md step 2).
+      // real client is the signal to recheck this.
       if (user.get(5)?.[0] !== 1) messages.push({ role: 'user', message_id: id('user'), provider_uuid: userId,
         content: string(user, 1), message_created_at: time(user, 25), request_id: generation, attributes: attrs })
       let index = 0

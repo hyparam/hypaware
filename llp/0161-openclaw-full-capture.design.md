@@ -675,7 +675,7 @@ untouched.
 
 ## 9. Acceptance procedure {#acceptance}
 
-`docs/ACCEPTANCE.md` gains `## openclaw_capture`, mirroring
+A manual `openclaw_capture` procedure is written, mirroring
 `## codex_desktop_capture`'s exact heading structure (What it proves / What
 it does not prove / Requires / Related / `### Steps` / `### If it fails`).
 
@@ -719,7 +719,7 @@ genuinely differs:
 
 @ref LLP 0157#acceptance [implements]: R12, the procedure must exist and
 must have been run by a human before the adapter ships; this section is
-that procedure's design, landing it in `docs/ACCEPTANCE.md` and running it
+that procedure's design; writing it down and running it
 is implementation work this document hands off, not something a design
 document can itself satisfy.
 

@@ -44,8 +44,6 @@ query tools. Command availability follows the active configuration. Run
 - [Product telemetry](PRODUCT_TELEMETRY.md): the enrollment default and its
   controls, current draft
   implementation, and rollout limitations.
-- [Acceptance procedures](ACCEPTANCE.md): manual release checks for real clients,
-  installed services, and upgrades.
 - [Repository guidance](../AGENTS.md): development checks and contribution rules.
 - [Architecture and design decisions](../llp/0000-hypaware.explainer.md): the LLP
   subsystem map and design rationale.
