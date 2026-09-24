@@ -54,7 +54,8 @@ The provider's exporter set is chosen from env, with three states:
 
 The OTLP branch is gated on `!devTelemetry && otlpEndpoint`: the two export
 modes are **mutually exclusive by construction**. This is the load-bearing
-invariant behind the self-loop guard: a
+invariant behind the `otel_self_loop_guard` acceptance smoke
+([LLP 0002](./0002-v1-scope.decision.md)): a
 daemon that runs its own OTLP listener must not also export *into* it, or it
 feeds itself in a runaway loop. Any change that lets both exporters install at
 once reintroduces that loop.

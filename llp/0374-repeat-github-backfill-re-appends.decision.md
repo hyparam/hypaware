@@ -113,6 +113,12 @@ its own answer to all three.
 
 ## Operator contract {#operator-contract}
 
+> **Amended (2026-09-23)** by
+> [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md). This
+> contract used to live in a manual `github_since_inclusivity` procedure, which
+> also held the open `since` question. That procedure is retired, so the
+> contract is stated here.
+
 Row growth is the expected result of a repeat backfill, so a reviewer
 measuring `count(*)` across two runs should not file it again. The other half
 of #1284's acceptance condition is still unconfirmed: whether GitHub's

@@ -661,8 +661,8 @@ Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
 sweep every five minutes by default.
 
 A positive `backfill.window_days` on a plugin entry bounds that scheduled
-sweep as well as the join-time import. This is deliberate,
-and it is easy to miss: a `window_days` set only to keep the first import
+sweep as well as the join-time import. This is deliberate:
+a `window_days` set only to keep the first import
 small also caps every later recovery, so a session older than the window is
 never swept up, OpenClaw's Lane B included. Nothing is removed from disk. The
 history is only left unimported, and widening or dropping `window_days` lets
@@ -766,7 +766,7 @@ hyp client claude-account status
 
 Plugin: `@hypaware/claude-desktop`.
 
-Desktop capture is transcript-only by default (LLP 0358). Select Claude
+Desktop capture is transcript-only by default. Select Claude
 Desktop in `hyp init`; the daemon reruns the Claude history provider every
 five minutes. This needs no Claude account credential and makes no changes to
 the Desktop app.

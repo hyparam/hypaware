@@ -106,7 +106,7 @@ order, paths, logging, and lifecycle. `ctx` gives you:
 - `ctx.log`: structured logger; `ctx.log.info('event', { ... })`.
 - `ctx.permissions`: check declared permissions.
 
-> **Style** (see `CLAUDE.md`): JavaScript, no semicolons, JSDoc types.
+> **Style**: JavaScript, no semicolons, JSDoc types.
 > Declare type imports with `@import` at the top of the file; never use
 > inline `import('...')` types or `@typedef`. Define shared types as
 > `interface`s in a `.d.ts` and `@import` them.
@@ -261,8 +261,8 @@ ctx.agents.register({
 Only clients whose manifest declares `contributes.client.agent_dir`
 receive agents; a target without one is skipped.
 
-Skills and agents are both **client assets** and share one install path
-(LLP 0138): attaching a client materializes them, and `hyp client skills
+Skills and agents are both **client assets** and share one install path:
+attaching a client materializes them, and `hyp client skills
 install` re-copies both on demand. There is no separate `agents`
 command.
 
@@ -360,7 +360,7 @@ throw err
 ```
 
 Keep dev telemetry local and secret-safe: no credentials, raw prompts,
-or private data, hash or redact when identity matters (see `CLAUDE.md`).
+or private data, hash or redact when identity matters.
 
 ---
 

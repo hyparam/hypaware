@@ -5,7 +5,7 @@
 Enrolling with a remote server (`hyp join`, or `hyp remote login` without
 `--no-forward`) automatically enables collection for that organization once
 gateway enrollment completes, including existing enrollments on the next CLI
-invocation or daemon start after upgrading (LLP 0408). Standalone installations
+invocation or daemon start after upgrading. Standalone installations
 default to **off**, and a saved `off` or `local` preference always takes
 precedence. This feature has no vendor endpoint, shared secret, or registration
 request.
@@ -20,8 +20,7 @@ hyp telemetry off
 
 `local` retains an allowlisted preview queue without network delivery and creates
 one random installation identity. `organization` requires exactly one configured
-central sink with an already enrolled gateway and an HTTPS URL (loopback HTTP is
-allowed for fixtures). Both enabling operations create new consent generations
+central sink with an already enrolled gateway and an HTTPS URL. Both enabling operations create new consent generations
 and remove earlier pending copies. `off` removes pending copies; it does not erase
 records already accepted by the receiver. A failed `off` exits nonzero and, when
 collection is still in force, says that product telemetry remains enabled.

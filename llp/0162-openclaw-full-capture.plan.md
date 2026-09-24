@@ -5,6 +5,7 @@
 **Related:** LLP 0161
 **Generated-by:** neutral
 **Extended-by:** LLP 0167 (two-lane capture: the steering-plugin tasks' output is deleted by LLP 0171 R9; the remainder stands as the record of what #510 shipped)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > [LLP 0161](./0161-openclaw-full-capture.design.md) is the technical design for
 > the two deliverables and one removal [LLP 0157](./0157-openclaw-full-capture.spec.md)
@@ -111,7 +112,7 @@ Everything else maps close to 1:1 onto the design's section numbers.
   OpenClaw capture procedure. Depends on everything it documents: T1 for
   the warning-ledger step, T6 and T7 for the live-capture route, T9 for the
   backfill route's pass condition. **Retired (2026-09-23)** by
-  [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md) with R12; the task line below is kept as history.
+  [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md) with R12; the task line below records what was planned.
 
 This yields a 4-wide first wave (T1, T3, T4, T5), a 5-wide second/third wave
 (T2, T6, T7, T9, then T8 once T3+T4 are in), and T11 landing last. T2, T6, T7,

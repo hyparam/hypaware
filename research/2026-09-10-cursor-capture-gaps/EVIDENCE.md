@@ -13,7 +13,7 @@ downtime can be recovered without adding a second conversation copy.
 
 Inspected editor 3.19.19 and CLI 2026.09.08-6caf4ff.
 
-Detailed research, source links and reproducible probes:
+Detailed research and source links:
 [Cursor capture gaps](REPORT.md).
 Sanitized hook fixtures remain under `test/fixtures/cursor/`.
 
