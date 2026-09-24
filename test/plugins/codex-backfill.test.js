@@ -346,7 +346,7 @@ test('scheduled capture migrates the route, skips unchanged files, and retries f
     assert.equal(first.items.length, 1)
     assert.equal(value(first.items[0]).system_text, 'native base instructions')
     assert.equal(value(first.items[0]).tools, undefined)
-    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "custom"\n')
+    assert.match(await fs.readFile(configPath, 'utf8'), /^model_provider = "custom"\n/)
     assert.ok(entries.some((e) => e.message === 'codex.capture.route_released'))
     assert.equal((await collect(provider.run(ctx))).items.length, 0)
     assert.equal(entries.at(-1)?.fields?.files_read, 0)
@@ -1197,4 +1197,39 @@ test('backfill refreshes exclusions and keys on the Codex container rather than 
     writer.delete('container-id')
     assert.equal((await collect(provider.run(runContext().ctx))).items.length, 1)
   } finally { await env.cleanup() }
+})
+
+test('scheduled repair covers markerless 1.38 configs but skips gateway, manual and dry runs', async () => {
+  const env = await stageEnv()
+  try {
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    const original = 'model_provider = "custom"\n[model_providers.custom]\nname = "Private"\nbase_url = "https://example.invalid/v1"\nenv_key = "PRIVATE_KEY"\n'
+    await fs.writeFile(configPath, original)
+    for (const scenario of [
+      { config: { capture_mode: 'gateway' }, sweep: true, dryRun: false },
+      { config: { capture_mode: 'transcript' }, sweep: false, dryRun: false },
+      { config: { capture_mode: 'transcript' }, sweep: true, dryRun: true },
+    ]) {
+      const { ctx } = runContext()
+      Object.assign(ctx, { sweep: scenario.sweep, dryRun: scenario.dryRun })
+      const provider = createCodexBackfillProvider({ homeDir: env.homeDir, config: scenario.config })
+      await collect(provider.run(ctx))
+      assert.equal(await fs.readFile(configPath, 'utf8'), original)
+    }
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    await collect(provider.run(ctx))
+    const repaired = await fs.readFile(configPath, 'utf8')
+    assert.ok(repaired.startsWith(original))
+    assert.match(repaired, /\[model_providers.hypaware\]\nname = "OpenAI"/)
+    assert.ok(entries.some(e => e.message === 'codex.capture.provider_repaired'))
+    const before = await fs.stat(configPath)
+    await collect(provider.run(ctx))
+    assert.equal((await fs.stat(configPath)).mtimeMs, before.mtimeMs)
+    assert.equal(await fs.readFile(configPath, 'utf8'), repaired)
+  } finally {
+    await env.cleanup()
+  }
 })

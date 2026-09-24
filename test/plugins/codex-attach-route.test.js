@@ -37,7 +37,7 @@ for (const initial of [undefined, 'model_provider = "custom"\nmodel = "test"\n']
       stdout = ''
       await client.attach(attachCtx)
       assert.equal(JSON.parse(stdout).mode, 'transcript')
-      if (initial) assert.equal(await fs.readFile(configPath, 'utf8'), 'model = "test"\nmodel_provider = "custom"\n')
+      if (initial) assert.match(await fs.readFile(configPath, 'utf8'), /^model = "test"\nmodel_provider = "custom"\n/)
       else await assert.rejects(fs.access(configPath), { code: 'ENOENT' })
       stdout = ''
       await client.attach(attachCtx)

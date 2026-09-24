@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
+import { isolatedClientEnv } from './isolation.js'
 import { makeExpect } from './expect.js'
 
 /**
@@ -41,6 +42,14 @@ export async function runFlow(name) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `hyp-smoke-${name}-`))
   const hypHome = path.join(tmpDir, '.hyp')
   await fs.mkdir(hypHome, { recursive: true })
+
+  const homeDir = path.join(tmpDir, 'home')
+  await fs.mkdir(homeDir, { recursive: true })
+  const isolated = isolatedClientEnv(process.env, homeDir)
+  for (const key of Object.keys(process.env)) {
+    if (!(key in isolated)) delete process.env[key]
+  }
+  Object.assign(process.env, isolated)
 
   process.env.DEV_RUN_ID = runId
   process.env.HYP_DEV_TELEMETRY = '1'

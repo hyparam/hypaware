@@ -234,11 +234,12 @@ export async function activate(ctx) {
             attachCtx.stdout.write(attachCtx.dryRun
               ? `(dry-run) Would attach Codex via ${configPath}\n`
               : `✓ Codex attached (${configPath})\n`)
-            if (result.changed) {
+            if (result.changed && result.removed) {
               attachCtx.stdout.write(attachCtx.dryRun
                 ? '  Would remove the managed gateway route.\n'
                 : '  Removed the managed gateway route.\n')
             }
+            if (result.changed) attachCtx.stdout.write('  Preserve saved chats with a direct OpenAI compatibility provider.\n')
             attachCtx.stdout.write(attachCtx.dryRun
               ? '  Would capture Codex CLI and Desktop from their local rollout files.\n'
               : '  Codex CLI and Desktop capture uses local rollout files; inference connects directly to your provider.\n')
