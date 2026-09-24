@@ -22,16 +22,21 @@ requirements:
 
 ## Install HypAware for the first time
 
-To start the guided setup, use `npx`:
+Install the CLI globally, then run the guided setup:
 
 ```sh
-npx hypaware
+npm i -g hypaware
+hyp setup
 ```
 
-The setup asks whether to collect locally or with a team and what to record.
-New guided setups also configure local Parquet exports; use `--export` to choose
-another strategy. It writes the configuration, installs a durable global CLI
-and the daemon, attaches the clients you selected, and imports supported client history.
+The first question is how to collect. **Sync to the cloud** is the default:
+press Enter and a browser sign-in enrolls this machine so its recordings
+follow you across machines. Choose **Local only** to keep everything on this
+machine; you can switch later with `hyp remote login`. The setup then asks
+what to record. New guided setups also configure local Parquet exports; use
+`--export` to choose another strategy. It writes the configuration, installs
+the daemon, attaches the clients you selected, and imports supported client
+history.
 
 If a valid configuration already exists, `hyp setup` shows the current setup
 and lets you reconfigure it, open full status, or quit. Quit is the default, so
@@ -116,7 +121,7 @@ hyp client status claude
 ```
 
 Claude Code capture uses Claude's OpenTelemetry (OTEL) export instead of a
-proxy. `hyp client attach claude` writes a reversible `env` block in
+proxy. `hyp attach claude` writes a reversible `env` block in
 `~/.claude/settings.json`. New Claude Code processes send telemetry events to
 the daemon's loopback listener and write transient raw API bodies to
 `~/.hyp/spool/claude-bodies`. The listener projects those bodies and deletes
@@ -133,7 +138,7 @@ endpoint drift, recent telemetry activity, transcript activity, and capture
 health. If the endpoints differ, reattach Claude and restart the daemon:
 
 ```sh
-hyp client attach claude
+hyp attach claude
 hyp daemon restart
 hyp client status claude
 ```
@@ -251,7 +256,7 @@ hyp daemon install
 hyp status
 ```
 
-Use `hyp client attach CLIENT` for any configured client that status reports as
+Use `hyp attach CLIENT` for any configured client that status reports as
 detached. Replace `CLIENT` with a listed client name, such as `claude` or
 `codex`.
 
@@ -275,7 +280,7 @@ Read the plan or warning before you approve any of these operations:
 - `hyp daemon uninstall` removes the persistent service and detaches clients
   so they don't point at a stopped gateway. It keeps the configuration,
   recordings, and logs.
-- `hyp client detach CLIENT` stops future capture and keeps recordings. For a
+- `hyp detach CLIENT` stops future capture and keeps recordings. For a
   legacy proxy attach, `--purge` also removes the HypAware interception CA and
   its keychain trust. Claude telemetry detach removes the managed telemetry
   settings and sweeps its raw-body spool.
@@ -294,7 +299,7 @@ remain compatibility aliases and use the same runners:
 | Compatibility spelling | Canonical spelling |
 | --- | --- |
 | `hyp init` | `hyp setup` |
-| `hyp attach`, `hyp detach`, `hyp unattach` | `hyp client attach`, `hyp client detach` |
+| `hyp unattach` | `hyp detach` |
 | `hyp backfill`, `hyp backfill plan`, `hyp backfill list` | `hyp client history import`, `hyp client history plan`, `hyp client history providers` |
 | `hyp skills install` | `hyp client skills install` |
 | `hyp policy ...`, `hyp ignore`, `hyp unignore`, `hyp purge` | `hyp privacy ...` |
@@ -304,6 +309,9 @@ remain compatibility aliases and use the same runners:
 | `hyp plugin new`, `hyp plugin doctor` | `hyp dev plugin new`, `hyp dev plugin doctor` |
 | `hyp mcp` | `hyp mcp serve` |
 | `hyp enrich ...` | `hyp enrichment ...` |
+
+`hyp attach` and `hyp detach` are the preferred short forms of `hyp client attach`
+and `hyp client detach`; both spellings run the same command.
 
 Plugin-owned aliases are available only when the owning plugin is active.
 
