@@ -218,3 +218,41 @@ test('provider fields after END still belong to the managed table', () => {
   assert.equal(result.changed, true)
   assert.doesNotMatch(result.content, /base_url|127.0.0.1/)
 })
+
+for (const escape of ['\\u0061', '\\U00000061']) {
+  const namespace = `"model_providers"`.replace('o', escape.replace('61', '6f'))
+  const provider = `"hypaware"`.replace('a', escape)
+  for (const content of [
+    `[${namespace}.${provider}]\nname = "Mine"\nwire_api = "responses"\n`,
+    `${namespace}.${provider} = { name = "Mine", wire_api = "responses" }\n`,
+    `[${namespace}]\n${provider} = { name = "Mine", wire_api = "responses" }\n`,
+    `${namespace} = { ${provider} = { name = "Mine", wire_api = "responses" } }\n`,
+    `${namespace} = { ${provider}.name = "Mine", ${provider}.wire_api = "responses" }\n`,
+  ]) {
+    test(`escaped user-owned provider remains byte-for-byte untouched: ${content.split('\n')[0]}`, () => {
+      assert.deepEqual(prepareDetach(content), { changed: false })
+    })
+  }
+  test(`escaped inline namespace repairs a missing provider: ${escape}`, () => {
+    const original = `${namespace} = { custom = { name = "Private", wire_api = "responses" } }\n`
+    const result = prepareDetach(original)
+    assert.equal(result.changed, true)
+    assert.match(result.content, /\[model_providers.hypaware\]/)
+    assert.ok(result.content.includes(`${namespace}.custom = { name = "Private", wire_api = "responses" }`))
+    assert.deepEqual(prepareDetach(result.content), { changed: false })
+  })
+}
+
+for (const header of ['[model_providers.hypaware.http_headers]', '["model_providers"."hyp\\U00000061ware".http_headers]']) {
+  test(`managed descendant beyond END is replaced without retaining credentials: ${header}`, () => {
+    const unrelated = '[features]\nfast_mode = true\n[model_providers.custom]\nname = "Private"\nwire_api = "responses"\n'
+    const content = prepareAttach('', 4388, 'old').content + unrelated
+      + `${header}\nAuthorization = "synthetic-secret"\n`
+    const result = prepareDetach(content)
+    assert.equal(result.changed, true)
+    assert.ok(result.content.includes(unrelated))
+    assert.match(result.content, /\[model_providers.hypaware\]\nname = "OpenAI"\nrequires_openai_auth = true\nwire_api = "responses"\nsupports_websockets = true/)
+    assert.doesNotMatch(result.content, /http_headers|synthetic-secret|base_url/)
+    assert.deepEqual(prepareDetach(result.content), { changed: false })
+  })
+}

@@ -34,18 +34,10 @@ const PROVIDER_BEGIN = '# BEGIN hypaware codex provider'
 const PROVIDER_END = '# END hypaware codex provider'
 const TOML_KEY_PART = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)`
 const TOML_DOTTED_KEY = String.raw`${TOML_KEY_PART}(?:\s*\.\s*${TOML_KEY_PART})*`
-const TOML_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
-const TOML_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
-const TOML_MODEL_PROVIDER_KEY = String.raw`(?:model_provider|"model_provider"|'model_provider')`
-const TOML_MODEL_PROVIDERS_KEY = String.raw`(?:model_providers|"model_providers"|'model_providers')`
-const TOML_MANAGED_PROVIDER_KEY = String.raw`(?:${PROVIDER_ID}|"${PROVIDER_ID}"|'${PROVIDER_ID}')`
-const TOML_MANAGED_PROVIDER_DOTTED_KEY = String.raw`${TOML_MODEL_PROVIDERS_KEY}\s*\.\s*${TOML_MANAGED_PROVIDER_KEY}(?:\s*\.\s*${TOML_KEY_PART})*`
-const TOML_MODEL_PROVIDERS_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_MODEL_PROVIDERS_KEY}\s*\]\s*(?:#.*)?$`)
-const TOML_MANAGED_PROVIDER_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_MANAGED_PROVIDER_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
-const TOML_MANAGED_PROVIDER_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_MANAGED_PROVIDER_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
-const TOML_MANAGED_PROVIDER_DOTTED_ASSIGNMENT_RE = new RegExp(String.raw`^\s*${TOML_MANAGED_PROVIDER_DOTTED_KEY}\s*=`)
-const TOML_MANAGED_PROVIDER_CHILD_ASSIGNMENT_RE = new RegExp(String.raw`^\s*${TOML_MANAGED_PROVIDER_KEY}(?:\s*\.\s*${TOML_KEY_PART})*\s*=`)
-const TOML_ROOT_MODEL_PROVIDER_RE = new RegExp(String.raw`^\s*${TOML_MODEL_PROVIDER_KEY}\s*=`)
+const TOML_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*(${TOML_DOTTED_KEY})\s*\]\s*(?:#.*)?$`)
+const TOML_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*(${TOML_DOTTED_KEY})\s*\]\]\s*(?:#.*)?$`)
+const TOML_ASSIGNMENT_RE = new RegExp(String.raw`^\s*(${TOML_DOTTED_KEY})\s*=`)
+const TOML_KEY_PART_RE = new RegExp(TOML_KEY_PART, 'g')
 
 /**
  * @param {string} content
@@ -326,13 +318,13 @@ function removeProviderDottedAssignments(lines) {
       continue
     }
     if (isTableHeader(line)) {
-      table = TOML_MODEL_PROVIDERS_TABLE_HEADER_RE.test(line) ? 'model_providers' : 'other'
+      table = hasKeyPrefix(TOML_TABLE_HEADER_RE.exec(line)?.[1], ['model_providers'], true) ? 'model_providers' : 'other'
       next.push(line)
       continue
     }
     if (
-      (table === 'root' && TOML_MANAGED_PROVIDER_DOTTED_ASSIGNMENT_RE.test(line))
-      || (table === 'model_providers' && TOML_MANAGED_PROVIDER_CHILD_ASSIGNMENT_RE.test(line))
+      (table === 'root' && hasKeyPrefix(TOML_ASSIGNMENT_RE.exec(line)?.[1], ['model_providers', PROVIDER_ID]))
+      || (table === 'model_providers' && hasKeyPrefix(TOML_ASSIGNMENT_RE.exec(line)?.[1], [PROVIDER_ID]))
     ) {
       removedMultilineDelimiter = openMultilineString(line)
       continue
@@ -354,6 +346,17 @@ function removeMarkedBlock(lines, begin, end) {
   const next = []
   let inside = false
   let root = true
+  // Ownership follows the provider namespace even when a descendant table
+  // appears outside the comments or after unrelated tables.
+  let ownsProviderNamespace = false
+  if (begin === PROVIDER_BEGIN) {
+    for (const line of syntaxLines(lines)) {
+      if (line.trim() === begin) inside = true
+      else if (line.trim() === end) inside = false
+      else if (inside && isManagedProviderTableHeader(line)) ownsProviderNamespace = true
+    }
+    inside = false
+  }
   let ownedProvider = false
   /** @type {string | undefined} */
   let multilineDelimiter
@@ -374,7 +377,7 @@ function removeMarkedBlock(lines, begin, end) {
     }
     if (isTableHeader(line)) {
       root = false
-      ownedProvider = inside && begin === PROVIDER_BEGIN && isManagedProviderTableHeader(line)
+      ownedProvider = ownsProviderNamespace && isManagedProviderTableHeader(line)
     }
     multilineDelimiter = openMultilineString(line)
     // Markers are comments, not TOML scope: Codex may insert unrelated root
@@ -400,8 +403,8 @@ function hasProvider(lines) {
   return removeProviderTable(lines).length !== lines.length
     || removeProviderDottedAssignments(lines).length !== lines.length
     || (findInlineProviderMap(lines)?.entries.some(entry => {
-      const key = new RegExp(`^(${TOML_KEY_PART})`).exec(entry.slice(inlineKeyStart(entry)))?.[1]
-      return key === PROVIDER_ID || (key !== undefined && parseTomlString(key) === PROVIDER_ID)
+      const key = TOML_ASSIGNMENT_RE.exec(entry.slice(inlineKeyStart(entry)))?.[1]
+      return hasKeyPrefix(key, [PROVIDER_ID])
     }) ?? false)
 }
 
@@ -426,15 +429,14 @@ function expandInlineProviderMap(lines) {
 
 /** @param {string[]} lines */
 function findInlineProviderMap(lines) {
-  const rootAssignment = new RegExp(`^\\s*(${TOML_MODEL_PROVIDERS_KEY})\\s*=`)
   let offset = 0
   let multiline
   for (const line of lines) {
     if (multiline !== undefined) multiline = closeMultilineString(line, multiline)
     else {
       if (isTableHeader(line)) return undefined
-      const match = rootAssignment.exec(line)
-      if (match) {
+      const match = TOML_ASSIGNMENT_RE.exec(line)
+      if (match && hasKeyPrefix(match[1], ['model_providers'], true)) {
         const text = lines.join('\n')
         let start = offset + match[0].length
         while (/\s/.test(text[start] ?? '') && start < text.length) start++
@@ -607,7 +609,7 @@ function parseRootModelProvider(line) {
 
 /** @param {string} line */
 function isRootModelProviderLine(line) {
-  return TOML_ROOT_MODEL_PROVIDER_RE.test(line)
+  return hasKeyPrefix(TOML_ASSIGNMENT_RE.exec(line)?.[1], ['model_provider'], true)
 }
 
 /** @param {string} line */
@@ -623,7 +625,13 @@ function parseTomlString(value) {
   if (trimmed.startsWith('"')) {
     const match = trimmed.match(/^"(?:\\.|[^"\\])*"/)
     if (!match) return undefined
-    try { return JSON.parse(match[0]) } catch { return undefined }
+    try {
+      // JSON and TOML share basic escapes, except TOML also accepts \U.
+      // Consume escaped backslashes too, so a literal \\U stays literal.
+      const normalized = match[0].replace(/\\(?:U([0-9a-fA-F]{8})|.)/g, (escape, hex) =>
+        hex ? JSON.stringify(String.fromCodePoint(Number.parseInt(hex, 16))).slice(1, -1) : escape)
+      return JSON.parse(normalized)
+    } catch { return undefined }
   }
   if (trimmed.startsWith('\'')) {
     const match = trimmed.match(/^'([^']*)'/)
@@ -691,11 +699,24 @@ function isEscaped(value, index) {
 
 /** @param {string} line */
 function isManagedProviderTableHeader(line) {
-  return TOML_MANAGED_PROVIDER_TABLE_HEADER_RE.test(line)
-    || TOML_MANAGED_PROVIDER_TABLE_ARRAY_HEADER_RE.test(line)
+  const key = (TOML_TABLE_HEADER_RE.exec(line) ?? TOML_TABLE_ARRAY_HEADER_RE.exec(line))?.[1]
+  return hasKeyPrefix(key, ['model_providers', PROVIDER_ID])
 }
 
 /** @param {string} value */
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Compare decoded TOML key segments without changing their source spelling.
+ * @param {string | undefined} key
+ * @param {string[]} prefix
+ * @param {boolean} [exact]
+ */
+function hasKeyPrefix(key, prefix, exact = false) {
+  if (key === undefined) return false
+  const parts = key.match(TOML_KEY_PART_RE) ?? []
+  return (!exact || parts.length === prefix.length) && prefix.every((part, i) =>
+    parts[i] === part || (parts[i] !== undefined && parseTomlString(parts[i]) === part))
 }

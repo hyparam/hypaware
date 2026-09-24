@@ -13,7 +13,8 @@ import path from 'node:path'
 export function isolatedClientEnv(inherited, homeDir) {
   const env = { ...inherited }
   for (const key of [
-    'HYP_CONFIG', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CURSOR_CONFIG_DIR',
+    'HYP_CONFIG', 'CODEX_HOME', 'CLAUDE_HOME', 'CLAUDE_CONFIG_DIR', 'CURSOR_CONFIG_DIR',
+    'HERMES_HOME',
     'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_SESSION_DIR',
     'OPENCLAW_HOME', 'OPENCLAW_STATE_DIR', 'OPENCLAW_CONFIG_PATH',
     'OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT',

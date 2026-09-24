@@ -42,3 +42,32 @@ test('smoke harness replaces inherited Codex home before importing the flow', as
   assert.equal(state.codex, undefined)
   assert.equal((await fs.readdir(root)).some(name => name.startsWith('live-')), false)
 })
+
+test('core Claude detach stays inside isolated HOME despite inherited CLAUDE_HOME', async t => {
+  const { detachClientFromDisk } = await import('../../src/core/config/client_detach_disk.js')
+  const manifest = JSON.parse(await fs.readFile(new URL('../../hypaware-core/plugins-workspace/claude/hypaware.plugin.json', import.meta.url), 'utf8'))
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-isolation-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const home = path.join(root, 'home')
+  const external = path.join(root, 'external-claude')
+  const local = path.join(home, '.claude', 'settings.json')
+  const fixture = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' } }, previous: { env: {} } } })
+  await fs.mkdir(path.dirname(local), { recursive: true })
+  await fs.mkdir(external)
+  await fs.writeFile(local, fixture)
+  await fs.writeFile(path.join(external, 'settings.json'), fixture)
+  const result = await detachClientFromDisk({
+    descriptor: { name: manifest.contributes.client.name, plugin: manifest.name, skillDir: manifest.contributes.client.skill_dir, attachProbe: manifest.contributes.client.attach_probe },
+    env: isolatedClientEnv({ CLAUDE_HOME: external }, home), homeDir: home,
+  })
+  assert.equal(result.settingsPath, local)
+  assert.equal(result.changed, true)
+  assert.equal(await fs.readFile(path.join(external, 'settings.json'), 'utf8'), fixture)
+  assert.equal(JSON.parse(await fs.readFile(local, 'utf8'))._hypaware, undefined)
+})
+
+test('isolation clears concrete generic client HOME overrides and preserves toolchain paths', () => {
+  const env = isolatedClientEnv({ CLAUDE_HOME: '/external/claude', CODEX_HOME: '/external/codex', OPENCLAW_HOME: '/external/openclaw', HERMES_HOME: '/external/hermes', JAVA_HOME: '/tools/java' }, '/fixture')
+  for (const key of ['CLAUDE_HOME', 'CODEX_HOME', 'OPENCLAW_HOME', 'HERMES_HOME']) assert.equal(env[key], undefined, key)
+  assert.equal(env.JAVA_HOME, '/tools/java')
+})
