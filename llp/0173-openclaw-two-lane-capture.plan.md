@@ -327,10 +327,11 @@ Design Section 10 names two items for a human, both carried forward
 unchanged rather than resolved here, because resolving them is not this
 rung's job:
 
-- **R11's acceptance rewrite (T13) requires a human run before the adapter
+- ~~**R11's acceptance rewrite (T13) requires a human run before the adapter
   ships.** This plan schedules the document; a human still has to run it,
   and per the external-blockers section above, a full successful run needs
-  PR #552 (and, for the status row, PR #553) merged first.
+  PR #552 (and, for the status row, PR #553) merged first.~~ Retired with
+  R11 (LLP 0171).
 - **The hermetic smoke gap** is the scoping call the previous section
   resolves for this plan (include, as T12, held pending #552); the design's
   framing of this as worth a human's reconsideration stands, since this

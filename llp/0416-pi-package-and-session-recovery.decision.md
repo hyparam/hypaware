@@ -136,5 +136,5 @@ not disable historical import.
 Deterministic tests and a hermetic smoke cover projection, replay, accounting,
 privacy, package lifecycle and health. An isolated actual Pi 0.85.1 run with a
 fake provider verifies extension loading and append ordering without credentials
-or paid model calls. Real-provider, TUI and upstream-version acceptance remains
-a release gate; source inspection and fixtures cannot replace it.
+or paid model calls. Real-provider, TUI and upstream-version behavior needs a
+real Pi to confirm; source inspection and fixtures cannot replace it.

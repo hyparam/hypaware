@@ -675,6 +675,9 @@ untouched.
 
 ## 9. Acceptance procedure {#acceptance}
 
+> **Retired (2026-09-23).** The repo no longer keeps written manual
+> procedures, so this one was removed. This section records its design.
+
 A manual OpenClaw capture procedure is written, mirroring
 the Codex Desktop procedure's exact heading structure (What it proves / What
 it does not prove / Requires / Related / `### Steps` / `### If it fails`).

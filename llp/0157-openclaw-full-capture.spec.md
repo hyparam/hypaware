@@ -164,6 +164,9 @@ the warning ledger.
 
 ## Acceptance {#acceptance}
 
+> **Retired (2026-09-23).** The repo no longer keeps written manual
+> procedures, so this one was removed. This section records what it covered.
+
 A manual OpenClaw capture procedure is written, mirroring the
 Codex Desktop procedure's structure (what it proves / does not prove /
 requires / steps with pass conditions / if it fails). It proves an
@@ -247,8 +250,10 @@ Named by the decisions as verify-before-relying-on:
   rows (same expansion path, same native ids), so that route overlap
   resolves to zero writes through the existing `part_id` dedupe
   (LLP 0159).
-- **R12.** The manual OpenClaw capture procedure of {#acceptance}
-  MUST exist and MUST have been run by a human before the adapter ships.
+- ~~**R12.** The manual OpenClaw capture procedure of {#acceptance}
+  MUST exist and MUST have been run by a human before the adapter ships.~~
+  **Retired (2026-09-23).** The repo no longer keeps written manual
+  procedures, so this one was removed.
 - **R13.** Coverage reporting MUST distinguish deferrals, sibling-adapter
   territory, and documented side channels from gaps, deriving from the
   warning ledger ({#coverage}).

@@ -729,6 +729,10 @@ touched by this change set:
 
 ### 8.1 The manual OpenClaw capture procedure (R11 of LLP 0171)
 
+> **Retired (2026-09-23).** The repo no longer keeps written manual
+> procedures, so this one was removed. This section records the rewrite it
+> specified.
+
 The old procedure required linking and enabling the
 steering plugin from the checkout under test
 (`openclaw plugins install --link ./openclaw-steering-plugin --force`), and
@@ -815,9 +819,9 @@ existing mechanism or a directly-cited decision. Two items are worth a
 human's attention regardless, both already flagged in the requirements
 rather than newly discovered here:
 
-- **R11's acceptance rewrite (section 8.1) requires a human run before the
+- ~~**R11's acceptance rewrite (section 8.1) requires a human run before the
   adapter ships.** This design specifies what that run must cover; it does
-  not and cannot perform the run itself.
+  not and cannot perform the run itself.~~ Retired with R11.
 - **The hermetic smoke gap (section 9)** is a real coverage hole this
   design chooses not to close, on the grounds that building a new smoke
   fixture is implementation work for a later rung, not a design decision.

@@ -116,6 +116,5 @@ OTLP. A provider baseURL proxy and a hosted gateway are not part of this slice.
 - An OpenCode config home relocated only through a process-local override that
   the setup process cannot observe may not be pre-checked. This does not widen
   the picker probe schema.
-- Manual CLI/Desktop acceptance is still required for releases touching this
-  adapter. It is not simulated by the hermetic smoke and is never run without
-  explicit authorization.
+- The hermetic smoke does not simulate real CLI/Desktop behavior; only a run
+  against the real clients can confirm it.

@@ -327,19 +327,11 @@ Do not run `git reset`, `git restore`, `git checkout --`, or `git add -A` as a
 cleanup shortcut. Inspect staged and unstaged diffs separately and stage only
 with deliberate file or hunk selection.
 
-## Remaining release boundary
-
-A manual check against a real Claude Code remains pending.
-It requires a real Claude Code 2.1.214 or newer and cannot be substituted with
-the hermetic fixture smoke. Before releasing Claude adapter changes, run it and
-record the observed Claude version and complete event-name list in the release
-notes.
+## Remaining cleanup
 
 The safety stash can be considered for removal only after:
 
 1. the final staged and unstaged diff is reviewed,
 2. the desired commit boundary is settled,
-3. any code changes made after this checkpoint are reverified,
-4. the manual Claude Code check is either completed or explicitly
-   carried as a release blocker, and
-5. Phil explicitly authorizes dropping `stash@{0}`.
+3. any code changes made after this checkpoint are reverified, and
+4. Phil explicitly authorizes dropping `stash@{0}`.

@@ -83,4 +83,4 @@ version attribution, canonicalization, nested/early dispatch, runtime arithmetic
 queue capacity/concurrent writers, restart retry, destination changes and errors.
 Benchmarks report measurements separately from targets (10 ms p95 queue append,
 1% idle CPU, 10 MiB pipeline memory). A 24-hour installed-daemon outage/idle soak
-and cross-version durable-spool acceptance remain manual release gates.
+and cross-version durable-spool behavior are not covered by automated tests.

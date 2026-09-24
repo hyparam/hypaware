@@ -76,12 +76,14 @@ reversed by R5 below, R12 is replaced by R11 below, and R13 is retired
   reader, and backfill projection MUST be unchanged by this change set;
   the projector's gate keeps reading `x-hypaware-upstream`, now
   config-sourced (LLP 0168).
-- **R11.** The manual OpenClaw capture procedure MUST be rewritten
+- ~~**R11.** The manual OpenClaw capture procedure MUST be rewritten
   per LLP 0167#deletion-inventory: attach-flow steps, a sweep step in
   which a turn on a non-overridden provider lands within the interval,
   a zero-duplicate assertion for a turn both lanes captured, and
   re-confirmation of verify items 1, 3, and 4 on a binary at or above
-  the 2026.4.24 floor. A human MUST run it before the adapter ships.
+  the 2026.4.24 floor. A human MUST run it before the adapter ships.~~
+  **Retired (2026-09-23).** The repo no longer keeps written manual
+  procedures, so this one was removed.
 - **R12.** The picker line items MUST carry the LLP 0167#onboarding
   copy: Claude's names the OpenClaw `claude-cli/<model>` case
   explicitly; OpenClaw's states the two capture tiers.
