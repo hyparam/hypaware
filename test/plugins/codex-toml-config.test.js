@@ -219,7 +219,7 @@ test('provider fields after END still belong to the managed table', () => {
   assert.doesNotMatch(result.content, /base_url|127.0.0.1/)
 })
 
-for (const escape of ['\\u0061', '\\U00000061']) {
+for (const escape of ['\\u0061', '\\U00000061', '\\x61']) {
   const namespace = `"model_providers"`.replace('o', escape.replace('61', '6f'))
   const provider = `"hypaware"`.replace('a', escape)
   for (const content of [
@@ -231,8 +231,22 @@ for (const escape of ['\\u0061', '\\U00000061']) {
   ]) {
     test(`escaped user-owned provider remains byte-for-byte untouched: ${content.split('\n')[0]}`, () => {
       assert.deepEqual(prepareDetach(content), { changed: false })
+      const attached = prepareAttach(content, 4388, 'new')
+      assert.doesNotMatch(attached.content, /name = "Mine"/)
+      assert.match(attached.content, /\[model_providers.hypaware\]/)
+      assert.equal(isManagedAttached(attached.content), true)
     })
   }
+  test(`literal escaped backslash does not name the managed provider: ${escape}`, () => {
+    const literalProvider = provider.replace('\\', '\\\\')
+    const original = `[model_providers.${literalProvider}]\nname = "Literal"\nwire_api = "responses"\n`
+    const result = prepareDetach(original)
+    assert.equal(result.changed, true)
+    assert.ok(result.content.startsWith(original))
+    assert.match(result.content, /\[model_providers.hypaware\]/)
+    assert.deepEqual(prepareDetach(result.content), { changed: false })
+    assert.ok(prepareAttach(original, 4388, 'new').content.includes(original))
+  })
   test(`escaped inline namespace repairs a missing provider: ${escape}`, () => {
     const original = `${namespace} = { custom = { name = "Private", wire_api = "responses" } }\n`
     const result = prepareDetach(original)

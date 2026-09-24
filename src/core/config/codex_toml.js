@@ -626,10 +626,12 @@ function parseTomlString(value) {
     const match = trimmed.match(/^"(?:\\.|[^"\\])*"/)
     if (!match) return undefined
     try {
-      // JSON and TOML share basic escapes, except TOML also accepts \U.
-      // Consume escaped backslashes too, so a literal \\U stays literal.
-      const normalized = match[0].replace(/\\(?:U([0-9a-fA-F]{8})|.)/g, (escape, hex) =>
-        hex ? JSON.stringify(String.fromCodePoint(Number.parseInt(hex, 16))).slice(1, -1) : escape)
+      // TOML also accepts \U and \x hex escapes that JSON cannot decode.
+      // Consume escaped backslashes too, so literal \\U and \\x stay literal.
+      const normalized = match[0].replace(/\\(?:U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2})|.)/g, (escape, unicode, byte) => {
+        const hex = unicode ?? byte
+        return hex ? JSON.stringify(String.fromCodePoint(Number.parseInt(hex, 16))).slice(1, -1) : escape
+      })
       return JSON.parse(normalized)
     } catch { return undefined }
   }
