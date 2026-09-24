@@ -5,6 +5,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { asyncRow } from 'squirreling'
 
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
@@ -52,6 +53,150 @@ const EDGES = [
   e('s2', 'a1', 'via'),
   e('s2', 'f1', 'touched'),
 ]
+
+/**
+ * Exercise the real SQL engine, including residual filtering on an unindexed
+ * source. Noise is generated lazily so the fixture itself is not a large heap.
+ * @param {any[]} nodes
+ * @param {any[]} edges
+ * @param {number} noise
+ */
+function memoryGraph(nodes = NODES, edges = EDGES, noise = 0) {
+  const scans = []
+  const registry = /** @type {any} */ ({
+    getDataset: name => ({
+      discoverPartitions: async () => [],
+      createDataSource: async () => ({
+        columns: (name === 'node' ? NODE_COLUMNS : EDGE_COLUMNS).map(c => c.name),
+        numRows: noise + (name === 'node' ? nodes.length : edges.length),
+        // Large sources use the engine's real vector filter, as Iceberg does.
+        // The fixture leaves WHERE and LIMIT residual: it never guesses what
+        // the graph query meant or filters by its own copy of that logic.
+        ...(noise ? {
+          schema: { fields: (name === 'node' ? NODE_COLUMNS : EDGE_COLUMNS).map((c, id) => ({ id, name: c.name, dataType: { type: 'unknown' }, nullable: true })) },
+          prepareScan(request) {
+            const fields = request.columns.map(c => ({ id: c.field, name: (name === 'node' ? NODE_COLUMNS : EDGE_COLUMNS)[c.field].name, dataType: { type: 'unknown' }, nullable: true }))
+            scans.push({ dataset: name, where: request.filter, columns: fields.map(f => f.name) })
+            return {
+              schema: { fields }, residual: { filter: request.filter, limit: request.limit, offset: request.offset }, properties: {},
+              async *batches({ signal }) {
+                const rows = name === 'node' ? nodes.map(fullNode) : edges.map((row, i) => fullEdge({ edge_id: `e-${i}`, ...row }))
+                for (let at = 0; at < noise + rows.length; at += 1024) {
+                  signal?.throwIfAborted()
+                  const length = Math.min(1024, noise + rows.length - at)
+                  const values = fields.map(() => [])
+                  for (let i = at; i < at + length; i++) {
+                    const row = i >= noise ? rows[i - noise] : name === 'node'
+                      ? fullNode({ node_id: `noise-${i}`, natural_key: `noise-${i}` })
+                      : fullEdge({ edge_id: `noise-${i}`, src_id: `noise-${i}`, dst_id: `noise-${i + 1}` })
+                    fields.forEach((f, j) => values[j].push(row[f.name]))
+                  }
+                  yield { selection: { type: 'all', length }, columns: values.map(values => ({ type: 'values', values, length })) }
+                }
+              },
+            }
+          },
+        } : {}),
+        scan(options) {
+          scans.push({ dataset: name, ...options })
+          return {
+            appliedWhere: false, appliedLimitOffset: false,
+            async *rows() {
+              for (let i = 0; i < noise; i++) {
+                const row = name === 'node'
+                  ? fullNode({ node_id: `noise-${i}`, natural_key: `noise-${i}` })
+                  : fullEdge({ edge_id: `noise-${i}`, src_id: `noise-${i}`, dst_id: `noise-${i + 1}` })
+                yield asyncRow(row, options.columns)
+              }
+              const rows = name === 'node' ? nodes.map(fullNode)
+                : edges.map((row, i) => fullEdge({ edge_id: `e-${i}`, ...row }))
+              for (const row of rows) yield asyncRow(row, options.columns)
+            },
+          }
+        },
+      }),
+    }),
+    listDatasets: () => [],
+  })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/graph-query-test', pendingInfo: async () => ({ pending: false }) })
+  return { query: registry, storage, scans, includeLocalOnly: true }
+}
+
+test('a small neighborhood remains queryable beyond 100000 unrelated nodes and edges', async () => {
+  const fixture = memoryGraph(NODES, EDGES, 100_010)
+  const result = ok(await queryNeighbors({ ...fixture, seed: 'conv-1', direction: 'out', limit: 1 }))
+  assert.equal(result.neighbors.length, 1)
+  assert.equal(result.reachable, 4)
+  assert.equal(result.truncated, true)
+  assert.equal(result.neighbors[0].node.node_id, 'a1')
+  assert.ok(fixture.scans.every(scan => scan.where), 'every nonempty-graph read is narrowed in SQL')
+})
+
+test('SQL neighborhoods preserve BFS, cycles, dangling endpoints and exact reachable totals', async () => {
+  const edges = [...EDGES, e('s2', 'missing', 'touched'), e('missing', 's1', 'used'), EDGES[0]]
+  for (const direction of /** @type {const} */ (['in', 'out', 'both'])) {
+    for (const depth of [1, 2, 4]) {
+      const expected = ok(traverse({ nodes: NODES, edges, seed: 'f1', direction, depth, limit: 2 }))
+      const actual = ok(await queryNeighbors({ ...memoryGraph(NODES, edges), seed: 'f1', direction, depth, limit: 2 }))
+      assert.equal(actual.reachable, expected.reachable)
+      assert.equal(actual.truncated, expected.truncated)
+      assert.deepEqual(actual.neighbors.map(({ hop, direction, from, node, edge_type }) => ({ hop, direction, from, node, edge_type })), expected.neighbors)
+    }
+  }
+})
+
+test('SQL seed resolution escapes literals and preserves tier precedence and ambiguity', async () => {
+  const nodes = [...NODES, n("id'quoted", 'File', "key'quoted", "label'quoted"), n('other', 'Tool', 's1', null)]
+  const fixture = memoryGraph(nodes, [])
+  for (const seed of ["id'quoted", "key'quoted", "label'quoted"])
+    assert.equal(ok(await queryNeighbors({ ...fixture, seed })).seed.node_id, "id'quoted")
+  assert.equal(ok(await queryNeighbors({ ...fixture, seed: 's1' })).seed.node_id, 's1')
+  assert.equal(ok(await queryNeighbors({ ...fixture, seed: 's1', type: 'Tool' })).seed.node_id, 'other')
+  const ambiguous = await queryNeighbors({ ...fixture, seed: 'index.js' })
+  assert.equal(ambiguous.ok, false)
+  assert.deepEqual(!ambiguous.ok && ambiguous.candidates?.map(n => n.node_id), ['f1', 'f2'])
+})
+
+test('wide frontiers cross query batches without losing reachability or fetching hidden output payloads', async () => {
+  const nodes = [n('root', 'Session', 'root', null)]
+  const edges = []
+  for (let i = 0; i < 300; i++) {
+    nodes.push(n(`child-${i}`, 'File', `child-${i}`, null))
+    edges.push(e('root', `child-${i}`, 'touched'), e(`child-${i}`, 'leaf', 'touched'))
+  }
+  const fixture = memoryGraph(nodes, edges)
+  const result = ok(await queryNeighbors({ ...fixture, seed: 'root', depth: 2, direction: 'out', limit: 1 }))
+  assert.equal(result.reachable, 301)
+  assert.equal(result.neighbors.length, 1)
+  assert.equal(result.totalEdges, 600)
+  const topology = fixture.scans.filter(s => s.dataset === 'edge' && !s.columns.includes('props'))
+  assert.equal(topology.length, 3, 'root plus two frontier batches')
+  const payload = fixture.scans.filter(s => s.dataset === 'edge' && s.columns.includes('props'))
+  assert.equal(payload.length, 1, 'evidence is fetched only for the returned neighbor')
+})
+
+test('the shared deadline rejects a late read before starting another hop', async t => {
+  const fixture = memoryGraph()
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    if (name === 'edge') now += 5001
+    return get(name)
+  })
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1', depth: 3 }), /five-second time budget/)
+  assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 1)
+})
+
+test('large labels are subject to the cumulative payload budget', async () => {
+  // A repeated string stays cheap to allocate in the fixture but represents
+  // a large decoded payload; one cell cannot evade a row-count-only guard.
+  const fixture = memoryGraph([n('root', 'Session', 'root', 'x'.repeat(65 * 1024 * 1024))], [])
+  const result = await queryNeighbors({ ...fixture, seed: 'root' })
+  assert.equal(result.ok, false)
+  assert.match(!result.ok && result.error || '', /payload budget/)
+  assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 0)
+})
 
 /**
  * Assert a traversal succeeded and return it as a plain object for field access.

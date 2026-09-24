@@ -5,6 +5,7 @@
 **Systems:** Graph, Plugins
 **Date:** 2026-09-21
 **Related:** LLP 0023, LLP 0028, LLP 0064, LLP 0075, LLP 0076
+**Extended-by:** LLP 0431 (query cost scoped to traversed neighborhoods)
 
 ## Literal actions
 

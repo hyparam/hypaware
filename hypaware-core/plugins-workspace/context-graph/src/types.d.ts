@@ -189,7 +189,9 @@ export interface TraversalOk {
   neighbors: Neighbor[]
   reachable: number
   truncated: boolean
+  /** For queryNeighbors: visited node ids including the seed, not the corpus size. */
   totalNodes: number
+  /** For queryNeighbors: distinct edges examined, not the corpus size. */
   totalEdges: number
 }
 
