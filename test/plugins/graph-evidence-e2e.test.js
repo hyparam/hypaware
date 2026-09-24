@@ -151,17 +151,30 @@ test('explicit refresh repairs stale activity evidence, repeat refresh is stable
 
 test('neighbor output limit cannot hide an over-budget neighborhood scan', async () => {
   const { asyncRow } = await import('squirreling')
+  const batchSize = 1024
+  const columns = ['edge_id', 'src_id', 'dst_id', 'edge_type', 'props', 'source_dataset', 'source_keys']
+  const schema = { fields: columns.map((name, id) => ({ id, name, dataType: { type: 'unknown' }, nullable: true })) }
   let scanned = 0
   const edgeSource = {
-    columns: ['edge_id', 'src_id', 'dst_id', 'edge_type', 'props', 'source_dataset', 'source_keys'],
+    columns, schema,
     numRows: 1_000_000,
-    scan(options) {
+    // Keep WHERE and LIMIT residual so the real SQL engine enforces both.
+    // Native batches avoid per-cell AsyncRow overhead racing the time budget.
+    prepareScan(request) {
+      const fields = request.columns.map(c => schema.fields[c.field])
       return {
-        appliedWhere: false, appliedLimitOffset: false,
-        async *rows() {
-          for (let i = 0; i < 1_000_000; i++) {
-            scanned++
-            yield asyncRow({ edge_id: `e${i}`, src_id: 'seed', dst_id: `node-${i}`, edge_type: 'touched', props: null, source_dataset: 'ai_gateway_messages', source_keys: null }, options.columns)
+        schema: { fields }, residual: { filter: request.filter, limit: request.limit, offset: request.offset }, properties: {},
+        async *batches({ signal }) {
+          for (let at = 0; at < 1_000_000; at += batchSize) {
+            signal?.throwIfAborted()
+            const length = Math.min(batchSize, 1_000_000 - at)
+            const values = fields.map(() => [])
+            for (let i = at; i < at + length; i++) {
+              const row = { edge_id: `e${i}`, src_id: 'seed', dst_id: `node-${i}`, edge_type: 'touched', props: null, source_dataset: 'ai_gateway_messages', source_keys: null }
+              fields.forEach((f, j) => values[j].push(row[f.name]))
+            }
+            scanned += length
+            yield { selection: { type: 'all', length }, columns: values.map(values => ({ type: 'values', values, length })) }
           }
         },
       }
@@ -176,5 +189,5 @@ test('neighbor output limit cannot hide an over-budget neighborhood scan', async
   const result = await queryNeighbors({ query: registry, storage, seed: 'seed', limit: 1, includeLocalOnly: true })
   assert.equal(result.ok, false)
   assert.match(result.ok ? '' : result.error, /read budget/)
-  assert.ok(scanned <= 100_002, `bounded row scan, observed ${scanned}`)
+  assert.ok(scanned > 100_000 && scanned <= 100_000 + batchSize, `bounded row scan, observed ${scanned}`)
 })
