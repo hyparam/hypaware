@@ -1,734 +1,135 @@
 # HypAware
 
-HypAware records the sessions, logs, and telemetry from your AI agents
-into one queryable history.
+HypAware records every session from your AI coding agents (Claude Code,
+Codex, Cursor, OpenCode, and more) into one queryable history on your
+machine. Then it helps you find what went wrong, what keeps repeating, and
+what to fix.
 
-It captures conversations and traffic from local AI clients (Claude
-Code, Codex), raw Anthropic / OpenAI API traffic, and OpenTelemetry
-logs / traces / metrics. Recordings land in a local query cache and can
-stay on your machine or sync to a central server.
+- **Collect.** A lightweight background daemon captures sessions from the
+  agents you already use. No changes to how you work.
+- **Store.** Sessions land in a local cache of open table files, linked as a
+  graph of sessions, repos, files, tools, and skills. No data warehouse.
+- **Analyze.** Query everything with SQL or search, or just ask a question
+  in plain English.
+- **Act.** HypAware turns patterns in your history into concrete fixes, like a
+  skill worth adding, with the sessions that prove it.
 
-There are two ways to run it:
+## Install
 
-- **Shared.** Each machine signs into your organization on the central
-  server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
-  and forwards its recordings there. One history follows you across
-  machines and harnesses, and usage, spend, and activity can be queried
-  and reported across the whole team.
-- **Solo, fully local.** No central server, no account. Everything stays in
-  a local query cache on your machine. Start with [`npx hypaware`](#quickstart-solo-fully-local).
-
-> Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
-
-**[Documentation](./docs/README.md):** setup, clients, querying, configuration, privacy, and troubleshooting.
-
-**Contents:**
-[Requirements](#requirements) ·
-[Quickstart](#quickstart-solo-fully-local) ·
-[Team setup](#set-up-for-your-team-hyp-remote-login) ·
-[Files](#files-and-directories) ·
-[Querying](#querying-captured-data) ·
-[Activity graph](#building-and-querying-the-activity-graph) ·
-[Clients](#attaching-and-detaching-ai-clients) ·
-[Privacy controls](#controlling-what-is-recorded-and-forwarded) ·
-[Daemon](#daemon-lifecycle) ·
-[Troubleshooting](#troubleshooting) ·
-[Uninstalling](#uninstalling) ·
-[Project documents](#project-documents)
-
-## Requirements
-
-- Node.js >= 22.12
-- macOS (launchd) or Linux (systemd `--user`) for the persistent daemon
-
-## Quickstart (solo, fully local)
+Requires Node.js 22 or newer, on macOS or Linux.
 
 ```sh
-npx hypaware
+npm install -g hypaware
+hyp setup
 ```
 
-When run through `npx`, the walkthrough also installs a durable global copy
-of the CLI (`npm install -g hypaware`) so the daemon and the `hyp` command
-outlive the `npx` cache. Every command below is available as both `hyp` and
-`hypaware`.
+Setup asks which agents to capture, installs the background daemon, and
+starts recording. It ends with a first look at your history: tokens per
+model, activity per day, which repos you worked in, and which tools got
+called. Both `hyp` and `hypaware` run the same CLI.
 
-On a TTY this launches the interactive walkthrough:
+## What you can do with it
 
-1. Pick the **sources** to capture. Any subset of:
-   - Claude Code conversations (`claude`)
-   - Codex conversations, CLI and Desktop (`codex`)
-   - OpenCode conversations, CLI and Desktop (`opencode`)
-   - OTEL logs / traces / metrics (`otel`)
-
-   The raw proxy sources (`raw-anthropic`, `raw-openai`) are not offered in
-   the menu. They open a gateway upstream but configure no client and carry
-   no projector of their own, so on their own they proxy traffic and record
-   nothing. They remain real sources: `hyp setup --source raw-anthropic`
-   still composes one, and a config that already collects one keeps it
-   through a reconfigure.
-2. New guided setups keep the local query cache and also write local
-   Parquet exports under `<HYP_HOME>/exports`. Use `--export keep-local`,
-   `--export local-parquet`, or `--export configure-later` to select a strategy
-   explicitly. Interactive reconfiguration preserves the existing choice.
-3. The **retention window** is not asked: the pathway sets it, `90` days on
-   a team install and `120` on a local-only one. `hyp setup --retention-days
-   <N>` overrides it, and `query.cache.retention` in the written config
-   remains the post-install knob.
-4. HypAware composes a minimal config with only the bundled plugins it
-   needs, writes it to `<HYP_HOME>/hypaware-config.json`, installs the
-   persistent daemon (launchd on macOS, systemd `--user` on Linux),
-   attaches the selected clients, and starts capturing.
-5. The walkthrough finishes by printing the config path, daemon status,
-   per-client attach results, and a first look at what was captured: token
-   volume per model, activity per day, which repos the sessions ran in, and
-   which tools got called. Reprint it any time with `hyp query overview`.
-6. Last, it asks whether you would like HypAware to suggest a skill. Yes
-   runs `hyp ask`: HypAware reads the last 30 days of that data for the one
-   skill worth adding first, then starts your AI client on the evidence to
-   explain and write it. Run `hyp ask` any time to take the offer later, or
-   ask something else with `hyp ask "which sessions touched the auth module"`.
-
-For unattended installs (CI, scripted bootstraps, dotfiles) use the
-non-interactive flags:
+See the summary any time:
 
 ```sh
-hyp setup --yes \
-  --source claude --source otel \
-  --client claude \
-  --export local-parquet \
-  --retention-days 90
+hyp query overview
 ```
 
-Other init flags:
-
-| Flag                       | Meaning                                                 |
-|----------------------------|---------------------------------------------------------|
-| `--yes` / `-y`             | Accept defaults; do not prompt                          |
-| `--no-daemon`              | Skip daemon install and restart                         |
-| `--dry-run`                | Render the config + planned actions, write nothing      |
-| `--client claude\|claude-desktop\|codex\|opencode` | Capture a client (repeatable)      |
-| `--source <id>`            | Add a capture source (repeatable)                       |
-| `--export <choice>`        | `keep-local`, `local-parquet`, or `configure-later`     |
-| `--retention-days <N>`     | Override the pathway retention default            |
-| `--from-file <config.json>`| Skip the picker and load a known-good config            |
-| `--bin <path>`             | Override the binary path the daemon installer uses      |
-
-## Set up for your team (`hyp remote login`)
-
-If your organization is set up on the central server, enrolling a machine is
-one command:
+Ask a question about your own history:
 
 ```sh
-npx hypaware remote login
+hyp ask "which sessions touched the auth module"
+hyp ask            # suggest a skill based on your recent sessions
 ```
 
-This opens a browser sign-in. Your organization is resolved from your work
-email domain, and the machine enrolls itself: it provisions the forwarding
-sink, stores a per-machine credential (mode `0600`, never in shell history),
-installs the persistent daemon, and starts capturing and forwarding. No
-bootstrap token, no URL to copy, no hand-edited config.
+Search and query directly:
 
-The same sign-in also unlocks remote queries, so you can ask questions
-across the whole team's recordings, not just this machine's:
+```sh
+hyp query grep "connection refused"
+hyp query sql "select count(*) from ai_gateway_messages"
+```
+
+Your agents can do this too. `hyp client skills install` gives Claude or
+Codex skills to look up what happened in past sessions on their own.
+
+See [querying and reports](./docs/QUERYING.md) for more.
+
+## Supported agents
+
+Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
+OpenClaw, and any tool that exports OpenTelemetry logs, traces, or metrics.
+
+Claude Code is captured through its built-in telemetry, so it still talks
+directly to Anthropic and nothing sits in the path of your session. See
+[clients and history](./docs/CLIENTS.md), including how to import sessions
+you ran before installing.
+
+## Use it with your team
+
+Sign each machine into your organization with one command:
+
+```sh
+hyp remote login
+```
+
+Everyone's history then flows to a shared server, so you can analyze usage,
+spend, and failure patterns across the whole team:
 
 ```sh
 hyp query sql "select count(*) from ai_gateway_messages" --remote
 ```
 
-**Privacy review before anything ships.** Nothing is forwarded immediately.
-The first sync (which includes backfilled history) waits until 11:59pm local
-time on the day you enroll, and the login prints the exact deadline. Before
-then, open Claude or Codex and run the `hypaware-privacy` skill to review what
-will ship, mark directories ignore / local-only / sync, and purge anything
-sensitive. Done reviewing, or want to see data on the server sooner? `hyp sync`
-shows what would leave and sends it once you confirm.
+Nothing leaves your machine right away. The first sync waits until the end of
+the day you sign in, so you can review what will be sent and mark anything
+private first.
 
-Useful login flags: `--no-forward` signs in for remote queries only (no
-enrollment), `--no-browser` prints the sign-in URL instead of opening one,
-`--token-file <path>` / stdin supply a static token, and `--host <label>`
-overrides the host label the server shows for this machine.
+Want this for your team? [Talk to us](https://hypaware.ai) and we'll set up
+your organization. See the [team setup guide](./docs/TEAM_SETUP.md).
 
-> **Want this for your team?** We host organizations on the central server.
-> [Get in touch](https://hypstack.ai/) and we will set one up for your email
-> domain; after that, everyone on the team onboards with the single
-> `hyp remote login` above.
+## Privacy
 
-For the full rollout story (fleet tokens, managed config, Claude Desktop
-capture, verifying machines) see the
-[team setup guide](./docs/TEAM_SETUP.md); for what enrollment means for
-each person's data, see
-[what HypAware records and how to control it](./docs/PRIVACY.md).
-
-### Unattended enrollment (`hyp join`)
-
-For scripted rollouts (MDM, dotfiles, CI images) where no browser is
-available, `hyp join` enrolls a host with a fleet policy token instead of an
-interactive sign-in:
+Everything stays local unless you sign in to a team server. You control what
+is recorded, per folder:
 
 ```sh
-hyp join <url> [token]
-hyp join <url> --token-file <path>     # read the token from a file (recommended for MDM)
-echo "<token>" | hyp join <url>        # or from stdin
-hyp join <url> <token> --no-daemon     # write the seed only, skip daemon install
+hyp privacy ignore              # never record sessions in this repo
+hyp privacy set . local-only    # record, but never send to the team server
+hyp session ignore              # stop recording the current session
+hyp privacy purge --session ID  # delete what was already recorded
 ```
 
-It writes a central-enrollment config (mode `0600`) to a dedicated layer under
-`config-control/`, never to your local `hypaware-config.json`, so joining
-augments an existing install rather than replacing it, then installs and starts
-the daemon (unless `--no-daemon` is passed).
+See [what HypAware records and how to control it](./docs/PRIVACY.md).
 
-The policy token is a multi-use fleet-wide credential. Prefer `--token-file`
-or stdin over a positional argument, which would otherwise land in shell
-history and process listings. Other flags: `--bin <path>` overrides the binary
-the daemon installer records, and `--no-daemon` writes the seed without
-installing or restarting the daemon.
-
-## Files and directories
-
-| Path                                           | Contents                                                 |
-|------------------------------------------------|----------------------------------------------------------|
-| `<HYP_HOME>/hypaware-config.json`              | Active config (rewritten by `hyp setup`)                   |
-| `<HYP_HOME>/hypaware/`                         | Kernel state root                                         |
-| `<HYP_HOME>/hypaware/plugins/<name>/`          | Per-plugin state                                          |
-| `<HYP_HOME>/hypaware/cache/`                   | Local query cache (Iceberg-backed)                        |
-| `<HYP_HOME>/hypaware/sinks/<name>/outbox/`     | Failed export rows awaiting retry                         |
-| `<HYP_HOME>/hypaware/dev-telemetry/`           | Daemon self-telemetry (logs, traces, metrics)             |
-| `<HYP_HOME>/hypaware/logs/daemon.{out,err}.log`| Daemon stdout / stderr (launchd / systemd)                |
-| `<HYP_HOME>/hypaware/processing/`              | Processing daemon runtime files (its own pid, status and `logs/daemon.log`) |
-| `<HYP_HOME>/exports/`                          | Local Parquet exports (when the local-fs sink is enabled) |
-
-`HYP_HOME` defaults to `~/.hyp`. Override it by exporting `HYP_HOME=...`
-before invoking the CLI or the daemon.
-
-### Product telemetry
-
-Enrolling with a remote server (`hyp join`, or `hyp remote login` without
-`--no-forward`) automatically enables product telemetry for that organization
-once gateway enrollment completes. This also applies to existing
-enrollments on the next CLI invocation or daemon start after upgrading.
-Standalone installations default to off. A saved `off` or `local` preference
-always takes precedence.
-
-Use `hyp telemetry status` to inspect the policy and destination,
-`hyp telemetry preview` to inspect the next payload, or `hyp telemetry off` to
-disable reporting and discard pending copies. Product telemetry contains bounded
-usage, health and runtime summaries; it excludes prompts, responses, command
-arguments and free-text errors. Delivery requires the server's telemetry receiver
-to be enabled.
-
-### Runtime diagnostics
-
-HypAware can emit opt-in OTEL runtime metrics for diagnosing memory pressure,
-out-of-memory failures, CPU spikes, garbage collection, and event-loop stalls:
-
-```sh
-HYP_OTEL_RUNTIME_METRICS=1 \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4319 \
-hyp daemon run
-```
-
-Point the endpoint at your own collector, not back at HypAware. The bundled
-OpenTelemetry source listens on `127.0.0.1:4318` when you enable it, and it
-drops requests carrying HypAware's own `hypaware.self` resource marker, so
-exporting the diagnostics into it discards them rather than storing them.
-
-`HYP_OTEL_RUNTIME_METRICS_INTERVAL_MS` changes the 30-second sampling interval.
-Values below 5000 are clamped to five seconds. Sampling starts only when a
-metrics exporter exists, through `OTEL_EXPORTER_OTLP_ENDPOINT` or
-`HYP_DEV_TELEMETRY=1`, and every sample is sent as one batch. The sampler
-records process and host memory, V8 heap spaces, CPU core use, event-loop
-utilization and delay, GC activity, load average, active Node resources, and
-its own collection duration. It does not inspect captured payloads.
-
-## Querying captured data
-
-Start with the overview: input, cached and output tokens per provider and
-model, the same per day, which repos the sessions ran in, and which tools
-get called - the same block `hyp setup` ends on.
-
-```sh
-hyp query overview            # --json to script it, --sql to print the queries
-hyp query overview --days 90  # widen the window past what fits by default
-```
-
-The block states the period it covers. It picks a window it can summarize
-quickly, so a large cache narrows the period rather than hanging - and the
-line under the title always says which days the numbers describe.
-
-Input is prompt sent fresh and cached is prompt served from (or written
-to) the cache, so `input + cached` is the whole prompt; output is what the
-model generated.
-
-Then query anything directly:
-
-```sh
-hyp query sql "select count(*) from ai_gateway_messages"
-hyp query sql "select count(*) from traces"
-hyp query sql "select count(*) from logs"
-```
-
-Use `hyp query schema <dataset>` to see the columns available on each
-dataset, and `hyp cache status` to inspect cache freshness per dataset.
-
-## Building and querying the activity graph
-
-Alongside the row datasets, HypAware can project captured activity into a
-node/edge **activity graph**: which sessions ran in which app, against which
-model, using which tools, touching which files. The projection is
-deterministic (exact-key matching, no models), and the `context-graph` plugins
-are active by default.
-
-Projection is a manual, cheap-to-rerun step. Build or refresh the graph from
-what has been captured, then walk it from a seed node:
-
-```sh
-hyp graph project                       # project captured data into the node/edge graph
-hyp graph compact                       # merge duplicate rows (optional housekeeping)
-hyp query graph neighbors <node> --depth 2    # walk out from a seed node
-```
-
-`hyp query graph neighbors` takes a `node_id`, natural key, or label as the seed,
-plus `--depth`, `--direction out|in|both`, `--type <node_type>`, `--edge-type
-<type>` (repeatable), and `--limit`. The graph is also plain data: the `node`
-and `edge` datasets are queryable through `hyp query sql` like any other
-dataset.
-
-This plugin ships a `graph_neighbors` tool and the `hyp graph` help that
-explains the traversal, and the `hypaware-query` skill covers when to ask the
-graph rather than the messages, so an assistant can project and walk the graph
-on your behalf.
-
-## Attaching and detaching AI clients
-
-Attach a single client (idempotent: running twice is a no-op):
-
-```sh
-hyp client attach <client>             # claude, codex, opencode, openclaw, ...
-# Pre-rollover spelling, still accepted:
-hyp attach <client>
-```
-
-Detach (removes only HypAware-managed settings):
-
-```sh
-hyp client detach <client>
-# Equivalent aliases:
-hyp detach <client>
-hyp unattach <client>
-```
-
-Both commands support `--dry-run` and `--json` for inspection and
-scripting. Each adapter writes only HypAware-managed settings to its
-client's own config file (for example `~/.claude/settings.json` for
-Claude). Codex defaults to rollout capture and removes any old managed
-provider entry from `~/.codex/config.toml`; unrelated settings are preserved.
-
-### Claude Code attaches by telemetry, not by proxy
-
-`hyp client attach claude` writes one reversible `env` block into
-`~/.claude/settings.json` that turns on Claude Code's own OpenTelemetry
-export and points it at a loopback listener the daemon runs. It leaves
-`ANTHROPIC_BASE_URL` alone, sets no proxy, and installs no certificate
-authority, so Claude Code still talks straight to `api.anthropic.com`,
-**Remote Control keeps working**, and a daemon that is down or wedged costs
-you capture rather than your session. Nothing has to be quit and reopened:
-Claude Code reads the `env` block at launch, on every launch path.
-
-Two things ride along with the conversation rows:
-
-- **Raw request and response bodies** land in `~/.hyp/spool/claude-bodies`
-  (owner-only) until the listener projects them and deletes them. They carry
-  what the events do not: the system prompt, the tool list, and untruncated
-  tool arguments. The directory is capped (512 MB by default, oldest evicted
-  first), and both `hyp privacy purge` and `hyp client detach claude` empty it.
-- **Behavioral signals the wire never showed** land in their own
-  `claude_telemetry_events` table: tool accept and reject decisions,
-  permission mode changes, per-request cost, hook and MCP health.
-
-Claude Code **2.1.193 or newer** is required (2.1.214 for the full
-tool-decision detail). Below the floor, attach refuses the switch, leaves any
-existing attach exactly as it is, and prints `claude update`, rather than
-silently capturing less.
-
-`hyp client detach claude` removes exactly those keys, restores anything they
-displaced, and sweeps the spool.
-
-If this machine was attached by proxy before, `hyp client attach claude` is also the
-migration: it releases the proxy keys, unwinds the launchd environment, and
-tells you how to end the CA trust that it will not end for you
-(`hyp client detach claude --purge`).
-
-### Proxy mode (TLS interception for the clients that still proxy)
-
-Claude Code no longer uses this path. It remains how the gateway captures a
-client that cannot simply be pointed at a different base URL. Turn it on in
-the `ai-gateway` section of `~/.hyp/hypaware-config.json` and restart the
-daemon:
-
-```json
-{ "name": "@hypaware/ai-gateway", "config": { "proxy_mode": true } }
-```
-
-```sh
-hyp daemon restart
-```
-
-Such a client is then pointed at the gateway with `HTTPS_PROXY` and
-`NODE_EXTRA_CA_CERTS` rather than a base URL. What that changes:
-
-- **A machine-local certificate authority is generated** under
-  `~/.hyp/hypaware/tls`, readable only by you, and name-constrained so it
-  cannot vouch for any host outside the provider set HypAware intercepts.
-  Trust stays file-scoped to the proxied client's own settings: nothing
-  installs it into any OS trust store, including your login keychain, and
-  anything wider is your own decision. Earlier releases attached Claude
-  Code by proxy and did add the CA to the macOS **login keychain** as a
-  user-domain trusted root, for a transport that trusts only the keychain;
-  macOS raised its own password dialog for that, it never needed admin
-  rights, and the machine-wide system keychain was never touched. If you
-  ran one of those releases, that trust setting is still on your account
-  until you remove it. `hyp status` shows
-  the fingerprint, every host the CA is permitted to vouch for, and whether
-  the login keychain still trusts it. `hyp client detach <client>` leaves the CA
-  and any trust an earlier release was granted in place, because a detach is
-  not a statement about the certificate and no attach re-creates the grant;
-  `hyp client detach <client> --purge` and `hyp daemon uninstall` remove both.
-- **On macOS, an earlier proxy attach also left a login-session variable
-  behind.** Bun picks its trust store before any settings file is read, so a
-  keychain root only counts if `NODE_USE_SYSTEM_CA=1` is already in the
-  process environment. The attach that trusted the CA therefore ran
-  `launchctl setenv NODE_USE_SYSTEM_CA 1` and installed a small LaunchAgent,
-  `~/Library/LaunchAgents/com.hyperparam.hypaware.node-system-ca.plist`,
-  whose only job is to re-run that command at each login. No attach writes
-  either one today; on a machine that ran one of those releases the agent
-  stays a login item until it is removed, and the variable stays session-wide
-  for other Node programs to read too. `launchctl setenv` reaches
-  processes launched after it, so a terminal app that was already running
-  must be fully quit and reopened. `hyp client detach <client> --purge` and
-  `hyp daemon uninstall` clear both unconditionally, and `hyp client attach claude`
-  unwinds them when it migrates a previously proxied machine. A plain
-  `hyp client detach <client>` only clears them while that client's attach marker still
-  records a proxy attach, so on a machine already migrated to another attach
-  mode it is not the command that removes the leftover. `hyp status` shows
-  whether the variable is currently live.
-- **Only the hosts a registered upstream names are decrypted.** Every other
-  host the client talks to is tunnelled through without being decrypted.
-- **What gets recorded does not change.** Only the recorded API paths are
-  stored; the other paths a client calls on the same host are passed through
-  without being stored.
-
-Two things to know before turning it on:
-
-- If the daemon is not running, a proxied client's HTTPS all fails, not just
-  its model calls. Attach refuses to write the settings unless proxy mode is
-  actually running, and `hyp client detach <client>` is the escape hatch.
-- If you already use a corporate proxy, set `upstream_proxy` to it so
-  traffic still chains through it. Attach warns and backs up your existing
-  `HTTPS_PROXY` (restored on detach) rather than silently replacing it:
-
-```json
-{ "name": "@hypaware/ai-gateway",
-  "config": { "proxy_mode": true, "upstream_proxy": "http://proxy.corp:8080" } }
-```
-
-Codex uses native rollout capture by default. Explicit gateway capture still
-uses the base-URL mechanism.
-
-### Desktop apps
-
-**Codex Desktop needs no separate setup.** `hyp client attach codex` covers the
-Codex CLI and Codex Desktop together. The daemon reads their shared native
-rollouts (`$CODEX_HOME/sessions/**`, default `~/.codex/sessions/**`) every
-minute, skipping unchanged files. Inference connects directly to the provider.
-Attach removes an old HypAware-managed provider route; restart running Codex
-clients to reload it. Rows from either surface land
-in `ai_gateway_messages`; the `entrypoint` column carries Codex's
-`originator`, which is what tells a Desktop session from a terminal one.
-Base instructions, developer messages, tool calls/results and usage recorded
-in the native files are imported. Full submitted tool definitions are unavailable.
-Modern responses still awaiting a usage/completion event are imported on a later
-sweep; manual history import can recover a crashed unfinished response.
-
-The Codex plugin's optional `capture_mode: "gateway"` restores explicit proxy
-capture after `hyp client attach codex` and a client restart. Its default is
-`"transcript"`. `backfill.sweep_cron` changes the one-minute schedule;
-`backfill.on_join: false` disables automatic imports, and `window_days` bounds
-the sweep as well as join-time history. Manual `hyp client history import codex`
-remains available. Old local installs migrate on the next scheduled sweep;
-installs with automatic import disabled migrate when explicitly attached.
-
-**Claude Desktop needs no attach.** Select it in `hyp init` and HypAware imports
-its local JSONL transcripts on the daemon's five-minute schedule.
-The picker makes no changes to Claude Desktop, opens no browser, writes no
-managed preferences, and needs no admin approval. Desktop rows land as
-`client_name = 'claude-desktop'`; entrypoint and container ownership keep them
-separate from Claude Code.
-
-```sh
-hyp init
-hyp query sql "select max(message_created_at) from ai_gateway_messages where client_name = 'claude-desktop'"
-```
-
-The legacy managed-profile commands remain available as an optional live-route
-experiment when `@hypaware/claude-account` is explicitly configured. They are
-not part of normal Desktop capture. See
-[the CLI reference](./docs/CLI_REFERENCE.md#claude-desktop-commands).
-
-What HypAware does **not** do for Codex Desktop: it never parses the app's
-own container at `~/Library/Application Support/Codex`. That store is
-opaque and undocumented, so `hyp client history import codex` flags it as an
-`unsupported_location` and moves on. It is not the only copy of those
-conversations: current and past sessions are captured from
-`~/.codex/sessions`. The same
-applies to the ChatGPT desktop app and browser storage, which HypAware does
-not capture at all.
-
-## Controlling what is recorded and forwarded
-
-Every directory subtree resolves to a usage class, evaluated gitignore-style
-from an exchange's working directory: `sync` (recorded, forwarded to the
-team server if enrolled; the default), `local-only` (recorded, never
-forwarded), or `ignore` (never recorded; the live LLM call is untouched,
-only persistence is suppressed). When multiple markings apply, the most
-restrictive wins.
-
-There are two ways to mark a subtree:
-
-```sh
-hyp privacy ignore [path]                     # write a committable .hypignore dotfile (travels with the repo)
-hyp privacy unignore [path]                   # remove it, re-enabling recording
-
-hyp privacy set <path> ignore          # same effect, stored machine-local (no dotfile in the repo)
-hyp privacy set <path> local-only      # recorded but never forwarded
-hyp privacy set <path> sync            # explicitly synced, not asked again
-hyp privacy show [path]                # which class governs, and from which source
-hyp privacy list                       # every machine-local entry
-hyp privacy unset <path> [class]       # back to the implicit default
-```
-
-On a machine connected to a server, folders you have not marked sync
-without asking. If you would rather be asked once per new folder, a session
-opened somewhere new can prompt you to classify it instead:
-
-```sh
-hyp privacy folders ask                # ask once per new folder
-hyp privacy folders sync               # back to syncing without asking (default)
-hyp privacy folders                    # report which is in force
-```
-
-This gates the question only: folders you already marked keep their class,
-and `.hypignore` files are unaffected either way. `hyp setup` asks for this
-in its own step, and `hyp status` names it on an enrolled machine.
-
-Markings are prospective only: rows captured before a marking existed stay
-in the cache. Delete those with the separate destructive step:
-
-```sh
-hyp privacy purge <path> | --session <id> | --ignored | --all   # delete already-cached rows (prompts; --yes to skip)
-```
-
-To pause recording for just the current Claude or Codex session (saved across restarts,
-reversible) run `hyp session ignore` from inside it; `hyp session unignore`
-resumes and `hyp session status` reports the current answer.
-
-The full model, including what enrollment forwards and the first-sync
-privacy review, is in
-[what HypAware records and how to control it](./docs/PRIVACY.md). One
-caveat worth repeating: directory markings need a working directory, which
-only the Claude and Codex pathways supply, so they are a no-op for the
-`raw-anthropic` / `raw-openai` proxy and OTEL sources.
-
-## Daemon lifecycle
-
-```sh
-hyp daemon install      # launchd LaunchAgent (macOS) or systemd --user unit (Linux)
-hyp daemon start        # ensure the service is started
-hyp daemon status       # health snapshot
-hyp daemon restart      # bounce after a config change
-hyp daemon stop         # signal the running daemon to shut down
-hyp daemon uninstall    # remove the service and detach clients (config + recordings are kept)
-```
-
-`hyp daemon install --dry-run --json` prints the rendered plist or unit
-content and target paths without touching the filesystem, useful for
-verifying what `hyp setup` will install.
-
-## Troubleshooting
-
-`hyp status` is the entry point for any "is HypAware working?" question.
-It prints the active config path, daemon install/run state, active
-plugins, source and sink rows, per-client attach state, retention
-window, cache size, and a recent-error count. Pass `--json` for the
-stable machine-readable shape that smokes and support tools rely on:
+## Is it working?
 
 ```sh
 hyp status
-hyp status --json
 ```
 
-When something is wrong, `hyp status` surfaces a `diagnostics:` section
-with one row per finding. Each row carries a `kind` (a stable
-machine-readable identifier) and one or more `repair:` lines you can
-run directly. The common Phase 8 conditions:
+This shows the daemon, attached agents, and what was captured recently. See
+[troubleshooting](./docs/TROUBLESHOOTING.md).
 
-| kind                                  | meaning                                                                            | repair                                                                  |
-|---------------------------------------|------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
-| `config_missing`                      | no `~/.hyp/hypaware-config.json` was found                                         | `hyp setup` or `hyp setup --from-file <config.json>`                       |
-| `config_invalid`                      | the loaded config failed schema / cross-plugin validation                          | `hyp setup --from-file <config.json>`                                     |
-| `client_without_gateway`              | a gateway-backed client plugin (Claude / Codex / OpenClaw) is enabled but `@hypaware/ai-gateway` is not | re-run `hyp setup`, then `hyp client attach <name>`                              |
-| `gateway_missing_anthropic_upstream`  | a gateway-routed Anthropic client (OpenClaw) is enabled but no Anthropic upstream is registered  | re-run `hyp setup` and pick the Anthropic upstream                        |
-| `gateway_missing_openai_upstream`     | `@hypaware/codex` enabled but no OpenAI upstream is registered                     | re-run `hyp setup` and pick the OpenAI upstream                           |
-| `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp setup` and pick "local Parquet export"                        |
-| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | the printed repair names the client, e.g. `hyp client attach opencode`     |
-| `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
-| `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it; an `error` rather than a warning when the service manager answered and no daemon process is running either, because nothing is being captured | `hyp daemon install` for the `error` case, which runs the load step that is missing; otherwise `hyp daemon restart` |
-| `daemon_heartbeat_stale`              | the daemon process is alive but its status snapshot has stopped advancing, so its tick is not completing | `hyp daemon restart`                                                     |
-| `daemon_exited_abnormally`            | launchd / systemd still has the service loaded but no daemon process is running, and the last status snapshot never recorded a completed stop | `hyp daemon restart`                                                     |
-| `recent_errors`                       | failures recorded in the last 24h: `error` lines in either daemon log (the gateway keeps one, the processing daemon another), failed sink export batches in an outbox, and dev-telemetry error records | inspect `~/.hyp/hypaware/logs/daemon.log`, `~/.hyp/hypaware/processing/logs/daemon.log` and `~/.hyp/hypaware/sinks/*/outbox`, then `hyp daemon restart` |
-
-Useful follow-on commands when a diagnostic fires:
-
-- `hyp daemon restart`: bounce the persistent daemon
-- `hyp daemon install`: re-install the launchd / systemd unit
-- `hyp client attach claude` (or `codex`, `opencode`, `openclaw`): wire a
-  selected client into HypAware capture
-- `hyp setup --from-file <path>`: rebuild the config from a known-good
-  file without re-running the interactive picker
-
-### An OTLP exporter is refused with `421 Misdirected Request`
-
-The two OTLP listeners HypAware hosts each take a bind address from their own
-config section, and both default it to `127.0.0.1`: `listen_host` for the
-`otel` source, `telemetry.listen_host` for the Claude Code telemetry listener.
-On their loopback side, whatever they are bound to, the only `Host` values
-they answer to are the ones that name this machine without consulting a
-resolver: `localhost`, `::1`, any `127.x.y.z` address, and the bind literals
-`0.0.0.0` and `::`. A request arriving there under any other name gets no
-route at all:
-
-```
-HTTP/1.1 421 Misdirected Request
-{"code":7,"message":"Misdirected request: Host is not a loopback name"}
-```
-
-That is a DNS-rebinding guard, not a bug. A name that merely resolves to a
-loopback address is exactly what a browser page rebound onto this listener
-carries, and the `Host` header is what tells that page apart from a local
-exporter, so a name is never enough.
-
-**The consequence on Debian and Ubuntu**, which ship `127.0.1.1 <hostname>` in
-`/etc/hosts`: an exporter pointed at `http://<hostname>:<port>` is refused
-(the default port is 4318 for the `otel` source, 4319 for the Claude Code
-telemetry listener). It connects to `127.0.1.1`, a loopback address, so the
-guard judges the request, and the machine's own hostname is not one of the
-accepted names. Addressing a local listener by the machine hostname is not
-supported, and no config key widens the accepted set. Reaching the listener
-by `127.0.1.1` needs a `listen_host` other than the default, since one bound to
-`127.0.0.1` never receives a connection addressed to `127.0.1.1`. The refusal
-itself does not: any other name that resolves to `127.0.0.1`, an
-`/etc/hosts` alias on that line or a `*.localhost` subdomain, is refused on
-the default bind too.
-
-Point the exporter at `localhost` or `127.0.0.1` instead. When `listen_host`
-is itself a non-default loopback address, address the listener by that
-literal, since every `127.x.y.z` one is accepted: a `listen_host` of the
-machine hostname binds to `127.0.1.1` on Debian and Ubuntu, so only
-`http://127.0.1.1:<port>` reaches it and `localhost` would not connect at all.
-On a wildcard bind (`0.0.0.0` or `::`) a remote exporter should use the
-routable interface address as the literal it puts in `Host`; a listener bound
-to a specific routable address answers under any name pointed at that address,
-since serving that name is the point of binding there.
-
-The listener also records each refusal as a `listener.host_refused` warning,
-carrying `hyp_component=sources`, `hyp_operation=host_check`, `status=skipped`,
-`error_kind=host_not_loopback`, `listener` (`hypaware/otel` or
-`hypaware/claude-telemetry`), `host` (the refused header, truncated), the
-`arrived_on` address and the `bind` it was compared against, and
-`refused_total`, the refusals since that listener started. Refusals are always
-counted but logged at most once a minute per listener, so a burst is still
-legible from a single line. These warnings travel HypAware's own OTel log
-channel, which an installed daemon exports nowhere by default: they reach none
-of `daemon.log`, `daemon.out.log`, or `daemon.err.log` under
-`<HYP_HOME>/hypaware/logs/`. To read one, reproduce the refusal against a
-daemon started with an exporter configured, either
-`HYP_DEV_TELEMETRY=1 hyp daemon run` (JSONL under
-`<HYP_HOME>/hypaware/dev-telemetry/`) or `OTEL_EXPORTER_OTLP_ENDPOINT`
-pointed at your own collector, not back at HypAware.
-
-A third listener shares this guard, the OpenCode snapshot receiver, but it
-binds `127.0.0.1` and only its port is configurable, so it cannot reach the
-case above. It answers `{"error":"misdirected request"}` rather than the OTLP
-body, and its refusals are logged under `listener=@hypaware/opencode`.
-
-A fourth shares it, the AI gateway (`@hypaware/ai-gateway`, default
-`127.0.0.1:18521`), on one of its three doors: the direct origin-form requests
-addressed to the listener itself. A tunnelled (`CONNECT`) or absolute-form
-request names a third party in `Host` by design, so its `Host` is never
-judged; what contains those doors is the loopback-peers-only rule and the
-routing table. Refusals answer `{"error":"misdirected request"}` and are
-logged under `listener=@hypaware/ai-gateway`.
-
-The gateway is the one hosting listener whose address nobody types by hand.
-Its bind host is configurable (`listen`), and the endpoint derived from it is
-what `hyp session ignore` posts to, what the openclaw attach writer builds
-both provider `baseUrl` fields from, and what `hyp client claude-desktop
-install` renders verbatim unless a `claude_desktop.endpoint` override
-displaces it; the claude and codex attach writers take only the port from that
-endpoint and hardcode `127.0.0.1`, and opencode is handed no gateway endpoint.
-So a `listen` naming a *hostname* that resolves to a loopback address,
-`localhost` aside, refuses the clients that were handed that name, and it
-takes their egress with it rather than only their capture, because the base
-URL they were handed stops answering. A hostname pointed at a routable address
-is served under that name instead, on the same exemption a name-based LAN
-exporter relies on above. Separately, the claude and codex clients hardcode
-`127.0.0.1`, so any bind that leaves nothing listening there answers their
-base URLs with `ECONNREFUSED`: a routable address, another loopback literal,
-or a hostname resolving to one. Pin `listen` to `127.0.0.1`, or to `0.0.0.0`
-or `[::]` (an IPv6 host is bracketed, since `listen` is a `host:port` string
-and `::18521` would read the last colon as the port separator); a default
-install already uses the first. The loopback-peers-only rule on `CONNECT` and
-absolute-form costs an attached client nothing on any bind, because proxy-mode
-attach points its client at loopback rather than at the bind host. On a
-wildcard bind a client on another machine has the same constraint as a remote
-exporter: address the gateway by the routable interface literal, not by a
-name.
-
-## Uninstalling
-
-To remove HypAware from a machine completely:
+## Uninstall
 
 ```sh
-hyp leave                     # only if enrolled with a team server: stop forwarding, drop the credential
-hyp daemon uninstall          # remove the launchd / systemd service and detach every attached client
-npm uninstall -g hypaware     # remove the CLI
-rm -rf ~/.hyp                 # delete all local recordings, config, and state
+hyp leave                  # only if you joined a team server
+hyp daemon uninstall       # stop the daemon and detach every agent
+npm uninstall -g hypaware
+rm -rf ~/.hyp              # delete all local recordings
 ```
 
-`hyp daemon uninstall` restores each attached client's own settings on its
-way out, so no client is left pointing at a gateway that no longer exists;
-to detach a single client without uninstalling, use `hyp client detach <client>`.
+Your agents' settings are restored on the way out. Copies already sent to a
+team server or exported to files are not affected.
 
-The first three steps are non-destructive and reversible; deleting `~/.hyp`
-permanently removes every local recording. Note that copies already
-forwarded to a team server or exported to Parquet are not affected; see
-[docs/PRIVACY.md](./docs/PRIVACY.md).
+## Documentation
 
-## Project documents
-
-Start at the [documentation index](./docs/README.md) for guides organized by task.
-User-facing guides include:
-
-- [`docs/CLI.md`](./docs/CLI.md): install, operate, upgrade, and recover HypAware with the task-oriented CLI
-- [Clients and history](./docs/CLIENTS.md): attach integrations and import existing sessions
-- [Querying and reports](./docs/QUERYING.md): search, SQL, remote queries, activity graphs, MCP, and reports
-- [Configuration and storage](./docs/CONFIGURATION.md): retention, exports, paths, and plugins
-- [Troubleshooting](./docs/TROUBLESHOOTING.md): diagnose capture, query, export, and daemon problems
-- [`docs/CLI_REFERENCE.md`](./docs/CLI_REFERENCE.md): complete syntax and behavior for every visible CLI command
-- [`docs/TEAM_SETUP.md`](./docs/TEAM_SETUP.md): rolling HypAware out across a team
-- [`docs/HEADLESS.md`](./docs/HEADLESS.md): headless deploys on CI runners and servers with a pre-minted token
-- [`docs/PRIVACY.md`](./docs/PRIVACY.md): what HypAware records and how to control it
-- [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md): how to write a plugin (`hyp dev plugin new` / `hyp dev plugin doctor`)
-
-Public plugin
-interfaces are declared in
-[`hypaware-plugin-kernel-types.d.ts`](./hypaware-plugin-kernel-types.d.ts).
+- [Setup and lifecycle](./docs/CLI.md)
+- [Clients and history](./docs/CLIENTS.md)
+- [Querying and reports](./docs/QUERYING.md)
+- [Configuration and storage](./docs/CONFIGURATION.md)
+- [Privacy](./docs/PRIVACY.md)
+- [Team setup](./docs/TEAM_SETUP.md) and [headless deploys](./docs/HEADLESS.md)
+- [Troubleshooting](./docs/TROUBLESHOOTING.md)
+- [CLI reference](./docs/CLI_REFERENCE.md)
+- [Writing a plugin](./docs/PLUGIN_AUTHORING.md)

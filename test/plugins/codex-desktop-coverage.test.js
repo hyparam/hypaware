@@ -98,7 +98,7 @@ test('the Codex app-container unsupported_location says what IS still captured',
     assert.ok(desktop, 'the Codex app container is flagged')
 
     // Short key-shaped tokens, not prose: the attribute has to stay
-    // queryable, and the explanation lives in LLP 0141 and the README.
+    // queryable, and the explanation lives in LLP 0141.
     assert.equal(
       desktop?.attributes?.covered_by,
       'codex_sessions_rollout',

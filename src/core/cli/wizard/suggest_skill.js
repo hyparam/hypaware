@@ -57,7 +57,7 @@ export async function runWizardSuggestSkill(opts) {
           span.setAttribute('skip_reason', 'no-rows')
           opts.stdout.write(
             '\nNothing recorded yet: HypAware captures from your next session onward.\n' +
-            'Once you have some history, run `hyp ask`: HypAware suggests the one skill worth adding first.\n'
+            'Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions.\n'
           )
           return { asked: false, reason: /** @type {const} */ ('no-rows') }
         }
@@ -177,5 +177,5 @@ function runAskChild(opts) {
  * @param {RunWizardSuggestSkillOptions} opts
  */
 function writeVerb(opts) {
-  opts.stdout.write('\nRun `hyp ask` any time: HypAware suggests the one skill worth adding first.\n')
+  opts.stdout.write('\nRun `hyp ask` any time: HypAware suggests a skill based on your recent sessions.\n')
 }
