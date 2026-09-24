@@ -2,7 +2,8 @@
 
 import { defaultConfigPath, readConfig, writeAtomic } from './config-file.js'
 import { CodexSettingsError } from './errors.js'
-import { prepareAttach, prepareDetach } from './toml-config.js'
+import { prepareCodexDetach } from '../../../../src/core/config/client_detach_disk.js'
+import { prepareAttach } from './toml-config.js'
 
 export { defaultConfigPath } from './config-file.js'
 export { CodexSettingsError } from './errors.js'
@@ -49,18 +50,17 @@ export async function attach(opts) {
 }
 
 /**
- * Reverse a previous `attach`. No-op when config.toml is absent or
- * has no hypaware-managed Codex block.
+ * Release managed routing, retaining the provider identity saved chats need.
+ * With no marker, recover a missing alias only from saved-session evidence.
  *
  * @param {CodexDetachOptions} [opts]
  * @returns {Promise<CodexDetachResult>}
  */
 export async function detach(opts = {}) {
   const { configPath = defaultConfigPath(), dryRun = false } = opts
-  const { content, existed, mtimeMs } = await readConfig(configPath)
-  if (!existed) return { changed: false }
+  const { content, mtimeMs } = await readConfig(configPath)
 
-  const prepared = prepareDetach(content)
+  const prepared = await prepareCodexDetach(content, configPath, { recover: opts.recover })
   if (!prepared.changed) return { changed: false }
 
   // A dry run reports the same answer it would act on: `changed: false` on

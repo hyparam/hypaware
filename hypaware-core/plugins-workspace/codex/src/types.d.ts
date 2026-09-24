@@ -133,6 +133,8 @@ export interface CodexAttachOptions {
 export type CodexAttachResult = { changed: true; prevValue?: string }
 
 export interface CodexDetachOptions {
+  /** Inspect saved session headers to recover an already-removed provider. */
+  recover?: boolean
   configPath?: string
   /** Report what the undo would do without writing it. */
   dryRun?: boolean

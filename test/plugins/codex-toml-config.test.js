@@ -1,5 +1,6 @@
 // @ts-check
 
+import { CODEX_LEGACY_PROVIDER } from '../../src/core/config/client_detach_disk.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -79,7 +80,7 @@ test('prepareDetach removes managed Codex blocks and restores previous provider'
   assert.equal(detached.restoredValue, 'openai')
   assert.equal(detached.removed, 'http://127.0.0.1:4388/backend-api/codex')
   assert.equal(isManagedAttached(detached.content), false)
-  assert.equal(detached.content, 'model_provider = "openai"\n')
+  assert.equal(detached.content, 'model_provider = "openai"\n' + CODEX_LEGACY_PROVIDER)
 })
 
 test('prepareDetach is a no-op when HypAware did not manage the config', () => {
@@ -91,4 +92,41 @@ test('managed marker parsing rejects unterminated blocks', () => {
     () => isManagedAttached('# BEGIN hypaware codex model_provider\nmodel_provider = "hypaware"\n'),
     /unterminated hypaware-managed Codex config block/
   )
+})
+
+// Both paths use this transform, including disk detach after plugin unload.
+test('detach preserves user settings and an explicit provider choice inside markers', () => {
+  const attached = prepareAttach('model_provider = "openai"\n', 4388, 'old').content
+    .replace('model_provider = "hypaware"', 'model_provider = "custom"\nmodel = "gpt-test"')
+    .replace('# END hypaware codex provider', '[desktop]\nfoo = true\n[features]\nbar = false\n[projects."/tmp/customer"]\ntrust_level = "trusted"\n# END hypaware codex provider')
+  const result = prepareDetach(attached)
+  assert.equal(result.changed, true)
+  if (!result.changed) return
+  assert.match(result.content, /model_provider = "custom"/)
+  assert.match(result.content, /model = "gpt-test"/)
+  assert.match(result.content, /\[desktop\]\nfoo = true\n\[features\]\nbar = false/)
+  assert.match(result.content, /trust_level = "trusted"/)
+  assert.equal(result.content.includes('base_url'), false)
+  assert.equal(result.content.includes('# BEGIN'), false)
+  assert.deepEqual(prepareDetach(result.content), { changed: false })
+})
+
+test('gateway reattach retains unrelated tables serialized inside the markers', () => {
+  const attached = prepareAttach('', 4388, 'old').content
+    .replace('# END hypaware codex provider', '[desktop]\nfoo = true\n# END hypaware codex provider')
+  assert.match(prepareAttach(attached, 4389, 'new').content, /\[desktop\]\nfoo = true/)
+})
+
+test('detach leaves unmarked user providers and marker-looking multiline strings alone', () => {
+  const custom = '[model_providers.hypaware]\nname = "custom"\nbase_url = "https://example.test/v1"\n'
+  assert.deepEqual(prepareDetach(custom), { changed: false })
+  const text = 'instructions = """\n# BEGIN hypaware codex provider\n[model_providers.hypaware]\n# END hypaware codex provider\n"""\n'
+  assert.deepEqual(prepareDetach(text), { changed: false })
+})
+
+test('quoted owned keys cannot leave gateway routing behind', () => {
+  const attached = prepareAttach('', 4388, 'old').content.replace('base_url =', '"base_url" =')
+  const result = prepareDetach(attached)
+  assert.ok(result.changed)
+  if (result.changed) assert.equal(result.content.includes('base_url'), false)
 })

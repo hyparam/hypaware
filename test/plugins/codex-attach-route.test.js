@@ -1,5 +1,6 @@
 // @ts-check
 
+import { CODEX_LEGACY_PROVIDER } from '../../src/core/config/client_detach_disk.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -37,7 +38,7 @@ for (const initial of [undefined, 'model_provider = "custom"\nmodel = "test"\n']
       stdout = ''
       await client.attach(attachCtx)
       assert.equal(JSON.parse(stdout).mode, 'transcript')
-      if (initial) assert.equal(await fs.readFile(configPath, 'utf8'), 'model = "test"\nmodel_provider = "custom"\n')
+      if (initial) assert.equal(await fs.readFile(configPath, 'utf8'), 'model = "test"\n\nmodel_provider = "custom"\n' + CODEX_LEGACY_PROVIDER)
       else await assert.rejects(fs.access(configPath), { code: 'ENOENT' })
       stdout = ''
       await client.attach(attachCtx)

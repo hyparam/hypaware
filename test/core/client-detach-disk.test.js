@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { CODEX_LEGACY_PROVIDER } from '../../src/core/config/client_detach_disk.js'
 import test from 'node:test'
 
 import { runDetach } from '../../src/core/commands/clients.js'
@@ -38,7 +39,7 @@ const CODEX_DESCRIPTOR = {
   plugin: /** @type {any} */ ('@hypaware/codex'),
   name: 'codex',
   skillDir: 'skills/codex',
-  attachProbe: { format: 'toml', settings_file: '.codex/config.toml', marker_header: '[model_providers.hypaware]' },
+  attachProbe: { format: 'toml', settings_file: '.codex/config.toml', marker_header: '# BEGIN hypaware codex provider' },
 }
 
 const ATTACH = { port: 4123, version: '0.2.0', stateFile: '/abs/session-context.jsonl' }
@@ -522,7 +523,7 @@ test('codex undo strips the managed blocks and restores model_provider byte-for-
     assert.equal(result.removed, 'http://127.0.0.1:4388/backend-api/codex')
     assert.equal(result.settingsPath, configPath)
 
-    assert.equal(await fs.readFile(configPath, 'utf8'), original)
+    assert.equal(await fs.readFile(configPath, 'utf8'), original + CODEX_LEGACY_PROVIDER)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -538,7 +539,7 @@ test('codex undo of a no-previous-provider attach round-trips to empty', async (
     assert.equal(result.changed, true)
     assert.equal('restoredValue' in result, false)
 
-    assert.equal(await fs.readFile(configPath, 'utf8'), '')
+    assert.equal(await fs.readFile(configPath, 'utf8'), CODEX_LEGACY_PROVIDER)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -555,7 +556,7 @@ test('codex undo preserves unrelated config alongside the restored provider', as
 
     const raw = await fs.readFile(configPath, 'utf8')
     assert.equal(raw.includes('# BEGIN hypaware'), false)
-    assert.equal(raw.includes('[model_providers.hypaware]'), false)
+    assert.equal(raw.includes('[model_providers.hypaware]'), true)
     assert.match(raw, /model_provider = "openai"/)
     assert.match(raw, /\[profiles\.default\]\nmodel = "gpt-5"/)
   } finally {
@@ -588,7 +589,7 @@ test('codex undo strips a hand-written marked block (no plugin loaded)', async (
     assert.equal(result.restoredValue, 'openai')
     assert.equal(result.removed, 'http://127.0.0.1:4388/v1')
 
-    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "openai"\n')
+    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "openai"\n' + CODEX_LEGACY_PROVIDER)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -621,7 +622,7 @@ test('codex undo warning carries the user value verbatim, so `warning` is never 
     const attached = codexPrepareAttach('model_provider = "openai"\n', 4388, '0.2.0')
     // The user re-points model_provider outside the managed block after we
     // attached, to an ordinary TOML value that happens to contain a pipe.
-    const configPath = await writeCodexConfig(home, attached.content + 'model_provider = "acme | prod"\n')
+    const configPath = await writeCodexConfig(home, attached.content.replace('model_provider = "hypaware"', 'model_provider = "acme | prod"'))
 
     const result = await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, true)
@@ -1360,4 +1361,49 @@ test('#898: a DAMAGED proxy marker that lost its mode still has HTTPS_PROXY reve
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
+})
+
+test('core detach repairs absent config from saved metadata and preserves unmarked provider choices', async () => {
+  const home = await stageHome()
+  try {
+    const sessions = path.join(home, '.codex', 'sessions')
+    await fs.mkdir(sessions, { recursive: true })
+    await fs.writeFile(path.join(sessions, 'rollout-saved.jsonl'), JSON.stringify({
+      type: 'session_meta', payload: { model_provider: 'hypaware' },
+    }) + '\n')
+    const configPath = path.join(home, '.codex', 'config.toml')
+    assert.equal((await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })).changed, true)
+    assert.equal(await fs.readFile(configPath, 'utf8'), CODEX_LEGACY_PROVIDER)
+    for (const custom of [
+      '[model_providers."hypaware"] # customer-owned\nbase_url = "https://example.test/v1"\n',
+      'model_providers.hypaware = { name = "Customer provider" }\n',
+      '[model_providers]\nhypaware = { name = "Customer provider" }\n',
+    ]) {
+      await fs.writeFile(configPath, custom)
+      assert.equal((await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })).changed, false)
+      assert.equal(await fs.readFile(configPath, 'utf8'), custom)
+    }
+  } finally { await fs.rm(home, { recursive: true, force: true }) }
+})
+
+test('recovery ignores provider names in prompts, oversized headers, and symlinked history', { skip: process.platform === 'win32' }, async () => {
+  const home = await stageHome()
+  try {
+    const sessions = path.join(home, '.codex', 'sessions')
+    await fs.mkdir(sessions, { recursive: true })
+    await fs.writeFile(path.join(sessions, 'rollout-prompt.jsonl'), JSON.stringify({
+      type: 'response_item', payload: { model_provider: 'hypaware' },
+    }) + '\n')
+    await fs.writeFile(path.join(sessions, 'rollout-large.jsonl'), JSON.stringify({
+      type: 'session_meta', payload: { pad: 'x'.repeat(65536), model_provider: 'hypaware' },
+    }) + '\n')
+    const outside = path.join(home, 'outside')
+    await fs.mkdir(outside)
+    await fs.writeFile(path.join(outside, 'rollout-saved.jsonl'), JSON.stringify({
+      type: 'session_meta', payload: { model_provider: 'hypaware' },
+    }) + '\n')
+    await fs.symlink(outside, path.join(home, '.codex', 'archived_sessions'), 'dir')
+    assert.equal((await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })).changed, false)
+    await assert.rejects(fs.access(path.join(home, '.codex', 'config.toml')), { code: 'ENOENT' })
+  } finally { await fs.rm(home, { recursive: true, force: true }) }
 })

@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-22
 **Related:** LLP 0141, LLP 0313, LLP 0359, LLP 0045
+**Extended-by:** LLP 0432 (saved provider compatibility and recovery)
 
 ## Default {#default}
 

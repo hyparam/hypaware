@@ -42,6 +42,15 @@ export async function runFlow(name) {
   const hypHome = path.join(tmpDir, '.hyp')
   await fs.mkdir(hypHome, { recursive: true })
 
+  // Isolate client homes before importing a flow: activation may run a
+  // scheduled migration even when the flow only meant to exercise a gateway.
+  process.env.HOME = tmpDir
+  process.env.USERPROFILE = tmpDir
+  process.env.CODEX_HOME = path.join(tmpDir, '.codex')
+  process.env.CLAUDE_CONFIG_DIR = path.join(tmpDir, '.claude')
+  delete process.env.HYP_CONFIG
+  await fs.mkdir(process.env.CODEX_HOME, { recursive: true })
+
   process.env.DEV_RUN_ID = runId
   process.env.HYP_DEV_TELEMETRY = '1'
   process.env.OTEL_SERVICE_NAME = 'hypaware-dev'

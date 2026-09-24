@@ -1,5 +1,7 @@
 // @ts-check
 
+import { prepareCodexDetachText } from '../../../../src/core/config/client_detach_disk.js'
+
 import { CodexSettingsError } from './errors.js'
 
 /**
@@ -42,7 +44,8 @@ const TOML_ROOT_MODEL_PROVIDER_RE = new RegExp(String.raw`^\s*${TOML_MODEL_PROVI
  * @returns {{ content: string, prevValue?: string }}
  */
 export function prepareAttach(content, port, version, opts = {}) {
-  let lines = splitLines(content)
+  const detached = prepareCodexDetachText(content)
+  let lines = splitLines(detached.changed ? detached.content : content)
   const previousFromMarker = readPreviousModelProvider(lines)
   lines = removeMarkedBlock(lines, ROOT_BEGIN, ROOT_END)
   lines = removeMarkedBlock(lines, PROVIDER_BEGIN, PROVIDER_END)
@@ -90,39 +93,7 @@ export function prepareAttach(content, port, version, opts = {}) {
  * @returns {{ changed: false } | { changed: true, content: string, removed?: string, restoredValue?: string, warning?: string }}
  */
 export function prepareDetach(content) {
-  const lines = splitLines(content)
-  const hadRoot = hasMarkedBlock(lines, ROOT_BEGIN, ROOT_END)
-  const hadProvider = hasMarkedBlock(lines, PROVIDER_BEGIN, PROVIDER_END)
-  if (!hadRoot && !hadProvider) return { changed: false }
-
-  const previous = readPreviousModelProvider(lines)
-  const removed = readManagedProviderBaseUrl(lines)
-
-  let next = removeMarkedBlock(lines, ROOT_BEGIN, ROOT_END)
-  next = removeMarkedBlock(next, PROVIDER_BEGIN, PROVIDER_END)
-  next = removeProviderTable(next)
-  next = removeProviderDottedAssignments(next)
-
-  /** @type {string | undefined} */
-  let restoredValue
-  /** @type {string | undefined} */
-  let warning
-  if (previous !== undefined) {
-    const current = readRootModelProvider(next)
-    if (current === undefined) {
-      insertRootLines(next, [`model_provider = ${tomlString(previous)}`])
-      restoredValue = previous
-    } else if (current !== previous) {
-      warning = `model_provider was changed externally; leaving ${current} in place`
-    }
-  }
-
-  /** @type {{ changed: true, content: string, removed?: string, restoredValue?: string, warning?: string }} */
-  const result = { changed: true, content: formatLines(next) }
-  if (removed !== undefined) result.removed = removed
-  if (restoredValue !== undefined) result.restoredValue = restoredValue
-  if (warning !== undefined) result.warning = warning
-  return result
+  return prepareCodexDetachText(content)
 }
 
 /**
@@ -205,26 +176,6 @@ function removeRootModelProvider(lines) {
   const result = { lines: next }
   if (prevValue !== undefined) result.prevValue = prevValue
   return result
-}
-
-/**
- * @param {string[]} lines
- * @returns {string | undefined}
- */
-function readRootModelProvider(lines) {
-  const firstTable = findFirstTableIndex(lines)
-  /** @type {string | undefined} */
-  let multilineDelimiter
-  for (let i = 0; i < firstTable; i++) {
-    if (multilineDelimiter !== undefined) {
-      multilineDelimiter = closeMultilineString(lines[i], multilineDelimiter)
-      continue
-    }
-    const parsed = parseRootModelProvider(lines[i])
-    if (parsed !== undefined) return parsed
-    multilineDelimiter = openMultilineString(lines[i])
-  }
-  return undefined
 }
 
 /** @param {string[]} lines */
@@ -374,13 +325,6 @@ function readPreviousModelProvider(lines) {
 
 /**
  * @param {string[]} lines
- */
-function readManagedProviderBaseUrl(lines) {
-  return readAssignmentInBlock(lines, PROVIDER_BEGIN, PROVIDER_END, 'base_url')
-}
-
-/**
- * @param {string[]} lines
  * @param {string} begin
  * @param {string} end
  * @param {string} key
@@ -401,33 +345,6 @@ function readCommentedString(lines, begin, end, key) {
     return parseTomlString(match[1])
   }
   return undefined
-}
-
-/**
- * @param {string[]} lines
- * @param {string} begin
- * @param {string} end
- * @param {string} key
- */
-function readAssignmentInBlock(lines, begin, end, key) {
-  let inside = false
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed === begin) {
-      inside = true
-      continue
-    }
-    if (inside && trimmed === end) return undefined
-    if (!inside || !new RegExp(`^\\s*${escapeRegExp(key)}\\s*=`).test(line)) continue
-    return parseAssignmentString(line)
-  }
-  return undefined
-}
-
-/** @param {string} line */
-function parseRootModelProvider(line) {
-  if (!isRootModelProviderLine(line)) return undefined
-  return parseAssignmentString(line)
 }
 
 /** @param {string} line */

@@ -5,6 +5,7 @@ import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { CODEX_LEGACY_PROVIDER } from '../../src/core/config/client_detach_disk.js'
 import test from 'node:test'
 
 import {
@@ -346,7 +347,7 @@ test('scheduled capture migrates the route, skips unchanged files, and retries f
     assert.equal(first.items.length, 1)
     assert.equal(value(first.items[0]).system_text, 'native base instructions')
     assert.equal(value(first.items[0]).tools, undefined)
-    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "custom"\n')
+    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "custom"\n' + CODEX_LEGACY_PROVIDER)
     assert.ok(entries.some((e) => e.message === 'codex.capture.route_released'))
     assert.equal((await collect(provider.run(ctx))).items.length, 0)
     assert.equal(entries.at(-1)?.fields?.files_read, 0)
@@ -1196,5 +1197,53 @@ test('backfill refreshes exclusions and keys on the Codex container rather than 
     assert.ok(run.entries.some(e => e.message === 'codex.backfill.session_ignore_drop'))
     writer.delete('container-id')
     assert.equal((await collect(provider.run(runContext().ctx))).items.length, 1)
+  } finally { await env.cleanup() }
+})
+
+for (const archived of [false, true]) {
+  test(`scheduled recovery restores already-removed provider (${archived ? 'archived' : 'active'})`, async () => {
+    const env = await stageEnv()
+    try {
+      const file = await writeModernRollout(env, 'rollout-legacy-provider.jsonl', {
+        meta: { id: 'legacy-provider', model_provider: 'hypaware' }, items: [],
+      })
+      if (archived) {
+        const dest = path.join(env.homeDir, '.codex', 'archived_sessions')
+        await fs.mkdir(dest)
+        await fs.rename(file, path.join(dest, path.basename(file)))
+      }
+      const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+      const original = 'model_provider = "custom"\n[desktop]\nfoo = true\n'
+      await fs.writeFile(configPath, original)
+      const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+      const { ctx, entries } = runContext()
+      ctx.sweep = true
+      ctx.dryRun = true
+      await collect(provider.run(ctx))
+      assert.equal(await fs.readFile(configPath, 'utf8'), original)
+      ctx.dryRun = false
+      await collect(provider.run(ctx))
+      const repaired = await fs.readFile(configPath, 'utf8')
+      assert.equal(repaired, original + '\n' + CODEX_LEGACY_PROVIDER)
+      assert.ok(entries.some((e) => e.message === 'codex.capture.route_released'))
+      const before = await fs.stat(configPath)
+      await collect(provider.run(ctx))
+      assert.equal((await fs.stat(configPath)).mtimeMs, before.mtimeMs)
+    } finally { await env.cleanup() }
+  })
+}
+
+test('manual imports and gateway mode never repair customer configuration', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-legacy.jsonl', { meta: { model_provider: 'hypaware' }, items: [] })
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    for (const config of [{ capture_mode: 'transcript' }, { capture_mode: 'gateway' }]) {
+      const provider = createCodexBackfillProvider({ homeDir: env.homeDir, config })
+      const { ctx } = runContext()
+      ctx.sweep = config.capture_mode === 'gateway'
+      await collect(provider.run(ctx))
+      await assert.rejects(fs.access(configPath), { code: 'ENOENT' })
+    }
   } finally { await env.cleanup() }
 })

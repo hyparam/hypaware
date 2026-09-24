@@ -50,11 +50,11 @@ async function writeCodexAttachMarker(home) {
     [
       'model_provider = "hypaware"',
       '',
-      '# BEGIN hypaware',
+      '# BEGIN hypaware codex provider',
       '[model_providers.hypaware]',
       'name = "hypaware"',
       'base_url = "http://127.0.0.1:4319/openai/v1"',
-      '# END hypaware',
+      '# END hypaware codex provider',
       '',
     ].join('\n'),
     'utf8'

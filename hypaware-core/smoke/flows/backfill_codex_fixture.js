@@ -14,6 +14,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
 import { createBackfillSweepDriver } from '../../../src/core/daemon/backfill_sweep.js'
 import { runBackfillProvider } from '../../../src/core/commands/backfill.js'
+import { CODEX_LEGACY_PROVIDER } from '../../../src/core/config/client_detach_disk.js'
 import { prepareAttach } from '../../plugins-workspace/codex/src/toml-config.js'
 
 /**
@@ -242,7 +243,8 @@ export async function run({ harness, expect }) {
     await sweep.tick({ now })
     const firstSweep = await Promise.all(pending)
     expect.that('sweep: both client surfaces imported', firstSweep[0], (v) => v?.ok && v.rowsWritten === 4)
-    expect.that('sweep: previous provider restored', await fs.readFile(configPath, 'utf8'), (v) => v === 'model_provider = "custom"\n')
+    expect.that('sweep: previous selection restored and saved sessions retain a direct provider',
+      await fs.readFile(configPath, 'utf8'), (v) => v === 'model_provider = "custom"\n' + CODEX_LEGACY_PROVIDER)
     const nativeRows = await queryRows({
       dispatch, kernel, registry, env, expect, label: 'scheduled capture',
       sql: "select entrypoint, system_text, tools from ai_gateway_messages where content_text = 'scheduled answer'",

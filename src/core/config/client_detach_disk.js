@@ -74,8 +74,11 @@ function hasUnwritableSegment(dottedPath) {
   return dottedPath.split('.').some((segment) => UNWRITABLE_PATH_SEGMENTS.has(segment))
 }
 
-const TOML_MANAGED_BEGIN = '# BEGIN hypaware'
-const TOML_MANAGED_END = '# END hypaware'
+const TOML_PROVIDER_MAP_KEY = String.raw`(?:model_providers|"model_providers"|'model_providers')`
+const TOML_CODEX_PROVIDER_KEY = String.raw`(?:hypaware|"hypaware"|'hypaware')`
+const TOML_CODEX_PROVIDER_TABLE_RE = new RegExp(String.raw`^\s*\[\s*${TOML_PROVIDER_MAP_KEY}\s*\.\s*${TOML_CODEX_PROVIDER_KEY}\s*\]\s*(?:#.*)?$`)
+const TOML_CODEX_PROVIDER_CHILD_RE = new RegExp(String.raw`^\s*\[\[?\s*${TOML_PROVIDER_MAP_KEY}\s*\.\s*${TOML_CODEX_PROVIDER_KEY}\s*[.\]]`)
+const TOML_PROVIDER_MAP_TABLE_RE = new RegExp(String.raw`^\s*\[\s*${TOML_PROVIDER_MAP_KEY}\s*\]\s*(?:#.*)?$`)
 const TOML_PREVIOUS_KEY = 'previous_model_provider'
 const TOML_ROOT_RESTORE_KEY = 'model_provider'
 const TOML_MANAGED_BASE_URL_KEY = 'base_url'
@@ -1538,36 +1541,128 @@ function segmentMatcher(segment) {
  */
 async function detachTomlManagedBlock({ settingsPath, fs }) {
   const read = await readText(settingsPath, fs)
-  if (!read.existed) return { changed: false, settingsPath }
+  const prepared = await prepareCodexDetach(read.content, settingsPath, { fs })
+  if (!prepared.changed) return { changed: false, settingsPath }
+  await writeTextAtomic(settingsPath, prepared.content, read.mtimeMs, fs)
+  const { content, ...result } = prepared
+  return { ...result, settingsPath }
+}
 
-  const lines = splitLines(read.content)
-  const blockValues = readManagedBlockValues(lines)
-  if (!blockValues.found) return { changed: false, settingsPath }
+/** Direct OpenAI compatibility for saved sessions, never a default selection. */
+export const CODEX_LEGACY_PROVIDER = '[model_providers.hypaware]\n'
+  + 'name = "OpenAI (legacy HypAware sessions)"\n'
+  + 'requires_openai_auth = true\n'
+  + 'wire_api = "responses"\n'
+  + 'supports_websockets = true\n'
 
+/**
+ * Shared by the unloaded-plugin undo and the transcript migration. Recovery
+ * reads headers only, once per scheduled provider lifetime, never prompts.
+ * @ref LLP 0432#compatibility [implements]: saved provider identity outlives routing ownership
+ * @param {string} content
+ * @param {string} settingsPath
+ * @param {{ fs?: typeof fsp, recover?: boolean }} [opts]
+ * @returns {Promise<ReturnType<typeof prepareCodexDetachText>>}
+ */
+export async function prepareCodexDetach(content, settingsPath, opts = {}) {
+  const prepared = prepareCodexDetachText(content)
+  if (prepared.changed || opts.recover === false || hasCodexProvider(splitLines(content))) return prepared
+  if (!await hasLegacyCodexSession(path.dirname(settingsPath), opts.fs ?? fsp)) return prepared
+  return { changed: true, content: formatLines([...splitLines(content), '', ...splitLines(CODEX_LEGACY_PROVIDER)]) }
+}
+
+/**
+ * Remove only our routing assignments, preserving user tables even when Codex
+ * has serialized them between our comment markers.
+ * @param {string} content
+ * @returns {{ changed: false } | { changed: true, content: string, removed?: string, restoredValue?: string, warning?: string }}
+ */
+export function prepareCodexDetachText(content) {
+  const lines = splitLines(content)
+  const values = readManagedBlockValues(lines)
+  if (!values.found) return { changed: false }
   let next = removeManagedBlocks(lines)
-
-  /** @type {string | undefined} */
   let restoredValue
-  /** @type {string | undefined} */
   let warning
-  if (blockValues.previous !== undefined) {
-    const current = readRootModelProvider(next)
+  const current = readRootModelProvider(next)
+  if (values.previous !== undefined && values.previous !== 'hypaware') {
     if (current === undefined) {
-      next = insertRootLines(next, [`${TOML_ROOT_RESTORE_KEY} = ${tomlString(blockValues.previous)}`])
-      restoredValue = blockValues.previous
-    } else if (current !== blockValues.previous) {
-      warning = `${TOML_ROOT_RESTORE_KEY} was changed externally; leaving ${current} in place`
+      next = insertRootLines(next, [`model_provider = ${tomlString(values.previous)}`])
+      restoredValue = values.previous
+    } else if (current !== values.previous) {
+      warning = `model_provider was changed externally; leaving ${current} in place`
     }
   }
+  if (!hasCodexProvider(next)) next.push('', ...splitLines(CODEX_LEGACY_PROVIDER))
+  return { changed: true, content: formatLines(next),
+    ...(values.removed !== undefined ? { removed: values.removed } : {}),
+    ...(restoredValue !== undefined ? { restoredValue } : {}),
+    ...(warning !== undefined ? { warning } : {}) }
+}
 
-  await writeTextAtomic(settingsPath, formatLines(next), read.mtimeMs, fs)
+/** @param {string[]} lines */
+function hasCodexProvider(lines) {
+  let table = 'root'
+  let multiline
+  for (const line of lines) {
+    if (multiline !== undefined) {
+      multiline = closeMultilineString(line, multiline)
+      continue
+    }
+    if (isTableHeader(line)) {
+      if (TOML_CODEX_PROVIDER_CHILD_RE.test(line)) return true
+      table = TOML_PROVIDER_MAP_TABLE_RE.test(line) ? 'providers' : 'other'
+    } else if ((table === 'root' && /^\s*(?:model_providers|"model_providers"|'model_providers')\s*[.=]/.test(line))
+      || (table === 'providers' && /^\s*(?:hypaware|"hypaware"|'hypaware')\s*[.=]/.test(line))) {
+      // Inline provider maps are user-owned; conservatively avoid adding a
+      // duplicate even when their syntax cannot establish the exact child.
+      return true
+    }
+    multiline = openMultilineString(line)
+  }
+  return false
+}
 
-  /** @type {DetachFromDiskResult} */
-  const result = { changed: true, settingsPath }
-  if (blockValues.removed !== undefined) result.removed = blockValues.removed
-  if (restoredValue !== undefined) result.restoredValue = restoredValue
-  if (warning !== undefined) result.warning = warning
-  return result
+/**
+ * Stream directory entries and at most 64 KiB per header. Do not follow
+ * symlinks, retain paths, parse transcripts, or inspect Codex credentials.
+ * @param {string} codexHome
+ * @param {typeof fsp} fs
+ */
+async function hasLegacyCodexSession(codexHome, fs) {
+  const buffer = Buffer.alloc(64 * 1024)
+  /** @param {string} dir @param {number} depth @returns {Promise<boolean>} */
+  async function visit(dir, depth) {
+    if (depth > 5) return false
+    let entries
+    try {
+      if ((await fs.lstat(dir)).isSymbolicLink()) return false
+      entries = await fs.opendir(dir)
+    } catch (err) {
+      if (errCode(err) === 'ENOENT') return false
+      throw err
+    }
+    for await (const entry of entries) {
+      const file = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (await visit(file, depth + 1)) return true
+      } else if (entry.isFile() && /^rollout-.*\.jsonl?$/.test(entry.name)) {
+        const handle = await fs.open(file, 'r')
+        try {
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+          const text = buffer.toString('utf8', 0, bytesRead)
+          const end = text.indexOf('\n')
+          if (end < 0 && bytesRead === buffer.length) continue
+          let row
+          try { row = JSON.parse(end < 0 ? text : text.slice(0, end)) } catch { continue }
+          if (row?.type === 'session_meta' && row.payload?.model_provider === 'hypaware') return true
+        } finally { await handle.close() }
+      }
+    }
+    return false
+  }
+  return await visit(path.join(codexHome, 'sessions'), 0)
+    || await visit(path.join(codexHome, 'archived_sessions'), 0)
 }
 
 /**
@@ -1581,6 +1676,7 @@ async function detachTomlManagedBlock({ settingsPath, fs }) {
 function readManagedBlockValues(lines) {
   const prevRe = new RegExp(String.raw`^#\s*${TOML_PREVIOUS_KEY}\s*=\s*(.+)$`)
   const baseRe = new RegExp(String.raw`^\s*${TOML_MANAGED_BASE_URL_KEY}\s*=\s*(.+)$`)
+  let multiline
   let inside = false
   let found = false
   /** @type {string | undefined} */
@@ -1588,15 +1684,20 @@ function readManagedBlockValues(lines) {
   /** @type {string | undefined} */
   let removed
   for (const line of lines) {
+    if (multiline !== undefined) {
+      multiline = closeMultilineString(line, multiline)
+      continue
+    }
+    multiline = openMultilineString(line)
     const trimmed = line.trim()
     if (!inside) {
-      if (trimmed.startsWith(TOML_MANAGED_BEGIN)) {
+      if (trimmed === '# BEGIN hypaware codex model_provider' || trimmed === '# BEGIN hypaware codex provider') {
         inside = true
         found = true
       }
       continue
     }
-    if (trimmed.startsWith(TOML_MANAGED_END)) {
+    if (trimmed === '# END hypaware codex model_provider' || trimmed === '# END hypaware codex provider') {
       inside = false
       continue
     }
@@ -1617,33 +1718,55 @@ function readManagedBlockValues(lines) {
 }
 
 /**
- * Strip every `# BEGIN hypaware …` … `# END hypaware …` block (inclusive). The
- * convention is self-delimiting, so this removes exactly what attach inserted.
+ * Remove exact Codex markers and owned routing fields, retaining other TOML.
  *
  * @param {string[]} lines
  * @returns {string[]}
  */
 function removeManagedBlocks(lines) {
-  /** @type {string[]} */
   const next = []
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim().startsWith(TOML_MANAGED_BEGIN)) {
-      next.push(lines[i])
+  let block
+  let table = 'root'
+  let multiline
+  for (const line of lines) {
+    if (multiline !== undefined) {
+      next.push(line)
+      multiline = closeMultilineString(line, multiline)
       continue
     }
-    let foundEnd = false
-    for (i++; i < lines.length; i++) {
-      if (lines[i].trim().startsWith(TOML_MANAGED_END)) {
-        foundEnd = true
-        break
+    const trimmed = line.trim()
+    const begin = /^# BEGIN hypaware codex (model_provider|provider)$/.exec(trimmed)
+    if (begin) {
+      if (block) throw new ClientDetachError('nested hypaware-managed config block', { code: 'MALFORMED_MARKER' })
+      block = begin[1]
+      continue
+    }
+    const end = /^# END hypaware codex (model_provider|provider)$/.exec(trimmed)
+    if (end) {
+      if (block !== end[1]) throw new ClientDetachError('mismatched hypaware-managed config block', { code: 'MALFORMED_MARKER' })
+      block = undefined
+      continue
+    }
+    if (isTableHeader(line)) {
+      table = TOML_CODEX_PROVIDER_TABLE_RE.test(line) ? 'provider' : 'other'
+      if (block === 'provider' && table === 'provider') {
+        // Replace in place so following user tables retain their TOML scope.
+        next.push(...splitLines(CODEX_LEGACY_PROVIDER))
+        continue
       }
     }
-    if (!foundEnd) {
-      throw new ClientDetachError('unterminated hypaware-managed config block', {
-        code: 'MALFORMED_MARKER',
-      })
+    if (block && /^#\s*(attached_at|version|port|previous_model_provider)\s*=/.test(trimmed)) continue
+    if (block === 'model_provider' && table === 'root'
+      && TOML_ROOT_MODEL_PROVIDER_RE.test(line) && parseAssignmentString(line) === 'hypaware') continue
+    if (block === 'provider' && table === 'provider'
+      && /^\s*(?:name|base_url|requires_openai_auth|wire_api|supports_websockets|"(?:name|base_url|requires_openai_auth|wire_api|supports_websockets)"|'(?:name|base_url|requires_openai_auth|wire_api|supports_websockets)')\s*=/.test(line)) {
+      if (openMultilineString(line)) throw new ClientDetachError('multiline managed provider assignment', { code: 'MALFORMED_MARKER' })
+      continue
     }
+    next.push(line)
+    multiline = openMultilineString(line)
   }
+  if (block) throw new ClientDetachError('unterminated hypaware-managed config block', { code: 'MALFORMED_MARKER' })
   return next
 }
 

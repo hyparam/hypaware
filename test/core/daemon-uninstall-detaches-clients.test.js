@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { CODEX_LEGACY_PROVIDER } from '../../src/core/config/client_detach_disk.js'
 import { detachAllClientsFromDisk } from '../../src/core/commands/clients.js'
 import { runDaemonUninstall } from '../../src/core/commands/daemon.js'
 // Adapter helpers build realistic fixtures only; the sweep under test reverses
@@ -69,7 +70,7 @@ test('the uninstall sweep reverses every attached client, claude and codex alike
     const claudeSettings = JSON.parse(await fs.readFile(claudePath, 'utf8'))
     assert.equal(claudeSettings.env.ANTHROPIC_BASE_URL, 'https://mine.example')
     assert.equal('_hypaware' in claudeSettings, false)
-    assert.equal(await fs.readFile(codexPath, 'utf8'), 'model_provider = "openai"\n')
+    assert.equal(await fs.readFile(codexPath, 'utf8'), 'model_provider = "openai"\n' + CODEX_LEGACY_PROVIDER)
 
     // Quiet: the summary is the caller's to render, so the sweep itself says
     // nothing on stdout.

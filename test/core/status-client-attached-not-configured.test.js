@@ -35,7 +35,7 @@ async function homeWithAttachedCodex() {
   await fs.mkdir(path.join(home, '.codex'), { recursive: true })
   await fs.writeFile(
     path.join(home, '.codex', 'config.toml'),
-    '# BEGIN hypaware\n[model_providers.hypaware]\nname = "hypaware"\n# END hypaware\n',
+    '# BEGIN hypaware codex provider\n[model_providers.hypaware]\nname = "hypaware"\n# END hypaware codex provider\n',
     'utf8'
   )
   return home

@@ -112,6 +112,7 @@ export function createCodexBackfillProvider(opts) {
   const unsupportedLocations = opts.unsupportedLocations
     ?? defaultUnsupportedLocations(opts.homeDir, opts.config?.capture_mode === 'gateway')
   const config = opts.config
+  let recoveryChecked = false
   const backfill = isPlainObject(config?.backfill) ? config.backfill : {}
   /** @type {Map<string, { ino: number, size: number, mtimeMs: number }>} */
   const fingerprints = new Map()
@@ -153,7 +154,8 @@ export function createCodexBackfillProvider(opts) {
       // @ref LLP 0429#migration [implements]
       if (ctx.sweep && !ctx.dryRun && config?.capture_mode !== 'gateway') {
         try {
-          const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml') })
+          const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml'), recover: !recoveryChecked })
+          recoveryChecked = true
           if (result.changed) ctx.log.info('codex.capture.route_released', {
             component: COMPONENT, operation: 'capture.migrate', status: 'ok',
             mode: 'transcript', restart_required: true,
