@@ -9,18 +9,20 @@ it.
 
 Organizations are hosted on the central server and keyed by email domain:
 anyone who signs in with a verified email on your claimed domain joins your
-organization automatically. 
+organization automatically.
 
-> To get an organization,
-> [get in touch](https://hyperparam.app/contact) and we will set one up for your
-> domain.
+You don't need an organization to start: one person can run the setup below
+and sync their own machines. To put more than one person in an organization,
+[contact us](https://hypaware.ai/contact) and we will set one up for your
+domain. There is no self-serve invite yet.
 
 ## Run the setup
 
 HypAware requires **Node 22.12 or newer**. Run:
 
 ```sh
-npx hypaware
+npm i -g hypaware
+hyp setup
 ```
 
 This opens a guided setup. The first question is how you want to collect
@@ -98,7 +100,20 @@ and undo the setup, run `hyp leave`.
 ## Explore what was recorded
 
 Because setup imports your recent history, there is data to query
-immediately. Two queries to start with:
+immediately. Start with the overview: sessions, tools, models, and tokens
+over recent activity.
+
+```sh
+hyp query overview
+```
+
+Or ask a question in plain language:
+
+```sh
+hyp ask "From my HypAware history, which tools failed most often this week?"
+```
+
+Two SQL queries to go further:
 
 ```sh
 # Which providers and models you use, by volume

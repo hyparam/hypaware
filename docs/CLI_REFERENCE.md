@@ -189,7 +189,7 @@ failures return `1`.
 hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
-Provided by the bundled `@hypaware/grep` plugin. New `hyp init` capture
+Provided by the bundled `@hypaware/grep` plugin. New `hyp setup` capture
 configurations include it; existing client configurations gain it automatically
 on startup, preserving explicit `enabled: false` entries. The migration backs up
 the local config before writing. With a read-only config, search remains
@@ -563,6 +563,8 @@ hyp client status claude --json
 hyp client attach [client] [--dry-run] [--json]
 ```
 
+Short form: `hyp attach`, which the guides use.
+
 Writes only HypAware-managed client settings and installs registered skills and
 subagents. Repeating the command is a no-op. Claude Code uses its OTEL settings
 and requires version 2.1.193 or later. Gateway-backed clients require an active
@@ -584,6 +586,8 @@ XDG config home and session store.
 ```text
 hyp client detach [client] [--dry-run] [--purge] [--json]
 ```
+
+Short form: `hyp detach`, which the guides use.
 
 Replays the on-disk undo marker and removes only managed settings. It keeps
 recordings. Claude telemetry detach removes the managed OTEL settings and
@@ -767,7 +771,7 @@ hyp client claude-account status
 Plugin: `@hypaware/claude-desktop`.
 
 Desktop capture is transcript-only by default. Select Claude
-Desktop in `hyp init`; the daemon reruns the Claude history provider every
+Desktop in `hyp setup`; the daemon reruns the Claude history provider every
 five minutes. This needs no Claude account credential and makes no changes to
 the Desktop app.
 

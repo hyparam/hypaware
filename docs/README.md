@@ -4,6 +4,27 @@ HypAware collects AI sessions and telemetry into a local, queryable history.
 You can keep it on your machine, export files, or share recordings with a team
 server. Both `hyp` and `hypaware` run the same CLI.
 
+## Quickstart
+
+HypAware needs Node.js 22.12 or newer on macOS or Linux.
+
+```sh
+npm i -g hypaware
+hyp setup
+```
+
+Setup's first question is how to collect. **Sync to the cloud** is the
+default and opens a browser sign-in; choose **Local only** to keep everything
+on this machine. Then check capture and look at what you already have:
+
+```sh
+hyp status
+hyp query overview
+hyp ask "From my HypAware history, where did my agents go off the rails recently?"
+```
+
+To switch a local-only machine to sync later, run `hyp remote login`.
+
 ## Start here
 
 1. [Install and set up HypAware](CLI.md) on your own machine, or follow

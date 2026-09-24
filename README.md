@@ -16,14 +16,17 @@ what to fix.
 
 ## Install
 
-Requires Node.js 22 or newer, on macOS or Linux.
+Requires Node.js 22.12 or newer, on macOS or Linux.
 
 ```sh
 npm install -g hypaware
 hyp setup
 ```
 
-Setup asks which agents to capture, installs the background daemon, and
+Setup first asks how to collect. **Sync to the cloud** is the default: press
+Enter and a browser sign-in enrolls this machine, so your history follows you
+across machines. Choose **Local only** to keep everything on this machine.
+Then it asks which agents to capture, installs the background daemon, and
 starts recording. It ends with a first look at your history: tokens per
 model, activity per day, which repos you worked in, and which tools got
 called. Both `hyp` and `hypaware` run the same CLI.
@@ -58,7 +61,8 @@ See [querying and reports](./docs/QUERYING.md) for more.
 ## Supported agents
 
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
-OpenClaw, and any tool that exports OpenTelemetry logs, traces, or metrics.
+OpenClaw, Hermes Agent, Pi, and any tool that exports OpenTelemetry logs,
+traces, or metrics.
 
 Claude Code is captured through its built-in telemetry, so it still talks
 directly to Anthropic and nothing sits in the path of your session. See
@@ -67,7 +71,8 @@ you ran before installing.
 
 ## Use it with your team
 
-Sign each machine into your organization with one command:
+Choosing **Sync to the cloud** in `hyp setup` signs the machine in. To sign
+in a machine you set up as local only, run:
 
 ```sh
 hyp remote login
@@ -84,13 +89,16 @@ Nothing leaves your machine right away. The first sync waits until the end of
 the day you sign in, so you can review what will be sent and mark anything
 private first.
 
-Want this for your team? [Talk to us](https://hypaware.ai) and we'll set up
-your organization. See the [team setup guide](./docs/TEAM_SETUP.md).
+One person can sign in and sync on their own. To put more than one person in
+an organization, [contact us](https://hypaware.ai/contact) and we'll set it
+up; there is no self-serve invite yet. See the
+[team setup guide](./docs/TEAM_SETUP.md).
 
 ## Privacy
 
-Everything stays local unless you sign in to a team server. You control what
-is recorded, per folder:
+Everything stays local unless you sign in, either by choosing **Sync to the
+cloud** in setup or with `hyp remote login`. You control what is recorded,
+per folder:
 
 ```sh
 hyp privacy ignore              # never record sessions in this repo
