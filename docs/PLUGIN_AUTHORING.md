@@ -226,7 +226,7 @@ command drives) is an *internal mechanism*: keep the manifest entry, so a
 dispatch miss can still name the owning plugin, and set `hidden: true` on
 **both** the manifest entry and the `register` call. The manifest flag governs
 the help rendered before boot; the registration flag governs group help after
-it. See [LLP 0268](../llp/0268-plugin-commands-classified-as-surface-or-mechanism.decision.md).
+it.
 
 ### Skills
 

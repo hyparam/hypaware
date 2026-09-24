@@ -8,6 +8,7 @@
 **Related:** LLP 0035 (the one-carrier rule this extends to a fifth path),
 LLP 0252, LLP 0262, LLP 0389
 **Tracker:** hyparam/hypaware#1470
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > LLP 0035 #one-carrier puts a response's `usage` on the LAST assistant row of
 > that response. The transcript sweep does. The OTEL lane did not: it stamped

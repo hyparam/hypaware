@@ -8,6 +8,7 @@
 **Related:** LLP 0222 (settles *whose* converter turns a WHERE into a parquet
 filter; this one settles what the WHERE holds by the time that converter sees
 it), LLP 0015, LLP 0098
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > Before a parsed statement reaches the engine or the pushdown converter, the
 > kernel gives every bare string literal sitting opposite a `TIMESTAMP` column

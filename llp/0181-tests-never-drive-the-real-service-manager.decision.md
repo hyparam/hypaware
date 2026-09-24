@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-08-04
 **Related:** LLP 0017, LLP 0174, LLP 0178
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > `runServiceCommand` refuses to spawn `launchctl` / `systemctl` when it is
 > running under the Node test runner, unless `HYP_ALLOW_REAL_SERVICE_MANAGER=1`

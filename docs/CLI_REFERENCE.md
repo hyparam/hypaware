@@ -661,8 +661,7 @@ Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
 sweep every five minutes by default.
 
 A positive `backfill.window_days` on a plugin entry bounds that scheduled
-sweep as well as the join-time import. This is deliberate
-([LLP 0359](../llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)),
+sweep as well as the join-time import. This is deliberate,
 and it is easy to miss: a `window_days` set only to keep the first import
 small also caps every later recovery, so a session older than the window is
 never swept up, OpenClaw's Lane B included. Nothing is removed from disk. The
@@ -678,8 +677,7 @@ the next sweep take it.
 With no `window_days`, the sweep falls back to the cache retention window:
 `query.cache.retention.default_days` if set, otherwise 90 days. A
 `default_days` of `0` is the open window rather than a zero-day one, so a
-sweep that falls back to it scans all history
-([LLP 0359 #sweep-context](../llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)).
+sweep that falls back to it scans all history.
 
 Setting the same block's `on_join` to false stops `@hypaware/claude`'s
 scheduled sweep as well as its join-time import: that adapter contributes no

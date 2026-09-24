@@ -7,12 +7,13 @@
 **Date:** 2026-09-23
 **Related:** hyparam/hypaware#2133
 **Extends:** LLP 0157, LLP 0161, LLP 0171, LLP 0172, LLP 0173, LLP 0193,
-LLP 0306, LLP 0374, LLP 0393, LLP 0406, LLP 0141, LLP 0164, LLP 0313
+LLP 0306, LLP 0374, LLP 0393, LLP 0406, LLP 0141, LLP 0164, LLP 0313,
+LLP 0021, LLP 0057, LLP 0151, LLP 0167, LLP 0181, LLP 0272, LLP 0390
 
 ## Decision {#decision}
 
-The repo no longer keeps written manual acceptance procedures.
-`docs/ACCEPTANCE.md` is deleted, and the "acceptance smoke" tier is gone from
+The repo no longer keeps written manual acceptance procedures. The
+procedures doc is deleted, and the "acceptance smoke" tier is gone from
 the repository guidance. That leaves two test tiers: traditional tests and
 hermetic smokes. The release checklist keeps its smoke battery and its
 `npm pack` / `npx` run on a macOS host and a Linux host. It no longer requires
@@ -21,7 +22,7 @@ procedure, the Claude OTEL shape check, or the LaunchAgent supervisor check.
 
 ## Why {#why}
 
-`docs/ACCEPTANCE.md` had grown to about 2,100 lines that mixed three things:
+The procedures doc had grown to about 2,100 lines that mixed three things:
 manual procedures that were not being run, rationale the LLPs already record,
 and dated run logs. The docs are being published, and a public procedure
 nobody follows is worse than none. It tells readers a gate exists when it
@@ -29,7 +30,7 @@ does not.
 
 ## What this retires {#retired}
 
-Each requirement below was a manual procedure in `docs/ACCEPTANCE.md`, or a
+Each requirement below was a manual procedure in that doc, or a
 rule that one had to run before a release. They are retired by this decision,
 not satisfied:
 

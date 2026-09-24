@@ -6,6 +6,7 @@
 **Author:** Claude
 **Date:** 2026-07-29
 **Related:** LLP 0030, LLP 0049, LLP 0050, LLP 0066, LLP 0083, LLP 0141
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > The Codex live projector derived a turn's thread, session and parent thread
 > from request headers, three of whose names Codex has never emitted, while the
