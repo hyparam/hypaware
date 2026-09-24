@@ -60,7 +60,6 @@ See [querying and reports](./docs/QUERYING.md) for more.
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
 OpenClaw, and any tool that exports OpenTelemetry logs, traces, or metrics.
 
-Attaching an agent is reversible and only touches HypAware's own settings.
 Claude Code is captured through its built-in telemetry, so it still talks
 directly to Anthropic and nothing sits in the path of your session. See
 [clients and history](./docs/CLIENTS.md), including how to import sessions
