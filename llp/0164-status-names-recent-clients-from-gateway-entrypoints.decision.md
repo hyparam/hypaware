@@ -8,6 +8,7 @@
 **Related:** LLP 0003, LLP 0017, LLP 0086, LLP 0114, LLP 0130, LLP 0131, LLP 0133, LLP 0141
 **Extended-by:** LLP 0394 (the tick refresh records the rest of what `status()`
 returns, not only its `details`; `state` is still left alone)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Closes the one consequence [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)
 > left deliberately open: `hyp status` could not say "Codex Desktop traffic

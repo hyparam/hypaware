@@ -7,6 +7,7 @@
 **Date:** 2026-08-25
 **Related:** LLP 0016, LLP 0045, LLP 0099, LLP 0109, LLP 0157, LLP 0161, LLP 0234
 **Extended-by:** LLP 0429 (native rollout capture is the default; gateway routing is explicit opt-in)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > `hyp attach codex` writes one provider block in both auth modes, on a
 > prefix that says nothing about how the user logged in. The gateway picks

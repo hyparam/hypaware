@@ -110,7 +110,8 @@ Everything else maps close to 1:1 onto the design's section numbers.
 - **T11** (deps `[T1, T6, T7, T9]`), Section 9: the manual
   OpenClaw capture procedure. Depends on everything it documents: T1 for
   the warning-ledger step, T6 and T7 for the live-capture route, T9 for the
-  backfill route's pass condition.
+  backfill route's pass condition. **Retired (2026-09-23)** by
+  [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md) with R12; the task line below is kept as history.
 
 This yields a 4-wide first wave (T1, T3, T4, T5), a 5-wide second/third wave
 (T2, T6, T7, T9, then T8 once T3+T4 are in), and T11 landing last. T2, T6, T7,

@@ -7,7 +7,7 @@
 **Date:** 2026-09-23
 **Related:** hyparam/hypaware#2133
 **Extends:** LLP 0157, LLP 0161, LLP 0171, LLP 0172, LLP 0173, LLP 0193,
-LLP 0306, LLP 0374, LLP 0393, LLP 0406
+LLP 0306, LLP 0374, LLP 0393, LLP 0406, LLP 0141, LLP 0164, LLP 0313
 
 ## Decision {#decision}
 
@@ -47,6 +47,13 @@ not satisfied:
 - LLP 0393 #validation: the installed-daemon outage soak and cross-version
   spool checks as manual release gates.
 - LLP 0406: the real macOS LaunchAgent check when the rendered plist changes.
+- LLP 0141 and LLP 0164: the Codex Desktop capture procedure as the check
+  that confirms Desktop traffic lands on real hardware.
+- LLP 0313: the Codex login-switch procedure as the real-traffic check of
+  credential routing.
+- Draft docs LLP 0365, 0411, and 0416 had their procedure references edited
+  directly: the LaunchAgent supervisor check, the GitHub OAuth browser check,
+  and the Pi real-client release gate.
 
 ## Consequences {#consequences}
 

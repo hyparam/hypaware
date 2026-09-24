@@ -175,6 +175,8 @@ Everything else maps directly onto the design's section numbers.
   assertion (a turn both lanes observe resolves to exactly one row), and
   re-confirms LLP 0167#verify-results items 1/3/4 on the floor OpenClaw
   version. **Externally blocked for the sweep/dedupe steps; see below.**
+  **Retired (2026-09-23)** by
+  [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md) with R11; the task line below is kept as history.
 
 ## Rating complexity: the hard parts, by name
 
