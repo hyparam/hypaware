@@ -32,8 +32,6 @@ const ROOT_BEGIN = '# BEGIN hypaware codex model_provider'
 const ROOT_END = '# END hypaware codex model_provider'
 const PROVIDER_BEGIN = '# BEGIN hypaware codex provider'
 const PROVIDER_END = '# END hypaware codex provider'
-const TOML_BASIC_MULTILINE_DELIMITER = '"""'
-const TOML_LITERAL_MULTILINE_DELIMITER = '\'\'\''
 const TOML_KEY_PART = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)`
 const TOML_DOTTED_KEY = String.raw`${TOML_KEY_PART}(?:\s*\.\s*${TOML_KEY_PART})*`
 const TOML_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
@@ -57,7 +55,7 @@ const TOML_ROOT_MODEL_PROVIDER_RE = new RegExp(String.raw`^\s*${TOML_MODEL_PROVI
  * @returns {{ content: string, prevValue?: string }}
  */
 export function prepareAttach(content, port, version, opts = {}) {
-  let lines = splitLines(content)
+  let lines = expandInlineProviderMap(splitLines(content))
   const previousFromMarker = readPreviousModelProvider(lines)
   lines = removeMarkedBlock(lines, ROOT_BEGIN, ROOT_END)
   lines = removeMarkedBlock(lines, PROVIDER_BEGIN, PROVIDER_END)
@@ -113,7 +111,7 @@ export function prepareDetach(content) {
   const previous = readPreviousModelProvider(lines)
   const removed = readManagedProviderBaseUrl(lines)
 
-  let next = removeMarkedBlock(lines, ROOT_BEGIN, ROOT_END)
+  let next = removeMarkedBlock(expandInlineProviderMap(lines), ROOT_BEGIN, ROOT_END)
   next = removeMarkedBlock(next, PROVIDER_BEGIN, PROVIDER_END)
 
   /** @type {string | undefined} */
@@ -401,7 +399,113 @@ function hasProvider(lines) {
   // and inline entries. Never overwrite an existing unmarked provider.
   return removeProviderTable(lines).length !== lines.length
     || removeProviderDottedAssignments(lines).length !== lines.length
-    || [...syntaxLines(lines.slice(0, findFirstTableIndex(lines)))].some(line => /^\s*(?:model_providers|"model_providers"|'model_providers')\s*=/.test(line))
+    || (findInlineProviderMap(lines)?.entries.some(entry => {
+      const key = new RegExp(`^(${TOML_KEY_PART})`).exec(entry.slice(inlineKeyStart(entry)))?.[1]
+      return key === PROVIDER_ID || (key !== undefined && parseTomlString(key) === PROVIDER_ID)
+    }) ?? false)
+}
+
+/**
+ * An inline table cannot be extended with a later [model_providers.hypaware]
+ * header. Expand its entries into equivalent root dotted assignments first,
+ * retaining each value verbatim. This also lets explicit gateway attach reuse
+ * the existing provider replacement logic without writing duplicate tables.
+ * @ref LLP 0432#ownership [implements]: preserve inline provider values while repairing a missing child
+ * @param {string[]} lines
+ */
+function expandInlineProviderMap(lines) {
+  const map = findInlineProviderMap(lines)
+  if (!map) return lines
+  const expanded = map.entries.map(entry => {
+    const start = inlineKeyStart(entry)
+    if (start === entry.length) return entry
+    return entry.slice(0, start) + map.key + '.' + entry.slice(start)
+  }).join('\n')
+  return splitLines(map.text.slice(0, map.start) + expanded + map.text.slice(map.end))
+}
+
+/** @param {string[]} lines */
+function findInlineProviderMap(lines) {
+  const rootAssignment = new RegExp(`^\\s*(${TOML_MODEL_PROVIDERS_KEY})\\s*=`)
+  let offset = 0
+  let multiline
+  for (const line of lines) {
+    if (multiline !== undefined) multiline = closeMultilineString(line, multiline)
+    else {
+      if (isTableHeader(line)) return undefined
+      const match = rootAssignment.exec(line)
+      if (match) {
+        const text = lines.join('\n')
+        let start = offset + match[0].length
+        while (/\s/.test(text[start] ?? '') && start < text.length) start++
+        if (text[start] !== '{') throw new CodexSettingsError('model_providers must be a TOML table', { code: 'INVALID_TOML' })
+        const { entries, end } = readInlineEntries(text, start)
+        return { text, start: offset, end, key: match[1], entries }
+      }
+      multiline = openMultilineString(line)
+    }
+    offset += line.length + 1
+  }
+  return undefined
+}
+
+/**
+ * Split only at this table's commas. Strings, nested tables, arrays and
+ * comments are opaque: braces or commas in a header value are not syntax.
+ * @param {string} text
+ * @param {number} start
+ */
+function readInlineEntries(text, start) {
+  /** @type {string[]} */
+  const entries = []
+  const stack = ['}']
+  let entryStart = start + 1
+  let quote = ''
+  for (let i = entryStart; i < text.length; i++) {
+    const char = text[i]
+    if (quote) {
+      if (text.startsWith(quote, i) && (quote[0] === "'" || !isEscaped(text, i))) {
+        i += quote.length - 1
+        // TOML permits one or two quotes just before the closing triple.
+        if (quote.length === 3) while (text[i + 1] === quote[0]) i++
+        quote = ''
+      }
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = text.startsWith(char.repeat(3), i) ? char.repeat(3) : char
+      i += quote.length - 1
+    } else if (char === '#') {
+      const newline = text.indexOf('\n', i)
+      if (newline < 0) break
+      i = newline
+    } else if (char === '{' || char === '[') stack.push(char === '{' ? '}' : ']')
+    else if (char === '}' || char === ']') {
+      if (stack.pop() !== char) break
+      if (stack.length === 0) {
+        const entry = text.slice(entryStart, i).trim()
+        if (entry) entries.push(entry)
+        return { entries, end: i + 1 }
+      }
+    } else if (char === ',' && stack.length === 1) {
+      entries.push(text.slice(entryStart, i).trim())
+      entryStart = i + 1
+    }
+  }
+  throw new CodexSettingsError('unterminated or malformed inline model_providers table', { code: 'INVALID_TOML' })
+}
+
+/** Skip leading whitespace/comments without changing the entry's value. @param {string} entry */
+function inlineKeyStart(entry) {
+  let i = 0
+  while (i < entry.length) {
+    if (/\s/.test(entry[i])) i++
+    else if (entry[i] === '#') {
+      const end = entry.indexOf('\n', i)
+      i = end < 0 ? entry.length : end + 1
+    } else break
+  }
+  return i
 }
 
 /**
@@ -540,18 +644,7 @@ function isTableHeader(line) {
 
 /** @param {string} line */
 function openMultilineString(line) {
-  const trimmed = assignmentValue(line) ?? line.trimStart()
-  if (trimmed.startsWith(TOML_BASIC_MULTILINE_DELIMITER)) {
-    return hasClosingMultilineString(trimmed.slice(3), TOML_BASIC_MULTILINE_DELIMITER)
-      ? undefined
-      : TOML_BASIC_MULTILINE_DELIMITER
-  }
-  if (trimmed.startsWith(TOML_LITERAL_MULTILINE_DELIMITER)) {
-    return hasClosingMultilineString(trimmed.slice(3), TOML_LITERAL_MULTILINE_DELIMITER)
-      ? undefined
-      : TOML_LITERAL_MULTILINE_DELIMITER
-  }
-  return undefined
+  return scanStringState(line)
 }
 
 /**
@@ -559,26 +652,31 @@ function openMultilineString(line) {
  * @param {string} delimiter
  */
 function closeMultilineString(line, delimiter) {
-  return hasClosingMultilineString(line, delimiter) ? undefined : delimiter
-}
-
-/** @param {string} line */
-function assignmentValue(line) {
-  if (/^\s*#/.test(line)) return undefined
-  const index = line.indexOf('=')
-  return index === -1 ? undefined : line.slice(index + 1).trimStart()
+  return scanStringState(line, delimiter)
 }
 
 /**
- * @param {string} value
- * @param {string} delimiter
+ * Track strings even inside inline tables/arrays, where header-looking lines
+ * are still value text. Ordinary strings and comments cannot open a triple.
+ * @param {string} line
+ * @param {string} [quote]
  */
-function hasClosingMultilineString(value, delimiter) {
-  if (delimiter === TOML_LITERAL_MULTILINE_DELIMITER) return value.includes(delimiter)
-  for (let index = value.indexOf(delimiter); index !== -1; index = value.indexOf(delimiter, index + 1)) {
-    if (!isEscaped(value, index)) return true
+function scanStringState(line, quote = '') {
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]
+    if (quote) {
+      if (line.startsWith(quote, i) && (quote[0] === "'" || !isEscaped(line, i))) {
+        i += quote.length - 1
+        if (quote.length === 3) while (line[i + 1] === quote[0]) i++
+        quote = ''
+      }
+    } else if (char === '#') break
+    else if (char === '"' || char === "'") {
+      quote = line.startsWith(char.repeat(3), i) ? char.repeat(3) : char
+      i += quote.length - 1
+    }
   }
-  return false
+  return quote.length === 3 ? quote : undefined
 }
 
 /**

@@ -157,3 +157,64 @@ test('partial marker ownership preserves an existing user provider and external 
   assert.match(detached.content, /name = "Mine"/)
   assert.match(detached.warning ?? '', /changed externally/)
 })
+
+for (const key of ['model_providers', '"model_providers"', "'model_providers'"]) {
+  test(`repair an inline ${key} map without changing custom settings`, () => {
+    const custom = 'custom = { name = "Private, {provider}", wire_api = "responses", http_headers = { "X-Note" = "},[" }, env_key = "PRIVATE_KEY" }'
+    const original = `model_provider = "custom"\n${key} = { ${custom} } # keep this comment\nservice_tier = "fast"\n`
+    const result = prepareDetach(original)
+    assert.equal(result.changed, true)
+    assert.ok(result.content.includes(`${key}.${custom}`))
+    assert.match(result.content, /# keep this comment\nservice_tier = "fast"/)
+    assert.match(result.content, /^model_provider = "custom"\n/)
+    assert.match(result.content, /\[model_providers.hypaware\]/)
+    assert.deepEqual(prepareDetach(result.content), { changed: false })
+    const gateway = prepareAttach(result.content, 4388, 'new')
+    assert.ok(gateway.content.includes(`${key}.${custom}`))
+    assert.match(gateway.content, /base_url = "http:\/\/127.0.0.1:4388/)
+  })
+}
+
+test('inline maps handle empty maps, quoted keys, nested arrays and multiline strings', () => {
+  for (const content of [
+    'model_providers = {} # empty\n',
+    "model_providers = { 'custom.name' = { name = 'Literal }, comma,', wire_api = 'responses' }, second.name = \"Second\", second.wire_api = \"responses\" }\n",
+    'model_providers = { custom = { name = """first\nsecond }, comma,\nthird""", wire_api = "responses" } }\n',
+    'model_providers = { custom = { name = "Escaped \\\"}, comma,", extra = [1, { nested = [2, 3] }], wire_api = "responses" } }\n',
+  ]) {
+    const result = prepareDetach(content)
+    assert.equal(result.changed, true)
+    assert.match(result.content, /\[model_providers.hypaware\]/)
+    assert.deepEqual(prepareDetach(result.content), { changed: false })
+  }
+  assert.deepEqual(prepareDetach('model_providers = { "hypaware".name = "Mine", "hypaware".wire_api = "responses" }\n'), { changed: false })
+})
+
+test('gateway attach replaces an inline compatibility provider without duplicating it', () => {
+  const content = 'model_providers = { custom = { name = "Private" }, hypaware = { name = "OpenAI", wire_api = "responses" } }\n'
+  const attached = prepareAttach(content, 4388, 'new')
+  assert.match(attached.content, /model_providers.custom = \{ name = "Private" \}/)
+  assert.doesNotMatch(attached.content, /hypaware = \{/)
+  const detached = prepareDetach(attached.content)
+  assert.equal(detached.changed, true)
+  assert.match(detached.content, /model_providers.custom = \{ name = "Private" \}/)
+})
+
+test('nested multiline values cannot claim provider ownership or contain real markers', () => {
+  const value = 'custom = { name = """first\n[model_providers.hypaware]\n# BEGIN hypaware codex provider\n# END hypaware codex provider\nlast""", wire_api = "responses" }'
+  const repaired = prepareDetach(`model_providers = { ${value} }\n`)
+  assert.equal(repaired.changed, true)
+  assert.ok(repaired.content.includes(`model_providers.${value}`))
+  assert.deepEqual(prepareDetach(repaired.content), { changed: false })
+  assert.ok(prepareAttach(repaired.content, 4388, 'new').content.includes(`model_providers.${value}`))
+})
+
+test('provider fields after END still belong to the managed table', () => {
+  const base = 'base_url = "http://127.0.0.1:4388/backend-api/codex"'
+  const content = prepareAttach('', 4388, 'old').content
+    .replace(base + '\n', '')
+    .replace('# END hypaware codex provider', '# END hypaware codex provider\n' + base)
+  const result = prepareDetach(content)
+  assert.equal(result.changed, true)
+  assert.doesNotMatch(result.content, /base_url|127.0.0.1/)
+})

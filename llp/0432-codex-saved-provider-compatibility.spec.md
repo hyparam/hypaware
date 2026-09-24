@@ -46,6 +46,13 @@ Preserve other settings and externally changed selections. Share this editor
 between the plugin and core undo so unloading a plugin cannot change repair.
 The status probe uses the gateway's BEGIN marker, not the alias's table header.
 
+If the root `model_providers` namespace is an inline table without a `hypaware`
+child, expand its entries into equivalent dotted assignments before appending
+the compatibility table. Retain each child value and the default selection.
+An existing user-owned inline `hypaware` child remains untouched. Strings,
+nested tables, arrays, and comments must not be mistaken for entry boundaries
+or managed markers.
+
 Previously deleted unrelated settings cannot be reconstructed without a backup;
 this repair prevents further loss and does not invent those settings.
 
@@ -58,10 +65,14 @@ client settings or histories. Regression coverage must exercise the real
 scheduled and explicit detach paths, markerless repair, custom selections,
 user-owned providers, idempotence, and unrelated settings inside markers.
 
-Config-loading probes with a saved provider on installed CLI/Desktop binaries
-prove provider resolution only. Authenticated inference and actual app resume
-are separate acceptance checks. No such inference claim follows from a
-`features list` result or a synthetic gateway smoke.
+`node scripts/check-codex-saved-provider.js /absolute/path/to/codex` exercises
+the installed CLI or Desktop-bundled app server in a disposable home. It first
+reproduces the missing-provider error from a synthetic saved rollout, applies
+the real settings repair, then checks `thread/resume` retains the saved provider
+and message while `thread/start` retains the custom default. The child uses an
+allowlisted environment and file-only credential storage, without credentials
+or `turn/start` requests. This proves synthetic app-server resume; authenticated
+inference and the Desktop UI remain separate acceptance checks.
 
 Work is a fixed number of linear passes over one config file and a single
 atomic write when needed. Repair does not scan session history, add a daemon
