@@ -6,7 +6,7 @@ import process from 'node:process'
 
 import { runWizardSuggestSkill } from '../../../../src/core/cli/wizard/suggest_skill.js'
 
-const VERB = /Run `hyp ask` any time: HypAware suggests the one skill worth adding first/
+const VERB = /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/
 
 function makeBuf() {
   let value = ''

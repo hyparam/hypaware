@@ -40,7 +40,7 @@ Ask a question about your own history:
 
 ```sh
 hyp ask "which sessions touched the auth module"
-hyp ask            # suggest the one skill worth adding first
+hyp ask            # suggest a skill based on your recent sessions
 ```
 
 Search and query directly:
@@ -108,8 +108,7 @@ See [what HypAware records and how to control it](./docs/PRIVACY.md).
 hyp status
 ```
 
-This shows the daemon, attached agents, and what was captured recently. If
-something is wrong, it prints the exact command to fix it. See
+This shows the daemon, attached agents, and what was captured recently. See
 [troubleshooting](./docs/TROUBLESHOOTING.md).
 
 ## Uninstall

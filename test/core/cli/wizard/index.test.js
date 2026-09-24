@@ -1568,7 +1568,7 @@ test('runInitWizard: the skill offer comes last, after the privacy narration, an
   // Order: rows, then what leaves this machine, then the offer's verb.
   assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
   assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Run `hyp ask` any time'))
-  assert.match(text, /Run `hyp ask` any time: HypAware suggests the one skill worth adding first/)
+  assert.match(text, /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/)
 })
 
 test('runInitWizard: a yes to the skill offer runs `hyp ask` on this terminal', async () => {
@@ -1607,7 +1607,7 @@ test('runInitWizard: a no to the skill offer names the verb and starts nothing',
   })
   await runInitWizard(opts)
   assert.equal(spawned, 0)
-  assert.match(stdout.text(), /Run `hyp ask` any time: HypAware suggests the one skill worth adding first/)
+  assert.match(stdout.text(), /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/)
 })
 
 // @ref LLP 0203#offer [tests]: the sync offer sits between the first look it follows and the closing skill offer
@@ -1662,7 +1662,7 @@ test('runInitWizard: a first look with no rows replaces the skill offer with an 
   })
   await runInitWizard(opts)
   assert.match(stdout.text(), /Nothing recorded yet/)
-  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests the one skill worth adding first/)
+  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions/)
 })
 
 test('runInitWizard: no detected client or gateway dataset still prints the empty-history note', async () => {
@@ -1671,7 +1671,7 @@ test('runInitWizard: no detected client or gateway dataset still prints the empt
   })
   await runInitWizard(opts)
   assert.match(stdout.text(), /Nothing recorded yet/)
-  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests the one skill worth adding first/)
+  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions/)
   assert.doesNotMatch(stdout.text(), /Starting Claude Code|Starting Codex/)
 })
 
