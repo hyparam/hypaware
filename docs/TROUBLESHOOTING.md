@@ -24,7 +24,7 @@ hyp cache status
 1. Check that the intended source is configured. Add it through `hyp setup`
    if needed.
 2. Check that the client is attached. Preview and apply its attach using
-   `hyp client attach CLIENT --dry-run` and `hyp client attach CLIENT`.
+   `hyp attach CLIENT --dry-run` and `hyp attach CLIENT`.
 3. Check the daemon is running. Use `hyp daemon start` for an installed service,
    or follow [headless setup](HEADLESS.md) when there is no service manager.
 4. Start a new client process and complete a turn so it uses the managed settings.

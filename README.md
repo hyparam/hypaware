@@ -8,15 +8,14 @@ Code, Codex), raw Anthropic / OpenAI API traffic, and OpenTelemetry
 logs / traces / metrics. Recordings land in a local query cache and can
 stay on your machine or sync to a central server.
 
-There are two ways to run it:
+There are two ways to run it, and [setup](#quickstart) asks which:
 
-- **Shared.** Each machine signs into your organization on the central
-  server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
-  and forwards its recordings there. One history follows you across
+- **Sync to the cloud (the default).** Each machine signs in to the central
+  server and forwards its recordings there. One history follows you across
   machines and harnesses, and usage, spend, and activity can be queried
   and reported across the whole team.
-- **Solo, fully local.** No central server, no account. Everything stays in
-  a local query cache on your machine. Start with [`npx hypaware`](#quickstart-solo-fully-local).
+- **Local only.** No central server, no account. Everything stays in a
+  local query cache on your machine.
 
 > Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
@@ -24,7 +23,7 @@ There are two ways to run it:
 
 **Contents:**
 [Requirements](#requirements) ·
-[Quickstart](#quickstart-solo-fully-local) ·
+[Quickstart](#quickstart) ·
 [Team setup](#set-up-for-your-team-hyp-remote-login) ·
 [Files](#files-and-directories) ·
 [Querying](#querying-captured-data) ·
@@ -41,20 +40,23 @@ There are two ways to run it:
 - Node.js >= 22.12
 - macOS (launchd) or Linux (systemd `--user`) for the persistent daemon
 
-## Quickstart (solo, fully local)
+## Quickstart
 
 ```sh
-npx hypaware
+npm i -g hypaware
+hyp setup
 ```
 
-When run through `npx`, the walkthrough also installs a durable global copy
-of the CLI (`npm install -g hypaware`) so the daemon and the `hyp` command
-outlive the `npx` cache. Every command below is available as both `hyp` and
-`hypaware`.
+Every command below is available as both `hyp` and `hypaware`.
 
 On a TTY this launches the interactive walkthrough:
 
-1. Pick the **sources** to capture. Any subset of:
+1. Choose how to collect. **Sync to the cloud** is the default: press
+   Enter and a browser sign-in enrolls this machine (see
+   [team setup](#set-up-for-your-team-hyp-remote-login)). Choose
+   **Local only** to keep everything on this machine; `hyp remote login`
+   switches it to sync later.
+2. Pick the **sources** to capture. Any subset of:
    - Claude Code conversations (`claude`)
    - Codex conversations, CLI and Desktop (`codex`)
    - OpenCode conversations, CLI and Desktop (`opencode`)
@@ -66,23 +68,23 @@ On a TTY this launches the interactive walkthrough:
    nothing. They remain real sources: `hyp setup --source raw-anthropic`
    still composes one, and a config that already collects one keeps it
    through a reconfigure.
-2. New guided setups keep the local query cache and also write local
+3. New guided setups keep the local query cache and also write local
    Parquet exports under `<HYP_HOME>/exports`. Use `--export keep-local`,
    `--export local-parquet`, or `--export configure-later` to select a strategy
    explicitly. Interactive reconfiguration preserves the existing choice.
-3. The **retention window** is not asked: the pathway sets it, `90` days on
+4. The **retention window** is not asked: the pathway sets it, `90` days on
    a team install and `120` on a local-only one. `hyp setup --retention-days
    <N>` overrides it, and `query.cache.retention` in the written config
    remains the post-install knob.
-4. HypAware composes a minimal config with only the bundled plugins it
+5. HypAware composes a minimal config with only the bundled plugins it
    needs, writes it to `<HYP_HOME>/hypaware-config.json`, installs the
    persistent daemon (launchd on macOS, systemd `--user` on Linux),
    attaches the selected clients, and starts capturing.
-5. The walkthrough finishes by printing the config path, daemon status,
+6. The walkthrough finishes by printing the config path, daemon status,
    per-client attach results, and a first look at what was captured: token
    volume per model, activity per day, which repos the sessions ran in, and
    which tools got called. Reprint it any time with `hyp query overview`.
-6. Last, it asks whether you would like HypAware to suggest a skill. Yes
+7. Last, it asks whether you would like HypAware to suggest a skill. Yes
    runs `hyp ask`: HypAware reads the last 30 days of that data for the one
    skill worth adding first, then starts your AI client on the evidence to
    explain and write it. Run `hyp ask` any time to take the offer later, or
@@ -115,11 +117,11 @@ Other init flags:
 
 ## Set up for your team (`hyp remote login`)
 
-If your organization is set up on the central server, enrolling a machine is
-one command:
+Choosing **Sync to the cloud** in `hyp setup` enrolls the machine. To enroll
+a machine you set up as local only, run:
 
 ```sh
-npx hypaware remote login
+hyp remote login
 ```
 
 This opens a browser sign-in. Your organization is resolved from your work
@@ -148,10 +150,11 @@ enrollment), `--no-browser` prints the sign-in URL instead of opening one,
 `--token-file <path>` / stdin supply a static token, and `--host <label>`
 overrides the host label the server shows for this machine.
 
-> **Want this for your team?** We host organizations on the central server.
-> [Get in touch](https://hypstack.ai/) and we will set one up for your email
-> domain; after that, everyone on the team onboards with the single
-> `hyp remote login` above.
+> **Want this for your team?** One person can sign in and sync on their own.
+> To put more than one person in an organization,
+> [contact us](https://hypaware.ai/contact) and we will set one up for your
+> email domain; after that, everyone on the team onboards with `hyp setup`
+> or `hyp remote login`.
 
 For the full rollout story (fleet tokens, managed config, Claude Desktop
 capture, verifying machines) see the
@@ -303,7 +306,7 @@ on your behalf.
 Attach a single client (idempotent: running twice is a no-op):
 
 ```sh
-hyp client attach <client>             # claude, codex, opencode, openclaw, ...
+hyp attach <client>             # claude, codex, opencode, openclaw, ...
 # Pre-rollover spelling, still accepted:
 hyp attach <client>
 ```
@@ -311,7 +314,7 @@ hyp attach <client>
 Detach (removes only HypAware-managed settings):
 
 ```sh
-hyp client detach <client>
+hyp detach <client>
 # Equivalent aliases:
 hyp detach <client>
 hyp unattach <client>
@@ -325,7 +328,7 @@ provider entry from `~/.codex/config.toml`; unrelated settings are preserved.
 
 ### Claude Code attaches by telemetry, not by proxy
 
-`hyp client attach claude` writes one reversible `env` block into
+`hyp attach claude` writes one reversible `env` block into
 `~/.claude/settings.json` that turns on Claude Code's own OpenTelemetry
 export and points it at a loopback listener the daemon runs. It leaves
 `ANTHROPIC_BASE_URL` alone, sets no proxy, and installs no certificate
@@ -340,7 +343,7 @@ Two things ride along with the conversation rows:
   (owner-only) until the listener projects them and deletes them. They carry
   what the events do not: the system prompt, the tool list, and untruncated
   tool arguments. The directory is capped (512 MB by default, oldest evicted
-  first), and both `hyp privacy purge` and `hyp client detach claude` empty it.
+  first), and both `hyp privacy purge` and `hyp detach claude` empty it.
 - **Behavioral signals the wire never showed** land in their own
   `claude_telemetry_events` table: tool accept and reject decisions,
   permission mode changes, per-request cost, hook and MCP health.
@@ -350,13 +353,13 @@ tool-decision detail). Below the floor, attach refuses the switch, leaves any
 existing attach exactly as it is, and prints `claude update`, rather than
 silently capturing less.
 
-`hyp client detach claude` removes exactly those keys, restores anything they
+`hyp detach claude` removes exactly those keys, restores anything they
 displaced, and sweeps the spool.
 
-If this machine was attached by proxy before, `hyp client attach claude` is also the
+If this machine was attached by proxy before, `hyp attach claude` is also the
 migration: it releases the proxy keys, unwinds the launchd environment, and
 tells you how to end the CA trust that it will not end for you
-(`hyp client detach claude --purge`).
+(`hyp detach claude --purge`).
 
 ### Proxy mode (TLS interception for the clients that still proxy)
 
@@ -389,10 +392,10 @@ Such a client is then pointed at the gateway with `HTTPS_PROXY` and
   ran one of those releases, that trust setting is still on your account
   until you remove it. `hyp status` shows
   the fingerprint, every host the CA is permitted to vouch for, and whether
-  the login keychain still trusts it. `hyp client detach <client>` leaves the CA
+  the login keychain still trusts it. `hyp detach <client>` leaves the CA
   and any trust an earlier release was granted in place, because a detach is
   not a statement about the certificate and no attach re-creates the grant;
-  `hyp client detach <client> --purge` and `hyp daemon uninstall` remove both.
+  `hyp detach <client> --purge` and `hyp daemon uninstall` remove both.
 - **On macOS, an earlier proxy attach also left a login-session variable
   behind.** Bun picks its trust store before any settings file is read, so a
   keychain root only counts if `NODE_USE_SYSTEM_CA=1` is already in the
@@ -404,10 +407,10 @@ Such a client is then pointed at the gateway with `HTTPS_PROXY` and
   stays a login item until it is removed, and the variable stays session-wide
   for other Node programs to read too. `launchctl setenv` reaches
   processes launched after it, so a terminal app that was already running
-  must be fully quit and reopened. `hyp client detach <client> --purge` and
-  `hyp daemon uninstall` clear both unconditionally, and `hyp client attach claude`
+  must be fully quit and reopened. `hyp detach <client> --purge` and
+  `hyp daemon uninstall` clear both unconditionally, and `hyp attach claude`
   unwinds them when it migrates a previously proxied machine. A plain
-  `hyp client detach <client>` only clears them while that client's attach marker still
+  `hyp detach <client>` only clears them while that client's attach marker still
   records a proxy attach, so on a machine already migrated to another attach
   mode it is not the command that removes the leftover. `hyp status` shows
   whether the variable is currently live.
@@ -421,7 +424,7 @@ Two things to know before turning it on:
 
 - If the daemon is not running, a proxied client's HTTPS all fails, not just
   its model calls. Attach refuses to write the settings unless proxy mode is
-  actually running, and `hyp client detach <client>` is the escape hatch.
+  actually running, and `hyp detach <client>` is the escape hatch.
 - If you already use a corporate proxy, set `upstream_proxy` to it so
   traffic still chains through it. Attach warns and backs up your existing
   `HTTPS_PROXY` (restored on detach) rather than silently replacing it:
@@ -436,7 +439,7 @@ uses the base-URL mechanism.
 
 ### Desktop apps
 
-**Codex Desktop needs no separate setup.** `hyp client attach codex` covers the
+**Codex Desktop needs no separate setup.** `hyp attach codex` covers the
 Codex CLI and Codex Desktop together. The daemon reads their shared native
 rollouts (`$CODEX_HOME/sessions/**`, default `~/.codex/sessions/**`) every
 minute, skipping unchanged files. Inference connects directly to the provider.
@@ -450,14 +453,14 @@ Modern responses still awaiting a usage/completion event are imported on a later
 sweep; manual history import can recover a crashed unfinished response.
 
 The Codex plugin's optional `capture_mode: "gateway"` restores explicit proxy
-capture after `hyp client attach codex` and a client restart. Its default is
+capture after `hyp attach codex` and a client restart. Its default is
 `"transcript"`. `backfill.sweep_cron` changes the one-minute schedule;
 `backfill.on_join: false` disables automatic imports, and `window_days` bounds
 the sweep as well as join-time history. Manual `hyp client history import codex`
 remains available. Old local installs migrate on the next scheduled sweep;
 installs with automatic import disabled migrate when explicitly attached.
 
-**Claude Desktop needs no attach.** Select it in `hyp init` and HypAware imports
+**Claude Desktop needs no attach.** Select it in `hyp setup` and HypAware imports
 its local JSONL transcripts on the daemon's five-minute schedule.
 The picker makes no changes to Claude Desktop, opens no browser, writes no
 managed preferences, and needs no admin approval. Desktop rows land as
@@ -465,7 +468,7 @@ managed preferences, and needs no admin approval. Desktop rows land as
 separate from Claude Code.
 
 ```sh
-hyp init
+hyp setup
 hyp query sql "select max(message_created_at) from ai_gateway_messages where client_name = 'claude-desktop'"
 ```
 
@@ -575,11 +578,11 @@ run directly. The common Phase 8 conditions:
 |---------------------------------------|------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
 | `config_missing`                      | no `~/.hyp/hypaware-config.json` was found                                         | `hyp setup` or `hyp setup --from-file <config.json>`                       |
 | `config_invalid`                      | the loaded config failed schema / cross-plugin validation                          | `hyp setup --from-file <config.json>`                                     |
-| `client_without_gateway`              | a gateway-backed client plugin (Claude / Codex / OpenClaw) is enabled but `@hypaware/ai-gateway` is not | re-run `hyp setup`, then `hyp client attach <name>`                              |
+| `client_without_gateway`              | a gateway-backed client plugin (Claude / Codex / OpenClaw) is enabled but `@hypaware/ai-gateway` is not | re-run `hyp setup`, then `hyp attach <name>`                              |
 | `gateway_missing_anthropic_upstream`  | a gateway-routed Anthropic client (OpenClaw) is enabled but no Anthropic upstream is registered  | re-run `hyp setup` and pick the Anthropic upstream                        |
 | `gateway_missing_openai_upstream`     | `@hypaware/codex` enabled but no OpenAI upstream is registered                     | re-run `hyp setup` and pick the OpenAI upstream                           |
 | `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp setup` and pick "local Parquet export"                        |
-| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | the printed repair names the client, e.g. `hyp client attach opencode`     |
+| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | the printed repair names the client, e.g. `hyp attach opencode`     |
 | `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
 | `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it; an `error` rather than a warning when the service manager answered and no daemon process is running either, because nothing is being captured | `hyp daemon install` for the `error` case, which runs the load step that is missing; otherwise `hyp daemon restart` |
 | `daemon_heartbeat_stale`              | the daemon process is alive but its status snapshot has stopped advancing, so its tick is not completing | `hyp daemon restart`                                                     |
@@ -590,7 +593,7 @@ Useful follow-on commands when a diagnostic fires:
 
 - `hyp daemon restart`: bounce the persistent daemon
 - `hyp daemon install`: re-install the launchd / systemd unit
-- `hyp client attach claude` (or `codex`, `opencode`, `openclaw`): wire a
+- `hyp attach claude` (or `codex`, `opencode`, `openclaw`): wire a
   selected client into HypAware capture
 - `hyp setup --from-file <path>`: rebuild the config from a known-good
   file without re-running the interactive picker
@@ -706,7 +709,7 @@ rm -rf ~/.hyp                 # delete all local recordings, config, and state
 
 `hyp daemon uninstall` restores each attached client's own settings on its
 way out, so no client is left pointing at a gateway that no longer exists;
-to detach a single client without uninstalling, use `hyp client detach <client>`.
+to detach a single client without uninstalling, use `hyp detach <client>`.
 
 The first three steps are non-destructive and reversible; deleting `~/.hyp`
 permanently removes every local recording. Note that copies already

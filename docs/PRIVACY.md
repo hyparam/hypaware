@@ -43,7 +43,7 @@ Three things keep it from becoming a second record:
   `@hypaware/claude` config). Past it the oldest files go first, so a stopped
   daemon costs detail, never disk.
 - `hyp purge` empties it, whatever else you asked that purge to delete, and
-  `hyp client detach claude` empties it on the way out.
+  `hyp detach claude` empties it on the way out.
 
 ### If you turned on proxy mode
 
@@ -100,9 +100,9 @@ programs will also read.
 
 **Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
 permitted to vouch for, whether the keychain still trusts it, and whether
-the launchd variable is live. `hyp client detach claude --purge` and `hyp daemon
+the launchd variable is live. `hyp detach claude --purge` and `hyp daemon
 uninstall` remove the CA, its keychain trust, the launchd variable, and the
-login agent. A plain `hyp client detach claude` leaves the CA and any trust an
+login agent. A plain `hyp detach claude` leaves the CA and any trust an
 earlier release was granted in place, because a detach is not a statement
 about the certificate and no attach re-creates the grant; it clears the
 launchd variable and its agent only while that client's attach marker still
