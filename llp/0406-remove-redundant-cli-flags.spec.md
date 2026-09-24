@@ -5,6 +5,7 @@
 **Systems:** CLI, Daemon, Config, Usage-Policy
 **Date:** 2026-09-14
 **Related:** LLP 0009, LLP 0017, LLP 0111, LLP 0293
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 ## Request
 

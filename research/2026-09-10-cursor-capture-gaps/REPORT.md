@@ -143,9 +143,9 @@ Confidence is high that the tested native stores can recover substantially more 
 
 Primary documentation and installed implementation evidence were examined September 10, 2026. Public pages did not consistently expose publication dates. Version-specific findings are deliberately tied to the tested builds. The full source ledger and reproduction notes are in [SOURCES.md](SOURCES.md).
 
-[^1]: [Editor storage findings and controlled evidence](work/WP1-editor-storage.md), Cursor 3.19.19.
-[^2]: [CLI, ACP and SDK findings and controlled evidence](work/WP2-cli.md), CLI 2026.09.08-6caf4ff.
-[^3]: [Supported-interface and transport findings](work/WP3-interfaces.md), with installed-code hashes and source anchors.
+[^1]: Editor storage probe, Cursor 3.19.19; see the [source ledger](SOURCES.md#controlled-local-evidence).
+[^2]: CLI store and JSON projection probes, CLI 2026.09.08-6caf4ff; see the [source ledger](SOURCES.md#controlled-local-evidence).
+[^3]: Installed-code inspection with hashes and source anchors; see the [source ledger](SOURCES.md#installed-and-published-implementation).
 [^4]: Cursor, [TypeScript SDK](https://cursor.com/docs/sdk/typescript), especially Token usage, Stream events, Conversation turns and Local agent stores.
 [^5]: Cursor, [API overview](https://cursor.com/docs/api) and [Admin API: Get Usage Events Data](https://cursor.com/docs/account/teams/admin-api).
 [^6]: Cursor, [SDK Bridge](https://cursor.com/docs/sdk/bridge) and [published service protocol](https://github.com/cursor/sdk-bridge/blob/main/proto/sdk/v1/sdk_agent_service.proto).

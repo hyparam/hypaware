@@ -1688,7 +1688,7 @@ requires an eligible enrolled central destination. `off` removes pending copies
 and stops collection, but cannot retract records already accepted remotely.
 
 See [product telemetry](PRODUCT_TELEMETRY.md) for daemon restart requirements,
-the current draft implementation, and rollout limitations.
+what is collected, and delivery limits.
 
 ## Print version information
 
@@ -1744,18 +1744,4 @@ errors return `1`.
 
 ```sh
 hyp dev plugin doctor ./plugins/hypaware-plugin-widget --json
-```
-
-### Internal: `hyp dev smoke`
-
-```text
-hyp dev smoke <flow-name>
-```
-
-This hidden developer command runs one hermetic smoke flow under a fresh
-temporary `HYP_HOME` and propagates the child exit code. It doesn't prove the
-installed daemon or a real client. Use it only when developing HypAware.
-
-```sh
-hyp dev smoke status_diagnostics
 ```

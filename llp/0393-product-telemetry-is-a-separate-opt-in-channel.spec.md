@@ -7,6 +7,7 @@
 **Date:** 2026-09-08
 **Extends:** LLP 0021, LLP 0318
 **Extended-by:** LLP 0408 (automatic organization reporting for enrolled SaaS users)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 ## Contract {#contract}
 

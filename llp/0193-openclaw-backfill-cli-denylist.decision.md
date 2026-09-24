@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-05
 **Related:** LLP 0147, LLP 0157, LLP 0158, LLP 0161, LLP 0167, LLP 0170, LLP 0172; issue #640
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > The Lane B sweep's projection gate flips from a vendor allowlist
 > (`{anthropic, openai}`) to a denylist of CLI-backend turns, keyed on two

@@ -5,6 +5,7 @@
 **Extended-by:** LLP 0193 (the backfill provider allowlist this plan lands is retired for a turn-scoped CLI-backend denylist)
 **Related:** LLP 0172
 **Generated-by:** neutral
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > [LLP 0172](./0172-openclaw-two-lane-capture.design.md) is the technical
 > design for the one deliverable set LLP 0171 specifies: the reworked

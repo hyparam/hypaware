@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-24
 **Related:** LLP 0011, LLP 0012, LLP 0015, LLP 0016, LLP 0035, LLP 0037, LLP 0045, LLP 0049, LLP 0050, LLP 0066, LLP 0103, LLP 0140, LLP 0252, LLP 0256, LLP 0257
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 ## Context {#context}
 

@@ -9,6 +9,7 @@ one non-blocking background queue because their materializer and spool state is 
 **Systems:** Plugins, Gateway, Config, Sources
 **Generated-by:** neutral
 **Related:** LLP 0167, LLP 0171, LLP 0168, LLP 0169, LLP 0170
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Technical design for the one deliverable set LLP 0171 specifies: the
 > reworked `@hypaware/openclaw` attach/detach module (Lane A), the daemon-side
@@ -729,8 +730,8 @@ touched by this change set:
 
 ### 8.1 The manual OpenClaw capture procedure (R11 of LLP 0171)
 
-> **Retired (2026-09-23).** The repo no longer keeps written manual
-> procedures, so this one was removed. This section records the rewrite it
+> **Retired (2026-09-23)** by [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md).
+> The repo no longer keeps written manual procedures. This section records the rewrite it
 > specified.
 
 The old procedure required linking and enabling the
@@ -804,7 +805,7 @@ minimal OpenClaw v3 session JSONL (nested `message` envelope, matching PR
 #552's fixed reader) under a temp `agents/<id>/sessions/` tree with a
 controllable mtime, would let a hermetic smoke exercise the quiesce filter
 and the sweep-then-dedupe path deterministically, the PR-confidence role
-`/work/hypaware/CLAUDE.md`'s Smoke Test Model section gives hermetic
+`CLAUDE.md`'s Smoke Test Model section gives hermetic
 smokes. Whether to build it in this change set or a follow-on is a scoping
 call for the plan, not this design; the design only establishes that Lane
 B's correctness currently rests entirely on 8.1's human-run procedure.

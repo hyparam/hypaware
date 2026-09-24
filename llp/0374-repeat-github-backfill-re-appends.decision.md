@@ -10,6 +10,7 @@
 hyparam/hypaware#1330, hyparam/hypaware#1334 (acceptance condition, clause 2,
 option a)
 **Extends:** LLP 0360, LLP 0361
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Running `hyp github backfill` a second time over unchanged history writes a
 > second full set of `github_events` rows. `count(*)` grows; it is not a
@@ -115,8 +116,9 @@ its own answer to all three.
 Row growth is the expected result of a repeat backfill, so a reviewer
 measuring `count(*)` across two runs should not file it again. The other half
 of #1284's acceptance condition is still unconfirmed: whether GitHub's
-issues-family `since` really is inclusive of the boundary second. That answer needs a real token, no fixture can supply it, and
-the boundary floor is correct either way.
+issues-family `since` really is inclusive of the boundary second. That answer
+needs a real token, no fixture can supply it, and the boundary floor is correct
+either way.
 
 ## Consequences {#consequences}
 
