@@ -69,7 +69,8 @@ test('the uninstall sweep reverses every attached client, claude and codex alike
     const claudeSettings = JSON.parse(await fs.readFile(claudePath, 'utf8'))
     assert.equal(claudeSettings.env.ANTHROPIC_BASE_URL, 'https://mine.example')
     assert.equal('_hypaware' in claudeSettings, false)
-    assert.equal(await fs.readFile(codexPath, 'utf8'), 'model_provider = "openai"\n')
+    assert.match(await fs.readFile(codexPath, 'utf8'), /^model_provider = "openai"\n/)
+    assert.match(await fs.readFile(codexPath, 'utf8'), /\[model_providers.hypaware\]/)
 
     // Quiet: the summary is the caller's to render, so the sweep itself says
     // nothing on stdout.

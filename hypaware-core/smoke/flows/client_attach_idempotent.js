@@ -418,9 +418,9 @@ export async function run({ harness, expect }) {
     expect.that('codex detach #1 exited 0', code, (v) => v === 0)
     const afterCodexDetach = await fs.readFile(codexConfigPath, 'utf8')
     expect.that(
-      'codex config: detach removed [model_providers.hypaware] table',
+      'codex config: detach retains saved-chat provider without gateway endpoint',
       afterCodexDetach,
-      (v) => typeof v === 'string' && !/\[model_providers\.hypaware\]/.test(v)
+      (v) => typeof v === 'string' && /\[model_providers\.hypaware\]/.test(v) && !v.includes('base_url') && v.includes('supports_websockets = true')
     )
     expect.that(
       'codex config: detach removed root model_provider assignment',

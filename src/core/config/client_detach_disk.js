@@ -12,6 +12,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
+import { prepareDetach } from './codex_toml.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 
 // Bump when an on-disk Claude marker must be rewritten for Claude Code to
@@ -73,22 +74,6 @@ const UNWRITABLE_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype
 function hasUnwritableSegment(dottedPath) {
   return dottedPath.split('.').some((segment) => UNWRITABLE_PATH_SEGMENTS.has(segment))
 }
-
-const TOML_MANAGED_BEGIN = '# BEGIN hypaware'
-const TOML_MANAGED_END = '# END hypaware'
-const TOML_PREVIOUS_KEY = 'previous_model_provider'
-const TOML_ROOT_RESTORE_KEY = 'model_provider'
-const TOML_MANAGED_BASE_URL_KEY = 'base_url'
-
-const TOML_BASIC_MULTILINE_DELIMITER = '"""'
-const TOML_LITERAL_MULTILINE_DELIMITER = '\'\'\''
-const TOML_KEY_PART = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)`
-const TOML_DOTTED_KEY = String.raw`${TOML_KEY_PART}(?:\s*\.\s*${TOML_KEY_PART})*`
-const TOML_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
-const TOML_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
-const TOML_ROOT_MODEL_PROVIDER_RE = new RegExp(
-  String.raw`^\s*(?:${TOML_ROOT_RESTORE_KEY}|"${TOML_ROOT_RESTORE_KEY}"|'${TOML_ROOT_RESTORE_KEY}')\s*=`
-)
 
 export class ClientDetachError extends Error {
   /**
@@ -1529,9 +1514,10 @@ function segmentMatcher(segment) {
 
 /**
  * Reverse a `toml` managed-block attach (e.g. Codex's `# BEGIN/END hypaware …`
- * blocks). The blocks are self-delimiting and record the prior `model_provider`
- * as `# previous_model_provider`, so core strips the blocks and restores the
- * recorded root pointer, without importing the codex plugin.
+ * blocks). The shared core editor releases the managed route, restores the
+ * recorded root selection and keeps saved chats resolvable, without importing
+ * the plugin. Marker comments do not grant ownership of unrelated TOML keys.
+ * @ref LLP 0432#ownership [implements]: core shares the key-scoped provider undo
  *
  * @param {{ settingsPath: string, fs: typeof fsp }} args
  * @returns {Promise<DetachFromDiskResult>}
@@ -1540,276 +1526,16 @@ async function detachTomlManagedBlock({ settingsPath, fs }) {
   const read = await readText(settingsPath, fs)
   if (!read.existed) return { changed: false, settingsPath }
 
-  const lines = splitLines(read.content)
-  const blockValues = readManagedBlockValues(lines)
-  if (!blockValues.found) return { changed: false, settingsPath }
-
-  let next = removeManagedBlocks(lines)
-
-  /** @type {string | undefined} */
-  let restoredValue
-  /** @type {string | undefined} */
-  let warning
-  if (blockValues.previous !== undefined) {
-    const current = readRootModelProvider(next)
-    if (current === undefined) {
-      next = insertRootLines(next, [`${TOML_ROOT_RESTORE_KEY} = ${tomlString(blockValues.previous)}`])
-      restoredValue = blockValues.previous
-    } else if (current !== blockValues.previous) {
-      warning = `${TOML_ROOT_RESTORE_KEY} was changed externally; leaving ${current} in place`
-    }
+  let prepared
+  try {
+    prepared = prepareDetach(read.content)
+  } catch (err) {
+    throw new ClientDetachError(errMsg(err), { code: 'MALFORMED_MARKER', cause: err })
   }
-
-  await writeTextAtomic(settingsPath, formatLines(next), read.mtimeMs, fs)
-
-  /** @type {DetachFromDiskResult} */
-  const result = { changed: true, settingsPath }
-  if (blockValues.removed !== undefined) result.removed = blockValues.removed
-  if (restoredValue !== undefined) result.restoredValue = restoredValue
-  if (warning !== undefined) result.warning = warning
-  return result
-}
-
-/**
- * Single pass over the managed blocks: detect their presence and read the prior
- * `model_provider` (the restore target, recorded as a `# previous_model_provider`
- * comment) and the managed `base_url` (reported as `removed`).
- *
- * @param {string[]} lines
- * @returns {{ found: boolean, previous?: string, removed?: string }}
- */
-function readManagedBlockValues(lines) {
-  const prevRe = new RegExp(String.raw`^#\s*${TOML_PREVIOUS_KEY}\s*=\s*(.+)$`)
-  const baseRe = new RegExp(String.raw`^\s*${TOML_MANAGED_BASE_URL_KEY}\s*=\s*(.+)$`)
-  let inside = false
-  let found = false
-  /** @type {string | undefined} */
-  let previous
-  /** @type {string | undefined} */
-  let removed
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!inside) {
-      if (trimmed.startsWith(TOML_MANAGED_BEGIN)) {
-        inside = true
-        found = true
-      }
-      continue
-    }
-    if (trimmed.startsWith(TOML_MANAGED_END)) {
-      inside = false
-      continue
-    }
-    if (previous === undefined) {
-      const m = line.match(prevRe)
-      if (m) previous = parseTomlString(m[1])
-    }
-    if (removed === undefined) {
-      const m = line.match(baseRe)
-      if (m) removed = parseTomlString(m[1])
-    }
-  }
-  /** @type {{ found: boolean, previous?: string, removed?: string }} */
-  const result = { found }
-  if (previous !== undefined) result.previous = previous
-  if (removed !== undefined) result.removed = removed
-  return result
-}
-
-/**
- * Strip every `# BEGIN hypaware …` … `# END hypaware …` block (inclusive). The
- * convention is self-delimiting, so this removes exactly what attach inserted.
- *
- * @param {string[]} lines
- * @returns {string[]}
- */
-function removeManagedBlocks(lines) {
-  /** @type {string[]} */
-  const next = []
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim().startsWith(TOML_MANAGED_BEGIN)) {
-      next.push(lines[i])
-      continue
-    }
-    let foundEnd = false
-    for (i++; i < lines.length; i++) {
-      if (lines[i].trim().startsWith(TOML_MANAGED_END)) {
-        foundEnd = true
-        break
-      }
-    }
-    if (!foundEnd) {
-      throw new ClientDetachError('unterminated hypaware-managed config block', {
-        code: 'MALFORMED_MARKER',
-      })
-    }
-  }
-  return next
-}
-
-/**
- * Read the root `model_provider` (before the first table header), honoring
- * multiline strings so a `"""…"""` value can't be misread as an assignment.
- *
- * @param {string[]} lines
- * @returns {string | undefined}
- */
-function readRootModelProvider(lines) {
-  const firstTable = findFirstTableIndex(lines)
-  /** @type {string | undefined} */
-  let multilineDelimiter
-  for (let i = 0; i < firstTable; i++) {
-    if (multilineDelimiter !== undefined) {
-      multilineDelimiter = closeMultilineString(lines[i], multilineDelimiter)
-      continue
-    }
-    if (TOML_ROOT_MODEL_PROVIDER_RE.test(lines[i])) return parseAssignmentString(lines[i])
-    multilineDelimiter = openMultilineString(lines[i])
-  }
-  return undefined
-}
-
-/**
- * Insert lines at the root (before the first table header / trailing blanks).
- *
- * @param {string[]} lines
- * @param {string[]} insert
- * @returns {string[]}
- */
-function insertRootLines(lines, insert) {
-  const next = lines.slice()
-  let index = findFirstTableIndex(next)
-  if (index === next.length) {
-    while (index > 0 && next[index - 1] === '') index--
-  }
-  next.splice(index, 0, ...insert)
-  return next
-}
-
-/** @param {string[]} lines */
-function findFirstTableIndex(lines) {
-  /** @type {string | undefined} */
-  let multilineDelimiter
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    if (multilineDelimiter !== undefined) {
-      multilineDelimiter = closeMultilineString(line, multilineDelimiter)
-      continue
-    }
-    if (isTableHeader(line)) return i
-    multilineDelimiter = openMultilineString(line)
-  }
-  return lines.length
-}
-
-/** @param {string} line */
-function isTableHeader(line) {
-  return TOML_TABLE_HEADER_RE.test(line) || TOML_TABLE_ARRAY_HEADER_RE.test(line)
-}
-
-/** @param {string} line */
-function openMultilineString(line) {
-  const value = assignmentValue(line) ?? line.trimStart()
-  if (value.startsWith(TOML_BASIC_MULTILINE_DELIMITER)) {
-    return hasClosingMultilineString(value.slice(3), TOML_BASIC_MULTILINE_DELIMITER)
-      ? undefined
-      : TOML_BASIC_MULTILINE_DELIMITER
-  }
-  if (value.startsWith(TOML_LITERAL_MULTILINE_DELIMITER)) {
-    return hasClosingMultilineString(value.slice(3), TOML_LITERAL_MULTILINE_DELIMITER)
-      ? undefined
-      : TOML_LITERAL_MULTILINE_DELIMITER
-  }
-  return undefined
-}
-
-/**
- * @param {string} line
- * @param {string} delimiter
- */
-function closeMultilineString(line, delimiter) {
-  return hasClosingMultilineString(line, delimiter) ? undefined : delimiter
-}
-
-/** @param {string} line */
-function assignmentValue(line) {
-  if (/^\s*#/.test(line)) return undefined
-  const index = line.indexOf('=')
-  return index === -1 ? undefined : line.slice(index + 1).trimStart()
-}
-
-/**
- * @param {string} value
- * @param {string} delimiter
- */
-function hasClosingMultilineString(value, delimiter) {
-  if (delimiter === TOML_LITERAL_MULTILINE_DELIMITER) return value.includes(delimiter)
-  for (let index = value.indexOf(delimiter); index !== -1; index = value.indexOf(delimiter, index + 1)) {
-    if (!isEscaped(value, index)) return true
-  }
-  return false
-}
-
-/**
- * @param {string} value
- * @param {number} index
- */
-function isEscaped(value, index) {
-  let backslashes = 0
-  for (let i = index - 1; i >= 0 && value[i] === '\\'; i--) backslashes++
-  return backslashes % 2 === 1
-}
-
-/** @param {string} line */
-function parseAssignmentString(line) {
-  const index = line.indexOf('=')
-  if (index === -1) return undefined
-  return parseTomlString(line.slice(index + 1))
-}
-
-/** @param {string} value */
-function parseTomlString(value) {
-  const trimmed = value.trim()
-  if (trimmed.startsWith('"')) {
-    const match = trimmed.match(/^"(?:\\.|[^"\\])*"/)
-    if (!match) return undefined
-    try { return JSON.parse(match[0]) } catch { return undefined }
-  }
-  if (trimmed.startsWith('\'')) {
-    const match = trimmed.match(/^'([^']*)'/)
-    return match ? match[1] : undefined
-  }
-  return undefined
-}
-
-/** @param {string} value */
-function tomlString(value) {
-  return JSON.stringify(value)
-}
-
-/**
- * @param {string} content
- * @returns {string[]}
- */
-function splitLines(content) {
-  const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  if (normalized === '') return []
-  const lines = normalized.split('\n')
-  if (lines[lines.length - 1] === '') lines.pop()
-  return lines
-}
-
-/**
- * @param {string[]} lines
- * @returns {string}
- */
-function formatLines(lines) {
-  let start = 0
-  let end = lines.length
-  while (start < end && lines[start] === '') start++
-  while (end > start && lines[end - 1] === '') end--
-  const out = lines.slice(start, end)
-  return out.length === 0 ? '' : `${out.join('\n')}\n`
+  if (!prepared.changed) return { changed: false, settingsPath }
+  await writeTextAtomic(settingsPath, prepared.content, read.mtimeMs, fs)
+  const { content, ...result } = prepared
+  return { ...result, settingsPath }
 }
 
 /* --------------------------------- I/O ------------------------------------ */

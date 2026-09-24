@@ -28,7 +28,7 @@
       "attach_probe": {
         "format": "toml",
         "settings_file": ".codex/config.toml",
-        "marker_header": "[model_providers.hypaware]"
+        "marker_header": "# BEGIN hypaware codex provider"
       },
       "launch": { "bin": "codex", "args": ["{prompt}"], "label": "Codex" }
     },

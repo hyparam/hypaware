@@ -8,6 +8,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import process from 'node:process'
 
+import { isolatedClientEnv } from '../hypaware-core/smoke/lib/isolation.js'
+
 const ROOT = 'test'
 const IGNORED_DIRS = new Set(['.git', '.github', 'node_modules'])
 
@@ -62,10 +64,12 @@ export function run(forwardedArgs) {
   // The parent owns this directory even when a test exits before its hooks run.
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-t-'))
   try {
+    const homeDir = path.join(temp, 'home')
+    fs.mkdirSync(homeDir)
     const result = spawnSync(
       process.execPath,
       buildNodeTestArgs(files, forwardedArgs),
-      { stdio: 'inherit', env: { ...process.env, TMPDIR: temp, TMP: temp, TEMP: temp } },
+      { stdio: 'inherit', env: { ...isolatedClientEnv(process.env, homeDir), TMPDIR: temp, TMP: temp, TEMP: temp } },
     )
     if (result.error) {
       process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)

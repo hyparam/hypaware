@@ -79,11 +79,12 @@ test('prepareDetach removes managed Codex blocks and restores previous provider'
   assert.equal(detached.restoredValue, 'openai')
   assert.equal(detached.removed, 'http://127.0.0.1:4388/backend-api/codex')
   assert.equal(isManagedAttached(detached.content), false)
-  assert.equal(detached.content, 'model_provider = "openai"\n')
+  assert.ok(detached.content.startsWith('model_provider = "openai"\n'))
+  assert.match(detached.content, /\[model_providers.hypaware\]/)
 })
 
-test('prepareDetach is a no-op when HypAware did not manage the config', () => {
-  assert.deepEqual(prepareDetach('model_provider = "openai"\n'), { changed: false })
+test('prepareDetach repairs a markerless existing config', () => {
+  assert.equal(prepareDetach('model_provider = "openai"\n').changed, true)
 })
 
 test('managed marker parsing rejects unterminated blocks', () => {
@@ -91,4 +92,68 @@ test('managed marker parsing rejects unterminated blocks', () => {
     () => isManagedAttached('# BEGIN hypaware codex model_provider\nmodel_provider = "hypaware"\n'),
     /unterminated hypaware-managed Codex config block/
   )
+})
+
+test('migration keeps saved hypaware providers resolvable without the gateway', () => {
+  const attached = prepareAttach('model_provider = "custom"\n[model_providers.custom]\nname = "Private"\nbase_url = "https://example.invalid/v1"\nenv_key = "PRIVATE_KEY"\n', 4388, '1.37.0')
+  const result = prepareDetach(attached.content)
+  assert.equal(result.changed, true)
+  assert.match(result.content, /\[model_providers.hypaware\]/)
+  assert.match(result.content, /requires_openai_auth = true/)
+  assert.doesNotMatch(result.content, /127.0.0.1|BEGIN hypaware/)
+  assert.match(result.content, /model_provider = "custom"/)
+  assert.match(result.content, /env_key = "PRIVATE_KEY"/)
+  assert.deepEqual(prepareDetach(result.content), { changed: false })
+})
+
+test('repair an already migrated config without changing its default or user provider', () => {
+  const original = 'model_provider = "custom"\n[model_providers.custom]\nname = "Private"\n'
+  const repair = prepareDetach(original)
+  assert.equal(repair.changed, true)
+  assert.ok(repair.content.startsWith(original))
+  assert.match(repair.content, /\[model_providers.hypaware\]/)
+  const userOwned = '[model_providers.hypaware]\nname = "User owned"\nbase_url = "https://example.invalid"\n'
+  assert.deepEqual(prepareDetach(userOwned), { changed: false })
+})
+
+test('Codex edits inside markers survive migration and gateway reattach', () => {
+  const attached = prepareAttach('', 4388, '1.37.0').content
+    .replace('# END hypaware codex model_provider', 'service_tier = "fast"\n[desktop]\ntheme = "dark"\n# END hypaware codex model_provider')
+    .replace('# END hypaware codex provider', '[features]\nfast_mode = true\n[hooks.trust."/tmp/project"]\ntrusted = true\n# END hypaware codex provider')
+  for (const result of [prepareDetach(attached), prepareAttach(attached, 4389, 'patched')]) {
+    assert.ok('content' in result)
+    assert.match(result.content, /service_tier = "fast"/)
+    assert.match(result.content, /\[desktop\]\ntheme = "dark"/)
+    assert.match(result.content, /\[features\]\nfast_mode = true/)
+    assert.match(result.content, /\[hooks.trust."\/tmp\/project"\]\ntrusted = true/)
+  }
+})
+
+for (const userOwned of [
+  '["model_providers"."hypaware"]\nname = "Mine"\n',
+  'model_providers.hypaware = { name = "Mine", wire_api = "responses" }\n',
+  '[model_providers]\nhypaware = { name = "Mine", wire_api = "responses" }\n',
+  'model_providers = { hypaware = { name = "Mine", wire_api = "responses" } }\n',
+]) {
+  test(`preserve user-owned provider syntax: ${userOwned.split('\n')[0]}`, () => {
+    assert.deepEqual(prepareDetach(userOwned), { changed: false })
+  })
+}
+
+test('marker-looking text inside multiline settings is preserved literally', () => {
+  const original = 'instructions = """\n# BEGIN hypaware codex model_provider\n# previous_model_provider = "fake"\nmodel_provider = "hypaware"\n# END hypaware codex model_provider\n"""\n'
+  const attached = prepareAttach(original, 4388, 'old')
+  const detached = prepareDetach(attached.content)
+  assert.equal(detached.changed, true)
+  assert.ok(detached.content.startsWith(original))
+  assert.equal(detached.restoredValue, undefined)
+})
+
+test('partial marker ownership preserves an existing user provider and external default', () => {
+  const original = '# BEGIN hypaware codex model_provider\n# previous_model_provider = "openai"\nmodel_provider = "custom"\n# END hypaware codex model_provider\n[model_providers.hypaware]\nname = "Mine"\nbase_url = "https://example.invalid"\n'
+  const detached = prepareDetach(original)
+  assert.equal(detached.changed, true)
+  assert.match(detached.content, /model_provider = "custom"/)
+  assert.match(detached.content, /name = "Mine"/)
+  assert.match(detached.warning ?? '', /changed externally/)
 })
