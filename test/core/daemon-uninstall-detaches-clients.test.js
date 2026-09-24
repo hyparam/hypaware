@@ -181,7 +181,7 @@ test('a never-attached openclaw config with its own providers is an honest no-op
 })
 
 test('uninstall detaches openclaw on a machine whose daemon was already stopped', async () => {
-  // The sequence README teaches (stop, then uninstall): a stale status file
+  // Stop, then uninstall: a stale status file
   // survives on disk, no pid, nothing to ask. The undo must not care - its
   // record is the entry's own signature, not any daemon fact (LLP 0210).
   const home = await stageHome()

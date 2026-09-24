@@ -47,7 +47,7 @@ Three things keep it from becoming a second record:
 
 ### If you turned on proxy mode
 
-Proxy mode (see the README) routes all of Claude Code's HTTPS through the
+Proxy mode routes all of Claude Code's HTTPS through the
 local gateway rather than only its model calls, so it is worth being
 precise about what that does and does not change.
 
