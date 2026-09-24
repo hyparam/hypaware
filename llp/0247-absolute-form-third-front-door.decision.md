@@ -6,6 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0232, LLP 0233, LLP 0234, LLP 0246
+**Extended-by:** LLP 0382 (#the-control-surface-never-answers-absolute-form
+and #only-forward-proxy-listeners-serve-it prescribe opposite answers for an
+absolute-form control-path request on a listener without the forward-proxy
+door; 0382 states the contradiction and requests the deciding document)
 
 > A request whose request-line carries an absolute URL is routed by the host
 > that URL names, through the same forwarding and per-path recording rules as
