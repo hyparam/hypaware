@@ -139,6 +139,9 @@ export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
  * - schema-aligned sources with cwd and no content declaration also expose
  *   a prepared scan that filters batch selections before yielding. It keeps
  *   lazy output vectors, but never forwards exact counts or range hints.
+ * - schema-aligned sources without cwd suppress content as constant null
+ *   vectors. Content demands keep WHERE residual, evaluated after suppression;
+ *   structural columns retain lazy native reads and existing selections.
  *
  * @ref LLP 0105 [implements]: the one shared filter at the query read path; caller class >= row class on the lattice, never per-command
  * @ref LLP 0105#graph-provenance [implements]: rows lacking per-row cwd provenance get their declared content-bearing columns suppressed, never surfaced
@@ -203,15 +206,59 @@ export function withLocalOnlyVisibility(source, opts) {
       }
     },
   }
-  // @ref LLP 0388#batch-filter [implements]: only withholding-only, schema-aligned sources gain the native path; content suppression retains its row semantics
+  // @ref LLP 0388#batch-filter [implements]: withholding-only sources preserve native batches
+  // @ref LLP 0431#native-suppression [implements]: cwd-less graph sources suppress content as null vectors, avoiding the row adapter's whole-file allocations
   const schema = source.schema
-  if (schema && source.prepareScan && hasCwd && declaredContent.length === 0 &&
+  if (schema && source.prepareScan &&
     schema.fields.length === source.columns.length &&
     schema.fields.every((field, index) => field.name === source.columns[index])) {
-    guarded.schema = schema
-    guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, opts)
+    if (hasCwd && declaredContent.length === 0) {
+      guarded.schema = schema
+      guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, opts)
+    } else if (!hasCwd && declaredContent.length > 0) {
+      guarded.schema = { fields: schema.fields.map(field => declaredContent.includes(field.name) ? { ...field, nullable: true } : field) }
+      guarded.prepareScan = prepareSuppressedScan(source.prepareScan.bind(source), guarded.schema, declaredContent, report)
+    }
   }
   return guarded
+}
+
+/**
+ * Without cwd, every demanded content cell is null. Keep filters residual
+ * whenever content is demanded so no source predicate can reveal its value.
+ * Source selections (including deletes) and lazy structural vectors survive.
+ * @param {PrepareScan} prepareScan
+ * @param {RelationSchema} schema
+ * @param {string[]} contentColumns
+ * @param {LocalOnlyVisibilityReport} report
+ * @returns {PrepareScan}
+ */
+function prepareSuppressedScan(prepareScan, schema, contentColumns, report) {
+  return request => {
+    const demandedContent = request.columns.some(demand =>
+      schema.fields.some(field => field.id === demand.field && contentColumns.includes(field.name)))
+    const inner = prepareScan({ ...request, filter: demandedContent ? undefined : request.filter, limit: undefined, offset: undefined })
+    const suppressed = inner.schema.fields.map(field => contentColumns.includes(field.name))
+    return {
+      schema: { fields: inner.schema.fields.map((field, index) => suppressed[index] ? { ...field, nullable: true } : field) },
+      residual: { filter: demandedContent ? request.filter : inner.residual.filter, limit: request.limit, offset: request.offset },
+      properties: inner.properties.maxRows === undefined ? {} : { maxRows: inner.properties.maxRows },
+      async *batches({ signal } = {}) {
+        for await (const batch of inner.batches({ signal })) {
+          signal?.throwIfAborted()
+          if (demandedContent) report.suppressedRows += selectedRowCount(batch.selection)
+          yield {
+            selection: batch.selection,
+            columns: batch.columns.map((column, columnIndex) => {
+              if (suppressed[columnIndex]) return { type: 'constant', value: null, length: batch.selection.length }
+              if (!('read' in column)) return column
+              return { read: ({ selection, signal }) => readBatchColumn({ batch, columnIndex, selection, signal }) }
+            }),
+          }
+        }
+      },
+    }
+  }
 }
 
 /**

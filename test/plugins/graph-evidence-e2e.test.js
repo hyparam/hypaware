@@ -149,7 +149,7 @@ test('explicit refresh repairs stale activity evidence, repeat refresh is stable
   }, [tool])
 })
 
-test('neighbor output limit cannot hide an over-budget graph scan', async () => {
+test('neighbor output limit cannot hide an over-budget neighborhood scan', async () => {
   const { asyncRow } = await import('squirreling')
   let scanned = 0
   const edgeSource = {
@@ -167,8 +167,10 @@ test('neighbor output limit cannot hide an over-budget graph scan', async () => 
       }
     },
   }
-  const nodeSource = { columns: ['node_id', 'node_type', 'natural_key', 'label'], numRows: 0,
-    scan() { return { appliedWhere: false, appliedLimitOffset: false, async *rows() {} } } }
+  const nodeSource = { columns: ['node_id', 'node_type', 'natural_key', 'label'], numRows: 1,
+    scan(options) { return { appliedWhere: false, appliedLimitOffset: false, async *rows() {
+      yield asyncRow({ node_id: 'seed', node_type: 'Session', natural_key: 'seed', label: null }, options.columns)
+    } } } }
   const registry = /** @type {any} */ ({ getDataset: name => ({ discoverPartitions: async () => [], createDataSource: async () => name === 'edge' ? edgeSource : nodeSource }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/graph-budget-test', pendingInfo: async () => ({ pending: false }) })
   const result = await queryNeighbors({ query: registry, storage, seed: 'seed', limit: 1, includeLocalOnly: true })
