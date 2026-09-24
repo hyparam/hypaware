@@ -88,7 +88,7 @@ over-count the Consequences below record. One claimable record keeps the
 turn counted once within this lane, it does not by itself make the two lanes
 agree. That residual is accepted rather than designed out. The emission order
 is the client's and no fixture here can pin it, so a reordering upstream is
-drift of the kind `claude_otel_shape_check` exists to catch, and it degrades to
+drift that only a real Claude Code run can catch, and it degrades to
 the pre-fix behavior rather than to anything worse. Buying order-independence
 would mean holding every `assistant_response` row back until its body event is
 known not to be coming, and the event stream carries no end-of-turn marker to

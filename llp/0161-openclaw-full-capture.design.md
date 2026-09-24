@@ -675,8 +675,8 @@ untouched.
 
 ## 9. Acceptance procedure {#acceptance}
 
-A manual `openclaw_capture` procedure is written, mirroring
-`## codex_desktop_capture`'s exact heading structure (What it proves / What
+A manual OpenClaw capture procedure is written, mirroring
+the Codex Desktop procedure's exact heading structure (What it proves / What
 it does not prove / Requires / Related / `### Steps` / `### If it fails`).
 
 Differences from the Codex template, each because OpenClaw's mechanism

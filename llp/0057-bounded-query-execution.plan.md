@@ -110,8 +110,7 @@ each layer can be tested before the one above:
 - **Smoke**: run a known issue-#9 crasher (`ORDER BY` over the full dataset;
   `COUNT(DISTINCT content_text)`) and assert a **clean refusal** (typed error,
   bounded heap) instead of an OOM / zero-byte socket, a candidate
-  `bounded_query_refusal` acceptance smoke alongside the
-  `installed_daemon_idle_soak` family.
+  `bounded_query_refusal` smoke.
 - Per the repo's log-driven-development rule, emit structured budget/refusal
   signals (`component: query`, `operation`, `error_kind: budget_exceeded`,
   buffered-row/byte high-water) so a smoke asserts the *internal* path, not only

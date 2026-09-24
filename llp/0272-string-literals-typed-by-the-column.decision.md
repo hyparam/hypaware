@@ -46,10 +46,10 @@ returned; this under-returns to exactly zero.
 
 ### Why zero rows is worse than an error {#why-silent}
 
-The manual acceptance procedures bounded six steps on `message_created_at`.
-Run against this defect, `claude_otel_shape_check` step 6, whose whole job was
-to prove captured rows landed with their columns filled, reports "no rows" on
-a healthy capture path. The written procedure then reads as a capture failure,
+Manual release checks bound queries on `message_created_at`. Run against this
+defect, a check whose whole job is to prove captured rows landed with their
+columns filled reports "no rows" on a healthy capture path. The check then
+reads as a capture failure,
 and the reader debugs code that is fine. The defect cost real diagnosis time
 during OTEL attach validation before the rows were found intact by re-querying
 with `order by message_created_at desc limit n`.
@@ -149,7 +149,7 @@ reintroduce the silent empty result through the front door.
 
 - `since`-style queries work as written, in both spellings, and a bare string
   bound now prunes row groups exactly as its typed twin does.
-- Bounds keep the trailing `Z`. The old acceptance text stripped it
+- Bounds keep the trailing `Z`. The old release-check text stripped it
   (`SINCE_SQL=${SINCE%Z}`) with a note that the zone-less form "compares
   cleanly", which was never true; worse, `new Date('...T21:00:00')` without a
   zone is *local* time, so on any non-UTC host the zone-less form silently

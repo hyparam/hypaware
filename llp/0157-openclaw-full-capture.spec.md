@@ -164,8 +164,8 @@ the warning ledger.
 
 ## Acceptance {#acceptance}
 
-A manual `openclaw_capture` procedure is written, mirroring the
-`codex_desktop_capture` structure (what it proves / does not prove /
+A manual OpenClaw capture procedure is written, mirroring the
+Codex Desktop procedure's structure (what it proves / does not prove /
 requires / steps with pass conditions / if it fails). It proves an
 OpenClaw conversation reaches `ai_gateway_messages` by **both** routes:
 
@@ -247,7 +247,7 @@ Named by the decisions as verify-before-relying-on:
   rows (same expansion path, same native ids), so that route overlap
   resolves to zero writes through the existing `part_id` dedupe
   (LLP 0159).
-- **R12.** The `openclaw_capture` acceptance procedure of {#acceptance}
+- **R12.** The manual OpenClaw capture procedure of {#acceptance}
   MUST exist and MUST have been run by a human before the adapter ships.
 - **R13.** Coverage reporting MUST distinguish deferrals, sibling-adapter
   territory, and documented side channels from gaps, deriving from the

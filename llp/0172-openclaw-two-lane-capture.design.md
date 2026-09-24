@@ -135,7 +135,7 @@ through `attachCtx.stdout`/`attachCtx.json`). It exports
    its OpenAI client does not. Writing the wrong shape for either
    produces a schema-valid but non-functional entry, so this exact split
    is the one place in the module worth a dedicated unit test rather than
-   trusting the acceptance run alone.
+   trusting a manual run alone.
 4. Writes the merged config back (existing `models` keys the file already
    had, if any that aren't `providers.anthropic`/`.openai`, are preserved;
    nothing outside these two keys under `models.providers` is touched, R1).
@@ -725,14 +725,14 @@ touched by this change set:
   policy resolver (`createUsagePolicyResolver`, `localOnlyListPath`) exactly
   as before Lane A/B existed in their current shape.
 
-## 8. Acceptance and onboarding rewrites {#acceptance-onboarding}
+## 8. Manual procedure and onboarding rewrites {#acceptance-onboarding}
 
-### 8.1 The manual `openclaw_capture` procedure (R11 of LLP 0171)
+### 8.1 The manual OpenClaw capture procedure (R11 of LLP 0171)
 
-The current procedure (lines 173 onward) requires linking and enabling the
+The old procedure required linking and enabling the
 steering plugin from the checkout under test
 (`openclaw plugins install --link ./openclaw-steering-plugin --force`), and
-its "what it proves" language names "live proxy capture through the
+its "what it proves" language named "live proxy capture through the
 steering plugin's shadow providers." Both go. The rewrite:
 
 - **Setup** drops the steering-plugin link/enable steps entirely; adds
@@ -755,7 +755,7 @@ steering plugin's shadow providers." Both go. The rewrite:
   the restart-required behavior) on an OpenClaw binary at or above the
   2026.4.24 floor the old procedure already required, since those verified
   facts were established against 2026.3.13 and R11 asks for re-confirmation
-  at the floor version the acceptance run actually gates on.
+  at the floor version the manual run actually gates on.
 - Drops the version-gate language specific to `before_model_resolve` and
   `hooks.allowConversationAccess` (2026.4.21/2026.4.23 features the steering
   plugin depended on): Lane A depends on no OpenClaw hook API at all, only
@@ -766,7 +766,7 @@ steering plugin's shadow providers." Both go. The rewrite:
 
 ```
 @ref LLP 0171#requirements [implements]: R11 (formerly R12 of LLP 0157,
-"replaced" per 0171's carried-over note), the acceptance rewrite: attach-flow
+"replaced" per 0171's carried-over note), the procedure rewrite: attach-flow
 steps, a sweep step, a zero-duplicate assertion, and re-confirmation of the
 verified facts on the floor version.
 ```
@@ -792,17 +792,16 @@ under `hypaware-core/smoke/flows`. This is a real, pre-existing gap, flagged
 during review of PR #552, and Lane B makes it more consequential: the sweep
 path (4.4/4.5) has no hermetic-smoke coverage today, so a regression in
 `listSessionFiles`'s new `quiesceBeforeMs` filter, or in the sweep driver's
-`cronMatches` wiring, would only surface in the manual acceptance run (8.1),
+`cronMatches` wiring, would only surface in the manual run (8.1),
 not in PR-level smoke confidence. This design does not build that fixture
 (out of scope for a design document), but names the gap for the
 Impl-designer rung: a `backfill_openclaw_fixture` helper, writing a
 minimal OpenClaw v3 session JSONL (nested `message` envelope, matching PR
 #552's fixed reader) under a temp `agents/<id>/sessions/` tree with a
 controllable mtime, would let a hermetic smoke exercise the quiesce filter
-and the sweep-then-dedupe path deterministically, the same tier distinction
-`/work/hypaware/CLAUDE.md`'s Smoke Test Model section draws between
-hermetic smokes (PR confidence) and the acceptance smoke (release gate,
-8.1). Whether to build it in this change set or a follow-on is a scoping
+and the sweep-then-dedupe path deterministically, the PR-confidence role
+`/work/hypaware/CLAUDE.md`'s Smoke Test Model section gives hermetic
+smokes. Whether to build it in this change set or a follow-on is a scoping
 call for the plan, not this design; the design only establishes that Lane
 B's correctness currently rests entirely on 8.1's human-run procedure.
 

@@ -43,9 +43,7 @@ the installed service.
 Keep deterministic policy and dotfile tests through the surviving commands,
 assert removed inputs have no side effects, validate config path precedence,
 and check both new daemon invocation and installed-service compatibility.
-Run the traditional suite, typecheck, and affected hermetic smokes. The real
-macOS LaunchAgent acceptance gate remains a release requirement when the
-rendered plist changes, per AGENTS.md.
+Run the traditional suite, typecheck, and affected hermetic smokes.
 
 ## CPU and memory
 

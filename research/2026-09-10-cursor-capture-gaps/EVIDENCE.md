@@ -1,6 +1,6 @@
 # Cursor capture implementation evidence
 
-Status: **Native recovery implemented; release acceptance still required.**
+Status: **Native recovery implemented; real-client coverage incomplete.**
 Date: 2026-09-10. Design: [LLP 0399](../../llp/0399-cursor-native-session-recovery.decision.md).
 
 Cursor's local saved sessions now supply user messages, assistant segments,
@@ -74,7 +74,7 @@ checking, the `cursor_capture` smoke, file hygiene and LLP reference checks
 passed. Synthetic fixtures pin the researched schema; they do not replace
 testing against a real client.
 
-## Fresh candidate CLI acceptance, September 10
+## Fresh candidate CLI probe, September 10
 
 A new live probe exposed a configuration incompatibility missed by the synthetic
 smoke: CLI `HooksConfigLoader.parseJSONC` removes `//` comments before parsing
@@ -125,7 +125,7 @@ and the disposable workspace hook file restored byte-for-byte afterward.
 
 ## Remaining limits
 
-Untested against a real client:
+Beyond the probes above, still unverified against a real client:
 installed handler behavior, editor/interactive/headless modes, interruption,
 resume, regeneration, upstream format drift and sustained resource measurements.
 Native storage is an internal version-specific interface, not a public API.
@@ -161,4 +161,4 @@ or retired between passes; no conversation contents remain in adapter caches.
 The CPU/memory pass found no unbounded new queue or lifetime content retention.
 Synchronous bounded SQLite/parsing can pause the event loop for large graphs,
 and shared dedupe still scans waiting data. Hook process overhead, large-session
-latency and sustained heap use remain measurements for release acceptance.
+latency and sustained heap use remain unmeasured.

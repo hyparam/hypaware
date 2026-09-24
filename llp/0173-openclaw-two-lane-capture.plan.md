@@ -165,7 +165,7 @@ Everything else maps directly onto the design's section numbers.
   the run) and a sweep-then-rerun dedupe assertion (identical `part_id`
   nets to zero new rows on a second sweep). **Externally blocked; see
   below.**
-- **T13** (deps `[T5, T8, T9]`), the manual `openclaw_capture` procedure
+- **T13** (deps `[T5, T8, T9]`), the manual OpenClaw capture procedure
   rewrite (Section 8.1): drops the steering-plugin link/enable setup and the
   `before_model_resolve`/`hooks.allowConversationAccess` version-gate
   language; adds the `hyp attach --client openclaw` setup step, a sweep step
@@ -199,7 +199,7 @@ crash:
   `models.providers` key already exists, R2) must run entirely before any
   write, and the two-entry shape's bare-origin-vs-`+v1` split is the one
   place the design itself flags as "worth a dedicated unit test rather than
-  trusting the acceptance run alone": writing the wrong shape for either
+  trusting a manual run alone": writing the wrong shape for either
   entry produces a schema-valid but non-functional config, which is a
   failure mode no test framework catches by accident.
 - **T9 (daemon sweep driver): 4.** Wiring into the daemon's hot tick loop
@@ -301,15 +301,14 @@ that hold even given the PR #552 blocker above:
    `backfill_codex_fixture.js` already establish the fixture-writer shape
    this plugin has never had an analog of.
 2. It is the only automated coverage, of any tier, for the quiesce filter
-   (T8) and the sweep driver's `cronMatches` wiring (T9) before the human
-   acceptance run (T13). CLAUDE.md's Smoke Test Model section states
+   (T8) and the sweep driver's `cronMatches` wiring (T9) before the
+   manual run (T13). CLAUDE.md's Smoke Test Model section states
    hermetic smokes exist precisely for "PR confidence" on "plugin/kernel
-   wiring checks" like this, as distinct from the acceptance tier's release
-   gate.
+   wiring checks" like this.
 3. Deferring it whole to #555 would mean Lane B ships with zero PR-level
    regression coverage between now and whenever #555 is separately
    prioritized; a regression in `listSessionFiles`'s new parameter or the
-   sweep's due-check would only surface in a manual acceptance run.
+   sweep's due-check would only surface in a manual run.
 
 The blocker on PR #552 does not argue against including the task in this
 plan; it argues for **naming T12 in this plan and holding it externally**,
@@ -402,4 +401,4 @@ rung's job:
 - id: T10  branch: task/openclaw-two-lane-capture/T10  deps: [T5]              complexity: 2  -- test/plugins/openclaw-client-registration.test.js: rewrite the two attach() no-op tests (current lines 39-82, 84-114) to assert the new write-based behavior (refusal-when-exists, the two-entry shape, restart-instruction print) instead of the old /openclaw-steering-plugin/ stdout match; rewrite the descriptor test (lines 222-240) to assert the new json_path attach_probe shape instead of `attachProbe === undefined`; correct the "honest no-op" detach test's (lines 197-220) stale R7 comment and add a companion case using a real openclaw.json fixture proving the ownership-based ` detachJsonPathProviders` (T2) actually fires and reports changed:true. Leave the registration-order test (116-155) and the generic hyp attach resolution test (157-195) unchanged; neither depends on the old no-op shape.
 - id: T11  branch: task/openclaw-two-lane-capture/T11  deps: [T5]              complexity: 1  -- Delete openclaw-steering-plugin/ in full (src/, test/, package.json, openclaw.plugin.json, .d.ts files) and test/plugins/openclaw-steering-plugin.test.js (R9). Remove tsconfig.json's `"openclaw-steering-plugin"` entry from the `include` array (line 19; not named in the design's own deletion inventory, found verifying the deletion against the real tree). Test: `npm test` and a `tsc --noEmit` (or equivalent checkJs run) pass with no reference to the deleted directory remaining anywhere in the tree (`grep -rl openclaw-steering-plugin` returns nothing outside llp/ history documents).
 - id: T12  branch: task/openclaw-two-lane-capture/T12  deps: [T8, T9]          complexity: 3  -- New backfill_openclaw_fixture helper under hypaware-core/smoke/flows (mirroring backfill_claude_fixture.js / backfill_codex_fixture.js), writing a minimal OpenClaw v3 session JSONL in the nested-message-envelope shape under a temp agents/<id>/sessions/ tree with a controllable mtime, plus a smoke flow asserting (a) a file with mtime inside the quiesce window is skipped by a sweep run, (b) a file outside the window is captured, and (c) rerunning the sweep after a live-lane row already wrote the same part_id nets zero new rows. Externally blocked: hold, do not dispatch, until PR #552 merges into this integration branch (the fixture's envelope shape only matches the reader #552 introduces; building it against the current flat reader would test the wrong, soon-obsolete shape).
-- id: T13  branch: task/openclaw-two-lane-capture/T13  deps: [T5, T8, T9]      complexity: 3  -- the manual openclaw_capture procedure: drop the steering-plugin link/enable setup and the before_model_resolve/hooks.allowConversationAccess version-gate language; add a setup step running `hyp attach --client openclaw` followed by the restart instruction it prints; add a sweep step (disable or wait out live capture, confirm the row is absent, confirm it lands within one sweep interval past the quiesce window); add a zero-duplicate assertion (a turn both lanes observe resolves to exactly one row for its part_id); re-confirm LLP 0167#verify-results items 1, 3, 4 on the floor OpenClaw version. State in the section's own Requires line that the sweep/dedupe steps need PR #552 merged, and the client_attach status-row re-confirmation needs PR #553 merged, to run successfully. Test: this is a doc; the test is a human's successful run, which this task's own text cannot perform, only specify accurately against what T2/T4/T5 actually implement.
+- id: T13  branch: task/openclaw-two-lane-capture/T13  deps: [T5, T8, T9]      complexity: 3  -- the manual OpenClaw capture procedure: drop the steering-plugin link/enable setup and the before_model_resolve/hooks.allowConversationAccess version-gate language; add a setup step running `hyp attach --client openclaw` followed by the restart instruction it prints; add a sweep step (disable or wait out live capture, confirm the row is absent, confirm it lands within one sweep interval past the quiesce window); add a zero-duplicate assertion (a turn both lanes observe resolves to exactly one row for its part_id); re-confirm LLP 0167#verify-results items 1, 3, 4 on the floor OpenClaw version. State in the section's own Requires line that the sweep/dedupe steps need PR #552 merged, and the client_attach status-row re-confirmation needs PR #553 merged, to run successfully. Test: this is a doc; the test is a human's successful run, which this task's own text cannot perform, only specify accurately against what T2/T4/T5 actually implement.

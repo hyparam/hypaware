@@ -296,8 +296,7 @@ exists.
 - What a hermetic smoke cannot prove is whether `api.openai.com/v1/responses`
   accepts the body Codex builds for this provider block. The shared
   `wire_api = "responses"` makes it likely and nothing else can settle it, so
-  the `codex_login_switch_reroute` acceptance procedure exists and is not
-  substitutable by a fixture.
+  only a real login switch can confirm it; a fixture cannot.
 
 ## References
 

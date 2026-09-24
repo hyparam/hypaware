@@ -20,7 +20,7 @@ returns, not only its `details`; `state` is still left alone)
 
 [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md) made
 Codex Desktop coverage legible in the picker, the reference docs, and the
-`unsupported_location` event, and wrote the manual `codex_desktop_capture`
+`unsupported_location` event, and wrote a manual Codex Desktop capture
 procedure. It closed with one item open, and named four candidate shapes for
 closing it:
 
@@ -194,5 +194,5 @@ invite reading the value as a query bound it is not.
   `rowsAffordable`, LLP 0135#window); this decision leaves it untouched.
 - **The live route is still only provable on real hardware.** Nothing here
   changes that: `gateway_codex_capture` asserts the plumbing against a
-  synthetic Desktop-shaped exchange, and the real-app claim stays with the
-  manual `codex_desktop_capture` procedure.
+  synthetic Desktop-shaped exchange, and the real-app claim needs a
+  manual run on real hardware.

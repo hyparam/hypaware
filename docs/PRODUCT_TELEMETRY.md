@@ -147,12 +147,3 @@ response bodies, one sender pass, at most 128 pending observations and three
 runtime series bound growth. Hot capture/export hooks are no-ops when collection
 is disabled. Queue maintenance reads only the bounded product queue. The RSS
 result and count-cap coverage are explicit limitations requiring pilot evaluation.
-
-Before release, run the repository's manual `durable_cache_upgrade` procedure for
-the new product outbox boundary: the previous package ignores this namespace;
-the candidate must preserve pending exact bytes/IDs through restart, deliver
-only eligible consent copies, and leave customer spool/cache data unchanged.
-Run a real installed-daemon 24-hour idle/outage soak on macOS and Linux, confirm
-30-second sample/five-minute summaries and shutdown cancellation, switch orgs
-while delivery is in flight, and verify production self-loop guards. None of
-these manual gates is claimed passed by the hermetic fixtures.
