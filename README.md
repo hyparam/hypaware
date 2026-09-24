@@ -65,7 +65,7 @@ On a TTY this launches the interactive walkthrough:
    no projector of their own, so on their own they proxy traffic and record
    nothing. They remain real sources: `hyp setup --source raw-anthropic`
    still composes one, and a config that already collects one keeps it
-   through a reconfigure (LLP 0202).
+   through a reconfigure.
 2. New guided setups keep the local query cache and also write local
    Parquet exports under `<HYP_HOME>/exports`. Use `--export keep-local`,
    `--export local-parquet`, or `--export configure-later` to select a strategy
@@ -458,7 +458,7 @@ remains available. Old local installs migrate on the next scheduled sweep;
 installs with automatic import disabled migrate when explicitly attached.
 
 **Claude Desktop needs no attach.** Select it in `hyp init` and HypAware imports
-its local JSONL transcripts on the daemon's five-minute schedule (LLP 0358).
+its local JSONL transcripts on the daemon's five-minute schedule.
 The picker makes no changes to Claude Desktop, opens no browser, writes no
 managed preferences, and needs no admin approval. Desktop rows land as
 `client_name = 'claude-desktop'`; entrypoint and container ownership keep them
@@ -482,10 +482,6 @@ conversations: current and past sessions are captured from
 `~/.codex/sessions`. The same
 applies to the ChatGPT desktop app and browser storage, which HypAware does
 not capture at all.
-
-See [LLP 0141](llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)
-for the reasoning, and [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) for the
-manual check that Desktop traffic is actually landing.
 
 ## Controlling what is recorded and forwarded
 
@@ -732,20 +728,7 @@ User-facing guides include:
 - [`docs/HEADLESS.md`](./docs/HEADLESS.md): headless deploys on CI runners and servers with a pre-minted token
 - [`docs/PRIVACY.md`](./docs/PRIVACY.md): what HypAware records and how to control it
 - [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md): how to write a plugin (`hyp dev plugin new` / `hyp dev plugin doctor`)
-- [`docs/ACCEPTANCE.md`](./docs/ACCEPTANCE.md): opt-in, manual pre-release checks that need a real client (e.g. Codex Desktop)
 
-Contributor material (repository layout, release checklist, test model)
-lives in [`AGENTS.md`](./AGENTS.md).
-
-Design rationale lives in numbered **LLP documents** under [`llp/`](./llp/)
-(Linked Literate Programming). Start here:
-
-- [`llp/0000-hypaware.explainer.md`](./llp/0000-hypaware.explainer.md): root overview and subsystem map
-- [`llp/0002-v1-scope.decision.md`](./llp/0002-v1-scope.decision.md): what actually shipped in V1
-- [`llp/0001-adopting-llp.plan.md`](./llp/0001-adopting-llp.plan.md): how this docs system was set up
-
-The former monolithic docs (`hypaware-design.md`, `finish-v1.md`,
-`hypaware-implementation-plan.md`) were decomposed into the LLP corpus and are
-preserved under [`llp/tombstones/`](./llp/tombstones/). Public plugin
+Public plugin
 interfaces are declared in
 [`hypaware-plugin-kernel-types.d.ts`](./hypaware-plugin-kernel-types.d.ts).

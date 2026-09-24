@@ -5,6 +5,7 @@
 **Systems:** CLI, Daemon, Config, Usage-Policy
 **Date:** 2026-09-14
 **Related:** LLP 0009, LLP 0017, LLP 0111, LLP 0293
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 ## Request
 
@@ -43,9 +44,10 @@ the installed service.
 Keep deterministic policy and dotfile tests through the surviving commands,
 assert removed inputs have no side effects, validate config path precedence,
 and check both new daemon invocation and installed-service compatibility.
-Run the traditional suite, typecheck, and affected hermetic smokes. The real
-macOS LaunchAgent acceptance gate remains a release requirement when the
-rendered plist changes, per AGENTS.md.
+Run the traditional suite, typecheck, and affected hermetic smokes.
+~~The real macOS LaunchAgent acceptance gate remains a release requirement when
+the rendered plist changes.~~ **Retired (2026-09-23)** by
+[LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md).
 
 ## CPU and memory
 

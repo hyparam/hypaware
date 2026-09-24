@@ -20,7 +20,7 @@ Shell calls can emit ordinary successful-looking callbacks. Cursor's saved
 conversation graph contains substantially richer results and actual outcomes.
 The candidate reader recovered the disposable editor's five user turns, eight
 assistant segments and twelve tools, plus two disposable CLI sessions. See
-`docs/cursor-capture-evidence.md` and the linked research for observed counts.
+`research/2026-09-10-cursor-capture-gaps/EVIDENCE.md` and the linked research for observed counts.
 This is a version-specific integration, not a supported Cursor export API.
 
 ## Identity and finality {#identity}
@@ -215,6 +215,6 @@ is ~27 ms per pass, amortized over up to sixteen sessions.
 CPU and memory review found bounded queues, graph allocation and identity maps.
 Shared dedupe still costs work proportional to relevant committed data and
 waiting spool size. Process startup, real-store recovery-pass latency, catalog-cap
-coverage and sustained heap behavior remain acceptance measurements
-(`docs/ACCEPTANCE.md`, cursor step 9). These bounds are not a claim of measured
+coverage and sustained heap behavior remain unmeasured against real
+stores. These bounds are not a claim of measured
 production throughput.

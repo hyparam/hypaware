@@ -120,7 +120,7 @@ The deployment's operators can read forwarded data across every org on the
 server, and each such read is recorded in that org's audit trail.
 
 An enrolled machine also reports [product telemetry](PRODUCT_TELEMETRY.md) to
-the same organization automatically unless you saved a preference (LLP 0408):
+the same organization automatically unless you saved a preference:
 bounded usage, health and runtime summaries about HypAware itself, never
 conversation content, prompts, paths, or command arguments. `hyp telemetry off`
 turns it off durably and discards pending copies, `hyp telemetry status` shows

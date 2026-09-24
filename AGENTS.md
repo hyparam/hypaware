@@ -128,90 +128,11 @@ actually shipped in V1.
 
 ## Smoke Test Model
 
-Keep three tiers distinct:
+Keep two tiers distinct:
 
 1. Traditional tests: fast, deterministic, and broad over edge cases.
 2. Hermetic smokes: narrow complete workflows in a temp install, good for PR
    confidence and plugin/kernel wiring checks.
-3. Acceptance smokes: heavier release or manual gates that cross boundaries
-   the hermetic harness cannot, such as consecutive package versions, real
-   daemon install/start/stop, real client behavior, and production-ish
-   telemetry defaults. Written procedures live in
-   [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md); a human runs them before a
-   release that touched the relevant boundary, and they are never replaced by
-   fixtures that only agree with the current code.
-
-Written acceptance procedures:
-
-- `durable_cache_upgrade`: required when a release changes a spool envelope or
-  label, cache schema or partition declaration, generation/cursor format, or
-  maintenance/compaction output. Runs the previous release and candidate in a
-  disposable `HYP_HOME`, one affected stream at a time, and proves confirmed
-  rows, waiting rows, migration, post-migration writes, and refresh-failure
-  behavior. See `docs/ACCEPTANCE.md`.
-- `codex_desktop_capture`: opt-in/manual, needs Codex Desktop on a real Mac.
-  Proves Desktop traffic reaches `ai_gateway_messages` by both the live
-  gateway route and the `~/.codex/sessions` backfill route, and is
-  attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
-- `codex_login_switch_reroute`: opt-in/manual, needs the Codex CLI and both a
-  ChatGPT subscription and an OpenAI API key. Proves a login switch needs no
-  re-attach, no daemon restart, and no client restart, and proves the half a
-  fixture cannot: that `api.openai.com/v1/responses` accepts the body Codex
-  builds for the neutral provider block. See `docs/ACCEPTANCE.md`.
-- `openclaw_capture`: opt-in/manual, needs OpenClaw with both `anthropic` and
-  `openai` credentials. Proves both capture lanes (live gateway and the
-  scheduled transcript sweep) and that a turn both lanes observe settles to
-  one row. See `docs/ACCEPTANCE.md`.
-- `opencode_cli_desktop_capture`: opt-in/manual, needs OpenCode CLI and Desktop
-  sharing one config home. Proves both capture lanes (the managed global
-  JavaScript plugin and the bounded `opencode export` recovery), that the live
-  `entrypoint` distinguishes CLI from Desktop, and that detach removes only the
-  marker-owned plugin file. See `docs/ACCEPTANCE.md`.
-- `claude_otel_shape_check`: opt-in/manual, needs a real Claude Code 2.1.214
-  or newer. The release gate against upstream drift on the OTEL attach path:
-  proves the installed Claude Code still honors the managed `env` block, still
-  emits the event names, attributes, and raw body fields the telemetry listener
-  reads, and still emits them in the order that puts a turn's tokens on the row
-  both capture lanes name, then checks the rows and the `hyp status`
-  capture-health line agree. See `docs/ACCEPTANCE.md`.
-- `launchd_supervisor_env`: opt-in/manual, needs a real Mac with the daemon
-  installed and started as a LaunchAgent. Reads `XPC_SERVICE_NAME` out of the
-  running daemon's own environment and proves the shipped `detectSupervisor`
-  accepts it, so the automatic self-update lanes apply on macOS instead of
-  refusing every update as unsupervised. No fixture can settle this: a
-  hermetic test asserts the value it wrote itself. See `docs/ACCEPTANCE.md`.
-- `github_since_inclusivity`: opt-in/manual, needs a GitHub token and a real
-  repository. Probes whether the issues-family `since` window is inclusive of
-  items sitting exactly on the boundary second, which is the premise the
-  capture gate and its hermetic fake are written to and which no fixture can
-  check. Also records that a repeat `hyp github backfill` re-appends by design
-  (LLP 0374), so a row-count check is not read as a regression. See
-  `docs/ACCEPTANCE.md`.
-- `cursor_editor_cli_capture`: opt-in/manual, needs a real Cursor editor and
-  Cursor CLI. The adapter reads a private, version-specific saved-session
-  format, so only a real client can say whether the recovered rows match what
-  the user saw. Proves editor Agent Chat, interactive CLI and headless CLI
-  independently, plus live hook delivery, WAL-committed recovery, replay
-  stability, and that inherited Claude hooks are not misattributed. See
-  `docs/ACCEPTANCE.md`.
-- `pi_tui_cli_capture`: opt-in/manual, needs a real Pi and a disposable Pi
-  config/session root. Proves TUI, print, JSON and RPC turns, native entry IDs
-  and token totals, the scheduled recovery sweep and its unchanged-file skip,
-  fork/compaction usage accounting, and that package install and managed
-  attach never both record. Not the hermetic `pi_capture` smoke, which POSTs a
-  fixture we wrote and so agrees with itself whatever upstream did. See
-  `docs/ACCEPTANCE.md`.
-
-Good acceptance smoke candidates (no written procedure yet):
-
-- `installed_daemon_idle_soak`: install/start/status/stop the real daemon path,
-  wait briefly while idle, and assert cache growth stays zero or bounded.
-- `otel_self_loop_guard`: run without `HYP_DEV_TELEMETRY=1` and prove the daemon
-  does not export into its own OTEL listener in a runaway loop.
-- `codex_subscription_capture`: opt-in/manual, using real or path-faithful
-  ChatGPT Codex traffic against `/backend-api/codex/responses`.
-- `configured_sink_roundtrip`: use config-driven sink setup and prove rows land
-  in the configured local destination.
 
 ## Log-Driven Development
 
@@ -344,41 +265,6 @@ hypaware query sql "select count(*) from traces"
 hypaware query sql "select count(*) from logs"
 hypaware daemon uninstall
 ```
-
-If the release touched a client adapter, run the matching procedure in
-[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) and record the result in the
-release notes.
-
-If the release changed a spool envelope or label, cache schema or partition
-declaration, generation/cursor format, or maintenance/compaction output, run
-[`durable_cache_upgrade`](docs/ACCEPTANCE.md#durable_cache_upgrade) against the
-last released version for every affected stream. Record the versions and the
-row, file, layout, and waiting-spool results in the release notes.
-
-If the release touched the **claude** adapter (`@hypaware/claude`, the
-telemetry listener, the body spool, or the attach settings writer), the
-matching procedure is
-[`claude_otel_shape_check`](docs/ACCEPTANCE.md#claude_otel_shape_check). It is
-not optional for those releases and it is not substitutable by the hermetic
-smokes: `claude_telemetry_capture` POSTs a fixture we wrote, so it agrees with
-itself no matter what upstream did. Only a real Claude Code can tell you it
-renamed an event, dropped a flag, or changed the raw body format, and the
-failure mode is silent (null columns, not an error). Record the observed
-`claude --version`, the full event-name list, and step 9's
-`usage_on_tool` / `usage_on_text` split in the release notes so the next
-release has a baseline to diff against. That split is the emission-order
-baseline: which row carries a turn's usage depends on the order Claude Code
-emits `api_response_body` and `assistant_response` in (LLP 0390), and the
-order is not queryable any other way.
-
-If the release changed `detectSupervisor`, `LAUNCH_LABEL`, or the LaunchAgent
-plist the macOS installer writes, run
-[`launchd_supervisor_env`](docs/ACCEPTANCE.md#launchd_supervisor_env) on a real
-Mac. The launchd half of that gate rests on a value only a running LaunchAgent
-can supply, and getting it wrong stops every automatic update on macOS while
-`hyp status` and `hyp update` keep working, so nothing else reports it. Record
-the observed `XPC_SERVICE_NAME` line verbatim in the release notes as the
-baseline for the next release.
 
 If the release changes what bounds an automatic import (`backfill.window_days`,
 `backfill.sweep_cron`, or the window the scheduled sweep resolves), say so in

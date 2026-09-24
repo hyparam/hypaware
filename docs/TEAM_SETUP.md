@@ -71,15 +71,6 @@ keypress per screen.
 
 <img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as set by your team and a detected tool pre-checked.">
 
-<!--
-  Screenshots need re-shooting on a real terminal: issue #1146 tracks it.
-  (Not #1139, which the PR that wrote this note closes.)
-  There is no image of the "Set up recording" question, which is now the
-  screen most people see after signing in, and wizard-pick.png predates
-  the step being renumbered, so its position line may not match what the
-  checklist shows today. The prose above was verified against the code;
-  the images were not.
--->
 
 ### After the questions
 

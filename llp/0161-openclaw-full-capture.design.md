@@ -10,6 +10,7 @@
 **Related:** LLP 0016, LLP 0027, LLP 0037, LLP 0044, LLP 0045, LLP 0049, LLP 0085,
 LLP 0103, LLP 0109, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148,
 LLP 0149, LLP 0150, LLP 0152, LLP 0157, LLP 0158, LLP 0159
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Technical design for the two deliverables and one removal LLP 0157 specifies:
 > the OpenClaw-side steering plugin, the `@hypaware/openclaw` adapter rework,
@@ -675,8 +676,11 @@ untouched.
 
 ## 9. Acceptance procedure {#acceptance}
 
-`docs/ACCEPTANCE.md` gains `## openclaw_capture`, mirroring
-`## codex_desktop_capture`'s exact heading structure (What it proves / What
+> **Retired (2026-09-23)** by [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md).
+> The repo no longer keeps written manual procedures. This section records its design.
+
+A manual OpenClaw capture procedure is written, mirroring
+the Codex Desktop procedure's exact heading structure (What it proves / What
 it does not prove / Requires / Related / `### Steps` / `### If it fails`).
 
 Differences from the Codex template, each because OpenClaw's mechanism
@@ -719,7 +723,7 @@ genuinely differs:
 
 @ref LLP 0157#acceptance [implements]: R12, the procedure must exist and
 must have been run by a human before the adapter ships; this section is
-that procedure's design, landing it in `docs/ACCEPTANCE.md` and running it
+that procedure's design; writing it down and running it
 is implementation work this document hands off, not something a design
 document can itself satisfy.
 

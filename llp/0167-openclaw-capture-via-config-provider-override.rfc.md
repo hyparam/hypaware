@@ -8,6 +8,7 @@
 **Related:** LLP 0109, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0148, LLP 0149, LLP 0152, LLP 0157, LLP 0161, LLP 0162; issues #539, #543, #544
 **Extended-by:** LLP 0407 (#dropped: the picker rows say it in plain words without claude-cli or the sweep interval)
 **Spawned:** LLP 0168 (override replaces steering), LLP 0169 (attach surface returns), LLP 0170 (scheduled sweep), LLP 0171 (requirements spec), accepted 2026-07-31
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > Proposal: replace the OpenClaw steering plugin with two lanes that need
 > nothing installed on the OpenClaw side. **Lane A (live wire)**:
@@ -235,7 +236,7 @@ set:
   files), `test/`, `openclaw.plugin.json`, `package.json`. 2,080 lines.
 - **Delete `test/plugins/openclaw-steering-plugin.test.js`** (the suite
   wrapper, 24 lines).
-- **Rewrite `docs/ACCEPTANCE.md` `openclaw_capture`**: the
+- **Rewrite the manual OpenClaw capture procedure**: the
   `openclaw plugins install --link` / `plugins enable` steps become
   `hyp attach --client openclaw` plus a config-content check; the
   "shadow providers registered and steering" assertion becomes "override
@@ -268,7 +269,7 @@ set:
   `json_path`). R8, R9, R11, R14 survive untouched (projector shapes,
   shared reader, route-identity dedupe, settlement policy drop). R10
   survives untouched (backfill policy gate and CLI-backend exclusion).
-  R12 survives with the acceptance procedure rewritten per this RFC.
+  R12 survives with the manual procedure rewritten per this RFC.
   R13 is retired with the ledger: the sweep makes the coverage
   statement of {#sweep-lane} and no escaped-traffic measurement is
   maintained.
@@ -339,7 +340,7 @@ implementation; each maps to an acceptance step:
    confirm no agent `models.json` retains the gateway URL.
 4. **Config reload semantics.** Whether a running OpenClaw picks up the
    override without a restart, and what attach should print if not
-   (the acceptance procedure currently restarts the OpenClaw gateway
+   (the manual procedure currently restarts the OpenClaw gateway
    after plugin changes).
 5. **OAuth setup-token profiles ride through.** A pasted subscription
    token on the `anthropic` provider authenticates through the gateway
@@ -352,9 +353,8 @@ implementation; each maps to an acceptance step:
 ### Verification results (2026-07-31, live install) {#verify-results}
 
 All six items were executed against the real install on this machine
-(binary 2026.3.13, source checkout 2026.4.2 for code reading; note
-`docs/ACCEPTANCE.md` floors `openclaw_capture` at 2026.4.24+, so the
-acceptance run must re-confirm items 1, 3, and 4 on a current binary).
+(binary 2026.3.13, source checkout 2026.4.2 for code reading; items
+1, 3, and 4 must be re-confirmed on a 2026.4.24 or newer binary).
 Method: config edits on the live `~/.openclaw/openclaw.json` (backed up
 and restored), one-turn probes against a local logging listener, an
 isolated `--profile` install for gateway tests, and a hermetic

@@ -76,6 +76,5 @@ two counters, with no persistent history index. Live capture stops above 100,000
 session entries. Protocol version 2 requires the matching HypAware adapter;
 old version-1 senders are refused and native recovery remains available.
 
-Baseline: Pi 0.85.1. The acceptance procedure in `docs/ACCEPTANCE.md` checks real
-Pi behavior when either adapter or upstream changes. This package does not
+Baseline: Pi 0.85.1. This package does not
 install HypAware, start services or transmit directly to a cloud destination.

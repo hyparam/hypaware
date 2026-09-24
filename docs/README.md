@@ -41,14 +41,8 @@ query tools. Command availability follows the active configuration. Run
 ## Contributors and advanced reference
 
 - [Plugin authoring](PLUGIN_AUTHORING.md): scaffold, validate, and implement a plugin.
-- [Product telemetry](PRODUCT_TELEMETRY.md): the enrollment default and its
-  controls, current draft
-  implementation, and rollout limitations.
-- [Acceptance procedures](ACCEPTANCE.md): manual release checks for real clients,
-  installed services, and upgrades.
-- [Repository guidance](../AGENTS.md): development checks and contribution rules.
-- [Architecture and design decisions](../llp/0000-hypaware.explainer.md): the LLP
-  subsystem map and design rationale.
+- [Product telemetry](PRODUCT_TELEMETRY.md): the enrollment default, its
+  controls, what is collected, and delivery limits.
 
 These guides describe the code in this repository. For an older installed
 release, use `hyp version` and `hyp COMMAND --help` to check its supported

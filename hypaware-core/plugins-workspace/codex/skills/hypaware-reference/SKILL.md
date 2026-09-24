@@ -84,7 +84,6 @@ curated HypAware registry.
 - Opt a folder out of recording - `hyp privacy ignore <path>` writes a committable
   `.hypignore`; `hyp privacy set <path> ignore` marks it machine-local instead,
   with no repo breadcrumb.
-<!-- @ref LLP 0212#routing-moves-to-reference [implements]: the retired hypaware-ignore skill's job, minus the second implementation of the control call -->
 - Stop recording *this conversation* - `hyp session ignore` drops this session's
   exchanges at every local recorder (the gateway, and the Claude telemetry
   listener when one is running); `hyp session unignore` resumes, and
