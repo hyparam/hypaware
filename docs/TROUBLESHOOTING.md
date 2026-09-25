@@ -64,7 +64,8 @@ hyp remote list
 
 Check that a sink exists, its destination is correct, and the rows are eligible
 to leave. An attended first-sync review hold, local-only folder or client
-marking, or export retry can explain why local data is not yet in HypAware Cloud.
+marking, or export retry can explain why local data is not yet in HypAware
+Cloud.
 After reviewing the destination plan, use `hyp sync` to attempt delivery and
 inspect each sink's result. It can partially succeed and still return failure.
 

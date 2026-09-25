@@ -45,9 +45,9 @@ under different gateways, and the old row stays in place in HypAware Cloud.
 
 ## Each run: join, capture, flush
 
-Three steps, all in the run's shell. The join URL is the HypAware Cloud base URL (not a
-`/v1/mcp` query URL), and the token goes in on standard input so it never
-appears in `ps` output or `set -x` traces:
+Three steps, all in the run's shell. The join URL is the HypAware Cloud base
+URL (not a `/v1/mcp` query URL), and the token goes in on standard input so
+it never appears in `ps` output or `set -x` traces:
 
 ```sh
 # setup
@@ -119,7 +119,8 @@ machine that keeps running; the scheduled exports drain it. Flush with
 - `hyp status` on the runner reports whether recording is active, and what is
   shared with your team versus kept on the machine.
 - `hyp remote mint` failing with HTTP 404 means the target does not support
-  token minting; check the URL with `hyp remote list`.
+  minting CI tokens, because it predates the mint endpoint. A wrong URL is
+  not the cause: mint reduces the registered target to its origin first.
 - A join that hangs is waiting on standard input: no token was piped in, and
   no positional token or `--token-file` was given.
 - Join never contacts HypAware Cloud, so a query-target URL (`.../v1/mcp`)

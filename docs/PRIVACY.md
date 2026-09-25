@@ -114,7 +114,8 @@ records a proxy attach.
   local Parquet exports if you enabled them). There is no phone-home.
 - **HypAware Cloud** (after choosing Sync to the cloud in setup,
   `hyp remote login`, or `hyp join`): recorded rows are forwarded to
-  HypAware Cloud, including conversation content. The controls below decide which rows that covers.
+  HypAware Cloud, including conversation content. The controls below
+  decide which rows that covers.
 
 HypAware Cloud operators can read forwarded data across every org, and each
 such read is recorded in that org's audit trail.
