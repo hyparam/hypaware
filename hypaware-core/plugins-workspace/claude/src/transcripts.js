@@ -626,6 +626,9 @@ function byTimestampAsc(a, b) {
  *  - `byToolCallId`  : assistant tool_use id → entry, independent of
  *                      whether the result has arrived yet.
  *  - `byContentKey`  : canonicalized role+content key → entry.
+ *  - `previousUuid`  : uuid → the uuid of the line before it in the SAME
+ *                      agent thread, built on first call because only a
+ *                      settlement that re-scoped a row's `agent_id` reads it.
  *
  * @param {TranscriptEntry[]} entries
  */
@@ -658,7 +661,49 @@ export function indexTranscriptEntries(entries) {
       }
     }
   }
-  return { byUuid, byContentKey, byMessageId, byToolUseId, byToolCallId, ordered: entries }
+  /** @type {Map<string, string> | undefined} */
+  let previousByUuid
+  return {
+    byUuid,
+    byContentKey,
+    byMessageId,
+    byToolUseId,
+    byToolCallId,
+    ordered: entries,
+    /** @param {string} uuid @returns {string | undefined} */
+    // @ref LLP 0439#lazy-predecessor-index [implements]: a settle pass that
+    // re-scopes no row never pays for the map; one that does builds it once
+    // per session.
+    previousUuid(uuid) {
+      previousByUuid ??= buildPreviousByUuid(entries)
+      return previousByUuid.get(uuid)
+    },
+  }
+}
+
+/**
+ * Map each uuid-bearing line to the uuid of the line before it in the SAME
+ * agent thread, which is the predecessor the transcript backfill's own
+ * expansion chains it to (the gateway keys its `previous_message_id` state by
+ * `(thread, agent_id)`). `entries` is already timestamp-sorted, so one pass
+ * carrying the last uuid per agent is enough. Roots are simply absent.
+ *
+ * @param {TranscriptEntry[]} entries
+ * @returns {Map<string, string>}
+ */
+function buildPreviousByUuid(entries) {
+  /** @type {Map<string, string>} */
+  const previousByUuid = new Map()
+  /** @type {Map<string, string>} */
+  const lastByAgent = new Map()
+  for (const entry of entries) {
+    if (!entry.provider_uuid) continue
+    const scope = entry.agent_id ?? ''
+    const previous = lastByAgent.get(scope)
+    if (previous !== undefined) previousByUuid.set(entry.provider_uuid, previous)
+    lastByAgent.set(scope, entry.provider_uuid)
+  }
+  return previousByUuid
 }
 
 /**

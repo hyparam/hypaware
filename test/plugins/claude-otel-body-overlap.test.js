@@ -805,3 +805,76 @@ test('a tool-id match with no transcript uuid falls through to the content-key m
     await env.cleanup()
   }
 })
+
+// Two same-name subagents project into ONE merged `general-purpose` chain
+// (the OTEL event labels a row by agent TYPE), so every row's
+// `previous_message_id` comes from that merged label. Settlement then hands
+// each row its own per-spawn `agent_id`, and the pointers are left naming
+// the other agent's turns - or, once the predecessor settled too, naming a
+// fallback hash id no row carries any more. Issue #2150.
+// @ref LLP 0439#relink-from-the-transcript [tests]: a settled row that changed
+// agent scope links to its own agent's predecessor, the line the sweep chains it to.
+test('settlement keeps each subagent thread\'s previous_message_id inside that agent', async () => {
+  const env = await stageEnv()
+  try {
+    const projectDir = path.join(env.homeDir, '.claude', 'projects', 'some-repo')
+    await appendSessionContext(env.stateFile, {
+      session_id: SESSION,
+      transcript_path: path.join(projectDir, `${SESSION}.jsonl`),
+      cwd: env.homeDir,
+      git_branch: 'main',
+      ts: '2026-09-05T22:36:50.000Z',
+    })
+    const agentsDir = path.join(projectDir, SESSION, 'subagents')
+    await fs.mkdir(agentsDir, { recursive: true })
+    const events = []
+    for (const agentId of ['a111111', 'a222222']) {
+      const call = { ...TOOL_BLOCK, id: `toolu_${agentId}` }
+      const result = { ...RESULT_BLOCK, tool_use_id: call.id }
+      const entries = [
+        { role: 'assistant', content: [call], uuid: `${agentId}-call` },
+        { role: 'user', content: [result], uuid: `${agentId}-result` },
+      ]
+      await fs.writeFile(path.join(agentsDir, `agent-${agentId}.jsonl`), entries.map((entry, i) => JSON.stringify({
+        sessionId: SESSION, agentId, isSidechain: true, type: entry.role,
+        uuid: entry.uuid,
+        message: { role: entry.role, content: entry.content },
+        timestamp: `2026-09-05T22:36:5${4 + i}.000Z`,
+      })).join('\n') + '\n')
+      await fs.writeFile(path.join(agentsDir, `agent-${agentId}.meta.json`), JSON.stringify({ toolUseId: `spawn_${agentId}` }))
+      const bodyRef = await spoolBody(env.spoolDir, `chain-${agentId}.json`, {
+        messages: entries.map(({ role, content }) => ({ role, content })),
+      })
+      events.push({
+        name: 'api_request_body', timestamp: '2026-09-05T22:36:56.000Z',
+        attributes: { 'session.id': SESSION, body_ref: bodyRef, 'agent.name': 'general-purpose' },
+      })
+    }
+    const { bodies } = await loadSpooledBodies(events, { spoolDir: env.spoolDir })
+    const [projection] = projectClaudeTelemetryEvents(events, {
+      clientName: 'claude', usageByRequestId: new Map(), spooledBodies: bodies,
+    })
+    const settled = await settleBatch(env, aiGatewayRowsFromProjectedExchange(projection), [])
+    assert.deepEqual(
+      settled.map((row) => row.agent_id),
+      ['a111111', 'a111111', 'a222222', 'a222222'],
+      'the tool-id path must have handed each row its own per-spawn agent_id'
+    )
+
+    // Read against the agent_ids above: every link names a message of the
+    // SAME agent, which is the chain the sweep writes for these lines (each
+    // agent's opening turn is its thread root, its result follows its call).
+    assert.deepEqual(
+      settled.map((row) => [row.message_id, row.previous_message_id]),
+      [
+        ['a111111-call', []],
+        ['a111111-result', ['a111111-call']],
+        ['a222222-call', []],
+        ['a222222-result', ['a222222-call']],
+      ],
+      'a settled row must link to its own agent\'s predecessor, not the merged chain\'s'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})

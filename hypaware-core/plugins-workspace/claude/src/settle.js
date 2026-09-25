@@ -192,7 +192,22 @@ export function createClaudeSettlementEnricher(opts) {
               const match = toolMatch?.provider_uuid
                 ? toolMatch
                 : index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
-              if (match && match.provider_uuid) row = upgradeRow(row, match, match === toolMatch)
+              if (match && match.provider_uuid) {
+                const agentBefore = stringValue(row.agent_id)
+                row = upgradeRow(row, match, match === toolMatch)
+                // The chain was built at projection time over
+                // (thread, agent_id), so a row whose agent_id just moved holds
+                // a link computed in a scope it no longer belongs to: with two
+                // same-name subagents, a pointer into the other agent's turns.
+                // The transcript knows the predecessor in the new scope, and
+                // names the same line the backfill sweep chains this row to.
+                // @ref LLP 0439#relink-from-the-transcript [implements]: the
+                // scope change is what re-links the row, and the only thing that
+                if (stringValue(row.agent_id) !== agentBefore) {
+                  const previous = index.previousUuid(match.provider_uuid)
+                  row.previous_message_id = previous ? [previous] : []
+                }
+              }
             }
           }
 
