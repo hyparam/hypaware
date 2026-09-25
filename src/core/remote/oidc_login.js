@@ -5,7 +5,7 @@ import process from 'node:process'
 
 import { withSpinner } from '../cli/spinner.js'
 import { isTty } from '../cli/stdio.js'
-import { countPhysicalRows } from '../cli/tui/runtime.js'
+import { countPhysicalRows } from '../cli/tui/live_region.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { exchangeCode, trimSlash } from './identity_client.js'
 import { startLoginPoller } from './login_poll.js'

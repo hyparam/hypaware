@@ -122,9 +122,10 @@ N rows, clear to end".
 
 ## Migration {#migration}
 
-1. Extract the prompt runtime's frame bookkeeping into a screen runtime with
-   `commit(lines)` and `render(frame)`, and have the prompts use it. No
-   behavior change.
+1. Extract the prompt runtime's frame bookkeeping into a live region
+   (`src/core/cli/tui/live_region.js`: `draw(frame)` and `clear()`), and have
+   the prompts use it. No behavior change. Committing lines to the log lands
+   with its first user in step 2.
 2. Move the join lane first: the login lane emits events, the join step
    renders the URL and spinner in the live region, and commits "Signed in".
    Delete `clearFallback`.

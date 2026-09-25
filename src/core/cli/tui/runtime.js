@@ -3,8 +3,8 @@
 import process from 'node:process'
 import readline from 'node:readline'
 
-import { lineRows } from '../style.js'
 import { reduce } from './keypress.js'
+import { createLiveRegion } from './live_region.js'
 import { render } from './render.js'
 
 /**
@@ -14,7 +14,6 @@ import { render } from './render.js'
 
 const CURSOR_HIDE  = '\x1b[?25l'
 const CURSOR_SHOW  = '\x1b[?25h'
-const CLEAR_TO_END = '\x1b[J'
 
 let activeRun = false
 
@@ -42,7 +41,7 @@ export async function run(initialState, io) {
 
   /** @type {State} */
   let state = initialState
-  let previousLineCount = 0
+  const region = createLiveRegion(stdout)
   /** @type {((s: string | undefined, k: ReadlineKey) => void) | null} */
   let onKeypress = null
   let cleanedUp = false
@@ -71,30 +70,21 @@ export async function run(initialState, io) {
         stdin.pause()
       }
     } catch {}
-    if (clearOnResolve && previousLineCount > 0) {
-      // Move the cursor back to the top of the rendered frame and clear
-      // everything below it, leaving the screen as it was before the
-      // prompt drew. The next prompt then redraws in the same position.
-      try { stdout.write(`\x1b[${previousLineCount}A\r${CLEAR_TO_END}`) } catch {}
-      previousLineCount = 0
+    if (clearOnResolve) {
+      // Leave the screen as it was before the prompt drew. The next
+      // prompt then redraws in the same position.
+      try { region.clear() } catch {}
     }
     try { stdout.write(CURSOR_SHOW) } catch {}
   }
 
   function writeFrame() {
-    let buf = ''
-    if (previousLineCount > 0) {
-      buf += `\x1b[${previousLineCount}A\r${CLEAR_TO_END}`
-    }
     // Width is read per frame, not once: a resize between keystrokes must
     // reach both the renderer (which drops a box that no longer fits) and
     // the row count below it, or the two disagree about the same frame.
     const columns = terminalColumns(stdout)
     const rows = terminalRows(stdout)
-    const frame = render(state, { color, columns, ...(rows !== undefined ? { rows } : {}) })
-    buf += frame
-    previousLineCount = countPhysicalRows(frame, columns)
-    stdout.write(buf)
+    region.draw(render(state, { color, columns, ...(rows !== undefined ? { rows } : {}) }), columns)
   }
 
   try {
@@ -195,31 +185,6 @@ function terminalColumns(stdout) {
 function terminalRows(stdout) {
   const rows = stdout.rows
   return typeof rows === 'number' && rows > 0 ? rows : undefined
-}
-
-/**
- * Count the number of *physical* terminal rows a frame occupies. The
- * runtime uses this to know how far to move the cursor up before
- * clearing the previous frame. A naive newline count is wrong whenever
- * a logical line is wider than the terminal: the terminal soft-wraps it
- * onto multiple rows, so the cursor descended further than the number of
- * `\n` written. Undercounting here leaves stale rows on screen on every
- * redraw: the classic "the question keeps duplicating when I move the
- * cursor" symptom.
- *
- * Frames always end with a trailing `\n`; the empty segment after it
- * contributes no row.
- *
- * @param {string} frame
- * @param {number} columns
- * @returns {number}
- */
-export function countPhysicalRows(frame, columns) {
-  const lines = frame.split('\n')
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
-  let rows = 0
-  for (const line of lines) rows += lineRows(line, columns)
-  return rows
 }
 
 /**
