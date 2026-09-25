@@ -128,6 +128,8 @@ export interface CodexAttachOptions {
   configPath?: string
   baseUrl?: string
   providerName?: string
+  /** Report what the attach would do without writing it. */
+  dryRun?: boolean
 }
 
 export type CodexAttachResult = { changed: true; prevValue?: string }
