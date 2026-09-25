@@ -276,6 +276,26 @@ test('Step 1 stops on a missing gateway entry only while the gateway is listenin
   )
   assert.match(
     crossCheck,
+    /nothing is capturing this session over `base_url`/,
+    'and that claim must be scoped to the gateway lane: on a default `transcript` capture_mode the rollout sweep still imports this session'
+  )
+  assert.match(
+    crossCheck,
+    /capture_mode` defaults to `transcript`/,
+    'so the skill must say why an idle gateway is not the same as an uncaptured session'
+  )
+  assert.match(
+    crossCheck,
+    /`"name"` is `"ai-gateway"`/,
+    'and the lookup must carry core own name fallback, or a snapshot that recorded no plugin reads as not listening while a port is bound'
+  )
+  assert.match(
+    crossCheck,
+    /\{"running": false, "state": "unknown"\}/,
+    'a daemon that never wrote a snapshot must be resolved explicitly: its missing `sources` key otherwise matches both the proceed clause and the fail-closed one'
+  )
+  assert.match(
+    crossCheck,
     /"running": false/,
     'a snapshot outlives its daemon, so a port in one must be read as live only beside a running process'
   )
