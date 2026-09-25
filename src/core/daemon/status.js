@@ -30,7 +30,7 @@ import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
-import { isEphemeralBinPath } from '../cli/global_install.js'
+import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
@@ -3191,17 +3191,20 @@ function markerHasRetiredHookField(markerObj) {
  * and this marker is current in every other key (port, mode, schema token,
  * asset set), so the repair short-circuits and changes nothing (issue #1607).
  *
- * The predicate is `isEphemeralBinPath`, the same one the adapter decides
- * with when it bakes the command. Anything narrower here reopens #1607 one
- * tree over: the adapter warns that a project-local hook command will stop
- * capturing and names a re-attach as the repair, and a marker current in every
- * other key short-circuits that re-attach, so the operator does as they are
- * told and nothing changes. A recorded path that merely no longer resolves is
- * still left alone: a CLI moves for ordinary reasons (a node version switch, a
- * prefix change) and "gone from disk" cannot tell that apart from a deleted
- * tree, whereas both of these are package-manager-owned and
- * deletion-scheduled by construction, whether or not they are still there
- * today.
+ * The predicate is `isEphemeralRecordedBinPath`, the recorded-path form of the
+ * one the adapter decides with when it bakes the command. Anything narrower
+ * here reopens #1607 one tree over: the adapter warns that a project-local hook
+ * command will stop capturing and names a re-attach as the repair, and a marker
+ * current in every other key short-circuits that re-attach, so the operator
+ * does as they are told and nothing changes. The recorded form adds the end
+ * state of that same drift: a dependency tree deleted outright still has to
+ * read stale, or the one machine whose hook is certainly dead is the one the
+ * repair cannot reach (LLP 0434, issue #1624). A recorded path that merely no
+ * longer resolves is still left alone: a CLI moves for ordinary reasons (a node
+ * version switch, a prefix change) and "gone from disk" cannot tell that apart
+ * from a deletion, so what carries the verdict is the tree, which is
+ * package-manager-owned and deletion-scheduled by construction whether or not
+ * it is still there today.
  *
  * With no CLI installed anywhere the re-attach writes the same path again,
  * because it is the only entrypoint there is, and takes the adapter's existing
@@ -3227,7 +3230,7 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
   for (const entry of entries) {
     if (!isPlainObject(entry)) continue
     const bin = hookCommandBin(entry.command)
-    // Absolute, or no claim. `isEphemeralBinPath` resolves whatever it is
+    // Absolute, or no claim. The predicate below resolves whatever it is
     // handed, so a relative token - a hand-edited `node hypaware.js ...`, an
     // empty quoted command - would be judged against the directory `hyp`
     // happened to run in, and one marker would read stale from inside a
@@ -3238,7 +3241,7 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
     asked ??= new Set()
     if (asked.has(bin)) continue
     asked.add(bin)
-    if (isEphemeralBinPath(bin, env)) return true
+    if (isEphemeralRecordedBinPath(bin, env)) return true
   }
   return false
 }
