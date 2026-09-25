@@ -154,9 +154,13 @@ test('Step 1 reports the id as inferred and names persistence and the fork bound
  * read from its rollout) or `codex_rollout` (container inferred from a `cwd`
  * match) for a Codex session, and a `claude_env` here means the verb opted out
  * a Claude session sharing this shell while this one kept being recorded.
- * Codex reaches HypAware through `base_url`, so the recorder that captures it
- * is `gateway` (`resolveRecorderTargetsForCli`), where for a Claude session it
- * is the telemetry listener.
+ * Codex reaches HypAware through `base_url` only in `gateway` capture mode;
+ * on the default `transcript` mode nothing reaches the gateway and a rollout
+ * sweep imports the session instead. `resolveRecorderTargetsForCli` still
+ * names `gateway` as the entry to read in either mode, because its control
+ * route writes the shared session-ignore store before it answers and the
+ * sweep reloads that same store at the start of every run. For a Claude
+ * session it is the telemetry listener.
  *
  * The checks are pinned inside the stop paragraph rather than anywhere in
  * Step 1, because a reading the agent is not told to stop on is commentary.
