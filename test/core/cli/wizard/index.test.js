@@ -198,7 +198,7 @@ function wizardOpts(home, over = {}) {
     fork: async () => 'local',
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
-    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return {} },
     folderAsk: async (/** @type {any} */ o) => { opts._folderOpts = o; return { mode: 'sync' } },
     // The express gate (LLP 0201) fronts the lanes on every attended run
     // with default rows; these tests exercise the step-by-step path, so it
@@ -422,12 +422,10 @@ test('runInitWizard: accepting the express gate auto-accepts every lane and stat
   // remove them.
   assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
   assert.equal(opts._pickOpts.autoAccept, true)
-  assert.equal(opts._syncOpts.autoAccept, true)
   assert.equal(opts._folderOpts.autoAccept, true)
   assert.equal(opts._expressOpts.enrolled, true, 'the gate is told whether it can promise anything about a server')
   // No lane is answering anything, so no lane states a position.
   assert.equal(opts._pickOpts.progress, undefined)
-  assert.equal(opts._syncOpts.progress, undefined)
   assert.equal(opts._folderOpts.progress, undefined)
   assert.equal(opts._finaleArgs.progress, undefined)
 })
@@ -693,13 +691,10 @@ test('runInitWizard: the sync-scope step receives the locked descriptors so it c
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor])
 })
 
-// The new-folder question's title names the tools whose sessions raise it
-// (LLP 0200 #wizard). A source the user sent local-only one screen earlier
-// never reaches the server from any folder, so naming it would promise
-// "syncs without asking" for a client that syncs nothing at all. Locked
-// rows always sync (LLP 0188 #locked) and are never filtered.
-// @ref LLP 0200#wizard [tests]: the title names the syncing rows, not the ones the sync menu just opted out
-test('runInitWizard: the new-folder title drops the sources the sync step opted out, and keeps the locked ones', async () => {
+// The new-folder title names the tools this run records, locked rows
+// included (they always sync, LLP 0188 #locked).
+// @ref LLP 0200#wizard [tests]: the title names the rows that sync
+test('runInitWizard: the new-folder title names the picked and locked sources', async () => {
   const catalog = emptyCatalog()
   const claude = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
   const codex = { plugin: '@hypaware/codex', id: 'codex', label: 'Codex' }
@@ -709,17 +704,16 @@ test('runInitWizard: the new-folder title drops the sources the sync step opted 
     fork: async () => 'team',
     catalog,
     pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex, openclaw] }),
-    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: ['codex'] } },
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return {} },
   })
   await runInitWizard(opts)
-  assert.deepEqual(opts._folderOpts.names, ['Claude Code', 'OpenClaw'])
+  assert.deepEqual(opts._folderOpts.names, ['Claude Code', 'Codex', 'OpenClaw'])
 })
 
-// The filter above reads `optedOut`, and a skipped lane returns `[]`
-// because it could not read the store, not because the store withholds
-// nothing (`sync_scope.js` warns and skips on an unreadable client policy
-// store). Naming every picked tool off that empty list promises "syncs
-// without asking" for rows the run has just said it cannot account for.
+// A skipped lane could not read the store (`sync_scope.js` warns and skips
+// on an unreadable client policy store), so the run cannot say what syncs.
+// Naming every picked tool would promise "syncs without asking" for rows
+// it has just said it cannot account for.
 // @ref LLP 0200#wizard [tests]: an unreadable sync store leaves the new-folder title with no names it can stand behind
 test('runInitWizard: a skipped sync step leaves the new-folder title tool-free', async () => {
   const catalog = emptyCatalog()
@@ -730,7 +724,7 @@ test('runInitWizard: a skipped sync step leaves the new-folder title tool-free',
     fork: async () => 'team',
     catalog,
     pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex] }),
-    syncScope: async () => ({ skipped: true, noQuestion: true, optedOut: [] }),
+    syncScope: async () => ({ skipped: true, noQuestion: true }),
   })
   await runInitWizard(opts)
   assert.deepEqual(opts._folderOpts.names, [], 'no list the run can stand behind, so no names')
@@ -927,18 +921,6 @@ test('runInitWizard: non-interactive picks skip the sync-scope step (default-syn
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.ok(!calls.includes('syncScope'))
-})
-
-test('runInitWizard: a cancelled sync-scope step exits 130 and runs nothing further', async () => {
-  const { opts, calls } = wizardOpts(await tmpHome(), {
-    fork: async () => 'team',
-    syncScope: async () => ({ cancelled: true, optedOut: [] }),
-  })
-  const result = await runInitWizard(opts)
-  assert.equal(result.exitCode, 130)
-  assert.equal(result.cancelled, true)
-  assert.ok(!calls.includes('configure'), 'cancel stops before the configure phase')
-  assert.ok(!calls.includes('finale'))
 })
 
 test('runInitWizard: local pathway runs pick -> configure -> finale, no join', async () => {
@@ -1167,8 +1149,8 @@ test('runInitWizard: an overwrite refusal returns the pick phase exit 1', async 
 
 // --- deferred config commit (LLP 0190 #commit-point) ---
 // The pick lane composes; the orchestrator commits after the sync lane, so
-// the overwrite confirm is the last question and a cancel at the sync lane
-// leaves the existing config untouched.
+// the overwrite confirm is the last question and a cancel at the folders
+// lane leaves the existing config untouched.
 // @ref LLP 0190#commit-point [tests]:
 
 test('runInitWizard: a pending config lands on disk after the sync lane, before configure', async () => {
@@ -1180,7 +1162,7 @@ test('runInitWizard: a pending config lands on disk after the sync lane, before 
     pick: async () => pickResult({ configPath, configPending: true }),
     syncScope: async () => {
       onDiskDuringSync = await fs.access(configPath).then(() => true, () => false)
-      return { optedOut: [] }
+      return {}
     },
   })
   const result = await runInitWizard(opts)
@@ -1267,16 +1249,6 @@ test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hol
   const text = stdout.text()
   assert.match(text, /syncs to your team by default/)
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
-})
-
-test('runInitWizard: a team-path sync-scope cancel narrates that default-sync stands', async () => {
-  const { opts, stdout } = wizardOpts(await tmpHome(), {
-    fork: async () => 'team',
-    syncScope: async () => ({ cancelled: true, optedOut: [] }),
-  })
-  const result = await runInitWizard(opts)
-  assert.equal(result.exitCode, 130)
-  assert.match(stdout.text(), /syncs to your team by default/)
 })
 
 test('runInitWizard: a local-path abort stays quiet - nothing enrolled this run', async () => {

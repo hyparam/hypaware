@@ -238,7 +238,7 @@ test('runInitWizard: the local pathway reads step 1 of 2 then step 2 of 2', asyn
 test('runInitWizard: the team pathway counts four steps with no separate sync position', async () => {
   const { opts, seen } = wizardOpts(await tmpHome(), {
     fork: async () => 'team',
-    syncScope: async (/** @type {any} */ o) => { seen.sync = o; return { optedOut: [] } },
+    syncScope: async (/** @type {any} */ o) => { seen.sync = o; return {} },
     folderAsk: async (/** @type {any} */ o) => { seen.folders = o; return { mode: 'sync' } },
   })
   const result = await runInitWizard(opts)
@@ -279,7 +279,7 @@ test('runInitWizard: a managed re-entry counts the pathway the fork returns, plu
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
     // Stay connected at the disconnect question (LLP 0190 #fork-disconnect).
     confirm: async () => 'stay',
-    syncScope: async (/** @type {any} */ o) => { seen.sync = o; return { optedOut: [] } },
+    syncScope: async (/** @type {any} */ o) => { seen.sync = o; return {} },
     folderAsk: async (/** @type {any} */ o) => { seen.folders = o; return { mode: 'sync' } },
   })
   const result = await runInitWizard(opts)

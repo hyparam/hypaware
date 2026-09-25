@@ -12,11 +12,8 @@ import { render } from '../../../../src/core/cli/tui/render.js'
 import { PromptBackRequestedError, isPromptBackError } from '../../../../src/core/cli/tui/runtime.js'
 import { runWizardFork } from '../../../../src/core/cli/wizard/fork.js'
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
-import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { LOCAL_INSTALL_RETENTION_DAYS } from '../../../../src/core/cli/walkthrough.js'
-import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
-import { clientSyncListPath } from '../../../../src/core/usage-policy/client_sync.js'
 import { discoverBundledPlugins } from '../../../../src/core/runtime/bundled.js'
 import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
 
@@ -200,50 +197,6 @@ test('runWizardPick: initialSelection seeds the boxes and skips detection', asyn
   assert.deepEqual(result.sourcesPicked, ['claude'])
 })
 
-// --- the sync lane: back propagation ---
-
-/** @param {string} id */
-function descriptor(id) {
-  return /** @type {any} */ ({ plugin: `@hypaware/${id}`, id, label: `capture ${id}` })
-}
-
-test('runWizardSyncScope: back at the menu propagates and leaves the store unwritten', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-back-sync-menu-'))
-  const env = { HYP_HOME: hypHome }
-  const stateDir = readObservabilityEnv(env).stateDir
-  const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env,
-    candidates: [descriptor('claude')],
-    allowBack: true,
-    prompt: async (/** @type {any} */ q) => {
-      assert.equal(q.allowBack, true)
-      throw new PromptBackRequestedError()
-    },
-  }))
-  assert.equal(result.back, true)
-  await assert.rejects(fs.access(clientSyncListPath(stateDir)), 'a backed-out lane writes nothing')
-})
-
-// The sibling of the pick lane's "no screen exists behind this prompt"
-// case. While the sync menu was the lane's *second* screen its back always
-// had the lane's own gate to return to, so it offered back unconditionally;
-// with that gate retired (LLP 0201 #decline) the menu's back propagates
-// out, and a back with no target must not be offered at all.
-// @ref LLP 0191#lane-loops [tests]: the sync menu offers back only on the orchestrator's opt-in
-test('runWizardSyncScope: without allowBack the menu offers no back', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-back-sync-noback-'))
-  const env = { HYP_HOME: hypHome }
-  const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env,
-    candidates: [descriptor('claude')],
-    prompt: async (/** @type {any} */ q) => {
-      assert.equal(q.allowBack, undefined, 'no screen exists behind this prompt')
-      return ['claude']
-    },
-  }))
-  assert.deepEqual(result, { optedOut: [] })
-})
-
 // --- the orchestrator: step-level edges ---
 
 /** Minimal empty catalog so the orchestrator never discovers real plugins. */
@@ -295,7 +248,7 @@ async function wizardOpts(over = {}) {
     fork: async () => 'local',
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async () => pickResult(),
-    syncScope: async () => ({ optedOut: [] }),
+    syncScope: async () => ({}),
     folderAsk: async () => ({ mode: 'sync' }),
     // The express gate (LLP 0201) fronts the lanes; these tests walk the
     // back edges between them, so it declines by default.
@@ -377,26 +330,6 @@ test('runInitWizard: a back from pick re-presents the express gate, not the fork
   )
 })
 
-// @ref LLP 0191#back-edges [tests]: the sync lane backs to the picker, not past it to the express gate
-test('runInitWizard: a back from sync re-presents pick without re-asking the express gate', async () => {
-  let syncCalls = 0
-  const { opts, calls } = await wizardOpts({
-    ...gatedOverrides(),
-    syncScope: async () => {
-      syncCalls += 1
-      if (syncCalls === 1) return { back: true, optedOut: [] }
-      return { optedOut: [] }
-    },
-  })
-  const result = await runInitWizard(opts)
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(
-    calls.filter((c) => c === 'express' || c === 'pick' || c === 'syncScope'),
-    ['express', 'pick', 'syncScope', 'pick', 'syncScope'],
-    'the gate is asked once per pass through the lanes, and a sync back is not a new pass'
-  )
-})
-
 // @ref LLP 0201#no-default-no-accept [tests]: with no gate shown, pick's back edge still reaches the fork
 test('runInitWizard: with nothing to accept there is no gate, and pick backs straight to the fork', async () => {
   let pickCalls = 0
@@ -428,7 +361,7 @@ test('runInitWizard: a back from folders skips a sync lane that asked nothing an
     // real lane's `candidates` list is empty and it only states its outcome.
     syncScope: async (/** @type {any} */ o) => {
       assert.deepEqual(o.candidates, [], 'nothing is left for this lane to ask about')
-      return { optedOut: [], noQuestion: true }
+      return { noQuestion: true }
     },
     folderAsk: async () => {
       folderCalls += 1
@@ -445,10 +378,10 @@ test('runInitWizard: a back from folders skips a sync lane that asked nothing an
   )
 })
 
-// The same edge for the lane that does ask: a sync lane with a question
-// behind it is still where a folders back lands.
-// @ref LLP 0191#back-edges [tests]: a sync lane that asked is the screen behind the folders lane
-test('runInitWizard: a back from folders re-presents a sync lane that did ask', async () => {
+// The same edge when the sync lane has candidates to state: it still asks
+// nothing, so a folders back lands on the picker.
+// @ref LLP 0191#back-edges [tests]: the sync lane is never a screen, so the picker is behind the folders lane
+test('runInitWizard: a back from folders reaches pick past a sync lane with candidates', async () => {
   let folderCalls = 0
   const { opts, calls } = await wizardOpts({
     ...gatedOverrides(),
@@ -462,8 +395,8 @@ test('runInitWizard: a back from folders re-presents a sync lane that did ask', 
   assert.equal(result.exitCode, 0)
   assert.deepEqual(
     calls.filter((c) => c === 'pick' || c === 'syncScope' || c === 'folderAsk'),
-    ['pick', 'syncScope', 'folderAsk', 'syncScope', 'folderAsk'],
-    'the picker is two screens back, not one'
+    ['pick', 'syncScope', 'folderAsk', 'pick', 'syncScope', 'folderAsk'],
+    'escape reaches the picker, the last screen the user could answer'
   )
 })
 
@@ -475,7 +408,7 @@ test('runInitWizard: a back from folders re-presents a sync lane that did ask', 
 // @ref LLP 0201#edges [tests]: a back into a gate this pass cannot show reaches the fork instead of re-opening the picker
 test('runInitWizard: a back from pick reaches the fork when the confirmed picks leave the gate empty', async () => {
   let pickCalls = 0
-  let syncCalls = 0
+  let folderCalls = 0
   let forkCalls = 0
   const { opts, calls } = await wizardOpts({
     ...gatedOverrides(),
@@ -488,11 +421,11 @@ test('runInitWizard: a back from pick reaches the fork when the confirmed picks 
       if (pickCalls === 2) return /** @type {any} */ ({ ...pickResult(), back: true })
       return pickResult()
     },
-    syncScope: async () => {
-      syncCalls += 1
+    folderAsk: async () => {
+      folderCalls += 1
       // One back, to re-enter the picker with the empty selection standing.
-      if (syncCalls === 1) return { back: true, optedOut: [] }
-      return { optedOut: [] }
+      if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
+      return { mode: 'sync' }
     },
   })
   const result = await runInitWizard(opts)
@@ -523,24 +456,24 @@ test('runInitWizard: back past a completed join reuses it instead of re-running 
   assert.match(stdout.text(), /Already signed in - continuing\./)
 })
 
-test('runInitWizard: a back from sync re-runs pick seeded with the confirmed selection', async () => {
-  let syncCalls = 0
+test('runInitWizard: a back from folders re-runs pick seeded with the confirmed selection', async () => {
+  let folderCalls = 0
   /** @type {any[]} */
   const pickOpts = []
   const { opts, calls } = await wizardOpts({
     fork: async () => 'team',
     pick: async (/** @type {any} */ o) => { pickOpts.push(o); return pickResult({ sourcesPicked: ['claude'] }) },
-    syncScope: async (/** @type {any} */ o) => {
-      assert.equal(o.allowBack, true, 'the sync lane always has the pick lane behind it')
-      syncCalls += 1
-      if (syncCalls === 1) return { back: true, optedOut: [] }
-      return { optedOut: [] }
+    folderAsk: async (/** @type {any} */ o) => {
+      assert.equal(o.allowBack, true, 'the folders lane always has the pick lane behind it')
+      folderCalls += 1
+      if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
+      return { mode: 'sync' }
     },
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
-  assert.deepEqual(calls.filter((c) => c === 'pick' || c === 'syncScope'),
-    ['pick', 'syncScope', 'pick', 'syncScope'])
+  assert.deepEqual(calls.filter((c) => c === 'pick' || c === 'folderAsk'),
+    ['pick', 'folderAsk', 'pick', 'folderAsk'])
   assert.equal(pickOpts[0].initialSelection, undefined, 'the first pass detects')
   assert.deepEqual(pickOpts[1].initialSelection, ['claude'], 'the re-entry is seeded, not re-detected')
 })
@@ -835,7 +768,7 @@ test('runInitWizard: a back replaces a lane statement instead of stacking it', a
     syncScope: async (/** @type {any} */ o) => {
       syncCalls += 1
       o.statement.write(`✓ sync statement ${syncCalls}\n`)
-      return { optedOut: [] }
+      return {}
     },
     folderAsk: async (/** @type {any} */ o) => {
       folderCalls += 1

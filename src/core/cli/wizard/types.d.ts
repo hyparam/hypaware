@@ -80,13 +80,8 @@ export interface RunWizardSyncScopeOptions {
    * (LLP 0435 #recap).
    */
   statement?: { write(chunk: string): unknown }
-  /** Return the combined selection for application after the config commits. */
-  deferWrite?: boolean
-  /** Collection picker already confirmed these sources for sharing. */
-  collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stdin?: NodeJS.ReadableStream
   env: NodeJS.ProcessEnv
   /**
    * The picked, locked-filtered descriptors (the pick result's
@@ -97,9 +92,7 @@ export interface RunWizardSyncScopeOptions {
   /**
    * The org's locked (central-layer) descriptors, already display-filtered
    * (LLP 0276 #sync-gate). Always-sync (LLP 0188 #locked) and never
-   * editable here, but listed - on the gate and as checked, disabled menu
-   * rows - so "these will sync" states the whole picture, not only the
-   * editable slice (LLP 0190 #sync-gate).
+   * editable, but counted and named as the team's on the lane's line.
    */
   locked?: PickerDescriptor[]
   /**
@@ -125,46 +118,14 @@ export interface RunWizardSyncScopeOptions {
    * its count already decides its sentence.
    */
   candidatesHiddenIds?: string[]
-  /** The step's position line, rendered on the prompt like the pick lane's. */
-  progress?: string
-  /**
-   * Offer back-navigation out of the lane (LLP 0191): escape at the menu
-   * returns `back: true` to the orchestrator (which re-runs the pick
-   * lane).
-   */
-  allowBack?: boolean
-  /** Prompt seam (tests); defaults to the walkthrough prompt factory. */
-  prompt?: AsyncPickPrompt
-  /**
-   * Take the stated default without stopping at it (LLP 0201 #narrate):
-   * the express gate already answered this lane, so it narrates the sync
-   * split the menu would have shown and proceeds. On the combined path
-   * (`collectAndSync`, LLP 0396) the picker already stated that split, so
-   * the lane applies the answer without restating it; set it only where the
-   * picker's narration carried the sync claim.
-   */
-  autoAccept?: boolean
 }
 
 export interface WizardSyncScopeResult {
   /** Selected source ids to enable after the config commits; never a store snapshot. */
   pendingSources?: string[]
-  /** The user cancelled at the prompt; the wizard exits 130. */
-  cancelled?: boolean
-  /** The user stepped back out of the lane (LLP 0191); nothing written. */
-  back?: true
-  /** Candidate source ids the user opted out (kept local-only). */
-  optedOut: string[]
   /** The step was skipped (corrupt store) rather than answered. */
   skipped?: boolean
-  /**
-   * The lane reached its outcome without presenting a prompt: everything
-   * picked was fleet-locked, or the store was unreadable. It is then a
-   * statement rather than a screen, so the lane after it steps back *past*
-   * it (LLP 0191 #back-edges: escape reaches the last screen the user could
-   * answer, and a lane that asked nothing is not one). Not set on the
-   * express path, which asks nothing anywhere and never backs.
-   */
+  /** The lane asked nothing; kept for the span and the orchestrator's log. */
   noQuestion?: true
 }
 

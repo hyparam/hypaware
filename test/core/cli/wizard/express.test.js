@@ -7,11 +7,9 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { narrateAcceptedGate, runWizardExpressGate } from '../../../../src/core/cli/wizard/express.js'
-import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { runWizardFolderAsk } from '../../../../src/core/cli/wizard/folder_ask.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { readFolderAskMode, writeFolderAskMode } from '../../../../src/core/usage-policy/folder_ask.js'
-import { readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 import { WIZARD_STEP_LABELS, wizardItinerary } from '../../../../src/core/cli/wizard/steps.js'
 
@@ -44,11 +42,6 @@ function capturingConfirm(answer) {
     return answer
   }
   return { confirm, state }
-}
-
-/** @param {string} id */
-function descriptor(id) {
-  return /** @type {any} */ ({ plugin: `@hypaware/${id}`, id, label: `capture ${id}`, summary: `${id} rows` })
 }
 
 const ROWS = ['Claude Code', 'Codex']
@@ -206,31 +199,6 @@ test('declining opens the menus; back and cancel are their own answers', async (
 // The lanes' half of the bargain: auto-accepting skips the prompt, never
 // the statement (LLP 0201 #narrate).
 
-test('the sync lane auto-accepts by narrating the same split and writing the same store', async () => {
-  const { env, stateDir } = await makeHome()
-  await writeClientSyncEntries({ stateDir, entries: [{ source: 'openclaw', class: 'local-only' }] })
-  const stdout = makeBuf()
-
-  const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout, stderr: makeBuf(), env,
-    candidates: [descriptor('openclaw'), descriptor('hermes')],
-    locked: [descriptor('claude')],
-    autoAccept: true,
-    confirm: async () => { throw new Error('the express path must not prompt') },
-    prompt: async () => { throw new Error('the express path must not prompt') },
-  }))
-
-  assert.deepEqual(result, { optedOut: ['openclaw'] }, 'a standing opt-out survives the fast path')
-  const out = stdout.text()
-  assert.match(out, /These will sync to your server:/)
-  assert.match(out, /capture claude · set by your team/)
-  assert.match(out, /capture hermes/)
-  assert.match(out, /Staying local-only:/)
-  assert.deepEqual(await readClientSyncEntries({ stateDir }), [
-    { source: 'openclaw', class: 'local-only' },
-  ])
-})
-
 test('the new-folder lane auto-accepts to the default and records it', async () => {
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
@@ -258,9 +226,8 @@ test('the new-folder lane auto-accepts the standing answer, not the constant', a
     confirm: async () => { throw new Error('the express path must not prompt') },
   }))
 
-  // The sibling of the sync lane's "a standing opt-out survives the fast
-  // path" above: both lanes sit behind one keypress, and both must
-  // round-trip their own store rather than reset it (LLP 0200 #wizard).
+  // The lane sits behind one keypress and must round-trip its own store
+  // rather than reset it (LLP 0200 #wizard).
   // Hardcoding the default here overwrote a deliberate 'ask' with the
   // less protective 'sync' and then announced the new value as though the
   // user had answered it.

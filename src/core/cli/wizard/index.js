@@ -193,8 +193,6 @@ async function runGuardedInitWizard(opts, guard) {
   let pickSeed
   /** @type {WizardPickResult | undefined} */
   let picked
-  /** @type {string[]} */
-  let sourcesOptedOut = []
   /** @type {string[] | undefined} */
   let pendingSyncSources
   /**
@@ -694,146 +692,83 @@ async function runGuardedInitWizard(opts, guard) {
 
         // @ref LLP 0396#combined-selection [implements]: apply the picker's sharing answer without another question
         if (interactive && (pathway === 'team' || enrolled())) {
-          atSync: while (true) {
-            if (!(await guard.checkpoint())) return await cancelDeadOutput()
-            const syncFn = opts.syncScope ?? runWizardSyncScope
-            // The locked descriptors ride along so the lane can state the whole
-            // sync picture: org rows always sync and are shown read-only there.
-            // Through the same display filter the picker uses, though: a
-            // hidden row (LLP 0202) is locked on every enrolled machine,
-            // because the central layer owns the gateway that contributes it,
-            // and leading the sync gate with two fleet-labelled rows the
-            // picker never offered made the label look like it described the
-            // clients underneath it.
-            // The candidates go through the same filter: `picked.descriptors`
-            // is the non-locked slice of the picks, and a carried hidden row
-            // (LLP 0202 #carry-through) survives into it whenever that row is
-            // not locked - a join whose org config has not converged yet, say.
-            // Unfiltered it rendered as an editable checkbox for a row the
-            // picker deliberately never offered.
-            // @ref LLP 0276#sync-gate [implements]: the sync lane's rows, locked and candidate alike, go through `visiblePickerDescriptors`, so a hidden row stays off this screen too
-            const allLockedDescriptors = picked.lockedSources
-              .map((id) => catalog.pickerDescriptors.get(id))
-              .filter((d) => d !== undefined)
-            const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors, opts.platform)
-            const candidateDescriptors = visiblePickerDescriptors(picked.descriptors, opts.platform)
-            const visibleCandidateIds = new Set(candidateDescriptors.map((d) => d.id))
-            const syncScope = await syncFn({
-              stdout: opts.stdout,
-              stderr: opts.stderr,
-              statement: recap.lane('sync'),
-              ...(opts.stdin ? { stdin: opts.stdin } : {}),
-              env: opts.env,
-              candidates: candidateDescriptors,
-              locked: lockedDescriptors,
-              // What the display filter removed from each list. The lane
-              // never names them, but it must not tell the user nothing syncs
-              // while they stand: a locked row always syncs (LLP 0188
-              // #locked), and a picked row ships unless the policy store
-              // withholds it, so a hidden row dropped from either list may be
-              // capture that still leaves the machine.
-              // A count suffices for the locked list, whose rows sync
-              // whatever the store says. The picked list does not: whether a
-              // hidden pick ships is the store's answer about that source, so
-              // the lane gets the ids and asks (it still never prints them).
-              // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible row to name" from "nothing standing at all"
-              // @ref LLP 0289#ask-the-store [implements]: the hidden picks cross as ids, the hidden locked rows as a count
-              lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
-              candidatesHiddenIds: picked.descriptors
-                .filter((d) => !visibleCandidateIds.has(d.id))
-                .map((d) => d.id),
-              collectAndSync: true,
-              deferWrite: true,
-              ...(opts.prompt ? { prompt: opts.prompt } : {}),
-              // On the combined path this says the picker already narrated
-              // this list, not merely that the gate answered the lane, so it
-              // is set only where that narration carried the sync claim: a
-              // pass whose picker said "record" alone still needs the
-              // statement from here.
-              // @ref LLP 0396#combined-selection [implements]: the express run states the combined picture once, at the picker
-              ...(express && pickCollectAndSync ? { autoAccept: true } : {}),
-              // The pick lane is always behind this one.
-              allowBack: true,
-            })
-            if (syncScope.back) continue atPick
-            if (syncScope.cancelled) {
-              // Cancelling here leaves the store unwritten, so default-sync
-              // stands; on an enrolled run that must be said, not implied
-              // (LLP 0188).
-              if (joined) await narrateEnrolledAbort(opts)
-              return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
-            }
-            sourcesOptedOut = syncScope.optedOut
-            pendingSyncSources = syncScope.pendingSources
+          if (!(await guard.checkpoint())) return await cancelDeadOutput()
+          const syncFn = opts.syncScope ?? runWizardSyncScope
+          // The locked descriptors ride along so the lane can state the whole
+          // sync picture: org rows always sync. Both lists go through the
+          // display filter the picker uses: a hidden row (LLP 0202) is
+          // locked on every enrolled machine, and a carried hidden row
+          // (LLP 0202 #carry-through) can survive into `picked.descriptors`,
+          // but neither was ever offered, so neither is named.
+          // @ref LLP 0276#sync-gate [implements]: the sync lane's rows, locked and candidate alike, go through `visiblePickerDescriptors`, so a hidden row is never named
+          const allLockedDescriptors = picked.lockedSources
+            .map((id) => catalog.pickerDescriptors.get(id))
+            .filter((d) => d !== undefined)
+          const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors, opts.platform)
+          const candidateDescriptors = visiblePickerDescriptors(picked.descriptors, opts.platform)
+          const visibleCandidateIds = new Set(candidateDescriptors.map((d) => d.id))
+          const syncScope = await syncFn({
+            stdout: opts.stdout,
+            stderr: opts.stderr,
+            statement: recap.lane('sync'),
+            env: opts.env,
+            candidates: candidateDescriptors,
+            locked: lockedDescriptors,
+            // What the display filter removed from each list. The lane
+            // never names them, but it must not tell the user nothing syncs
+            // while they stand: a locked row always syncs (LLP 0188
+            // #locked), and a picked row ships unless the policy store
+            // withholds it, so a hidden row dropped from either list may be
+            // capture that still leaves the machine.
+            // A count suffices for the locked list, whose rows sync
+            // whatever the store says. The picked list does not: whether a
+            // hidden pick ships is the store's answer about that source, so
+            // the lane gets the ids and asks (it still never prints them).
+            // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible row to name" from "nothing standing at all"
+            // @ref LLP 0289#ask-the-store [implements]: the hidden picks cross as ids, the hidden locked rows as a count
+            lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
+            candidatesHiddenIds: picked.descriptors
+              .filter((d) => !visibleCandidateIds.has(d.id))
+              .map((d) => d.id),
+          })
+          pendingSyncSources = syncScope.pendingSources
 
-            if (!(await guard.checkpoint())) return await cancelDeadOutput()
-            const folderFn = opts.folderAsk ?? runWizardFolderAsk
-            const folders = await folderFn({
-              stdout: opts.stdout,
-              stderr: opts.stderr,
-              statement: recap.lane('folders'),
-              deferWrite: true,
-              ...(opts.stdin ? { stdin: opts.stdin } : {}),
-              env: opts.env,
-              // The title names the tools whose sessions raise the question:
-              // this run's recorded rows, through the same display filter as
-              // the sync lane, so a hidden row (LLP 0202) stays unnamed here
-              // too - minus the candidates the answer one screen back just
-              // sent local-only. The question is about what happens to a new
-              // folder's rows on the way to the server, and an opted-out
-              // source has no such way: naming it would promise "syncs
-              // without asking" for a client the user just stopped syncing
-              // at all. Locked rows always sync (LLP 0188 #locked), so they
-              // are never filtered.
-              //
-              // A skipped lane answers nothing, so it can filter nothing:
-              // `optedOut` is `[]` on the unreadable-store path because the
-              // store could not be read, not because it withholds nothing
-              // (`sync_scope.js` warns and returns `{ skipped: true }`
-              // there). Naming every picked tool off that empty list would
-              // promise "syncs without asking" for rows the run just said
-              // it cannot account for, which is the same false promise the
-              // filter exists to prevent. With no list we can stand behind,
-              // the title takes its tool-free phrasing (LLP 0200 #wizard):
-              // the preference is machine-local and worth recording either
-              // way, so the question still runs, it just stops naming
-              // names it cannot check.
-              // @ref LLP 0200#wizard [implements]: the title names only rows the run can say still sync, so an unreadable store falls back to the tool-free phrasing
-              names: syncScope.skipped
-                ? []
-                : [
-                    ...lockedDescriptors,
-                    ...candidateDescriptors.filter((d) => !sourcesOptedOut.includes(d.id)),
-                  ].map((d) => d.label),
-              ...(foldersProgress ? { progress: foldersProgress } : {}),
-              ...(opts.confirm ? { confirm: opts.confirm } : {}),
-              ...(express ? { autoAccept: true } : {}),
-              // The sync lane is always behind this one.
-              allowBack: true,
-            })
-            // One screen back is the sync lane only when the sync lane was
-            // a screen. On a fully fleet-managed machine (nothing left to
-            // opt out) and on an unreadable store it states its outcome and
-            // asks nothing, so backing "into" it re-ran it and re-asked this
-            // question: escape became a redraw the user could never get out
-            // of. Past a lane that asked nothing, the last screen is the
-            // picker.
-            // @ref LLP 0191#back-edges [implements]: escape reaches the previous screen, skipping a lane that rendered a statement rather than a question
-            if (folders.back) {
-              if (syncScope.noQuestion) continue atPick
-              continue atSync
-            }
-            if (folders.cancelled) {
-              // Same shape as the sync lane's cancel: nothing new was
-              // written, and the enrolled consequence is narrated rather
-              // than left implied.
-              if (joined) await narrateEnrolledAbort(opts)
-              return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
-            }
-            folderAsk = folders.mode
-            folderAskPending = folders.pendingWrite === true
-            break atSync
+          if (!(await guard.checkpoint())) return await cancelDeadOutput()
+          const folderFn = opts.folderAsk ?? runWizardFolderAsk
+          const folders = await folderFn({
+            stdout: opts.stdout,
+            stderr: opts.stderr,
+            statement: recap.lane('folders'),
+            deferWrite: true,
+            ...(opts.stdin ? { stdin: opts.stdin } : {}),
+            env: opts.env,
+            // The title names the tools whose sessions raise the question:
+            // this run's recorded rows, through the same display filter as
+            // the sync lane, so a hidden row (LLP 0202) stays unnamed here
+            // too. On an unreadable store the sync lane could not say what
+            // syncs, so the title takes its tool-free phrasing rather than
+            // promise "syncs without asking" for rows it cannot account for.
+            // @ref LLP 0200#wizard [implements]: the title names only rows the run can say still sync, so an unreadable store falls back to the tool-free phrasing
+            names: syncScope.skipped
+              ? []
+              : [...lockedDescriptors, ...candidateDescriptors].map((d) => d.label),
+            ...(foldersProgress ? { progress: foldersProgress } : {}),
+            ...(opts.confirm ? { confirm: opts.confirm } : {}),
+            ...(express ? { autoAccept: true } : {}),
+            // The picker is always behind this one.
+            allowBack: true,
+          })
+          // The sync lane asks nothing, so one screen back is the picker.
+          // @ref LLP 0191#back-edges [implements]: escape reaches the previous screen, skipping a lane that rendered a statement rather than a question
+          if (folders.back) continue atPick
+          if (folders.cancelled) {
+            // Nothing new was written, and the enrolled consequence is
+            // narrated rather than left implied.
+            if (joined) await narrateEnrolledAbort(opts)
+            return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
           }
+          folderAsk = folders.mode
+          folderAskPending = folders.pendingWrite === true
         }
         break atFork
       }
@@ -1078,7 +1013,6 @@ async function runGuardedInitWizard(opts, guard) {
     pathway: pathway ?? 'non-interactive',
     sources_picked: picked.sourcesPicked.length,
     locked_count: picked.lockedSources.length,
-    sources_opted_out: sourcesOptedOut.length,
     folder_ask: folderAsk ?? 'not-asked',
     express,
     cancelled,
