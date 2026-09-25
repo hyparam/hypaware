@@ -117,7 +117,9 @@ the lines together, in lane order, just before it saves:
 - what is recorded ("Recording Claude Code, Codex, and Claude Desktop"),
 - where it goes ("Syncing all 3 to HypAware Cloud", naming the server as
   #server-name says and the rows the team sets, or "Everything stays on
-  this machine" on a local run),
+  this machine" on a local run, printed only when every sink writes to
+  local disk, since a reconfigure carries forward sinks the picker does
+  not compose),
 - the new-folder answer, with the command that flips it.
 
 The sign-in step no longer prints its own "logs will sync to the server"

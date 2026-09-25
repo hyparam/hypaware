@@ -799,3 +799,25 @@ test('runInitWizard: a local run recaps that everything stays on this machine', 
   assert.equal(calls.includes('syncScope'), false)
   assert.match(stdout.text(), /\n✓ Recording Claude Code\n✓ Everything stays on this machine\n/)
 })
+
+// @ref LLP 0437#recap [tests]: the local line is a claim, so a carried off-machine sink withholds it
+test('runInitWizard: a local run with an off-machine sink does not claim everything stays local', async () => {
+  const config = {
+    version: 2,
+    plugins: [],
+    sinks: {
+      local: { writer: '@hypaware/format-parquet', destination: '@hypaware/local-fs' },
+      bucket: { writer: '@hypaware/format-parquet', destination: '@hypaware/s3' },
+    },
+  }
+  const { opts, stdout } = await wizardOpts({
+    pick: async (/** @type {any} */ o) => {
+      o.statement.write('✓ Recording Claude Code\n')
+      return { ...pickResult({ config }), configPending: true }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.match(stdout.text(), /\n✓ Recording Claude Code\n/)
+  assert.doesNotMatch(stdout.text(), /Everything stays on this machine/)
+})

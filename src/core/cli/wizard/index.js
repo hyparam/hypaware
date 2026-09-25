@@ -17,6 +17,7 @@
  *   WizardSyncNowResult,
  * } from '../../../../src/core/cli/wizard/types.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
+ * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
@@ -685,8 +686,11 @@ async function runGuardedInitWizard(opts, guard) {
         // lane, or a later pass through the fork - re-seeds with it.
         pickSeed = picked.sourcesPicked
 
-        // A run with no sync lane still says where its capture goes.
-        if (interactive && !(pathway === 'team' || enrolled())) {
+        // A run with no sync lane still says where its capture goes, but
+        // only when it is true: a reconfigure carries forward sinks the
+        // picker does not compose (an s3 export, say), and those still
+        // send data off the machine.
+        if (interactive && !(pathway === 'team' || enrolled()) && sinksStayLocal(picked.config)) {
           recap.lane('sync').write('✓ Everything stays on this machine\n')
         }
 
@@ -1469,6 +1473,20 @@ async function collectStatusSafe(opts) {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Whether every sink in `config` writes to this machine's disk: a blob sink
+ * whose destination is local-fs. Anything else, including a sink type added
+ * later, counts as leaving the machine, so the "stays on this machine" line
+ * fails closed.
+ *
+ * @param {HypAwareV2Config | undefined} config
+ * @returns {boolean}
+ */
+function sinksStayLocal(config) {
+  return Object.values(config?.sinks ?? {}).every((sink) =>
+    'destination' in sink && sink.destination === '@hypaware/local-fs')
 }
 
 /**
