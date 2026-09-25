@@ -1548,7 +1548,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
  *   skipAttachClients?: Set<string>,
- *   progress?: string,
+ *   heading?: string,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   daemonService?: {
  *     restartServiceDaemon: typeof restartServiceDaemonFn,
@@ -1566,13 +1566,11 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
-  // Like the join lane, the finale is one step made of several actions
-  // (install, attach, assets, backfill consent, restart), so it states its
-  // position once where the lane starts rather than per action. Only the
-  // wizard sets this; `runPickerWalkthrough` and non-interactive runs leave
-  // it unset and the line is not printed.
-  // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
-  if (args.progress) stdout.write(`${args.progress}\n`)
+  // Like the join lane, the finale opens with a plain heading rather than a
+  // step count, since the line stays on screen. Only the wizard sets it;
+  // `runPickerWalkthrough` and non-interactive runs print none.
+  // @ref LLP 0435#headings [implements]: permanent lines carry headings, live menus carry the step count
+  if (args.heading) stdout.write(`${args.heading}\n`)
   // `?? ''`, not os.homedir(): '' is the "no home, stay inert" sentinel this
   // whole finale keys on - the materialize/prune guards, the attach probe,
   // and the conditional homeDir spreads below all read it as "write

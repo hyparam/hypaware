@@ -461,14 +461,6 @@ export interface RunWizardJoinOptions {
    * `--bin` so enrollment neither asks again nor records a different CLI.
    */
   binPath?: string
-  /**
-   * The lane's position line (LLP 0135 #progress), e.g.
-   * `Step 1 of 3 · Join your team`. The join lane owns no prompt spec, so
-   * it prints the line itself where its narration would go, and prints that
-   * plain sentence only when there is no position line. Absent on runs with
-   * no committed pathway, which print the plain sentence instead.
-   */
-  progress?: string
 }
 
 /**

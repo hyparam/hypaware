@@ -131,6 +131,14 @@ For the same reason an express accept's new-folder answer is recorded after
 the recap, not when the lane runs. An answer the user gave on screen is
 still recorded at once (LLP 0341 #retained).
 
+### Step counts live on menus {#headings}
+
+"Step 2 of 4" helps while a menu is on screen and goes with it. A step that
+leaves permanent lines (the sign-in, the finish) opens with a plain heading
+instead ("Joining your team", "Finishing setup"), so the finished screen
+never shows a count with gaps in it, and an express run, which shows no
+menus, shows no counts at all.
+
 ### Row accounting {#rows}
 
 The runtime tracks the physical rows of the live region with

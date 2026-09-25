@@ -469,7 +469,6 @@ async function runGuardedInitWizard(opts, guard) {
         // The join is a question lane too (a login is an interaction),
         // so it does not open on a dead surface either (LLP 0341).
         if (!(await guard.checkpoint())) return await cancelDeadOutput()
-        const joinProgress = wizardStepProgress('team', 'join')
         const joinFn = opts.join ?? runWizardJoin
         const join = await joinFn({
           stdout: opts.stdout,
@@ -479,7 +478,6 @@ async function runGuardedInitWizard(opts, guard) {
           catalog,
           ctx: opts.ctx,
           ...(daemonBin !== undefined ? { binPath: daemonBin } : {}),
-          ...(joinProgress ? { progress: joinProgress } : {}),
         })
         // Fail closed: every status but the two that completed a sign-in
         // returns to the fork, so a member added to `WizardJoinStatus`
@@ -779,7 +777,6 @@ async function runGuardedInitWizard(opts, guard) {
   // lanes above, other than returning, assigns `picked` first.
   if (!picked) throw new Error('hyp setup: internal error: the pick lane did not run')
 
-  const finaleProgress = express ? undefined : wizardStepProgress(pathway, 'finale', { managed: enrolled() })
 
   // Every question lane has run; commit the composed config to disk before
   // the acting phases (configure and the finale both read/edit the file).
@@ -857,7 +854,7 @@ async function runGuardedInitWizard(opts, guard) {
       // once at the door.
       // @ref LLP 0341#dead-surface [implements]: the boundary reaches the one question the finale opens
       checkBoundary: () => guard.checkpoint(),
-      ...(finaleProgress ? { progress: finaleProgress } : {}),
+      ...(interactive ? { heading: 'Finishing setup' } : {}),
     })
   }
 
@@ -1148,11 +1145,11 @@ async function resolveWizardDaemonBin(opts, interactive) {
  *   daemonIncomplete: boolean,
  *   daemonBin?: string,
  *   checkBoundary: () => Promise<boolean>,
- *   progress?: string,
+ *   heading?: string,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, progress }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, heading }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
@@ -1217,7 +1214,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
         checkBoundary,
         ...(skipAttachClients ? { skipAttachClients } : {}),
-        ...(progress ? { progress } : {}),
+        ...(heading ? { heading } : {}),
       }),
     { component: 'wizard' }
   )
