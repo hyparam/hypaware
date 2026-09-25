@@ -80,11 +80,14 @@ never clears it, for the reason a narrowed run does not publish `next_repo`
 (LLP 0361#budget): its verdict covers a subset, so work remaining in it is real
 while work absent from it says nothing about the rest of the inventory.
 
-A tick that throws leaves the marker exactly as it read it. It sized nothing,
-so it has no verdict to record, and the closing write it still makes to save
-per-repo progress carries the value already on disk. This is the "learned
-nothing" contract, obtained for free: the field is data, so not writing it is
-the same thing as preserving it.
+A tick that throws sized nothing, so it has no verdict of its own to carry into
+the closing write it still makes to save per-repo progress. That write deletes
+the marker from its snapshot before committing, so `writeCursors` takes
+whatever verdict is on disk at that moment instead of re-asserting the one this
+tick read at the top, minutes earlier on a long-running tick, and possibly
+already retired by another process. This is the "learned nothing" contract,
+obtained the same way as before: the field is data, so recording no opinion
+about it is the same thing as preserving whatever is already there.
 
 The early return taken when a `session_repos` inventory read fails deliberately
 does **not** write the marker. That path holds a snapshot read before it

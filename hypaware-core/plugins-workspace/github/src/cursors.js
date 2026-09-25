@@ -90,6 +90,10 @@ export function authorizedImports(state) {
  * its state wins and a finished import is not resurrected. Cursor advancement
  * outside that window still follows the last writer, as before.
  *
+ * A caller with no verdict of its own (`state.pending === undefined`) takes
+ * whatever verdict is already on disk, newer or not, rather than committing an
+ * absence that reads as "no backlog".
+ *
  * @ref LLP 0409#one-time-imports [implements]: an authorization written before the network work survives a tick already in flight
  *
  * @param {string} stateDir
@@ -101,11 +105,14 @@ export async function writeCursors(stateDir, state, known) {
   fs.mkdirSync(stateDir, { recursive: true })
   const file = path.join(stateDir, STATE_FILE)
   await withFileLock(`${file}.lock`, async () => {
+    const disk = known || state.pending === undefined ? readCursors(stateDir) : undefined
     if (known) {
-      for (const [repo, cursor] of Object.entries(readCursors(stateDir).repos)) {
+      for (const [repo, cursor] of Object.entries(/** @type {CursorState} */ (disk).repos)) {
         if (cursor.one_time_import === true && !known.has(repo)) state.repos[repo] = cursor
       }
     }
+    // @ref LLP 0438#writers [implements]: a caller with no verdict of its own takes the one already on disk
+    if (state.pending === undefined && disk?.pending !== undefined) state.pending = disk.pending
     const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
     fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
     fs.renameSync(tmp, file)

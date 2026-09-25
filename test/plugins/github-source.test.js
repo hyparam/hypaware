@@ -10,7 +10,7 @@ import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/s
 import { BACKLOG_RETRY_MS, nextCaptureDelay, startGithubSource } from '../../hypaware-core/plugins-workspace/github/src/source.js'
 import { emptyGraph, fakeClient, silentLog } from './github-fake-client.js'
 import { CURSOR_ERROR_REPO, runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
-import { readCursors, writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
+import { authorizedImports, readCursors, writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { runGithubBackfill, runGithubSync } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 
 /** @import { TestContext } from 'node:test' */
@@ -821,4 +821,117 @@ test('a continuation another process retired returns the source to the configure
     'a continuation another process retired is not backlog this source can still claim')
   assert.ok(Math.abs(after.delayMs - 30 * 60_000) < 60_000,
     `next tick scheduled in ${after.delayMs}ms, not the configured poll interval`)
+})
+
+// @ref LLP 0438#writers [tests]: a throwing tick's closing write takes the verdict on disk, not the stale one its snapshot read
+test('a throwing tick closing write does not re-assert a verdict retired by a newer sidecar', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-stale-pending-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+
+  // The snapshot a daemon tick reads at the top: backlog pending, one repo
+  // with unfinished work.
+  await writeCursors(stateDir, {
+    schema_version: 1,
+    pending: true,
+    repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } },
+  })
+  const snapshot = readCursors(stateDir)
+  const known = authorizedImports(snapshot)
+
+  // A second process (`hyp github sync`) retires the backlog while that tick
+  // is still working, minutes later.
+  await writeCursors(stateDir, {
+    schema_version: 1,
+    pending: false,
+    repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } },
+  })
+
+  // The daemon tick's `captureRepos` throws. Its closing write sized nothing
+  // of its own, so it carries no verdict into `writeCursors`.
+  delete snapshot.pending
+  await writeCursors(stateDir, snapshot, known)
+
+  assert.equal(readCursors(stateDir).pending, false, 'the newer retirement survives the stale tick closing write')
+})
+
+// @ref LLP 0438#writers [tests]: pinned through the real throw path, not just the cursors.js/tick.js seam above
+test('a runCaptureTick whose repository capture throws leaves the on-disk verdict as it is at write time', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-stale-write-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  await writeCursors(stateDir, { schema_version: 1, pending: true, repos: {} })
+
+  const runtime = /** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'all_visible' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => ({
+      async listViewerRepos() {
+        // A second writer (`hyp github sync`) retires the backlog while this
+        // tick is still in flight.
+        await writeCursors(stateDir, { schema_version: 1, pending: false, repos: {} })
+        throw new Error('ENETDOWN: inventory unreachable')
+      },
+    }),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows() { throw new Error('must not append past the failed inventory call') },
+    },
+    log: silentLog,
+  })
+
+  await assert.rejects(() => runCaptureTick(runtime, { mode: 'poll' }), /ENETDOWN/)
+  assert.equal(
+    readCursors(stateDir).pending,
+    false,
+    'the throwing tick closing write does not re-assert the stale pending its snapshot read at tick start',
+  )
+})
+
+// @ref LLP 0438#writers [tests]: a narrowed run may set the verdict but its clean result never retires one it did not size
+test('a narrowed run may set the verdict but never clears it', async (t) => {
+  const cleanDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-narrowed-clean-'))
+  t.after(() => fs.rmSync(cleanDir, { recursive: true, force: true }))
+  await writeCursors(cleanDir, { schema_version: 1, pending: true, repos: {} })
+
+  const cleanResult = await runCaptureTick(/** @type {any} */ ({
+    stateDir: cleanDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'all_visible' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => fakeClient({
+      repos: { 'o/a': { issues: [{ number: 1, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] } },
+    }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }), { mode: 'backfill', only: ['o/a'] })
+  assert.equal(cleanResult.pending, false, 'the one named repo completed in this pass')
+  assert.equal(
+    readCursors(cleanDir).pending,
+    true,
+    'a narrowed run clean result covers only a subset, so it does not retire a verdict over the whole inventory',
+  )
+
+  const stuckDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-narrowed-stuck-'))
+  t.after(() => fs.rmSync(stuckDir, { recursive: true, force: true }))
+  await writeCursors(stuckDir, { schema_version: 1, pending: false, repos: {} })
+
+  const stuckResult = await runCaptureTick(/** @type {any} */ ({
+    stateDir: stuckDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'all_visible' },
+    captureRequestLimit: 1,
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => fakeClient({
+      repos: { 'o/a': { issues: [{ number: 1, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] } },
+    }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }), { mode: 'backfill', only: ['o/a'] })
+  assert.equal(stuckResult.pending, true, 'the exhausted budget left the named repo unfinished')
+  assert.equal(
+    readCursors(stuckDir).pending,
+    true,
+    'work left behind in the named subset is real backlog, whether or not the run was narrowed',
+  )
 })

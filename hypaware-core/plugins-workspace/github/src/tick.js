@@ -195,6 +195,10 @@ async function captureTick(runtime, opts) {
     // The tick ended with no result to carry a report, so still commit whatever
     // per-repo progress it did advance, but never let that write's own failure
     // stand in for the error that actually ended the tick.
+    // This tick sized nothing, so it has no verdict of its own to record; the
+    // snapshot it read at the top may already be stale, so let `writeCursors`
+    // take whatever verdict is on disk now instead of re-asserting this one.
+    delete cursors.pending
     await persistCursors()
     throw err
   }
