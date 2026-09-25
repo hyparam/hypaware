@@ -137,7 +137,8 @@ still recorded at once (LLP 0341 #retained).
 
 ### Naming the server {#server-name}
 
-The recap's sync line and `hyp sync`'s plan and result lines name the
+The wizard's sign-in line ("Signed in to HypAware Cloud as org ..."), the
+recap's sync line, and `hyp sync`'s plan and result lines name the
 destination the same way: "HypAware Cloud" for the built-in hosted server
 (matched by origin, including its previous host), and any other server by
 its host ("hyp.acme.dev"). Never a URL, for LLP 0100 R1a's reason: a

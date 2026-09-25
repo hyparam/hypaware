@@ -342,7 +342,10 @@ test('compact login (the wizard join lane) prints one line per event and no priv
     /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to the team server and a background service is installed\. Ctrl-C to cancel\.$/m,
     'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
-  assert.match(text, /✓ Signed in to 'prod' as org /)
+  // Named the way the recap names it (LLP 0437 #server-name): the host, not
+  // the target key.
+  assert.match(text, /✓ Signed in to hyp\.internal as org /)
+  assert.doesNotMatch(text, /Signed in to 'prod'/)
   // The deadline line still gives the hold's deadline and the fact that
   // nothing has been sent. There is no forwarding line: the wizard's recap
   // says what syncs to the team's server (LLP 0437 #recap).

@@ -9,7 +9,7 @@ import { parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer } from '../remote/builtin_remotes.js'
+import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -784,7 +784,12 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
     return { exitCode: 1, reason: 'store_failed' }
   }
-  ctx.stdout.write(compact ? `✓ Signed in to '${name}' as org '${session.org}'\n` : `logged in to '${name}' as org '${session.org}'\n`)
+  // The compact lane is the wizard's, whose lines name the server the way the
+  // recap does; the wide lane keeps the target name `hyp remote list` maps.
+  // @ref LLP 0437#server-name [implements]: the wizard's sign-in line reads as HypAware Cloud or the host, never the target key
+  ctx.stdout.write(compact
+    ? `✓ Signed in to ${serverDisplayName(entry.url)} as org '${session.org}'\n`
+    : `logged in to '${name}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it
