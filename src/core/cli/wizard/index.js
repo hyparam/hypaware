@@ -845,7 +845,6 @@ async function runGuardedInitWizard(opts, guard) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
       stderr: opts.stderr,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
       interactive,
       ...(opts.force !== undefined ? { force: opts.force } : {}),
       configPath: picked.configPath,

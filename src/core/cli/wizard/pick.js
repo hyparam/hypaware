@@ -445,7 +445,6 @@ export async function runWizardPick(opts) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
       stderr: opts.stderr,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
       interactive,
       ...(opts.force !== undefined ? { force: opts.force } : {}),
       configPath,
@@ -521,8 +520,8 @@ export async function runWizardPick(opts) {
  * the backup notice, and the write itself. Split out of `runWizardPick` so
  * the wizard orchestrator can run it after the sync lane (LLP 0190
  * #commit-point) - the last thing before the wizard starts acting - while
- * the non-deferred pick keeps calling it inline. Interactive runs prompt
- * for confirmation; non-interactive runs require `--force`. Either path
+ * the non-deferred pick keeps calling it inline. Attended runs save
+ * without asking (LLP 0433); non-interactive runs require `--force`. Either path
  * backs the file up before replacing it. A refusal is reported here
  * (message to stderr) and returned as `ok: false` for the caller to turn
  * into its exit-1 result.
@@ -533,7 +532,6 @@ export async function runWizardPick(opts) {
  * @param {{
  *   stdout: { write(chunk: string): unknown },
  *   stderr: { write(chunk: string): unknown },
- *   stdin?: NodeJS.ReadableStream,
  *   interactive: boolean,
  *   force?: boolean,
  *   configPath: string,

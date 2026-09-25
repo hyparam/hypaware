@@ -1205,6 +1205,22 @@ test('runInitWizard: an attended run overwrites an existing config without askin
   assert.match(stdout.text(), /Backed up existing config to /)
 })
 
+test('runInitWizard: a non-interactive commit over an existing config without --force exits 1 and leaves it untouched', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
+  const { opts, calls, stderr } = wizardOpts(home, {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    pick: async () => pickResult({ configPath, configPending: true }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.ok(!calls.includes('configure'))
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n')
+  assert.match(stderr.text(), /hyp setup: /)
+})
+
 test('runInitWizard: a scripted pick result without configPending is never committed by the orchestrator', async () => {
   const home = await tmpHome()
   const configPath = path.join(home, '.hyp', 'config.json')
