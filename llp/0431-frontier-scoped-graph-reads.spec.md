@@ -44,8 +44,9 @@ Exceeding a budget fails explicitly, never with an incomplete reachable count.
 `--limit` remains an output cap, not a work cap. `totalNodes` now counts visited
 ids including the seed, and `totalEdges` counts distinct examined edges;
 neither claims the corpus size. Computing global totals would reintroduce
-unnecessary whole-corpus work. The pure in-memory `traverse` helper continues
-to describe the arrays supplied by its caller.
+unnecessary whole-corpus work. The retired in-memory traversal and its tests
+are removed; neighborhood tests exercise the SQL reader against explicit
+expected results.
 
 ## Native suppression
 

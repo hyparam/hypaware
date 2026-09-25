@@ -11,7 +11,7 @@ import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { EDGE_COLUMNS, graphDatasetRegistration, NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
-import { queryNeighbors, resolveSeed, traverse } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
+import { queryNeighbors, resolveSeed } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
 import { graphNeighborsVerb } from '../../hypaware-core/plugins-workspace/context-graph/src/verb.js'
 
 /**
@@ -134,15 +134,26 @@ test('a small neighborhood remains queryable beyond 100000 unrelated nodes and e
 
 test('SQL neighborhoods preserve BFS, cycles, dangling endpoints and exact reachable totals', async () => {
   const edges = [...EDGES, e('s2', 'missing', 'touched'), e('missing', 's1', 'used'), EDGES[0]]
+  // From f1: incoming sessions at hop 1, then missing via its edge to s1.
+  // Walking both ways also reaches a1, m1 and t1. Cycles and duplicate
+  // edges add no new nodes, and f1 has no outgoing edges.
+  const reachable = { in: [2, 3, 3], out: [0, 0, 0], both: [2, 6, 6] }
   for (const direction of /** @type {const} */ (['in', 'out', 'both'])) {
-    for (const depth of [1, 2, 4]) {
-      const expected = ok(traverse({ nodes: NODES, edges, seed: 'f1', direction, depth, limit: 2 }))
+    for (const [index, depth] of [1, 2, 4].entries()) {
       const actual = ok(await queryNeighbors({ ...memoryGraph(NODES, edges), seed: 'f1', direction, depth, limit: 2 }))
-      assert.equal(actual.reachable, expected.reachable)
-      assert.equal(actual.truncated, expected.truncated)
-      assert.deepEqual(actual.neighbors.map(({ hop, direction, from, node, edge_type }) => ({ hop, direction, from, node, edge_type })), expected.neighbors)
+      assert.equal(actual.reachable, reachable[direction][index])
+      assert.equal(actual.truncated, reachable[direction][index] > 2)
+      assert.deepEqual(actual.neighbors.map(({ hop, direction, from, node, edge_type }) =>
+        ({ hop, direction, from, node, edge_type })), direction === 'out' ? [] : [
+        { hop: 1, direction: 'in', from: 'f1', node: NODES[0], edge_type: 'touched' },
+        { hop: 1, direction: 'in', from: 'f1', node: NODES[1], edge_type: 'touched' },
+      ])
     }
   }
+  const all = ok(await queryNeighbors({ ...memoryGraph(NODES, edges), seed: 'f1', direction: 'both', depth: 4 }))
+  assert.deepEqual(all.neighbors.map(({ hop, node }) => [hop, node.node_id]),
+    [[1, 's1'], [1, 's2'], [2, 'a1'], [2, 'm1'], [2, 't1'], [2, 'missing']])
+  assert.equal(all.neighbors.at(-1).node.node_type, '?', 'a dangling endpoint keeps its placeholder')
 })
 
 test('SQL seed resolution escapes literals and preserves tier precedence and ambiguity', async () => {
@@ -200,7 +211,7 @@ test('large labels are subject to the cumulative payload budget', async () => {
 
 /**
  * Assert a traversal succeeded and return it as a plain object for field access.
- * @param {ReturnType<typeof traverse>} r
+ * @param {Awaited<ReturnType<typeof queryNeighbors>>} r
  * @returns {any}
  */
 function ok(r) {
@@ -211,51 +222,9 @@ function ok(r) {
 /** @param {any[]} neighbors */
 const idsOf = (neighbors) => new Set(neighbors.map((x) => x.node.node_id))
 
-test('depth-1 out from a Session reaches its app/model/tool/file', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 's1', depth: 1, direction: 'out' }))
-  assert.equal(r.neighbors.length, 4)
-  assert.deepEqual(idsOf(r.neighbors), new Set(['a1', 'm1', 't1', 'f1']))
-  assert.ok(r.neighbors.every((x) => x.hop === 1 && x.direction === 'out'))
-})
-
-test('depth-1 in from a File reaches the Sessions that touched it', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: '/repo/index.js', depth: 1, direction: 'in' }))
-  assert.deepEqual(idsOf(r.neighbors), new Set(['s1', 's2']))
-  assert.ok(r.neighbors.every((x) => x.hop === 1 && x.direction === 'in' && x.edge_type === 'touched'))
-})
-
-test('depth-2 both from a File yields co-occurrence (file → sessions → resources)', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 'f1', depth: 2, direction: 'both' }))
-  // hop1: s1, s2 ; hop2: a1, m1, t1 (f1 already visited, not revisited)
-  assert.equal(r.neighbors.length, 5)
-  const hop2 = r.neighbors.filter((x) => x.hop === 2)
-  assert.deepEqual(idsOf(hop2), new Set(['a1', 'm1', 't1']))
-})
-
-test('--edge-type restricts which relations are walked', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 's1', depth: 1, direction: 'out', edgeTypes: ['used'] }))
+test('--edge-type restricts which relations are walked', async () => {
+  const r = ok(await queryNeighbors({ ...memoryGraph(), seed: 's1', depth: 1, direction: 'out', edgeTypes: ['used'] }))
   assert.deepEqual(idsOf(r.neighbors), new Set(['t1']))
-})
-
-test('direction out from a leaf File yields no neighbors (but succeeds)', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 'f1', depth: 2, direction: 'out' }))
-  assert.equal(r.neighbors.length, 0)
-})
-
-test('--limit truncates in BFS order and reports the true reachable total', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 's1', depth: 1, direction: 'out', limit: 2 }))
-  assert.equal(r.neighbors.length, 2)
-  assert.equal(r.truncated, true)
-  assert.equal(r.reachable, 4)
-})
-
-test('a node with no visited dedup is never revisited across hops', () => {
-  // s1 is reachable from f1 (hop1) and would re-appear via s2→f1→... ; ensure
-  // the seed and already-seen nodes are not re-emitted.
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 'f1', depth: 3, direction: 'both' }))
-  const ids = [...idsOf(r.neighbors)]
-  assert.equal(ids.includes('f1'), false, 'seed not emitted as its own neighbor')
-  assert.equal(new Set(ids).size, ids.length, 'no duplicate neighbors')
 })
 
 test('resolveSeed matches node_id, then natural_key, then label', () => {
@@ -279,8 +248,8 @@ test('resolveSeed --type narrows the match', () => {
   assert.equal(r.ok && r.node.node_id, 'm1')
 })
 
-test('traverse returns an error shape for an unresolved seed', () => {
-  const r = traverse({ nodes: NODES, edges: EDGES, seed: 'does-not-exist' })
+test('queryNeighbors returns an error shape for an unresolved seed', async () => {
+  const r = await queryNeighbors({ ...memoryGraph(), seed: 'does-not-exist' })
   assert.equal(r.ok, false)
 })
 

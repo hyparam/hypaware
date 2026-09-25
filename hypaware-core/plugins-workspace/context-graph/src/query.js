@@ -6,13 +6,11 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 import { Attr, markSpanStatus, withSpan } from '../../../../src/core/observability/index.js'
 
-import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
-
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { LocalOnlyVisibilityReport } from '../../../../src/core/query/types.js'
- * @import { GraphNode, GraphEdge, Direction, Neighbor, TraversalOk, TraversalErr } from './types.js'
+ * @import { GraphNode, Direction, Neighbor, TraversalOk, TraversalErr } from './types.js'
  */
 
 /**
@@ -47,79 +45,6 @@ export function resolveSeed(nodes, token, type) {
   }
 
   return { ok: false, error: `no node matches ${JSON.stringify(token)}${type ? ` of type ${type}` : ''}` }
-}
-
-/**
- * Breadth-first walk from a seed to `depth` hops over in-memory node/edge
- * arrays. Pure, no IO, so the traversal logic is unit-testable directly.
- *
- * `direction` 'out' follows src→dst, 'in' follows dst→src, 'both' follows
- * either (recording which way each neighbor was reached). A non-empty
- * `edgeTypes` restricts which edge types are traversable. The full reachable
- * set within `depth` is collected, then `limit` slices it in BFS order with
- * `truncated`/`reachable` reporting the drop: never a silent cap.
- *
- * @param {{ nodes: GraphNode[], edges: GraphEdge[], seed: string, depth?: number, edgeTypes?: string[], direction?: Direction, limit?: number, type?: string }} args
- * @returns {TraversalOk | TraversalErr}
- * @ref LLP 0064#thin-in-memory-traversal [implements]: whole-graph-in-RAM BFS is the deliberate basic tier; persisted index is the deferred fast path
- */
-export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direction = 'both', limit = Infinity, type }) {
-  const resolved = resolveSeed(nodes, seed, type)
-  if (!resolved.ok) return resolved
-
-  /** @type {Map<string, GraphNode>} */
-  const byId = new Map(nodes.map((n) => [n.node_id, n]))
-  const typeFilter = edgeTypes.length > 0 ? new Set(edgeTypes) : null
-
-  // Forward (src→dst) and reverse (dst→src) adjacency, built only for the
-  // directions we'll actually walk so a one-directional query does no extra work.
-  /** @type {Map<string, { to: string, edge_type: string, direction: 'out' | 'in', row: GraphEdge }[]>} */
-  const adjacency = new Map()
-  const link = (from, to, edge_type, dir, row) => {
-    let list = adjacency.get(from)
-    if (!list) adjacency.set(from, (list = []))
-    list.push({ to, edge_type, direction: dir, row })
-  }
-  for (const e of edges) {
-    if (typeFilter && !typeFilter.has(e.edge_type)) continue
-    if (direction === 'out' || direction === 'both') link(e.src_id, e.dst_id, e.edge_type, 'out', e)
-    if (direction === 'in' || direction === 'both') link(e.dst_id, e.src_id, e.edge_type, 'in', e)
-  }
-
-  /** @type {Neighbor[]} */
-  const reached = []
-  const visited = new Set([resolved.node.node_id])
-  /** @type {{ id: string, hop: number }[]} */
-  let frontier = [{ id: resolved.node.node_id, hop: 0 }]
-
-  while (frontier.length > 0) {
-    /** @type {{ id: string, hop: number }[]} */
-    const next = []
-    for (const { id, hop } of frontier) {
-      if (hop >= depth) continue
-      for (const edge of adjacency.get(id) ?? []) {
-        if (visited.has(edge.to)) continue
-        visited.add(edge.to)
-        const node = byId.get(edge.to) ?? { node_id: edge.to, node_type: '?', natural_key: edge.to, label: null }
-        reached.push({ hop: hop + 1, edge_type: edge.edge_type, direction: edge.direction, from: id, node,
-          ...(edge.row.edge_id ? { edge_id: edge.row.edge_id, props: edge.row.props,
-            source_dataset: edge.row.source_dataset, source_keys: edge.row.source_keys } : {}) })
-        next.push({ id: edge.to, hop: hop + 1 })
-      }
-    }
-    frontier = next
-  }
-
-  const truncated = reached.length > limit
-  return {
-    ok: true,
-    seed: resolved.node,
-    neighbors: Number.isFinite(limit) ? reached.slice(0, limit) : reached,
-    reachable: reached.length,
-    truncated,
-    totalNodes: nodes.length,
-    totalEdges: edges.length,
-  }
 }
 
 /**
