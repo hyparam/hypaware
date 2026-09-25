@@ -59,6 +59,20 @@ test('zero candidates with org rows: states the team-set Syncing line, prompts n
   assert.equal(await readClientSyncEntries({ stateDir: stateDir }), null, 'no store write on the no-question path')
 })
 
+// @ref LLP 0437#server-name [tests]: the line names the server the wizard read, falling back to the team's
+test('the line names the server it is given', async () => {
+  const { env } = await makeHome()
+  const stdout = makeBuf()
+
+  await runWizardSyncScope(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    server: 'HypAware Cloud',
+    candidates: [descriptor('claude'), descriptor('codex')],
+  }))
+
+  assert.equal(stdout.text(), '✓ Syncing both to HypAware Cloud\n')
+})
+
 // The same no-question path with nothing for the fleet to own. Reachable on
 // an enrolled machine whose only locked rows are hidden (LLP 0276
 // #sync-gate) and that picked nothing visible: claiming the fleet manages

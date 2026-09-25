@@ -26,6 +26,8 @@ import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import { readClientSyncEntries } from '../../usage-policy/index.js'
+import { readCentralSinkOrigins } from '../../remote/gateway_seed.js'
+import { serverDisplayName } from '../../remote/builtin_remotes.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
   defaultConfirmSelectPromptFactory,
@@ -705,10 +707,12 @@ async function runGuardedInitWizard(opts, guard) {
           const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors, opts.platform)
           const candidateDescriptors = visiblePickerDescriptors(picked.descriptors, opts.platform)
           const visibleCandidateIds = new Set(candidateDescriptors.map((d) => d.id))
+          const server = await syncServerName(opts, picked.configPath)
           const syncScope = await syncFn({
             stdout: opts.stdout,
             stderr: opts.stderr,
             statement: recap.lane('sync'),
+            ...(server ? { server } : {}),
             env: opts.env,
             candidates: candidateDescriptors,
             locked: lockedDescriptors,
@@ -1366,6 +1370,26 @@ async function syncWithheldSafe({ opts }) {
     return false
   } catch {
     return true
+  }
+}
+
+/**
+ * The server this machine syncs to, as the sync lane's line names it
+ * (LLP 0437 #server-name), read from the enrollment the join just wrote.
+ * Undefined when there is not exactly one, or the layer cannot be read:
+ * the line then names no server rather than guess.
+ *
+ * @param {Pick<RunInitWizardOptions, 'env'>} opts
+ * @param {string} configPath
+ * @returns {Promise<string | undefined>}
+ */
+async function syncServerName(opts, configPath) {
+  try {
+    const stateDir = readObservabilityEnv(opts.env).stateDir
+    const origins = await readCentralSinkOrigins({ stateDir, configPath })
+    return origins.length === 1 ? serverDisplayName(origins[0]) : undefined
+  } catch {
+    return undefined
   }
 }
 

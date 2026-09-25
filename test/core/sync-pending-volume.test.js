@@ -254,7 +254,7 @@ test('the sharing plan states upload rows and excludes the accompanying copy fro
 
   assert.equal(code, 0)
   // Past watermark seq 3: nine entries, two of them withheld.
-  assert.match(stdout.text, /^Ready to upload 7 rows \(captured since 2026-08-12T00:50Z\) to the 'hyperparam' server\.\n/m)
+  assert.match(stdout.text, /^Ready to upload 7 rows \(captured since 2026-08-12T00:50Z\) to hypaware\.example\.com\.\n/m)
   assert.match(stdout.text, /2 rows withheld by policy \(not sent\)/)
   // The accompanying copy has a different cursor; it is not another upload.
   assert.doesNotMatch(stdout.text, /10 rows|\/home\/u\/exports/)

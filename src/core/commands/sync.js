@@ -6,7 +6,7 @@ import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { sinkInstanceConfig, sinkInstanceName } from '../registry/sinks.js'
-import { effectiveRemotes, sameServer } from '../remote/builtin_remotes.js'
+import { serverDisplayName } from '../remote/builtin_remotes.js'
 import { previewPendingRows } from '../sinks/pending.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
@@ -149,8 +149,7 @@ export async function runSync(argv, ctx) {
     return 0
   }
 
-  const remotes = effectiveRemotes(ctx.config)
-  const destinations = handles.map((handle) => describeDestination(handle, remotes))
+  const destinations = handles.map((handle) => describeDestination(handle))
 
   if (history) {
     return runHistorySync({
@@ -702,8 +701,10 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  * which command printed the line: any `https://` run autolinks with no way
  * to opt out, and the server root answers `{"error":"unknown_path"}` in a
  * browser. This prompt appears at the same moment in onboarding and would
- * collect the same dead-link click. An origin with no configured name falls
- * back to its host, which is still not a URL a terminal will linkify.
+ * collect the same dead-link click. The hosted default reads as "HypAware
+ * Cloud" and any other server as its host, which says which server it is
+ * without a lookup and is still not a URL a terminal will linkify
+ * (LLP 0437 #server-name).
  *
  * The name is the registry's key, because it is the one field of the row that
  * is not description: the plan is read as "these destinations will receive
@@ -739,42 +740,20 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  *
  * @ref LLP 0100#requirements [constrained-by]: R1a's reason - name the server, never its URL - applied to the consent prompt R1a's text does not reach
  * @param {ExtendedSinkHandle} handle
- * @param {Record<string, { url?: string }>} remotes configured targets, name to URL
  * @returns {{ instance: string, text: string, offMachine: boolean | null }}
  */
-function describeDestination(handle, remotes) {
+function describeDestination(handle) {
   const instance = sinkInstanceName(handle)
   const config = /** @type {Record<string, unknown>} */ (sinkInstanceConfig(handle))
   const url = Object.hasOwn(config, 'url') ? config.url : undefined
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
-    return { instance, text: nameServer(url, remotes), offMachine: true }
+    return { instance, text: serverDisplayName(url), offMachine: true }
   }
   const dir = Object.hasOwn(config, 'dir') ? config.dir : undefined
   if (typeof dir === 'string' && dir.length > 0) {
     return { instance, text: dir, offMachine: false }
   }
   return { instance, text: handle.plugin ?? 'unknown destination', offMachine: null }
-}
-
-/**
- * Render a server URL as the name the user configured for it, matching on
- * origin so a target registered with a trailing path or slash still resolves.
- *
- * @param {string} url
- * @param {Record<string, { url?: string }>} remotes
- * @returns {string}
- */
-function nameServer(url, remotes) {
-  for (const [name, target] of Object.entries(remotes ?? {})) {
-    if (typeof target?.url === 'string' && sameServer(target.url, url)) {
-      return `the '${name}' server`
-    }
-  }
-  try {
-    return new URL(url).host
-  } catch {
-    return url
-  }
 }
 
 /**

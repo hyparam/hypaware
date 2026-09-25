@@ -52,6 +52,24 @@ export function canonicalOrigin(url) {
 }
 
 /**
+ * How a sync destination is named on screen: "HypAware Cloud" for the
+ * built-in default server (through the alias table, so an enrollment under
+ * its old host reads the same), otherwise the server's host. Never a URL:
+ * a printed `https://` run autolinks to a service endpoint (#391), and a
+ * bare host does not.
+ *
+ * @ref LLP 0437#server-name [implements]: the hosted default reads as HypAware Cloud, any other server by its host
+ * @param {string} url
+ * @returns {string}
+ */
+export function serverDisplayName(url) {
+  const builtin = BUILTIN_REMOTES[BUILTIN_DEFAULT_REMOTE]?.url
+  if (builtin && sameServer(url, builtin)) return 'HypAware Cloud'
+  const origin = canonicalOrigin(url)
+  return origin === null ? url : new URL(origin).host
+}
+
+/**
  * The origin of a URL, or null when it does not parse or has no origin to
  * compare (an opaque origin such as `file:` serializes as the string 'null',
  * which would otherwise read as a match between any two such URLs).

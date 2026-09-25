@@ -17,7 +17,8 @@ import {
  * @import { PickerDescriptor } from '../../../../src/core/types.js'
  */
 
-const SERVER = "your team's server"
+/** The fallback when the wizard could not tell which server this machine syncs to. */
+const TEAM_SERVER = "your team's server"
 
 /**
  * The wizard's sync lane, on every enrolled run after the picker. It asks
@@ -43,6 +44,8 @@ const SERVER = "your team's server"
  */
 export async function runWizardSyncScope(opts) {
   const stateDir = readObservabilityEnv(opts.env).stateDir
+  // @ref LLP 0100#requirements [implements]: R1a - the compact lane's destination surface names the server, and prints no URL
+  const server = opts.server ?? TEAM_SERVER
 
   /** @type {ClientSyncEntry[]} */
   let existing
@@ -103,11 +106,11 @@ export async function runWizardSyncScope(opts) {
     // @ref LLP 0289#ask-the-store [implements]: a hidden pick the store withholds is not standing, so this branch reads "nothing syncs" instead of promising an export that will not happen
     if (locked.length === 0) {
       if ((opts.lockedHidden ?? 0) > 0) {
-        said.write(`✓ Capture your team manages still syncs to ${SERVER}\n`)
+        said.write(`✓ Capture your team manages still syncs to ${server}\n`)
       } else if (hiddenCandidateSyncs) {
-        said.write(`✓ Capture already set up on this machine still syncs to ${SERVER}\n`)
+        said.write(`✓ Capture already set up on this machine still syncs to ${server}\n`)
       } else {
-        said.write(`✓ Nothing syncs to ${SERVER}\n`)
+        said.write(`✓ Nothing syncs to ${server}\n`)
       }
       return await finishSpan({ noQuestion: true }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
@@ -116,9 +119,9 @@ export async function runWizardSyncScope(opts) {
     // fact, never a name, and only when the store does not withhold it.
     // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it, withheld or not
     // @ref LLP 0289#ask-the-store [implements]: the store answers whether the machine's own capture ships, not whether the fleet owns it
-    stateSyncing(said, locked, [])
+    stateSyncing(said, server, locked, [])
     if (hiddenCandidates.length > 0 && hiddenCandidateSyncs) {
-      said.write(`✓ Capture already set up on this machine also syncs to ${SERVER}\n`)
+      said.write(`✓ Capture already set up on this machine also syncs to ${server}\n`)
     }
     // A statement, not a screen: `noQuestion` is what tells the lane after
     // this one that there is nothing here to step back *to* (LLP 0191
@@ -130,7 +133,7 @@ export async function runWizardSyncScope(opts) {
   // #never-silent); the picker's line names what is recorded. The answer is
   // applied after the config commits (`commitWizardSyncScope`).
   // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
-  stateSyncing(opts.statement ?? opts.stdout, opts.locked ?? [], opts.candidates)
+  stateSyncing(opts.statement ?? opts.stdout, server, opts.locked ?? [], opts.candidates)
   return await finishSpan({ noQuestion: true, pendingSources: [...candidateIds] }, opts, {
     hidden_picks_syncing: hiddenCandidateSyncs,
   })
@@ -171,14 +174,15 @@ export async function commitWizardSyncScope(opts) {
 
 /**
  * The lane's one-line statement of what syncs, for the wizard's recap (LLP
- * 0435 #recap). The rows are the ones the recording line just named, so it
+ * 0437 #recap). The rows are the ones the recording line just named, so it
  * counts them rather than naming them again, and names only the team's.
  *
  * @param {{ write(chunk: string): unknown }} said
+ * @param {string} server
  * @param {PickerDescriptor[]} locked
  * @param {PickerDescriptor[]} candidates
  */
-function stateSyncing(said, locked, candidates) {
+function stateSyncing(said, server, locked, candidates) {
   const total = locked.length + candidates.length
   const what = total === 1 ? 'it' : total === 2 ? 'both' : `all ${total}`
   const team = locked.length === 0
@@ -186,7 +190,7 @@ function stateSyncing(said, locked, candidates) {
     : candidates.length === 0
       ? ' (set by your team)'
       : ` (${joinNames(locked.map((d) => d.label))} ${locked.length === 1 ? 'is' : 'are'} set by your team)`
-  said.write(`✓ Syncing ${what} to ${SERVER}${team}\n`)
+  said.write(`✓ Syncing ${what} to ${server}${team}\n`)
 }
 
 /**

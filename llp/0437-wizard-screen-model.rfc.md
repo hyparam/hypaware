@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-09-24
 **Supersedes:** LLP 0387, LLP 0412
+**Extends:** LLP 0100 (#requirements R1a: the recap and `hyp sync` name the server as "HypAware Cloud" or its host, with no lookup pointer; see #server-name)
 **Related:** LLP 0188 (#never-silent: the wizard is a consent surface),
 LLP 0341 (#context: stdout is that surface; the guarded streams),
 LLP 0387 (#adjacency: compact lines that must sit next to each other),
@@ -114,8 +115,9 @@ it hands the line to the wizard instead of printing it. The wizard prints
 the lines together, in lane order, just before it saves:
 
 - what is recorded ("Recording Claude Code, Codex, and Claude Desktop"),
-- where it goes ("Syncing all 3 to your team's server", naming the rows
-  the team sets, or "Everything stays on this machine" on a local run),
+- where it goes ("Syncing all 3 to HypAware Cloud", naming the server as
+  #server-name says and the rows the team sets, or "Everything stays on
+  this machine" on a local run),
 - the new-folder answer, with the command that flips it.
 
 The sign-in step no longer prints its own "logs will sync to the server"
@@ -130,6 +132,24 @@ surface that dies while saying it cancels the run with nothing written.
 For the same reason an express accept's new-folder answer is recorded after
 the recap, not when the lane runs. An answer the user gave on screen is
 still recorded at once (LLP 0341 #retained).
+
+### Naming the server {#server-name}
+
+The recap's sync line and `hyp sync`'s plan and result lines name the
+destination the same way: "HypAware Cloud" for the built-in hosted server
+(matched by origin, including its previous host), and any other server by
+its host ("hyp.acme.dev"). Never a URL, for LLP 0100 R1a's reason: a
+printed `https://` run autolinks to a service endpoint.
+
+This extends LLP 0100 R1a for these surfaces. R1a names a server by its
+configured target name and points at `hyp remote list` to map the name
+back to a URL. A host needs no lookup, because it already says which server
+it is, and the built-in's product name is what the user signed up to, where
+its target name (`hyperparam`) is an internal key. So these lines carry no
+lookup pointer. The wide `hyp remote login` lane is unchanged: it still
+prints the target name and the lookup. When the wizard cannot tell which
+server the machine enrolled with (no central sink, several, or an
+unreadable layer), the line says "your team's server" rather than guess.
 
 ### Step counts live on menus {#headings}
 
@@ -157,7 +177,7 @@ paragraph then speaks in the offer's place, since it is the only line on
 that path naming `hyp sync` and the privacy review (LLP 0100 R1). With history,
 the first look keeps its two tables, and the upload offer is `hyp sync`'s
 own plan, which now reads as one line per destination ("Ready to upload
-1,240 rows (the full history) to the 'hyperparam' server (automatic by
+1,240 rows (the full history) to HypAware Cloud (automatic by
 ...)"), the exclude hint, the question, and one result line ("Uploaded
 1,240 rows to ..."). `hyp sync` run by hand prints the same lines.
 

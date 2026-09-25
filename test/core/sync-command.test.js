@@ -648,9 +648,10 @@ test('a sharing plan shows upload targets without counting the accompanying file
   await runSync(['--dry-run'], ctx)
 
   const text = stdout.text
-  // A server is named, never spelled as a URL a terminal would autolink
-  // (LLP 0100 R1a's reason, applied to this surface).
-  assert.match(text, /^Ready to upload to the 'prod' server[ .]/m)
+  // A server is named by its host, never spelled as a URL a terminal would
+  // autolink (LLP 0100 R1a's reason, applied to this surface; LLP 0437
+  // #server-name).
+  assert.match(text, /^Ready to upload to hypaware\.example\.com[ .]/m)
   assert.doesNotMatch(text, /https:\/\//)
   assert.doesNotMatch(text, /parquet|\/home\/u\/exports|destinations|leaves this machine|stays on this machine|local-only/)
   assert.match(text, /^Ready to export to @hypaware\/fake[ .]/m)
@@ -666,7 +667,7 @@ test('a sharing plan names the built-in target for a sink saved under its previo
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /^Ready to upload to the 'hyperparam' server[ .]/m)
+  assert.match(stdout.text, /^Ready to upload to HypAware Cloud[ .]/m)
   assert.doesNotMatch(stdout.text, /hypaware\.hyperparam\.app|api\.hypaware\.ai/)
 })
 
