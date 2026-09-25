@@ -195,6 +195,9 @@ test('runWizardPick falls back to the legacy numbered prompt under HYP_NO_TUI=1'
     stdin: /** @type {any} */ (input),
     // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
     platform: 'darwin',
+    // Stub detection: a host with a detected client pre-checks its row,
+    // which swaps the prompt line the answer hook waits for.
+    detect: async () => new Set(),
     env: {
       HOME: tmp,
       HYP_HOME: path.join(tmp, '.hyp'),
