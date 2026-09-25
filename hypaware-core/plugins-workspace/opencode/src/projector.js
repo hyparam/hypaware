@@ -133,11 +133,6 @@ function isSettledAssistantMessage(info) {
   return isPlainObject(info.error)
 }
 
-/** @param {Record<string, unknown>} part @returns {JsonObject | undefined} */
-export function projectOpenCodePart(part) {
-  return projectPart(part)
-}
-
 function projectPart(part) {
   const id = stringValue(part.id)
   const type = stringValue(part.type)
