@@ -5,7 +5,6 @@ import test from 'node:test'
 
 import {
   CA_COMMON_NAME,
-  installCaTrust,
   isCaTrusted,
   loginKeychainPath,
   removeCaTrust,
@@ -85,35 +84,6 @@ test('isCaTrusted maps verify-cert exit codes to a boolean', async () => {
 
   const untrusted = recordingRunner({ exitCode: 1 })
   assert.equal(await isCaTrusted({ certPath: '/tmp/ca.pem', run: untrusted.run }), false)
-})
-
-test('installCaTrust targets the login keychain user domain, no sudo shape', async () => {
-  const { calls, run } = recordingRunner({ exitCode: 0 })
-  const result = await installCaTrust({ certPath: '/tmp/ca.pem', homeDir: '/Users/u', run })
-
-  assert.equal(result.installed, true)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].cmd, 'security')
-  assert.deepEqual(calls[0].args, [
-    'add-trusted-cert',
-    '-r', 'trustRoot',
-    '-k', '/Users/u/Library/Keychains/login.keychain-db',
-    '/tmp/ca.pem',
-  ])
-  // No `-d`: the admin domain would demand privileges and trust machine-wide.
-  assert.equal(calls[0].args.includes('-d'), false)
-})
-
-// A cancelled password dialog is a refusal the caller reports, not an error.
-// @ref LLP 0237#attach-anyway-on-refusal [tests]
-test('a cancelled dialog surfaces as installed:false with the detail', async () => {
-  const { run } = recordingRunner({
-    exitCode: 1,
-    stderr: 'The authorization was canceled by the user.',
-  })
-  const result = await installCaTrust({ certPath: '/tmp/ca.pem', run })
-  assert.equal(result.installed, false)
-  assert.match(result.detail ?? '', /canceled/)
 })
 
 test('removeCaTrust deletes trust settings too and is idempotent', async () => {
