@@ -110,6 +110,47 @@ const RECEIPT_PREMISE_OPENER = '**What the receipt does and does not say.**'
 const CAPTURING_RECORDER_CLAIM =
   /recorder[\s*_`,]{1,4}(?:(?:that|which)[\s*_`]{1,4}(?:is[\s*_`]{1,4})?captur(?:es|ing)|capturing)[\s*_`,]{1,4}this session/i
 
+/**
+ * Strings measured against the pattern above: each is one of the three forms it
+ * holds, carrying a separator it does not reach (emphasis or a code span
+ * splitting `this session`, a comma inside a verb slot). They bound what the two
+ * guard messages may claim, which is the forms and not a separator axis, since
+ * naming an axis claims coverage these falsify (issue #2174). The bounds the pin
+ * does hold are on the pattern itself.
+ */
+const MEASURED_ESCAPES = [
+  'the recorder capturing this **session**',
+  'the recorder capturing this `session`',
+  'the recorder that, captures this session',
+  'the recorder that is, capturing this session',
+]
+
+/** The message the Step 1 stop guard reports, pinned by the test below. */
+const STOP_CLAIM_MESSAGE =
+  'and must not describe gateway as the recorder that captures, that is capturing, or capturing this session, anywhere in Step 1: on the default `transcript` capture_mode nothing reaches it. Those three present-tense forms are what this pin holds'
+
+/** The message the receipt premise guard reports, pinned by the test below. */
+const PREMISE_CLAIM_MESSAGE =
+  'the premise must not assert the gateway is the capturing recorder unconditionally, in the that/which-captures, that/which-is-capturing, or bare-gerund forms this pin holds'
+
+test('the guard messages name the forms the pin holds, not an axis its escapes falsify', () => {
+  for (const escape of MEASURED_ESCAPES) {
+    assert.doesNotMatch(
+      escape,
+      CAPTURING_RECORDER_CLAIM,
+      `the pin does not reach ${escape}, so no guard message may advertise the separator carrying it`
+    )
+  }
+
+  for (const message of [STOP_CLAIM_MESSAGE, PREMISE_CLAIM_MESSAGE]) {
+    assert.doesNotMatch(
+      message,
+      /emphasis|code span|comma/i,
+      `a guard message naming a separator axis claims coverage the escapes above falsify; the bounds the pin does hold are on the pattern itself: ${message}`
+    )
+  }
+})
+
 test('Step 1 sends the session container, never a thread id', () => {
   // The id that goes on the wire is read from `payload.session_id`.
   assert.match(
@@ -255,7 +296,7 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
   assert.doesNotMatch(
     prose,
     CAPTURING_RECORDER_CLAIM,
-    'and must not describe gateway as the recorder that captures, that is capturing, or capturing this session, anywhere in Step 1: on the default `transcript` capture_mode nothing reaches it. Those three present-tense forms are what this pin holds, in either case and through emphasis, code spans or a comma between the words'
+    STOP_CLAIM_MESSAGE
   )
 })
 
@@ -402,7 +443,7 @@ test('Step 1 frames the receipt for both capture modes, and still says what the 
   assert.doesNotMatch(
     premise,
     CAPTURING_RECORDER_CLAIM,
-    'the premise must not assert the gateway is the capturing recorder unconditionally, in the that/which-captures, that/which-is-capturing, or bare-gerund forms this pin holds'
+    PREMISE_CLAIM_MESSAGE
   )
 
   assert.match(
