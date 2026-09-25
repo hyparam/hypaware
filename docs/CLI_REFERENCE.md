@@ -330,13 +330,13 @@ hyp report render ~/hypaware-reports
 hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]
 ```
 
-Uploads Markdown for HypAware Cloud to render. A single file must be `.md` or
+Uploads Markdown for the remote to render. A single file must be `.md` or
 `.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
 its root and may otherwise contain only `usage.md`, `work.md`, `health.md`,
 and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`); HTML,
 images, client assets, subdirectories, and symlinks are rejected before any
-upload. HypAware Cloud renders the HTML; there is no local render step in the
-publish path. HypAware Cloud identifies repeat uploads by content hash. `--org`
+upload. The remote renders the HTML; there is no local render step in the
+publish path. The remote identifies repeat uploads by content hash. `--org`
 applies only to an operator credential that can name an organization.
 
 ```sh
@@ -417,7 +417,8 @@ With no id on a terminal, it asks in two steps: first which report, newest
 first, each with its publish date and how many recommendations it carries
 (a report with none is not offered); then which of that report's
 recommendations, labelled by the page's title and described by its thesis
-when HypAware Cloud lists them, else by the page name. Escape on the second list
+when the remote lists them, else by the page name. Escape on the second
+list
 returns to the first. `--kind`, `--period` and `--limit` narrow which reports
 are offered. Without a terminal the id is required. If more than one attached
 client could be started, it asks which. A declined pick succeeds. An unknown
