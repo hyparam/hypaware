@@ -84,8 +84,8 @@ const RECEIPT_PREMISE_OPENER = '**What the receipt does and does not say.**'
  * let the claim back in: a reintroduction had only to pick a verb form neither
  * literal spelled out (issue #2167). So the pattern names the claim's shape - a
  * recorder, a relative clause or gerund, and this session - and tolerates
- * markdown emphasis and code spans between its words, which is what is left to
- * vary once the words themselves are fixed.
+ * markdown emphasis, code spans, a comma, and an `is` auxiliary between its
+ * words, which is what is left to vary once the words themselves are fixed.
  *
  * The relative clause or gerund is mandatory, and that is what keeps the guard
  * off true prose. It does not match the shipped two-mode framing, "Which
@@ -99,7 +99,7 @@ const RECEIPT_PREMISE_OPENER = '**What the receipt does and does not say.**'
  * so naming one recorder as this session's is false on a default install.
  */
 const CAPTURING_RECORDER_CLAIM =
-  /recorder[\s*_`]{1,4}(?:(?:that|which)[\s*_`]{1,4}captures|capturing)[\s*_`]{1,4}this session/
+  /recorder[\s*_`,]{1,4}(?:(?:that|which)[\s*_`]{1,4}(?:is[\s*_`]{1,4})?captur(?:es|ing)|capturing)[\s*_`,]{1,4}this session/i
 
 test('Step 1 sends the session container, never a thread id', () => {
   // The id that goes on the wire is read from `payload.session_id`.
@@ -246,7 +246,7 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
   assert.doesNotMatch(
     prose,
     CAPTURING_RECORDER_CLAIM,
-    'and must not describe gateway as the recorder capturing this session, anywhere in Step 1, however it is punctuated and in whatever verb form: on the default `transcript` capture_mode nothing reaches it'
+    'and must not describe gateway as the recorder that captures, or is capturing, this session, anywhere in Step 1 and through markdown emphasis, code spans or a comma: on the default `transcript` capture_mode nothing reaches it'
   )
 })
 
@@ -393,7 +393,7 @@ test('Step 1 frames the receipt for both capture modes, and still says what the 
   assert.doesNotMatch(
     premise,
     CAPTURING_RECORDER_CLAIM,
-    'the premise must not assert the gateway is the capturing recorder unconditionally, in any verb form'
+    'the premise must not assert the gateway is the capturing recorder unconditionally, in the relative-clause or gerund forms'
   )
 
   assert.match(
