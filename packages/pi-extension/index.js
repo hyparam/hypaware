@@ -119,15 +119,17 @@ export default function hypawarePi(pi) {
   /** @param {any} ctx @param {boolean} deliver */
   function checkpoint(ctx, deliver) {
     const entries = ctx.sessionManager.getEntries()
-    // This snapshot is what gets counted, so `leaf` may only stop a later
-    // walk at an entry it holds. Pi can name a navigation summary as the leaf
-    // before its entry list is rebuilt to hold it, and stopping there would
-    // skip an entry nothing counted and shift every later position. A null
-    // leaf over a non-empty snapshot is the same hazard: entries root at
-    // parentId null, so a later walk would stop at the root and re-append the
-    // whole counted chain. Only an empty snapshot may accept it.
-    const head = ctx.sessionManager.getLeafId()
-    leaf = (head == null && entries.length === 0) || holdsEntry(entries, head) ? head : STALE_LEAF
+    // This snapshot is what gets counted, so the checkpoint is its own last
+    // entry, not the leaf Pi reports: a reported leaf the snapshot does not
+    // hold skips an entry nothing counted and shifts every later position,
+    // and a reported null stops the next walk at the root and re-appends the
+    // whole counted chain. The counted tail is an entry every later walk can
+    // find, so a leaf that stays ahead costs deltas, not a snapshot per turn.
+    // A tail carrying no id of its own is not a value a walk may stop at:
+    // null reaches the root and undefined reaches a root with no parentId
+    // key, and either one reads as a successful walk over a counted prefix.
+    const tail = entries.length ? entries[entries.length - 1]?.id : null
+    leaf = entries.length && typeof tail !== 'string' ? STALE_LEAF : tail
     if (entries.length > MAX_SESSION_ENTRIES || (deliver && entries.length < nextEntry)) {
       enabled = false
       lastStatus = 'session changed or exceeds entry limit; live capture disabled'
@@ -146,7 +148,6 @@ export default function hypawarePi(pi) {
   /** @param {any} _event @param {any} ctx */
   function capture(_event, ctx) {
     if (!enabled || stopping || shared[LEASE] !== owner) return
-    if (leaf === STALE_LEAF) { checkpoint(ctx, true); return }
     const sm = ctx.sessionManager
     const head = sm.getLeafId()
     if (head === leaf) return
@@ -216,12 +217,6 @@ export default function hypawarePi(pi) {
       ctx.ui.notify(`HypAware: ${lastStatus}. Capture drops: ${dropped}.`, 'info')
     },
   })
-}
-
-/** Newest first: a current snapshot holds the leaf it reports as its last entry. @param {any[]} entries @param {any} id */
-function holdsEntry(entries, id) {
-  for (let index = entries.length - 1; index >= 0; index--) if (entries[index]?.id === id) return true
-  return false
 }
 
 /** Shared with recovery so metadata, invalid entries and pending output consume no position. @param {any} entry */

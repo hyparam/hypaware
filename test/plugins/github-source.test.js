@@ -150,6 +150,15 @@ test('status reports the repositories the last tick reached, and the inventory i
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-status-budget-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
 
+  // A backstop, never the margin the assertions read: waiting on the tick's
+  // own completion log removes the race a fixed sleep had against a slow or
+  // busy runner (a bare setTimeout(35) could sample before the budget-stopped
+  // tick finished), and this only guards against the source never ticking.
+  const waitDeadlineMs = 1000
+  /** @type {() => void} */
+  let noteTickCompleted = () => {}
+  const tickCompleted = new Promise((resolve) => { noteTickCompleted = () => resolve(undefined) })
+
   // A three-repo inventory with room for exactly one request: the tick reaches
   // the first repository and the budget stops it there.
   setGithubRuntime(/** @type {any} */ ({
@@ -170,11 +179,24 @@ test('status reports the repositories the last tick reached, and the inventory i
       cacheTablePath() { return '/cache/github_events' },
       async appendRows() {},
     },
-    log: { info() {}, error() {} },
+    log: {
+      info(name) { if (name === 'github.poll_tick_completed') noteTickCompleted() },
+      error() {},
+    },
   }))
 
+  // The source unrefs its own timers, so nothing else keeps the event loop
+  // alive while the test waits on a tick.
+  const keepAlive = setInterval(() => {}, 1000)
+  t.after(() => clearInterval(keepAlive))
+
   const source = await startGithubSource()
-  await new Promise((resolve) => setTimeout(resolve, 35))
+  /** @type {ReturnType<typeof setTimeout>} */
+  let timer
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('github.poll_tick_completed did not arrive within ' + waitDeadlineMs + 'ms')), waitDeadlineMs)
+  })
+  await Promise.race([tickCompleted, deadline]).finally(() => clearTimeout(timer))
   assert.ok(source.status)
   const status = await source.status()
   await source.stop()
