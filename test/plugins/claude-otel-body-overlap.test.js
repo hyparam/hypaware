@@ -814,7 +814,8 @@ test('a tool-id match with no transcript uuid falls through to the content-key m
 // fallback hash id no row carries any more. Issue #2150.
 // @ref LLP 0439#relink-from-the-transcript [tests]: a settled row that changed
 // agent scope links to its own agent's predecessor, the line the sweep chains
-// it to, and the two lanes must agree on that link even across a roleless line.
+// it to, and the two lanes must agree on that link even across a line that
+// projects no row (roleless, or role with empty content).
 test('settlement keeps each subagent thread\'s previous_message_id inside that agent', async () => {
   const env = await stageEnv()
   try {
@@ -854,6 +855,15 @@ test('settlement keeps each subagent thread\'s previous_message_id inside that a
           uuid: `${agentId}-system`,
           content: 'hook ran',
           timestamp: '2026-09-05T22:36:54.500Z',
+        }),
+        // A line WITH a role but EMPTY content: the projector's other drop
+        // (`normalizeContent(...).length === 0`), so it projects no row
+        // either. Pins the emptiness half of the guard, not just the role half.
+        JSON.stringify({
+          sessionId: SESSION, agentId, isSidechain: true, type: 'user',
+          uuid: `${agentId}-empty`,
+          message: { role: 'user', content: [] },
+          timestamp: '2026-09-05T22:36:54.750Z',
         }),
         JSON.stringify({
           sessionId: SESSION, agentId, isSidechain: true, type: 'user',
