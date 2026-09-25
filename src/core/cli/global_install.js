@@ -209,6 +209,8 @@ export function isEphemeralBinPath(binPath, env = process.env) {
  * from a deletion. Those reasons also leave the old install where it is (a node
  * version switch and a prefix change only stop resolving one), so the global
  * roots they move between keep their `node_modules` and go on reading durable.
+ * A manifest that cannot be read still answers durable here too, so this arm
+ * turns only on one confirmed absent, never merely unreadable.
  *
  * @ref LLP 0434#rule [implements]: a recorded CLI path whose dependency tree is gone is drift
  * @param {string} binPath
@@ -243,8 +245,15 @@ function isEphemeralTreePath(binPath, env, vanishedTreeIsEphemeral) {
   if (tree === undefined) return false
   try {
     return statSync(path.join(path.dirname(tree), 'package.json')).isFile()
-  } catch {
-    return vanishedTreeIsEphemeral && !existsSync(tree)
+  } catch (err) {
+    // Absent, not unreadable. `existsSync` collapses every error to `false`,
+    // so without this an intact tree whose root is merely unreadable (a
+    // checkout under macOS TCC, a stalled network mount) would read
+    // ephemeral, which is the one direction LLP 0434 does not license and
+    // the opposite of the fail-safe the live predicate keeps.
+    if (!vanishedTreeIsEphemeral) return false
+    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') return false
+    return !existsSync(tree)
   }
 }
 

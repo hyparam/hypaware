@@ -38,7 +38,7 @@ const HELPER_READ_LIMIT_BYTES = 4096
  * still on disk today, because the cache is npm-owned and prune-scheduled by
  * construction: the same reasoning as core's `markerRecordsEphemeralHookBin`
  * for the sibling Claude hook (#1607). No longer the same predicate, though,
- * and deliberately so: core widened to `isEphemeralBinPath` because a stale
+ * and deliberately so: core widened to `isEphemeralRecordedBinPath` because a stale
  * verdict there is what lets `hyp client attach claude` stop short-circuiting
  * and rewrite the hook, and nothing else can reach that command. Here the
  * repair is `install-helper`, which regenerates the wrapper unconditionally
