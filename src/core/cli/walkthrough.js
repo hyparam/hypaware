@@ -229,59 +229,6 @@ function legacyNumberedPromptFactory(opts) {
 }
 
 /**
- * Build the interactive "overwrite existing config?" confirm. Defaults
- * to **yes**: this lands at the end of an attended run, after every
- * question was answered, so a bare Enter has to complete the run the
- * user just walked - an enter that silently threw those answers away
- * read as the wizard failing. It is safe as a yes because nothing is
- * destroyed either way: the caller backs the file up before replacing
- * it, and the carried-over list below names what the rewrite keeps.
- *
- * The question says the file is *rewritten* from the choices, not merely
- * "overwritten": the write is a whole-file regeneration, and a user whose
- * mental model is "I am adjusting checkboxes" needs to know that before
- * the y/N. What survives and the backup are not listed (LLP 0407): the
- * backup line that follows a yes names the file, and the run is safe to
- * accept either way. The path is not printed here for the same reason.
- *
- * A stdin that ends without a line (a terminal that dropped, a scripted
- * run whose input runs out before the commit point) is read through
- * `queuedLineAsker` rather than `rl.question`, whose promise is left
- * permanently unsettled at EOF. The unanswerable question falls to the
- * default it prints, which is the same answer a bare Enter gives, so the
- * on-screen `[Y/n]` stays the whole contract: EOF completes the run the
- * same way that Enter does, and the backup is taken either way.
- *
- * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
- * @returns {(targetPath: string) => Promise<boolean>}
- * @ref LLP 0183#say-so [implements]: the overwrite confirm states that the config is regenerated and what is carried over
- * @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default instead of waiting on an answer that can never come
- */
-export function defaultOverwriteConfirmFactory(opts) {
-  const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
-  const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
-  return async function (_targetPath) {
-    const rl = readline.createInterface({ input, output, terminal: false })
-    const askLine = queuedLineAsker(rl, input, output)
-    try {
-      const answer = await askLine(
-        '\n' +
-        'Saving rewrites your HypAware config from these choices.\n' +
-        '\n' +
-        'Continue? [Y/n]: '
-      )
-      // Only an explicit no declines; a bare enter (and any stray answer)
-      // proceeds, matching the stated default. `null` is EOF, read as that
-      // same empty line so one parse serves both: the answer a spent stdin
-      // takes cannot drift from the default the printed question advertises.
-      return !/^n(o)?$/i.test((answer ?? '').trim())
-    } finally {
-      rl.close()
-    }
-  }
-}
-
-/**
  * Render each pick category through the new TUI multiselect prompt.
  *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
@@ -725,17 +672,13 @@ export async function runPickerWalkthrough(opts) {
     : defaultConfigPath(obsEnv.hypHome)
 
   // Guard against clobbering an existing local config (the non-destructive
-  // half of #111). Interactive runs prompt for confirmation;
-  // non-interactive runs require `--force`. Either path backs up the
-  // existing file before replacing it.
-  // @ref LLP 0031#local-layer-writers [implements]: init overwrite safety on the walkthrough write path
-  const overwriteConfirm = interactive
-    ? (opts.confirmOverwrite ?? defaultOverwriteConfirmFactory({ stdin: opts.stdin, stdout }))
-    : undefined
+  // half of #111). Non-interactive runs require `--force`; an interactive
+  // run just answered every question, so it saves. Either path backs up
+  // the existing file before replacing it.
+  // @ref LLP 0433#scope [implements]: an attended run backs up and saves without asking
   const guard = await prepareLocalConfigWrite({
     targetPath: configPath,
-    force: opts.force,
-    ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
+    force: interactive || opts.force,
   })
   if (!guard.proceed) {
     opts.stderr.write(`hyp setup: ${guard.message}\n`)
@@ -2254,7 +2197,7 @@ async function runFinaleBackfill(args) {
       // The one thing that outlives a run whose surface died inside the
       // finale: the import did not happen, and it names the one command
       // that does it rather than the whole wizard, which would re-run the
-      // install, the attach and the overwrite confirm to redo one import.
+      // install and the attach to redo one import.
       // Said on stderr because stdout is the stream that just went, so
       // the decline's own line would be written into nothing - and
       // "declined" is not what happened anyway. It names `asked` rather

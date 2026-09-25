@@ -132,7 +132,6 @@ test('an enrolled machine that never picked keeps no pick answer and seeds init 
     stdout: makeBuf(), stderr: makeBuf(), catalog, prompt,
     env: { ...f.env, HOME: f.hypHome, HYP_NO_TUI: '1' },
     detect: async () => new Set(['claude', 'codex']),
-    confirmOverwrite: async () => true,
   }))
   const checked = state.question.options
     .filter((/** @type {any} */ o) => o.checked)
@@ -178,7 +177,6 @@ test('a machine holding the forged grep-only config records no pick answer and s
     stdout: makeBuf(), stderr: makeBuf(), catalog, prompt,
     env: { ...f.env, HOME: f.hypHome, HYP_NO_TUI: '1' },
     detect: async () => new Set(['claude', 'codex']),
-    confirmOverwrite: async () => true,
   }))
   const checked = state.question.options
     .filter((/** @type {any} */ o) => o.checked)

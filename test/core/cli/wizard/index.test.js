@@ -86,21 +86,6 @@ test('declining GitHub writes no GitHub activation and starts no login', async (
   assert.deepEqual(result.config?.plugins, [])
 })
 
-test('GitHub login waits for config overwrite consent', async () => {
-  const home = await tmpHome()
-  const configPath = path.join(home, 'config.json')
-  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n')
-  const { opts } = wizardOpts(home, {
-    pick: async () => pickResult({ configPending: true, configPath }),
-    confirmOverwrite: async () => false,
-    github: { confirm: async () => 'yes' },
-    ctx: { commands: { run: async () => assert.fail('refused write started login') } },
-  })
-  const result = await runInitWizard(opts)
-  assert.equal(result.exitCode, 1)
-  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, [])
-})
-
 test('already configured GitHub does not repeat the offer or login', async () => {
   const home = await tmpHome()
   const { opts } = wizardOpts(home, {
@@ -1203,24 +1188,37 @@ test('runInitWizard: a pending config lands on disk after the sync lane, before 
   assert.ok(calls.includes('configure'), 'the acting phases still run after the commit')
 })
 
-test('runInitWizard: a declined commit exits 1, runs nothing further, and narrates on the team pathway', async () => {
+test('runInitWizard: an attended run overwrites an existing config without asking, and backs it up', async () => {
   const home = await tmpHome()
   const configPath = path.join(home, '.hyp', 'config.json')
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
-  const { opts, calls, stdout } = wizardOpts(home, {
-    fork: async () => 'team',
+  const { opts, stdout } = wizardOpts(home, {
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'defaults',
     pick: async () => pickResult({ configPath, configPending: true }),
-    confirmOverwrite: async () => false,
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')), pickResult().config)
+  assert.match(stdout.text(), /Backed up existing config to /)
+})
+
+test('runInitWizard: a non-interactive commit over an existing config without --force exits 1 and leaves it untouched', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
+  const { opts, calls, stderr } = wizardOpts(home, {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    pick: async () => pickResult({ configPath, configPending: true }),
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 1)
-  assert.notEqual(result.cancelled, true)
-  assert.ok(calls.includes('syncScope'), 'the questions all ran before the commit refused')
   assert.ok(!calls.includes('configure'))
-  assert.ok(!calls.includes('finale'))
-  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n', 'the existing config is untouched')
-  assert.match(stdout.text(), /syncs to your team by default/)
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n')
+  assert.match(stderr.text(), /hyp setup: /)
 })
 
 test('runInitWizard: a scripted pick result without configPending is never committed by the orchestrator', async () => {
@@ -1734,7 +1732,7 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
 })
 
 // @ref LLP 0396#combined-selection [tests]: cancellation and Back cannot revoke a standing privacy choice
-for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-failure', 'corrupt-policy', 'commit']) {
+for (const scenario of ['cancel', 'back', 'config-failure', 'policy-failure', 'corrupt-policy', 'commit']) {
   test(`combined sharing is deferred through setup: ${scenario}`, async (t) => {
     const home = await tmpHome()
     const env = { HYP_HOME: path.join(home, '.hyp') }
@@ -1764,10 +1762,6 @@ for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-fa
         assert.doesNotMatch(stdout.text(), /No longer local-only/)
         if (scenario === 'cancel') return { cancelled: true }
         if (scenario === 'back' && passes === 1) return { back: true }
-        return { mode: 'sync' }
-      },
-      confirmOverwrite: async () => {
-        assert.deepEqual(await readClientSyncEntries({ stateDir }), original)
         if (scenario === 'corrupt-policy') await fs.writeFile(clientSyncListPath(stateDir), 'broken')
         if (scenario === 'policy-failure') {
           const rename = fs.rename.bind(fs)
@@ -1779,7 +1773,7 @@ for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-fa
         if (scenario === 'commit') await writeClientSyncEntries({ stateDir, entries: [
           ...original, { source: 'codex', class: 'local-only' },
         ] })
-        return scenario !== 'refuse'
+        return { mode: 'sync' }
       },
       configure: async () => { configured = true; return { results: [] } },
     })
@@ -1787,7 +1781,7 @@ for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-fa
       await assert.rejects(runInitWizard(opts))
     } else {
       const result = await runInitWizard(opts)
-      assert.equal(result.exitCode, scenario === 'cancel' ? 130 : scenario === 'refuse' ? 1 : 0)
+      assert.equal(result.exitCode, scenario === 'cancel' ? 130 : 0)
     }
     if (scenario === 'corrupt-policy') {
       assert.equal(await fs.readFile(clientSyncListPath(stateDir), 'utf8'), 'broken')

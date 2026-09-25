@@ -644,15 +644,14 @@ async function runGuardedInitWizard(opts, guard) {
           // The shared, run-once detector (never `opts.detect` directly), so
           // the pick lane's rows are the rows the express gate listed.
           ...(interactive ? { detect } : opts.detect ? { detect: opts.detect } : {}),
-          ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
           // Back-navigation is attended-only by construction (it takes a
           // keypress); the lane's first screen backs out to the fork.
           ...(interactive ? { allowBack: true } : {}),
           ...(express ? { autoAccept: true } : {}),
           ...(pickSeed ? { initialSelection: pickSeed } : {}),
-          // The write commits below, after the sync lane: the overwrite confirm
-          // is then the last question, and a cancel at the sync lane leaves the
-          // existing config untouched (LLP 0190 #commit-point).
+          // The write commits below, after the sync lane, so a cancel at the
+          // sync lane leaves the existing config untouched (LLP 0190
+          // #commit-point).
           deferWrite: true,
         })
         // One screen back is the express gate when this pass showed one,
@@ -833,7 +832,7 @@ async function runGuardedInitWizard(opts, guard) {
   // A refusal mirrors pick's old overwrite-refusal exit (1, not cancelled),
   // and on the team pathway narrates the enrolled state it leaves behind.
   // Scripted phase stubs (tests) return no `configPending` and skip this.
-  // @ref LLP 0190#commit-point [implements]: the overwrite confirm is the wizard's last question, after the sync lane
+  // @ref LLP 0190#commit-point [implements]: the config write lands after the last question, after the sync lane
   //
   // The one act that must never outrun the stream's death report: a
   // config the user never saw confirmed must not land because the run
@@ -846,10 +845,8 @@ async function runGuardedInitWizard(opts, guard) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
       stderr: opts.stderr,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
       interactive,
       ...(opts.force !== undefined ? { force: opts.force } : {}),
-      ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
       configPath: picked.configPath,
       config: picked.config,
     })

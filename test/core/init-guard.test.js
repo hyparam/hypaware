@@ -106,11 +106,9 @@ test('init --yes refuses to clobber an existing local config without --force', a
   assert.deepEqual(after.plugins, EXISTING.plugins)
 })
 
-// The interactive (TTY) half of the guard: prompt → decline aborts with
-// no write; confirm backs up then writes. Driving runPickerWalkthrough
-// with an injected `prompt` keeps `interactive = true` (no pre-baked
-// picks) without driving the TUI, and an injected `confirmOverwrite`
-// stub stands in for the readline prompt.
+// The interactive (TTY) half of the guard: no prompt, back up then write
+// (LLP 0433). Driving runPickerWalkthrough with an injected `prompt` keeps
+// `interactive = true` (no pre-baked picks) without driving the TUI.
 
 /** @param {string} hypHome */
 function interactiveOpts(hypHome) {
@@ -130,36 +128,13 @@ function interactiveOpts(hypHome) {
   }
 }
 
-test('interactive init: declining the overwrite prompt aborts with the config intact', async () => {
-  const { hypHome } = await makeHome()
-  const configPath = path.join(hypHome, 'hypaware-config.json')
-  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
-
-  const { stderr, opts } = interactiveOpts(hypHome)
-  const result = await runPickerWalkthrough({
-    ...opts,
-    confirmOverwrite: async () => false,
-  })
-
-  assert.equal(result.exitCode, 1)
-  assert.match(stderr.text(), /existing config is kept/)
-  // The existing config is untouched and no backup was written.
-  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
-  assert.deepEqual(after.plugins, EXISTING.plugins)
-  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
-  assert.equal(backups.length, 0)
-})
-
-test('interactive init: confirming the overwrite prompt backs up then writes', async () => {
+test('interactive init: an existing config is backed up then rewritten without asking', async () => {
   const { hypHome } = await makeHome()
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
 
   const { stdout, stderr, opts } = interactiveOpts(hypHome)
-  const result = await runPickerWalkthrough({
-    ...opts,
-    confirmOverwrite: async () => true,
-  })
+  const result = await runPickerWalkthrough(opts)
 
   assert.equal(result.exitCode, 0, stderr.text())
   assert.match(stdout.text(), /Backed up existing config/)

@@ -8,6 +8,7 @@
 **Related:** LLP 0104 (confirm-on-TTY / `--yes` posture, unchanged), LLP 0174 (#prompt/#openclaw: enable-prompt copy, polarity overridden here), LLP 0190 (#fork-disconnect: default overridden here; #eof-everywhere narrowed here for `askYesNo` only), LLP 0203 (#offer: polarity overridden here), LLP 0101 (#no-release: the hold #eof-declines protects)
 **Extended-by:** [LLP 0410](./0410-fork-two-rows-sync-default.decision.md) (#eof-declines below: the wizard fork menu's Quit is no longer one of the defaults that already decline to act - the fork's default is now sync, which signs in - so #eof-declines covers the fork menu too and `fork.js` reads the asker's EOF `null` as quit. The narrowing of LLP 0190 #eof-everywhere now reaches `src/core/cli/wizard/fork.js` as well as `src/core/cli/confirm.js`; nothing else here changes.)
 **Extended-by:** LLP 0203 (#offer, amended 2026-09-05: the wizard's own send-now select is gone, so the second acting-default select this doc names no longer exists in code. `hyp sync`'s `askYesNo` is the only prompt on that path, and it declines at EOF like every other `askYesNo`, so #eof-declines still holds the hold - it just holds it with one prompt instead of two.)
+**Extended-by:** [LLP 0433](./0433-attended-setup-saves-without-asking.decision.md) (the config overwrite confirm this doc lists among the `[Y/n]` prompts it leaves alone is gone: an attended setup backs up the config and saves without asking.)
 
 ## Context {#context}
 
