@@ -503,7 +503,7 @@ export async function runPolicyClient(argv, ctx) {
 
   if (parsed.token === 'local-only') {
     if (provenance === 'central') {
-      ctx.stderr.write(`error: '${name}' is set by your team and always syncs to HypAware Cloud\n`)
+      ctx.stderr.write(`error: '${name}' is set by your team and always syncs to the cloud\n`)
       return 1
     }
     const next = [...(entries ?? []), { source: name, class: /** @type {'local-only'} */ ('local-only') }]
@@ -516,7 +516,7 @@ export async function runPolicyClient(argv, ctx) {
     ctx.stdout.write(`${name}: local-only${optedOut.has(name) ? ' (unchanged)' : ''}\n`)
     ctx.stdout.write(`  future ${name} rows stay on this machine; rows already exported are not recalled\n`)
     if (layered && !layered.centralConfig) {
-      ctx.stdout.write('  this machine is not connected to HypAware Cloud; the opt-out takes effect if it joins\n')
+      ctx.stdout.write('  this machine is not connected to the cloud; the opt-out takes effect if it connects\n')
     }
     return 0
   }
@@ -535,7 +535,7 @@ export async function runPolicyClient(argv, ctx) {
   ctx.stdout.write(`${name}: sync\n`)
   // @ref LLP 0188#no-retroactive-ship [implements]: changing standing policy remains future-only
   // @ref LLP 0345#command [implements]: the policy transition points at the separate attended history replay
-  ctx.stdout.write(`  future ${name} rows sync to HypAware Cloud\n`)
+  ctx.stdout.write(`  future ${name} rows sync to the cloud\n`)
   ctx.stdout.write(`  to upload retained history too: hyp sync --history ${name}\n`)
   return 0
 }

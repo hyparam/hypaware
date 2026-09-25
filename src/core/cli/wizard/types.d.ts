@@ -80,7 +80,7 @@ export interface RunWizardSyncScopeOptions {
   /**
    * The server the machine syncs to, as the line names it: "HypAware Cloud"
    * or a host (LLP 0437 #server-name). Absent when the wizard could not tell,
-   * and the line then says "your team's server".
+   * and the line then says "the cloud".
    */
   server?: string
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }

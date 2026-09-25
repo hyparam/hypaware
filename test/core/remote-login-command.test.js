@@ -339,7 +339,7 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   // comment above the write in remote_commands.js).
   assert.match(
     text,
-    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to HypAware Cloud and a background service is installed\. Ctrl-C to cancel\.$/m,
+    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to hyp\.internal and a background service is installed\. Ctrl-C to cancel\.$/m,
     'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
   // Named the way the recap names it (LLP 0437 #server-name): the host, not

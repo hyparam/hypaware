@@ -16,7 +16,7 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
-import { sameServer } from '../remote/builtin_remotes.js'
+import { sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
@@ -176,7 +176,7 @@ export async function runJoin(argv, ctx) {
         span.setAttribute('error_kind', 'daemon_install_failed')
         return code
       }
-      ctx.stdout.write('✓ Joined - the daemon will pull its configuration from HypAware Cloud\n')
+      ctx.stdout.write(`✓ Joined - the daemon will pull its configuration from ${serverDisplayName(/** @type {string} */ (parsed.url))}\n`)
       return 0
     },
     { component: 'join' }
@@ -446,7 +446,7 @@ export async function runLeave(argv, ctx) {
     },
     async (span) => {
       let failures = 0
-      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'HypAware Cloud'}\n`)
+      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the cloud'}\n`)
 
       // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
       // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes

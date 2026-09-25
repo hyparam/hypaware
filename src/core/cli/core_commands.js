@@ -542,7 +542,7 @@ function buildCoreCommands(registry) {
       summary: 'Keep a client local-only, or return it to the sync-by-default',
       usage: 'hyp privacy client [<name>] [sync|local-only] [--json]',
       help: [
-        'On a machine connected to a server, every configured client syncs by',
+        'On a machine connected to the cloud, every configured client syncs by',
         'default. `privacy client <name> local-only` keeps that client\'s rows on',
         'this machine; `privacy client <name> sync` removes the opt-out for future',
         'rows. It then names `hyp sync --history <name>` when you deliberately',
@@ -558,7 +558,7 @@ function buildCoreCommands(registry) {
       summary: 'Let new folders sync (default), or be asked once about each',
       usage: 'hyp privacy folders [ask|sync] [--json]',
       help: [
-        'On a machine connected to a server, folders you have not marked sync',
+        'On a machine connected to the cloud, folders you have not marked sync',
         'without asking. `privacy folders ask` turns on the per-folder question:',
         'a session opened somewhere new asks once how to handle it. `privacy',
         'folders sync` returns to the default. With no argument, reports the',

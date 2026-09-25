@@ -346,7 +346,7 @@ test('combined collection and sync clears only selected policies', async (t) => 
   // The revocation, which no row list can state: claude was local-only
   // until this confirm. codex and raw-anthropic are not named because
   // neither is a visible candidate, so neither was revoked.
-  const revocation = "No longer local-only: claude. Future rows sync to HypAware Cloud; rows already recorded " +
+  const revocation = "No longer local-only: claude. Future rows sync to the cloud; rows already recorded " +
     "are not sent. Change back with 'hyp privacy client <name> local-only'."
   // The org's row is attributed to the team on the Syncing line: unlabelled,
   // the line reads as though every row it counts were the user's to change

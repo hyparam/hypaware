@@ -722,8 +722,9 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // one line, still before the browser. The hedge is not shortenable - the
   // client still cannot know pre-auth whether a gateway will be minted, so a
   // flat "signing in sends your logs" is false against a forwarding-off org.
-  // The notice names two consequences in plain words: logs go to the team
-  // server, and a background service is installed. D3's third consequence
+  // The notice names two consequences in plain words: logs go to the target's
+  // server (named as the sign-in line names it), and a background service is
+  // installed. D3's third consequence
   // (org config that can attach clients and backfill local history) is left
   // out on purpose: it confused new users more than it informed them, and the
   // wizard's later steps show what gets recorded before anything is written.
@@ -731,11 +732,12 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
   // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward) {
+    const destination = serverDisplayName(entry.url)
     if (compact) {
-      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to HypAware Cloud and a background service is installed. Ctrl-C to cancel.\n')
+      ctx.stderr.write(`If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to ${destination} and a background service is installed. Ctrl-C to cancel.\n`)
     } else {
       ctx.stderr.write('If your org shares logs, signing in connects this machine to your team:\n')
-      ctx.stderr.write('  your recorded sessions are sent to HypAware Cloud and a background\n')
+      ctx.stderr.write(`  your recorded sessions are sent to ${destination} and a background\n`)
       ctx.stderr.write('  service is installed.\n')
       ctx.stderr.write("  Re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
     }

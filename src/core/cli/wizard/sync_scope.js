@@ -141,7 +141,7 @@ export async function runWizardSyncScope(opts) {
  * Re-reading preserves unrelated edits made while the wizard was open and
  * refuses to replace a store that became unreadable since the preview.
  * @ref LLP 0396#combined-selection [implements]: clearing waits until the config has committed
- * @param {{ env: NodeJS.ProcessEnv, stdout: RunWizardSyncScopeOptions['stdout'], sources: string[] }} opts
+ * @param {{ env: NodeJS.ProcessEnv, stdout: RunWizardSyncScopeOptions['stdout'], sources: string[], server?: string }} opts
  * @returns {Promise<number>} Number of standing opt-outs cleared.
  */
 export async function commitWizardSyncScope(opts) {
@@ -161,7 +161,7 @@ export async function commitWizardSyncScope(opts) {
     // @ref LLP 0188#no-retroactive-ship [constrained-by]: clearing is future-only and names the standing control to reverse it
     if (cleared.length > 0) {
       opts.stdout.write(
-        `No longer local-only: ${cleared.join(' · ')}. Future rows sync to HypAware Cloud; ` +
+        `No longer local-only: ${cleared.join(' · ')}. Future rows sync to ${opts.server ?? CLOUD_FALLBACK}; ` +
         "rows already recorded are not sent. Change back with 'hyp privacy client <name> local-only'.\n"
       )
     }

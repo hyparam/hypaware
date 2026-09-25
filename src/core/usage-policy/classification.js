@@ -53,13 +53,13 @@ export const CLASSIFICATION_CHOICES = [
     class: 'full',
     token: 'sync',
     label: 'sync',
-    blurb: "this folder's sessions upload to HypAware Cloud (the current default)",
+    blurb: "this folder's sessions sync to the cloud when this machine is connected (the current default)",
   },
   {
     class: 'local-only',
     token: 'local-only',
     label: 'local-only',
-    blurb: 'keep sessions on this machine only, never forward them to HypAware Cloud',
+    blurb: 'keep sessions on this machine only, never send them to the cloud',
   },
   {
     class: 'ignore',
