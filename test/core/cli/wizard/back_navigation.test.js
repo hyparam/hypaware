@@ -821,3 +821,33 @@ test('runInitWizard end-to-end: join, back to the fork, local, and one combined 
   assert.ok(Array.isArray(written.plugins) && written.plugins.length > 0)
   assert.deepEqual(result.config, written)
 })
+
+// @ref LLP 0435#recap [tests]: the lanes' statements print once, together, at the commit point
+test('runInitWizard: a back replaces a lane statement instead of stacking it', async () => {
+  let syncCalls = 0
+  let folderCalls = 0
+  const { opts, stdout } = await wizardOpts({
+    ...gatedOverrides(),
+    pick: async (/** @type {any} */ o) => {
+      o.statement.write('\nHypAware will record and sync:\n  Claude Code\n')
+      return { ...pickResult(), configPending: true }
+    },
+    syncScope: async (/** @type {any} */ o) => {
+      syncCalls += 1
+      o.statement.write(`sync statement ${syncCalls}\n`)
+      return { optedOut: [] }
+    },
+    folderAsk: async (/** @type {any} */ o) => {
+      folderCalls += 1
+      if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
+      o.statement.write('New folders will sync without asking.\n')
+      return { mode: 'sync' }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  const text = stdout.text()
+  assert.doesNotMatch(text, /sync statement 1/, 'the statement from before the back is gone')
+  assert.match(text, /\nHypAware will record and sync:\n  Claude Code\n\nsync statement 2\n\nNew folders will sync without asking\.\n/)
+  assert.equal(text.match(/HypAware will record and sync/g)?.length, 1)
+})

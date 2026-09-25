@@ -118,6 +118,7 @@ export async function runWizardSyncScope(opts) {
     // no-question path is not the one that runs into its neighbour.
     opts.stdout.write('\n')
     if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
+    const said = opts.statement ?? opts.stdout
     // Five ways to reach this line, and they are not the same fact. With
     // org rows to name and nothing else standing, everything picked is the
     // fleet's and always syncs; with a hidden pick standing beside them the
@@ -139,15 +140,15 @@ export async function runWizardSyncScope(opts) {
     // @ref LLP 0289#ask-the-store [implements]: a hidden pick the store withholds is not standing, so this branch reads "nothing syncs" instead of promising an export that will not happen
     if ((opts.locked ?? []).length === 0) {
       if ((opts.lockedHidden ?? 0) > 0) {
-        opts.stdout.write(
+        said.write(
           'You picked nothing to record, but capture your team manages directly still syncs to your server.\n'
         )
       } else if (hiddenCandidateSyncs) {
-        opts.stdout.write(
+        said.write(
           'You picked nothing to record, but capture already set up on this machine still syncs to your server.\n'
         )
       } else {
-        opts.stdout.write('You picked nothing to record, so nothing syncs to your server.\n')
+        said.write('You picked nothing to record, so nothing syncs to your server.\n')
       }
       return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
@@ -169,15 +170,15 @@ export async function runWizardSyncScope(opts) {
     // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it, withheld or not
     // @ref LLP 0289#ask-the-store [implements]: the store answers whether the machine's own capture ships, not whether the fleet owns it
     if (hiddenCandidates.length > 0) {
-      opts.stdout.write('Your team manages these and they always sync:\n')
-      for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
+      said.write('Your team manages these and they always sync:\n')
+      for (const d of opts.locked ?? []) said.write(`  ${d.label}\n`)
       if (hiddenCandidateSyncs) {
-        opts.stdout.write('Capture already set up on this machine also syncs to your server.\n')
+        said.write('Capture already set up on this machine also syncs to your server.\n')
       }
       return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
-    opts.stdout.write('Everything you picked is set by your team and always syncs.\n')
-    for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
+    said.write('Everything you picked is set by your team and always syncs.\n')
+    for (const d of opts.locked ?? []) said.write(`  ${d.label}\n`)
     // A statement, not a screen: `noQuestion` is what tells the lane after
     // this one that there is nothing here to step back *to* (LLP 0191
     // #back-edges).
@@ -194,7 +195,7 @@ export async function runWizardSyncScope(opts) {
     // names what leaves the machine (LLP 0188 #never-silent).
     if (!opts.autoAccept) {
       narrateAcceptedGate({
-        stdout: opts.stdout,
+        stdout: opts.statement ?? opts.stdout,
         title: 'These will sync to your server:',
         // The org's rows keep the suffix the picker and the menu both give
         // them: the list is the whole sync picture (LLP 0188 #locked), and

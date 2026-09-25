@@ -307,12 +307,11 @@ test('a stdout that dies during the express narration stops the run before the f
   const home = await tmpHome('hyp-guard-sync-')
   let folderConfirmAsked = false
   const opts = drivenOpts(home, {
-    // Express accept: the lanes narrate instead of prompting, and the
-    // narration is the run's consent surface (LLP 0201 #narrate). On an
-    // enrolled run that surface is the picker's accept statement, which
-    // states the whole collect-and-sync picture while the lane behind it
-    // applies the answer silently (LLP 0396 #combined-selection), so the
-    // real lane runs here and its first write is the one that dies.
+    // Express accept: the lanes state their answers instead of prompting,
+    // and those statements are the run's consent surface. They are printed
+    // together as the recap at the commit point (LLP 0435 #recap), so the
+    // recap is the first write and the one that dies, and the express
+    // folder answer it states is never recorded.
     express: async () => 'defaults',
     pick: undefined,
     // The composed config lands where the pick lane is told to put it, so

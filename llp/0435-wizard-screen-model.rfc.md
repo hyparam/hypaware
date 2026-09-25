@@ -108,13 +108,19 @@ the join itself cannot be undone (LLP 0191 #join-not-undone).
 
 ### The commit point writes a recap {#recap}
 
-Because answered questions leave nothing in the log, a finished run would
-otherwise show no record of what the user chose. When the wizard commits
-the config (LLP 0190 #commit-point), it commits one short recap line of
-the answers, for example "Collecting Claude and Codex, syncing to your
-team." It is written there and not per answer so that a back never leaves
-a stale line behind (#back). It states what was saved, so it sits with
-LLP 0391's rule that the wizard states results, not plans.
+Each question lane still states its answer (what will be recorded, what
+syncs, what happens in a new folder), but it hands the statement to the
+wizard instead of printing it. The wizard prints the statements together,
+in lane order, just before it saves. Re-running a lane replaces its
+statement and drops the later lanes', so a back never leaves a stale one
+on screen (#back).
+
+The recap is the consent surface for what the save sets up, so it lands
+before the checkpoint that guards the save (LLP 0341 #dead-surface): a
+surface that dies while saying it cancels the run with nothing written.
+For the same reason an express accept's new-folder answer is recorded after
+the recap, not when the lane runs. An answer the user gave on screen is
+still recorded at once (LLP 0341 #retained).
 
 ### Row accounting {#rows}
 

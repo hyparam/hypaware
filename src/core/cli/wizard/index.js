@@ -46,7 +46,7 @@ import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
 import { heldStatement, runWizardSyncNow } from './sync_now.js'
 import { commitWizardSyncScope, runWizardSyncScope } from './sync_scope.js'
-import { runWizardFolderAsk } from './folder_ask.js'
+import { commitWizardFolderAsk, runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
 import { guardWizardOutput } from './output_guard.js'
@@ -203,6 +203,15 @@ async function runGuardedInitWizard(opts, guard) {
    * @type {FolderAskMode | undefined}
    */
   let folderAsk
+  /**
+   * Each question lane's statement of its answer, held until the config is
+   * saved and then printed together. Running a lane replaces its statement
+   * and drops the ones after it, so a back never leaves a stale one behind.
+   * @ref LLP 0435#recap [implements]: the answers are stated once, at the commit point, not per lane
+   */
+  const recap = createRecap()
+  /** An express accept's new-folder answer, recorded once the recap is shown. */
+  let folderAskPending = false
   /**
    * Did this pass through the lanes accept the express gate (LLP 0201)?
    * Re-answered on every pass, so stepping back to the fork and forward
@@ -649,6 +658,7 @@ async function runGuardedInitWizard(opts, guard) {
           ...(interactive ? { allowBack: true } : {}),
           ...(express ? { autoAccept: true } : {}),
           ...(pickSeed ? { initialSelection: pickSeed } : {}),
+          ...(interactive ? { statement: recap.lane('pick') } : {}),
           // The write commits below, after the sync lane, so a cancel at the
           // sync lane leaves the existing config untouched (LLP 0190
           // #commit-point).
@@ -706,6 +716,7 @@ async function runGuardedInitWizard(opts, guard) {
             const syncScope = await syncFn({
               stdout: opts.stdout,
               stderr: opts.stderr,
+              statement: recap.lane('sync'),
               ...(opts.stdin ? { stdin: opts.stdin } : {}),
               env: opts.env,
               candidates: candidateDescriptors,
@@ -755,6 +766,8 @@ async function runGuardedInitWizard(opts, guard) {
             const folders = await folderFn({
               stdout: opts.stdout,
               stderr: opts.stderr,
+              statement: recap.lane('folders'),
+              deferWrite: true,
               ...(opts.stdin ? { stdin: opts.stdin } : {}),
               env: opts.env,
               // The title names the tools whose sessions raise the question:
@@ -813,6 +826,7 @@ async function runGuardedInitWizard(opts, guard) {
               return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
             }
             folderAsk = folders.mode
+            folderAskPending = folders.pendingWrite === true
             break atSync
           }
         }
@@ -840,7 +854,14 @@ async function runGuardedInitWizard(opts, guard) {
   // first, so a failure the stream has not delivered yet still counts
   // (LLP 0341 #absorb).
   // @ref LLP 0341#dead-surface [implements]: the commit point checks the surface before the config lands
+  // The recap is the statement of what is about to be saved, so it lands
+  // before the checkpoint that guards the save: a surface that dies while
+  // saying it cancels the run before anything is written.
+  recap.print(opts.stdout)
   if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
+  if (folderAskPending && folderAsk) {
+    await commitWizardFolderAsk({ env: opts.env, stderr: opts.stderr, mode: folderAsk })
+  }
   if (picked.configPending) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
@@ -1475,5 +1496,28 @@ async function collectStatusSafe(opts) {
     return await collectHypAwareStatus({ env: opts.env, runtime: statusRuntimeFrom(opts) })
   } catch {
     return undefined
+  }
+}
+
+/**
+ * The question lanes' statements, collected in lane order. `lane(name)`
+ * starts that lane's statement over and discards every later lane's, since
+ * re-running a lane means the answers after it will be asked again.
+ */
+function createRecap() {
+  const order = /** @type {const} */ (['pick', 'sync', 'folders'])
+  /** @type {Record<typeof order[number], string>} */
+  const said = { pick: '', sync: '', folders: '' }
+  return {
+    /** @param {typeof order[number]} name */
+    lane(name) {
+      for (const key of order.slice(order.indexOf(name))) said[key] = ''
+      return { write: (/** @type {string} */ chunk) => { said[name] += chunk } }
+    },
+    /** @param {{ write(chunk: string): unknown }} stdout */
+    print(stdout) {
+      const blocks = order.map((key) => said[key].replace(/^\n+/, '')).filter(Boolean)
+      if (blocks.length > 0) stdout.write(`\n${blocks.join('\n')}`)
+    },
   }
 }

@@ -102,7 +102,12 @@ export async function runWizardFolderAsk(opts) {
   // @ref LLP 0200#wizard [implements]: an express accept round-trips the standing preference instead of resetting it
   // @ref LLP 0201#narrate [implements]: an auto-accepted question prints its statement instead of prompting
   if (opts.autoAccept) {
-    narrateAcceptedGate({ stdout: opts.stdout, title })
+    const said = opts.statement ?? opts.stdout
+    narrateAcceptedGate({ stdout: said, title })
+    if (opts.deferWrite) {
+      said.write(`${standingClause(before)}; change later with ${undoCommand(before)}\n`)
+      return await finishSpan({ mode: before, pendingWrite: true }, opts)
+    }
     // Inline: the title is a sentence lead-in still on screen, so the
     // answer belongs under it as an indented line completing it rather
     // than as a second flush-left announcement repeating the subject.
@@ -153,6 +158,7 @@ export async function runWizardFolderAsk(opts) {
  * @returns {Promise<WizardFolderAskResult>}
  */
 async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
+  const said = opts.statement ?? opts.stdout
   try {
     await writeFolderAskMode({ stateDir, mode })
   } catch (err) {
@@ -193,7 +199,7 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     // @ref LLP 0200#wizard [implements]: the failed-write arm warns and leaves the previous mode standing rather than failing the run, including when the warning itself cannot be written
     if (inline) {
       try {
-        opts.stdout.write(`${standingClause(before)}\n`)
+        said.write(`${standingClause(before)}\n`)
       } catch {
         // best-effort: stdout might be closed during cleanup
       }
@@ -212,16 +218,47 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
   // Two short lines rather than one long one: what is now true, then the
   // command that changes it, indented so it reads as a footnote to the
   // first rather than a second announcement.
-  const undo = mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
-  const said = mode === 'sync'
+  const undo = undoCommand(mode)
+  const now = mode === 'sync'
     ? 'New folders will sync without asking.'
     : 'You will be asked once per new folder.'
-  opts.stdout.write(
+  said.write(
     inline
       ? `${standingClause(mode)}; change later with ${undo}\n`
-      : `${said}\n  change this later: ${undo}\n`
+      : `${now}\n  change this later: ${undo}\n`
   )
   return await finishSpan({ mode }, opts)
+}
+
+/**
+ * Record an answer `deferWrite` held back, once the wizard has shown its
+ * statement. A failed write warns and leaves the previous mode standing,
+ * as the lane's own write does.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, stderr: RunWizardFolderAskOptions['stderr'], mode: FolderAskMode }} opts
+ */
+export async function commitWizardFolderAsk({ env, stderr, mode }) {
+  const stateDir = readObservabilityEnv(env).stateDir
+  try {
+    await writeFolderAskMode({ stateDir, mode })
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    try {
+      stderr.write(`warning: could not record the new-folder answer (${detail}) - set it later with 'hyp privacy folders ${mode}'\n`)
+    } catch {
+      // best-effort: stderr might be closed during cleanup
+    }
+  }
+}
+
+/**
+ * The command that flips the new-folder answer away from `mode`.
+ *
+ * @param {FolderAskMode} mode
+ * @returns {string}
+ */
+function undoCommand(mode) {
+  return mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
 }
 
 /**

@@ -625,7 +625,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
   // @ref LLP 0201#narrate [implements]: an auto-accepted lane prints its statement instead of prompting
   if (defaultRows.length > 0 && opts.autoAccept) {
     narrateAcceptedGate({
-      stdout: opts.stdout,
+      stdout: opts.statement ?? opts.stdout,
       title: opts.collectAndSync ? 'HypAware will record and sync:' : 'HypAware will record:',
       // One source per line; the locked suffix matches the menu rows'.
       items: defaultRowLabels({ defaultRows, lockedSet }),

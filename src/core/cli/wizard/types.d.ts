@@ -73,6 +73,13 @@ export type WizardStepName = 'join' | 'pick' | 'sync' | 'folders' | 'finale'
  * (LLP 0188 #locked).
  */
 export interface RunWizardSyncScopeOptions {
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0435 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
   /** Return the combined selection for application after the config commits. */
   deferWrite?: boolean
   /** Collection picker already confirmed these sources for sharing. */
@@ -168,6 +175,19 @@ export interface WizardSyncScopeResult {
  * time I work somewhere new" - which is why it is its own step.
  */
 export interface RunWizardFolderAskOptions {
+  /**
+   * On an auto-accepted run, state the answer but leave it unwritten: the
+   * caller records it with `commitWizardFolderAsk` once the statement has
+   * been shown. An answer the user gave on screen is recorded at once.
+   */
+  deferWrite?: boolean
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0435 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
@@ -249,6 +269,8 @@ export interface WizardFolderAskResult {
   back?: true
   /** The answer could not be written; the previous mode stands. */
   skipped?: boolean
+  /** `deferWrite` held the answer back; the caller records `mode`. */
+  pendingWrite?: true
 }
 
 export interface RunWizardForkOptions {
@@ -497,6 +519,13 @@ export interface RunWizardJoinOptions {
  * prompting, matching today's `interactive = !opts.picks` split.
  */
 export interface RunWizardPickOptions {
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0435 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
   /** Checked sources are collected locally and synced remotely. */
   collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
