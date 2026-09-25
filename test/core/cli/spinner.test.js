@@ -134,6 +134,16 @@ test('withSpinner draws its lines above the spinner and erases them with it', as
   assert.ok(text.endsWith('\x1b[4A\r\x1b[J'))
 })
 
+test('withSpinner writes its lines above once, however many frames it draws', async () => {
+  const stdout = makeStdout({ isTTY: true, columns: 80 })
+  await withSpinner({ stdout, label: 'waiting', env: {}, intervalMs: 5, above: ['visit:', '  url'] }, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30))
+  })
+  // Redrawing the URL every frame would clear a selection on it.
+  assert.equal(stdout.text().split('visit:\n  url\n').length - 1, 1)
+  assert.match(stdout.text(), /\x1b\[1A\r\x1b\[J\S waiting/)
+})
+
 test('withSpinner off a TTY prints its lines above once, before the label', async () => {
   const stdout = makeStdout()
   await withSpinner({ stdout, label: 'waiting', env: {}, above: ['visit:', '  url'] }, async () => {})

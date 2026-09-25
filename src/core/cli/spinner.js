@@ -41,8 +41,9 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  * arrive during the wait (a device code); off a TTY the caller prints those
  * itself, since they arrive after the label would.
  *
- * On a TTY the spinner is a live region (LLP 0437): each frame redraws the
- * rows the last one took, and the end of the work erases them all.
+ * On a TTY the spinner is a live region (LLP 0437): each frame rewrites
+ * the spinner row, the `above` lines only when they change, and the end of
+ * the work erases them all.
  *
  * The timer never outlives the work: errors clear the line and rethrow.
  *
@@ -78,7 +79,7 @@ export async function withSpinner(opts, work) {
     const columns = typeof stdout.columns === 'number' && stdout.columns > 0 ? stdout.columns : 80
     const lines = typeof above === 'function' ? above() : above
     const prefix = lines.map((line) => `${line}\n`).join('')
-    region.draw(`${prefix}${clampToWidth(head, label, suffix, stdout)}\n`, columns)
+    region.draw(`${clampToWidth(head, label, suffix, stdout)}\n`, columns, prefix)
     frame += 1
   }
   render()
