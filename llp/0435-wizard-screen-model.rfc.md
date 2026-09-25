@@ -149,6 +149,17 @@ the same lines; the scan counts and file paths go to the spans. The one
 difference is the closing summary, which only a scripted run prints: an
 attended run has just watched each act happen.
 
+### The close says only what is news {#first-look}
+
+With nothing recorded yet, the first look prints nothing and there is no
+upload offer: setup's closing line says nothing is recorded yet, and the
+sign-in already said nothing uploads until the user says so. With history,
+the first look keeps its two tables, and the upload offer is `hyp sync`'s
+own plan, which now reads as one line per destination ("Ready to upload
+1,240 rows (the full history) to the 'hyperparam' server (automatic by
+...)"), the exclude hint, the question, and one result line ("Uploaded
+1,240 rows to ..."). `hyp sync` run by hand prints the same lines.
+
 ### Row accounting {#rows}
 
 The runtime tracks the physical rows of the live region with

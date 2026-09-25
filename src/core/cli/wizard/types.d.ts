@@ -579,7 +579,7 @@ export interface RunWizardPickOptions {
  */
 export type FirstLookOutcome =
   | { shown: true; providerRows: number; dayRows: number; partial?: true }
-  | { shown: false; reason: 'no-dataset' | 'error' | 'slow' }
+  | { shown: false; reason: 'no-dataset' | 'error' | 'slow' | 'empty' }
 
 /**
  * The outcome plus whether the step wrote anything to stdout, which is a

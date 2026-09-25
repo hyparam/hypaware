@@ -71,7 +71,7 @@ export async function runWizardSyncNow(opts) {
         }
 
         // @ref LLP 0203#no-new-consent [implements]: sync owns the plan and the only confirmation
-        opts.stdout.write('\nUpload your logs.\n\n')
+        opts.stdout.write('\n')
         const code = await runConfiguredSync(opts)
         span.setAttribute('exit_code', code)
         if (code !== 0) span.setAttribute('status', 'error')
@@ -212,8 +212,7 @@ export function heldStatement(deadline) {
   return (
     '\nNothing has been uploaded yet. Your logs upload by\n' +
     `${formatFirstSyncDeadline(deadline)}, or sooner if you run \`hyp sync\`.\n` +
-    'To exclude anything first, configure privacy settings with `hyp privacy`,\n' +
-    'or the hypaware-privacy skill in Claude or Codex.\n'
+    'To exclude anything first, use `hyp privacy` or the `/hypaware-privacy` skill.\n'
   )
 }
 

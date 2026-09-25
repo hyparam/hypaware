@@ -254,13 +254,13 @@ test('the sharing plan states upload rows and excludes the accompanying copy fro
 
   assert.equal(code, 0)
   // Past watermark seq 3: nine entries, two of them withheld.
-  assert.match(stdout.text, /7 rows pending, captured since 2026-08-12T00:50Z/)
+  assert.match(stdout.text, /^Ready to upload 7 rows \(captured since 2026-08-12T00:50Z\) to the 'hyperparam' server\.\n/m)
   assert.match(stdout.text, /2 rows withheld by policy \(not sent\)/)
   // The accompanying copy has a different cursor; it is not another upload.
-  assert.doesNotMatch(stdout.text, /10 rows pending|\/home\/u\/exports/)
+  assert.doesNotMatch(stdout.text, /10 rows|\/home\/u\/exports/)
   // The withheld rows are stated apart from the pending ones, never added in.
-  assert.doesNotMatch(stdout.text, /9 rows pending/)
-  assert.doesNotMatch(stdout.text, /12 rows pending/)
+  assert.doesNotMatch(stdout.text, /\b9 rows/)
+  assert.doesNotMatch(stdout.text, /12 rows/)
 })
 
 test('a machine with no backlog renders differently from one with a backlog', async () => {
@@ -275,8 +275,8 @@ test('a machine with no backlog renders differently from one with a backlog', as
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /nothing pending/)
-  assert.doesNotMatch(stdout.text, /rows pending/)
+  assert.match(stdout.text, /^Nothing pending for hypaware\.example\.com\.\n/m)
+  assert.doesNotMatch(stdout.text, /Ready to upload/)
   assert.doesNotMatch(stdout.text, /withheld by policy/)
 
   // The same command on a machine that has a backlog must not print this.
@@ -288,7 +288,8 @@ test('a machine with no backlog renders differently from one with a backlog', as
   })
   await runSync(['--dry-run'], busyCtx)
   assert.notEqual(busyOut.text, stdout.text, 'a size-free plan is the defect: these must differ')
-  assert.doesNotMatch(busyOut.text, /nothing pending/)
+  assert.doesNotMatch(busyOut.text, /Nothing pending/)
+  assert.match(busyOut.text, /^Ready to upload 10 rows \(the full history\) to hypaware\.example\.com\.\n/m)
 })
 
 test('rewinding a watermark changes what the dry-run plan discloses', async () => {
@@ -305,7 +306,7 @@ test('rewinding a watermark changes what the dry-run plan discloses', async () =
   })
   const before = makeCtx({ hypHome, sinks: [sink], storage })
   await runSync(['--dry-run'], before.ctx)
-  assert.match(before.stdout.text, /2 rows pending, captured since 2026-08-20T09:00Z/)
+  assert.match(before.stdout.text, /^Ready to upload 2 rows \(captured since 2026-08-20T09:00Z\) to /m)
 
   await writeWatermark({
     hypHome,
@@ -316,7 +317,7 @@ test('rewinding a watermark changes what the dry-run plan discloses', async () =
   })
   const after = makeCtx({ hypHome, sinks: [sink], storage })
   await runSync(['--dry-run'], after.ctx)
-  assert.match(after.stdout.text, /10 rows pending, captured since 2026-08-20T09:00Z/)
+  assert.match(after.stdout.text, /^Ready to upload 10 rows \(captured since 2026-08-20T09:00Z\) to /m)
   assert.notEqual(after.stdout.text, before.stdout.text)
 })
 
@@ -389,10 +390,10 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /at least 2,000,000 rows pending/, 'the command counts to the shipped limit, not to a caller\'s')
+  assert.match(stdout.text, /Ready to upload at least 2,000,000 rows \(/, 'the command counts to the shipped limit, not to a caller\'s')
   assert.doesNotMatch(
     stdout.text,
-    /2,500,000 rows pending/,
+    /2,500,000 rows/,
     'the floor is the limit the scan reached, never the rows behind it'
   )
 })
@@ -428,13 +429,13 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /1,234 rows pending, the full history/)
+  assert.match(stdout.text, /Ready to upload 1,234 rows \(the full history\) to /)
   assert.doesNotMatch(
     stdout.text,
-    /1\.234 rows pending/,
+    /1\.234 rows/,
     'a count read off the ambient locale renders one backlog two ways across machines'
   )
-  assert.doesNotMatch(stdout.text, /1234 rows pending/, 'a count a person has to read is grouped, not a bare integer')
+  assert.doesNotMatch(stdout.text, /1234 rows/, 'a count a person has to read is grouped, not a bare integer')
 })
 
 test('the shipped wall-clock budget is the one that stops a long count, not a fixture\'s', async () => {
@@ -491,9 +492,9 @@ test('a count that cannot be taken says unknown, never zero', async () => {
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /pending volume unknown/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
-  assert.doesNotMatch(stdout.text, /0 rows pending/)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume unknown: /m)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
+  assert.doesNotMatch(stdout.text, /\b0 rows/)
 })
 
 test('a spent wall-clock budget yields unknown, not a floor built from one partial partition', async () => {
@@ -827,9 +828,9 @@ test('rows still buffered in the spool make the count a floor rather than a sile
   // scan-limit case above is counted through `previewPendingRows` on a frozen
   // clock precisely so it stops asserting how fast the machine is (#1105), and
   // this is where the string it used to check is pinned instead.
-  assert.match(stdout.text, /at least 10 rows pending, the full history/)
-  assert.doesNotMatch(stdout.text, /^ +10 rows pending/m, 'a floor rendered as a total overstates what the scan saw')
-  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.match(stdout.text, /^Ready to upload at least 10 rows \(the full history\) to hypaware\.example\.com\.\n/m)
+  assert.doesNotMatch(stdout.text, /Ready to upload 10 rows/, 'a floor rendered as a total overstates what the scan saw')
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
 })
 
 test('a plan still renders when the count itself throws: unknown, never a missing or zero line', async () => {
@@ -847,9 +848,8 @@ test('a plan still renders when the count itself throws: unknown, never a missin
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /central/)
-  assert.match(stdout.text, /pending volume unknown/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume unknown: /m)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
 })
 
 test('previewPendingRows never rejects, even when storage itself throws on every call', async () => {
@@ -1051,10 +1051,9 @@ test('a plan still renders when the capability probe itself throws, and nothing 
   // non-string that coerces renders harmlessly and is pinned by the unit
   // cases' `typeof` assertions instead.
   assert.equal(code, 0)
-  assert.match(stdout.text, /central/)
-  assert.match(stdout.text, /pending volume unknown/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
-  assert.doesNotMatch(stdout.text, /rows pending/)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume unknown: /m)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
+  assert.doesNotMatch(stdout.text, /Ready to upload (at least )?\d/)
   // Fail-closed: a resolved preview is not a release. `--dry-run` stops short
   // of the confirmation, and the run says so.
   assert.match(stdout.text, /nothing was sent/)
@@ -1112,7 +1111,7 @@ test('a truncated count never claims a resume point it did not survey', async ()
   assert.notEqual(volume.resume.kind, 'since')
 })
 
-test('a destination whose whole pending range is withheld never renders "at least 0 rows pending"', async () => {
+test('a destination whose whole pending range is withheld never renders "at least 0 rows"', async () => {
   const hypHome = await makeHome('allwithheld')
   const storage = fakeStorage({
     hypHome,
@@ -1125,9 +1124,9 @@ test('a destination whose whole pending range is withheld never renders "at leas
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.doesNotMatch(stdout.text, /at least 0 rows pending/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
-  assert.match(stdout.text, /pending volume not fully counted/)
+  assert.doesNotMatch(stdout.text, /at least 0 rows/)
+  assert.doesNotMatch(stdout.text, /Nothing pending/)
+  assert.match(stdout.text, /^Ready to upload to hypaware\.example\.com \(pending volume not fully counted/m)
   // The floor mark belongs on this line too, and this is the branch where it
   // carries the whole magnitude: the payload line has stood down to "not fully
   // counted", so the withheld tally is the only number on screen. An
@@ -1259,7 +1258,7 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   })
 
   assert.equal(await runSync(['--dry-run'], shortRun.ctx), 0)
-  assert.match(shortRun.stdout.text, /at least 10 rows pending/)
+  assert.match(shortRun.stdout.text, /Ready to upload at least 10 rows /)
   assert.match(shortRun.stdout.text, /at least 2 rows withheld by policy \(not sent\)/)
   assert.doesNotMatch(
     shortRun.stdout.text,
@@ -1389,15 +1388,15 @@ test('a local-only dataset counts for a local-fs destination and not for a centr
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [central, local], storage })
   ctx.query = query
   assert.equal(await runSync(['--dry-run'], ctx), 0)
-  assert.doesNotMatch(stdout.text, /12 rows pending|\/home\/u\/exports/)
-  assert.match(stdout.text, /nothing pending/)
+  assert.doesNotMatch(stdout.text, /12 rows|\/home\/u\/exports/)
+  assert.match(stdout.text, /^Nothing pending for hypaware\.example\.com\.\n/m)
   assert.doesNotMatch(stdout.text, /withheld by policy/)
 
   // Explicitly syncing the file target still previews its own rows.
   const fileRun = makeCtx({ hypHome, sinks: [local], storage })
   fileRun.ctx.query = query
   assert.equal(await runSync(['--dry-run'], fileRun.ctx), 0)
-  assert.match(fileRun.stdout.text, /12 rows pending, the full history/)
+  assert.match(fileRun.stdout.text, /^Ready to export 12 rows \(the full history\) to \/home\/u\/exports\.\n/m)
 })
 
 // ---------------------------------------------------------------------------

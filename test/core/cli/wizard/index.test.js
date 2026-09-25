@@ -1619,12 +1619,41 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
   // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt on the attended path
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
   assert.doesNotMatch(text, /Send your recorded history/)
-  assert.ok(text.indexOf('First look') < text.indexOf('Upload your logs.'))
-  assert.ok(text.indexOf('Upload your logs.') < text.indexOf('Run `hyp ask` any time'))
+  assert.ok(text.indexOf('First look') >= 0, text)
+  assert.ok(text.indexOf('First look') < text.indexOf('Nothing was sent.'), text)
+  assert.ok(text.indexOf('Nothing was sent.') < text.indexOf('Run `hyp ask` any time'), text)
   // A run that ends on the wait still leaves the deadline and the release
   // verb on screen.
   assert.match(text, /Nothing was sent\. Your history stays on this machine until /)
   assert.match(text, /run `hyp sync` any time to send it sooner/)
+})
+
+// @ref LLP 0435#first-look [tests]: nothing recorded, so no upload offer and no held paragraph
+test('runInitWizard: an enrolled run whose first look finds nothing makes no sync offer', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  let syncRuns = 0
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    // Every section comes back empty: the dataset exists and holds nothing.
+    firstLook: firstLookStub([], []).runner,
+    syncNow: {
+      dispatchFn: async () => {
+        syncRuns += 1
+        return 0
+      },
+    },
+  })
+  await runInitWizard(opts)
+
+  assert.equal(syncRuns, 0, 'there is nothing to upload, so nothing to offer')
+  const text = stdout.text()
+  // The empty block is not printed; setup's closing note says it once.
+  assert.doesNotMatch(text, /First look/, text)
+  assert.match(text, /Nothing recorded yet/, text)
+  // The attended close still stands the held paragraph down.
+  assert.doesNotMatch(text, /Nothing has been uploaded yet/, text)
+  assert.doesNotMatch(text, /Nothing was sent\./, text)
 })
 
 test('runInitWizard: a local install with no hold is never offered a sync', async () => {

@@ -23,7 +23,7 @@ import { groupThousands } from '../util/format_number.js'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
- * @import { PendingVolume, TickOptions } from '../../../src/core/sinks/types.js'
+ * @import { PendingVolume, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
@@ -261,8 +261,7 @@ export async function runSync(argv, ctx) {
     hyp_withheld_rows: sum(volumes, (v) => v.withheldRows),
     hyp_exact_counts: [...volumes.values()].filter((v) => v.status === 'counted').length,
   })
-  ctx.stdout.write(renderPlan({ destinations: displayedDestinations, volumes, exclusions: await readExclusions(stateDir) }))
-  if (deadline !== null) ctx.stdout.write(renderFirstSyncWarning(deadline))
+  ctx.stdout.write(renderPlan({ destinations: displayedDestinations, volumes, exclusions: await readExclusions(stateDir), deadline }))
 
   if (dryRun) {
     ctx.stdout.write('\n[dry-run] nothing was sent\n')
@@ -370,15 +369,12 @@ export async function runSync(argv, ctx) {
     return 1
   }
 
+  const described = new Map(destinations.map((d) => [d.instance, d]))
   for (const r of report.sinks) {
     // Successful file copies are incidental to sharing. Failures still need
     // their diagnostic and continue to determine the command's exit code.
     if (!displayedInstances.has(r.instance) && r.status === 'exported') continue
-    ctx.stdout.write(
-      `${r.instance}: ${r.status} (partitions=${r.partitionsExported}, bytes=${r.bytesWritten}${
-        r.error ? `, error=${r.error}` : ''
-      })\n`
-    )
+    ctx.stdout.write(renderResult(r, described.get(r.instance), volumes.get(r.instance)))
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
 }
@@ -823,85 +819,103 @@ async function readExclusions(stateDir) {
  *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
  *   volumes?: Map<string, PendingVolume>,
  *   exclusions: { localOnly: number, ignore: number, clientLocalOnly?: string[] } | { error: string },
+ *   deadline?: number | null,
  * }} args
  * @returns {string}
  */
-function renderPlan({ destinations, volumes, exclusions }) {
-  const width = Math.max(...destinations.map((d) => d.instance.length))
-  const lines = ['hyp sync:\n', '\n']
+function renderPlan({ destinations, volumes, exclusions, deadline = null }) {
+  const lines = []
   for (const dest of destinations) {
-    lines.push(`  ${dest.instance.padEnd(width)}  ${dest.text}\n`)
-    for (const line of renderVolume(volumes?.get(dest.instance))) {
-      lines.push(`  ${' '.repeat(width)}  ${line}\n`)
+    const volume = volumes?.get(dest.instance)
+    // The hold is driver-wide, so its deadline applies to every off-machine
+    // destination on the plan; a local copy was never held.
+    const automatic = deadline !== null && dest.offMachine === true
+      ? ` (automatic by ${formatFirstSyncDeadline(deadline)})`
+      : ''
+    lines.push(`${renderVolume(volume, dest, automatic)}\n`)
+    if (volume && volume.withheldRows > 0) {
+      const floor = volume.status === 'partial' ? 'at least ' : ''
+      lines.push(`  ${floor}${plural(volume.withheldRows, 'row')} withheld by policy (not sent)\n`)
     }
   }
-  // Naming a server instead of its URL is only safe if the name stays
-  // auditable: R1a's second half, applied here for the same reason.
-  if (destinations.some((d) => d.offMachine === true)) {
-    lines.push("  (run 'hyp remote list' to see server URLs)\n")
-  }
-  lines.push('\n')
   if ('error' in exclusions) {
-    lines.push(`  warning: could not read the exclusions (${exclusions.error});\n`)
-    lines.push('  exclusions still apply, but cannot be summarized here\n')
+    lines.push(`Could not read the exclusions (${exclusions.error}); they still apply, but cannot be summarized here.\n`)
   } else {
-    const clientLocalOnly = exclusions.clientLocalOnly ?? []
+    const excluded = []
     if (exclusions.localOnly > 0 || exclusions.ignore > 0) {
-      lines.push(`  excluded: ${plural(exclusions.localOnly + exclusions.ignore, 'directory', 'directories')}\n`)
+      excluded.push(plural(exclusions.localOnly + exclusions.ignore, 'directory', 'directories'))
     }
-    if (clientLocalOnly.length > 0) {
-      lines.push(`  excluded clients: ${clientLocalOnly.join(' · ')}\n`)
-    }
+    const clientLocalOnly = exclusions.clientLocalOnly ?? []
+    if (clientLocalOnly.length > 0) excluded.push(clientLocalOnly.join(', '))
+    if (excluded.length > 0) lines.push(`Excluded: ${excluded.join('; ')}\n`)
+  }
+  // The one prompt where the user has never sent anything: say how to
+  // exclude things first, so the answer is not only yes or no.
+  // @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
+  if (deadline !== null) {
+    lines.push('To exclude anything first, use `hyp privacy` or the `/hypaware-privacy` skill.\n')
   }
   return lines.join('')
 }
 
 /**
- * The volume disclosure under one destination: what would go, how far back it
- * reaches, and what is being held back.
+ * The plan's line for one destination: what would go, how far back it
+ * reaches, and where, with `suffix` (the hold's deadline) before the period.
+ * The withheld tally is its own line under it (`renderPlan`), because
+ * folding it into the pending count would overstate the egress and dropping
+ * it is how a machine that withholds everything looks like one that
+ * withholds nothing (#958).
  *
- * Three rules, all of them about not misleading the person at the prompt:
+ * Two rules about not misleading the person at the prompt:
  *
- * - **Withheld rows get their own line.** Folding them into the pending count
- *   would overstate the egress; dropping them entirely is how a machine that
- *   withholds *everything* looks identical to one that withholds nothing (#958
- *   was invisible at exactly this prompt).
- * - **A floor says so, on every line the scan produced.** A truncated count
- *   renders "at least N", never N, and the withheld tally carries the same
- *   mark: it came off the same short scan, so an exact-looking number beside
- *   an "at least" claims a precision the count never had and understates what
- *   policy held back, on the one line that says policy is working at all.
+ * - **A floor says so.** A truncated count renders "at least N", never N,
+ *   and `renderPlan` marks the withheld tally the same way, since it came
+ *   off the same short scan.
  * - **An unknown count says unknown.** Rendering it as "nothing pending" would
  *   be a false all-clear on a consent surface, which is worse than a gap.
  *
  * @param {PendingVolume | undefined} volume
- * @returns {string[]}
+ * @param {{ text: string, offMachine: boolean | null }} dest
+ * @param {string} [suffix]
+ * @returns {string}
  */
-function renderVolume(volume) {
-  if (!volume) return []
+function renderVolume(volume, dest, suffix = '') {
+  const verb = dest.offMachine === true ? 'upload' : 'export'
+  if (!volume) return `Ready to ${verb} to ${dest.text}${suffix}.`
   if (volume.status === 'unknown') {
-    return [`pending volume unknown${volume.reason ? ` (${volume.reason})` : ''}`]
+    return `Ready to ${verb} to ${dest.text} (pending volume unknown${volume.reason ? `: ${volume.reason}` : ''})${suffix}.`
   }
-  // One scan produced the payload tally and the withheld tally together, so
-  // one truncation marks both.
+  if (volume.rows === 0 && volume.status === 'counted') return `Nothing pending for ${dest.text}.`
+  if (volume.rows === 0) {
+    // A floor of zero is not a floor. "at least 0 rows" reads as a bug on
+    // the one line somebody is deciding from, and it is reachable: a
+    // destination whose whole pending range is withheld, counted short.
+    return `Ready to ${verb} to ${dest.text} (pending volume not fully counted${volume.reason ? `: ${volume.reason}` : ''})${suffix}.`
+  }
   const floor = volume.status === 'partial' ? 'at least ' : ''
-  const lines = []
-  if (volume.rows === 0 && volume.status === 'counted') {
-    lines.push('nothing pending')
-  } else if (volume.rows === 0) {
-    // A floor of zero is not a floor. "at least 0 rows pending" reads as a bug
-    // on the one line somebody is deciding from, and it is reachable: a
-    // destination whose whole pending range is withheld, counted short. Say the
-    // payload count is incomplete and let the withheld line below carry the
-    // magnitude, marked as the floor it is.
-    lines.push(`pending volume not fully counted${volume.reason ? ` (${volume.reason})` : ''}`)
-  } else {
-    lines.push(`${floor}${plural(volume.rows, 'row')} pending${renderResume(volume.resume)}`)
+  return `Ready to ${verb} ${floor}${plural(volume.rows, 'row')}${renderResume(volume.resume)} to ${dest.text}${suffix}.`
+}
+
+/**
+ * One line per destination the tick reached: what went where, in the plan's
+ * words, or the failure and its error.
+ *
+ * @param {TickReport['sinks'][number]} r
+ * @param {{ text: string, offMachine: boolean | null } | undefined} dest
+ * @param {PendingVolume | undefined} volume
+ * @returns {string}
+ */
+function renderResult(r, dest, volume) {
+  const where = dest?.text ?? r.instance
+  if (r.status === 'failed') {
+    return `Could not send to ${where}: ${r.error ?? 'no reason given; see `hyp status`'}\n`
   }
-  if (volume.withheldRows > 0) {
-    lines.push(`${floor}${plural(volume.withheldRows, 'row')} withheld by policy (not sent)`)
+  const verb = dest?.offMachine === true ? 'uploaded' : 'exported'
+  if (r.status === 'partial') {
+    return `Partly ${verb} to ${where}${r.error ? ` (${r.error})` : ''}; the rest goes on the next sync\n`
   }
-  return lines
+  const rows = volume?.status === 'counted' && volume.rows > 0 ? ` ${plural(volume.rows, 'row')}` : ''
+  return `✓ ${verb.charAt(0).toUpperCase()}${verb.slice(1)}${rows} to ${where}\n`
 }
 
 /**
@@ -913,8 +927,8 @@ function renderVolume(volume) {
  * @returns {string}
  */
 function renderResume(resume) {
-  if (resume.kind === 'beginning') return ', the full history'
-  if (resume.kind === 'since') return `, captured since ${formatResumeInstant(resume.at)}`
+  if (resume.kind === 'beginning') return ' (the full history)'
+  if (resume.kind === 'since') return ` (captured since ${formatResumeInstant(resume.at)})`
   return ''
 }
 
@@ -928,35 +942,6 @@ function formatResumeInstant(iso) {
   const ms = Date.parse(iso)
   if (!Number.isFinite(ms)) return iso
   return `${new Date(ms).toISOString().slice(0, 16)}Z`
-}
-
-/**
- * The warning shown while the first-sync hold is open.
- *
- * This is the one prompt in the CLI where the user has never sent anything
- * before, so it states the deadline the upload happens by on its own, and
- * names the command and the skill that configure privacy settings first: a
- * warning that only warns leaves the user with no move except yes or no. On
- * an attended enrolling `hyp init` this is also the only place the privacy
- * hint appears, since the wizard's own narration stands down for it. It does
- * not restate that the upload includes imported history: on the wizard path
- * the user answered the import question two screens earlier.
- *
- * @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
- * @ref LLP 0407#dropped [constrained-by]: no backfill statement and no irreversibility line, by decision
- * @param {number} deadlineMs
- * @returns {string}
- */
-function renderFirstSyncWarning(deadlineMs) {
-  return (
-    '\n' +
-    // "by", because the printed instant is the deadline: LLP 0101 calls it
-    // "the latest the first sync can happen, not the earliest". Without it the
-    // line schedules an upload for tonight directly above a prompt whose bare
-    // enter uploads now, so the reader is told the opposite of what enter does.
-    `  Your logs upload by ${formatFirstSyncDeadline(deadlineMs)}, or now if you say yes.\n` +
-    '  To exclude anything first, configure privacy settings with `hyp privacy`, or the hypaware-privacy skill in Claude or Codex.\n'
-  )
 }
 
 /**

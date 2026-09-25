@@ -942,8 +942,14 @@ async function runGuardedInitWizard(opts, guard) {
   // `offerFollows` mirrors the sync offer's own gate below, so the
   // narration goes quiet exactly when `hyp sync`'s plan is about to state
   // the same things and ask.
+  // With nothing recorded there is nothing to upload, so no offer; the
+  // sign-in already said nothing uploads until the user says so.
+  // @ref LLP 0435#first-look [implements]: no upload offer when nothing is recorded
+  const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
-  const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts, { offerFollows }) : null
+  const holdDeadline = joined
+    ? await narratePrivacyIfTeamPath(opts, { alreadySaid: offerFollows })
+    : null
 
   // ...and then the offer to end the wait: `hyp sync` itself, whose plan
   // and confirm are the one question about the first sync. It sits ahead of
@@ -956,7 +962,7 @@ async function runGuardedInitWizard(opts, guard) {
   // is already committed and its acts done, so the offer is skipped
   // rather than the run cancelled (LLP 0341 #dead-surface).
   if (holdDeadline !== null && interactive && !cancelled && opts.finale?.dryRun !== true
-    && (await guard.checkpoint())) {
+    && !nothingRecorded && (await guard.checkpoint())) {
     syncNow = await runWizardSyncNow({
       deadline: holdDeadline,
       stdout: opts.stdout,
@@ -1055,9 +1061,9 @@ async function runGuardedInitWizard(opts, guard) {
  *   launch against a cache that turns out to be full is fine, while
  *   suppressing one against a cache that was merely unreadable is not.
  *
- * A shown block with zero rows in both counted sections is an empty
- * cache: the dataset exists and holds nothing yet, which is exactly the
- * fresh-install case (LLP 0198#empty-cache).
+ * `empty` (or a shown block with zero rows in both counted sections) is
+ * an empty cache: the dataset exists and holds nothing yet, which is
+ * exactly the fresh-install case (LLP 0198#empty-cache).
  *
  * Takes the outcome half, not the whole {@link FirstLookResult}: this
  * question is answered from what the step found, and `wrote` (LLP 0230
@@ -1070,7 +1076,7 @@ async function runGuardedInitWizard(opts, guard) {
 export function firstLookHadRows(result) {
   if (!result) return undefined
   if (result.shown) return result.providerRows > 0 || result.dayRows > 0
-  if (result.reason === 'no-dataset') return false
+  if (result.reason === 'no-dataset' || result.reason === 'empty') return false
   if (result.reason === 'slow') return true
   return undefined
 }
@@ -1237,21 +1243,20 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
  * runs off the same read rather than racing a second one against a marker
  * `hyp sync` may have cleared in between.
  *
- * `offerFollows` silences the narration: when the closing sync offer is
- * about to run (the ordinary attended close), `hyp sync`'s own plan states
- * the deadline and the privacy hint, and asks, so a paragraph here said
- * everything twice in a row (the backfill statement is dropped on that
- * path, LLP 0407 #dropped). Every path that ends without the
- * offer (aborts, non-interactive, dry runs) keeps the paragraph, because
- * there it is the only sighting of the deadline and the way out. The
- * deadline is still read and returned either way, since the offer runs
- * off it.
+ * `alreadySaid` silences the narration on the ordinary attended close: the
+ * sign-in stated the deadline, and when there is anything to upload
+ * `hyp sync`'s own plan states it again and asks, so a paragraph here said
+ * everything twice (the backfill statement is dropped on that path, LLP
+ * 0407 #dropped). Every path that ends without that close (aborts,
+ * non-interactive, dry runs) keeps the paragraph, because there it is the
+ * only sighting of the deadline and the way out. The deadline is still
+ * read and returned either way, since the offer runs off it.
  *
  * @param {Pick<RunInitWizardOptions, 'stdout' | 'env'>} opts
- * @param {{ offerFollows?: boolean }} [flags]
+ * @param {{ alreadySaid?: boolean }} [flags]
  * @returns {Promise<number | null>} the live deadline, or null when no hold applies
  */
-async function narratePrivacyIfTeamPath(opts, { offerFollows = false } = {}) {
+async function narratePrivacyIfTeamPath(opts, { alreadySaid = false } = {}) {
   /** @type {number|null} */
   let deadline = null
   try {
@@ -1261,7 +1266,7 @@ async function narratePrivacyIfTeamPath(opts, { offerFollows = false } = {}) {
     // Unreadable state dir: skip the narration rather than fail the run.
   }
   if (typeof deadline !== 'number') return null
-  if (offerFollows) return deadline
+  if (alreadySaid) return deadline
   opts.stdout.write(heldStatement(deadline))
   return deadline
 }
