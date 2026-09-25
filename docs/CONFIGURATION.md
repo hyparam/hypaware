@@ -69,7 +69,7 @@ following is a fragment to merge into the existing `query` block:
 
 This retains local logs for 30 days and other datasets for 120 days. A value
 of `0` means no age limit. Shortening retention allows maintenance to remove
-older cache data; it does not delete exported files or server copies.
+older cache data; it does not delete exported files or copies in HypAware Cloud.
 
 Retention also supplies the fallback history-recovery window when an adapter
 has no explicit `backfill.window_days`. See [clients and history](CLIENTS.md).

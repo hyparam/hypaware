@@ -2,7 +2,7 @@
 
 [Documentation](README.md)
 
-Enrolling with a remote server (`hyp join`, or `hyp remote login` without
+Enrolling with HypAware Cloud (`hyp join`, or `hyp remote login` without
 `--no-forward`) automatically enables collection for that organization once
 gateway enrollment completes, including existing enrollments on the next CLI
 invocation or daemon start after upgrading. Standalone installations

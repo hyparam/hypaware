@@ -16,8 +16,8 @@ Two things make headless different from a laptop install:
   or supervisor backgrounds, via `hyp join --no-daemon` plus
   `hyp daemon run`.
 
-Every run that joins with one token lands under **one shared gateway** on the
-server, so a pipeline's runs stay grouped together. A token-based join
+Every run that joins with one token lands under **one shared gateway** in
+HypAware Cloud, so a pipeline's runs stay grouped together. A token-based join
 forwards immediately: there is no first-sync review hold, because whoever
 minted the token chose enrollment deliberately. See
 [what HypAware records and how to control it](./PRIVACY.md).
@@ -41,11 +41,11 @@ output, so `hyp remote mint > ci.token` captures exactly the secret. Options:
 The token never rotates. When it nears expiry, mint a new one and swap the CI
 secret. Minting binds a **new gateway row** at mint time (the id is printed on
 standard error next to the token), so runs before and after the swap group
-under different gateways, and the old row stays in place server-side.
+under different gateways, and the old row stays in place in HypAware Cloud.
 
 ## Each run: join, capture, flush
 
-Three steps, all in the run's shell. The join URL is the server base (not a
+Three steps, all in the run's shell. The join URL is the HypAware Cloud base URL (not a
 `/v1/mcp` query URL), and the token goes in on standard input so it never
 appears in `ps` output or `set -x` traces:
 
@@ -118,12 +118,12 @@ machine that keeps running; the scheduled exports drain it. Flush with
 
 - `hyp status` on the runner reports whether recording is active, and what is
   shared with your team versus kept on the machine.
-- `hyp remote mint` failing with HTTP 404 means the server predates the mint
-  endpoint; upgrade the server.
+- `hyp remote mint` failing with HTTP 404 means the target does not support
+  token minting; check the URL with `hyp remote list`.
 - A join that hangs is waiting on standard input: no token was piped in, and
   no positional token or `--token-file` was given.
-- Join never contacts the server, so a query-target URL (`.../v1/mcp`) instead
-  of the server base, or an expired token, still joins cleanly and surfaces
+- Join never contacts HypAware Cloud, so a query-target URL (`.../v1/mcp`)
+  instead of the base URL, or an expired token, still joins cleanly and surfaces
   later as a daemon bootstrap failure.
 
 Command details live in

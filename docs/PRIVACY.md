@@ -22,7 +22,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 
 Recording is content-level: conversation rows include the actual message
 text, not just metadata. Rows age out of the local cache after the
-retention window init set (90 days on a team install, 120 on a
+retention window setup set (90 days on a HypAware Cloud install, 120 on a
 local-only one; `hyp setup --retention-days <N>` overrides).
 
 ### The raw-body spool
@@ -110,14 +110,14 @@ records a proxy attach.
 
 ## Where it goes
 
-- **Solo install**: nowhere. Everything stays in the local cache (plus
+- **Local only**: nowhere. Everything stays in the local cache (plus
   local Parquet exports if you enabled them). There is no phone-home.
-- **Team install** (after `hyp remote login` or `hyp join`): recorded rows
-  are forwarded to your organization's central server, including
-  conversation content. The controls below decide which rows that covers.
+- **HypAware Cloud** (after choosing Sync to the cloud in setup,
+  `hyp remote login`, or `hyp join`): recorded rows are forwarded to
+  HypAware Cloud, including conversation content. The controls below decide which rows that covers.
 
-The deployment's operators can read forwarded data across every org on the
-server, and each such read is recorded in that org's audit trail.
+HypAware Cloud operators can read forwarded data across every org, and each
+such read is recorded in that org's audit trail.
 
 An enrolled machine also reports [product telemetry](PRODUCT_TELEMETRY.md) to
 the same organization automatically unless you saved a preference:
@@ -133,7 +133,7 @@ an exchange's working directory, walking up the ancestor chain
 (gitignore-style), and when multiple markings apply the most restrictive
 wins.
 
-| Class        | Recorded locally | Forwarded to the team server |
+| Class        | Recorded locally | Forwarded to HypAware Cloud |
 |--------------|------------------|------------------------------|
 | `sync`       | yes              | yes (the default)            |
 | `local-only` | yes              | never                        |
@@ -171,7 +171,7 @@ There are two authoring surfaces for the same classes:
   hyp privacy unset <path> [class]     # back to the implicit default
   ```
 
-On a machine connected to a server, folders you have not marked sync
+On a machine connected to HypAware Cloud, folders you have not marked sync
 without asking. You can instead be asked, once per new folder, how to
 handle it, at the moment you open a session there:
 
@@ -269,7 +269,7 @@ Before an attended review deadline passes:
 
 open Claude Code or Codex and run the **`hypaware-privacy`** skill. It walks
 the captured directories with you, samples them for credentials, personal
-material, and anything else you would not want on a shared server, marks each
+material, and anything else you would not want in the cloud, marks each
 directory ignore / local-only / sync, and purges anything sensitive before the
 first byte leaves the machine. It redacts every value it reports back to you;
 it never echoes a secret.
@@ -277,11 +277,11 @@ it never echoes a secret.
 The first sync is the moment this matters most, but it is not a precondition:
 run `hypaware-privacy` whenever you want to know what has been captured here,
 enrolled or not. It reviews this machine's local cache; it cannot inspect rows
-already forwarded to a server.
+already forwarded to HypAware Cloud.
 
 ## Leaving
 
-`hyp leave` disconnects the machine from its central server: forwarding and
+`hyp leave` disconnects the machine from HypAware Cloud: forwarding and
 config pull stop, org-driven client attaches are undone, and the forward
 credential is removed. Local recordings, config, and the daemon stay; use
 `hyp privacy purge` and the uninstall steps in the [README](../README.md#uninstall)
@@ -293,5 +293,5 @@ HypAware's self-telemetry (under `~/.hyp/hypaware/dev-telemetry/`) is local
 and secret-safe by design: it records component / operation / status
 attributes, never credentials or raw prompt content.
 [Product telemetry](PRODUCT_TELEMETRY.md) is a separate channel: on a machine
-enrolled with an organization it is reported to that organization's server
+enrolled with an organization it is reported to HypAware Cloud
 automatically, as described under "Where it goes" above.

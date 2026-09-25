@@ -269,9 +269,9 @@ Read the plan or warning before you approve any of these operations:
   `hyp sync --dry-run` to send nothing.
 - `hyp privacy purge` permanently deletes matching rows from this machine's
   local cache and sweeps the Claude raw-body spool. It doesn't delete copies
-  that were already exported or sent to a server.
+  that were already exported or sent to HypAware Cloud.
 - `hyp report delete` permanently deletes a report and its artifacts for the
-  entire organization on the selected remote server.
+  entire organization in HypAware Cloud.
 - `hyp plugin install` and an updating `hyp plugin update PLUGIN` can fetch and
   execute remote plugin code. HypAware shows the source, resolved revision,
   manifest, requested permissions, and warnings before it asks you to trust

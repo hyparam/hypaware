@@ -1,8 +1,8 @@
 # HypAware documentation
 
 HypAware collects AI sessions and telemetry into a local, queryable history.
-You can keep it on your machine, export files, or share recordings with a team
-server. Both `hyp` and `hypaware` run the same CLI.
+You can keep it on your machine, export files, or sync recordings to
+HypAware Cloud. Both `hyp` and `hypaware` run the same CLI.
 
 ## Quickstart
 
@@ -43,7 +43,7 @@ To switch a local-only machine to sync later, run `hyp remote login`.
 | Find a conversation, inspect tool calls, or summarize activity | [Querying and reports](QUERYING.md) |
 | Change retention, configure exports, or enable plugins | [Configuration and storage](CONFIGURATION.md) |
 | Keep a project private, pause recording, or delete local data | [Privacy controls](PRIVACY.md) |
-| Connect a laptop to a team server | [Team setup](TEAM_SETUP.md) |
+| Connect a machine to HypAware Cloud | [Team setup](TEAM_SETUP.md) |
 | Capture in CI, containers, or an unattended server | [Headless setup](HEADLESS.md) |
 | Diagnose missing recordings, stale results, or failed exports | [Troubleshooting](TROUBLESHOOTING.md) |
 | Look up exact command syntax and flags | [CLI reference](CLI_REFERENCE.md) |
@@ -52,7 +52,7 @@ To switch a local-only machine to sync later, run `hyp remote login`.
 
 Clients and telemetry sources write to the **local query cache**. Queries read
 that cache. **Sinks** export eligible data from it on a schedule: for example,
-Parquet files on disk or recordings sent to an enrolled team server. Enabling
+Parquet files on disk or recordings sent to HypAware Cloud. Enabling
 capture and enabling export are separate choices.
 
 **Plugins** provide client integrations, sources, destinations, and optional

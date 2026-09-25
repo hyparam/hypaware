@@ -19,7 +19,7 @@ For installation, upgrade, recovery, and task-oriented workflows, see
 - [Control the current session](#control-the-current-session)
 - [Manage AI clients and history](#manage-ai-clients-and-history)
 - [Control privacy](#control-privacy)
-- [Connect to or leave a central server](#connect-to-or-leave-a-central-server)
+- [Connect to or leave HypAware Cloud](#connect-to-or-leave-hypaware-cloud)
 - [Manage the daemon](#manage-the-daemon)
 - [Validate configuration](#validate-configuration)
 - [Manage the local cache](#manage-the-local-cache)
@@ -144,7 +144,7 @@ for remote execution when the command is a remote-capable typed verb. You
 can't request an explicit local refresh and remote execution together.
 With `--remote`, an operator can add `--org <label|*>` to read one org by
 label or every org the account may read. It is rejected without `--remote`,
-and the server records each such read in that org's audit trail.
+and HypAware Cloud records each such read in that org's audit trail.
 
 ### `hyp query overview`
 
@@ -209,10 +209,10 @@ hits is not evidence the text is absent from `system_text`, `tools`,
 `tool_args`, `attributes`, or `raw_frame`; read those with `hyp query sql`.
 
 Local search scans the cache directly without building or reading indexes.
-Narrow the date range on large histories to reduce scan work. Remote servers
-retain their own hypgrep indexes. Local-only rows are withheld with
+Narrow the date range on large histories to reduce scan work. HypAware Cloud
+keeps its own hypgrep indexes. Local-only rows are withheld with
 a count on stderr, exactly as in SQL, and `--include-local-only` is the same
-informed-consent override. `--remote TARGET` runs the same search on a server,
+informed-consent override. `--remote TARGET` runs the same search in HypAware Cloud,
 which enforces its own visibility: `--regex` is operator-only there, and
 `--include-local-only` is rejected.
 
@@ -226,7 +226,7 @@ cannot select a day: one not shaped `YYYY-MM-DD`, or a `--from` later than the
 reads like "nothing is recorded". A pattern the search cannot use is a usage
 error too: an invalid regular expression under `--regex`, or one longer than
 1024 characters. Those day and pattern checks are local: `--remote` hands the
-request to the server, which applies its own argument rules and its own codes
+request to HypAware Cloud, which applies its own argument rules and its own codes
 (the flag-shape and `--limit` checks still run locally, before the request is
 sent). Search or output failures return `1`.
 
@@ -305,7 +305,7 @@ Use `hyp report --help` to list report operations:
 hyp report --help
 ```
 
-`render` is local. The other report commands use a remote server and resolve
+`render` is local. The other report commands use HypAware Cloud and resolve
 the default remote if `--remote` is omitted. Publishing and deletion require a
 write-capable credential.
 
@@ -331,7 +331,7 @@ hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title
 ```
 
 Uploads one HTML or Markdown file, or a directory bundle whose root contains
-`report.html` or `report.md`. The server identifies repeat uploads by content
+`report.html` or `report.md`. HypAware Cloud identifies repeat uploads by content
 hash. `--org` applies only to an operator credential that can name an
 organization.
 
@@ -349,8 +349,8 @@ Lists the newest reports visible to the selected organization. An empty list
 succeeds. Each report's recommendations follow its line, one per line, as the
 server-minted id, the `recommendation-<slug>` page the id names, and the page's
 title, with its thesis on the line below. The page is the artifact path
-`hyp report get` takes. A server that does not read the page's opening at
-publish, or a report published before it did, lists the id and page alone.
+`hyp report get` takes. A report published before HypAware Cloud read the page's opening
+at publish lists the id and page alone.
 `--json` prints the records whole, `recommendations` included.
 
 ```text
@@ -413,7 +413,7 @@ With no id on a terminal, it asks in two steps: first which report, newest
 first, each with its publish date and how many recommendations it carries
 (a report with none is not offered); then which of that report's
 recommendations, labelled by the page's title and described by its thesis
-when the server lists them, else by the page name. Escape on the second list
+when HypAware Cloud lists them, else by the page name. Escape on the second list
 returns to the first. `--kind`, `--period` and `--limit` narrow which reports
 are offered. Without a terminal the id is required. If more than one attached
 client could be started, it asks which. A declined pick succeeds. An unknown
@@ -747,7 +747,7 @@ hyp client claude-account logout
 ```
 
 Removes the locally stored subscription credential. It doesn't revoke the
-credential at the server or remove organization-key configuration.
+credential in HypAware Cloud or remove organization-key configuration.
 
 ```sh
 hyp client claude-account logout
@@ -1035,7 +1035,7 @@ hyp privacy purge <path> | --session <id> | --ignored | --all [--yes] [--json]
 
 **Warning:** This operation permanently deletes matching rows from this
 machine's local cache. Select exactly one target. It never contacts a sink or
-remote server and can't retract exported copies. Every form also sweeps the
+HypAware Cloud and can't retract exported copies. Every form also sweeps the
 Claude raw-body spool so pending bodies can't recreate deleted rows. A terminal
 prompts for confirmation; a non-interactive call requires `--yes`.
 
@@ -1046,7 +1046,7 @@ hyp privacy purge --session SESSION_ID
 Replace `SESSION_ID` with the reviewed session ID. Avoid `--yes` during manual
 work.
 
-## Connect to or leave a central server
+## Connect to or leave HypAware Cloud
 
 ### `hyp join`
 
@@ -1054,7 +1054,7 @@ work.
 hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]
 ```
 
-Validates the server and enrollment token, writes a permission-restricted
+Validates the HypAware Cloud URL and enrollment token, writes a permission-restricted
 central seed layer, and installs or restarts the daemon. The full organization
 configuration arrives later. Local configuration and history remain.
 `--no-daemon` writes only the seed and leaves service installation as an
@@ -1475,7 +1475,7 @@ warning, and the recipe go to standard error, so `hyp remote mint > ci.token`
 stores exactly the secret.
 
 Use the printed token as the CI recipe's bootstrap credential. The recipe names
-the server base, which is what `hyp join` expects, even when the target was
+the HypAware Cloud base URL, which is what `hyp join` expects, even when the target was
 registered with a `/v1/mcp` suffix, and feeds the token on standard input
 rather than as a positional argument, which would expose a long-lived shared
 secret to `ps` and to `set -x` traces on the runner:
@@ -1507,7 +1507,7 @@ hyp remote list --json
 hyp remote remove <name>
 ```
 
-Removes the named target and its locally stored token. It doesn't leave central
+Removes the named target and its locally stored token. It doesn't leave HypAware Cloud
 enrollment; use `hyp leave` for that.
 
 ```sh
@@ -1686,7 +1686,7 @@ Product telemetry is automatic for enrolled organizations and defaults off on
 standalone installations. `status` reports consent, destination, and queue
 state; `preview` prints the next serialized batch or `null`. `enable local`
 retains an allowlisted preview queue without delivery. `enable organization`
-requires an eligible enrolled central destination. `off` removes pending copies
+requires an eligible HypAware Cloud enrollment. `off` removes pending copies
 and stops collection, but cannot retract records already accepted remotely.
 
 See [product telemetry](PRODUCT_TELEMETRY.md) for daemon restart requirements,
