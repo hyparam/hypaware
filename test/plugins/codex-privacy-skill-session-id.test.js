@@ -216,8 +216,8 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
   )
   assert.doesNotMatch(
     prose,
-    /entry for `gateway`, the recorder that captures this session/,
-    'and must not call the gateway the recorder that captures this session: on the default `transcript` capture_mode nothing reaches it'
+    /recorder that captures this session/,
+    'and must not describe gateway as the recorder that captures this session, in any phrasing: on the default `transcript` capture_mode nothing reaches it'
   )
 })
 
