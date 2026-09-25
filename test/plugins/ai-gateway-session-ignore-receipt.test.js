@@ -481,6 +481,11 @@ test('the claude privacy skill stops on a missing claude-telemetry entry only wh
     /daemon[\s\S]{0,200}"error"/,
     'listener_started_at and control_routes come from one status.json read, so a daemon object carrying an error must read as the live case, not as "not running"'
   )
+  assert.match(
+    crossCheck,
+    /"error"[\s\S]{0,40}"running":\s*false|"running":\s*false[\s\S]{0,40}"error"/,
+    'a daemon reporting "running": false beside an "error" is down, however unreadably, so the gate must name that shape as safe to read as "not running", not just gate on any bare daemon.error'
+  )
 })
 
 /**
