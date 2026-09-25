@@ -641,7 +641,7 @@ test('runInitWizard: a fully fleet-managed machine still probes the store for it
 // lanes, because the wiring that collects them into the recap is the
 // orchestrator's.
 // @ref LLP 0396#combined-selection [tests]: an express run states the combined picture once
-// @ref LLP 0435#recap [tests]: the recording and syncing lines print together before the save
+// @ref LLP 0437#recap [tests]: the recording and syncing lines print together before the save
 test('runInitWizard: an express enrolled run states what it records and where it syncs once each', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
@@ -1628,7 +1628,7 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
   assert.match(text, /run `hyp sync` any time to send it sooner/)
 })
 
-// @ref LLP 0435#first-look [tests]: nothing recorded, so no upload offer and no held paragraph
+// @ref LLP 0437#first-look [tests]: nothing recorded, so no upload offer and no held paragraph
 test('runInitWizard: an enrolled run whose first look finds nothing makes no sync offer', async () => {
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })

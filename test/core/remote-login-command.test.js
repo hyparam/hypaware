@@ -345,7 +345,7 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   assert.match(text, /✓ Signed in to 'prod' as org /)
   // The deadline line still gives the hold's deadline and the fact that
   // nothing has been sent. There is no forwarding line: the wizard's recap
-  // says what syncs to the team's server (LLP 0435 #recap).
+  // says what syncs to the team's server (LLP 0437 #recap).
   assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
   assert.doesNotMatch(text, /Logs will sync to/)
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,

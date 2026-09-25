@@ -139,3 +139,19 @@ test('withSpinner off a TTY prints its lines above once, before the label', asyn
   await withSpinner({ stdout, label: 'waiting', env: {}, above: ['visit:', '  url'] }, async () => {})
   assert.equal(stdout.text(), 'visit:\n  url\nwaiting\n')
 })
+
+test('withSpinner reads a function above on every frame, and leaves it to the caller off a TTY', async () => {
+  const tty = makeStdout({ isTTY: true, columns: 80 })
+  /** @type {string[]} */
+  let lines = []
+  await withSpinner({ stdout: tty, label: 'waiting', env: {}, intervalMs: 5, above: () => lines }, async () => {
+    lines = ['enter code: ABCD']
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  })
+  assert.match(tty.text(), /enter code: ABCD\n\S waiting/)
+  assert.ok(tty.text().endsWith('\x1b[2A\r\x1b[J'), 'the late line goes with the spinner')
+
+  const plain = makeStdout()
+  await withSpinner({ stdout: plain, label: 'waiting', env: {}, quietWhenPlain: true, above: () => ['never printed'] }, async () => {})
+  assert.equal(plain.text(), '')
+})

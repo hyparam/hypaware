@@ -755,7 +755,7 @@ test('runInitWizard end-to-end: join, back to the fork, local, and one combined 
   assert.deepEqual(result.config, written)
 })
 
-// @ref LLP 0435#recap [tests]: the lanes' statements print once, together, at the commit point
+// @ref LLP 0437#recap [tests]: the lanes' statements print once, together, at the commit point
 test('runInitWizard: a back replaces a lane statement instead of stacking it', async () => {
   let syncCalls = 0
   let folderCalls = 0
@@ -786,7 +786,7 @@ test('runInitWizard: a back replaces a lane statement instead of stacking it', a
   assert.equal(text.match(/✓ Recording Claude Code/g)?.length, 1)
 })
 
-// @ref LLP 0435#recap [tests]: a run with no sync lane still says where its capture goes
+// @ref LLP 0437#recap [tests]: a run with no sync lane still says where its capture goes
 test('runInitWizard: a local run recaps that everything stays on this machine', async () => {
   const { opts, stdout, calls } = await wizardOpts({
     pick: async (/** @type {any} */ o) => {

@@ -205,7 +205,7 @@ async function runGuardedInitWizard(opts, guard) {
    * Each question lane's statement of its answer, held until the config is
    * saved and then printed together. Running a lane replaces its statement
    * and drops the ones after it, so a back never leaves a stale one behind.
-   * @ref LLP 0435#recap [implements]: the answers are stated once, at the commit point, not per lane
+   * @ref LLP 0437#recap [implements]: the answers are stated once, at the commit point, not per lane
    */
   const recap = createRecap()
   /** An express accept's new-folder answer, recorded once the recap is shown. */
@@ -944,7 +944,7 @@ async function runGuardedInitWizard(opts, guard) {
   // the same things and ask.
   // With nothing recorded there is nothing to upload, so no offer; the
   // sign-in already said nothing uploads until the user says so.
-  // @ref LLP 0435#first-look [implements]: no upload offer when nothing is recorded
+  // @ref LLP 0437#first-look [implements]: no upload offer when nothing is recorded
   const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
   const holdDeadline = joined
@@ -986,7 +986,7 @@ async function runGuardedInitWizard(opts, guard) {
     })
     if (answer === 'yes' && (await guard.checkpoint())) {
       const config = await connectWizardGithub({
-        stdout: opts.stdout, stderr: opts.stderr, ctx: opts.ctx,
+        stdout: opts.stdout, stderr: opts.stderr, ctx: opts.ctx, env: opts.env,
         configPath: picked.configPath,
         restartDaemon: finaleSummary?.daemonRestart.ok === true,
       })

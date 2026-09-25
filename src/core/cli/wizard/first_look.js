@@ -244,7 +244,7 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
         span.setAttribute('day_rows', rows.dailyRows.length)
         // Nothing recorded is said once, by setup's closing line; an empty
         // block here would say it first. A withholding notice is still news.
-        // @ref LLP 0435#first-look [implements]: an empty first look prints nothing
+        // @ref LLP 0437#first-look [implements]: an empty first look prints nothing
         const withheld = runner.sawWithholding?.() ?? false
         if (!expired && !withheld && rows.providerRows.length === 0 && rows.dailyRows.length === 0) {
           span.setAttribute('status', 'skipped')

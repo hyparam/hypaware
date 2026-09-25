@@ -77,7 +77,7 @@ export interface RunWizardSyncScopeOptions {
    * Where the lane's statement of its answer goes. Defaults to stdout. The
    * wizard collects it instead and prints every lane's statement together
    * when the config is saved, so a back never leaves a stale one on screen
-   * (LLP 0435 #recap).
+   * (LLP 0437 #recap).
    */
   statement?: { write(chunk: string): unknown }
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
@@ -146,7 +146,7 @@ export interface RunWizardFolderAskOptions {
    * Where the lane's statement of its answer goes. Defaults to stdout. The
    * wizard collects it instead and prints every lane's statement together
    * when the config is saved, so a back never leaves a stale one on screen
-   * (LLP 0435 #recap).
+   * (LLP 0437 #recap).
    */
   statement?: { write(chunk: string): unknown }
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
@@ -476,7 +476,7 @@ export interface RunWizardPickOptions {
    * Where the lane's statement of its answer goes. Defaults to stdout. The
    * wizard collects it instead and prints every lane's statement together
    * when the config is saved, so a back never leaves a stale one on screen
-   * (LLP 0435 #recap).
+   * (LLP 0437 #recap).
    */
   statement?: { write(chunk: string): unknown }
   /** Checked sources are collected locally and synced remotely. */

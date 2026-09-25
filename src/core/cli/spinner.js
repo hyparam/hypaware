@@ -37,9 +37,11 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  *
  * `above` is lines that belong to the wait and go when it does, drawn above
  * the spinner (the sign-in URL over its poll). Off a TTY they are printed
- * once, before the label.
+ * once, before the label. A function is read on every frame, for lines that
+ * arrive during the wait (a device code); off a TTY the caller prints those
+ * itself, since they arrive after the label would.
  *
- * On a TTY the spinner is a live region (LLP 0435): each frame redraws the
+ * On a TTY the spinner is a live region (LLP 0437): each frame redraws the
  * rows the last one took, and the end of the work erases them all.
  *
  * The timer never outlives the work: errors clear the line and rethrow.
@@ -52,22 +54,21 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  *   intervalMs?: number,
  *   quietWhenPlain?: boolean,
  *   status?: () => string,
- *   above?: string[],
+ *   above?: string[] | (() => string[]),
  * }} opts
  * @param {() => Promise<T>} work
  * @returns {Promise<T>}
  */
 export async function withSpinner(opts, work) {
   const { stdout, label, env, intervalMs = 120, quietWhenPlain = false, above = [] } = opts
-  const animate = isTty(stdout) && (env ?? process.env).HYP_NO_TUI !== '1'
+  const animate = spinnerAnimates(stdout, env)
   if (!animate) {
-    for (const line of above) stdout.write(`${line}\n`)
+    if (Array.isArray(above)) for (const line of above) stdout.write(`${line}\n`)
     if (!quietWhenPlain) stdout.write(`${label}\n`)
     return work()
   }
 
   const region = createLiveRegion(stdout)
-  const prefix = above.map((line) => `${line}\n`).join('')
   const started = Date.now()
   let frame = 0
   const render = () => {
@@ -75,6 +76,8 @@ export async function withSpinner(opts, work) {
     const suffix = opts.status ? ` ${opts.status()}` : elapsed >= 1 ? ` (${elapsed}s)` : ''
     const head = `${FRAMES[frame % FRAMES.length]} `
     const columns = typeof stdout.columns === 'number' && stdout.columns > 0 ? stdout.columns : 80
+    const lines = typeof above === 'function' ? above() : above
+    const prefix = lines.map((line) => `${line}\n`).join('')
     region.draw(`${prefix}${clampToWidth(head, label, suffix, stdout)}\n`, columns)
     frame += 1
   }
@@ -86,6 +89,19 @@ export async function withSpinner(opts, work) {
     clearInterval(timer)
     region.clear()
   }
+}
+
+/**
+ * Whether `withSpinner` will animate on this stream: a TTY, and not vetoed by
+ * `HYP_NO_TUI=1`. Exported for a caller whose `above` lines arrive mid-wait
+ * and must be printed by hand when nothing is animating.
+ *
+ * @param {unknown} stdout
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean}
+ */
+export function spinnerAnimates(stdout, env) {
+  return isTty(stdout) && (env ?? process.env).HYP_NO_TUI !== '1'
 }
 
 /**

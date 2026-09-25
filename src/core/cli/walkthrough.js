@@ -1572,10 +1572,10 @@ export async function runPickerFinale(args) {
   // Like the join lane, the finale opens with a plain heading rather than a
   // step count, since the line stays on screen. Only the wizard sets it;
   // `runPickerWalkthrough` and non-interactive runs print none.
-  // @ref LLP 0435#headings [implements]: permanent lines carry headings, live menus carry the step count
+  // @ref LLP 0437#headings [implements]: permanent lines carry headings, live menus carry the step count
   if (args.heading) stdout.write(`${args.heading}\n`)
   // Each act is reported in one line, by the names the user picked from
-  // (LLP 0435 #finish).
+  // (LLP 0437 #finish).
   const label = (/** @type {string} */ client) => args.clientLabels?.get(client) ?? client
   // `?? ''`, not os.homedir(): '' is the "no home, stay inert" sentinel this
   // whole finale keys on - the materialize/prune guards, the attach probe,
@@ -2272,7 +2272,7 @@ async function runFinaleBackfill(args) {
           const tag = entry.dryRun ? '(dry-run) ' : ''
           // Only an import that wrote rows or failed is news; a zero means
           // there was nothing to do, and the scan counts go to the span.
-          // @ref LLP 0435#finish [implements]: an import reports only what it imported or a failure
+          // @ref LLP 0437#finish [implements]: an import reports only what it imported or a failure
           if (!entry.ok) {
             stdout.write(`${tag}${label(provider)} import ${describeBackfillResult(entry)}\n`)
           } else if (entry.rowsWritten > 0) {

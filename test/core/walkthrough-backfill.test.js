@@ -100,7 +100,7 @@ test('onboarding with claude selected runs the backfill step and records stats',
     { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 1 },
   ])
   // An import that wrote rows is one line; the scan counts stay in the
-  // summary above (LLP 0435 #finish).
+  // summary above (LLP 0437 #finish).
   assert.match(stdout.text(), /^✓ Imported 5 rows of claude history$/m)
   assert.doesNotMatch(stdout.text(), /scanned/)
 })
@@ -571,7 +571,7 @@ test('an openclaw-only pick asks no backfill question but still runs the first i
   assert.deepEqual(result.clientsPicked, ['openclaw'])
   assert.equal(consentAsked, 0, 'nothing askable: every picked provider is sweep-backed')
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
-  // A zero import prints no result line (LLP 0435 #finish); the run shows
+  // A zero import prints no result line (LLP 0437 #finish); the run shows
   // on screen as its spinner label and in the summary.
   assert.match(stdout.text(), /^Importing openclaw history…$/m)
   assert.doesNotMatch(stdout.text(), /Imported|nothing to import/)

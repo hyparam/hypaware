@@ -309,7 +309,7 @@ test('a stdout that dies during the express narration stops the run before the f
   const opts = drivenOpts(home, {
     // Express accept: the lanes state their answers instead of prompting,
     // and those statements are the run's consent surface. They are printed
-    // together as the recap at the commit point (LLP 0435 #recap), so the
+    // together as the recap at the commit point (LLP 0437 #recap), so the
     // recap is the first write and the one that dies, and the express
     // folder answer it states is never recorded.
     express: async () => 'defaults',

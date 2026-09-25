@@ -148,7 +148,7 @@ test('autoAccept states the answer and records the default without prompting (LL
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
   // Never silent: the answer is stated as the same one recap line the
   // asked path prints, and the question's title is not narrated.
-  // @ref LLP 0435#recap [tests]: an auto-accepted lane states its answer as one checkmark line
+  // @ref LLP 0437#recap [tests]: an auto-accepted lane states its answer as one checkmark line
   assert.equal(stdout.text(), '✓ New folders sync automatically (change with `hyp privacy folders ask`)\n')
 })
 

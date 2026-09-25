@@ -869,7 +869,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // `effectiveDefaultRemote` on a bare login, so it is not always something
     // the user typed, and no other line in that lane recovers the URL. The
     // compact lane (the wizard's join) says nothing here: the wizard's recap
-    // states what syncs to the team's server a moment later (LLP 0435 #recap).
+    // states what syncs to the team's server a moment later (LLP 0437 #recap).
     // Revisit if the server root ever becomes a real landing page.
     // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL
     if (!compact) {

@@ -99,7 +99,7 @@ export async function loginWithBrowser({
       // Drawn above the wait's spinner, and erased with it once the sign-in
       // settles: the URL is a fallback for while the browser is out, and left
       // behind it reads as a step still waiting on the user.
-      // @ref LLP 0435#regions [implements]: the fallback URL is live, not logged
+      // @ref LLP 0437#regions [implements]: the fallback URL is live, not logged
       fallback = [
         opened ? 'Opening your browser to sign in; if it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:',
         `  ${startUrl}`,

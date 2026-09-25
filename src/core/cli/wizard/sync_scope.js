@@ -23,7 +23,7 @@ const SERVER = "your team's server"
  * The wizard's sync lane, on every enrolled run after the picker. It asks
  * nothing: the picker's answer is also the sharing answer (LLP 0396
  * #combined-selection). It states what syncs, as one line for the recap
- * (LLP 0435 #recap), and returns the picked sources whose standing opt-outs
+ * (LLP 0437 #recap), and returns the picked sources whose standing opt-outs
  * the wizard clears once the config has committed.
  *
  * Locked (org-configured) sources always sync (LLP 0188 #locked), so the

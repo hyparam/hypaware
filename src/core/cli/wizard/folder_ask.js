@@ -179,7 +179,7 @@ async function recordAnswer(mode, { stateDir, before, opts }) {
 
 /**
  * The lane's one-line statement of the new-folder answer, for the wizard's
- * recap (LLP 0435 #recap), with the command that flips it.
+ * recap (LLP 0437 #recap), with the command that flips it.
  *
  * @param {RunWizardFolderAskOptions} opts
  * @param {FolderAskMode} mode

@@ -69,7 +69,19 @@ export async function loginWizardGithub(opts) {
 }
 
 /**
- * @param {{ stdout: RunWizardGithubOptions['stdout'], stderr: RunWizardGithubOptions['stderr'], ctx: Pick<CommandRunContext, 'commands'>, configPath: string, restartDaemon: boolean }} opts
+ * `restart` restarts the daemon directly rather than through `hyp daemon
+ * restart`, whose "daemon: restarted" line would be the only thing setup
+ * says about it (LLP 0437 #finish).
+ *
+ * @param {{
+ *   stdout: RunWizardGithubOptions['stdout'],
+ *   stderr: RunWizardGithubOptions['stderr'],
+ *   ctx: Pick<CommandRunContext, 'commands'>,
+ *   env?: NodeJS.ProcessEnv,
+ *   configPath: string,
+ *   restartDaemon: boolean,
+ *   restart?: () => Promise<void>,
+ * }} opts
  * @returns {Promise<HypAwareV2Config | undefined>}
  */
 // @ref LLP 0411#activation [implements]: extend the saved config after upload, preserving changes made during setup
@@ -87,8 +99,10 @@ export async function connectWizardGithub(opts) {
         if (existing) existing.enabled = true
         else plugins.push({ name })
       }
+      // Silent: setup already said it saved the settings, and this is the
+      // same file gaining the GitHub plugins.
       const committed = await commitWizardPickedConfig({
-        ...opts, config, interactive: false, force: true,
+        ...opts, stdout: { write: () => true }, config, interactive: false, force: true,
       })
       if (!committed.ok) throw new Error('config write refused')
     } catch {
@@ -100,7 +114,11 @@ export async function connectWizardGithub(opts) {
     await loginWizardGithub(opts)
     if (opts.restartDaemon) {
       try {
-        if (await opts.ctx.commands.run('daemon restart', []) !== 0) throw new Error('restart failed')
+        const restart = opts.restart ?? (async () => {
+          const { restartServiceDaemon } = await import('../../daemon/install.js')
+          await restartServiceDaemon({ ...(opts.env?.HOME ? { homeDir: opts.env.HOME } : {}) })
+        })
+        await restart()
       } catch {
         span.setAttribute('status', 'error')
         span.setAttribute(Attr.ERROR_KIND, 'github_daemon_restart_failed')

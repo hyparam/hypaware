@@ -541,7 +541,7 @@ export async function commitWizardPickedConfig(args) {
     },
     { component: 'wizard' }
   )
-  // One line once the save lands, under the recap (LLP 0435 #recap).
+  // One line once the save lands, under the recap (LLP 0437 #recap).
   args.stdout.write(`✓ Saved settings${guard.backupPath ? ' (previous config backed up)' : ''}\n`)
   return { ok: true }
 }
@@ -638,7 +638,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
 
 /**
  * The lane's one-line statement of what will be recorded, for the wizard's
- * recap (LLP 0435 #recap). Plain names: whether a row is the team's is said
+ * recap (LLP 0437 #recap). Plain names: whether a row is the team's is said
  * on the sync line, where it matters.
  *
  * @param {RunWizardPickOptions} opts

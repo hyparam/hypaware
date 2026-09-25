@@ -11,7 +11,7 @@ const CLEAR_TO_END = '\x1b[J'
  * so it is only correct while nothing else writes below it and while every
  * frame goes to the one stream it was given.
  *
- * @ref LLP 0435#regions [implements]: the live region, redrawn from state and cleared when its step ends
+ * @ref LLP 0437#regions [implements]: the live region, redrawn from state and cleared when its step ends
  * @param {{ write(chunk: string): unknown }} stdout
  */
 export function createLiveRegion(stdout) {

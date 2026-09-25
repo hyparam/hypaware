@@ -3,6 +3,7 @@
 import { requireGithubRuntime } from './runtime.js'
 import { GRAPH_ERROR_REPO, runCaptureTick } from './tick.js'
 import { openBrowser } from 'hypaware/core/util'
+import { spinnerAnimates, withSpinner } from '../../../../src/core/cli/spinner.js'
 import { loginGithub, logoutGithub, readGithubAuth, resolveGithubOAuth } from './auth.js'
 import { githubIdentity } from './oauth.js'
 import { tokenFromGh } from './github_client.js'
@@ -92,18 +93,32 @@ export async function runGithubLogin(argv, ctx) {
   try {
     ctx.stdout.write('GitHub login requests repo access, including private repositories. GitHub grants write permissions with this scope; HypAware only reads.\n')
     if (rt.env[rt.config.token_env]?.trim()) ctx.stdout.write(`Environment override ${rt.config.token_env} remains the effective capture credential.\n`)
-    const account = await loginGithub(rt.stateDir, {
-      signal: abort.signal,
-      onCode(code, uri) {
-        ctx.stdout.write(`Open ${uri} and enter code: ${code}\nWaiting for GitHub authorization (Ctrl-C to cancel)...\n`)
-        if (!argv.includes('--no-browser')) openBrowser(uri)
-      },
-    })
+    // The device code is only needed while the sign-in is open, so on a
+    // terminal it is drawn above the wait's spinner and goes with it
+    // (LLP 0437 #regions). Off a terminal it prints once, as it arrives.
+    const waiting = 'Waiting for GitHub authorization (Ctrl-C to cancel)...'
+    const animate = spinnerAnimates(ctx.stdout, rt.env)
+    /** @type {string[]} */
+    let codeLines = []
+    const account = await withSpinner(
+      { stdout: ctx.stdout, env: rt.env, label: waiting, quietWhenPlain: true, above: () => codeLines },
+      () => loginGithub(rt.stateDir, {
+        signal: abort.signal,
+        onCode(code, uri) {
+          codeLines = [`Open ${uri} and enter code: ${code}`]
+          if (!animate) ctx.stdout.write(`${codeLines[0]}\n${waiting}\n`)
+          if (!argv.includes('--no-browser')) openBrowser(uri)
+        },
+      })
+    )
     rt.log.info('github.login_completed', { operation: 'github.login', status: 'ok', source: 'oauth' })
-    ctx.stdout.write(`GitHub: signed in as ${account.login}.\n`)
+    ctx.stdout.write(`✓ Signed in to GitHub as ${account.login}\n`)
     return 0
   } catch (err) {
     rt.log.warn('github.login_failed', { operation: 'github.login', error_kind: /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind ?? 'github_auth_store' })
+    // A Ctrl-C is the user's own answer, and the terminal already shows it;
+    // a caller that carries on (setup) says what it means for them.
+    if (abort.signal.aborted) return 130
     ctx.stderr.write(`hyp github login: ${errMessage(err)}\n`)
     return 1
   } finally {

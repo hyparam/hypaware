@@ -227,7 +227,7 @@ test('wizardStepProgress: an uncommitted pathway has no denominator', async () =
 
 // --- orchestrator threading ---
 
-// @ref LLP 0435#headings [tests]: the menus carry the count, the finish step a heading
+// @ref LLP 0437#headings [tests]: the menus carry the count, the finish step a heading
 test('runInitWizard: the local pathway counts on its menu and heads the finish step', async () => {
   const { opts, seen } = wizardOpts(await tmpHome())
   const result = await runInitWizard(opts)

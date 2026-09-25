@@ -83,7 +83,7 @@ export async function runWizardJoin(opts) {
 async function runJoinFlow(opts, span) {
   // A plain heading, not a step count: it stays on screen, and a count only
   // helps on a live menu, where it goes with the menu.
-  // @ref LLP 0435#headings [implements]: permanent lines carry headings, live menus carry the step count
+  // @ref LLP 0437#headings [implements]: permanent lines carry headings, live menus carry the step count
   opts.stdout.write('Joining your team\n')
 
   const runLogin = opts.runLogin ?? (() => defaultRunLogin(opts))
