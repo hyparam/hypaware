@@ -75,6 +75,13 @@ The basic neighbor reader retains its existing semantics below a cap of
 query and a shared five-second cancellation signal. It explicitly refuses a
 read over the row cap. Evidence lookups allow at most two provenance hops and
 require exactly one matching row at each hop.
+
+> **Extended-by: [LLP 0431 §bounded-frontiers](./0431-frontier-scoped-graph-reads.spec.md#bounded-frontiers).**
+> The cancellation signal is no longer one shared value. The frontier-scoped
+> neighbor traversal arms a thirty-second abort signal and wall-clock deadline,
+> so sequential frontier reads on cold or unindexed storage get more time inside
+> the same row and payload budgets. Evidence lookups keep the five-second signal.
+
 This bounds materialization and traversal, not physical storage scans: predicate
 pushdown and cancellation remain the query engine's responsibility. It is not a
 persisted adjacency index or a prompt hook. Projection and enrichment remain
