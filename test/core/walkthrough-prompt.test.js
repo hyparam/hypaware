@@ -29,6 +29,9 @@ test('picker prompt prints context under source options and defaults export to l
     stdin: /** @type {any} */ (input),
     // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
     platform: 'darwin',
+    // Stub detection: a host with a detected client pre-checks its row,
+    // which swaps the prompt line the answer hook waits for.
+    detect: async () => new Set(),
     env: {
       HOME: tmp,
       HYP_HOME: path.join(tmp, '.hyp'),
@@ -297,6 +300,9 @@ test('a dropped terminal at the source picker cancels the run instead of install
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
+    // Stub detection: a detected client pre-checks its row, and enter
+    // (or EOF) then keeps it instead of cancelling.
+    detect: async () => new Set(),
     env: { HOME: tmp, HYP_HOME: path.join(tmp, '.hyp') },
   })
 
