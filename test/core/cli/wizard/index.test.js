@@ -737,7 +737,7 @@ test('runInitWizard: a skipped sync step leaves the new-folder title tool-free',
     fork: async () => 'team',
     catalog,
     pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex] }),
-    syncScope: async () => ({ skipped: true, noQuestion: true }),
+    syncScope: async () => ({ skipped: true }),
   })
   await runInitWizard(opts)
   assert.deepEqual(opts._folderOpts.names, [], 'no list the run can stand behind, so no names')

@@ -68,7 +68,7 @@ export async function runWizardSyncScope(opts) {
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
-    return await finishSpan({ skipped: true, noQuestion: true }, opts)
+    return await finishSpan({ skipped: true }, opts)
   }
 
   const candidateIds = new Set(opts.candidates.map((d) => d.id))
@@ -112,7 +112,7 @@ export async function runWizardSyncScope(opts) {
       } else {
         said.write(`✓ Nothing syncs to ${server}\n`)
       }
-      return await finishSpan({ noQuestion: true }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+      return await finishSpan({}, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
     // A hidden pick beside the org rows is the machine's own capture, not
     // the fleet's: the org rows get their line, and the hidden pick gets a
@@ -123,10 +123,7 @@ export async function runWizardSyncScope(opts) {
     if (hiddenCandidates.length > 0 && hiddenCandidateSyncs) {
       said.write(`✓ Capture already set up on this machine also syncs to ${server}\n`)
     }
-    // A statement, not a screen: `noQuestion` is what tells the lane after
-    // this one that there is nothing here to step back *to* (LLP 0191
-    // #back-edges).
-    return await finishSpan({ noQuestion: true }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+    return await finishSpan({}, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
   }
 
   // The statement that names what leaves the machine (LLP 0188
@@ -134,7 +131,7 @@ export async function runWizardSyncScope(opts) {
   // applied after the config commits (`commitWizardSyncScope`).
   // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
   stateSyncing(opts.statement ?? opts.stdout, server, opts.locked ?? [], opts.candidates)
-  return await finishSpan({ noQuestion: true, pendingSources: [...candidateIds] }, opts, {
+  return await finishSpan({ pendingSources: [...candidateIds] }, opts, {
     hidden_picks_syncing: hiddenCandidateSyncs,
   })
 }
