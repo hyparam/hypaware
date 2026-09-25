@@ -217,8 +217,11 @@ export function createSinkRegistry() {
    * instantiate time (issue #1568). `supports` is a declaration made once,
    * matching the manifest's `contributes.sinks[].supports`
    * (LLP 0014 #queryable-sinks), not a per-instance negotiation, so what this
-   * registry checked, and published in `sink.contribute`, is what every later
-   * step gets.
+   * registry checked for a registration, and published in that registration's
+   * `sink.contribute`, is what every later step for an instance built from it
+   * gets. Per registration, not per contribution object: one object can hold
+   * two of them, which is why `registeredSupports` resolves on the owner as
+   * well as the object (issue #1582).
    *
    * `plugin` is checked against the registrar rather than taken on trust, the
    * way `SourceRegistry.register` checks it. It is half the key this registry
@@ -344,22 +347,46 @@ export function createSinkRegistry() {
   }
 
   /**
-   * The `supports` this registry validated for `contribution`, found by object
-   * identity so no plugin-controlled property picks the record.
+   * The `supports` this registry validated for the registration `owner` made
+   * of `contribution`, found by object identity plus the owner the kernel
+   * resolved, so no plugin-controlled property picks the record.
    *
    * `instantiate` is handed the contribution by its caller
    * (`src/core/sinks/materialize.js`), not by this index, and what the caller
    * has is the object `listContributions()` gave it, so identity finds the
-   * registration behind every configured sink. A contribution that was never
-   * registered has no validated tags to prefer, so its own are read, once.
+   * registrations behind every configured sink. Identity alone does not find
+   * *the* registration: `contribution.plugin` is a live plugin-written
+   * property, so the registrar check in `register` binds each registration to
+   * the plugin the kernel saw call it without forcing one object to answer one
+   * name, and two plugins sharing a contribution (a shared module, or one
+   * handed over as a capability value) hold two registrations of it with two
+   * separately validated tag sets (issue #1582).
+   *
+   * `owner` is what `instantiate` read off the `ActivePlugin` record the
+   * kernel's materializer took out of the config row, so it is both the value
+   * every other label on the instance comes from and the `entry.plugin`
+   * `materializeRequest`/`materializeBlob` filtered the listing on to reach
+   * this contribution: the entry selected here is the one the caller chose.
+   *
+   * An identity match under another owner is still preferred over reading the
+   * contribution, because a host driving this registry itself records no owner
+   * (`ownerName` answers `''`) and reading the plugin's live property is the
+   * drift #1568 closed. A contribution that was never registered has no
+   * validated tags to prefer, so its own are read, once.
    *
    * @param {SinkContribution} contribution
+   * @param {string} owner
    * @returns {SinkSupportTag[]}
    */
-  function registeredSupports(contribution) {
+  function registeredSupports(contribution, owner) {
+    /** @type {SinkSupportTag[] | undefined} */
+    let identityMatch
     for (const entry of contributions.values()) {
-      if (entry.contribution === contribution) return entry.supports
+      if (entry.contribution !== contribution) continue
+      if (entry.plugin === owner) return entry.supports
+      if (identityMatch === undefined) identityMatch = entry.supports
     }
+    if (identityMatch !== undefined) return identityMatch
     const declared = contribution.supports
     return Array.isArray(declared) ? declared : []
   }
@@ -426,7 +453,10 @@ export function createSinkRegistry() {
     // `handle.plugin` the driver's `sink.export` spans, its per-tick record
     // and `hyp sync`'s destination line (issue #1562).
     const owner = ownerName(args.plugin)
-    const supports = resolveSupports(registeredSupports(contribution), args.kind === 'blob' ? args.encoder : undefined)
+    const supports = resolveSupports(
+      registeredSupports(contribution, owner),
+      args.kind === 'blob' ? args.encoder : undefined
+    )
     // Emit `sink.resolved` ahead of the destination's `create()` so the
     // resolved writer+destination+supports tuple lands in logs even when
     // `create` is slow or fails. Status code (`hyp_status`) and `hyp_sink_*`
