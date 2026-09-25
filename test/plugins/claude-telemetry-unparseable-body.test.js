@@ -268,7 +268,8 @@ test('overlapping loadSpooledBodies calls for one body_ref issue exactly one rea
 // `bodies`: the second event read the file again after the first event had
 // deleted it, saw ENOENT, and counted `missing`, so one result called one ref
 // both `unparseable` and `missing`. The shared `reading` entry does not
-// cover it: it is dropped when the read settles, before the first `unlink`.
+// cover it: this call releases it as its own classification finishes, which
+// for a body it deleted is still before the loop reaches the second event.
 test('one batch naming an unparseable body_ref twice counts it once, never missing', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dup-'))
   const realReadFile = fsp.readFile
@@ -300,4 +301,368 @@ test('one batch naming an unparseable body_ref twice counts it once, never missi
     fsp.readFile = realReadFile
     await fsp.rm(dir, { recursive: true, force: true })
   }
+})
+
+// A shared read dropped the moment it settles leaves the window between the
+// read and the `unlink` uncovered: a caller arriving inside it finds no entry,
+// reads the file for itself, sees ENOENT for a body that was never legitimately
+// missing, and counts `missing` where every other caller counts `unparseable`
+// (#2053). The window is real but short, so it is pinned by holding the removal
+// open rather than by racing it.
+test('a caller arriving while an unparseable body is being removed still calls it unparseable', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-window-'))
+  const realUnlink = fsp.unlink
+  try {
+    const content = 'not json at all'
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, content, 'utf8')
+    const events = [{
+      name: 'api_request_body',
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    }]
+    /** @type {(value?: unknown) => void} */
+    let removed = () => {}
+    const fileIsGone = new Promise((resolve) => { removed = resolve })
+    /** @type {(value?: unknown) => void} */
+    let release = () => {}
+    const finishRemoval = new Promise((resolve) => { release = resolve })
+    // The real removal happens, then the arm is held open: the file is off the
+    // disk while the first call is still inside it.
+    fsp.unlink = /** @type {any} */ (async (/** @type {string} */ target) => {
+      if (target !== file) return realUnlink(target)
+      await realUnlink(target)
+      removed()
+      await finishRemoval
+    })
+    const first = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    await fileIsGone
+    const second = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    // One tick, so the second call reaches its classification while the first
+    // still owns the removal.
+    await new Promise((resolve) => setImmediate(resolve))
+    release()
+    const [a, b] = await Promise.all([first, second])
+    assert.equal(a.unparseable + b.unparseable, 2, 'both callers classified the same body the same way')
+    assert.equal(a.missing + b.missing, 0, 'a body being removed is not a body that was missing')
+    assert.equal(
+      a.unparseableBytes + b.unparseableBytes,
+      content.length,
+      'one file left the disk, so its bytes are reported once'
+    )
+  } finally {
+    fsp.unlink = realUnlink
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// How many whole macrotasks a `loadSpooledBodies` call survives is not a
+// property of this code, and not a property of the scheduler either: it is a
+// wall-clock race between the call's two `fs` operations and the turns an
+// otherwise-empty loop spins while they are in flight, and both sides move
+// independently. Measured on one box the pair settles in about 68us on Node 26
+// against about 110us on Node 22, while an empty `setImmediate` turn costs
+// about 2.4us on both, so the same call spans roughly 28 turns on one and 44 on
+// the other. Machine speed and whatever else is running move it just as far,
+// and it drifts within a single run.
+//
+// So the separations are not a fixed schedule and not a measured one either.
+// Trial `n` waits for the number of trailing 1 bits in `n`, which is 0 for
+// every second trial, 1 for every fourth, 2 for every eighth, and so on. That
+// spreads the second call geometrically over the first call's lifetime without
+// anyone having to know how long that lifetime is, and it puts exactly half the
+// trials at a separation that cannot fail to overlap, because no `await` runs
+// between the statement that issues the first call and the one that issues the
+// second.
+/**
+ * @param {number} n
+ * @returns {number}
+ */
+function tickOffset(n) {
+  let ticks = 0
+  while ((n & 1) === 1) {
+    ticks += 1
+    n >>= 1
+  }
+  return ticks
+}
+
+// The same defect measured the way it was found: a second call separated from
+// the first by whole macrotasks, so it lands wherever the first call's read and
+// removal happen to be. A trial only counts when the second call was issued
+// before the first returned - a second call that starts after the first has
+// fully finished overlaps nothing and proves nothing - so the overlapping count
+// is asserted too, or a machine could pass this vacuously. Both halves of that
+// are asserted: the total, which the previous fixed separations of
+// [0, 5, 10, 20] could not hold once Node 26 retired the read and the unlink in
+// fewer turns than Node 22 did, and the share of it contributed by trials that
+// actually waited, so a run where the second call only ever overlapped
+// trivially fails too.
+test('macrotask-separated overlapping callers never miscount one unparseable body', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-sep-'))
+  try {
+    const content = 'not json at all'
+    const trials = 300
+    let waited = 0
+    let overlapping = 0
+    let overlappingWaited = 0
+    let miscounts = 0
+    let badBytes = 0
+    for (let trial = 0; trial < trials; trial++) {
+      const separation = tickOffset(trial)
+      if (separation > 0) waited += 1
+      const file = path.join(root, `broken.${trial}.request.json`)
+      await fsp.writeFile(file, content, 'utf8')
+      const events = [{
+        name: 'api_request_body',
+        timestamp: '2026-08-17T19:31:00.000Z',
+        attributes: { body_ref: file, request_id: REQUEST_ID },
+      }]
+      let firstReturned = false
+      const first = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: root })
+        .then((result) => { firstReturned = true; return result })
+      for (let tick = 0; tick < separation; tick++) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      // Sampled and used in one synchronous run, after the tick loop drained
+      // the microtask queue, so it is exact at the instant the second call
+      // claims (or fails to claim) the shared read.
+      const overlapped = !firstReturned
+      const second = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: root })
+      const [a, b] = await Promise.all([first, second])
+      if (!overlapped) continue
+      overlapping += 1
+      if (separation > 0) overlappingWaited += 1
+      if (a.unparseable + b.unparseable !== 2 || a.missing + b.missing !== 0) miscounts += 1
+      if (a.unparseableBytes + b.unparseableBytes !== content.length) badBytes += 1
+    }
+    // The floor it always had, half of every trial run, and it is now met by
+    // construction rather than by luck: the half of the trials that wait no
+    // ticks at all overlap unless overlapping itself has stopped happening,
+    // which is the one thing this is here to catch.
+    assert.ok(
+      overlapping >= trials / 2,
+      `too few genuinely-overlapping trials to prove anything (${overlapping} of ${trials})`
+    )
+    // Meeting the floor with the free half alone would prove only that a call
+    // cannot return before the statement after it runs. The trials that waited
+    // at least one macrotask have to have landed inside the first call too.
+    assert.ok(
+      overlappingWaited >= waited / 2,
+      `too few of the trials that waited actually overlapped (${overlappingWaited} of ${waited})`
+    )
+    assert.equal(miscounts, 0, `${miscounts} of ${overlapping} overlapping trials miscounted`)
+    assert.equal(badBytes, 0, `${badBytes} of ${overlapping} overlapping trials misreported bytes`)
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true })
+  }
+})
+
+// Holding the shared read past its own settlement is what closes that window,
+// so the entry now has to be released by whichever arm classified the bytes,
+// on every exit path. A leaked entry is directly observable: a later caller
+// naming the same ref would be handed the stale promise and would issue no
+// `readFile` of its own, so counting reads on a probe call is a residency
+// assertion on the map.
+test('the shared read is released on every exit path of loadSpooledBodies', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-residency-'))
+  const realReadFile = fsp.readFile
+  const realUnlink = fsp.unlink
+  /** @param {string} file */
+  const eventsFor = (file) => /** @type {any} */ ([{
+    name: 'api_request_body',
+    timestamp: '2026-08-17T19:31:00.000Z',
+    attributes: { body_ref: file, request_id: REQUEST_ID },
+  }])
+  /**
+   * Drive one exit path, then probe whether the map still holds its read.
+   * @param {string} name
+   * @param {(file: string) => Promise<void>} drive
+   */
+  const probeAfter = async (name, drive) => {
+    const file = path.join(root, `${name}.request.json`)
+    await drive(file)
+    let reads = 0
+    fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+      if (target === file) reads += 1
+      return realReadFile(target)
+    })
+    try {
+      await loadSpooledBodies(eventsFor(file), { spoolDir: root })
+    } finally {
+      fsp.readFile = realReadFile
+    }
+    assert.equal(reads, 1, `${name} left its read in the map`)
+  }
+  try {
+    // The read rejected: nothing was read, so nothing will be removed.
+    await probeAfter('missing', async (file) => {
+      await loadSpooledBodies(eventsFor(file), { spoolDir: root })
+    })
+    // Unparseable, and this call owned the removal.
+    await probeAfter('removed', async (file) => {
+      await fsp.writeFile(file, 'not json at all', 'utf8')
+      await loadSpooledBodies(eventsFor(file), { spoolDir: root })
+    })
+    // Unparseable, and the removal itself failed: the `finally` still runs.
+    await probeAfter('unremovable', async (file) => {
+      await fsp.writeFile(file, 'not json at all', 'utf8')
+      fsp.unlink = /** @type {any} */ (async (/** @type {string} */ target) => {
+        if (target === file) throw new Error('EPERM')
+        return realUnlink(target)
+      })
+      try {
+        await loadSpooledBodies(eventsFor(file), { spoolDir: root })
+      } finally {
+        fsp.unlink = realUnlink
+      }
+    })
+    // Decoding threw: a body past the runtime's maximum string length leaves
+    // the loop without reaching any of the releases below it.
+    await probeAfter('undecodable', async (file) => {
+      await fsp.writeFile(file, 'not json at all', 'utf8')
+      // Throws only while the drive runs, so a leaked entry shows up as the
+      // probe reusing it rather than as the same error thrown twice.
+      let decodable = false
+      fsp.readFile = /** @type {any} */ (async (/** @type {string} */ target) => {
+        if (target !== file) return realReadFile(target)
+        return {
+          length: 1,
+          toString() {
+            if (!decodable) throw new Error('string too long')
+            return 'not json at all'
+          },
+        }
+      })
+      try {
+        await assert.rejects(loadSpooledBodies(eventsFor(file), { spoolDir: root }))
+      } finally {
+        fsp.readFile = realReadFile
+        decodable = true
+      }
+    })
+    // Unparseable, on the `removing.has(file)` early continue: the two callers
+    // that are not the removal's owner take that branch and release nothing,
+    // and the owner's `finally` still clears the entry.
+    await probeAfter('conceded', async (file) => {
+      await fsp.writeFile(file, 'not json at all', 'utf8')
+      await Promise.all([
+        loadSpooledBodies(eventsFor(file), { spoolDir: root }),
+        loadSpooledBodies(eventsFor(file), { spoolDir: root }),
+        loadSpooledBodies(eventsFor(file), { spoolDir: root }),
+      ])
+    })
+    // Projected: the file outlives the read, and `deleteSpooledBodies` removes
+    // it once the batch is written, so there is no removal to outlive.
+    await probeAfter('projected', async (file) => {
+      await fsp.writeFile(file, JSON.stringify({ model: 'claude-x', messages: [] }), 'utf8')
+      await loadSpooledBodies(eventsFor(file), { spoolDir: root })
+    })
+  } finally {
+    fsp.readFile = realReadFile
+    fsp.unlink = realUnlink
+    await fsp.rm(root, { recursive: true, force: true })
+  }
+})
+
+// `releaseRead` matches on promise identity, so an arm releases the entry only
+// while the map still hands that promise out. A caller can take the removal
+// holding a promise the map has already let go of: it claimed the entry while
+// an earlier owner was still removing, then resumed after that owner's
+// `finally` cleared it. Whatever a later caller puts in the map concedes to
+// that owner and releases nothing, and the owner's own release matches nothing,
+// so the entry outlives every caller and its bytes are handed out forever
+// (#2053). The alignment is one microtask wide, so the second call is scheduled
+// off the same promise the first owner's removal waits on and its depth in that
+// chain is swept, which orders the two without depending on how many turns
+// anything else takes. Only the depth that lands the second call between the
+// first owner's claim and its `finally` proves anything, and which depth that is
+// is not a property of this code, so the sweep is asserted to have reached that
+// state at least once: the state is a second owner that took the removal having
+// issued no read of its own, which it can only have done by holding the promise
+// the first owner put in the map.
+//
+// Both waits are keyed on events, not on a fixed number of macrotask turns:
+// the first call's `readFile` is real threadpool I/O, and on a loaded box it
+// can outlive any fixed window (the full suite runs test files in parallel,
+// and 20 turns was not enough there), which released the first owner before
+// it ever reached its removal and starved every depth of the state under
+// test. Waiting for the removal to actually start, and sampling once the
+// second call has either finished or started its own removal, keeps the
+// schedule the depth chain orders without betting on how long the I/O takes.
+test('an owner holding a promise the map let go of still leaves the map empty', async () => {
+  const realReadFile = fsp.readFile
+  const realUnlink = fsp.unlink
+  /** @param {string} file */
+  const eventsFor = (file) => /** @type {any} */ ([{
+    name: 'api_request_body',
+    timestamp: '2026-08-17T19:31:00.000Z',
+    attributes: { body_ref: file, request_id: REQUEST_ID },
+  }])
+  const settle = async () => {
+    for (let turn = 0; turn < 20; turn++) await new Promise((resolve) => setImmediate(resolve))
+  }
+  let sawStaleOwner = false
+  for (let depth = 0; depth <= 8; depth++) {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-stale-'))
+    try {
+      const file = path.join(root, 'broken.request.json')
+      await fsp.writeFile(file, 'not json at all', 'utf8')
+      let reads = 0
+      fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+        if (target === file) reads += 1
+        return realReadFile(target)
+      })
+      let removals = 0
+      /** @type {(value?: unknown) => void} */
+      let releaseFirst = () => {}
+      const firstHeld = new Promise((resolve) => { releaseFirst = resolve })
+      /** @type {(value?: unknown) => void} */
+      let releaseSecond = () => {}
+      const secondHeld = new Promise((resolve) => { releaseSecond = resolve })
+      /** @type {(value?: unknown) => void} */
+      let signalFirstRemoval = () => {}
+      const firstRemovalStarted = new Promise((resolve) => { signalFirstRemoval = resolve })
+      /** @type {(value?: unknown) => void} */
+      let signalSecondRemoval = () => {}
+      const secondRemovalStarted = new Promise((resolve) => { signalSecondRemoval = resolve })
+      // Every removal fails and the file stays, which is what lets a later
+      // caller read real bytes while an earlier one still owns the removal.
+      fsp.unlink = /** @type {any} */ (async (/** @type {string} */ target) => {
+        if (target !== file) return realUnlink(target)
+        removals += 1
+        if (removals === 1) { signalFirstRemoval(); await firstHeld }
+        if (removals === 2) { signalSecondRemoval(); await secondHeld }
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' })
+      })
+      const first = loadSpooledBodies(eventsFor(file), { spoolDir: root })
+      // Not a settle: the first call's read is real I/O, so wait for the call
+      // to have entered its removal (and so registered on `firstHeld` ahead of
+      // the chain below) rather than for a turn count to have elapsed.
+      await firstRemovalStarted
+      /** @type {Promise<unknown>} */
+      let chain = firstHeld
+      for (let hop = 0; hop < depth; hop++) chain = chain.then(() => {})
+      const second = chain.then(() => loadSpooledBodies(eventsFor(file), { spoolDir: root }))
+      releaseFirst()
+      // The second call either takes the removal (and blocks on `secondHeld`
+      // inside it) or concedes and finishes: whichever happens, this settles,
+      // where a fixed turn count could sample before the call got that far.
+      await Promise.race([second, secondRemovalStarted])
+      // Sampled before the third call and before the probe resets the counter.
+      if (removals >= 2 && reads === 1) sawStaleOwner = true
+      const third = loadSpooledBodies(eventsFor(file), { spoolDir: root })
+      await settle()
+      releaseSecond()
+      await Promise.all([first, second, third])
+      reads = 0
+      await loadSpooledBodies(eventsFor(file), { spoolDir: root })
+      assert.equal(reads, 1, `a promise the map let go of was left in it (depth ${depth})`)
+    } finally {
+      fsp.readFile = realReadFile
+      fsp.unlink = realUnlink
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  }
+  assert.ok(sawStaleOwner, 'no depth put a second owner on a promise it never read, so the sweep proved nothing')
 })
