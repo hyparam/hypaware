@@ -33,7 +33,9 @@ consistent, as the previous separate node and edge reads were.
 The 100,000 physical-result-row budget per dataset is cumulative across the
 request, including duplicate rows, repeated endpoint reads and evidence
 lookups. The extra LIMIT row detects overflow. Preserve the SQL engine's
-128 MiB per-query heap-growth guard and shared five-second abort signal.
+128 MiB per-query heap-growth guard. Extend LLP 0428's shared traversal abort
+signal to thirty seconds, allowing sequential frontier reads on cold or
+unindexed storage more time within the same row and memory budgets.
 Additionally cap cumulative materialized payload at 128 MiB (UTF-16 string
 length, serialized JSON length and a fixed per-cell allowance). This is a
 payload estimate, not an exact V8 heap limit; query intermediates retain the

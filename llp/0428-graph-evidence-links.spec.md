@@ -81,6 +81,12 @@ persisted adjacency index or a prompt hook. Projection and enrichment remain
 offline corpus operations. No retrieval-quality gain is claimed without an
 equal-budget comparison.
 
+> **Extended-by: [LLP 0431 §bounded-frontiers](./0431-frontier-scoped-graph-reads.spec.md#bounded-frontiers).**
+> The cancellation signal is no longer one shared value. The frontier-scoped
+> neighbor traversal arms a thirty-second abort signal and wall-clock deadline,
+> so sequential frontier reads on cold or unindexed storage get more time inside
+> the same row and payload budgets. Evidence lookups keep the five-second signal.
+
 
 T1 refuses sessions over 10,000 parts or 2,000,000 transcript characters before
 submission, without advancing their watermark. It accepts at most 128 candidates
