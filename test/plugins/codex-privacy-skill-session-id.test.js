@@ -214,10 +214,14 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
     /- `"recorders"` contains an entry for `gateway`[\s\S]{0,240}A list without one means the gateway was never addressed\b/,
     'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
   )
+  // The pin is on the claim, not on its position or its punctuation: it
+  // fires anywhere in Step 1, however the apposition is joined. It is still a
+  // literal, so another verb form of the same claim ("the recorder capturing
+  // this session") is not covered; that gap is issue #2167.
   assert.doesNotMatch(
     prose,
     /recorder that captures this session/,
-    'and must not describe gateway as the recorder that captures this session, in any phrasing: on the default `transcript` capture_mode nothing reaches it'
+    'and must not describe gateway as the recorder that captures this session, anywhere in Step 1 and however it is punctuated: on the default `transcript` capture_mode nothing reaches it'
   )
 })
 
