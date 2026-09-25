@@ -607,3 +607,68 @@ test('an empty batch is returned untouched', async () => {
   const out = await enricher({ agentsDir }).settle([], NO_CTX)
   assert.deepEqual(out, [])
 })
+
+// The gateway's settle selection (LLP 0441) now also hands this enricher a
+// row it never used to see: an in-batch successor of a fallback row, already
+// carrying native identity and a non-null cwd, selected purely so the
+// claude-side relink can reach it. This enricher's drop gate reads the
+// SESSION HEADER's cwd, not the row's own, and its identity upgrade falls
+// through to the ordinal/time fallback for a row with no match_key - a
+// native row never has one - so without a guard such a row would be
+// dropped by an unrelated header verdict and could have its already-correct
+// identity overwritten by an ordinal match. The fallback predecessor must be
+// governed exactly as it always was.
+// @ref LLP 0441#no-new-drop-authority [tests]: a row this pass was handed
+// only for the relink comes back untouched - no header-cwd drop, no
+// ordinal/time rename - while a genuine fallback row still settles and
+// drops exactly as before.
+test('a native successor of a fallback row is returned untouched, not dropped or ordinal-renamed', async () => {
+  const agentsDir = writeSessionFile(realisticSessionRecords())
+  const wire = realisticWireMessages()
+
+  // The predecessor: a genuine gateway_fallback row, content-matching the
+  // session file's first message so the group binds to this file.
+  const predecessor = fallbackRow({
+    role: wire[0].role,
+    content: wire[0].content,
+    messageIndex: 0,
+    ts: wire[0].ts,
+  })
+
+  // The successor: already native (its own message_id, part_id and cwd),
+  // carries no openclaw.match_key (a native row never does), and its
+  // previous_message_id names the predecessor's pre-settlement fallback id -
+  // exactly the shape the widened selection now hands this enricher.
+  // message_index/role/timestamp are deliberately aligned with the file's
+  // own msg-0004 so the ordinal/time fallback WOULD match and rename it if
+  // this pass did not skip it first.
+  const successor = {
+    session_id: HASH_SESSION_ID,
+    client_name: 'openclaw',
+    conversation_source: 'openclaw',
+    message_id: 'native-real-id-777',
+    part_id: 'native-real-id-777#0',
+    message_index: 3,
+    part_index: 0,
+    role: 'assistant',
+    message_created_at: iso(T0 + 4_000),
+    cwd: SESSION_CWD,
+    attributes: {},
+    previous_message_id: [/** @type {any} */ (predecessor).message_id],
+  }
+
+  const rows = [predecessor, successor]
+  const out = await enricher({ agentsDir, verdict: 'ignore' }).settle(rows, NO_CTX)
+
+  // Pre-existing fallback-row behavior is unchanged: content-matched, then
+  // dropped by the session's ignore-classed header cwd.
+  assert.equal(out[0], USAGE_POLICY_DROP)
+
+  // The native successor is untouched: same object, not dropped, not
+  // ordinal-renamed onto the file's msg-0004.
+  assert.equal(out[1], successor)
+  assert.notEqual(out[1], USAGE_POLICY_DROP)
+  assert.equal(/** @type {any} */ (out[1]).message_id, 'native-real-id-777')
+  assert.equal(/** @type {any} */ (out[1]).part_id, 'native-real-id-777#0')
+  assert.equal(/** @type {any} */ (out[1]).cwd, SESSION_CWD)
+})

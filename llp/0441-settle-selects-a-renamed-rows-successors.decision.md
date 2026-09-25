@@ -96,6 +96,24 @@ have given the row at projection time had it existed yet, written by the same
 code on the same evidence. It adds an attribute; it removes and changes
 nothing.
 
+The argument above is only true of the claude enricher, whose late-resolve
+returns on `stringValue(row.cwd)` before it ever asks the usage-policy
+resolver anything. The selection this document widens is registered on the
+dataset, not on any one enricher, so it reaches every registered settlement
+enricher, and the OpenClaw enricher (`openclaw/src/settle.js`) does not have
+that guard: its drop gate reads the session file header's `cwd`
+(`index.cwd`), not the row's own. Left unguarded, a newly selected native
+successor with a good cwd would become droppable by an unrelated header
+verdict, and would also fall into the ordinal/time fallback match and risk
+having its already-correct native `message_id` overwritten. The bound is
+therefore held there by an explicit skip at the top of `settle()`'s per-row
+loop: a row that is not a `gateway_fallback` row and already carries a
+non-null `cwd` is returned exactly as it was handed in, no ordinal match
+attempted and no header-cwd drop applied. That same skip is what keeps this
+enricher's ordinal/time fallback from renaming an already-native row, which
+is the fact "One level is enough" rests on: a selected successor is never
+itself renamed, so none of its own successors need selecting in turn.
+
 ## Consequences
 
 - LLP 0440's scoped consequence ("a successor that already carries native
@@ -128,5 +146,12 @@ nothing.
   a settled turn is followed by an already-landed one, single digits per batch
   against a batch that already carried the fallback rows the enricher had to
   read a transcript for. Per added row the enricher does two field reads and a
-  hash lookup, with no new file read and no new allocation unless the row's
-  link actually moved.
+  hash lookup, with one exception the sidechain late-stamp above already
+  names: a newly selected successor that carries an `agent_id` and no
+  `claude.spawned_by_tool_use_id` now satisfies `wantsSpawnedBy`, so
+  `loadAgentMeta` can fire for a session where no previously selected row
+  wanted it, a synchronous `fs.existsSync` plus a directory read, and in the
+  stale-rootDir branch a walk of the projects tree. That load is memoised in
+  `agentMeta` per session per `settle()` call (`??=`, not re-fetched per row),
+  so the added cost is bounded to at most one sidecar resolution per session
+  per flush, not one per added row.

@@ -170,6 +170,14 @@ export function createOpenclawSettlementEnricher(opts) {
         for (const i of indices) {
           const row = rows[i]
 
+          // @ref LLP 0441#no-new-drop-authority [constrained-by]: the gateway's
+          // settle selection now also hands this pass the in-batch successors
+          // of the rows it can rename. Such a row is already native and
+          // already governed by the cwd it carries, so this pass must return
+          // it untouched for the relink to find - no ordinal/time match, and
+          // no header-cwd drop.
+          if (!isFallbackRow(row.attributes) && stringValue(row.cwd)) continue
+
           // 1. Identity upgrade. Content match first (strong evidence);
           // only on a miss does the ordinal/time fallback run, as a
           // separate second pass (LLP 0161 Section 5), never merged into
@@ -535,6 +543,22 @@ function readMatchKey(attributes) {
   const openclaw = parsed.openclaw
   if (!isPlainObject(openclaw)) return undefined
   return stringValue(openclaw.match_key)
+}
+
+/**
+ * Whether a row still carries the gateway's fallback-identity marker,
+ * matching the gateway dataset's own `isFallbackRow` test exactly (the two
+ * must agree: a backfill fallback row has no `openclaw.match_key` either, so
+ * "has no match_key" is not a safe substitute here - it would also match a
+ * row this test correctly leaves alone).
+ *
+ * @param {unknown} attributes
+ */
+function isFallbackRow(attributes) {
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  if (!isPlainObject(parsed)) return false
+  const gateway = parsed.gateway
+  return isPlainObject(gateway) && gateway.identity_source === 'gateway_fallback'
 }
 
 /**
