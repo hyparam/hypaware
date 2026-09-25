@@ -184,9 +184,15 @@ export function createClaudeSettlementEnricher(opts) {
             const key = readMatchKey(row.attributes)
             if (key) {
               const toolMatch = findOtelToolMatch(row, index)
-              const match = toolMatch
-                ?? index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
-              if (match && match.provider_uuid) row = upgradeRow(row, match, toolMatch !== undefined)
+              // A uuid-less tool match knows less than the content key: fall
+              // through instead of letting `match.provider_uuid` below reject
+              // the row outright. Keep this a ternary, not `??`: `toolMatch`
+              // is truthy even without a `provider_uuid`, so `??` would never
+              // reach the content-key fallback.
+              const match = toolMatch?.provider_uuid
+                ? toolMatch
+                : index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
+              if (match && match.provider_uuid) row = upgradeRow(row, match, match === toolMatch)
             }
           }
 
@@ -454,9 +460,16 @@ function findOtelToolMatch(row, index) {
 function upgradeRow(row, match, resolveAgent = false) {
   const upgraded = { ...row }
   assignTranscriptIdentity(upgraded, match)
-  // A replayed parent tool in a subagent body belongs to the main loop. Clear
-  // the event's provisional label as well as replacing it for sidechains.
-  if (resolveAgent) {
+  // A resolved transcript line replaces the event's provisional label: a
+  // replayed parent tool in a subagent body belongs to the main loop, so its
+  // label is cleared as well as replaced for sidechains. But this tool-id
+  // lookup also admits the proxy lane (conversation_source 'claude_code' is
+  // the claude-cli User-Agent, not an OTEL marker), whose agent_id comes from
+  // the authoritative x-claude-code-agent-id request header. A line that
+  // claims `isSidechain: true` while naming no agentId knows less than that
+  // header, so leave the row's agent_id/is_sidechain alone in that case -
+  // clearing it would also drop the row's spawned_by late-stamp below.
+  if (resolveAgent && (match.agent_id || !match.is_sidechain)) {
     upgraded.agent_id = match.agent_id
     upgraded.is_sidechain = match.is_sidechain ?? (match.agent_id ? true : undefined)
   }
