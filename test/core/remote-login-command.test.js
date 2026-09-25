@@ -323,6 +323,21 @@ test('a configured persisted_path is honored and non-matching central sinks are 
   await assert.rejects(fs.access(otherPath))
 })
 
+// @ref LLP 0063#d3 [tests]: the wide pre-auth notice names the destination the way serverDisplayName does
+test('wide login notice names the destination before the browser opens', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, both } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(
+    both.join(''),
+    /^ {2}your recorded sessions are sent to hyp\.internal and a background$/m,
+    'the wide notice names the target host, not a hard-coded product'
+  )
+})
+
 test('compact login (the wizard join lane) prints one line per event and no privacy block', async () => {
   const hypHome = await tmpHome()
   const { ctx, both } = await makeCtx({ hypHome })

@@ -130,7 +130,7 @@ test('a gate naming an eofValue takes it, not the acting default, when stdin end
     env: { HYP_NO_TUI: '1' },
   })
   const answer = ask(/** @type {any} */ ({
-    title: 'This machine syncs to HypAware Cloud. Disconnect and go local-only?',
+    title: 'This machine syncs to the cloud. Disconnect and go local-only?',
     options: [
       { value: 'disconnect', label: 'Yes, disconnect' },
       { value: 'stay', label: 'No, stay connected' },
@@ -152,7 +152,7 @@ test('a gate naming an eofValue still honours an explicit pick', async () => {
     env: { HYP_NO_TUI: '1' },
   })
   const answer = ask(/** @type {any} */ ({
-    title: 'This machine syncs to HypAware Cloud. Disconnect and go local-only?',
+    title: 'This machine syncs to the cloud. Disconnect and go local-only?',
     options: [
       { value: 'disconnect', label: 'Yes, disconnect' },
       { value: 'stay', label: 'No, stay connected' },

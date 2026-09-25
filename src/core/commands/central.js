@@ -393,7 +393,7 @@ export async function runLeave(argv, ctx) {
   const parsedArgv = parseCommandArgv(argv, { type: 'object', properties: {} })
   if ('help' in parsedArgv) {
     ctx.stdout.write('usage: hyp leave\n')
-    ctx.stdout.write('  disconnect this machine from HypAware Cloud: stop forwarding and\n')
+    ctx.stdout.write('  disconnect this machine from the cloud: stop forwarding and\n')
     ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
     ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
     return 0
@@ -425,7 +425,7 @@ export async function runLeave(argv, ctx) {
   // lands here with work to do and finishes it - the marker is its own
   // "unfinished teardown" signal, no separate bookkeeping needed.
   if (centralLayerPath === null && unresolvableCentralLayer === null && attachedNames.length === 0) {
-    ctx.stdout.write('hyp leave: this machine is not connected to HypAware Cloud - nothing to do\n')
+    ctx.stdout.write('hyp leave: this machine is not connected to the cloud - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
     // and leave never edits the local layer (#111 doctrine), but a user
     // running `leave` to stop forwarding deserves to know where it lives.

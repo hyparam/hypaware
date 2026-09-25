@@ -723,8 +723,9 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // client still cannot know pre-auth whether a gateway will be minted, so a
   // flat "signing in sends your logs" is false against a forwarding-off org.
   // The notice names two consequences in plain words: logs go to the target's
-  // server (named as the sign-in line names it), and a background service is
-  // installed. D3's third consequence
+  // server (HypAware Cloud or its host, as serverDisplayName names it; the
+  // compact sign-in line uses the same name, the wide one keeps the target
+  // key), and a background service is installed. D3's third consequence
   // (org config that can attach clients and backfill local history) is left
   // out on purpose: it confused new users more than it informed them, and the
   // wizard's later steps show what gets recorded before anything is written.

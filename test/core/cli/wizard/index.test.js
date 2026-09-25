@@ -14,6 +14,7 @@ import { clientSyncListPath, readClientSyncEntries, writeClientSyncEntries } fro
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
+import { centralSeedPath } from '../../../../src/core/config/apply.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
 // the fork/join loop, phase threading (locked/managed), the
@@ -1772,6 +1773,17 @@ for (const scenario of ['cancel', 'back', 'config-failure', 'policy-failure', 'c
     await writeClientSyncEntries({ stateDir, entries: original })
     const configPath = path.join(home, 'config.json')
     await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    if (scenario === 'commit') {
+      // An enrollment the wizard can name, so the commit line has to carry
+      // the server the sync lane resolved rather than fall back.
+      const seedPath = centralSeedPath(stateDir)
+      await fs.mkdir(path.dirname(seedPath), { recursive: true })
+      await fs.writeFile(seedPath, JSON.stringify({
+        version: 2,
+        plugins: [],
+        sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.acme.dev' } } },
+      }))
+    }
     let passes = 0
     let configured = false
     const { opts, stdout } = wizardOpts(home, {
@@ -1822,7 +1834,8 @@ for (const scenario of ['cancel', 'back', 'config-failure', 'policy-failure', 'c
         : original)
     }
     assert.equal(configured, scenario === 'commit' || scenario === 'back')
-    if (scenario === 'commit') assert.match(stdout.text(), /No longer local-only: claude/)
+    // @ref LLP 0437#server-name [tests]: the commit line names the server the sync lane resolved
+    if (scenario === 'commit') assert.match(stdout.text(), /No longer local-only: claude\. Future rows sync to hyp\.acme\.dev;/)
     else assert.doesNotMatch(stdout.text(), /No longer local-only/)
     if (scenario === 'back') assert.equal(passes, 2)
   })

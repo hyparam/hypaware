@@ -357,6 +357,17 @@ test('combined collection and sync clears only selected policies', async (t) => 
   ], stdout.text())
 })
 
+// @ref LLP 0437#server-name [tests]: the revocation line names the server the sync lane resolved
+test('the revocation line names the resolved server when the wizard knows it', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
+  const stdout = makeBuf()
+  const cleared = await commitWizardSyncScope({ env, stdout, sources: ['claude'], server: 'hyp.acme.dev' })
+  assert.equal(cleared, 1)
+  assert.match(stdout.text(), /^No longer local-only: claude\. Future rows sync to hyp\.acme\.dev; /m)
+})
+
 test('combined selection preserves an unreadable policy store and warns', async (t) => {
   const { hypHome, env, stateDir } = await makeHome()
   t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
