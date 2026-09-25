@@ -250,7 +250,7 @@ test('runWizardPick: a seeded needs_setup row is taken on the express path and n
     platform: 'darwin',
     initialSelection: ['codex', 'claude-desktop'],
   }))
-  assert.equal(stdout.text(), '✓ Recording Claude Desktop and Codex\n')
+  assert.equal(stdout.text(), '✓ Recording Claude Desktop and Codex\n✓ Saved settings\n')
   assert.deepEqual(result.sourcesPicked.sort(), ['claude-desktop', 'codex'])
 })
 
@@ -276,8 +276,9 @@ test('runWizardPick: autoAccept takes the default rows and prints what it accept
     locked: ['claude'],
   }))
   // One line, plain names: the locked row is named on the fast path too,
-  // and whether it is the team's is said on the sync line, not here.
-  assert.equal(stdout.text(), '✓ Recording Claude Code and Codex\n')
+  // and whether it is the team's is said on the sync line, not here. The
+  // save confirmation follows it.
+  assert.equal(stdout.text(), '✓ Recording Claude Code and Codex\n✓ Saved settings\n')
   assert.deepEqual(result.sourcesPicked, ['codex'])
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
@@ -593,9 +594,12 @@ test('commitWizardPickedConfig: writes the config, backing up an existing one fi
   })
 
   assert.equal(committed.ok, true)
-  assert.match(stdout.text(), /Backed up existing config to /)
+  assert.equal(stdout.text(), '✓ Saved settings (previous config backed up)\n')
   const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.ok(written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/otel'))
+  const backups = (await fs.readdir(path.dirname(configPath))).filter((f) => f.startsWith('config.json.bak-'))
+  assert.equal(backups.length, 1, 'the existing config is backed up before the write')
+  assert.equal(await fs.readFile(path.join(path.dirname(configPath), backups[0]), 'utf8'), '{"version":2,"plugins":[]}\n')
 })
 
 test('commitWizardPickedConfig: an unattended run without --force refuses without touching the config', async () => {

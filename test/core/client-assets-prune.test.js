@@ -1347,7 +1347,7 @@ test('the wizard finale says how many retired assets it removed', async () => {
   )
   assert.match(
     stdout.text(),
-    /removed 1 retired skill for claude/,
+    /^Removed 1 retired skill for claude$/m,
     'a wizard that deletes a skill under the user\'s nose must count it out loud'
   )
 })

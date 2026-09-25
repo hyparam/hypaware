@@ -139,6 +139,16 @@ instead ("Joining your team", "Finishing setup"), so the finished screen
 never shows a count with gaps in it, and an express run, which shows no
 menus, shows no counts at all.
 
+### The finish step says each act once {#finish}
+
+The finish step reports one line per act, by the names the user picked
+from: the settings saved, each client attached with the one thing to do
+next (restart its open sessions), the clients that got skills, and an
+import only when it wrote rows or failed. Attended and scripted runs print
+the same lines; the scan counts and file paths go to the spans. The one
+difference is the closing summary, which only a scripted run prints: an
+attended run has just watched each act happen.
+
 ### Row accounting {#rows}
 
 The runtime tracks the physical rows of the live region with

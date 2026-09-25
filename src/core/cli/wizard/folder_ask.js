@@ -188,7 +188,7 @@ function stateFolderMode(opts, mode) {
   const now = mode === 'sync' ? 'New folders sync automatically' : 'New folders ask first'
   const undo = mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
   const said = opts.statement ?? opts.stdout
-  said.write(`✓ ${now} (change with ${undo})\n`)
+  said.write(`✓ ${now} (change with \`${undo}\`)\n`)
 }
 
 /**

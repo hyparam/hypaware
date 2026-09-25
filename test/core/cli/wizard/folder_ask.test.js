@@ -70,7 +70,7 @@ test('sync leads, is the bare-enter default, and both rows state their consequen
   assert.ok(state.question.options.every((/** @type {any} */ o) => typeof o.summary === 'string' && o.summary.length > 0))
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
-  assert.equal(stdout.text(), '✓ New folders sync automatically (change with hyp privacy folders ask)\n')
+  assert.equal(stdout.text(), '✓ New folders sync automatically (change with `hyp privacy folders ask`)\n')
 })
 
 test('choosing the ask buys the per-folder question and says how to undo it', async () => {
@@ -84,7 +84,7 @@ test('choosing the ask buys the per-folder question and says how to undo it', as
 
   assert.deepEqual(result, { mode: 'ask' })
   assert.equal(await readFolderAskMode({ stateDir }), 'ask')
-  assert.equal(stdout.text(), '✓ New folders ask first (change with hyp privacy folders sync)\n')
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('the answer is recorded even when it matches the default, so status can read it back', async () => {
@@ -149,7 +149,7 @@ test('autoAccept states the answer and records the default without prompting (LL
   // Never silent: the answer is stated as the same one recap line the
   // asked path prints, and the question's title is not narrated.
   // @ref LLP 0435#recap [tests]: an auto-accepted lane states its answer as one checkmark line
-  assert.equal(stdout.text(), '✓ New folders sync automatically (change with hyp privacy folders ask)\n')
+  assert.equal(stdout.text(), '✓ New folders sync automatically (change with `hyp privacy folders ask`)\n')
 })
 
 test('an express accept round-trips the standing answer instead of resetting it', async () => {
@@ -173,7 +173,7 @@ test('an express accept round-trips the standing answer instead of resetting it'
   assert.deepEqual(result, { mode: 'ask' })
   assert.equal(await readFolderAskMode({ stateDir }), 'ask', 'the standing answer was not overwritten')
   // And the screen reports what is now true, not the constant.
-  assert.equal(stdout.text(), '✓ New folders ask first (change with hyp privacy folders sync)\n')
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('an unwritable preference warns and leaves the previous mode standing', async () => {
@@ -217,7 +217,7 @@ test('a failed write on the express path states the mode that stands, not the on
   // The lane still states its answer, and the answer it states is the one
   // that is true of the machine: the standing mode, not the default the
   // write failed to record.
-  assert.equal(stdout.text(), '✓ New folders ask first (change with hyp privacy folders sync)\n')
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
   // And the failure itself is still reported, in full, on stderr.
   assert.match(stderr.text(), /could not record the new-folder answer/)
   assert.match(stderr.text(), /it stays 'ask'/)
@@ -241,7 +241,7 @@ test('a failed write puts the statement before the warning that qualifies it', a
   const lines = screen.text().split('\n').filter((l) => l !== '')
   assert.deepEqual(
     [lines[0], lines[1]?.slice(0, 7)],
-    ['✓ New folders ask first (change with hyp privacy folders sync)', 'warning'],
+    ['✓ New folders ask first (change with `hyp privacy folders sync`)', 'warning'],
     `the statement must come before the warning; the screen read:\n${screen.text()}`
   )
 })
@@ -312,7 +312,7 @@ test('a failed write survives a stderr that cannot take the warning', async () =
   assert.equal(result.skipped, true)
   assert.equal(result.mode, 'ask', 'the mode already in force is what stands')
   // stdout was healthy, so the standing mode is still stated on it.
-  assert.equal(stdout.text(), '✓ New folders ask first (change with hyp privacy folders sync)\n')
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('the asked path survives a stderr that cannot take the warning', async () => {

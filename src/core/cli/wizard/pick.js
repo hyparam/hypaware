@@ -480,7 +480,7 @@ export async function runWizardPick(opts) {
 
 /**
  * Commit a composed pick config to disk: the overwrite guard (LLP 0031),
- * the backup notice, and the write itself. Split out of `runWizardPick` so
+ * the write itself, and the one line confirming it. Split out of `runWizardPick` so
  * the wizard orchestrator can run it after the sync lane (LLP 0190
  * #commit-point) - the last thing before the wizard starts acting - while
  * the non-deferred pick keeps calling it inline. Attended runs save
@@ -524,9 +524,6 @@ export async function commitWizardPickedConfig(args) {
     )
     return { ok: false }
   }
-  if (guard.backupPath) {
-    args.stdout.write(`Backed up existing config to ${guard.backupPath}\n`)
-  }
 
   await withSpan(
     'wizard.pick.write_config',
@@ -544,6 +541,8 @@ export async function commitWizardPickedConfig(args) {
     },
     { component: 'wizard' }
   )
+  // One line once the save lands, under the recap (LLP 0435 #recap).
+  args.stdout.write(`✓ Saved settings${guard.backupPath ? ' (previous config backed up)' : ''}\n`)
   return { ok: true }
 }
 

@@ -1186,7 +1186,10 @@ test('runInitWizard: an attended run overwrites an existing config without askin
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')), pickResult().config)
-  assert.match(stdout.text(), /Backed up existing config to /)
+  assert.match(stdout.text(), /✓ Saved settings \(previous config backed up\)\n/)
+  const backups = (await fs.readdir(path.dirname(configPath))).filter((f) => f.startsWith('config.json.bak-'))
+  assert.equal(backups.length, 1, 'the previous config is kept on disk')
+  assert.equal(await fs.readFile(path.join(path.dirname(configPath), backups[0]), 'utf8'), '{"version":2,"plugins":["existing"]}\n')
 })
 
 test('runInitWizard: a non-interactive commit over an existing config without --force exits 1 and leaves it untouched', async () => {
@@ -1280,13 +1283,21 @@ test('runInitWizard: a cancelled finale returns 130 with the cancel notice', asy
 
 // --- run summary + privacy narration ---
 
-test('runInitWizard: prints the run summary with the written config path', async () => {
-  const { opts, stdout } = wizardOpts(await tmpHome())
+test('runInitWizard: a non-interactive run prints the run summary with the written config path', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+  })
   await runInitWizard(opts)
   assert.match(stdout.text(), /✓ Wrote \/tmp\/x\/config\.json/)
   // The old `next: hyp query sql 'select count(*) from logs'` hint named a
   // dataset most installs do not register (LLP 0135 #first-look).
   assert.ok(!stdout.text().includes('next: hyp query sql'))
+})
+
+test('runInitWizard: an attended run skips the run summary, having said each step as it ran', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome())
+  await runInitWizard(opts)
+  assert.doesNotMatch(stdout.text(), /✓ Wrote /)
 })
 
 // --- first look ---

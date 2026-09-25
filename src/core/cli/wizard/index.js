@@ -855,6 +855,7 @@ async function runGuardedInitWizard(opts, guard) {
       // @ref LLP 0341#dead-surface [implements]: the boundary reaches the one question the finale opens
       checkBoundary: () => guard.checkpoint(),
       ...(interactive ? { heading: 'Finishing setup' } : {}),
+      clientLabels: new Map([...catalog.pickerDescriptors.values()].map((d) => [d.id, d.label])),
     })
   }
 
@@ -866,7 +867,9 @@ async function runGuardedInitWizard(opts, guard) {
       // best-effort: stderr might be closed during cleanup
     }
   }
-  writeWalkthroughRunSummary({ stdout: opts.stdout, configPath: picked.configPath, finaleSummary })
+  // An attended run already said each of these as it happened; the summary
+  // is for a scripted run's log.
+  if (!interactive) writeWalkthroughRunSummary({ stdout: opts.stdout, configPath: picked.configPath, finaleSummary })
 
   // End an attended setup on the user's own rows, not on a command they
   // still have to type. Attended and non-dry-run only: a scripted `--yes`
@@ -1146,10 +1149,11 @@ async function resolveWizardDaemonBin(opts, interactive) {
  *   daemonBin?: string,
  *   checkBoundary: () => Promise<boolean>,
  *   heading?: string,
+ *   clientLabels?: Map<string, string>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, heading }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, heading, clientLabels }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
@@ -1215,6 +1219,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         checkBoundary,
         ...(skipAttachClients ? { skipAttachClients } : {}),
         ...(heading ? { heading } : {}),
+        ...(clientLabels ? { clientLabels } : {}),
       }),
     { component: 'wizard' }
   )

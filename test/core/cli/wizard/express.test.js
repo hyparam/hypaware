@@ -212,7 +212,7 @@ test('the new-folder lane auto-accepts to the default and records it', async () 
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
   // Never silent: the accepted answer is stated as its one recap line.
-  assert.equal(stdout.text(), '✓ New folders sync automatically (change with hyp privacy folders ask)\n')
+  assert.equal(stdout.text(), '✓ New folders sync automatically (change with `hyp privacy folders ask`)\n')
 })
 
 test('the new-folder lane auto-accepts the standing answer, not the constant', async () => {
@@ -234,7 +234,7 @@ test('the new-folder lane auto-accepts the standing answer, not the constant', a
   // @ref LLP 0200#wizard [tests]: an express accept round-trips the standing preference instead of resetting it
   assert.deepEqual(result, { mode: 'ask' }, 'a standing preference survives the fast path')
   assert.equal(await readFolderAskMode({ stateDir }), 'ask')
-  assert.equal(stdout.text(), '✓ New folders ask first (change with hyp privacy folders sync)\n')
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('narrateAcceptedGate prints the gate title and its items verbatim, led by a blank line', () => {
