@@ -777,6 +777,29 @@ test('a live surface, and a caller with no boundary check, both still ask', asyn
   }
 })
 
+// @ref LLP 0201#finale-import [tests]: an express accept answers the import question too
+test('an auto-accepted finale imports without asking', async () => {
+  const env = await tmpEnv('hypaware-bf-auto-accept-')
+  const backfill = makeBackfill(['codex', 'opencode'])
+  await runPickerFinale(/** @type {any} */ ({
+    finale: { skipDaemon: true },
+    clientsPicked: ['codex', 'opencode'],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout: makeBuf(),
+    stderr: makeBuf(),
+    retentionDays: 90,
+    interactive: true,
+    autoAccept: true,
+    backfill,
+    backfillConsentPrompt: async () => { throw new Error('an express run must not ask about the import') },
+    checkBoundary: async () => { throw new Error('no question, so no boundary to check') },
+  }))
+  assert.deepEqual(backfill.calls.map((c) => c.provider), ['codex', 'opencode'])
+})
+
 // A dry run previews the real run, so it can only advertise a restart the
 // real run would perform. The real-run gate reads `skipDaemonRestart`, so
 // the dry-run branch has to read it too.

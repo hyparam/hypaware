@@ -428,6 +428,19 @@ test('runInitWizard: accepting the express gate auto-accepts every lane and stat
   assert.equal(opts._pickOpts.progress, undefined)
   assert.equal(opts._folderOpts.progress, undefined)
   assert.equal(opts._finaleArgs.progress, undefined)
+  // The finale's history import is one of the answered questions.
+  assert.equal(opts._finaleArgs.autoAccept, true)
+})
+
+test('runInitWizard: Customize leaves the finale to ask about the history import', async () => {
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'choose',
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  assert.equal(opts._finaleArgs.autoAccept, undefined)
 })
 
 test('runInitWizard: with nothing detected and nothing locked, no express gate is shown', async () => {

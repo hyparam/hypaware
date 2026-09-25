@@ -1549,6 +1549,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   skipAttachClients?: Set<string>,
  *   clientLabels?: Map<string, string>,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
@@ -1887,6 +1888,7 @@ export async function runPickerFinale(args) {
     ...(args.backfill ? { backfill: args.backfill } : {}),
     ...(args.backfillConsentPrompt ? { backfillConsentPrompt: args.backfillConsentPrompt } : {}),
     ...(args.checkBoundary ? { checkBoundary: args.checkBoundary } : {}),
+    ...(args.autoAccept ? { autoAccept: true } : {}),
     clientsPicked,
     interactive: args.interactive,
     dryRun,
@@ -2118,6 +2120,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   clientsPicked: string[],
  *   interactive: boolean,
  *   dryRun: boolean,
@@ -2154,7 +2157,9 @@ async function runFinaleBackfill(args) {
   // places: a decline was read and answered, while this one was never
   // asked and its own "skipped" line goes to the stream that just died.
   let surfaceDead = false
-  if (interactive && asked.length > 0) {
+  // An express accept already said yes to the import (LLP 0201 #finale-import), so
+  // it runs as a scripted run's does, with no question to open.
+  if (interactive && !args.autoAccept && asked.length > 0) {
     // The last consent question in the run, and the only one inside the
     // finale: the install, the attach, and the asset copy above it have
     // each narrated first, so the surface can die between the caller's
@@ -2193,6 +2198,7 @@ async function runFinaleBackfill(args) {
       providers: providers.join(','),
       dry_run: dryRun,
       interactive,
+      auto_accept: args.autoAccept === true,
       consent,
       consent_cancelled: cancelled,
       consent_surface_dead: surfaceDead,

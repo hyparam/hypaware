@@ -862,6 +862,10 @@ async function runGuardedInitWizard(opts, guard) {
       // once at the door.
       // @ref LLP 0341#dead-surface [implements]: the boundary reaches the one question the finale opens
       checkBoundary: () => guard.checkpoint(),
+      // An express accept answered every remaining question, the history
+      // import included; only Customize asks it.
+      // @ref LLP 0201#finale-import [implements]: the accept skips the finale's import question too
+      ...(express ? { autoAccept: true } : {}),
       clientLabels: new Map([...catalog.pickerDescriptors.values()].map((d) => [d.id, d.label])),
     })
   }
@@ -1163,11 +1167,12 @@ async function resolveWizardDaemonBin(opts, interactive) {
  *   daemonIncomplete: boolean,
  *   daemonBin?: string,
  *   checkBoundary: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   clientLabels?: Map<string, string>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, clientLabels }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, autoAccept, clientLabels }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
@@ -1231,6 +1236,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         ...(opts.backfill ? { backfill: opts.backfill } : {}),
         ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
         checkBoundary,
+        ...(autoAccept ? { autoAccept } : {}),
         ...(skipAttachClients ? { skipAttachClients } : {}),
         ...(clientLabels ? { clientLabels } : {}),
       }),
