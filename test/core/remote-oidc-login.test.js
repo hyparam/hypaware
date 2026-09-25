@@ -150,7 +150,8 @@ test('compact shows a live waiting indication for the whole poll, then clears it
   // The opener boolean is best-effort (a launcher that exists but fails still
   // returns true), so the compact line phrases the open as an attempt rather
   // than asserting a browser is already up, matching the plain lane's wording.
-  assert.equal(printed[0], 'Opening your browser to sign in; if it did not open, visit:')
+  assert.equal(chunks[0], 'Opening your browser to sign in; if it did not open, visit:\n')
+  assert.deepEqual(printed, [], 'the lines it will erase are drawn on the stream that erases them')
 })
 
 test('the plain lane writes nothing to stdout, spinner or otherwise', async () => {
@@ -265,4 +266,42 @@ test('the plain lane names the exchange phase too', async () => {
     print: (line) => printed.push(line),
   })
   assert.equal(printed.at(-1), 'Finishing the sign-in...')
+})
+
+test('compact erases the sign-in URL once the sign-in succeeds', async () => {
+  const { startPoller } = scriptedPoller()
+  /** @type {string[]} */
+  const chunks = []
+  const stdout = { isTTY: true, columns: 80, write: (/** @type {string} */ chunk) => { chunks.push(chunk); return true } }
+
+  await loginWithBrowser({
+    identityBase: 'https://hyp.internal/v1/identity',
+    openBrowser: () => true,
+    fetchImpl: tokenFetch(),
+    startPoller,
+    compact: true,
+    stdout,
+    env: {},
+  })
+  // The heading fits one row; the indented URL wraps at 80 columns.
+  const urlRows = Math.ceil((chunks[1].length - 1) / 80)
+  assert.equal(chunks.at(-1), `\x1b[${1 + urlRows}A\r\x1b[J`)
+})
+
+test('compact leaves the sign-in URL up off an animating TTY', async () => {
+  const { startPoller } = scriptedPoller()
+  /** @type {string[]} */
+  const chunks = []
+  const stdout = { isTTY: true, columns: 80, write: (/** @type {string} */ chunk) => { chunks.push(chunk); return true } }
+
+  await loginWithBrowser({
+    identityBase: 'https://hyp.internal/v1/identity',
+    openBrowser: () => true,
+    fetchImpl: tokenFetch(),
+    startPoller,
+    compact: true,
+    stdout,
+    env: { HYP_NO_TUI: '1' },
+  })
+  assert.ok(!chunks.some((chunk) => chunk.includes('\x1b[J')))
 })

@@ -4,6 +4,8 @@ import crypto from 'node:crypto'
 import process from 'node:process'
 
 import { withSpinner } from '../cli/spinner.js'
+import { isTty } from '../cli/stdio.js'
+import { countPhysicalRows } from '../cli/tui/runtime.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { exchangeCode, trimSlash } from './identity_client.js'
 import { startLoginPoller } from './login_poll.js'
@@ -74,6 +76,8 @@ export async function loginWithBrowser({
   stdout = process.stdout,
   env,
 }) {
+  /** @type {string[]} */
+  const fallback = []
   const log = getLogger('remote')
   const { verifier, challenge } = createPkcePair()
   const state = crypto.randomBytes(16).toString('hex')
@@ -94,8 +98,12 @@ export async function loginWithBrowser({
     if (compact) {
       // The wizard's join lane: the same fallback URL, without the paragraph
       // around it. The lane's own position line already says what is happening.
-      print(opened ? 'Opening your browser to sign in; if it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:')
-      print(`  ${startUrl}`)
+      fallback.push(opened ? 'Opening your browser to sign in; if it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:')
+      fallback.push(`  ${startUrl}`)
+      // On stdout, not the print seam's stderr: clearFallback erases these
+      // rows through stdout, which is only safe when stdout drew them.
+      // @ref LLP 0435#streams [implements]: an erased line is drawn on the stream that erases it
+      for (const line of fallback) stdout.write(`${line}\n`)
     } else if (opened) {
       // The opener boolean is best-effort: a launcher that exists but fails (no
       // display on a headless box) still returns true. So phrase this as an
@@ -137,6 +145,7 @@ export async function loginWithBrowser({
     const session = compact
       ? await withSpinner({ stdout, env, label: FINISHING_LABEL }, redeem)
       : await redeem()
+    if (compact) clearFallback(fallback, stdout, env)
     log.info('remote.login_complete', {
       [Attr.COMPONENT]: 'remote-oidc',
       [Attr.OPERATION]: 'remote.login',
@@ -147,6 +156,26 @@ export async function loginWithBrowser({
   } finally {
     poller.close()
   }
+}
+
+/**
+ * Erase the compact lane's sign-in URL once the sign-in has succeeded. It is
+ * only a fallback for while the browser is out; left behind, it reads as a
+ * step still waiting on the user. Both spinners clear their own row, so the
+ * cursor sits directly below the URL. Only on an animating TTY with a known
+ * width (the rows a wrapped URL takes depend on it); a failed sign-in never
+ * gets here, so the URL stays up for a retry.
+ *
+ * @param {string[]} lines
+ * @param {{ write(chunk: string): unknown, columns?: number }} stdout
+ * @param {NodeJS.ProcessEnv | undefined} env
+ */
+function clearFallback(lines, stdout, env) {
+  if (!lines.length || !isTty(stdout) || (env ?? process.env).HYP_NO_TUI === '1') return
+  const columns = stdout.columns
+  if (typeof columns !== 'number' || columns < 1) return
+  const rows = countPhysicalRows(`${lines.join('\n')}\n`, columns)
+  stdout.write(`\x1b[${rows}A\r\x1b[J`)
 }
 
 /**
