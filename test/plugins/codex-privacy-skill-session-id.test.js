@@ -73,6 +73,34 @@ const STOP_LIST_OPENER = '**Stop on any of these**'
 /** The words Step 1 opens the paragraph that frames every receipt reading with. */
 const RECEIPT_PREMISE_OPENER = '**What the receipt does and does not say.**'
 
+/**
+ * The claim Step 1 must never make, in whatever words: that the gateway is the
+ * recorder this session's capture runs through. `readCodexCaptureMode` returns
+ * `transcript` for anything but an explicit `gateway`, and in that mode the
+ * rollout sweep imports this session out of `~/.codex/sessions` while nothing
+ * reaches the gateway, so stating it flatly is false on a default install.
+ *
+ * Both guards below share it, because pinning a phrasing per paragraph is what
+ * let the claim back in: a reintroduction had only to pick a verb form neither
+ * literal spelled out (issue #2167). So the pattern names the claim's shape - a
+ * recorder, a relative clause or gerund, and this session - and tolerates
+ * markdown emphasis and code spans between its words, which is what is left to
+ * vary once the words themselves are fixed.
+ *
+ * The relative clause or gerund is mandatory, and that is what keeps the guard
+ * off true prose. It does not match the shipped two-mode framing, "Which
+ * recorder captures this session depends on Codex's `capture_mode`", where
+ * `recorder` is followed straight by the verb; nor any statement about what the
+ * gateway records, covers, or is the entry to read. What it rejects is the
+ * apposition, in either capture mode: Step 1 says which recorder captures a
+ * session by naming the mode that decides it, never by naming the gateway.
+ *
+ * @ref LLP 0429#default [tests]: absent or `transcript` selects file capture,
+ * so naming one recorder as this session's is false on a default install.
+ */
+const CAPTURING_RECORDER_CLAIM =
+  /recorder[\s*_`]{1,4}(?:(?:that|which)[\s*_`]{1,4}captures|capturing)[\s*_`]{1,4}this session/
+
 test('Step 1 sends the session container, never a thread id', () => {
   // The id that goes on the wire is read from `payload.session_id`.
   assert.match(
@@ -214,14 +242,11 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
     /- `"recorders"` contains an entry for `gateway`[\s\S]{0,240}A list without one means the gateway was never addressed\b/,
     'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
   )
-  // The pin is on the claim, not on its position or its punctuation: it
-  // fires anywhere in Step 1, however the apposition is joined. It is still a
-  // literal, so another verb form of the same claim ("the recorder capturing
-  // this session") is not covered; that gap is issue #2167.
+  // The pin fires anywhere in Step 1, however the apposition is joined.
   assert.doesNotMatch(
     prose,
-    /recorder that captures this session/,
-    'and must not describe gateway as the recorder that captures this session, anywhere in Step 1 and however it is punctuated: on the default `transcript` capture_mode nothing reaches it'
+    CAPTURING_RECORDER_CLAIM,
+    'and must not describe gateway as the recorder capturing this session, anywhere in Step 1, however it is punctuated and in whatever verb form: on the default `transcript` capture_mode nothing reaches it'
   )
 })
 
@@ -367,8 +392,8 @@ test('Step 1 frames the receipt for both capture modes, and still says what the 
 
   assert.doesNotMatch(
     premise,
-    /the recorder capturing this session is the \*\*gateway\*\*/,
-    'the premise must not assert the gateway is the capturing recorder unconditionally'
+    CAPTURING_RECORDER_CLAIM,
+    'the premise must not assert the gateway is the capturing recorder unconditionally, in any verb form'
   )
 
   assert.match(
