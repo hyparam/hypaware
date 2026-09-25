@@ -83,9 +83,18 @@ const RECEIPT_PREMISE_OPENER = '**What the receipt does and does not say.**'
  * Both guards below share it, because pinning a phrasing per paragraph is what
  * let the claim back in: a reintroduction had only to pick a verb form neither
  * literal spelled out (issue #2167). So the pattern names the claim's shape - a
- * recorder, a relative clause or gerund, and this session - and tolerates
- * markdown emphasis, code spans, a comma, and an `is` auxiliary between its
- * words, which is what is left to vary once the words themselves are fixed.
+ * recorder, a present-tense relative clause or gerund, and this session - and
+ * tolerates case, an `is` auxiliary, and up to four characters of whitespace,
+ * markdown emphasis, code spans or, outside the verb slots, a comma between its
+ * words. That is a surface pin on those three forms, not a claim about every
+ * wording: other tenses (`that captured`), other auxiliaries (`that was
+ * capturing`), an adverb in any slot, emphasis splitting `this session`, and
+ * separator runs past four all pass, because reaching them costs true prose.
+ *
+ * The comma closes the non-restrictive form, `the recorder, which captures this
+ * session, is the gateway`. Its accepted cost is that a qualified true
+ * appositive is rejected with it - `one recorder, capturing this session only in
+ * gateway mode` - and has to be rewritten without the comma.
  *
  * The relative clause or gerund is mandatory, and that is what keeps the guard
  * off true prose. It does not match the shipped two-mode framing, "Which
@@ -246,7 +255,7 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
   assert.doesNotMatch(
     prose,
     CAPTURING_RECORDER_CLAIM,
-    'and must not describe gateway as the recorder that captures, or is capturing, this session, anywhere in Step 1 and through markdown emphasis, code spans or a comma: on the default `transcript` capture_mode nothing reaches it'
+    'and must not describe gateway as the recorder that captures, that is capturing, or capturing this session, anywhere in Step 1: on the default `transcript` capture_mode nothing reaches it. Those three present-tense forms are what this pin holds, in either case and through emphasis, code spans or a comma between the words'
   )
 })
 
@@ -393,7 +402,7 @@ test('Step 1 frames the receipt for both capture modes, and still says what the 
   assert.doesNotMatch(
     premise,
     CAPTURING_RECORDER_CLAIM,
-    'the premise must not assert the gateway is the capturing recorder unconditionally, in the relative-clause or gerund forms'
+    'the premise must not assert the gateway is the capturing recorder unconditionally, in the that/which-captures, that/which-is-capturing, or bare-gerund forms this pin holds'
   )
 
   assert.match(
