@@ -145,7 +145,7 @@ test('the guard messages name the forms the pin holds, not an axis its escapes f
   for (const message of [STOP_CLAIM_MESSAGE, PREMISE_CLAIM_MESSAGE]) {
     assert.doesNotMatch(
       message,
-      /emphasis|code span|comma/i,
+      /emphasis|code span|\bcommas?\b/i,
       `a guard message naming a separator axis claims coverage the escapes above falsify; the bounds the pin does hold are on the pattern itself: ${message}`
     )
   }
