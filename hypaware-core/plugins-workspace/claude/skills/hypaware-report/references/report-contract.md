@@ -46,11 +46,14 @@ When investigating recorded sessions and proposing recommendations:
 ## Files and presentation
 
 Deliver `report.md`, `usage.md`, `work.md`, `health.md`, and zero to four
-`recommendation-<slug>.md` files. Use relative Markdown links. Write only `.md`
-report artifacts: no raw HTML, SVG, CSS, JavaScript, image assets, or HTML
-preview. Replace the server's charts, cards, and metric grids with concise
-Markdown tables carrying the same labels, exact values, units, and caveats.
-Use headings, bold text, lists, blockquotes, and fenced artifact/SQL blocks.
+`recommendation-<slug>.md` files. The slug must be lowercase letters, digits,
+and hyphens only, starting with a letter or digit (`[a-z0-9][a-z0-9-]*`):
+`hyp report publish` rejects any other name. Use relative Markdown links.
+Write only `.md` report artifacts: no raw HTML, SVG, CSS, JavaScript, image
+assets, or HTML preview. Replace the server's charts, cards, and metric grids
+with concise Markdown tables carrying the same labels, exact values, units,
+and caveats. Use headings, bold text, lists, blockquotes, and fenced
+artifact/SQL blocks.
 
 Every page identifies local scope and absolute period dates, then a descriptive
 title and a bold thesis of 2 short sentences. Keep prose plain and direct,

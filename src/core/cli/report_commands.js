@@ -1215,7 +1215,7 @@ async function reportSourcePages(dir) {
   const entries = await fs.opendir(dir)
   for await (const entry of entries) {
     if (!entry.isFile() || !/^(?:report|usage|work|health|(?:recommendation|change)-[a-z0-9][a-z0-9-]*)\.md$/.test(entry.name)) {
-      throw new Error(`unsupported report entry '${esc(entry.name)}'; upload only report.md, usage.md, work.md, health.md, and recommendation-<slug>.md as regular files, without HTML, assets, directories, or symlinks`)
+      throw new Error(`unsupported report entry '${esc(entry.name)}'; upload only report.md, usage.md, work.md, health.md, and recommendation-<slug>.md as regular files, without HTML, assets, directories, or symlinks; names are lowercase, and a slug is [a-z0-9][a-z0-9-]* - remove stray files such as .DS_Store first`)
     }
     pages.push(entry.name)
   }

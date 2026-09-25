@@ -3,6 +3,7 @@
 **Type:** Decision
 **Status:** Accepted
 **Systems:** CLI, Reports, Plugins
+**Author:** Phil / Codex
 **Date:** 2026-09-24
 **Related:** LLP 0155, LLP 0107, LLP 0196, LLP 0216 (the removal this reverses)
 
@@ -19,10 +20,13 @@ Slugs use the server grammar `[a-z0-9][a-z0-9-]*`.
 
 Reject HTML, assets, unknown pages, directories, and symlinks before packing
 or sending a directory. Enumerate only its immediate entries and pack the
-validated filenames explicitly using the existing ustar transport. The
-server remains authoritative for content validation, raw HTML and unsafe
-links, input and output limits, rendering, and organization permissions.
-No Markdown parser or renderer is added to the client upload path.
+validated filenames explicitly using the existing ustar transport. Members
+are packed under their bare filenames (`report.md`, not `./report.md`), with
+no directory entry, because the validated list names files explicitly rather
+than packing the whole directory tree as the old HTML bundle path did (`./`
+and `./<name>`). The server remains authoritative for content validation, raw
+HTML and unsafe links, input and output limits, rendering, and organization
+permissions. No Markdown parser or renderer is added to the client upload path.
 
 This extends LLP 0155's entry-document and fail-fast contract. Existing
 published HTML remains readable. `hyp report render` remains available as
