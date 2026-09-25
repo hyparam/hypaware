@@ -49,7 +49,7 @@ test('zero candidates with org rows: states the team-set Syncing line, prompts n
     locked: [descriptor('claude')],
   }))
 
-  assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
+  assert.equal(stdout.text(), "✓ Syncing it to the cloud (set by your team)\n")
   assert.equal(await readClientSyncEntries({ stateDir: stateDir }), null, 'no store write on the no-question path')
 })
 
@@ -82,7 +82,7 @@ test('zero candidates and no org rows: says nothing syncs, never names the fleet
     locked: [],
   }))
 
-  assert.equal(stdout.text(), "✓ Nothing syncs to your team's server\n")
+  assert.equal(stdout.text(), "✓ Nothing syncs to the cloud\n")
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
 
@@ -103,7 +103,7 @@ test('zero candidates with only hidden org rows: does not claim nothing syncs', 
     lockedHidden: 2,
   }))
 
-  assert.equal(stdout.text(), "✓ Capture your team manages still syncs to your team's server\n")
+  assert.equal(stdout.text(), "✓ Capture your team manages still syncs to the cloud\n")
   assert.doesNotMatch(stdout.text(), /Nothing syncs/)
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld rows are still never named')
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
@@ -127,7 +127,7 @@ test('zero visible candidates with a hidden picked row: does not claim nothing s
     candidatesHiddenIds: ['raw-anthropic'],
   }))
 
-  assert.equal(stdout.text(), "✓ Capture already set up on this machine still syncs to your team's server\n")
+  assert.equal(stdout.text(), "✓ Capture already set up on this machine still syncs to the cloud\n")
   assert.doesNotMatch(stdout.text(), /Nothing syncs/)
   assert.doesNotMatch(stdout.text(), /set by your team|team manages/, 'the fleet owns no row here, so it is never named')
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
@@ -154,7 +154,7 @@ test('zero visible candidates with a hidden picked row already opted out: says n
     candidatesHiddenIds: ['raw-anthropic'],
   }))
 
-  assert.equal(stdout.text(), "✓ Nothing syncs to your team's server\n")
+  assert.equal(stdout.text(), "✓ Nothing syncs to the cloud\n")
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
   assert.deepEqual(
     await readClientSyncEntries({ stateDir }),
@@ -180,7 +180,7 @@ test('zero visible candidates with one hidden pick opted out and one standing: d
     candidatesHiddenIds: ['raw-anthropic', 'raw-openai'],
   }))
 
-  assert.match(stdout.text(), /still syncs to your team's server/)
+  assert.match(stdout.text(), /still syncs to the cloud/)
   assert.doesNotMatch(stdout.text(), /Nothing syncs/)
 })
 
@@ -202,7 +202,7 @@ test('a stale opt-out for a hidden locked row does not soften the fleet line', a
     candidatesHiddenIds: [],
   }))
 
-  assert.equal(stdout.text(), "✓ Capture your team manages still syncs to your team's server\n")
+  assert.equal(stdout.text(), "✓ Capture your team manages still syncs to the cloud\n")
 })
 
 // The fifth no-question fact, and the residual LLP 0276 left open: a visible
@@ -226,8 +226,8 @@ test('zero visible candidates with an org row and a hidden picked row: the fleet
   // The org row's line, then the hidden pick disclosed as a fact without
   // being named or handed to the fleet.
   assert.deepEqual(stdout.text().split('\n').filter(Boolean), [
-    "✓ Syncing it to your team's server (set by your team)",
-    "✓ Capture already set up on this machine also syncs to your team's server",
+    "✓ Syncing it to the cloud (set by your team)",
+    "✓ Capture already set up on this machine also syncs to the cloud",
   ])
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
@@ -248,7 +248,7 @@ test('zero visible candidates with an org row and no hidden pick: states only th
     candidatesHiddenIds: [],
   }))
 
-  assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
+  assert.equal(stdout.text(), "✓ Syncing it to the cloud (set by your team)\n")
 })
 
 // The two claims on this branch answer to different authorities. An opt-out
@@ -270,7 +270,7 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
   }))
 
   // The store answered the shipping question, so the export promise goes.
-  assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
+  assert.equal(stdout.text(), "✓ Syncing it to the cloud (set by your team)\n")
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
 })
 
@@ -346,15 +346,26 @@ test('combined collection and sync clears only selected policies', async (t) => 
   // The revocation, which no row list can state: claude was local-only
   // until this confirm. codex and raw-anthropic are not named because
   // neither is a visible candidate, so neither was revoked.
-  const revocation = "No longer local-only: claude. Future rows sync to your team's server; rows already recorded " +
+  const revocation = "No longer local-only: claude. Future rows sync to the cloud; rows already recorded " +
     "are not sent. Change back with 'hyp privacy client <name> local-only'."
   // The org's row is attributed to the team on the Syncing line: unlabelled,
   // the line reads as though every row it counts were the user's to change
   // (LLP 0188 #locked).
   assert.deepEqual(stdout.text().split('\n').filter((l) => l !== ''), [
-    "✓ Syncing both to your team's server (capture gateway is set by your team)",
+    "✓ Syncing both to the cloud (capture gateway is set by your team)",
     revocation,
   ], stdout.text())
+})
+
+// @ref LLP 0437#server-name [tests]: the revocation line names the server the sync lane resolved
+test('the revocation line names the resolved server when the wizard knows it', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
+  const stdout = makeBuf()
+  const cleared = await commitWizardSyncScope({ env, stdout, sources: ['claude'], server: 'hyp.acme.dev' })
+  assert.equal(cleared, 1)
+  assert.match(stdout.text(), /^No longer local-only: claude\. Future rows sync to hyp\.acme\.dev; /m)
 })
 
 test('combined selection preserves an unreadable policy store and warns', async (t) => {

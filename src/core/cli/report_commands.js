@@ -208,7 +208,7 @@ export async function runReportPublish(argv, ctx) {
     const ext = path.extname(source).toLowerCase()
     if (ext === '.md' || ext === '.markdown') contentType = 'text/markdown'
     else {
-      ctx.stderr.write(`hyp report publish: a single-file report must be Markdown (.md or .markdown); the server renders HTML (got '${esc(ext || source)}')\n`)
+      ctx.stderr.write(`hyp report publish: a single-file report must be Markdown (.md or .markdown); the remote renders HTML (got '${esc(ext || source)}')\n`)
       return 2
     }
     body = await fs.readFile(source)

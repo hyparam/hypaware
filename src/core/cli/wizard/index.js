@@ -198,6 +198,8 @@ async function runGuardedInitWizard(opts, guard) {
   let picked
   /** @type {string[] | undefined} */
   let pendingSyncSources
+  /** @type {string | undefined} */
+  let pendingSyncServer
   /**
    * The standing new-folder answer this run left behind (LLP 0200), for
    * the finish log. Undefined on runs that never reach the lane.
@@ -405,7 +407,7 @@ async function runGuardedInitWizard(opts, guard) {
             let disconnect
             try {
               disconnect = await confirm({
-                title: 'This machine syncs to your team server. Disconnect and go local-only?',
+                title: 'This machine syncs to the cloud. Disconnect and go local-only?',
                 options: [
                   { value: 'disconnect', label: 'Yes, disconnect' },
                   { value: 'stay', label: 'No, stay connected' },
@@ -447,7 +449,7 @@ async function runGuardedInitWizard(opts, guard) {
               const leaveFn = opts.leave ?? (() => opts.ctx.commands.run('leave', []))
               const code = await leaveFn()
               if (code !== 0) {
-                opts.stderr.write('hyp setup: leaving the server failed - this machine is still connected. Retry, or continue without disconnecting.\n')
+                opts.stderr.write('hyp setup: leaving the cloud failed - this machine is still connected. Retry, or continue without disconnecting.\n')
                 continue
               }
               // Disconnected: the org's rows are no longer locked and the
@@ -602,6 +604,7 @@ async function runGuardedInitWizard(opts, guard) {
 
       atPick: while (true) {
         pendingSyncSources = undefined
+        pendingSyncServer = undefined
         if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
@@ -738,6 +741,7 @@ async function runGuardedInitWizard(opts, guard) {
               .map((d) => d.id),
           })
           pendingSyncSources = syncScope.pendingSources
+          pendingSyncServer = server
 
           if (!(await guard.checkpoint())) return await cancelDeadOutput()
           const folderFn = opts.folderAsk ?? runWizardFolderAsk
@@ -827,7 +831,12 @@ async function runGuardedInitWizard(opts, guard) {
   // @ref LLP 0396#combined-selection [implements]: no opt-out is cleared until the selection questions and the config write succeed
   if (pendingSyncSources) {
     if (!(await guard.checkpoint())) return await cancelDeadOutput()
-    await commitWizardSyncScope({ env: opts.env, stdout: opts.stdout, sources: pendingSyncSources })
+    await commitWizardSyncScope({
+      env: opts.env,
+      stdout: opts.stdout,
+      sources: pendingSyncSources,
+      ...(pendingSyncServer ? { server: pendingSyncServer } : {}),
+    })
   }
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when

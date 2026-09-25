@@ -60,7 +60,7 @@ test('leave when not connected is a friendly no-op', async () => {
   const { stdout, opts } = await makeDispatchOpts()
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
 })
 
 test('leave after join removes the seed and reports the server', async () => {
@@ -202,7 +202,7 @@ test('leave never edits the local layer, and says so when a local central sink e
   // the hand-authored sink instead of leaving the user mystified.
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
   assert.match(stdout.text(), /local config defines a '@hypaware\/central' sink \('central'\)/)
   assert.match(stdout.text(), /never edits the local layer/)
 
@@ -250,7 +250,7 @@ test('leave is idempotent: a second leave is the not-connected no-op', async () 
   )
   assert.equal(await dispatch(['leave'], opts), 0)
   assert.equal(await dispatch(['leave'], opts), 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
 })
 
 test('leave tears down a central layer whose active-slot pointer does not resolve (#623)', async () => {
@@ -278,7 +278,7 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
 
     const code = await dispatch(['leave'], opts)
     assert.equal(code, 0, `${name}: ${stdout.text()}`)
-    assert.doesNotMatch(stdout.text(), /not connected to a central server/, name)
+    assert.doesNotMatch(stdout.text(), /not connected to the cloud/, name)
     assert.match(stdout.text(), /removed the central config layer/, name)
     await assert.rejects(fs.lstat(path.join(controlDir, 'active')), /ENOENT/, name)
     await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')), /ENOENT/, name)
@@ -335,7 +335,7 @@ test('leave still tears down when only a stale attach marker survives a prior pa
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
-  assert.doesNotMatch(stdout.text(), /not connected to a central server/)
+  assert.doesNotMatch(stdout.text(), /not connected to the cloud/)
   // The stranded attach is reversed on the re-run, marker and all.
   const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
   assert.equal('_hypaware' in settings, false)

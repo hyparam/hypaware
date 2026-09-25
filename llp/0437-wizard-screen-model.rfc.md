@@ -152,7 +152,7 @@ its target name (`hyperparam`) is an internal key. So these lines carry no
 lookup pointer. The wide `hyp remote login` lane is unchanged: it still
 prints the target name and the lookup. When the wizard cannot tell which
 server the machine enrolled with (no central sink, several, or an
-unreadable layer), the line says "your team's server" rather than guess.
+unreadable layer), the line says "the cloud" rather than guess.
 
 ### Step counts live on menus {#headings}
 

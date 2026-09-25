@@ -400,7 +400,7 @@ function buildCoreCommands(registry) {
       name: 'join',
       category: 'capture-movement',
       audience: 'everyday',
-      summary: 'Connect this machine to a central server',
+      summary: 'Connect this machine to the cloud',
       usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]',
       help: 'Token sources (pick one): positional argument, --token-file, or stdin.\nA bare argv token lands in shell history; scripts should prefer\n--token-file or stdin.\n--force allows the existing CLI path if global installation fails.',
       run: runJoin,
@@ -411,7 +411,7 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       summary: 'Disconnect central management, keep local history',
       usage: 'hyp leave',
-      help: 'Disconnects this machine from its central server: stops forwarding and\nconfig pull, undoes org-driven client attaches, and removes the forward\ncredential. Keeps query sessions, the local config, and the daemon service.',
+      help: 'Disconnects this machine from the cloud: stops forwarding and\nconfig pull, undoes org-driven client attaches, and removes the forward\ncredential. Keeps query sessions, the local config, and the daemon service.',
       run: runLeave,
     },
     {
@@ -542,7 +542,7 @@ function buildCoreCommands(registry) {
       summary: 'Keep a client local-only, or return it to the sync-by-default',
       usage: 'hyp privacy client [<name>] [sync|local-only] [--json]',
       help: [
-        'On a machine connected to a server, every configured client syncs by',
+        'On a machine connected to the cloud, every configured client syncs by',
         'default. `privacy client <name> local-only` keeps that client\'s rows on',
         'this machine; `privacy client <name> sync` removes the opt-out for future',
         'rows. It then names `hyp sync --history <name>` when you deliberately',
@@ -558,7 +558,7 @@ function buildCoreCommands(registry) {
       summary: 'Let new folders sync (default), or be asked once about each',
       usage: 'hyp privacy folders [ask|sync] [--json]',
       help: [
-        'On a machine connected to a server, folders you have not marked sync',
+        'On a machine connected to the cloud, folders you have not marked sync',
         'without asking. `privacy folders ask` turns on the per-folder question:',
         'a session opened somewhere new asks once how to handle it. `privacy',
         'folders sync` returns to the default. With no argument, reports the',
@@ -808,7 +808,7 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'report publish',
-      summary: "Publish Markdown report sources for the server to render and share with the org",
+      summary: "Publish Markdown report sources for the remote to render and share with the org",
       usage: coreUsage('report publish'),
       help: [
         'Upload a .md/.markdown file, or a folder containing report.md plus',

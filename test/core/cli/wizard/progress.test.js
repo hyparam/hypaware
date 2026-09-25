@@ -158,7 +158,7 @@ test('the sync lane states its outcome, with no position line, when it has nothi
   // The statement alone: no `Step n of m` above it, because the lane is
   // not a counted screen any more.
   assert.deepEqual(lines, [
-    "✓ Syncing it to your team's server (set by your team)",
+    "✓ Syncing it to the cloud (set by your team)",
   ], stdout.text())
 })
 

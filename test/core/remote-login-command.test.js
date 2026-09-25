@@ -323,6 +323,21 @@ test('a configured persisted_path is honored and non-matching central sinks are 
   await assert.rejects(fs.access(otherPath))
 })
 
+// @ref LLP 0063#d3 [tests]: the wide pre-auth notice names the destination the way serverDisplayName does
+test('wide login notice names the destination before the browser opens', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, both } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(
+    both.join(''),
+    /^ {2}your recorded sessions are sent to hyp\.internal and a background$/m,
+    'the wide notice names the target host, not a hard-coded product'
+  )
+})
+
 test('compact login (the wizard join lane) prints one line per event and no privacy block', async () => {
   const hypHome = await tmpHome()
   const { ctx, both } = await makeCtx({ hypHome })
@@ -339,7 +354,7 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   // comment above the write in remote_commands.js).
   assert.match(
     text,
-    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to the team server and a background service is installed\. Ctrl-C to cancel\.$/m,
+    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to hyp\.internal and a background service is installed\. Ctrl-C to cancel\.$/m,
     'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
   // Named the way the recap names it (LLP 0437 #server-name): the host, not
@@ -348,7 +363,7 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   assert.doesNotMatch(text, /Signed in to 'prod'/)
   // The deadline line still gives the hold's deadline and the fact that
   // nothing has been sent. There is no forwarding line: the wizard's recap
-  // says what syncs to the team's server (LLP 0437 #recap).
+  // says what syncs to the cloud (LLP 0437 #recap).
   assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
   assert.doesNotMatch(text, /Logs will sync to/)
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,

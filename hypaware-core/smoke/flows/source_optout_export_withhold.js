@@ -310,7 +310,7 @@ export async function run({ harness, expect }) {
       expect.that(
         'cli: the flip-back names the future-only property',
         stdout.text(),
-        (v) => v.includes('future openclaw rows sync to your server')
+        (v) => v.includes('future openclaw rows sync to the cloud')
       )
       // LLP 0345 moved retained history to its own consent-gated command, so the
       // flip-back no longer promises history is never uploaded: it promises it

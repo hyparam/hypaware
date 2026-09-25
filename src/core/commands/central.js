@@ -16,7 +16,7 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
-import { sameServer } from '../remote/builtin_remotes.js'
+import { sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
@@ -176,7 +176,7 @@ export async function runJoin(argv, ctx) {
         span.setAttribute('error_kind', 'daemon_install_failed')
         return code
       }
-      ctx.stdout.write('✓ Joined - the daemon will pull its configuration from the server\n')
+      ctx.stdout.write(`✓ Joined - the daemon will pull its configuration from ${serverDisplayName(/** @type {string} */ (parsed.url))}\n`)
       return 0
     },
     { component: 'join' }
@@ -393,7 +393,7 @@ export async function runLeave(argv, ctx) {
   const parsedArgv = parseCommandArgv(argv, { type: 'object', properties: {} })
   if ('help' in parsedArgv) {
     ctx.stdout.write('usage: hyp leave\n')
-    ctx.stdout.write('  disconnect this machine from its central server: stop forwarding and\n')
+    ctx.stdout.write('  disconnect this machine from the cloud: stop forwarding and\n')
     ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
     ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
     return 0
@@ -425,7 +425,7 @@ export async function runLeave(argv, ctx) {
   // lands here with work to do and finishes it - the marker is its own
   // "unfinished teardown" signal, no separate bookkeeping needed.
   if (centralLayerPath === null && unresolvableCentralLayer === null && attachedNames.length === 0) {
-    ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
+    ctx.stdout.write('hyp leave: this machine is not connected to the cloud - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
     // and leave never edits the local layer (#111 doctrine), but a user
     // running `leave` to stop forwarding deserves to know where it lives.
@@ -446,7 +446,7 @@ export async function runLeave(argv, ctx) {
     },
     async (span) => {
       let failures = 0
-      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the central server'}\n`)
+      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the cloud'}\n`)
 
       // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
       // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes
