@@ -469,8 +469,10 @@ function upgradeRow(row, match, resolveAgent = false) {
   // the claude-cli User-Agent, not an OTEL marker), whose agent_id comes from
   // the authoritative x-claude-code-agent-id request header. A line that
   // claims `isSidechain: true` while naming no agentId knows less than that
-  // header, so leave the row's agent_id/is_sidechain alone in that case -
-  // clearing it would also drop the row's spawned_by late-stamp below.
+  // header, so the row keeps its own agent_id in that case - clearing it
+  // would also drop the row's spawned_by late-stamp below. is_sidechain
+  // still follows the line: assignTranscriptIdentity above already copied
+  // it, and true is what such a row already carried.
   // @ref LLP 0435#line-arbitrates [implements]: the matched line decides
   // attribution, except where it knows less than the row already did
   if (resolveAgent && (match.agent_id || !match.is_sidechain)) {

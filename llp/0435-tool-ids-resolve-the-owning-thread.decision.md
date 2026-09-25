@@ -77,14 +77,16 @@ Deciding attribution from the event there would move a main-loop tool call into
 a sidechain.
 
 **A line that claims `isSidechain: true` while naming no `agentId` is the
-exception, and leaves the row's labels alone.** `conversation_source =
+exception, and keeps the row's `agent_id`.** `conversation_source =
 'claude_code'` is the `claude-cli` User-Agent, not an OTEL marker, so the live
 proxy lane's fallback rows reach this path too, and there `agent_id` is the
 authoritative `x-claude-code-agent-id` request header rather than a provisional
 `agent.name`. Such a line knows less than the header, and clearing the column
 would also drop the row's `spawned_by_tool_use_id` late-stamp, whose lookup
-keys on `agent_id`. The row still gains the line's native identity; only its
-attribution is left as it was.
+keys on `agent_id`. The row still gains the line's native identity and its
+`is_sidechain` (which `assignTranscriptIdentity` copies before this guard is
+reached, and which such a row already carried as `true`); only the `agent_id`
+is left as it was.
 
 Attribution is resolved on the tool-id path only. A content-key match is
 agent-scoped, so it can only have matched a line of the thread the row already
