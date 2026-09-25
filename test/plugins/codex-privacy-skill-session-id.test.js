@@ -70,6 +70,9 @@ const prose = (() => {
 /** The words Step 1 opens its stop list with. */
 const STOP_LIST_OPENER = '**Stop on any of these**'
 
+/** The words Step 1 opens the paragraph that frames every receipt reading with. */
+const RECEIPT_PREMISE_OPENER = '**What the receipt does and does not say.**'
+
 test('Step 1 sends the session container, never a thread id', () => {
   // The id that goes on the wire is read from `payload.session_id`.
   assert.match(
@@ -199,5 +202,58 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
     prose,
     /- `"recorders"` contains an entry for `gateway`, the recorder that captures this session\. A list without one means the gateway was never addressed\b/,
     'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
+  )
+})
+
+/**
+ * The premise the receipt reading rests on (issue #2159).
+ *
+ * The paragraph an agent reads first frames every reading under it, so a false
+ * statement of fact there is not a wording nit. Codex's `capture_mode` defaults
+ * to `transcript` (`readCodexCaptureMode`, src/core/config/attach_policy.js),
+ * and in that mode no managed `base_url` block is written and the backfill
+ * provider registers the sweep that imports this session's rollout out of
+ * `~/.codex/sessions` (codex/src/backfill.js, gated on
+ * `capture_mode !== 'gateway'`). So the gateway is not the capturing recorder
+ * on a default install.
+ *
+ * The conclusion is pinned with it, because a premise pin alone passes over a
+ * paragraph corrected into saying nothing: a confirmed `gateway` entry still
+ * covers both lanes, since the control route saves the id to the shared
+ * session-ignore store before it answers (`ignoredSessions.add`,
+ * src/core/control/session_ignore.js) and the sweep reloads that store at the
+ * start of every run (`refreshSessionIgnores`).
+ *
+ * @ref LLP 0429#default [tests]: absent or `transcript` is file capture, so
+ * which recorder captures a Codex session is not one fixed answer.
+ * @ref LLP 0403#backfill [tests]: the durable store is what carries a confirmed
+ * opt-out across to the transcript lane.
+ */
+test('Step 1 frames the receipt for both capture modes, and still says what the gateway entry proves', () => {
+  const at = prose.indexOf(RECEIPT_PREMISE_OPENER)
+  assert.ok(at >= 0, `Step 1 must still frame the receipt under "${RECEIPT_PREMISE_OPENER}"`)
+  const rest = prose.slice(at)
+  const paraEnd = rest.search(/\n\s*\n/)
+  const premise = paraEnd < 0 ? rest : rest.slice(0, paraEnd)
+
+  assert.doesNotMatch(
+    premise,
+    /the recorder capturing this session is the \*\*gateway\*\*/,
+    'the premise must not assert the gateway is the capturing recorder unconditionally'
+  )
+
+  assert.match(
+    premise,
+    /`capture_mode`[\s\S]{0,400}default `transcript`[\s\S]{0,300}`~\/\.codex\/sessions`[\s\S]{0,200}sweep/,
+    'the premise must name capture_mode, say transcript is the default, and say the sweep imports the rollout there'
+  )
+
+  // Reversing this into "so the gateway entry does not matter" is the
+  // overcorrection, and it would leave the bullets and stop list below
+  // hanging on a recorder the paragraph no longer gives a reason to read.
+  assert.match(
+    premise,
+    /\*\*gateway\*\* entry is still the one to read[\s\S]{0,500}session-ignore store[\s\S]{0,300}sweep reloads/,
+    'the premise must still say why a confirmed gateway entry is what the readings below rest on'
   )
 })
