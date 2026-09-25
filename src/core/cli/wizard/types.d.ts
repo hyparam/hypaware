@@ -579,8 +579,6 @@ export interface RunWizardPickOptions {
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
   /** Overwrite an existing local config non-interactively (`--force`). */
   force?: boolean
-  /** Interactive overwrite confirm, consulted only when a config exists. */
-  confirmOverwrite?: (targetPath: string) => Promise<boolean>
   /**
    * Skip the overwrite guard and the config write, returning the composed
    * config with `configPending` set. The wizard orchestrator sets this and
@@ -890,7 +888,6 @@ export interface RunInitWizardOptions {
    */
   leave?: () => Promise<number>
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
-  confirmOverwrite?: (targetPath: string) => Promise<boolean>
   backfillConsentPrompt?: AsyncBackfillConsentPrompt
 }
 

@@ -4,6 +4,7 @@
 **Status:** Active
 **Systems:** Config
 **Extended-by:** LLP 0415 (local grep compatibility migration during client boot)
+**Extended-by:** LLP 0433 (#local-layer-writers: an attended setup run no longer prompts before overwriting; it backs up and saves)
 **Author:** Phil / Claude
 **Date:** 2026-06-16
 **Related:** LLP 0003, LLP 0004, LLP 0009, LLP 0010, LLP 0011, LLP 0013, LLP 0014, LLP 0017, LLP 0025; hypaware-server LLP 0009 (out of tree, design authority)

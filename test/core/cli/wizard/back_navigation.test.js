@@ -720,7 +720,7 @@ test('runInitWizard: ctrl+c at the disconnect question cancels the run instead o
  * A stdout that answers the wizard's own prompts: each time a readline
  * prompt line is written, the next scripted answer is pushed into stdin.
  * The prompt strings are the real ones (`fork.js`'s `Choose [...]`,
- * `walkthrough.js`'s `select ...` and overwrite confirm), so a change to
+ * `walkthrough.js`'s `select ...`), so a change to
  * any of them fails here rather than hanging.
  *
  * @param {string[]} answers
@@ -729,7 +729,7 @@ function scriptedIo(answers) {
   const input = new PassThrough()
   const pending = [...answers]
   let value = ''
-  const PROMPTS = ['Choose [1-', 'select [', 'select (e.g.', 'Continue? [Y/n]: ']
+  const PROMPTS = ['Choose [1-', 'select [', 'select (e.g.']
   return {
     stdin: input,
     pending,

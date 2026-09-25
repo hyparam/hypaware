@@ -254,8 +254,8 @@ with `deferWrite`: the lane returns the composed config with
 (`commitWizardPickedConfig`: guard, backup notice, write) after the sync
 lane and before the acting phases, which is as late as it can go - the
 configure phase and the finale read and edit the file on disk. Order:
-pick questions, sync questions, overwrite confirm + write, configure,
-finale. A refusal keeps pick's old exit-1 (not cancelled) shape and, on
+pick questions, sync questions, write, configure, finale. (LLP 0433
+removed the overwrite confirm: an attended run backs up and saves.) A refusal keeps pick's old exit-1 (not cancelled) shape and, on
 the team pathway, narrates the enrolled state per #abort-narration. The
 sync lane's `client-sync.json` write still precedes the commit; a store
 entry for a source whose config never lands is inert and errs toward

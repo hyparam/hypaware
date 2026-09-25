@@ -253,16 +253,10 @@ export interface RunPickerWalkthroughOptions {
   finale?: PickerFinaleActions
   /**
    * Overwrite an existing local config (LLP 0031). Non-interactive only
-   * (`--force` / `--from-file`); the interactive wizard prompts instead.
+   * (`--force` / `--from-file`); an interactive run always saves, with a
+   * backup (LLP 0433).
    */
   force?: boolean
-  /**
-   * Interactive overwrite confirm, consulted only in interactive mode
-   * (no pre-baked `picks`) when a local config already exists. Tests
-   * inject a stub; the default is a readline yes/no prompt defaulting to
-   * no.
-   */
-  confirmOverwrite?: (targetPath: string) => Promise<boolean>
 }
 
 /**
