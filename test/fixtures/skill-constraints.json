@@ -9,7 +9,8 @@
     "terms, not a full sentence, so honest rewording survives and deletion does not.",
     "'harm' says what goes wrong if it is dropped. If you cannot name real harm, it is",
     "guidance, not a constraint, and does not belong here.",
-    "2026-08-12: eleven constraints removed with the hypaware-report skill, which was their only home. Report generation moved server-side, so the server owns them now. Two of them (no-wide-column-scans, one-remote-worker-at-a-time) describe query shapes with production outages behind them; they are no longer enforced by this repo's skill corpus and depend on the server carrying them."
+    "2026-08-12: eleven constraints removed with the hypaware-report skill, which was their only home. Report generation moved server-side, so the server owns them now. Two of them (no-wide-column-scans, one-remote-worker-at-a-time) describe query shapes with production outages behind them; they are no longer enforced by this repo's skill corpus and depend on the server carrying them.",
+    "2026-09-24: four of the eleven (coalesce-token-sums, no-wide-column-scans, tokens-never-dollars, no-person-rankings) return with the restored hypaware-report skill (LLP 0436 #constraints), because the skill restates them locally again. one-remote-worker-at-a-time and the other six stay the server's."
   ],
   "constraints": [
     {
@@ -61,6 +62,26 @@
       "id": "graph-is-derived-not-truth",
       "pattern": "rebuildable and never the source of truth|never hand-edit",
       "harm": "Hand-editing node/edge to fix a wrong answer desynchronises the graph from the capture it is projected from, and the next projection silently reverts it. The real defect stays in capture, unfixed."
+    },
+    {
+      "id": "coalesce-token-sums",
+      "pattern": "COALESCE every token sum",
+      "harm": "A provider that never emits a field (`cache_write_tokens` on OpenAI) makes sum() return NULL, and NULL poisons every total built from it. Measured on a real install: 25,581,312 OpenAI cache-read tokens silently became 0. The report is confidently wrong with no error."
+    },
+    {
+      "id": "no-wide-column-scans",
+      "pattern": "Never GROUP BY / DISTINCT / row-fetch wide content columns",
+      "harm": "This query shape has 504'd and then OOM'd the production server. It is a denial of service against the fleet's own infrastructure, caused by a report run."
+    },
+    {
+      "id": "tokens-never-dollars",
+      "pattern": "Tokens, never dollars|Token volume, never dollars",
+      "harm": "Capture is partial, so a dollar figure is fabricated precision on top of an incomplete denominator."
+    },
+    {
+      "id": "no-person-rankings",
+      "pattern": "never person-rankings|never to individuals|never as an output-per-person",
+      "harm": "The report is a team improvement tool shared in the open. Person-ranking turns it into a monitoring tool, which is the stated non-goal."
     }
   ]
 }

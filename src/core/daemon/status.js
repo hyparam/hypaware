@@ -503,13 +503,9 @@ const MAX_RECENT_ENTRYPOINTS = 32
  * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: hyp status answers from status.json, with no dataset registry and no cache read
  */
 export function recentEntrypointsFromSources(sources) {
-  const list = Array.isArray(sources) ? sources : []
-  const source =
-    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
-    list.find((s) => s && s.name === 'ai-gateway')
-  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
-  if (!rawDetails) return []
-  const raw = /** @type {Record<string, unknown>} */ (rawDetails).recent_entrypoints
+  const details = gatewaySourceRawDetails(sources)
+  if (!details) return []
+  const raw = details.recent_entrypoints
   if (!Array.isArray(raw)) return []
   /** @type {RecentEntrypoint[]} */
   const out = []

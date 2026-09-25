@@ -97,6 +97,29 @@ async function tmpReportFile(content = '# Weekly\n') {
   return { dir, file, content }
 }
 
+/**
+ * Walk a plain-ustar archive and return each member's exact name field
+ * (bytes 0-99 of its 512-byte header, NUL-trimmed), in on-disk order.
+ *
+ * @param {Buffer} tar
+ * @returns {string[]}
+ */
+function ustarMemberNames(tar) {
+  const HEADER_SIZE = 512
+  /** @type {string[]} */
+  const names = []
+  let offset = 0
+  while (offset + HEADER_SIZE <= tar.length) {
+    const nameField = tar.subarray(offset, offset + 100).toString('latin1').split('\0')[0]
+    if (!nameField) break
+    names.push(nameField)
+    const sizeField = tar.subarray(offset + 124, offset + 136).toString('latin1').split('\0')[0].trim()
+    const size = sizeField ? parseInt(sizeField, 8) : 0
+    offset += HEADER_SIZE + Math.ceil(size / HEADER_SIZE) * HEADER_SIZE
+  }
+  return names
+}
+
 /* ---------- publish ---------- */
 
 test('publish sends a single .md file with kind/period/title params and the content hash', async (t) => {
@@ -135,9 +158,10 @@ test('publish reports a 200 dedup hit as already published', async (t) => {
 
 test('publish packs a folder as a gzipped ustar bundle', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-bundle-'))
-  await fs.writeFile(path.join(dir, 'report.html'), '<h1>hi</h1>')
-  await fs.mkdir(path.join(dir, 'assets'))
-  await fs.writeFile(path.join(dir, 'assets', 'style.css'), 'h1{}')
+  await fs.writeFile(path.join(dir, 'report.md'), '# Brief\n[Usage](usage.md)')
+  await fs.writeFile(path.join(dir, 'usage.md'), '# Usage')
+  await fs.writeFile(path.join(dir, 'recommendation-batch.md'), '# Batch')
+  await fs.writeFile(path.join(dir, 'change-legacy.md'), '# Legacy')
   const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-2', kind: 'k', period: 'p', files: 2, bytes: 15 } } }))
   const { ctx } = ctxWith()
   const code = await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx)
@@ -147,9 +171,23 @@ test('publish packs a folder as a gzipped ustar bundle', async (t) => {
   const tar = zlib.gunzipSync(/** @type {Buffer} */ (call.body))
   assert.equal(tar.subarray(257, 262).toString('ascii'), 'ustar')
   const names = tar.toString('latin1')
-  assert.match(names, /report\.html/)
-  assert.match(names, /style\.css/)
+  assert.match(names, /report\.md/)
+  assert.match(names, /usage\.md/)
+  assert.match(names, /recommendation-batch\.md/)
+  assert.match(names, /change-legacy\.md/)
+  assert.doesNotMatch(names, /report\.html|style\.css/)
   assert.equal(call.headers['x-report-content-hash'], crypto.createHash('sha256').update(/** @type {Buffer} */ (call.body)).digest('hex'))
+  // Pin the exact ustar name field (bytes 0-99 of each 512-byte header)
+  // rather than a substring match: the server keys a page by its bare
+  // filename, and the old `tar -C dir .` whole-directory pack emitted a
+  // `./` prefix (plus a `./` directory entry) that the substring checks
+  // above cannot tell apart from the bare form. reportSourcePages() sorts
+  // entries before packing, so 'change-legacy.md' sorts ahead of
+  // 'report.md' and is the first member on the wire.
+  const memberNames = ustarMemberNames(tar)
+  assert.equal(memberNames[0], 'change-legacy.md')
+  assert.equal(memberNames.includes('report.md'), true)
+  assert.ok(memberNames.every((name) => !name.startsWith('./')))
 })
 
 test('publish rejects a folder without an entry document before any upload', async (t) => {
@@ -160,7 +198,7 @@ test('publish rejects a folder without an entry document before any upload', asy
   const code = await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx)
   assert.equal(code, 2)
   assert.equal(calls.length, 0)
-  assert.match(err.join(''), /must contain report\.html or report\.md/)
+  assert.match(err.join(''), /must contain report\.md/)
 })
 
 test('publish rejects an invalid kind before any network call', async (t) => {
@@ -173,16 +211,71 @@ test('publish rejects an invalid kind before any network call', async (t) => {
   assert.match(err.join(''), /kind must match/)
 })
 
-test('publish rejects a single file that is neither .html nor .md', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-ext-'))
-  const file = path.join(dir, 'report.pdf')
-  await fs.writeFile(file, 'pdfish')
+for (const extension of ['html', 'htm', 'HTML', 'pdf', 'css']) {
+  test(`publish rejects a single .${extension} file before any upload`, async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-ext-'))
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    const file = path.join(dir, `report.${extension}`)
+    await fs.writeFile(file, '<h1>Not Markdown</h1>')
+    const { calls } = stubServer(t, () => ({ status: 500 }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportPublish([file, '--kind', 'k', '--period', 'p'], ctx), 2)
+    assert.equal(calls.length, 0)
+    assert.match(err.join(''), /must be Markdown/)
+  })
+}
+
+for (const entry of ['report.html', 'style.css', 'image.png', 'notes.md', 'assets', 'usage.md', '.DS_Store', 'report.MD']) {
+  test(`publish rejects unsupported bundle entry ${entry} before any upload`, async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-invalid-entry-'))
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    await fs.writeFile(path.join(dir, 'report.md'), '# Brief')
+    if (entry === 'assets') await fs.mkdir(path.join(dir, entry))
+    else if (entry === 'usage.md') await fs.symlink('report.md', path.join(dir, entry))
+    else await fs.writeFile(path.join(dir, entry), 'not a report source')
+    const { calls } = stubServer(t, () => ({ status: 500 }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx), 2)
+    assert.equal(calls.length, 0)
+    assert.match(err.join(''), /unsupported report entry/)
+  })
+}
+
+test('publish rejects unsupported bundle entry with a message stating the slug grammar and case rule', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-ds-store-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  await fs.writeFile(path.join(dir, 'report.md'), '# Brief')
+  await fs.writeFile(path.join(dir, '.DS_Store'), 'not a report source')
   const { calls } = stubServer(t, () => ({ status: 500 }))
   const { ctx, err } = ctxWith()
-  const code = await runReportPublish([file, '--kind', 'k', '--period', 'p'], ctx)
-  assert.equal(code, 2)
+  assert.equal(await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx), 2)
   assert.equal(calls.length, 0)
-  assert.match(err.join(''), /must be \.html or \.md/)
+  const message = err.join('')
+  assert.match(message, /unsupported report entry '\.DS_Store'/)
+  assert.match(message, /names are lowercase/)
+  assert.match(message, /\[a-z0-9\]\[a-z0-9-\]\*/)
+  assert.match(message, /\.DS_Store/)
+})
+
+test('publish requires report.md even when the folder has report.html', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-html-only-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  await fs.writeFile(path.join(dir, 'report.html'), '<h1>Brief</h1>')
+  const { calls } = stubServer(t, () => ({ status: 500 }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx), 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /must contain report\.md/)
+})
+
+test('publish surfaces server Markdown validation errors without retrying or rendering locally', async (t) => {
+  const { file } = await tmpReportFile()
+  await fs.writeFile(file, '<script>alert(1)</script>')
+  const { calls } = stubServer(t, () => ({ status: 400, json: { error: 'invalid_markdown', detail: 'raw HTML is not accepted' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportPublish([file, '--kind', 'k', '--period', 'p'], ctx), 1)
+  assert.equal(calls.length, 1)
+  assert.match(err.join(''), /HTTP 400: invalid_markdown - raw HTML is not accepted/)
 })
 
 test('publish surfaces the quota error with its make-room guidance', async (t) => {
