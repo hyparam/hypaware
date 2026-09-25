@@ -5,7 +5,7 @@ import { readObservabilityEnv } from '../../observability/env.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
 import { readFolderAskModeSafe, writeFolderAskMode } from '../../usage-policy/index.js'
-import { joinNames, narrateAcceptedGate } from './express.js'
+import { joinNames } from './express.js'
 
 /**
  * @import { RunWizardFolderAskOptions, WizardFolderAskResult } from '../../../../src/core/cli/wizard/types.js'
@@ -82,10 +82,9 @@ export const FOLDER_ASK_OPTIONS = [
 export async function runWizardFolderAsk(opts) {
   const stateDir = readObservabilityEnv(opts.env).stateDir
   const before = await readFolderAskModeSafe({ stateDir })
-  const title = folderAskTitle(opts.names ?? [])
 
   // The express gate already answered this lane (LLP 0201): state the
-  // question and its standing answer, record it, and move on.
+  // standing answer, record it, and move on.
   //
   // `before`, not the constant: an accept takes the answer the prompted
   // arm would have offered (`default: before` below), which on a machine
@@ -102,18 +101,14 @@ export async function runWizardFolderAsk(opts) {
   // @ref LLP 0200#wizard [implements]: an express accept round-trips the standing preference instead of resetting it
   // @ref LLP 0201#narrate [implements]: an auto-accepted question prints its statement instead of prompting
   if (opts.autoAccept) {
-    const said = opts.statement ?? opts.stdout
-    narrateAcceptedGate({ stdout: said, title })
     if (opts.deferWrite) {
-      said.write(`${standingClause(before)}; change later with ${undoCommand(before)}\n`)
+      stateFolderMode(opts, before)
       return await finishSpan({ mode: before, pendingWrite: true }, opts)
     }
-    // Inline: the title is a sentence lead-in still on screen, so the
-    // answer belongs under it as an indented line completing it rather
-    // than as a second flush-left announcement repeating the subject.
-    return await recordAnswer(before, { stateDir, before, opts, inline: true })
+    return await recordAnswer(before, { stateDir, before, opts })
   }
 
+  const title = folderAskTitle(opts.names ?? [])
   const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
   /** @type {string | number} */
   let choice
@@ -145,64 +140,28 @@ export async function runWizardFolderAsk(opts) {
 }
 
 /**
- * Persist the answer and confirm it, or warn and leave the previous mode
- * standing. Shared by the asked and the auto-accepted paths so both record
- * and report identically.
- *
- * `inline` renders the confirmation as part of the block above it (the
- * auto-accepted path, where the title is still on screen); the asked path
- * prints it flush-left, because the prompt frame it answers has cleared.
+ * Persist the answer and state it, or state the standing mode and warn.
+ * Shared by the asked and the auto-accepted paths so both record and report
+ * identically.
  *
  * @param {FolderAskMode} mode
- * @param {{ stateDir: string, before: FolderAskMode, opts: RunWizardFolderAskOptions, inline?: boolean }} ctx
+ * @param {{ stateDir: string, before: FolderAskMode, opts: RunWizardFolderAskOptions }} ctx
  * @returns {Promise<WizardFolderAskResult>}
  */
-async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
-  const said = opts.statement ?? opts.stdout
+async function recordAnswer(mode, { stateDir, before, opts }) {
   try {
     await writeFolderAskMode({ stateDir, mode })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
-    // The inline path left its title on stdout as a sentence lead-in
-    // ending in a comma, and the clause that completes it is written
-    // below, after this branch has already returned. Nothing on stdout
-    // then finishes the sentence: the next thing the user sees is the
-    // configure phase's own output, under a half-written question. So
-    // this arm completes it with the mode that actually stands, which is
-    // `before` - the store was not written, so the standing answer is
-    // still true of the machine and the title is still true of it. The
-    // "could not record" half stays on stderr, where the failure belongs;
-    // no new claim is made here, only the one the run was already about
-    // to make.
-    //
-    // Before the warning, not after it. stdout and stderr are the same
-    // terminal on the run this narration is for, so writing the warning
-    // first wedges it between the lead-in and the clause that completes
-    // it - a milder version of the half-written question this arm exists
-    // to close. Finishing the sentence first leaves the warning where a
-    // warning belongs: under the statement it qualifies. The two streams
-    // are separate sinks in tests, so only the terminal can see this
-    // ordering, which is why a test asserts it through one shared sink.
-    //
-    // Both writes are best-effort, and guarded separately. This is the arm
-    // the step documents as one that warns rather than failing the run, so
-    // a stream that throws must not be the thing that fails it; the cancel
-    // path above already guards its one write for exactly that reason (a
-    // stream can be closed under a run that is shutting down). The guards
-    // are separate because the two halves are separate obligations: a
-    // stdout that throws must not take the warning down with it, and a
-    // warning that cannot be written must not take the run down with it.
-    // Nothing is made conditional here - both writes still happen on every
-    // reachable run, and the guard only covers the case that today ends the
-    // run with the warning unsaid anyway.
-    // @ref LLP 0201#narrate [implements]: a narrated question finishes its sentence even when the write behind it fails, before the warning that qualifies it
+    // The statement names the mode that actually stands, `before`, and the
+    // warning under it qualifies it. Both writes are best-effort and
+    // guarded separately: this arm warns rather than failing the run, so a
+    // stream that throws must not be the thing that fails it.
     // @ref LLP 0200#wizard [implements]: the failed-write arm warns and leaves the previous mode standing rather than failing the run, including when the warning itself cannot be written
-    if (inline) {
-      try {
-        said.write(`${standingClause(before)}\n`)
-      } catch {
-        // best-effort: stdout might be closed during cleanup
-      }
+    try {
+      stateFolderMode(opts, before)
+    } catch {
+      // best-effort: stdout might be closed during cleanup
     }
     try {
       opts.stderr.write(
@@ -214,20 +173,22 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     }
     return await finishSpan({ mode: before, skipped: true }, opts)
   }
-
-  // Two short lines rather than one long one: what is now true, then the
-  // command that changes it, indented so it reads as a footnote to the
-  // first rather than a second announcement.
-  const undo = undoCommand(mode)
-  const now = mode === 'sync'
-    ? 'New folders will sync without asking.'
-    : 'You will be asked once per new folder.'
-  said.write(
-    inline
-      ? `${standingClause(mode)}; change later with ${undo}\n`
-      : `${now}\n  change this later: ${undo}\n`
-  )
+  stateFolderMode(opts, mode)
   return await finishSpan({ mode }, opts)
+}
+
+/**
+ * The lane's one-line statement of the new-folder answer, for the wizard's
+ * recap (LLP 0435 #recap), with the command that flips it.
+ *
+ * @param {RunWizardFolderAskOptions} opts
+ * @param {FolderAskMode} mode
+ */
+function stateFolderMode(opts, mode) {
+  const now = mode === 'sync' ? 'New folders sync automatically' : 'New folders ask first'
+  const undo = mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
+  const said = opts.statement ?? opts.stdout
+  said.write(`✓ ${now} (change with ${undo})\n`)
 }
 
 /**
@@ -249,29 +210,6 @@ export async function commitWizardFolderAsk({ env, stderr, mode }) {
       // best-effort: stderr might be closed during cleanup
     }
   }
-}
-
-/**
- * The command that flips the new-folder answer away from `mode`.
- *
- * @param {FolderAskMode} mode
- * @returns {string}
- */
-function undoCommand(mode) {
-  return mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
-}
-
-/**
- * The indented clause that completes the title's sentence on the inline
- * (narrated) path: "When opening Claude Code in a new project," + "it
- * syncs automatically". One source for it, because both the recorded and
- * the failed-write arms have to finish the same sentence.
- *
- * @param {FolderAskMode} mode
- * @returns {string}
- */
-function standingClause(mode) {
-  return mode === 'sync' ? '  it syncs automatically' : '  you are asked the first time'
 }
 
 /**

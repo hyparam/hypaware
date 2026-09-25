@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { defaultPromptFactory } from '../walkthrough.js'
-import { narrateAcceptedGate } from './express.js'
+import { joinNames, narrateAcceptedGate } from './express.js'
 import { LOCKED_LABEL_SUFFIX } from './pick.js'
 import {
   ClientSyncListUnreadableError,
@@ -18,9 +18,11 @@ import {
  * @import { AsyncPickPrompt } from '../../../../src/core/cli/types.js'
  * @import { RunWizardSyncScopeOptions, WizardSyncScopeResult } from '../../../../src/core/cli/wizard/types.js'
  * @import { ClientSyncEntry } from '../../../../src/core/usage-policy/types.js'
+ * @import { PickerDescriptor } from '../../../../src/core/types.js'
  */
 
 const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this machine.'
+const SERVER = "your team's server"
 
 /**
  * Combined setup applies its confirmed collection choice without a prompt
@@ -114,71 +116,42 @@ export async function runWizardSyncScope(opts) {
   const hiddenCandidateSyncs = hiddenCandidates.some((id) => !optedOutAll.has(id))
 
   if (opts.candidates.length === 0) {
-    // Led by a blank line like every other block this lane prints, so the
-    // no-question path is not the one that runs into its neighbour.
-    opts.stdout.write('\n')
-    if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
     const said = opts.statement ?? opts.stdout
+    const locked = opts.locked ?? []
     // Five ways to reach this line, and they are not the same fact. With
-    // org rows to name and nothing else standing, everything picked is the
-    // fleet's and always syncs; with a hidden pick standing beside them the
-    // fleet sentence narrows to the rows it owns (below).
-    // With none nameable but locked rows still standing - the enrolled
-    // machine whose locked set is entirely hidden (LLP 0276 #sync-gate) -
-    // the fleet's own capture still ships, so the line may not claim
-    // nothing syncs; it just has no row to attribute it to. With no locked
-    // row but a hidden row among the picks that the store does not already
-    // withhold - a carried raw source (LLP 0202 #carry-through) on a run
-    // whose org config has not converged - capture still ships and the
-    // fleet does not own it, so the line names neither the row nor an
-    // owner. Only with nothing standing at all is nothing picked and
-    // nothing synced. The locked branch needs no such check: an org row
-    // always syncs (LLP 0188 #locked) and the export seam drops opt-out
-    // entries for central-classified sources, so a store entry for one is
-    // inert.
+    // org rows to name, they sync. With none nameable but locked rows still
+    // standing - the enrolled machine whose locked set is entirely hidden
+    // (LLP 0276 #sync-gate) - the fleet's own capture still ships, so the
+    // line may not claim nothing syncs; it just has no row to attribute it
+    // to. With no locked row but a hidden row among the picks that the store
+    // does not already withhold - a carried raw source (LLP 0202
+    // #carry-through) on a run whose org config has not converged - capture
+    // still ships and the fleet does not own it, so the line names neither
+    // the row nor an owner. Only with nothing standing at all does nothing
+    // sync. The locked branch needs no such check: an org row always syncs
+    // (LLP 0188 #locked) and the export seam drops opt-out entries for
+    // central-classified sources, so a store entry for one is inert.
     // @ref LLP 0276#no-candidates [implements]: the no-candidates line states the fleet only when there is a visible org row to name, and never claims nothing syncs while a filtered-out row stands
     // @ref LLP 0289#ask-the-store [implements]: a hidden pick the store withholds is not standing, so this branch reads "nothing syncs" instead of promising an export that will not happen
-    if ((opts.locked ?? []).length === 0) {
+    if (locked.length === 0) {
       if ((opts.lockedHidden ?? 0) > 0) {
-        said.write(
-          'You picked nothing to record, but capture your team manages directly still syncs to your server.\n'
-        )
+        said.write(`✓ Capture your team manages still syncs to ${SERVER}\n`)
       } else if (hiddenCandidateSyncs) {
-        said.write(
-          'You picked nothing to record, but capture already set up on this machine still syncs to your server.\n'
-        )
+        said.write(`✓ Capture already set up on this machine still syncs to ${SERVER}\n`)
       } else {
-        said.write('You picked nothing to record, so nothing syncs to your server.\n')
+        said.write(`✓ Nothing syncs to ${SERVER}\n`)
       }
       return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
-    // A hidden pick standing beside the org rows breaks the exhaustive
-    // reading of the fleet sentence: the carried row (LLP 0202
-    // #carry-through) is in `sources`, composes into the *local* layer, and
-    // syncs, so "everything you picked is set by your team" hands the
-    // fleet an owner's claim over capture it does not own. The org rows get
-    // a sentence scoped to themselves, and the machine's own capture gets
-    // the line the no-locked branch already uses - a fact, never a name.
-    // Two claims, two questions. *Ownership* is not the store's to answer:
-    // a hidden pick the store withholds is still not the fleet's, so the
-    // fleet sentence narrows whenever such a row exists, which is the count
-    // LLP 0281 settled on. *Shipping* is the store's, so the second line -
-    // the one that promises an export - prints only when a hidden pick is
-    // not already withheld. That is the same question the no-locked branch
-    // asks, so the two agree about what leaves the machine without this one
-    // re-acquiring an owner's claim it gave up.
+    // A hidden pick beside the org rows is the machine's own capture, not
+    // the fleet's: the org rows get their line, and the hidden pick gets a
+    // fact, never a name, and only when the store does not withhold it.
     // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it, withheld or not
     // @ref LLP 0289#ask-the-store [implements]: the store answers whether the machine's own capture ships, not whether the fleet owns it
-    if (hiddenCandidates.length > 0) {
-      said.write('Your team manages these and they always sync:\n')
-      for (const d of opts.locked ?? []) said.write(`  ${d.label}\n`)
-      if (hiddenCandidateSyncs) {
-        said.write('Capture already set up on this machine also syncs to your server.\n')
-      }
-      return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+    stateSyncing(said, locked, [])
+    if (hiddenCandidates.length > 0 && hiddenCandidateSyncs) {
+      said.write(`✓ Capture already set up on this machine also syncs to ${SERVER}\n`)
     }
-    said.write('Everything you picked is set by your team and always syncs.\n')
-    for (const d of opts.locked ?? []) said.write(`  ${d.label}\n`)
     // A statement, not a screen: `noQuestion` is what tells the lane after
     // this one that there is nothing here to step back *to* (LLP 0191
     // #back-edges).
@@ -187,26 +160,9 @@ export async function runWizardSyncScope(opts) {
 
   // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
   if (opts.collectAndSync) {
-    // `autoAccept` here means the picker already printed this list, under
-    // "HypAware will record and sync:" and with the same fleet suffixes, one
-    // line above; the revocation that once set this block apart prints at
-    // commit time. A declined run answers the picker as a menu, which
-    // confirms nothing, so there this block is still the statement that
-    // names what leaves the machine (LLP 0188 #never-silent).
-    if (!opts.autoAccept) {
-      narrateAcceptedGate({
-        stdout: opts.statement ?? opts.stdout,
-        title: 'These will sync to your server:',
-        // The org's rows keep the suffix the picker and the menu both give
-        // them: the list is the whole sync picture (LLP 0188 #locked), and
-        // unlabelled it reads as though every row on it were the user's to
-        // change here.
-        items: [
-          ...(opts.locked ?? []).map((d) => `  ${d.label}${LOCKED_LABEL_SUFFIX}`),
-          ...opts.candidates.map((d) => `  ${d.label}`),
-        ],
-      })
-    }
+    // The statement that names what leaves the machine (LLP 0188
+    // #never-silent); the picker's line names what is recorded.
+    stateSyncing(opts.statement ?? opts.stdout, opts.locked ?? [], opts.candidates)
     if (opts.deferWrite) {
       return await finishSpan({ noQuestion: true, optedOut: [], pendingSources: [...candidateIds] }, opts, {
         hidden_picks_syncing: hiddenCandidateSyncs,
@@ -377,6 +333,26 @@ async function promptSyncScopeSelection({ opts, ask, optedOutBefore }) {
     if (isPromptBackError(err)) return { back: true }
     throw err
   }
+}
+
+/**
+ * The lane's one-line statement of what syncs, for the wizard's recap (LLP
+ * 0435 #recap). The rows are the ones the recording line just named, so it
+ * counts them rather than naming them again, and names only the team's.
+ *
+ * @param {{ write(chunk: string): unknown }} said
+ * @param {PickerDescriptor[]} locked
+ * @param {PickerDescriptor[]} candidates
+ */
+function stateSyncing(said, locked, candidates) {
+  const total = locked.length + candidates.length
+  const what = total === 1 ? 'it' : total === 2 ? 'both' : `all ${total}`
+  const team = locked.length === 0
+    ? ''
+    : candidates.length === 0
+      ? ' (set by your team)'
+      : ` (${joinNames(locked.map((d) => d.label))} ${locked.length === 1 ? 'is' : 'are'} set by your team)`
+  said.write(`✓ Syncing ${what} to ${SERVER}${team}\n`)
 }
 
 /**

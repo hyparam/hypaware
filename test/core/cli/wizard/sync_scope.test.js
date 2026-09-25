@@ -8,7 +8,6 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
-import { LOCKED_LABEL_SUFFIX } from '../../../../src/core/cli/wizard/pick.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import {
   clientSyncListPath,
@@ -286,7 +285,7 @@ test('a locked source never enters the opt-out computation', async () => {
   ], 'no entry for the locked source')
 })
 
-test('zero candidates with org rows: prints the position and the fleet line, prompts nothing, writes nothing', async () => {
+test('zero candidates with org rows: states the team-set Syncing line, prompts nothing, writes nothing', async () => {
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
   let prompted = false
@@ -302,18 +301,18 @@ test('zero candidates with org rows: prints the position and the fleet line, pro
   // `noQuestion` is the part the orchestrator reads: a lane that only
   // stated its outcome is not a screen, so the new-folder lane behind it
   // backs past it to the picker rather than re-running it (LLP 0191
-  // #back-edges).
+  // #back-edges). Being a recap line and not a screen, it carries no
+  // position line either.
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
-  assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
-  assert.match(stdout.text(), /set by your team and always syncs/)
+  assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
   assert.equal(await readClientSyncEntries({ stateDir: stateDir }), null, 'no store write on the no-question path')
 })
 
 // The same no-question path with nothing for the fleet to own. Reachable on
 // an enrolled machine whose only locked rows are hidden (LLP 0276
 // #sync-gate) and that picked nothing visible: claiming the fleet manages
-// "everything you picked" would invent an owner for an empty list.
+// what was picked would invent an owner for an empty list.
 // @ref LLP 0276#sync-gate [tests]:
 test('zero candidates and no org rows: says nothing syncs, never names the fleet', async () => {
   const { env, stateDir } = await makeHome()
@@ -324,15 +323,12 @@ test('zero candidates and no org rows: says nothing syncs, never names the fleet
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [],
-    progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
-  assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
-  assert.match(stdout.text(), /nothing syncs to your server/)
-  assert.doesNotMatch(stdout.text(), /fleet/)
+  assert.equal(stdout.text(), "✓ Nothing syncs to your team's server\n")
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
 
@@ -352,15 +348,13 @@ test('zero candidates with only hidden org rows: does not claim nothing syncs', 
     candidates: [],
     locked: [],
     lockedHidden: 2,
-    progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
-  assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
-  assert.match(stdout.text(), /still syncs to your server/)
-  assert.doesNotMatch(stdout.text(), /nothing syncs to your server/)
+  assert.equal(stdout.text(), "✓ Capture your team manages still syncs to your team's server\n")
+  assert.doesNotMatch(stdout.text(), /Nothing syncs/)
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld rows are still never named')
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
@@ -382,16 +376,14 @@ test('zero visible candidates with a hidden picked row: does not claim nothing s
     locked: [],
     lockedHidden: 0,
     candidatesHiddenIds: ['raw-anthropic'],
-    progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
-  assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
-  assert.match(stdout.text(), /still syncs to your server/)
-  assert.doesNotMatch(stdout.text(), /nothing syncs to your server/)
-  assert.doesNotMatch(stdout.text(), /fleet/, 'the fleet owns no row here, so it is never named')
+  assert.equal(stdout.text(), "✓ Capture already set up on this machine still syncs to your team's server\n")
+  assert.doesNotMatch(stdout.text(), /Nothing syncs/)
+  assert.doesNotMatch(stdout.text(), /set by your team|team manages/, 'the fleet owns no row here, so it is never named')
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
@@ -415,14 +407,12 @@ test('zero visible candidates with a hidden picked row already opted out: says n
     locked: [],
     lockedHidden: 0,
     candidatesHiddenIds: ['raw-anthropic'],
-    progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
-  assert.match(stdout.text(), /nothing syncs to your server/)
-  assert.doesNotMatch(stdout.text(), /still syncs to your server/)
+  assert.equal(stdout.text(), "✓ Nothing syncs to your team's server\n")
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
   assert.deepEqual(
     await readClientSyncEntries({ stateDir }),
@@ -432,7 +422,7 @@ test('zero visible candidates with a hidden picked row already opted out: says n
 })
 
 // One hidden pick withheld and one standing is still capture leaving the
-// machine, so the qualified sentence stands: the check is "any hidden pick
+// machine, so the qualified line stands: the check is "any hidden pick
 // ships", never "every one does".
 // @ref LLP 0289#ask-the-store [tests]:
 test('zero visible candidates with one hidden pick opted out and one standing: does not claim nothing syncs', async () => {
@@ -450,16 +440,16 @@ test('zero visible candidates with one hidden pick opted out and one standing: d
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
-  assert.match(stdout.text(), /still syncs to your server/)
-  assert.doesNotMatch(stdout.text(), /nothing syncs to your server/)
+  assert.match(stdout.text(), /still syncs to your team's server/)
+  assert.doesNotMatch(stdout.text(), /Nothing syncs/)
 })
 
-// A locked row's sentence needs no store question: the export seam drops
+// A locked row's line needs no store question: the export seam drops
 // opt-out entries for central-classified sources (an org row always syncs,
 // LLP 0188 #locked), so a stale entry for one is inert and the fleet line
 // stays unconditional.
 // @ref LLP 0289#ask-the-store [tests]:
-test('a stale opt-out for a hidden locked row does not soften the fleet sentence', async () => {
+test('a stale opt-out for a hidden locked row does not soften the fleet line', async () => {
   const { env, stateDir } = await makeHome()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
   const stdout = makeBuf()
@@ -474,16 +464,16 @@ test('a stale opt-out for a hidden locked row does not soften the fleet sentence
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
-  assert.match(stdout.text(), /capture your team manages directly still syncs to your server/)
+  assert.equal(stdout.text(), "✓ Capture your team manages still syncs to your team's server\n")
 })
 
 // The fifth no-question fact, and the residual LLP 0276 left open: a visible
 // org row and a hidden carried pick standing at the same time. The fleet row
-// is real, so the screen still names it - but the carried row composes into
-// the *local* layer, so "everything you picked is set by your team"
-// would hand the fleet an owner's claim over capture it does not own.
+// is real, so its line still attributes it to the team - but the carried row
+// composes into the *local* layer, so it gets its own line, stated as a fact
+// and never as the team's.
 // @ref LLP 0281#visible-org-row [tests]:
-test('zero visible candidates with an org row and a hidden picked row: the fleet sentence covers only its own rows', async () => {
+test('zero visible candidates with an org row and a hidden picked row: the fleet line covers only its own rows', async () => {
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
   let prompted = false
@@ -494,29 +484,25 @@ test('zero visible candidates with an org row and a hidden picked row: the fleet
     locked: [descriptor('claude')],
     lockedHidden: 0,
     candidatesHiddenIds: ['raw-anthropic'],
-    progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
-  assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
-  // The org row is still named, under a sentence scoped to it alone.
-  assert.match(stdout.text(), /Your team manages these and they always sync:/)
-  assert.match(stdout.text(), /capture claude/)
-  // The claim that broke: the hidden pick is not the fleet's, so nothing may
-  // say the fleet manages everything picked.
-  assert.doesNotMatch(stdout.text(), /Everything you picked is set by your team/)
-  // And the hidden pick is disclosed as a fact without being named.
-  assert.match(stdout.text(), /Capture already set up on this machine also syncs to your server\./)
+  // The org row's line, then the hidden pick disclosed as a fact without
+  // being named or handed to the fleet.
+  assert.deepEqual(stdout.text().split('\n').filter(Boolean), [
+    "✓ Syncing it to your team's server (set by your team)",
+    "✓ Capture already set up on this machine also syncs to your team's server",
+  ])
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
 
 // The unchanged case, pinned beside it: with no hidden pick standing the
-// exhaustive sentence is true and stays.
+// org row's line is the whole picture.
 // @ref LLP 0281#visible-org-row [tests]:
-test('zero visible candidates with an org row and no hidden pick: keeps the exhaustive fleet sentence', async () => {
+test('zero visible candidates with an org row and no hidden pick: states only the fleet line', async () => {
   const { env } = await makeHome()
   const stdout = makeBuf()
 
@@ -529,18 +515,15 @@ test('zero visible candidates with an org row and no hidden pick: keeps the exha
     prompt: async () => [],
   }))
 
-  assert.match(stdout.text(), /Everything you picked is set by your team and always syncs\./)
-  assert.doesNotMatch(stdout.text(), /also syncs to your server/)
+  assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
 })
 
 // The two claims on this branch answer to different authorities. An opt-out
 // entry settles whether the machine's own capture *ships*, so the second
-// line goes; it does not make the withheld row the fleet's, so the fleet
-// sentence stays narrowed to the rows the fleet owns (LLP 0281
-// #visible-org-row). The store is not a licence to re-acquire an owner's
-// claim this branch gave up.
+// line goes; the fleet line still names only the rows the fleet owns (LLP
+// 0281 #visible-org-row).
 // @ref LLP 0289#ask-the-store [tests]:
-test('zero visible candidates with an org row and a hidden pick already opted out: drops the sync line, keeps the narrowed fleet sentence', async () => {
+test('zero visible candidates with an org row and a hidden pick already opted out: drops the also-syncs line, keeps the fleet line', async () => {
   const { env, stateDir } = await makeHome()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
   const stdout = makeBuf()
@@ -556,11 +539,7 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   // The store answered the shipping question, so the export promise goes.
-  assert.doesNotMatch(stdout.text(), /also syncs to your server/)
-  // It did not answer the ownership question, so this one may not come back.
-  assert.doesNotMatch(stdout.text(), /Everything you picked is set by your team/)
-  assert.match(stdout.text(), /Your team manages these and they always sync:/)
-  assert.match(stdout.text(), /capture claude/)
+  assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
 })
 
@@ -654,22 +633,16 @@ for (const autoAccept of [false, true]) {
     // The revocation, which no row list can state: claude was local-only
     // until this confirm. codex and raw-anthropic are not named because
     // neither is a visible candidate, so neither was revoked. Both arms
-    // print it; only the list above it differs.
+    // print it under the same Syncing line.
     const revocation = 'No longer local-only: claude. Future rows sync to your server; rows already recorded are not ' +
       "sent. Change back with 'hyp privacy client <name> local-only'."
-    // The statement is the whole sync picture, and the org's row is
-    // labelled as the fleet's on it: without the suffix the list reads as
-    // though every row on it were the user's to change (LLP 0188 #locked).
-    // Express states that picture at the picker instead, so this lane adds
-    // only what the picker could not say.
-    assert.deepEqual(stdout.text().split('\n').filter((l) => l !== ''), autoAccept
-      ? [revocation]
-      : [
-          'These will sync to your server:',
-          `  capture gateway${LOCKED_LABEL_SUFFIX}`,
-          '  capture claude',
-          revocation,
-        ], stdout.text())
+    // The Syncing line is the sync picture on both arms, and the org's row
+    // is attributed to the team on it: unlabelled, the line reads as though
+    // every row it counts were the user's to change (LLP 0188 #locked).
+    assert.deepEqual(stdout.text().split('\n').filter((l) => l !== ''), [
+      "✓ Syncing both to your team's server (capture gateway is set by your team)",
+      revocation,
+    ], stdout.text())
   })
 }
 

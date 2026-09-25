@@ -829,18 +829,18 @@ test('runInitWizard: a back replaces a lane statement instead of stacking it', a
   const { opts, stdout } = await wizardOpts({
     ...gatedOverrides(),
     pick: async (/** @type {any} */ o) => {
-      o.statement.write('\nHypAware will record and sync:\n  Claude Code\n')
+      o.statement.write('✓ Recording Claude Code\n')
       return { ...pickResult(), configPending: true }
     },
     syncScope: async (/** @type {any} */ o) => {
       syncCalls += 1
-      o.statement.write(`sync statement ${syncCalls}\n`)
+      o.statement.write(`✓ sync statement ${syncCalls}\n`)
       return { optedOut: [] }
     },
     folderAsk: async (/** @type {any} */ o) => {
       folderCalls += 1
       if (folderCalls === 1) return /** @type {any} */ ({ back: true, mode: 'sync' })
-      o.statement.write('New folders will sync without asking.\n')
+      o.statement.write('✓ New folders sync automatically\n')
       return { mode: 'sync' }
     },
   })
@@ -848,6 +848,21 @@ test('runInitWizard: a back replaces a lane statement instead of stacking it', a
   assert.equal(result.exitCode, 0)
   const text = stdout.text()
   assert.doesNotMatch(text, /sync statement 1/, 'the statement from before the back is gone')
-  assert.match(text, /\nHypAware will record and sync:\n  Claude Code\n\nsync statement 2\n\nNew folders will sync without asking\.\n/)
-  assert.equal(text.match(/HypAware will record and sync/g)?.length, 1)
+  // One block, led by a blank line, lane order, no blank lines between.
+  assert.match(text, /(?:^|\n)\n✓ Recording Claude Code\n✓ sync statement 2\n✓ New folders sync automatically\n/)
+  assert.equal(text.match(/✓ Recording Claude Code/g)?.length, 1)
+})
+
+// @ref LLP 0435#recap [tests]: a run with no sync lane still says where its capture goes
+test('runInitWizard: a local run recaps that everything stays on this machine', async () => {
+  const { opts, stdout, calls } = await wizardOpts({
+    pick: async (/** @type {any} */ o) => {
+      o.statement.write('✓ Recording Claude Code\n')
+      return { ...pickResult(), configPending: true }
+    },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(calls.includes('syncScope'), false)
+  assert.match(stdout.text(), /\n✓ Recording Claude Code\n✓ Everything stays on this machine\n/)
 })

@@ -637,14 +637,14 @@ test('runInitWizard: a fully fleet-managed machine still probes the store for it
   assert.equal(opts._pickOpts.collectAndSync, undefined)
 })
 
-// The express fast path is one keypress over two lanes that both narrate,
-// and under the combined selection they narrate the same rows: the picker's
-// accept statement already carries the sync claim and the fleet suffixes, so
-// a second block one line later restates it with no fact of its own. Counted
-// off a real run through both lanes, because the duplication lives in how the
-// orchestrator wires them together.
+// The express fast path is one keypress over two lanes, and each states its
+// own half of the combined picture exactly once: the picker what is
+// recorded, the sync lane where it goes. Counted off a real run through both
+// lanes, because the wiring that collects them into the recap is the
+// orchestrator's.
 // @ref LLP 0396#combined-selection [tests]: an express run states the combined picture once
-test('runInitWizard: an express enrolled run states the sync row list once, not twice', async () => {
+// @ref LLP 0435#recap [tests]: the recording and syncing lines print together before the save
+test('runInitWizard: an express enrolled run states what it records and where it syncs once each', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
     confirm: async () => 'stay',
@@ -652,20 +652,21 @@ test('runInitWizard: an express enrolled run states the sync row list once, not 
     detect: async () => new Set(['claude']),
     express: async () => 'defaults',
   })
-  // The real pick and sync lanes: the narration under test is theirs, and
-  // the wiring that prints it twice is the orchestrator's.
+  // The real pick and sync lanes: the statements under test are theirs, and
+  // the wiring that collects them is the orchestrator's.
   delete opts.pick
   delete opts.syncScope
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
 
   const lines = stdout.text().split('\n')
-  const rowLines = lines.filter((l) => l === '  Claude Code')
-  assert.equal(rowLines.length, 1, `the row list was stated ${rowLines.length} times:\n${stdout.text()}`)
-  // The statement that survives is the combined one, so nothing goes unsaid
-  // (LLP 0188 #never-silent): it names the sync claim itself.
-  assert.ok(lines.includes('HypAware will record and sync:'), stdout.text())
-  assert.ok(!lines.includes('These will sync to your server:'), stdout.text())
+  const recording = lines.indexOf('✓ Recording Claude Code')
+  const syncing = lines.indexOf("✓ Syncing it to your team's server")
+  // Nothing goes unsaid on the fast path (LLP 0188 #never-silent): the sync
+  // claim is stated, and neither line is restated.
+  assert.ok(recording >= 0 && syncing === recording + 1, stdout.text())
+  assert.equal(lines.filter((l) => l.includes('Claude Code')).length, 1, stdout.text())
+  assert.equal(lines.filter((l) => l.startsWith('✓ Syncing')).length, 1, stdout.text())
 })
 
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
@@ -876,8 +877,8 @@ test('runInitWizard: a hidden picked row with a standing opt-out does not make t
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  assert.match(text, /nothing syncs to your server/, 'the only standing pick is withheld by the store, so nothing ships')
-  assert.doesNotMatch(text, /still syncs to your server/)
+  assert.match(text, /Nothing syncs to your team's server/, 'the only standing pick is withheld by the store, so nothing ships')
+  assert.doesNotMatch(text, /still syncs/)
   assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
 })
 
@@ -897,8 +898,9 @@ test('runInitWizard: a hidden picked row with no opt-out keeps the sentence that
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  assert.match(text, /still syncs to your server/)
-  assert.doesNotMatch(text, /nothing syncs to your server/)
+  assert.match(text, /Capture already set up on this machine still syncs to your team's server/)
+  assert.doesNotMatch(text, /Nothing syncs/)
+  assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the carried row is still never named')
 })
 
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {

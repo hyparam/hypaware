@@ -108,10 +108,14 @@ the join itself cannot be undone (LLP 0191 #join-not-undone).
 
 ### The commit point writes a recap {#recap}
 
-Each question lane still states its answer (what will be recorded, what
-syncs, what happens in a new folder), but it hands the statement to the
-wizard instead of printing it. The wizard prints the statements together,
-in lane order, just before it saves. Re-running a lane replaces its
+Each question lane still states its answer, but as one checkmark line, and
+it hands the line to the wizard instead of printing it. The wizard prints
+the lines together, in lane order, just before it saves:
+
+- what is recorded ("Recording Claude Code, Codex, and Claude Desktop"),
+- where it goes ("Syncing all 3 to your team's server", naming the rows
+  the team sets, or "Everything stays on this machine" on a local run),
+- the new-folder answer, with the command that flips it. Re-running a lane replaces its
 statement and drops the later lanes', so a back never leaves a stale one
 on screen (#back).
 

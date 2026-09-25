@@ -236,10 +236,9 @@ test('runWizardPick: a fresh pick reports nothing as previously configured', asy
 
 // A needs_setup row can still reach the default rows off a recorded answer
 // (a config already composing it, or this run's own confirmed selection on a
-// re-entry). There the narration keeps it but says the part that is coming:
-// its configure phase walks a sign-in and a sudo prompt when it is newly
-// picked.
-test('runWizardPick: a seeded needs_setup row is narrated with the needs-extra-setup suffix', async () => {
+// re-entry). The express path keeps it and names it on the Recording line
+// like any other row; its configure phase says what it needs when it runs.
+test('runWizardPick: a seeded needs_setup row is taken on the express path and named plainly', async () => {
   const tmp = await mkTmp()
   const catalog = await catalogWithVisibleNeedsSetup()
   const stdout = makeBuf()
@@ -251,11 +250,7 @@ test('runWizardPick: a seeded needs_setup row is narrated with the needs-extra-s
     platform: 'darwin',
     initialSelection: ['codex', 'claude-desktop'],
   }))
-  assert.match(
-    stdout.text(),
-    /Claude Desktop · needs extra setup/,
-    'the narration names the consent still to come'
-  )
+  assert.equal(stdout.text(), '✓ Recording Claude Desktop and Codex\n')
   assert.deepEqual(result.sourcesPicked.sort(), ['claude-desktop', 'codex'])
 })
 
@@ -280,10 +275,9 @@ test('runWizardPick: autoAccept takes the default rows and prints what it accept
     detect: async () => new Set(['codex']),
     locked: ['claude'],
   }))
-  const out = stdout.text()
-  assert.match(out, /HypAware will record:/)
-  assert.match(out, /· set by your team/, 'the locked row is named on the fast path too')
-  assert.match(out, /codex/i)
+  // One line, plain names: the locked row is named on the fast path too,
+  // and whether it is the team's is said on the sync line, not here.
+  assert.equal(stdout.text(), '✓ Recording Claude Code and Codex\n')
   assert.deepEqual(result.sourcesPicked, ['codex'])
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
@@ -1085,7 +1079,7 @@ test('runWizardPick: the express path carries a raw-only config and never states
     locked: ['claude'],
   }))
   const out = stdout.text()
-  assert.match(out, /HypAware will record:/)
+  assert.match(out, /^✓ Recording Claude Code$/m)
   assert.doesNotMatch(out, /raw|API/i, 'the hidden row is not narrated on the fast path either')
   // Locked claude is dropped from local-layer composition; the carried raw
   // row is what the local layer still collects.

@@ -687,6 +687,11 @@ async function runGuardedInitWizard(opts, guard) {
         // lane, or a later pass through the fork - re-seeds with it.
         pickSeed = picked.sourcesPicked
 
+        // A run with no sync lane still says where its capture goes.
+        if (interactive && !(pathway === 'team' || enrolled())) {
+          recap.lane('sync').write('✓ Everything stays on this machine\n')
+        }
+
         // @ref LLP 0396#combined-selection [implements]: apply the picker's sharing answer without another question
         if (interactive && (pathway === 'team' || enrolled())) {
           atSync: while (true) {
@@ -1516,8 +1521,8 @@ function createRecap() {
     },
     /** @param {{ write(chunk: string): unknown }} stdout */
     print(stdout) {
-      const blocks = order.map((key) => said[key].replace(/^\n+/, '')).filter(Boolean)
-      if (blocks.length > 0) stdout.write(`\n${blocks.join('\n')}`)
+      const lines = order.map((key) => said[key]).join('')
+      if (lines) stdout.write(`\n${lines}`)
     },
   }
 }

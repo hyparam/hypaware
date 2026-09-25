@@ -7,7 +7,7 @@ import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { configRecordsPickAnswer, defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
-import { narrateAcceptedGate } from './express.js'
+import { joinNames } from './express.js'
 import {
   DEFAULT_RETENTION_DAYS,
   WALKTHROUGH_CANCEL_EXIT_CODE,
@@ -40,22 +40,6 @@ import {
  * sync-scope lane labels the same rows the same way.
  */
 export const LOCKED_LABEL_SUFFIX = ' · set by your team'
-
-/**
- * Label suffix for a `needs_setup` row listed on the accept narration.
- * Such a row reaches the default rows only off a recorded answer (the
- * config on disk, or this run's own confirmed selection - detection never
- * seeds one). Its extra setup (a sign-in, a sudo prompt) runs when it is
- * newly picked; a reconfigure's carried row is not re-asked. Saying so is
- * what keeps "record everything" from reading as if enter alone finished
- * the job.
- *
- * No BUNDLED row reaches it today: `claude-desktop` was the only one, and
- * LLP 0358 turned it into a plain transcript row with no `needs_setup` and no
- * configure phase. `needs_setup` remains a kernel contract any plugin may
- * declare, so the suffix stays and is tested against a synthetic descriptor.
- */
-export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
 
 /**
  * Everything the pick lane decides *before* it asks anything: the ordered
@@ -264,27 +248,6 @@ export async function resolvePickSeeding(opts) {
     interactive,
     defaultRows: visibleList.filter((d) => seed.has(d.id) || lockedSet.has(d.id)),
   }
-}
-
-/**
- * The rows the accept narration lists, one label per line, locked rows
- * fleet-suffixed. The express gate's summary sentence names these same
- * rows (plain, unsuffixed) from the same `resolvePickSeeding` computation,
- * so the two can never disagree about what "the defaults" are.
- *
- * @ref LLP 0201#narrate [implements]: the accept narration lists the rows the express gate accepted, from one computation
- * @param {{ defaultRows: PickerDescriptor[], lockedSet: Set<string> }} seeding
- * @returns {string[]}
- */
-export function defaultRowLabels({ defaultRows, lockedSet }) {
-  // Locked wins when both apply: a fleet-managed row's config is the org's,
-  // and stacking both suffixes buys length, not clarity.
-  return defaultRows.map((d) => {
-    const suffix = lockedSet.has(d.id)
-      ? LOCKED_LABEL_SUFFIX
-      : d.needsSetup === true ? NEEDS_SETUP_LABEL_SUFFIX : ''
-    return `  ${d.label}${suffix}`
-  })
 }
 
 /**
@@ -624,12 +587,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
   // defaults" must have one definition, not two that happen to agree.
   // @ref LLP 0201#narrate [implements]: an auto-accepted lane prints its statement instead of prompting
   if (defaultRows.length > 0 && opts.autoAccept) {
-    narrateAcceptedGate({
-      stdout: opts.statement ?? opts.stdout,
-      title: opts.collectAndSync ? 'HypAware will record and sync:' : 'HypAware will record:',
-      // One source per line; the locked suffix matches the menu rows'.
-      items: defaultRowLabels({ defaultRows, lockedSet }),
-    })
+    stateRecording(opts, defaultRows)
     return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
   }
   try {
@@ -668,6 +626,8 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
       ...(hasChecked ? { enterKeepsChecked: true } : {}),
       ...(opts.allowBack ? { allowBack: true } : {}),
     })
+    const chosen = new Set(sourceRaw)
+    stateRecording(opts, visibleList.filter((d) => chosen.has(d.id)))
     return {
       rawSources: withCarried(sourceRaw.filter((v) => descriptors.has(v))),
     }
@@ -675,6 +635,19 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
     if (isPromptBackError(err)) return { back: true }
     throw err
   }
+}
+
+/**
+ * The lane's one-line statement of what will be recorded, for the wizard's
+ * recap (LLP 0435 #recap). Plain names: whether a row is the team's is said
+ * on the sync line, where it matters.
+ *
+ * @param {RunWizardPickOptions} opts
+ * @param {PickerDescriptor[]} rows
+ */
+function stateRecording(opts, rows) {
+  const said = opts.statement ?? opts.stdout
+  said.write(rows.length > 0 ? `✓ Recording ${joinNames(rows.map((d) => d.label))}\n` : '✓ Nothing picked to record\n')
 }
 
 /**
