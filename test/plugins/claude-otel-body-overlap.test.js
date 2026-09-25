@@ -38,6 +38,7 @@ import { appendSessionContext } from '../../hypaware-core/plugins-workspace/clau
 import { loadSpooledBodies } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/bodies.js'
 import { flattenClaudeTelemetryEvents } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/events.js'
 import { projectClaudeTelemetryEvents } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/projection.js'
+import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 
 /**
  * @import { BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -52,6 +53,11 @@ const CHAIN_AGENT = 'a17d2c40'
 // transcript loader memoises per session (LLP 0312 #settle-purity), so a
 // second transcript has to be a second session to be read at all.
 const PLAIN_SESSION = '0b7e4a15-93c6-42df-8f31-6d5a0c8e2b47'
+// A `[text, tool_use]` message whose tool part settles into a subagent while
+// its text part matches nothing (review regression on #2176, LLP 0440). A
+// session of its own: the shared transcript loader memoises per session.
+const PART_SESSION = 'aaaaaaaa-3333-4333-8333-bbbbbbbbbbbb'
+const PART_AGENT = 'b28e3d51'
 const PROMPT_UUID = '11111111-1111-4111-8111-111111111111'
 const TOOL_UUID = '5233b3fa-fd52-4c1e-9a44-6c0e8c0f1a2b'
 const RESULT_UUID = '77ea6f90-90c5-47ab-9d20-1c4e6f9b3a55'
@@ -1073,6 +1079,90 @@ test('a settled row is not left pointing at a predecessor\'s pre-settlement id',
       'a successor whose own scope never moved must still follow its predecessor\'s rename'
     )
     assert.deepEqual(danglingLinks(plainSettled), [], 'no settled link may name an id no row carries')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// Identity settles per PART, but `message_id` (and `attributes.claude.match_key`)
+// is shared by every part row of one API message. When only the tool_use part
+// of a `[text, tool_use]` message finds a transcript line, and that line turns
+// out to belong to a subagent, the row that upgrades must not claim the shared
+// `message_id` was invalidated: the text part is still in the batch carrying
+// it. A relink that does not check for that surviving row splices the
+// tool_result's link past the whole assistant turn, straight to the user
+// prompt before it (review regression on #2176).
+// @ref LLP 0440#successors-follow-the-rewrite [tests]: a rewritten id is only
+// dropped from the relink map when no surviving row of the batch still
+// carries it as its `message_id`
+test('a message whose only-partly-settled part shares an id with a surviving row is not treated as renamed', async () => {
+  const env = await stageEnv()
+  try {
+    const projectDir = path.join(env.homeDir, '.claude', 'projects', 'some-repo')
+    await fs.mkdir(path.join(projectDir, PART_SESSION, 'subagents'), { recursive: true })
+    await appendSessionContext(env.stateFile, {
+      session_id: PART_SESSION,
+      transcript_path: path.join(projectDir, `${PART_SESSION}.jsonl`),
+      cwd: env.homeDir,
+      git_branch: 'main',
+      ts: '2026-09-05T22:36:50.000Z',
+    })
+
+    const toolBlock = { type: 'tool_use', id: 'toolu_p3', name: 'Bash', input: { command: 'ls' } }
+    const resultBlock = { type: 'tool_result', tool_use_id: 'toolu_p3', content: 'a\nb\n' }
+
+    // The main transcript holds only the user line. The tool_use line lives
+    // in a subagent transcript, so the tool part re-scopes there and the text
+    // part of the same message matches nothing in either transcript.
+    await fs.writeFile(path.join(projectDir, `${PART_SESSION}.jsonl`), [
+      JSON.stringify({
+        sessionId: PART_SESSION, uuid: 'user-line', type: 'user',
+        message: { role: 'user', content: 'hello' },
+        timestamp: '2026-09-05T22:36:50.000Z',
+      }),
+    ].join('\n') + '\n')
+    await fs.writeFile(path.join(projectDir, PART_SESSION, 'subagents', `agent-${PART_AGENT}.jsonl`), [
+      JSON.stringify({
+        sessionId: PART_SESSION, agentId: PART_AGENT, isSidechain: true, type: 'assistant',
+        uuid: 'sub-tool-line', message: { role: 'assistant', content: [toolBlock] },
+        timestamp: '2026-09-05T22:36:54.000Z',
+      }),
+    ].join('\n') + '\n')
+
+    const assistantContent = [{ type: 'text', text: 'Let me look at the tree.' }, toolBlock]
+    const projected = aiGatewayRowsFromProjectedExchange({
+      provider: 'anthropic',
+      session_id: PART_SESSION,
+      conversation_source: 'claude_code',
+      client_name: 'claude',
+      conversation_started_at: '2026-09-05T22:36:50.000Z',
+      messages: [
+        {
+          role: 'user', content: 'hello',
+          attributes: { claude: { match_key: matchKey('user', 'hello') } },
+        },
+        {
+          role: 'assistant', content: assistantContent,
+          attributes: { claude: { match_key: matchKey('assistant', assistantContent) } },
+        },
+        {
+          role: 'user', content: [resultBlock],
+          attributes: { claude: { match_key: matchKey('user', [resultBlock]) } },
+        },
+      ],
+    }, { gatewayId: 'gw' })
+
+    const settled = await settleBatch(env, projected, [])
+    const textRow = settled.find((row) => row.part_type === 'text' && row.role === 'assistant')
+    const toolResultRow = settled.find((row) => row.part_type === 'tool_result')
+    assert.ok(textRow, 'the text part must still be in the batch, unsettled')
+    assert.ok(toolResultRow, 'the tool_result row must be in the batch')
+    assert.deepEqual(
+      toolResultRow.previous_message_id,
+      [textRow.message_id],
+      'the tool_result must still resolve to the surviving text-part row of the assistant turn, not skip past it to the user prompt'
+    )
+    assert.deepEqual(danglingLinks(settled), [], 'no settled link may name an id no row carries')
   } finally {
     await env.cleanup()
   }

@@ -64,6 +64,19 @@ this one, over the full live message stream including wire-only traffic no
 transcript holds, and that decision stands; only the name it was recorded
 under changes.
 
+Identity settles per PART, not per message, but `message_id` is shared by
+every part row the same API message expanded into. A message whose content is
+`[text, tool_use]` projects two rows under one `message_id`; if only the
+`tool_use` part finds a transcript match, the `text` part is still in the
+batch carrying the old id when the pass is done. That id was never
+invalidated, so it must not enter the map the walk below reads: a key stays
+only when NO surviving row of the batch still carries it as its `message_id`.
+Without that check the pass reads an ordinary sibling-part row as a vacated
+predecessor and splices a successor past it, which is a wrong rename, not a
+missing one - the ordinary Claude tool-calling shape (an assistant turn whose
+tool call re-scopes to a subagent while its own text part settles nowhere)
+hits this on every such turn.
+
 The other case is the one LLP 0439 sees from the far end. A predecessor that
 settled into a different thread has left this chain, and pointing at it anyway
 would rebuild the cross-agent pointer 0439 removed, so the successor inherits
@@ -95,10 +108,19 @@ it has.
 
 ## Consequences
 
-- Every `previous_message_id` a settle pass produces names either a row of that
-  pass, a row already committed under the id it still carries, or `[]`. No pass
-  leaves a pointer to an id it invalidated itself, and none follows a row into
-  an agent thread settlement just moved it to.
+- Every `previous_message_id` a settle pass produces, for a row the pass
+  actually touches, names either a row of that pass, a row already committed
+  under the id it still carries, or `[]`. No pass leaves a pointer to an id it
+  invalidated itself, and none follows a row into an agent thread settlement
+  just moved it to. "Invalidated" is judged against the whole batch, not the
+  single renamed row: a `message_id` shared by a surviving sibling part is
+  never treated as vacated (#successors-follow-the-rewrite).
+- The pass only ever sees `settleSelect`'s rows (`dataset.js`): a fallback row
+  or a null-cwd row. A successor that already carries native identity and a
+  known cwd is never handed to the enricher, so it never reaches this repair
+  and keeps whatever `previous_message_id` it already had, rewritten or not.
+  The claim above is therefore scoped to rows the enricher is called with, not
+  every row of the conversation.
 - A splice can shorten a thread's visible chain: a row whose only recorded
   predecessor turned out to belong to another agent reads as that thread's
   earliest known turn. That is what settlement can actually establish. The

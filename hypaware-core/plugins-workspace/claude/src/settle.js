@@ -550,6 +550,19 @@ function upgradeRow(row, match, resolveAgent = false) {
  * @param {Map<string, SettledIdRewrite>} rewrittenIds
  */
 function relinkRewrittenPredecessors(out, rewrittenIds) {
+  // Identity settles per PART, and every part row of one message carries
+  // that message's `message_id`. A message whose other parts matched
+  // nothing is still in the batch under the old id, so nothing was
+  // invalidated: without this a successor is spliced past a row that is
+  // still there.
+  for (const entry of out) {
+    if (entry === USAGE_POLICY_DROP) continue
+    const row = /** @type {Record<string, unknown>} */ (entry)
+    const id = stringValue(row.message_id)
+    if (id) rewrittenIds.delete(id)
+  }
+  if (rewrittenIds.size === 0) return
+
   for (let i = 0; i < out.length; i++) {
     const entry = out[i]
     if (entry === USAGE_POLICY_DROP) continue
