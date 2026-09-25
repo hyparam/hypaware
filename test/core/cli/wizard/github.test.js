@@ -68,6 +68,7 @@ test('closing GitHub connection preserves saved setup changes and restarts after
   await fs.writeFile(configPath, JSON.stringify(config))
   const calls = []
   const result = await connectWizardGithub({ ...options(), configPath, restartDaemon: true,
+    restart: async () => { calls.push('restart') },
     ctx: { commands: { run: async (name) => {
       calls.push(name)
       const saved = JSON.parse(await fs.readFile(configPath, 'utf8'))
@@ -77,7 +78,7 @@ test('closing GitHub connection preserves saved setup changes and restarts after
       return 0
     } } },
   })
-  assert.deepEqual(calls, ['github login', 'daemon restart'])
+  assert.deepEqual(calls, ['github login', 'restart'])
   assert.deepEqual(result?.query, config.query)
 })
 

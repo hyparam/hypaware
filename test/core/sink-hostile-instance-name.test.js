@@ -636,12 +636,45 @@ for (const [label, beHostile] of [
 // counts under the same key `renderPlan` looks them up by, so a lying
 // accessor no longer separates the number from the line it belongs to.
 
-/** The plan's destination names, in the order it printed them. */
+/** The history plan's destination names, in the order it printed them. */
 function planInstances(/** @type {string} */ stdout) {
   return stdout
     .split('\n')
     .map((line) => /^ {2}(\S+) {2}\S/.exec(line)?.[1])
     .filter((name) => name === HOSTILE_INSTANCE || name === HEALTHY_INSTANCE || name === LIE)
+}
+
+/**
+ * The `hyp sync` plan's destinations, in the order it printed them. That plan
+ * names a destination by where it goes rather than by its instance, so these
+ * are the destination texts.
+ */
+function planDestinations(/** @type {string} */ stdout) {
+  return stdout
+    .split('\n')
+    .map((line) => /^(?:Ready to (?:upload|export)(?: .*?)? to (.+?)(?: \(.*)?\.|Nothing pending for (.+)\.)$/.exec(line))
+    .filter((m) => m !== null)
+    .map((m) => /** @type {RegExpExecArray} */ (m)[1] ?? /** @type {RegExpExecArray} */ (m)[2])
+}
+
+/** The destinations the `hyp sync` receipt lines name, in order. */
+function resultDestinations(/** @type {string} */ stdout) {
+  return stdout
+    .split('\n')
+    .map((line) => /^✓ (?:Uploaded|Exported)(?: [\d,]+ rows?)? to (.+?)(?: \(partly.*)?$/.exec(line)?.[1])
+    .filter((text) => text !== undefined)
+}
+
+/**
+ * The registry keys a `hyp sync` plan staged with {@link localDirConfig} names:
+ * each instance writes to a directory derived from the key the kernel
+ * materialized it under, so the directory on each line says which key the
+ * line was rendered for.
+ *
+ * @param {string[]} destinations
+ */
+function keysOf(destinations) {
+  return destinations.map((text) => text.startsWith(`${CONFIGURED_DIR}/`) ? text.slice(CONFIGURED_DIR.length + 1) : text)
 }
 
 for (const [label, beHostile] of [
@@ -650,7 +683,7 @@ for (const [label, beHostile] of [
   ['lying', lyingInstanceName],
 ]) {
   test(`hyp sync renders a plan naming the registry's keys with a ${label} instanceName accessor`, async (t) => {
-    const staged = await stage(/** @type {any} */ (beHostile))
+    const staged = await stage(/** @type {any} */ (beHostile), '/nowhere', { configFor: localDirConfig })
     const { ctx } = await syncCtx(t, staged.registry)
 
     const code = await runSync(['--yes'], ctx)
@@ -659,20 +692,27 @@ for (const [label, beHostile] of [
     // The whole point of the prompt: the destinations it named are the
     // destinations the driver then handed batches to, in that order.
     assert.deepEqual(
-      planInstances(ctx.stdout.text),
+      keysOf(planDestinations(ctx.stdout.text)),
       [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
       'the plan named a destination by something other than the key the driver matches'
     )
     assert.deepEqual(
       staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
-      planInstances(ctx.stdout.text),
+      keysOf(planDestinations(ctx.stdout.text)),
       'the destinations that received data are not the ones the plan showed'
+    )
+    // The receipts join the driver's report to the plan by the same key: a
+    // miss falls back to the bare instance, which no destination text is.
+    assert.deepEqual(
+      resultDestinations(ctx.stdout.text),
+      planDestinations(ctx.stdout.text),
+      'a receipt named a destination other than the one the plan showed'
     )
     assert.doesNotMatch(ctx.stdout.text, new RegExp(LIE), 'the plan offered a name only the owner answers to')
   })
 
   test(`hyp sync <instance> renders a plan naming the registry's key with a ${label} instanceName accessor`, async (t) => {
-    const staged = await stage(/** @type {any} */ (beHostile))
+    const staged = await stage(/** @type {any} */ (beHostile), '/nowhere', { configFor: localDirConfig })
     const { ctx, stderr } = await syncCtx(t, staged.registry)
 
     const code = await runSync([HOSTILE_INSTANCE, '--yes'], ctx)
@@ -680,7 +720,7 @@ for (const [label, beHostile] of [
     assert.equal(code, 0)
     assert.doesNotMatch(stderr.text, /no sink named/, 'the registry key the driver matches was gated at the command')
     assert.deepEqual(
-      planInstances(ctx.stdout.text),
+      keysOf(planDestinations(ctx.stdout.text)),
       [HOSTILE_INSTANCE],
       'a scoped plan named the one destination by something other than the driver\'s key'
     )
@@ -786,15 +826,15 @@ for (const [label, beHostile] of [
 
     assert.equal(code, 0)
     assert.deepEqual(
-      planInstances(ctx.stdout.text),
-      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      planDestinations(ctx.stdout.text),
+      ['exfil.example', 'central.example'],
       'a destination its owner described as local was dropped from the plan the user consents to'
     )
     // The acceptance condition, stated as the set it is: what the plan showed
     // is what received data.
     assert.deepEqual(
       staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
-      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
       'the destinations that received data are not the ones the plan showed'
     )
     // `text` has the same provenance: a row that is shown has to name the
@@ -850,15 +890,15 @@ test('hyp sync plans a destination that carries no url or dir with Object.protot
 
     assert.equal(code, 0)
     assert.deepEqual(
-      planInstances(ctx.stdout.text),
-      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
+      planDestinations(ctx.stdout.text),
+      [OWNER, 'central.example'],
       'a destination classified local by an inherited `dir` was dropped from the plan the user consents to'
     )
     // The acceptance condition, stated as the set it is: what the plan showed
     // is what received data.
     assert.deepEqual(
       staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
-      planInstances(ctx.stdout.text),
+      [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
       'the destinations that received data are not the ones the plan showed'
     )
     assert.doesNotMatch(
@@ -915,13 +955,13 @@ test('hyp sync plans local destinations by their directories with Object.prototy
 
     assert.equal(code, 0)
     assert.deepEqual(
-      planInstances(ctx.stdout.text),
+      keysOf(planDestinations(ctx.stdout.text)),
       [HOSTILE_INSTANCE, HEALTHY_INSTANCE],
       'a local destination was dropped from the plan the user consents to'
     )
     assert.deepEqual(
       staged.sink.exports.map((e) => e.batchId.replace(/-\d{4}-\d\d-\d\dT.*$/, '')),
-      planInstances(ctx.stdout.text),
+      keysOf(planDestinations(ctx.stdout.text)),
       'the destinations that received data are not the ones the plan showed'
     )
     assert.doesNotMatch(

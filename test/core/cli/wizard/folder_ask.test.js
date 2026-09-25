@@ -70,8 +70,7 @@ test('sync leads, is the bare-enter default, and both rows state their consequen
   assert.ok(state.question.options.every((/** @type {any} */ o) => typeof o.summary === 'string' && o.summary.length > 0))
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
-  assert.match(stdout.text(), /New folders will sync without asking/)
-  assert.match(stdout.text(), /hyp privacy folders ask/)
+  assert.equal(stdout.text(), '✓ New folders sync automatically (change with `hyp privacy folders ask`)\n')
 })
 
 test('choosing the ask buys the per-folder question and says how to undo it', async () => {
@@ -85,8 +84,7 @@ test('choosing the ask buys the per-folder question and says how to undo it', as
 
   assert.deepEqual(result, { mode: 'ask' })
   assert.equal(await readFolderAskMode({ stateDir }), 'ask')
-  assert.match(stdout.text(), /asked once per new folder/)
-  assert.match(stdout.text(), /hyp privacy folders sync/)
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('the answer is recorded even when it matches the default, so status can read it back', async () => {
@@ -135,7 +133,7 @@ test('cancel and back leave the standing answer untouched', async () => {
   }
 })
 
-test('autoAccept states the question and records the default without prompting (LLP 0201)', async () => {
+test('autoAccept states the answer and records the default without prompting (LLP 0201)', async () => {
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
 
@@ -148,11 +146,10 @@ test('autoAccept states the question and records the default without prompting (
 
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
-  // Never silent: the statement the question would have shown is printed,
-  // with the answer as an indented line completing the title's sentence
-  // rather than a second flush-left announcement repeating the subject.
-  assert.match(stdout.text(), /When opening Claude Code or Codex in a new project,/)
-  assert.match(stdout.text(), /^ {2}it syncs automatically; change later with hyp privacy folders ask$/m)
+  // Never silent: the answer is stated as the same one recap line the
+  // asked path prints, and the question's title is not narrated.
+  // @ref LLP 0437#recap [tests]: an auto-accepted lane states its answer as one checkmark line
+  assert.equal(stdout.text(), '✓ New folders sync automatically (change with `hyp privacy folders ask`)\n')
 })
 
 test('an express accept round-trips the standing answer instead of resetting it', async () => {
@@ -176,7 +173,7 @@ test('an express accept round-trips the standing answer instead of resetting it'
   assert.deepEqual(result, { mode: 'ask' })
   assert.equal(await readFolderAskMode({ stateDir }), 'ask', 'the standing answer was not overwritten')
   // And the screen reports what is now true, not the constant.
-  assert.match(stdout.text(), /^ {2}you are asked the first time; change later with hyp privacy folders sync$/m)
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('an unwritable preference warns and leaves the previous mode standing', async () => {
@@ -199,7 +196,7 @@ test('an unwritable preference warns and leaves the previous mode standing', asy
   assert.match(stderr.text(), /hyp privacy folders ask/)
 })
 
-test(`a failed write still finishes the narrated title's sentence on stdout`, async () => {
+test('a failed write on the express path states the mode that stands, not the one it could not record', async () => {
   const { env, stateDir } = await makeHome()
   // A directory where the file belongs makes the atomic write fail, and
   // makes the safe read answer 'ask' (LLP 0200 #fail-safe), so 'ask' is
@@ -217,33 +214,21 @@ test(`a failed write still finishes the narrated title's sentence on stdout`, as
 
   assert.equal(result.skipped, true)
   assert.equal(result.mode, 'ask', 'the mode already in force is what stands')
-  // On the narrated path the title is a sentence lead-in ending in a
-  // comma, completed by the indented clause under it. A failed write used
-  // to return before writing that clause, leaving a half-written question
-  // on screen with the next phase's output under it while the whole
-  // explanation went to stderr.
-  // @ref LLP 0201#narrate [tests]: the narrated question is finished on stdout even when the write behind it fails
-  const out = stdout.text()
-  assert.match(out, /^When opening Claude Code in a new project,$/m)
-  assert.match(out, /^ {2}you are asked the first time$/m)
-  // Still one sentence, not two answers: the recorded-answer form (with
-  // its "change later with" tail) is not what an unrecorded answer says.
-  assert.doesNotMatch(out, /change later with/)
+  // The lane still states its answer, and the answer it states is the one
+  // that is true of the machine: the standing mode, not the default the
+  // write failed to record.
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
   // And the failure itself is still reported, in full, on stderr.
   assert.match(stderr.text(), /could not record the new-folder answer/)
   assert.match(stderr.text(), /it stays 'ask'/)
 })
 
-test('a failed write keeps the narrated sentence contiguous on the screen', async () => {
+test('a failed write puts the statement before the warning that qualifies it', async () => {
   const { env, stateDir } = await makeHome()
   await fs.mkdir(folderAskPath(stateDir), { recursive: true })
-  // One sink for both streams: on the attended run this narration exists
-  // for, stdout and stderr are the same terminal, and the order the user
-  // reads is the order the writes happen in. Asserting each stream on its
-  // own cannot see that - it is how a warning came to sit between the
-  // title's lead-in and the clause completing it, which is the same
-  // half-written question the completing clause was added to close.
-  // @ref LLP 0201#narrate [tests]: the completed sentence is contiguous on a terminal, with the warning under it rather than inside it
+  // One sink for both streams: stdout and stderr are the same terminal on
+  // an attended run, and the order the user reads is the order the writes
+  // happen in. Asserting each stream on its own cannot see that.
   const screen = makeBuf()
 
   await runWizardFolderAsk(/** @type {any} */ ({
@@ -255,25 +240,22 @@ test('a failed write keeps the narrated sentence contiguous on the screen', asyn
 
   const lines = screen.text().split('\n').filter((l) => l !== '')
   assert.deepEqual(
-    [lines[0], lines[1], lines[2]?.slice(0, 7)],
-    ['When opening Claude Code in a new project,', '  you are asked the first time', 'warning'],
-    `the sentence must finish before the warning; the screen read:\n${screen.text()}`
+    [lines[0], lines[1]?.slice(0, 7)],
+    ['✓ New folders ask first (change with `hyp privacy folders sync`)', 'warning'],
+    `the statement must come before the warning; the screen read:\n${screen.text()}`
   )
 })
 
 // The failed-write arm is documented as one that warns and leaves the
 // previous mode standing "rather than failing the run" (LLP 0200 #wizard).
 // Its own two writes were the one way it could still fail it: a stream
-// that throws between the write that opened the sentence and the writes
-// that close it took the whole run down from inside the arm that exists
-// to keep the run alive. Each write is now guarded on its own, so neither
+// that throws took the whole run down from inside the arm that exists to
+// keep the run alive. Each write is now guarded on its own, so neither
 // half can take the other, or the run, with it.
 // @ref LLP 0200#wizard [tests]: the failed-write arm cannot fail the run, including through its own writes
 
 /**
- * A stream that writes normally until the nth write, which throws. The
- * realistic shape: a pipe closes between two writes of the same block,
- * not before the first one.
+ * A stream that writes normally until the nth write, which throws.
  *
  * @param {number} failOn 1-based index of the write that throws
  */
@@ -292,11 +274,11 @@ function throwingBuf(failOn) {
   }
 }
 
-test('a failed write survives a stdout that dies mid-sentence, and still warns', async () => {
+test('a failed write survives a stdout that cannot take the statement, and still warns', async () => {
   const { env, stateDir } = await makeHome()
   await fs.mkdir(folderAskPath(stateDir), { recursive: true })
-  // Write 1 is the narrated title; write 2 is the clause completing it.
-  const stdout = throwingBuf(2)
+  // The lane's one stdout write is the statement of the standing mode.
+  const stdout = throwingBuf(1)
   const stderr = makeBuf()
 
   const result = await runWizardFolderAsk(/** @type {any} */ ({
@@ -329,9 +311,8 @@ test('a failed write survives a stderr that cannot take the warning', async () =
 
   assert.equal(result.skipped, true)
   assert.equal(result.mode, 'ask', 'the mode already in force is what stands')
-  // stdout was healthy, so the narrated sentence is still finished on it.
-  assert.match(stdout.text(), /^When opening Claude Code in a new project,$/m)
-  assert.match(stdout.text(), /^ {2}you are asked the first time$/m)
+  // stdout was healthy, so the standing mode is still stated on it.
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('the asked path survives a stderr that cannot take the warning', async () => {

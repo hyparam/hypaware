@@ -535,7 +535,8 @@ test('an out-of-range numeric entity in a heading renders instead of crashing, m
   assert.ok(html.includes('<h2 id="e--f">'), 'the top of the reachable decimal window must slug like pandoc')
   assert.ok(html.includes('<h2 id="g--h">'), 'the top of the reachable hex window must slug like pandoc')
   assert.ok(html.includes('<h2 id="ij">'), 'with no spaces around it the substituted character leaves no hyphen at all')
-  assert.ok(html.includes('<h2>&#x110000;</h2>'), 'a heading of nothing but the reference gets no id, and its text stays verbatim')
+  // marked 18.0.14 and later render the out-of-range reference as U+FFFD, as pandoc does.
+  assert.ok(html.includes('<h2>�</h2>'), 'a heading of nothing but the reference gets no id')
 
   // Lone surrogates were already safe (`fromCodePoint` accepts them and the `/u` strip
   // removes them) and must stay that way, as must the last real codepoint.

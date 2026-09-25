@@ -74,6 +74,8 @@ export async function loginWithBrowser({
   stdout = process.stdout,
   env,
 }) {
+  /** @type {string[]} */
+  let fallback = []
   const log = getLogger('remote')
   const { verifier, challenge } = createPkcePair()
   const state = crypto.randomBytes(16).toString('hex')
@@ -94,8 +96,14 @@ export async function loginWithBrowser({
     if (compact) {
       // The wizard's join lane: the same fallback URL, without the paragraph
       // around it. The lane's own position line already says what is happening.
-      print(opened ? 'Opening your browser to sign in; if it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:')
-      print(`  ${startUrl}`)
+      // Drawn above the wait's spinner, and erased with it once the sign-in
+      // settles: the URL is a fallback for while the browser is out, and left
+      // behind it reads as a step still waiting on the user.
+      // @ref LLP 0437#regions [implements]: the fallback URL is live, not logged
+      fallback = [
+        opened ? 'Opening your browser to sign in; if it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:',
+        `  ${startUrl}`,
+      ]
     } else if (opened) {
       // The opener boolean is best-effort: a launcher that exists but fails (no
       // display on a headless box) still returns true. So phrase this as an
@@ -125,7 +133,7 @@ export async function loginWithBrowser({
     // settles, and off a TTY the same one plain line.
     const poll = () => poller.waitForCode()
     const { code } = compact
-      ? await withSpinner({ stdout, env, label: WAITING_LABEL }, poll)
+      ? await withSpinner({ stdout, env, label: WAITING_LABEL, above: fallback }, poll)
       : await poll()
 
     // Redeeming the code is still the login and still blocking: `exchangeCode`

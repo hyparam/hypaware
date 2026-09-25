@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -10,7 +11,6 @@ import { PassThrough } from 'node:stream'
 import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   defaultPromptFactory,
-  runPickerWalkthrough,
 } from '../../src/core/cli/walkthrough.js'
 import { isPromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
@@ -22,13 +22,16 @@ test('picker prompt prints context under source options and defaults export to l
   const stdout = answerDrivenOutput(input, ['5\n'])
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
     // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
     platform: 'darwin',
+    // Stub detection: a host with a detected client pre-checks its row,
+    // which swaps the prompt line the answer hook waits for.
+    detect: async () => new Set(),
     env: {
       HOME: tmp,
       HYP_HOME: path.join(tmp, '.hyp'),
@@ -292,11 +295,14 @@ test('a dropped terminal at the source picker cancels the run instead of install
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
+    // Stub detection: a detected client pre-checks its row, and enter
+    // (or EOF) then keeps it instead of cancelling.
+    detect: async () => new Set(),
     env: { HOME: tmp, HYP_HOME: path.join(tmp, '.hyp') },
   })
 

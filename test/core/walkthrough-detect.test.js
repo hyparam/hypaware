@@ -10,7 +10,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 
 function makeBuf() {
   let s = ''
@@ -35,8 +35,8 @@ test('picker pre-checks detected sources, labels them, and defaults export to lo
     return question.options.filter((o) => o.checked).map((o) => o.value)
   }
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout: makeBuf(),
     stderr: makeBuf(),
     env: await tmpEnv(),
@@ -71,8 +71,8 @@ test('nothing detected → no source pre-checked, export still defaults to local
     return question.options.filter((o) => o.checked).map((o) => o.value)
   }
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout: makeBuf(),
     stderr: makeBuf(),
     env: await tmpEnv(),
@@ -91,8 +91,8 @@ test('nothing detected → no source pre-checked, export still defaults to local
 test('non-interactive picks skip detection entirely', async () => {
   let detectCalled = false
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout: makeBuf(),
     stderr: makeBuf(),
     env: await tmpEnv(),

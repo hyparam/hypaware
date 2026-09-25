@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { render } from '../../../../src/core/cli/tui/render.js'
-import { countPhysicalRows } from '../../../../src/core/cli/tui/runtime.js'
+import { countPhysicalRows } from '../../../../src/core/cli/tui/live_region.js'
 
 const COLOR_RE = /\x1b\[\d{1,3}(;\d{1,3})*m/
 
