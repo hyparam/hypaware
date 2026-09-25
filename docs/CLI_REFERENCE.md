@@ -189,7 +189,7 @@ failures return `1`.
 hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
-Provided by the bundled `@hypaware/grep` plugin. New `hyp init` capture
+Provided by the bundled `@hypaware/grep` plugin. New `hyp setup` capture
 configurations include it; existing client configurations gain it automatically
 on startup, preserving explicit `enabled: false` entries. The migration backs up
 the local config before writing. With a read-only config, search remains
@@ -563,6 +563,8 @@ hyp client status claude --json
 hyp client attach [client] [--dry-run] [--json]
 ```
 
+Short form: `hyp attach`, which the guides use.
+
 Writes only HypAware-managed client settings and installs registered skills and
 subagents. Repeating the command is a no-op. Claude Code uses its OTEL settings
 and requires version 2.1.193 or later. Gateway-backed clients require an active
@@ -584,6 +586,8 @@ XDG config home and session store.
 ```text
 hyp client detach [client] [--dry-run] [--purge] [--json]
 ```
+
+Short form: `hyp detach`, which the guides use.
 
 Replays the on-disk undo marker and removes only managed settings. It keeps
 recordings. Claude telemetry detach removes the managed OTEL settings and
@@ -661,9 +665,8 @@ Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
 sweep every five minutes by default.
 
 A positive `backfill.window_days` on a plugin entry bounds that scheduled
-sweep as well as the join-time import. This is deliberate
-([LLP 0359](../llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)),
-and it is easy to miss: a `window_days` set only to keep the first import
+sweep as well as the join-time import. This is deliberate:
+a `window_days` set only to keep the first import
 small also caps every later recovery, so a session older than the window is
 never swept up, OpenClaw's Lane B included. Nothing is removed from disk. The
 history is only left unimported, and widening or dropping `window_days` lets
@@ -678,8 +681,7 @@ the next sweep take it.
 With no `window_days`, the sweep falls back to the cache retention window:
 `query.cache.retention.default_days` if set, otherwise 90 days. A
 `default_days` of `0` is the open window rather than a zero-day one, so a
-sweep that falls back to it scans all history
-([LLP 0359 #sweep-context](../llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)).
+sweep that falls back to it scans all history.
 
 Setting the same block's `on_join` to false stops `@hypaware/claude`'s
 scheduled sweep as well as its join-time import: that adapter contributes no
@@ -768,8 +770,8 @@ hyp client claude-account status
 
 Plugin: `@hypaware/claude-desktop`.
 
-Desktop capture is transcript-only by default (LLP 0358). Select Claude
-Desktop in `hyp init`; the daemon reruns the Claude history provider every
+Desktop capture is transcript-only by default. Select Claude
+Desktop in `hyp setup`; the daemon reruns the Claude history provider every
 five minutes. This needs no Claude account credential and makes no changes to
 the Desktop app.
 
@@ -1688,7 +1690,7 @@ requires an eligible enrolled central destination. `off` removes pending copies
 and stops collection, but cannot retract records already accepted remotely.
 
 See [product telemetry](PRODUCT_TELEMETRY.md) for daemon restart requirements,
-the current draft implementation, and rollout limitations.
+what is collected, and delivery limits.
 
 ## Print version information
 
@@ -1744,18 +1746,4 @@ errors return `1`.
 
 ```sh
 hyp dev plugin doctor ./plugins/hypaware-plugin-widget --json
-```
-
-### Internal: `hyp dev smoke`
-
-```text
-hyp dev smoke <flow-name>
-```
-
-This hidden developer command runs one hermetic smoke flow under a fresh
-temporary `HYP_HOME` and propagates the child exit code. It doesn't prove the
-installed daemon or a real client. Use it only when developing HypAware.
-
-```sh
-hyp dev smoke status_diagnostics
 ```

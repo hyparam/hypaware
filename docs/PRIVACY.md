@@ -43,11 +43,11 @@ Three things keep it from becoming a second record:
   `@hypaware/claude` config). Past it the oldest files go first, so a stopped
   daemon costs detail, never disk.
 - `hyp purge` empties it, whatever else you asked that purge to delete, and
-  `hyp client detach claude` empties it on the way out.
+  `hyp detach claude` empties it on the way out.
 
 ### If you turned on proxy mode
 
-Proxy mode (see the README) routes all of Claude Code's HTTPS through the
+Proxy mode routes all of Claude Code's HTTPS through the
 local gateway rather than only its model calls, so it is worth being
 precise about what that does and does not change.
 
@@ -100,9 +100,9 @@ programs will also read.
 
 **Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
 permitted to vouch for, whether the keychain still trusts it, and whether
-the launchd variable is live. `hyp client detach claude --purge` and `hyp daemon
+the launchd variable is live. `hyp detach claude --purge` and `hyp daemon
 uninstall` remove the CA, its keychain trust, the launchd variable, and the
-login agent. A plain `hyp client detach claude` leaves the CA and any trust an
+login agent. A plain `hyp detach claude` leaves the CA and any trust an
 earlier release was granted in place, because a detach is not a statement
 about the certificate and no attach re-creates the grant; it clears the
 launchd variable and its agent only while that client's attach marker still
@@ -120,7 +120,7 @@ The deployment's operators can read forwarded data across every org on the
 server, and each such read is recorded in that org's audit trail.
 
 An enrolled machine also reports [product telemetry](PRODUCT_TELEMETRY.md) to
-the same organization automatically unless you saved a preference (LLP 0408):
+the same organization automatically unless you saved a preference:
 bounded usage, health and runtime summaries about HypAware itself, never
 conversation content, prompts, paths, or command arguments. `hyp telemetry off`
 turns it off durably and discards pending copies, `hyp telemetry status` shows
@@ -284,7 +284,7 @@ already forwarded to a server.
 `hyp leave` disconnects the machine from its central server: forwarding and
 config pull stop, org-driven client attaches are undone, and the forward
 credential is removed. Local recordings, config, and the daemon stay; use
-`hyp privacy purge` and the uninstall steps in the [README](../README.md#uninstalling)
+`hyp privacy purge` and the uninstall steps in the [README](../README.md#uninstall)
 to remove those too.
 
 ## The daemon's own telemetry

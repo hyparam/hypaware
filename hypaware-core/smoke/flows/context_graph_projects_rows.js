@@ -110,6 +110,14 @@ export async function run({ harness, expect }) {
     Array.isArray(v) && v.length === 2 && v[0] === 'Edit' && v[1] === 'Read'
   )
 
+  const walked = JSON.parse(await dispatchOk(
+    ['graph', 'neighbors', 'conv-1', '--direction', 'out', '--edge-type', 'used', '--limit', '1', '--json', '--include-local-only'],
+    { kernel, registry, harness, expect, label: 'bounded_neighbors' }
+  ))
+  expect.that('neighbors preserves exact reachability with bounded output', walked, v =>
+    v.neighbors.length === 1 && v.reachable === 2 && v.truncated === true && v.neighbors[0].edge_id
+  )
+
   // Re-run: idempotent (deterministic ids + pre-write dedup → no new rows).
   const project2 = await dispatchOk(['graph', 'project'], { kernel, registry, harness, expect, label: 'second' })
   expect.that('graph project: second run wrote 0 new nodes', project2, (v) => typeof v === 'string' && v.includes('wrote 0 new node(s)'))
@@ -150,6 +158,11 @@ export async function run({ harness, expect }) {
   await obs.shutdown()
   const traces = await expect.traces()
   const projectSpans = traces.filter((/** @type {any} */ t) => t.name === 'graph.project')
+  expect.that('traces: scoped traversal records its query and materialization counts', traces, rows => rows.some(t =>
+    t.name === 'graph.neighbors' && t.attributes?.status === 'ok' &&
+    t.attributes?.query_count === 5 && t.attributes?.node_rows === 2 &&
+    t.attributes?.edge_rows === 3 && t.attributes?.payload_bytes > 0
+  ))
   expect.that(
     'traces: graph.project span for the writing run records 7 nodes / 6 edges, status ok',
     projectSpans,

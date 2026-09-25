@@ -5,11 +5,6 @@ description: Audit what HypAware has captured from Claude/Codex sessions on this
 
 # HypAware privacy review: audit what was captured, decide what leaves
 
-<!-- @ref LLP 0100#skill [implements]: the six-step agent-assisted privacy review the deferred first sync directs the user to run (R3-R8) -->
-<!-- @ref LLP 0142#any-time [constrained-by]: the description advertises the audit itself, not the first-sync window; enrolled-ness gates behavior, not presence (LLP 0107#gating) -->
-<!-- @ref LLP 0142#local-cache-scope [constrained-by]: this machine's cache only; scanning an org server's rows is deliberately out of scope, not an oversight -->
-<!-- @ref LLP 0197#t2-premise-corrected [constrained-by]: the claude and codex copies of this skill are deliberately forked, not drifted. Step 1 resolves the session id by mechanisms only that host has, and the codex copy's version is separately tested (test/plugins/codex-privacy-skill-session-id.test.js). Mirror an edit to the other copy only where it is genuinely host-agnostic; test/plugins/skill-host-parity.test.js records the divergence. -->
-
 This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. The six steps run the same way whenever the user asks; only the stakes change.
 
 The one moment they are time-critical is enrollment. When `hyp remote login` enrolls this machine, the first sync to the org server is **held until a printed deadline** rather than run immediately, and the whole captured history (backfill included) ships at that deadline unless you refine it first. Doing nothing is a valid choice there - at the deadline everything forwards, which is the documented default. On a machine that was never enrolled there is no pending export at all, and the same steps simply bound what gets recorded and what stays in the local cache.
@@ -25,8 +20,6 @@ This flow governs **HypAware's own surfaces only** - what the local cache holds 
 The review conversation will discuss the most sensitive content on the machine, so it must never itself become a captured, forwardable transcript. **Before surveying anything**, opt this Codex session out of capture and **verify it took effect**. On failure, say so plainly and continue **only** with the user's explicit consent.
 
 Prefer `hyp session ignore --json`, which resolves the id and verifies the opt-out in one tested implementation and refuses rather than guessing. It exits nonzero and prints no success when it cannot establish the right id, which is the answer this step needs. Only where it is unavailable, or cannot resolve the session, does the script below apply.
-
-<!-- @ref LLP 0256#cli-posts-to-both [constrained-by]: more than one recorder hosts this route, so an opt-out that reaches one of them is not an opt-out -->
 
 Reading the receipt is not optional. The verb fails closed on the questions it can answer, but two of its **successes** are narrower than they look, and both are checked below.
 
@@ -194,7 +187,7 @@ Then run the enumeration query (Step 3) **twice, a short interval apart** (say ~
 
 ## Step 3 - Survey the captured directories, then sample content (R4 applies)
 
-Enumerate the distinct working directories this machine has captured (the LLP 0069 enumerate query over `ai_gateway_messages`):
+Enumerate the distinct working directories this machine has captured (an enumerate query over `ai_gateway_messages`):
 
 ```bash
 hyp query sql "SELECT cwd, repo_root, COUNT(*) AS rows, MAX(date) AS last_seen \

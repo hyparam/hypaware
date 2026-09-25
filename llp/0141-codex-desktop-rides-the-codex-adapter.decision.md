@@ -7,6 +7,7 @@
 **Date:** 2026-07-28
 **Related:** LLP 0012, LLP 0083, LLP 0115, LLP 0130, LLP 0133, LLP 0151
 **Extended-by:** LLP 0429 (native rollout capture is the default; gateway routing is explicit opt-in)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Names a coverage fact that was already true in code and nowhere in the
 > product surface. Nothing about capture changes here; the picker copy, the
@@ -32,16 +33,13 @@ routes, neither of which was named anywhere a user looks:
    by both surfaces too. That half rests on the provider's long-standing
    assumption (`codex/src/backfill.js`) and on smoke fixtures that synthesize
    a Desktop `originator`, not on a verified capture from a real Desktop
-   install; step 5 of [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md) is the
-   check that confirms it on real hardware.
+   install. Only a run on real hardware confirms it.
    `session_meta.originator` rides into the row's
    first-class `entrypoint` column and into `attributes.codex.originator`, so
    a Desktop session is distinguishable after import: the terminal client
    reports `codex-tui`, Desktop reports its own value. The live route
    populates the same column from the request's `originator` header. Neither
-   value is pinned here - Codex owns them, and the check in
-   [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md) lists what a machine
-   actually recorded rather than asserting a literal.
+   value is pinned here - Codex owns them.
 
 Three things in the product surface argued the opposite:
 
@@ -115,9 +113,7 @@ a `covered_by` attribute naming both routes, so the flag cannot be read as
   gateway counts and timestamps the `entrypoint` values it writes, the daemon
   carries them into `status.json`, and core renders them without
   interpreting any of them. The list is in-memory and daemon-scoped, so the
-  **query remains the durable check** and is still the pass condition in
-  [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md).
+  **query remains the durable check**.
 - Proving the live Desktop route end to end needs Codex Desktop on a real
-  machine, which no hermetic smoke can supply. `docs/ACCEPTANCE.md` carries
-  the opt-in manual procedure; `gateway_codex_capture` stays a fixture smoke
+  machine, which no hermetic smoke can supply; `gateway_codex_capture` stays a fixture smoke
   and is explicit that its Desktop-shaped traffic is synthetic.

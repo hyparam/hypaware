@@ -105,8 +105,8 @@ export function createCursorDecoder({ log } = {}) {
     started.unref()
     syncRef = updateRef
     worker = started
-    // The signal the acceptance gate reads to tell a decode thread that
-    // appears for a run of passes from one that respawns on every pass.
+    // One per spawn, so the log tells a decode thread that persists for a
+    // run of passes from one that respawns on every pass.
     log?.info('cursor.decoder.started', { component: 'plugin.cursor', operation: 'recovery.read' })
     return started
   }

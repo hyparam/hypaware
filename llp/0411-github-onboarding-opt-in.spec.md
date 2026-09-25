@@ -61,5 +61,4 @@ Offer, configuration, and login emit secret-free outcome spans.
 Traditional tests cover consent, EOF, skipped runs, committed activation,
 command ordering, login failure, and reconfiguration. The GitHub capture smoke
 checks the onboarding spans alongside existing session inventory and capture.
-Real browser authorization remains the manual GitHub OAuth acceptance gate
-in `docs/ACCEPTANCE.md`.
+Real browser authorization is only checked by hand.

@@ -50,7 +50,8 @@ export async function attach(opts) {
 
 /**
  * Reverse a previous `attach`. No-op when config.toml is absent or
- * has no hypaware-managed Codex block.
+ * already has an unmarked hypaware provider. Missing providers in existing
+ * configs are repaired for saved chats migrated by 1.38.0.
  *
  * @param {CodexDetachOptions} [opts]
  * @returns {Promise<CodexDetachResult>}

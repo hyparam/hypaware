@@ -7,6 +7,7 @@
 **Date:** 2026-08-25
 **Related:** LLP 0016, LLP 0045, LLP 0099, LLP 0109, LLP 0157, LLP 0161, LLP 0234
 **Extended-by:** LLP 0429 (native rollout capture is the default; gateway routing is explicit opt-in)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > `hyp attach codex` writes one provider block in both auth modes, on a
 > prefix that says nothing about how the user logged in. The gateway picks
@@ -296,8 +297,7 @@ exists.
 - What a hermetic smoke cannot prove is whether `api.openai.com/v1/responses`
   accepts the body Codex builds for this provider block. The shared
   `wire_api = "responses"` makes it likely and nothing else can settle it, so
-  the `codex_login_switch_reroute` acceptance procedure exists and is not
-  substitutable by a fixture.
+  only a real login switch can confirm it; a fixture cannot.
 
 ## References
 
@@ -309,6 +309,5 @@ exists.
   `test/plugins/codex-attach-route.test.js`,
   `test/plugins/ai-gateway-proxy-routing.test.js`,
   `test/plugins/gateway-openai-upstream-slot.test.js`
-- `docs/ACCEPTANCE.md` (`codex_login_switch_reroute`)
 - LLP 0099 (superseded by this document), LLP 0157 (extended by it),
   LLP 0161 (the `openai` preset slot), LLP 0234 (`record_prefix`)

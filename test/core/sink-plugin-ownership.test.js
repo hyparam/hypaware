@@ -5,7 +5,9 @@ import assert from 'node:assert/strict'
 
 import { createActivationContext } from '../../src/core/runtime/activation.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
-import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+import { LoggerProvider, MeterProvider, TracerProvider, logs, metrics } from '../../src/core/observability/runtime.js'
+import { resetKernelInstruments } from '../../src/core/observability/meter.js'
+import { materializeSinks } from '../../src/core/sinks/materialize.js'
 
 /** @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../src/core/registry/types.js' */
 
@@ -381,4 +383,186 @@ test('an owner\'s throwing instanceName accessor does not escape out of a listin
   assert.deepEqual(own.map((/** @type {any} */ h) => h.name), ordered, 'the owner\'s own listing changed order')
   assert.equal(own[0], live[1], 'the owner no longer gets its own live handles back')
   assert.deepEqual(owner.seen.exports, [], 'forged rows reached the owner\'s destination')
+})
+
+// The label half of the same question (issue #1562). `register` refuses a
+// contribution that names a neighbour, but `contribution.plugin` is a live
+// property and only had to agree with its registrar at that one moment, and
+// `instantiate` read it again for every label on the instance. The kernel
+// never had to ask: `args.plugin` is the `ActivePlugin` its materializer
+// resolved out of the config row.
+
+/**
+ * A contribution honest exactly once, for `register`, and answering `plugin`
+ * with a neighbour's name ever after. `arm()` is called by the test, so the
+ * fixture cannot drift early and be refused at registration instead.
+ *
+ * @param {string} name
+ * @param {string} honest
+ * @param {string} claimed
+ */
+function driftingSink(name, honest, claimed) {
+  let armed = false
+  return {
+    arm() { armed = true },
+    contribution: /** @type {any} */ ({
+      name,
+      get plugin() { return armed ? claimed : honest },
+      supports: [],
+      async create() {
+        return { async exportBatch() { return { exported: true } }, async close() {} }
+      },
+    }),
+  }
+}
+
+/**
+ * Collect the kernel's logs, metrics and spans emitted while `fn` runs.
+ * `resetKernelInstruments` is what makes the counter observable: the sink
+ * registry takes its instruments at construction, so the meter has to be the
+ * global one before `stage()` builds the registry inside `fn`.
+ *
+ * @param {() => Promise<void>} fn
+ */
+async function telemetryFrom(fn) {
+  /** @type {any[]} */
+  const records = []
+  /** @type {any[]} */
+  const measurements = []
+  /** @type {any[]} */
+  const spans = []
+  const loggerProvider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
+  })
+  const meterProvider = new MeterProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { measurements.push(...batch) } }],
+  })
+  const tracerProvider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { spans.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(loggerProvider)
+  metrics.setGlobalMeterProvider(meterProvider)
+  tracerProvider.register()
+  resetKernelInstruments()
+  try {
+    await fn()
+  } finally {
+    await loggerProvider.shutdown()
+    await meterProvider.shutdown()
+    await tracerProvider.shutdown()
+    resetKernelInstruments()
+  }
+  return { records, measurements, spans }
+}
+
+test('a sink instance is attributed to the owner the kernel resolved, not to a contribution that renames itself after registration', async () => {
+  const drifting = driftingSink('drifting', A, B)
+  /** @type {any} */
+  let staged
+  /** @type {ExtendedSinkHandle[]} */
+  let handles = []
+  /** @type {any[]} */
+  let errors = []
+  const seen = await telemetryFrom(async () => {
+    staged = stage()
+    staged.ctxA.sinks.register(drifting.contribution)
+    drifting.arm()
+    const result = await materializeSinks(
+      staged.runtime,
+      /** @type {any} */ ({ sinks: { 'org-export': { plugin: A, config: { schedule: '* * * * *' } } } }),
+      { stateRoot: '/nowhere', runId: 'r' }
+    )
+    handles = result.handles
+    errors = result.errors
+  })
+
+  assert.deepEqual(errors, [], 'the honest half of the fixture stopped materializing')
+  assert.equal(drifting.contribution.plugin, B, 'the fixture stopped drifting, so nothing was proved')
+  assert.equal(handles.length, 1)
+  assert.equal(handles[0].plugin, A, 'handle.plugin came from the contribution, not from the resolved owner')
+  assert.equal(
+    /** @type {ExtendedSinkRegistry} */ (staged.runtime.sinks).ownerOf('org-export'),
+    A,
+    'the registry\'s owner record and the handle disagree'
+  )
+
+  for (const body of ['sink.resolved', 'sink.register']) {
+    const record = seen.records.find((r) => r.body === body)
+    assert.ok(record, `no ${body} record`)
+    assert.equal(record.attributes.hyp_plugin, A, `${body} named the neighbour`)
+    assert.equal(record.attributes.hyp_sink_destination, A, `${body} sent the destination to the neighbour`)
+  }
+
+  const span = seen.spans.find((s) => s.name === 'sink.register')
+  assert.ok(span, 'no sink.register span')
+  assert.equal(span.attributes.hyp_plugin, A, 'the sink.register span named the neighbour')
+
+  const counted = seen.measurements.filter((m) => m.name === 'hyp_sinks_registered')
+  assert.equal(counted.length, 1, 'hyp_sinks_registered did not tick exactly once')
+  assert.equal(counted[0].attributes.hyp_plugin, A, 'hyp_sinks_registered ticked under a plugin that registered no sink')
+})
+
+test('a blob sink\'s destination is the resolved owner too, not the contribution\'s later claim', async () => {
+  // The blob shape carries the claim twice: `handle.plugin` and
+  // `handle.destination`, and `describeDestination` in `src/core/commands/sync.js`
+  // shows one of them to the operator.
+  const staged = stage()
+  const registry = /** @type {ExtendedSinkRegistry} */ (staged.runtime.sinks)
+  const drifting = driftingSink('drifting-blob', A, B)
+  staged.ctxA.sinks.register(drifting.contribution)
+  drifting.arm()
+  const handle = await registry.instantiate(/** @type {any} */ ({
+    kind: 'blob',
+    instanceName: 'blob-export',
+    destination: drifting.contribution,
+    writerPlugin: '@hypaware/format-parquet',
+    encoder: { format: 'parquet', extension: 'parquet', supports: [], async encodePartition() { return {} } },
+    config: { schedule: '* * * * *', dir: '/nowhere' },
+    plugin: staged.ctxA.plugin,
+    paths: staged.ctxA.paths,
+    log: staged.ctxA.log,
+  }))
+  assert.equal(drifting.contribution.plugin, B, 'the fixture stopped drifting, so nothing was proved')
+  assert.equal(handle.plugin, A)
+  assert.equal(handle.destination, A, 'the blob handle\'s destination came from the contribution')
+  assert.equal(handle.writer, '@hypaware/format-parquet')
+  await registry.closeAll()
+})
+
+test('a contribution naming a neighbour never reaches that neighbour\'s activation context', async () => {
+  // The end-to-end shape of #1565, through the kernel's own materializer
+  // rather than through `register` alone: the impostor declares the
+  // neighbour's name, the neighbour is active and registered no sink of its
+  // own (so the ambiguity guard does not fire), and the config row names the
+  // neighbour. Before the binding existed this ran the impostor's `create()`
+  // with the neighbour's `plugin` and `paths.stateDir`.
+  const staged = stage()
+  /** @type {{ plugin?: string, stateDir?: string } | null} */
+  let received = null
+  const impostor = /** @type {any} */ ({
+    name: 'impostor-sink',
+    plugin: A,
+    supports: [],
+    async create(/** @type {any} */ ctx) {
+      received = { plugin: ctx.plugin?.name, stateDir: ctx.paths?.stateDir }
+      return { async exportBatch() { return { exported: true } }, async close() {} }
+    },
+  })
+  assert.throws(
+    () => staged.ctxB.sinks.register(impostor),
+    /declares plugin/,
+    'a sink contribution naming a neighbour was registered'
+  )
+  const { handles, errors } = await materializeSinks(
+    staged.runtime,
+    /** @type {any} */ ({ sinks: { 'org-central': { plugin: A, config: {} } } }),
+    { stateRoot: '/nowhere', runId: 'r' }
+  )
+  assert.deepEqual(handles, [], 'the impostor\'s sink was materialized under the neighbour\'s config row')
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].errorKind, 'sink_contribution_missing')
+  assert.equal(received, null, 'the impostor\'s create() ran under the neighbour\'s activation context')
 })

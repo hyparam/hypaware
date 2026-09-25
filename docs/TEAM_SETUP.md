@@ -9,18 +9,20 @@ it.
 
 Organizations are hosted on the central server and keyed by email domain:
 anyone who signs in with a verified email on your claimed domain joins your
-organization automatically. 
+organization automatically.
 
-> To get an organization,
-> [get in touch](https://hyperparam.app/contact) and we will set one up for your
-> domain.
+You don't need an organization to start: one person can run the setup below
+and sync their own machines. To put more than one person in an organization,
+[contact us](https://hypaware.ai/contact) and we will set one up for your
+domain. There is no self-serve invite yet.
 
 ## Run the setup
 
 HypAware requires **Node 22.12 or newer**. Run:
 
 ```sh
-npx hypaware
+npm i -g hypaware
+hyp setup
 ```
 
 This opens a guided setup. The first question is how you want to collect
@@ -71,15 +73,6 @@ keypress per screen.
 
 <img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as set by your team and a detected tool pre-checked.">
 
-<!--
-  Screenshots need re-shooting on a real terminal: issue #1146 tracks it.
-  (Not #1139, which the PR that wrote this note closes.)
-  There is no image of the "Set up recording" question, which is now the
-  screen most people see after signing in, and wizard-pick.png predates
-  the step being renumbered, so its position line may not match what the
-  checklist shows today. The prose above was verified against the code;
-  the images were not.
--->
 
 ### After the questions
 
@@ -107,7 +100,20 @@ and undo the setup, run `hyp leave`.
 ## Explore what was recorded
 
 Because setup imports your recent history, there is data to query
-immediately. Two queries to start with:
+immediately. Start with the overview: sessions, tools, models, and tokens
+over recent activity.
+
+```sh
+hyp query overview
+```
+
+Or ask a question in plain language:
+
+```sh
+hyp ask "From my HypAware history, which tools failed most often this week?"
+```
+
+Two SQL queries to go further:
 
 ```sh
 # Which providers and models you use, by volume

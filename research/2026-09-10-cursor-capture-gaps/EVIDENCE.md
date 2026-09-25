@@ -1,23 +1,20 @@
 # Cursor capture implementation evidence
 
-Status: **Native recovery implemented; release acceptance still required.**
-Date: 2026-09-10. Design: [LLP 0399](../llp/0399-cursor-native-session-recovery.decision.md).
+Status: **Native recovery implemented; real-client coverage incomplete.**
+Date: 2026-09-10. Design: [LLP 0399](../../llp/0399-cursor-native-session-recovery.decision.md).
 
 Cursor's local saved sessions now supply user messages, assistant segments,
 full tool results and tool outcomes. Native hooks trigger bounded recovery and
-retain the extra `beforeReadFile` observations requested by the operator.
+retain the extra `beforeReadFile` observations.
 Scheduled/manual backfill uses the same identities, so missed hooks and daemon
 downtime can be recovered without adding a second conversation copy.
 
 ## Source evidence
 
-Inspected editor 3.19.19 and isolated CLI 2026.09.08-6caf4ff. The installed old
-CLI 2025.10.28-0a91dc2 was not upgraded. Controlled calls and workspace probes
-were authorized; sign-in used Cursor's supported login flow. No credentials
-were extracted or staged, and the global HypAware installation is unchanged.
+Inspected editor 3.19.19 and CLI 2026.09.08-6caf4ff.
 
-Detailed research, source links and reproducible probes:
-[Cursor capture gaps](../research/2026-09-10-cursor-capture-gaps/REPORT.md).
+Detailed research and source links:
+[Cursor capture gaps](REPORT.md).
 Sanitized hook fixtures remain under `test/fixtures/cursor/`.
 
 The hooks deliberately summarize tiny Read/Grep results, mislabel Glob as
@@ -27,8 +24,8 @@ Cursor's JSONL transcript serializer can merge thinking into ordinary text
 and omit stable identities, so the adapter does not read those transcripts.
 The native SQLite graph preserves richer typed and model-context records.
 
-The candidate JavaScript reader was run read-only against exactly three
-previously authorized disposable sessions, with ordinary WAL-aware SQLite:
+The JavaScript reader was run read-only against three disposable sessions,
+with ordinary WAL-aware SQLite:
 
 | Store | User turns | Assistant segments | Tools | Native errors |
 | --- | ---: | ---: | ---: | ---: |
@@ -40,7 +37,7 @@ The editor includes four Read, three Glob, one Grep, two Shell and two
 GetDynamicTools calls. The last CLI session includes a missing-file Read and
 two genuinely rejected Shell calls. File text and matching Grep lines are
 recovered. These counts agree with the independent research probes.
-The final assistant timestamp is absent in exited CLI sessions; the candidate
+The final assistant timestamp is absent in exited CLI sessions; the reader
 requires matching saved model-context text for those segments.
 
 These read-only probes verify native decoding, not a globally installed live
@@ -67,14 +64,11 @@ handler or every interactive client lifecycle.
 The `cursor_capture` smoke activates Cursor without the gateway, seeds both
 native store formats with open WAL connections, sends hooks, queries 18 rows,
 and repeats recovery through the registered backfill command without duplicates.
-It checks receive, storage, recovery and privacy telemetry. Passing run:
-`smoke-cursor_capture-2026-09-10T23-22-23-505Z-52999`.
-Final verification: `npm test` passed 6,570 tests with three skips. Type
-checking, the `cursor_capture` smoke, file hygiene and LLP reference checks
-passed. Synthetic fixtures pin the researched schema; they do not replace
-the real-client acceptance procedure.
+It checks receive, storage, recovery and privacy telemetry. Synthetic
+fixtures pin the researched schema; they do not replace testing against a
+real client.
 
-## Fresh candidate CLI acceptance, September 10
+## Live CLI probe
 
 A new live probe exposed a configuration incompatibility missed by the synthetic
 smoke: CLI `HooksConfigLoader.parseJSONC` removes `//` comments before parsing
@@ -90,7 +84,7 @@ for existing callers. This is constant bounded work with no new CPU or memory
 concern.
 
 With corrected temporary project hooks, fresh CLI session
-`791944d7-dfec-4390-80a2-399226b48227` delivered eight callbacks. The real candidate
+`791944d7-dfec-4390-80a2-399226b48227` delivered eight callbacks. The real
 listener and storage recovered one user message, all three assistant segments,
 five tools, and one extra file observation: ten distinct stored parts. The
 Read result contained the complete 32-byte fixture; Grep retained matching text,
@@ -100,14 +94,13 @@ The native assistant/tool counts match the independent filtered CLI stream.
 During execution, incomplete roots and pending tools produced bounded retries.
 Recovery later added the final assistant segment and settled with no pending
 work or last error. Replaying saved native records added zero rows, both before
-and after restarting the candidate source. Data stayed in a disposable cache;
+and after restarting the source. Data stayed in a disposable cache;
 this was a temporary project-hook test, not a global installation or proof of
-all editor/interactive behavior. Editor verification remains pending.
+all editor/interactive behavior.
 
 ## Additional editor history recovery
 
-At 23:25 UTC, the latest saved turn in the scoped disposable editor session
-had checkpoint time 23:15:15 UTC. It contained thirteen tools: three Read,
+The latest saved turn in a disposable editor session contained thirteen tools: three Read,
 two Grep, two Glob, two Shell, three GetDynamicTools and one CallDynamicTool,
 plus three assistant segments. A manual local recovery trigger persisted the
 whole six-turn session as 42 unique parts: six user messages, eleven assistant
@@ -116,16 +109,13 @@ editor/CLI test cache contained 52 unique parts and no duplicate identities.
 Full native results were retained; unverified editor Shell/dynamic-call outcome
 variants correctly remained unknown rather than being labeled successful.
 
-The operator confirmed that the 23:15 UTC (4:15 p.m. local) turn was the
-intended test batch. All thirteen tools and three assistant segments in that
-batch were recovered. No new editor callback had reached the candidate
-listener: this verifies saved-session recovery, while live editor delivery
-still requires a fresh run after attachment. The temporary listener was stopped
-and the disposable workspace hook file restored byte-for-byte afterward.
+All thirteen tools and three assistant segments in that turn were recovered.
+No editor callback reached the listener, so this verifies saved-session
+recovery only; live editor delivery is unverified.
 
 ## Remaining limits
 
-[Release acceptance](ACCEPTANCE.md#cursor_editor_cli_capture) still covers
+Beyond the probes above, still unverified against a real client:
 installed handler behavior, editor/interactive/headless modes, interruption,
 resume, regeneration, upstream format drift and sustained resource measurements.
 Native storage is an internal version-specific interface, not a public API.
@@ -161,4 +151,4 @@ or retired between passes; no conversation contents remain in adapter caches.
 The CPU/memory pass found no unbounded new queue or lifetime content retention.
 Synchronous bounded SQLite/parsing can pause the event loop for large graphs,
 and shared dedupe still scans waiting data. Hook process overhead, large-session
-latency and sustained heap use remain measurements for release acceptance.
+latency and sustained heap use remain unmeasured.

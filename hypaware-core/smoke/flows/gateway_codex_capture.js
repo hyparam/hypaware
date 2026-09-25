@@ -8,6 +8,7 @@ import process from 'node:process'
 import { Attr, installObservability } from '../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { runDaemon } from '../../../src/core/daemon/runtime.js'
+import { prepareAttach } from '../../plugins-workspace/codex/src/toml-config.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
@@ -29,8 +30,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * synthetic: it is issued by this file against a local fake upstream, with
  * no Codex Desktop involved. It proves the gateway and projector handle
  * that shape, not that a real Codex Desktop routes through HypAware. The
- * end-to-end claim needs a human and a real app: see the
- * `codex_desktop_capture` procedure in `docs/ACCEPTANCE.md`
+ * end-to-end claim needs a human and a real app
  * (@ref LLP 0141#one-adapter).
  *
  * Bead `hy-bbyi` assertions:
@@ -53,6 +53,13 @@ export async function run({ harness, expect }) {
       'gateway_codex_capture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
+
+  const isolatedHome = path.join(harness.tmpDir, 'home')
+  expect.that('isolation: HOME belongs to this smoke', process.env.HOME, (v) => v === isolatedHome)
+  expect.that('isolation: inherited CODEX_HOME was removed', process.env.CODEX_HOME, (v) => v === undefined)
+  const clientConfig = path.join(isolatedHome, '.codex', 'config.toml')
+  await fs.mkdir(path.dirname(clientConfig), { recursive: true })
+  await fs.writeFile(clientConfig, prepareAttach('service_tier = "fast"\n', 4388, 'old').content)
 
   const openai = await startOpenAiUpstream()
 
@@ -178,6 +185,8 @@ export async function run({ harness, expect }) {
   await sleep(120)
   await handle.stop()
   await handle.done
+  expect.that('migration: only the disposable client config is repaired', await fs.readFile(clientConfig, 'utf8'),
+    (v) => v.includes('service_tier = "fast"') && v.includes('[model_providers.hypaware]') && !v.includes('base_url'))
 
   // ----- The gateway's last-seen entrypoints reached status.json -----
   // This is the half of `hyp status` that answers "did Desktop traffic
@@ -375,6 +384,8 @@ export async function run({ harness, expect }) {
   )
 
   const logs = await expect.logs()
+  expect.that('logs: isolated daemon released the managed route', logs, (v) =>
+    v.some((l) => l.body === 'codex.capture.route_released' && l.attributes?.restart_required === true))
   const exchangeLogs = logs.filter(
     (/** @type {any} */ l) =>
       l.body === 'aigw.exchange' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,

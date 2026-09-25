@@ -1,11 +1,11 @@
-# Product telemetry (draft client increment)
+# Product telemetry
 
 [Documentation](README.md)
 
 Enrolling with a remote server (`hyp join`, or `hyp remote login` without
 `--no-forward`) automatically enables collection for that organization once
 gateway enrollment completes, including existing enrollments on the next CLI
-invocation or daemon start after upgrading (LLP 0408). Standalone installations
+invocation or daemon start after upgrading. Standalone installations
 default to **off**, and a saved `off` or `local` preference always takes
 precedence. This feature has no vendor endpoint, shared secret, or registration
 request.
@@ -20,8 +20,7 @@ hyp telemetry off
 
 `local` retains an allowlisted preview queue without network delivery and creates
 one random installation identity. `organization` requires exactly one configured
-central sink with an already enrolled gateway and an HTTPS URL (loopback HTTP is
-allowed for fixtures). Both enabling operations create new consent generations
+central sink with an already enrolled gateway and an HTTPS URL. Both enabling operations create new consent generations
 and remove earlier pending copies. `off` removes pending copies; it does not erase
 records already accepted by the receiver. A failed `off` exits nonzero and, when
 collection is still in force, says that product telemetry remains enabled.
@@ -67,7 +66,7 @@ by this process, not every historical cache table. They are snapshots (1 ms
 coverage), and their oldest age starts at first local observation. Missing stages
 remain absent, not zero. No cache traversal is added. First useful-result
 milestones, complete setup funnels and adapter-specific capture failure coverage
-remain subsequent instrumentation work; do not derive those reports yet.
+are not yet instrumented.
 
 ## Delivery and durability
 
@@ -96,63 +95,14 @@ one refresh through the existing gateway route, without writing an old identity
 over a concurrent enrollment; the refreshed token is used only for that pass.
 Continued authentication refusal pauses until the next bounded attempt.
 
-The [companion server PR #488](https://github.com/hyparam/hypaware-server/pull/488)
-must ship **first**, with product reporting explicitly
-enabled. GET `/v1/telemetry` uses the gateway Bearer token and advertises
-`schema_versions:[1]`, `max_records:100`, `max_batch_bytes:32768`,
-`max_queue_age_seconds:604800`, and `dedup_seconds:691200`. POST to the same route
+The receiver must have product reporting enabled. GET `/v1/telemetry` uses the
+gateway Bearer token and advertises `schema_versions:[1]`, `max_records:100`,
+`max_batch_bytes:32768`, `max_queue_age_seconds:604800`, and
+`dedup_seconds:691200`. POST to the same route
 carries uncompressed `{schema_version:1,batch_id,resource,records}`. The exact
 schemas and finite dimensions are in `src/core/product_telemetry/contract.js`.
 
 Only `202 {status:202,duplicate:boolean}` acknowledges durable acceptance.
 400/409/413/415/422 discard permanently rejected batches. 404 or incompatible
 capabilities pause rather than falling back to the old diagnostics endpoint.
-429/503 honor Retry-After. Never dual-send a legacy diagnostic for the same event.
-Durable acknowledgement does not claim immediate Iceberg materialization.
-
-The server companion currently gates archive/cache materialization and long-term
-summaries separately. Its retention, scoped SQL/MCP, durable dedup and disabled
-receiver compatibility must be verified before client release. Vendor sharing,
-standalone registration/credentials, golden-image identity resets and fleet-wide
-policy precedence remain rollout prerequisites.
-
-## Validation and performance
-
-Run `node --test test/core/product-telemetry.test.js`, `npm test`,
-`npm run typecheck`, `npm run smoke -- product_telemetry`, and
-`node --expose-gc benchmarks/product-telemetry.mjs`. The product smoke asserts
-both CLI/queue/receiver behavior and run-specific step logs. Its receiver fsyncs
-before deliberately losing an ack, then proves exact replay is acknowledged
-without a second append. The actual companion server task also accepted a
-client-constructed batch and the shared runtime output in its integration check.
-
-Measured on Node 24.2.0, macOS arm64, September 8:
-
-| Probe | Measurement | Scope |
-| --- | --- | --- |
-| 400 queue appends, p95 | 0.120 ms | Local filesystem, small invocation batches |
-| 100 enabled client lifecycles, p95 | 2.406 ms | Includes construction/maintenance/append/close |
-| 65-second idle process CPU | 0.00405% | Local-only collection, two basic samples |
-| Retained heap increase after queue exercise | 1.05 MiB | GC before readings |
-| Retained RSS increase after queue exercise | 18.53 MiB | Includes imports and allocator residency |
-
-The 10-MiB memory target is **not met by this probe**. The CPU probe is not an
-installed-daemon or full five-minute network-flush measurement. Queue limits
-survived a simulated 24-hour receiver outage, with at most one attempt per hour
-under Retry-After and visible drops at the count cap. These are measurements,
-not a claim that all proposed budgets or production rollout gates pass.
-
-CPU/memory review: fixed event dimensions, fixed queue reservations, bounded
-response bodies, one sender pass, at most 128 pending observations and three
-runtime series bound growth. Hot capture/export hooks are no-ops when collection
-is disabled. Queue maintenance reads only the bounded product queue. The RSS
-result and count-cap coverage are explicit limitations requiring pilot evaluation.
-
-Before release, run the repository's manual `durable_cache_upgrade` procedure for
-the new product outbox boundary: the previous package ignores this namespace;
-the candidate must preserve pending exact bytes/IDs through restart, deliver
-only eligible consent copies, and leave customer spool/cache data unchanged.
-Run a real installed-daemon 24-hour idle/outage soak on macOS and Linux, confirm
-30-second sample/five-minute summaries and shutdown cancellation, switch orgs
-while delivery is in flight, and verify production self-loop guards. None of
-these manual gates is claimed passed by the hermetic fixtures.
+429/503 honor Retry-After. Durable acknowledgement does not claim immediate Iceberg materialization.

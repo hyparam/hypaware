@@ -268,8 +268,8 @@ test('local-only Cursor rows remain queryable but are withheld by the actual exp
   }
 })
 
-async function waitFor(check) {
-  for (let i = 0; i < 200; i++) {
+async function waitFor(check, attempts = 200) {
+  for (let i = 0; i < attempts; i++) {
     if (await check()) return
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
@@ -416,7 +416,9 @@ test('stop drains both recovery and receiver lanes while a maximal graph is mid-
 })
 
 test('back-to-back recovery passes share one decode thread, released once the source goes quiet', async () => {
-  const f = await fixture({ recoveryDelayMs: 10, decoderIdleMs: 120 })
+  // Leave enough idle time for hooks to cross a loaded event loop without
+  // turning scheduling delays into a false claim that the decoder respawned.
+  const f = await fixture({ recoveryDelayMs: 10, decoderIdleMs: 1000 })
   const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
   const spawns = () => f.events.filter((event) => event === 'cursor.decoder.started').length
   // The idle-release timer is deliberately unref'd (it must not hold a
@@ -442,7 +444,7 @@ test('back-to-back recovery passes share one decode thread, released once the so
     // the release's own log line, backstopped by waitFor's deadline, instead
     // of guessing how long the idle window plus teardown takes under load -
     // a fixed sleep here raced the internal timer and intermittently lost.
-    await waitFor(() => f.events.includes('cursor.decoder.released'))
+    await waitFor(() => f.events.includes('cursor.decoder.released'), 600)
     await hook()
     await waitFor(() => spawns() === 2)
   } finally { clearInterval(keepAlive); native.close(); await f.cleanup() }

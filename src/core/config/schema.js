@@ -120,24 +120,22 @@ const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'vers
  * `init` still can). Behaviour:
  *
  * - **No existing config** → proceed.
- * - **Existing config, non-interactive** (no `confirmOverwrite`): refuse
- *   unless `force`; on `force`, copy the current file to
- *   `hypaware-config.json.bak-<ts>` first, then proceed.
- * - **Existing config, interactive** (`confirmOverwrite` supplied):
- *   prompt; on confirm, back up and proceed; on decline, abort.
+ * - **Existing config**: refuse unless `force`; on `force`, copy the
+ *   current file to `hypaware-config.json.bak-<ts>` first, then proceed.
+ *   An attended setup run passes `force`: the user just answered every
+ *   question, and the backup keeps the old file (LLP 0433).
  *
  * The helper only decides + backs up; the caller performs the write.
  *
  * @param {{
  *   targetPath: string,
  *   force?: boolean,
- *   confirmOverwrite?: (targetPath: string) => Promise<boolean>,
  *   now?: () => number,
  * }} args
  * @returns {Promise<LocalConfigWriteGuard>}
- * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup (non-interactive), prompt (interactive)
+ * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup
  */
-export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwrite, now }) {
+export async function prepareLocalConfigWrite({ targetPath, force, now }) {
   let exists = true
   try {
     await fs.access(targetPath)
@@ -146,12 +144,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwr
   }
   if (!exists) return { proceed: true }
 
-  if (confirmOverwrite) {
-    const confirmed = await confirmOverwrite(targetPath)
-    if (!confirmed) {
-      return { proceed: false, message: 'nothing was changed; your existing config is kept' }
-    }
-  } else if (!force) {
+  if (!force) {
     return {
       proceed: false,
       message:

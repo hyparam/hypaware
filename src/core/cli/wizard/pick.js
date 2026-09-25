@@ -15,7 +15,6 @@ import {
   composePickerConfig,
   configuredExportChoice,
   configuredPickerSources,
-  defaultOverwriteConfirmFactory,
   defaultPickerDetect,
   defaultPromptFactory,
   derivePickedClients,
@@ -438,18 +437,16 @@ export async function runWizardPick(opts) {
   })
 
   // The wizard orchestrator defers the write until every question lane has
-  // run (LLP 0190 #commit-point): the overwrite confirm then lands after
-  // the sync lane, and a cancel there leaves the existing config untouched.
+  // run (LLP 0190 #commit-point): the save then lands after the sync
+  // lane, and a cancel there leaves the existing config untouched.
   // Without `deferWrite` the write (and its guard) happens here, keeping
   // the standalone shape every direct caller and test relies on.
   if (!opts.deferWrite) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
       stderr: opts.stderr,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
       interactive,
       ...(opts.force !== undefined ? { force: opts.force } : {}),
-      ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
       configPath,
       config,
     })
@@ -523,8 +520,8 @@ export async function runWizardPick(opts) {
  * the backup notice, and the write itself. Split out of `runWizardPick` so
  * the wizard orchestrator can run it after the sync lane (LLP 0190
  * #commit-point) - the last thing before the wizard starts acting - while
- * the non-deferred pick keeps calling it inline. Interactive runs prompt
- * for confirmation; non-interactive runs require `--force`. Either path
+ * the non-deferred pick keeps calling it inline. Attended runs save
+ * without asking (LLP 0433); non-interactive runs require `--force`. Either path
  * backs the file up before replacing it. A refusal is reported here
  * (message to stderr) and returned as `ok: false` for the caller to turn
  * into its exit-1 result.
@@ -535,23 +532,18 @@ export async function runWizardPick(opts) {
  * @param {{
  *   stdout: { write(chunk: string): unknown },
  *   stderr: { write(chunk: string): unknown },
- *   stdin?: NodeJS.ReadableStream,
  *   interactive: boolean,
  *   force?: boolean,
- *   confirmOverwrite?: (targetPath: string) => Promise<boolean>,
  *   configPath: string,
  *   config: HypAwareV2Config,
  * }} args
  * @returns {Promise<{ ok: boolean }>}
  */
 export async function commitWizardPickedConfig(args) {
-  const overwriteConfirm = args.interactive
-    ? (args.confirmOverwrite ?? defaultOverwriteConfirmFactory({ ...(args.stdin ? { stdin: args.stdin } : {}), stdout: args.stdout }))
-    : undefined
+  // @ref LLP 0433#scope [implements]: an attended run backs up and saves without asking
   const guard = await prepareLocalConfigWrite({
     targetPath: args.configPath,
-    force: args.force,
-    ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
+    force: args.interactive || args.force,
   })
   if (!guard.proceed) {
     args.stderr.write(`hyp setup: ${guard.message}\n`)
@@ -667,7 +659,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
       // Without this the non-TTY menu printed bare labels and read a
       // bare enter as "collect nothing", so a reconfigure that reached
       // the menu and pressed enter rewrote a seeded config to collect
-      // nothing - past an overwrite confirm that defaults to yes.
+      // nothing.
       // Opted in only when a box is actually checked: with none there
       // is no state to keep, so enter stays the historical empty
       // selection and a dropped terminal still cancels the run rather

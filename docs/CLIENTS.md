@@ -24,6 +24,9 @@ choices are locked; local additions remain yours to configure.
 | OpenCode (`opencode`) | Managed global JavaScript plugin and bounded `opencode export` recovery for CLI and Desktop. |
 | Claude Desktop (`claude-desktop`) | Scheduled transcript import by default. Also enables the shared Claude integration. |
 | OpenClaw (`openclaw`) | Gateway routing plus a scheduled transcript recovery lane. |
+| Cursor (`cursor`) | Native session recovery for the Cursor editor and CLI, including the file contents and command output its tools see. Token usage is not available. |
+| Hermes Agent (`hermes`) | Reads Hermes's local state database read-only: a history import plus ongoing polling. Makes no changes to Hermes. |
+| Pi (`pi`) | A managed Pi extension plus bounded recovery of native sessions, including recent history. |
 
 Available integrations depend on active plugins and the installed version.
 Check `hyp plugin list` and `hyp client history providers` for your
@@ -35,8 +38,8 @@ integration for conversation capture.
 For a configured client, preview its changes and apply them:
 
 ```sh
-hyp client attach codex --dry-run
-hyp client attach codex
+hyp attach codex --dry-run
+hyp attach codex
 hyp client status codex
 hyp status
 ```
@@ -90,8 +93,8 @@ before changing those settings.
 ## Stop capture or keep it local
 
 ```sh
-hyp client detach codex --dry-run
-hyp client detach codex
+hyp detach codex --dry-run
+hyp detach codex
 ```
 
 Detach reverses managed client settings and retains recorded history. To remove

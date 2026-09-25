@@ -24,7 +24,7 @@ hyp cache status
 1. Check that the intended source is configured. Add it through `hyp setup`
    if needed.
 2. Check that the client is attached. Preview and apply its attach using
-   `hyp client attach CLIENT --dry-run` and `hyp client attach CLIENT`.
+   `hyp attach CLIENT --dry-run` and `hyp attach CLIENT`.
 3. Check the daemon is running. Use `hyp daemon start` for an installed service,
    or follow [headless setup](HEADLESS.md) when there is no service manager.
 4. Start a new client process and complete a turn so it uses the managed settings.
@@ -120,9 +120,8 @@ With the default `HYP_HOME`, service output is under
 its own `~/.hyp/hypaware/processing/logs/daemon.log`. Use the paths reported for
 your installation if you configured another home.
 
-For an OTLP `421 Misdirected Request`, see the
-[listener addressing guide](../README.md#an-otlp-exporter-is-refused-with-421-misdirected-request).
-For CPU or memory diagnosis, see [runtime diagnostics](../README.md#runtime-diagnostics).
+An OTLP exporter refused with `421 Misdirected Request` is pointed at a name
+other than `localhost` or `127.0.0.1`; point it at one of those instead.
 [Product telemetry](PRODUCT_TELEMETRY.md) has separate controls; it is
 automatic for enrolled organizations, defaults off on standalone installations,
 and is not the captured conversations or the local diagnostic log.

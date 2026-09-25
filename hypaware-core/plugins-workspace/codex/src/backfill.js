@@ -154,7 +154,7 @@ export function createCodexBackfillProvider(opts) {
       if (ctx.sweep && !ctx.dryRun && config?.capture_mode !== 'gateway') {
         try {
           const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml') })
-          if (result.changed) ctx.log.info('codex.capture.route_released', {
+          if (result.changed) ctx.log.info(result.removed ? 'codex.capture.route_released' : 'codex.capture.provider_repaired', {
             component: COMPONENT, operation: 'capture.migrate', status: 'ok',
             mode: 'transcript', restart_required: true,
           })

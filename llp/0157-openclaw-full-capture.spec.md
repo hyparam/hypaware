@@ -7,6 +7,7 @@
 **Date:** 2026-07-30
 **Related:** LLP 0016, LLP 0027, LLP 0037, LLP 0049, LLP 0085, LLP 0103, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148, LLP 0149, LLP 0152, LLP 0158, LLP 0159
 **Extended-by:** LLP 0313 (the upstream is selected by path AND credential, not path alone; an upstream may declare a declarative outbound path rewrite). Also: LLP 0167 / LLP 0171 (two-lane capture: R1-R6 void, R7 reversed, R12 replaced, R13 retired; R8, R9, R10, R11, R14 remain binding, disposition in LLP 0171#carried-over)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Requirements for implementing the Accepted OpenClaw full-capture decision
 > set (LLP 0143 through 0149 and 0152), plus the backfill route those
@@ -164,8 +165,11 @@ the warning ledger.
 
 ## Acceptance {#acceptance}
 
-`docs/ACCEPTANCE.md` gains an `openclaw_capture` procedure mirroring the
-`codex_desktop_capture` structure (what it proves / does not prove /
+> **Retired (2026-09-23)** by [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md).
+> The repo no longer keeps written manual procedures. This section records what it covered.
+
+A manual OpenClaw capture procedure is written, mirroring the
+Codex Desktop procedure's structure (what it proves / does not prove /
 requires / steps with pass conditions / if it fails). It proves an
 OpenClaw conversation reaches `ai_gateway_messages` by **both** routes:
 
@@ -247,8 +251,10 @@ Named by the decisions as verify-before-relying-on:
   rows (same expansion path, same native ids), so that route overlap
   resolves to zero writes through the existing `part_id` dedupe
   (LLP 0159).
-- **R12.** The `openclaw_capture` acceptance procedure of {#acceptance}
-  MUST exist and MUST have been run by a human before the adapter ships.
+- ~~**R12.** The manual OpenClaw capture procedure of {#acceptance}
+  MUST exist and MUST have been run by a human before the adapter ships.~~
+  **Retired (2026-09-23)** by
+  [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md).
 - **R13.** Coverage reporting MUST distinguish deferrals, sibling-adapter
   territory, and documented side channels from gaps, deriving from the
   warning ledger ({#coverage}).
@@ -262,5 +268,4 @@ Named by the decisions as verify-before-relying-on:
 - LLP 0143, 0144, 0145, 0146, 0147, 0148, 0149, 0152 (the Accepted set)
 - LLP 0158, 0159 (companion backfill decisions)
 - LLP 0016, 0027, 0037, 0049, 0103 (house constraints cited above)
-- `docs/ACCEPTANCE.md` (`codex_desktop_capture`, the acceptance template)
 - PR #475, #486 (the decision set's verified-facts record)

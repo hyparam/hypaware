@@ -242,7 +242,7 @@ export async function run({ harness, expect }) {
     await sweep.tick({ now })
     const firstSweep = await Promise.all(pending)
     expect.that('sweep: both client surfaces imported', firstSweep[0], (v) => v?.ok && v.rowsWritten === 4)
-    expect.that('sweep: previous provider restored', await fs.readFile(configPath, 'utf8'), (v) => v === 'model_provider = "custom"\n')
+    expect.that('sweep: previous provider restored', await fs.readFile(configPath, 'utf8'), (v) => v.startsWith('model_provider = "custom"\n') && v.includes('[model_providers.hypaware]') && !v.includes('127.0.0.1'))
     const nativeRows = await queryRows({
       dispatch, kernel, registry, env, expect, label: 'scheduled capture',
       sql: "select entrypoint, system_text, tools from ai_gateway_messages where content_text = 'scheduled answer'",

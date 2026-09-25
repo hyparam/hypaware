@@ -107,8 +107,6 @@ Hidden machine contracts retain their current spellings:
 | `status` | Builds one repair-oriented snapshot of config, daemon, plugins, sources, sinks, clients, cache, errors, first-sync, gateway, and trust state | Read-only and no plugin activation. JSON is the stable machine form. |
 | `ask` | Lists suggested questions or launches the first attached executable CLI client on one | Does not query itself. No launchable client or spawn failure exits 1; list/decline/empty-cache paths succeed. |
 
-Full inputs, writes, and failure paths: [WP1](work/WP1-onboarding-clients-privacy.md).
-
 ### Query and report
 
 | Command | What it does | Effects, requirements, and failure meaning |
@@ -126,7 +124,7 @@ Full inputs, writes, and failure paths: [WP1](work/WP1-onboarding-clients-privac
 
 Shared typed query controls include format, output, cell/byte budgets, refresh,
 and bare/named remote selection. Explicit refresh cannot be combined with
-remote execution. Full detail: [WP2](work/WP2-query-report-sync.md).
+remote execution.
 
 ### Capture and movement
 
@@ -138,7 +136,7 @@ remote execution. Full detail: [WP2](work/WP2-query-report-sync.md).
 | `session unignore` | Removes exact session ID from the drop set | Resumes capture if folder policy permits. |
 
 Session ID can be explicit or derived from Claude/Codex context. The drop set is
-not durable and forks mint new IDs. Full detail: [WP1](work/WP1-onboarding-clients-privacy.md).
+not durable and forks mint new IDs.
 
 ### Clients
 
@@ -158,9 +156,6 @@ not durable and forks mint new IDs. Full detail: [WP1](work/WP1-onboarding-clien
 | `client claude-desktop status` | Reports resolved endpoint/mode/helper/models/bundle | Helper missing exits 1; does not verify plist. |
 | `client claude-desktop verify` | Checks plist freshness and cleared residue, then prints manual in-app capture check | macOS read-only; automatic checks drive exit code. |
 
-Full detail: [WP1](work/WP1-onboarding-clients-privacy.md) and
-[WP4](work/WP4-plugin-commands.md).
-
 ### Privacy
 
 | Command | What it does | Effects, requirements, and failure meaning |
@@ -178,7 +173,7 @@ Full detail: [WP1](work/WP1-onboarding-clients-privacy.md) and
 The three similarly named operations remain deliberately different:
 `privacy set ... ignore` is machine-local prospective policy,
 `privacy ignore` is a shareable dotfile, and `privacy purge` removes existing
-local data. Full detail: [WP1](work/WP1-onboarding-clients-privacy.md).
+local data.
 
 ### Enrollment
 
@@ -204,9 +199,6 @@ local data. Full detail: [WP1](work/WP1-onboarding-clients-privacy.md).
 | `admin source gascity attach|detach|list` | Starts/reloads/lists Gas City subscriptions | Current attach/detach are process-memory only and not durable. Fix before teaching canonical names. |
 | `admin client claude-desktop profile|install-helper` | Renders secret-free MDM profile or writes executable credential wrapper | Profile output may write a file; helper is 0755 and invokes hidden credential command. |
 | `admin version` | Prints HypAware, Node, platform/arch, and HYP_HOME | Read-only and no plugin activation. |
-
-Full administration semantics: [WP3](work/WP3-admin-dev.md). Plugin-owned
-details: [WP4](work/WP4-plugin-commands.md).
 
 ### Development
 
@@ -269,12 +261,4 @@ sudo, a browser, or Claude Desktop.
 
 ## Methods and supporting artifacts
 
-- [Research brief](BRIEF.md)
-- [Approved plan](PLAN.md)
-- [Status](STATUS.md)
 - [Evidence ledger](SOURCES.md)
-- [WP1: onboarding, clients, privacy, enrollment](work/WP1-onboarding-clients-privacy.md)
-- [WP2: query, report, sync, remote execution](work/WP2-query-report-sync.md)
-- [WP3: administration and development](work/WP3-admin-dev.md)
-- [WP4: plugin commands](work/WP4-plugin-commands.md)
-- [WP5: coverage and interface assessment](work/WP5-cross-check.md)
