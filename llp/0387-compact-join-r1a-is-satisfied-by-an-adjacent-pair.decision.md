@@ -1,7 +1,8 @@
 # LLP 0387: In the compact join lane, R1a is satisfied by an adjacent pair
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0435](./0435-wizard-screen-model.rfc.md) (#recap: the compact sign-in prints no forwarding line; the wizard's recap states what syncs)
 **Systems:** CLI, Onboarding, Usage-Policy
 **Generated-by:** neutral
 **Author:** Phil / Claude

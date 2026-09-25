@@ -343,25 +343,11 @@ test('compact login (the wizard join lane) prints one line per event and no priv
     'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
   assert.match(text, /✓ Signed in to 'prod' as org /)
-  // Plain words (LLP 0407): the sync line still names the server by its
-  // configured name and prints no URL (LLP 0100 R1a; the end anchor pins
-  // that nothing follows the name - no URL and, per LLP 0412, no lookup
-  // pointer), and the deadline line still gives the hold's deadline and
-  // the fact that nothing has been sent.
-  assert.match(text, /✓ Logs will sync to the 'prod' server$/m)
+  // The deadline line still gives the hold's deadline and the fact that
+  // nothing has been sent. There is no forwarding line: the wizard's recap
+  // says what syncs to the team's server (LLP 0435 #recap).
   assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
-  // Compact drops the privacy block, so the deadline line is the second half of
-  // the R1a pair: it names no server itself and reads as being about this target
-  // only while it sits directly under the forwarding line. The pair spans stdout
-  // and stderr, so adjacency is only visible in the interleaved capture.
-  // @ref LLP 0100#requirements [tests]: R1a - the compact pair's name and no-URL clauses hold only while the two lines stay consecutive (the lookup clause is relaxed there by LLP 0412)
-  const forwardingAt = lines.findIndex((line) => line.startsWith("✓ Logs will sync to the 'prod' server"))
-  assert.notEqual(forwardingAt, -1, 'the compact forwarding line is written')
-  assert.match(
-    lines[forwardingAt + 1] ?? '',
-    /^✓ Nothing uploads until you say so, or .+ at the latest$/,
-    'the deadline line comes next, with no other write between it and the forwarding line'
-  )
+  assert.doesNotMatch(text, /Logs will sync to/)
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,
   // and the deadline itself just lapses (LLP 0101 #no-release), so the line
   // must not promise a prompt.

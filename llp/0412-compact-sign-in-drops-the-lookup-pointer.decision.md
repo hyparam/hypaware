@@ -1,7 +1,8 @@
 # LLP 0412: The compact sign-in line drops the lookup pointer
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0435](./0435-wizard-screen-model.rfc.md) (#recap: the compact sign-in prints no forwarding line; the wizard's recap states what syncs)
 **Systems:** CLI, Onboarding, Usage-Policy
 **Generated-by:** neutral
 **Author:** Kenny / Claude

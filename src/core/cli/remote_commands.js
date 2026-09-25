@@ -868,15 +868,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // The wide lane pairs the name with its lookup: `name` can come from
     // `effectiveDefaultRemote` on a bare login, so it is not always something
     // the user typed, and no other line in that lane recovers the URL. The
-    // compact lane carries the name alone: the lookup pointer was dropped by
-    // maintainer decision (LLP 0412).
+    // compact lane (the wizard's join) says nothing here: the wizard's recap
+    // states what syncs to the team's server a moment later (LLP 0435 #recap).
     // Revisit if the server root ever becomes a real landing page.
-    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL; the compact branch omits the lookup per LLP 0412, the long form below still carries it
-    // @ref LLP 0412#compact-lookup-dropped [implements]: the compact sign-in line names the server and nothing else - no URL, no lookup pointer
-    // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name here and the compact privacy block below has none (the pair's lookup half is relaxed by LLP 0412)
-    if (compact) {
-      ctx.stdout.write(`✓ Logs will sync to the '${name}' server\n`)
-    } else {
+    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL
+    if (!compact) {
       ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
       ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
     }
@@ -900,7 +896,6 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // would be false on exactly the paths where it would matter.
     // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the skill hint and the release verb land after it, from `hyp sync`'s plan on the attended close and from the wizard's narration on every path that skips the offer
     // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
-    // @ref LLP 0387#adjacency [implements]: compact meets R1a's name and no-URL clauses as a pair - the forwarding line directly above carries the server name for both lines; the lookup half is relaxed by LLP 0412
     if (holdDeadline !== null && compact) {
       ctx.stderr.write(`✓ Nothing uploads until you say so, or ${formatFirstSyncDeadline(holdDeadline)} at the latest\n`)
     } else if (holdDeadline !== null) {
@@ -939,10 +934,12 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     const attached = compact
       ? await withSpinner({ stdout: ctx.stdout, env: ctx.env, label: 'Attaching clients...' }, wait)
       : await wait()
-    if (attached.length > 0) {
-      ctx.stdout.write(compact ? `✓ Recording ${attached.join(', ')}\n` : `capturing ${attached.join(', ')}\n`)
-    } else {
-      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
+    // Compact reports nothing: the wizard's recap says what is recorded,
+    // and its finish step attaches the clients itself.
+    if (!compact) {
+      ctx.stdout.write(attached.length > 0
+        ? `capturing ${attached.join(', ')}\n`
+        : "no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     if (!compact) ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }

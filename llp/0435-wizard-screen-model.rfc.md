@@ -5,6 +5,7 @@
 **Systems:** Onboarding, CLI
 **Author:** Kenny / Claude
 **Date:** 2026-09-24
+**Supersedes:** LLP 0387, LLP 0412
 **Related:** LLP 0188 (#never-silent: the wizard is a consent surface),
 LLP 0341 (#context: stdout is that surface; the guarded streams),
 LLP 0387 (#adjacency: compact lines that must sit next to each other),
@@ -115,7 +116,11 @@ the lines together, in lane order, just before it saves:
 - what is recorded ("Recording Claude Code, Codex, and Claude Desktop"),
 - where it goes ("Syncing all 3 to your team's server", naming the rows
   the team sets, or "Everything stays on this machine" on a local run),
-- the new-folder answer, with the command that flips it. Re-running a lane replaces its
+- the new-folder answer, with the command that flips it.
+
+The sign-in step no longer prints its own "logs will sync to the server"
+line, or the background service's partial "recording" line: the recap says
+both. This supersedes LLP 0387 and LLP 0412, which governed that line. Re-running a lane replaces its
 statement and drops the later lanes', so a back never leaves a stale one
 on screen (#back).
 
