@@ -432,6 +432,8 @@ function hashCwd(cwd) {
  * cannot inherit their uuid with its unchanged zero part_index.
  *
  * @ref LLP 0026#decision [implements]: native single-block transcript identity
+ * @ref LLP 0435#tool-id-first [implements]: the tool id joins the two sides
+ *   without the agent scope, which `agent.name` can never satisfy
  * @param {Record<string, unknown>} row
  * @param {ReturnType<typeof indexTranscriptEntries>} index
  */
@@ -469,6 +471,8 @@ function upgradeRow(row, match, resolveAgent = false) {
   // claims `isSidechain: true` while naming no agentId knows less than that
   // header, so leave the row's agent_id/is_sidechain alone in that case -
   // clearing it would also drop the row's spawned_by late-stamp below.
+  // @ref LLP 0435#line-arbitrates [implements]: the matched line decides
+  // attribution, except where it knows less than the row already did
   if (resolveAgent && (match.agent_id || !match.is_sidechain)) {
     upgraded.agent_id = match.agent_id
     upgraded.is_sidechain = match.is_sidechain ?? (match.agent_id ? true : undefined)
