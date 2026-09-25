@@ -864,7 +864,9 @@ function renderVolume(volume, dest, suffix = '') {
   if (volume.status === 'unknown') {
     return `Ready to ${verb} to ${dest.text} (pending volume unknown${volume.reason ? `: ${volume.reason}` : ''})${suffix}.`
   }
-  if (volume.rows === 0 && volume.status === 'counted') return `Nothing pending for ${dest.text}.`
+  // The suffix stays on an empty count too: a yes still ends the hold, so the
+  // deadline it ends must be said whatever is pending right now.
+  if (volume.rows === 0 && volume.status === 'counted') return `Nothing pending for ${dest.text}${suffix}.`
   if (volume.rows === 0) {
     // A floor of zero is not a floor. "at least 0 rows" reads as a bug on
     // the one line somebody is deciding from, and it is reachable: a

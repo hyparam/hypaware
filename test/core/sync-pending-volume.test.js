@@ -14,6 +14,7 @@ import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createSourceWithholdResolver } from '../../src/core/cache/source-withhold.js'
 import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
+import { writeFirstSyncHoldMarker } from '../../src/core/usage-policy/first_sync_hold.js'
 
 // `hyp sync`'s plan is the consent surface: it is where a person decides
 // whether to let captured data leave the machine. Naming the destinations
@@ -290,6 +291,23 @@ test('a machine with no backlog renders differently from one with a backlog', as
   assert.notEqual(busyOut.text, stdout.text, 'a size-free plan is the defect: these must differ')
   assert.doesNotMatch(busyOut.text, /Nothing pending/)
   assert.match(busyOut.text, /^Ready to upload 10 rows \(the full history\) to hypaware\.example\.com\.\n/m)
+})
+
+test('a held machine with no backlog still states the deadline a yes would end', async () => {
+  const hypHome = await makeHome('empty-held')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: fakeStorage({ hypHome, entries: [] }),
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  // Nothing is pending now, but confirming still clears the hold for every
+  // row recorded later, so the plan must say when it would have ended.
+  assert.match(stdout.text, /^Nothing pending for hypaware\.example\.com \(automatic by [^)]+\)\.\n/m)
 })
 
 test('rewinding a watermark changes what the dry-run plan discloses', async () => {
