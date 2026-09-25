@@ -308,16 +308,17 @@ export function aiGatewayDatasetRegistration(state) {
 /**
  * Build the flush-time settlement pass (LLP 0024). On each flush batch:
  *
- *  1. Short-circuit when the batch carries no fallback rows AND no null-cwd
- *     rows - the common case, so the hot path does zero transcript or storage
- *     I/O. (A null-cwd row is the #258 session-start race, handled by 2/LLP 0085.)
+ *  1. Choose the rows the enricher sees (`planSettleSelection`), and
+ *     short-circuit when there are none - the common case, so the hot path
+ *     does zero transcript or storage I/O.
  *  2. Group selected rows by `client_name` and hand each group to the
  *     enricher registered for that client; the enricher upgrades the rows it
  *     can match against its native log (re-stamping
  *     `message_id`/`part_id`/native identity, clearing `identity_source`),
  *     re-resolves a null-cwd row's `cwd` from the now-present session context
  *     (filling it, or marking the row for removal when it resolves to a
- *     `.hypignore` `ignore`, LLP 0085), and returns the rest unchanged.
+ *     `.hypignore` `ignore`, LLP 0085), re-points the links of the rows whose
+ *     predecessors it just renamed (LLP 0440), and returns the rest unchanged.
  *  3. Dedupe the whole batch by `part_id` against already-committed
  *     partitions and within-batch, so an upgraded row collapses onto the
  *     uuid twin a later replay already wrote. The committed row wins (the
@@ -330,32 +331,90 @@ export function aiGatewayDatasetRegistration(state) {
 function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
-    const hasFallback = rows.some(isFallbackRow)
-    // @ref LLP 0085 [implements]: a null-cwd row (the #258 session-start race)
-    // gets a second look at flush even when it is NOT a gateway fallback (its
-    // transcript identity landed but the session-context record raced), so the
-    // settle pass must select it too.
-    const hasNullCwd = rows.some(rowHasNullCwd)
-    if (!hasFallback && !hasNullCwd) return rows
+    const plan = planSettleSelection(rows)
+    if (!plan) return rows
     // @ref LLP 0085 [implements]: the settle pass may now REMOVE a row (a
     // late-resolved `.hypignore` ignore), not only upgrade its identity - the
     // filtered batch is what gets committed, so the dropped row never reaches a
     // durable partition or a sink.
     const settled = await upgradeFallbackRows(rows, state, ctx, {
-      select: settleSelect,
+      select: (row) => plan.selected.has(row),
       allowDrop: true,
     })
     // Dedupe only matters for a fallback->native upgrade that can twin a
     // committed uuid row; a pure cwd-enrich/drop pass creates no new twins, so
     // preserve the original dedupe trigger and leave non-fallback batches
     // byte-for-byte as before.
-    return hasFallback ? dedupeByPartId(settled, ctx) : settled
+    return plan.hasFallback ? dedupeByPartId(settled, ctx) : settled
   }
 }
 
-/** @param {Record<string, unknown>} row */
-function settleSelect(row) {
-  return isFallbackRow(row) || rowHasNullCwd(row)
+/**
+ * Choose which rows of a flush batch reach the settlement enricher. Three
+ * shapes qualify:
+ *
+ *  - a `gateway_fallback` row: the identity-upgrade case (LLP 0027).
+ *  - a null-cwd row: the #258 session-start race, selected even when the row
+ *    is NOT a gateway fallback (its transcript identity landed but the
+ *    session-context record raced).
+ *    @ref LLP 0085 [implements]: that second look is what the late `.hypignore`
+ *    resolve, and its drop, run on.
+ *  - a row whose `previous_message_id` names a fallback row of this same
+ *    batch. Nothing about such a row asks to be settled; it is selected so the
+ *    relink can reach it when the pass renames its predecessor, and the relink
+ *    only ever sees rows the enricher was called with.
+ *    @ref LLP 0441#select-the-successors [implements]: the renameable ids are
+ *    the pre-settlement `message_id`s of the batch's fallback rows, so the
+ *    successors LLP 0440's repair can move are knowable before the pass runs.
+ *
+ * One pass over the batch decides all three and the result is reused as the
+ * `select` predicate: `isFallbackRow` parses the `attributes` column, so the
+ * batch is parsed once per flush rather than once per membership question. The
+ * successor sweep is a second, parse-free pass, skipped when nothing in the
+ * batch can be renamed.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @returns {{ selected: Set<Record<string, unknown>>, hasFallback: boolean } | undefined} `undefined` when there is nothing to settle
+ */
+function planSettleSelection(rows) {
+  /** @type {Set<Record<string, unknown>>} */
+  const selected = new Set()
+  /** @type {Set<string>} */
+  const renameable = new Set()
+  let hasFallback = false
+  for (const row of rows) {
+    const fallback = isFallbackRow(row)
+    if (fallback) {
+      hasFallback = true
+      const id = stringValue(row.message_id)
+      if (id !== undefined) renameable.add(id)
+    }
+    if (fallback || rowHasNullCwd(row)) selected.add(row)
+  }
+  if (selected.size === 0) return undefined
+  if (renameable.size > 0) {
+    for (const row of rows) {
+      if (!selected.has(row) && linksInto(row, renameable)) selected.add(row)
+    }
+  }
+  return { selected, hasFallback }
+}
+
+/**
+ * True when any entry of `row.previous_message_id` names one of `ids`. Links
+ * are 0- or 1-element (LLP 0026 #consequences), so this is one hash lookup in
+ * practice.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {Set<string>} ids
+ */
+function linksInto(row, ids) {
+  const previous = row?.previous_message_id
+  if (!Array.isArray(previous)) return false
+  for (const id of previous) {
+    if (typeof id === 'string' && ids.has(id)) return true
+  }
+  return false
 }
 
 /**

@@ -58,6 +58,10 @@ const PLAIN_SESSION = '0b7e4a15-93c6-42df-8f31-6d5a0c8e2b47'
 // session of its own: the shared transcript loader memoises per session.
 const PART_SESSION = 'aaaaaaaa-3333-4333-8333-bbbbbbbbbbbb'
 const PART_AGENT = 'b28e3d51'
+// A successor projected under its own native uuid, with a cwd, so nothing
+// about it asks to be settled (issue #2178). A session of its own: the shared
+// transcript loader memoises per session.
+const NATIVE_SESSION = 'cccccccc-4444-4444-8444-dddddddddddd'
 const PROMPT_UUID = '11111111-1111-4111-8111-111111111111'
 const TOOL_UUID = '5233b3fa-fd52-4c1e-9a44-6c0e8c0f1a2b'
 const RESULT_UUID = '77ea6f90-90c5-47ab-9d20-1c4e6f9b3a55'
@@ -1161,6 +1165,81 @@ test('a message whose only-partly-settled part shares an id with a surviving row
       toolResultRow.previous_message_id,
       [textRow.message_id],
       'the tool_result must still resolve to the surviving text-part row of the assistant turn, not skip past it to the user prompt'
+    )
+    assert.deepEqual(danglingLinks(settled), [], 'no settled link may name an id no row carries')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// A successor whose own transcript line HAD landed at projection time is
+// projected under its native uuid, with a cwd, so it is neither a fallback row
+// nor a null-cwd row: `settleSelect` never handed it to the enricher, and the
+// LLP 0440 relink pass only ever sees selected rows. Its link to a predecessor
+// the same pass renamed therefore stayed naming the vacated fallback hash, and
+// settlement strips `claude.match_key` from the renamed predecessor, which is
+// what the LLP 0027 re-settle sweep selects on: the dangle was permanent
+// (issue #2178).
+// @ref LLP 0441#select-the-successors [tests]: the settle pass selects the
+// in-batch successors of the rows whose ids it can rewrite, so the relink
+// reaches a successor that needed no settling of its own
+test('a successor that already carries native identity and a cwd still follows its predecessor\'s rename', async () => {
+  const env = await stageEnv()
+  try {
+    const projectDir = path.join(env.homeDir, '.claude', 'projects', 'some-repo')
+    await fs.mkdir(projectDir, { recursive: true })
+    await appendSessionContext(env.stateFile, {
+      session_id: NATIVE_SESSION,
+      transcript_path: path.join(projectDir, `${NATIVE_SESSION}.jsonl`),
+      cwd: env.homeDir,
+      git_branch: 'main',
+      ts: '2026-09-05T22:36:50.000Z',
+    })
+
+    const toolBlock = { type: 'tool_use', id: 'toolu_n1', name: 'Bash', input: { command: 'ls' } }
+    const resultBlock = { type: 'tool_result', tool_use_id: 'toolu_n1', content: 'a\nb\n' }
+    await fs.writeFile(path.join(projectDir, `${NATIVE_SESSION}.jsonl`), [
+      JSON.stringify({
+        sessionId: NATIVE_SESSION, type: 'assistant', uuid: 'assist-line',
+        message: { role: 'assistant', content: [toolBlock] },
+        timestamp: '2026-09-05T22:36:54.000Z',
+      }),
+    ].join('\n') + '\n')
+
+    const projected = aiGatewayRowsFromProjectedExchange({
+      provider: 'anthropic',
+      session_id: NATIVE_SESSION,
+      conversation_source: 'claude_code',
+      client_name: 'claude',
+      cwd: env.homeDir,
+      conversation_started_at: '2026-09-05T22:36:50.000Z',
+      messages: [
+        {
+          role: 'assistant', content: [toolBlock],
+          attributes: { claude: { match_key: matchKey('assistant', [toolBlock]) } },
+        },
+        // Native identity already in hand, so no match_key and no fallback
+        // marker: nothing about this row asks to be settled.
+        { role: 'user', content: [resultBlock], message_id: 'result-line-uuid' },
+      ],
+    }, { gatewayId: 'gw' })
+
+    const [predecessor, successor] = projected
+    assert.equal(successor.message_id, 'result-line-uuid', 'the successor must be projected under native identity')
+    assert.equal(successor.cwd, env.homeDir, 'a null cwd would admit the successor for the LLP 0085 reason instead')
+    assert.deepEqual(
+      successor.previous_message_id,
+      [predecessor.message_id],
+      'the fixture only bites if the successor was chained to the predecessor\'s fallback hash'
+    )
+
+    const settled = await settleBatch(env, projected, [])
+    const settledSuccessor = settled.find((row) => row.message_id === 'result-line-uuid')
+    assert.ok(settledSuccessor, 'the successor must still be in the committed batch')
+    assert.deepEqual(
+      settledSuccessor.previous_message_id,
+      ['assist-line'],
+      'the successor must name the id settlement gave its predecessor, not the hash it vacated'
     )
     assert.deepEqual(danglingLinks(settled), [], 'no settled link may name an id no row carries')
   } finally {

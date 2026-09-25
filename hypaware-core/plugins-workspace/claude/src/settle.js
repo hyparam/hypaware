@@ -543,8 +543,13 @@ function upgradeRow(row, match, resolveAgent = false) {
  * row whose OWN scope moved; this is the same repair seen from the other end,
  * for the row whose PREDECESSOR moved or was renamed under it.
  *
+ * A successor that already had native identity and a cwd asks for nothing
+ * else in this pass; it is in the group only so this can reach it.
+ *
  * @ref LLP 0440#batch-local [constrained-by]: only ids this pass rewrote are
  * in hand, so a link into an earlier batch is out of reach and stays as it is
+ * @ref LLP 0441#select-the-successors [constrained-by]: this repair reaches
+ * exactly the rows `planSettleSelection` hands the enricher
  *
  * @param {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} out
  * @param {Map<string, SettledIdRewrite>} rewrittenIds
