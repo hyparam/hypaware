@@ -405,7 +405,7 @@ async function runGuardedInitWizard(opts, guard) {
             let disconnect
             try {
               disconnect = await confirm({
-                title: 'This machine syncs to your team server. Disconnect and go local-only?',
+                title: 'This machine syncs to HypAware Cloud. Disconnect and go local-only?',
                 options: [
                   { value: 'disconnect', label: 'Yes, disconnect' },
                   { value: 'stay', label: 'No, stay connected' },
@@ -447,7 +447,7 @@ async function runGuardedInitWizard(opts, guard) {
               const leaveFn = opts.leave ?? (() => opts.ctx.commands.run('leave', []))
               const code = await leaveFn()
               if (code !== 0) {
-                opts.stderr.write('hyp setup: leaving the server failed - this machine is still connected. Retry, or continue without disconnecting.\n')
+                opts.stderr.write('hyp setup: leaving HypAware Cloud failed - this machine is still connected. Retry, or continue without disconnecting.\n')
                 continue
               }
               // Disconnected: the org's rows are no longer locked and the

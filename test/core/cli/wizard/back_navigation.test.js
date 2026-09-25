@@ -737,7 +737,7 @@ test('runInitWizard end-to-end: join, back to the fork, local, and one combined 
   // `b` at the pick menu.
   assert.equal(out.split('How do you want to collect agent logs?').length - 1, 2)
   // Enrolled-state decisions survive the walk to the local pathway.
-  assert.match(out, /This machine syncs to your team server\. Disconnect and go local-only\?/)
+  assert.match(out, /This machine syncs to HypAware Cloud\. Disconnect and go local-only\?/)
   assert.match(out, /What do you want to collect and sync\?/)
   assert.doesNotMatch(out, /Choose what syncs/)
   // The itinerary is the enrolled one (pick, sync, folders, finish), not

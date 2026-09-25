@@ -339,7 +339,7 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   // comment above the write in remote_commands.js).
   assert.match(
     text,
-    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to the team server and a background service is installed\. Ctrl-C to cancel\.$/m,
+    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to HypAware Cloud and a background service is installed\. Ctrl-C to cancel\.$/m,
     'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
   // Named the way the recap names it (LLP 0437 #server-name): the host, not
@@ -348,7 +348,7 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   assert.doesNotMatch(text, /Signed in to 'prod'/)
   // The deadline line still gives the hold's deadline and the fact that
   // nothing has been sent. There is no forwarding line: the wizard's recap
-  // says what syncs to the team's server (LLP 0437 #recap).
+  // says what syncs to the cloud (LLP 0437 #recap).
   assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
   assert.doesNotMatch(text, /Logs will sync to/)
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,

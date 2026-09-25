@@ -672,7 +672,7 @@ test('runInitWizard: an express enrolled run states what it records and where it
 
   const lines = stdout.text().split('\n')
   const recording = lines.indexOf('✓ Recording Claude Code')
-  const syncing = lines.indexOf("✓ Syncing it to your team's server")
+  const syncing = lines.indexOf("✓ Syncing it to the cloud")
   // Nothing goes unsaid on the fast path (LLP 0188 #never-silent): the sync
   // claim is stated, and neither line is restated.
   assert.ok(recording >= 0 && syncing === recording + 1, stdout.text())
@@ -884,7 +884,7 @@ test('runInitWizard: a hidden picked row with a standing opt-out does not make t
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  assert.match(text, /Nothing syncs to your team's server/, 'the only standing pick is withheld by the store, so nothing ships')
+  assert.match(text, /Nothing syncs to the cloud/, 'the only standing pick is withheld by the store, so nothing ships')
   assert.doesNotMatch(text, /still syncs/)
   assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
 })
@@ -905,7 +905,7 @@ test('runInitWizard: a hidden picked row with no opt-out keeps the sentence that
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  assert.match(text, /Capture already set up on this machine still syncs to your team's server/)
+  assert.match(text, /Capture already set up on this machine still syncs to the cloud/)
   assert.doesNotMatch(text, /Nothing syncs/)
   assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the carried row is still never named')
 })

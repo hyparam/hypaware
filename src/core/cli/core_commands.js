@@ -400,7 +400,7 @@ function buildCoreCommands(registry) {
       name: 'join',
       category: 'capture-movement',
       audience: 'everyday',
-      summary: 'Connect this machine to a central server',
+      summary: 'Connect this machine to HypAware Cloud',
       usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]',
       help: 'Token sources (pick one): positional argument, --token-file, or stdin.\nA bare argv token lands in shell history; scripts should prefer\n--token-file or stdin.\n--force allows the existing CLI path if global installation fails.',
       run: runJoin,
@@ -411,7 +411,7 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       summary: 'Disconnect central management, keep local history',
       usage: 'hyp leave',
-      help: 'Disconnects this machine from its central server: stops forwarding and\nconfig pull, undoes org-driven client attaches, and removes the forward\ncredential. Keeps query sessions, the local config, and the daemon service.',
+      help: 'Disconnects this machine from HypAware Cloud: stops forwarding and\nconfig pull, undoes org-driven client attaches, and removes the forward\ncredential. Keeps query sessions, the local config, and the daemon service.',
       run: runLeave,
     },
     {
@@ -808,7 +808,7 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'report publish',
-      summary: "Publish Markdown report sources for the server to render and share with the org",
+      summary: "Publish Markdown report sources for HypAware Cloud to render and share with the org",
       usage: coreUsage('report publish'),
       help: [
         'Upload a .md/.markdown file, or a folder containing report.md plus',

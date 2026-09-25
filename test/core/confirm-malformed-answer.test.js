@@ -76,7 +76,7 @@ function makeBuf() {
 /** The enrolled fork's disconnect gate, whose default runs `hyp leave`. */
 function disconnectGate() {
   return /** @type {any} */ ({
-    title: 'This machine syncs to your team server. Disconnect and go local-only?',
+    title: 'This machine syncs to HypAware Cloud. Disconnect and go local-only?',
     options: [
       { value: 'disconnect', label: 'Yes, disconnect' },
       { value: 'stay', label: 'No, stay connected' },

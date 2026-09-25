@@ -732,10 +732,10 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward) {
     if (compact) {
-      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to the team server and a background service is installed. Ctrl-C to cancel.\n')
+      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to HypAware Cloud and a background service is installed. Ctrl-C to cancel.\n')
     } else {
       ctx.stderr.write('If your org shares logs, signing in connects this machine to your team:\n')
-      ctx.stderr.write('  your recorded sessions are sent to the team server and a background\n')
+      ctx.stderr.write('  your recorded sessions are sent to HypAware Cloud and a background\n')
       ctx.stderr.write('  service is installed.\n')
       ctx.stderr.write("  Re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
     }
