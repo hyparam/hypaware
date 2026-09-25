@@ -476,6 +476,11 @@ test('the claude privacy skill stops on a missing claude-telemetry entry only wh
     /(?:cannot read|do not recognise|nonzero)[\s\S]{0,200}\bstop\b/,
     'an observation that could not be made is not an answer, so it must fail closed'
   )
+  assert.match(
+    crossCheck,
+    /daemon[\s\S]{0,200}"error"/,
+    'listener_started_at and control_routes come from one status.json read, so a daemon object carrying an error must read as the live case, not as "not running"'
+  )
 })
 
 /**

@@ -11,7 +11,7 @@ import { renderStatusJson } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
-import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
 import { DEFAULT_TELEMETRY_PORT } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import {
   runSessionIgnore,
@@ -277,7 +277,7 @@ test('a gateway-only receipt cannot say whether the listener is down, and captur
         'the receipt is the single-recorder one either way, so the stop cannot be read off it'
       )
 
-      const health = await captureHealth({ hypHome, homeDir })
+      const { health } = await captureHealth({ hypHome, homeDir })
       assert.equal(health?.client, 'claude')
       assert.equal(
         health?.listener_started_at,
@@ -285,6 +285,51 @@ test('a gateway-only receipt cannot say whether the listener is down, and captur
         'and the second observation is what separates them'
       )
     }
+  })
+})
+
+/**
+ * Issue #1626's fix reads `listener_started_at` as the cross-check, but that
+ * field and the `control_routes` advertisement the verb resolves recorders by
+ * come from one liveness-gated read of one `run/status.json` (`liveStatusSources`
+ * / `readStatusFile` in `src/core/daemon/status.js`). When the daemon process is
+ * alive - pid file intact, process running - but that file cannot be parsed,
+ * `collectHypAwareStatus` swallows the parse failure into `daemon.error` while
+ * `daemon.running` stays `true` from the pid check alone, and the claude
+ * `capture_health` entry still gets built (it is gated on config and the otel
+ * attach marker, not on the status file parsing), with `listener_started_at`
+ * forced to `null` because the source snapshot it would have read is gone.
+ *
+ * So a null `listener_started_at` is not, by itself, proof the listener is
+ * down: it is also what a live, still-recording listener looks like the
+ * instant its own status snapshot is unreadable. The privacy skill's
+ * cross-check has to require the rendered `daemon` object to carry no
+ * `"error"` before it reads that null as "not running" - this pins the shape
+ * that requirement is written against.
+ */
+test('an unreadable status.json nulls the cross-check for a listener that is still running', async () => {
+  const gatewaySet = /** @type {Set<string>} */ (new Set())
+  await withControlServer(gatewaySet, async (gatewayBase) => {
+    const listenerStartedAt = new Date(Date.now() - 60_000).toISOString()
+    const hypHome = daemonHome({ gatewayBase, listenerStartedAt })
+    const homeDir = otelAttachedClaude(hypHome)
+    const stateRoot = path.join(hypHome, 'hypaware')
+
+    // Keep the pid file (the daemon process is genuinely alive) but corrupt
+    // the status file it would otherwise read the listener's snapshot from.
+    fs.writeFileSync(statusFilePath(stateRoot), 'not json')
+
+    const { health, daemon } = await captureHealth({ hypHome, homeDir })
+    assert.equal(daemon.running, true, 'the process is alive, so the daemon still reads as running')
+    assert.ok(
+      typeof daemon.error === 'string' && daemon.error.length > 0,
+      'and the unparseable snapshot must show up as an error, not silently'
+    )
+    assert.equal(
+      health?.listener_started_at,
+      null,
+      'the listener is genuinely running, but its snapshot could not be read, so the cross-check field nulls anyway'
+    )
   })
 })
 
@@ -346,10 +391,17 @@ async function withRefusingServer(fn) {
  * shape the daemon writes.
  *
  * `listenerStartedAt` is the other half of that source, the one `hyp status`
- * reads: a listener the running daemon started. The two are independent
- * because they can genuinely differ - a listener with no advertisement is
- * running and unaddressable, which is one of the two absences issue #1626 is
- * about.
+ * reads: a listener the running daemon started. The two are split into
+ * separate parameters here only to isolate the field the cross-check reads
+ * in each test - the shipped listener co-emits them: `control_routes` and
+ * `listener_started_at` ride the same unconditional `details` literal in
+ * `hypaware-core/plugins-workspace/claude/src/telemetry/source.js`, so a
+ * live listener never actually carries one without the other. What can
+ * separate them for a caller of `hyp status` is not the listener but the
+ * read of its snapshot: see the unreadable-status-file case below, where a
+ * listener that is genuinely running still reports a null
+ * `listener_started_at` because the file that would have said so could not
+ * be parsed.
  *
  * @param {{ gatewayBase: string, listenerBase?: string, listenerStartedAt?: string }} args
  * @returns {string}
@@ -445,8 +497,9 @@ function otelAttachedClaude(hypHome) {
 
 /**
  * The claude entry of the `capture_health` array `hyp status --json` prints,
- * through the real collector and renderer, so the keys the privacy skill
- * names are the ones the command actually carries.
+ * alongside the rendered `daemon` block, through the real collector and
+ * renderer - so the keys the privacy skill names, on both sides of its
+ * cross-check, are the ones the command actually carries.
  *
  * @param {{ hypHome: string, homeDir: string }} args
  */
@@ -463,5 +516,8 @@ async function captureHealth({ hypHome, homeDir }) {
     datasets: [],
     cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
   })
-  return json.capture_health.find((/** @type {any} */ entry) => entry.client === 'claude')
+  return {
+    health: json.capture_health.find((/** @type {any} */ entry) => entry.client === 'claude'),
+    daemon: json.daemon,
+  }
 }
