@@ -119,8 +119,8 @@ export interface WalkthroughQuestion {
   /**
    * Optional position line shown above the title (LLP 0135 #progress),
    * e.g. `Step 2 of 3 · Choose what to collect`. Set only by the wizard,
-   * which knows the committed pathway; `runPickerWalkthrough` and every
-   * non-interactive caller leave it unset and print nothing.
+   * which knows the committed pathway; non-interactive callers leave it
+   * unset and print nothing.
    */
   progress?: string
   options: WalkthroughOption[]
@@ -129,7 +129,7 @@ export interface WalkthroughQuestion {
    * Back-navigation opt-in (LLP 0191): the TUI multiselect's escape and
    * the numbered fallback's `b` answer throw `PromptBackRequestedError`
    * instead of cancelling. Set only by wizard lanes that have a screen
-   * to return to; `runPickerWalkthrough` never sets it.
+   * to return to.
    */
   allowBack?: boolean
   /**
@@ -185,78 +185,6 @@ export interface PickerFinaleActions {
    * restart to take effect.
    */
   skipDaemonInstall?: boolean
-}
-
-export interface RunPickerWalkthroughOptions {
-  capabilities: CapabilityRegistry
-  /**
-   * Platform the picker gates rows against, defaulting to `process.platform`.
-   * The menu is otherwise a function of the host, so a test over it would
-   * answer differently on a Mac and on CI.
-   */
-  platform?: string
-  /**
-   * Kernel-owned client registry. The superset of attachable clients: the
-   * gateway capability's `getClient`/`listClients` filter to registrations
-   * with a gateway upstream, so an endpoint-free adapter (LLP 0306) is only
-   * reachable here.
-   */
-  clients?: ClientRegistry
-  sources?: { stopAll?: () => Promise<void> }
-  skills?: {
-    list(): { name: string; clients: ('claude' | 'codex')[]; sourceDir: string }[]
-  }
-  agents?: {
-    list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[]
-  }
-  /**
-   * Plugins this boot failed to activate, threaded to the finale's client-asset
-   * materialization so a partial boot copies but never prunes
-   * (LLP 0219 #incomplete-activation-prunes-nothing).
-   */
-  failedPlugins?: string[]
-  stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stdin?: NodeJS.ReadableStream
-  env: NodeJS.ProcessEnv
-  /** Pre-baked picks; bypass prompts when set. */
-  picks?: PickerPicks
-  /**
-   * Provenance of `picks.exportChoice`, for telemetry only. Consulted
-   * solely on the pre-baked path (with `picks`); the interactive wizard
-   * always defaults export, so its origin is `default`. Omit to default.
-   */
-  exportOrigin?: PickerExportOrigin
-  prompt?: AsyncPickPrompt
-  /**
-   * Override the system source detector. Defaults to a catalog-backed
-   * wrapper around the real filesystem-based `detectPickerSources`.
-   * Only consulted in interactive mode (no pre-baked `picks`); tests
-   * inject a stub so the picker's preselected boxes do not depend on
-   * the dev's home dir.
-   */
-  detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
-  /**
-   * Interactive consent prompt for the onboarding backfill step. Only
-   * consulted in interactive mode (no pre-baked `picks`); non-interactive
-   * runs (`--yes` / `--dry-run`) backfill automatically. Defaults to a
-   * yes/no confirm that defaults to yes.
-   */
-  backfillConsentPrompt?: AsyncBackfillConsentPrompt
-  /**
-   * Backfill runner the finale uses to import a picked client's local
-   * history right after config is written. Injected by `hyp init` with the
-   * kernel registries; omit to skip the backfill step entirely.
-   */
-  backfill?: PickerBackfillRunner
-  /** When set, run daemon install / attach / skills / restart after writing config. */
-  finale?: PickerFinaleActions
-  /**
-   * Overwrite an existing local config (LLP 0031). Non-interactive only
-   * (`--force` / `--from-file`); an interactive run always saves, with a
-   * backup (LLP 0433).
-   */
-  force?: boolean
 }
 
 /**
@@ -350,17 +278,6 @@ export interface FinaleSummary {
    * injectable seam) need not synthesize it.
    */
   attachedNotConfigured?: string[]
-}
-
-export interface PickerWalkthroughResult {
-  exitCode: number
-  configPath: string
-  config: HypAwareV2Config
-  sourcesPicked: PickerSource[]
-  exportPicked: PickerExport
-  clientsPicked: string[]
-  retentionDays: number
-  finale?: FinaleSummary
 }
 
 export interface CommandResult {

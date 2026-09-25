@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { runPickerFinale } from '../../src/core/cli/walkthrough.js'
 
 // The finale's client-asset step reports one line naming the clients, not one
 // line per copy: a two-client install copies a dozen trees, and a dozen paths
@@ -61,18 +61,22 @@ test('the finale reports one install line naming the clients, never a line per c
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities,
     skills,
     agents,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude', 'codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude', 'codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true, dryRun: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   const text = stdout.text()
   // One line for both clients, and "agents" because claude took one.
   assert.match(text, /^\(dry-run\) would install skills and agents for claude and codex$/m)

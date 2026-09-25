@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { findAttachedNotConfiguredClients, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { findAttachedNotConfiguredClients, runPickerFinale } from '../../src/core/cli/walkthrough.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
 
@@ -75,24 +75,25 @@ test('the finale names a still-attached client the new config no longer collects
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: gatewayCapability(),
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.attachedNotConfigured, ['codex'])
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attachedNotConfigured, ['codex'])
   const out = stdout.text()
   assert.match(out, /codex/, out)
   assert.match(out, /hyp client detach codex/, out)
-  // Exactly once. This entry point writes only its short run summary after the
-  // finale, so the warning is still on screen when the run ends and repeating
-  // it (the shape an echo from the shared `writeWalkthroughRunSummary` would
-  // take) would print the same paragraph twice within a few lines of itself.
+  // The finale prints once; the wizard owns any reminder after later output.
   // @ref LLP 0230#repeat-at-the-end [tests]: the repeat belongs to the caller that buried the first print, and this one does not
   assert.equal(out.match(/hyp client detach codex/g)?.length, 1, out)
   assert.equal(out.match(/Still attached, no longer collected/g)?.length, 1, out)
@@ -104,17 +105,21 @@ test('a picked client that stays configured draws no stranded-attach warning', a
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: gatewayCapability(),
     stdout,
     stderr,
     env,
-    picks: { sources: ['codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.attachedNotConfigured, [])
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attachedNotConfigured, [])
   assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
   assert.doesNotMatch(stderr.text(), /hyp client detach/, stderr.text())
 })
@@ -124,17 +129,21 @@ test('an unattached client the picker skipped is not warned about', async () => 
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: gatewayCapability(),
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.attachedNotConfigured, [])
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attachedNotConfigured, [])
   assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
 })
 
@@ -155,17 +164,21 @@ test('a client the central layer names is not stranded by an unpicking run', asy
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: gatewayCapability(),
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.attachedNotConfigured, [])
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attachedNotConfigured, [])
   assert.doesNotMatch(stdout.text(), /hyp client detach/, stdout.text())
 })
 

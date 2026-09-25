@@ -8,7 +8,7 @@ import process from 'node:process'
 import test from 'node:test'
 
 import { DurableBinRequiredError, GlobalInstallError } from '../../src/core/cli/global_install.js'
-import { runPickerFinale, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { runPickerFinale } from '../../src/core/cli/walkthrough.js'
 import { SystemdUnitError } from '../../src/core/daemon/linux.js'
 import { LaunchAgentError } from '../../src/core/daemon/macos.js'
 import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
@@ -20,7 +20,7 @@ import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
  * already committed and attach, client assets and backfill never run. The
  * team pathway's `skipDaemonInstall` does not cover it: only a join sets it.
  *
- * Driven through `runPickerWalkthrough` with `process.platform` stubbed, so
+ * Driven through `runPickerFinale` with `process.platform` stubbed, so
  * the real `installDaemon` rather than the injectable seam is what throws.
  */
 
@@ -66,7 +66,7 @@ test('a local-pathway setup on a platform with no service manager finishes attac
   /** @type {string[]} */
   const backfilled = []
 
-  const result = await withPlatform('win32', () => runPickerWalkthrough({
+  const result = await withPlatform('win32', () => runPickerFinale({
     capabilities: /** @type {any} */ ({
       has: (/** @type {string} */ id) => id === 'hypaware.ai-gateway',
       require: () => ({
@@ -80,7 +80,11 @@ test('a local-pathway setup on a platform with no service manager finishes attac
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 14 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 14,
+    interactive: false,
     backfill: {
       available: ['claude'],
       /** @param {{ provider: string, dryRun: boolean, retentionDays: number, until: string }} args */
@@ -94,13 +98,13 @@ test('a local-pathway setup on a platform with no service manager finishes attac
     finale: {},
   }))
 
-  assert.equal(result.exitCode, 0, 'the run finishes rather than throwing out to the CLI')
-  assert.equal(result.finale?.daemonInstall.failed, true, 'the install step is recorded as failed, not as a clean skip')
+  assert.notEqual(result.cancelled, true, 'the finale finishes rather than throwing out to the CLI')
+  assert.equal(result.daemonInstall.failed, true, 'the install step is recorded as failed, not as a clean skip')
   assert.match(stderr.text(), /win32 has no background service to install/)
   assert.doesNotMatch(stderr.text(), /hyp daemon install/, 'a platform with no service manager is not told to run the installer')
   assert.deepEqual(attached, ['claude'], 'client attach still runs; it needs no service manager')
   assert.deepEqual(backfilled, ['claude'], 'backfill still runs; it is a local file import')
-  assert.deepEqual(result.finale?.attach, [{ client: 'claude', dryRun: false, ok: true }])
+  assert.deepEqual(result.attach, [{ client: 'claude', dryRun: false, ok: true }])
 
   await fs.rm(home, { recursive: true, force: true })
 })

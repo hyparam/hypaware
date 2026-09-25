@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -8,7 +9,6 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import {
-  runPickerWalkthrough,
   WALKTHROUGH_CANCEL_EXIT_CODE,
 } from '../../src/core/cli/walkthrough.js'
 import {
@@ -55,7 +55,7 @@ async function settle(ticks = 5) {
   }
 }
 
-test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdout are TTYs', async () => {
+test('runWizardPick drives the TUI multiselect end-to-end when stdin+stdout are TTYs', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-tui-happy-'))
   const io = makeFakeTty()
   const stderr = makeBuf()
@@ -69,8 +69,8 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
   delete process.env.HYP_NO_TUI
 
   try {
-    const promise = runPickerWalkthrough({
-      capabilities: /** @type {any} */ ({}),
+    const promise = runWizardPick({
+
       stdout: io.stdout,
       stderr,
       stdin: io.stdin,
@@ -121,7 +121,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
   }
 })
 
-test('runPickerWalkthrough returns a deterministic cancel exit code when the user cancels at the source prompt', async () => {
+test('runWizardPick returns a deterministic cancel exit code when the user cancels at the source prompt', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-cancel-'))
   const io = makeFakeTty()
   const stderr = makeBuf()
@@ -140,8 +140,8 @@ test('runPickerWalkthrough returns a deterministic cancel exit code when the use
   delete process.env.HYP_NO_TUI
 
   try {
-    const promise = runPickerWalkthrough({
-      capabilities: /** @type {any} */ ({}),
+    const promise = runWizardPick({
+
       stdout: io.stdout,
       stderr,
       stdin: io.stdin,
@@ -160,10 +160,10 @@ test('runPickerWalkthrough returns a deterministic cancel exit code when the use
     await obs.shutdown()
     const traces = await readJsonl(path.join(devTelemetryDir(obsEnv.stateDir), `traces-${process.pid}.jsonl`))
     const finish = traces.find((record) => (
-      record.name === 'walkthrough.finish' &&
+      record.name === 'wizard.pick.finish' &&
       record.attributes?.status === 'cancelled'
     ))
-    assert.ok(finish, 'cancelled walkthrough.finish span not emitted')
+    assert.ok(finish, 'cancelled wizard.pick.finish span not emitted')
     assert.equal(finish.attributes.exit_code, WALKTHROUGH_CANCEL_EXIT_CODE)
   } finally {
     await obs.shutdown()
@@ -174,7 +174,7 @@ test('runPickerWalkthrough returns a deterministic cancel exit code when the use
   }
 })
 
-test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO_TUI=1', async () => {
+test('runWizardPick falls back to the legacy numbered prompt under HYP_NO_TUI=1', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-tui-fallback-'))
   const input = new PassThrough()
   // Mark BOTH ends as TTYs so the only signal that flips the router is
@@ -188,8 +188,8 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
 
   // HYP_NO_TUI flows through opts.env: the same channel real callers
   // use. So this test also exercises the env-threading contract.
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),

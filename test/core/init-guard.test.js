@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 
 // `init` writes the user-owned local layer; the overwrite guard is the
 // non-destructive half of #111. @ref LLP 0031#local-layer-writers [tests]:
@@ -107,7 +107,7 @@ test('init --yes refuses to clobber an existing local config without --force', a
 })
 
 // The interactive (TTY) half of the guard: no prompt, back up then write
-// (LLP 0433). Driving runPickerWalkthrough with an injected `prompt` keeps
+// (LLP 0433). Driving runWizardPick with an injected `prompt` keeps
 // `interactive = true` (no pre-baked picks) without driving the TUI.
 
 /** @param {string} hypHome */
@@ -118,7 +118,6 @@ function interactiveOpts(hypHome) {
     stdout,
     stderr,
     opts: {
-      capabilities: /** @type {any} */ ({}),
       stdout,
       stderr,
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
@@ -134,10 +133,10 @@ test('interactive init: an existing config is backed up then rewritten without a
   await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
 
   const { stdout, stderr, opts } = interactiveOpts(hypHome)
-  const result = await runPickerWalkthrough(opts)
+  const result = await runWizardPick(opts)
 
   assert.equal(result.exitCode, 0, stderr.text())
-  assert.match(stdout.text(), /Backed up existing config/)
+  assert.match(stdout.text(), /Saved settings \(previous config backed up\)/)
   // A timestamped backup with the OLD content exists.
   const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
   assert.equal(backups.length, 1)

@@ -918,9 +918,7 @@ async function runGuardedInitWizard(opts, guard) {
   // them (LLP 0185 #warn-do-not-detach). That print is no longer on screen by
   // the time this run ends: the summary, then the first look's block, then
   // the narration below all follow it without a pause. Repeat it here, short,
-  // and only when this closing sequence actually wrote something, so the
-  // direct `runPickerWalkthrough` entry point (whose summary follows the
-  // finale with nothing in between) keeps its single print.
+  // and only when this closing sequence actually wrote something.
   //
   // `firstLookResult.wrote` is the whole condition, the team pathway included.
   // It is read rather than `firstLookRan` because a first look that wrote

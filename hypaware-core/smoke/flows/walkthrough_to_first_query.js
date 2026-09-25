@@ -45,11 +45,6 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  * - SQL count(*) returns one `logs` row and the two projected
  *   `ai_gateway_messages` rows (user and assistant) under the same
  *   `dev_run_id`.
- * - `walkthrough.finish` span (via the preset shortcut: the preset
- *   does not emit it; the bead lists it as a walkthrough-specific
- *   contract, validated separately by an in-process walkthrough call
- *   inside this smoke) carries `sources_picked`/`sinks_picked`/
- *   `clients_picked`.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -329,22 +324,7 @@ export async function run({ harness, expect }) {
       (v) => v === 2
     )
 
-    // ----- 5. Span assertions: walkthrough.start/finish + status.render -----
-    // The preset path does not by itself invoke the walkthrough spans
-    // (they're emitted by the interactive walkthrough), so drive a
-    // headless picker walkthrough now with pre-baked picks to validate
-    // the span contract documented on the bead.
-    const { runPickerWalkthrough } = await import('../../../src/core/cli/walkthrough.js')
-    const headlessStdout = makeBuf()
-    const headlessStderr = makeBuf()
-    await runPickerWalkthrough({
-      capabilities: kernel.capabilities,
-      stdout: headlessStdout,
-      stderr: headlessStderr,
-      env: { ...smokeEnv(harness), HYP_CONFIG: path.join(harness.tmpDir, 'walkthrough-config.json') },
-      picks: { sources: ['claude', 'codex'], exportChoice: 'local-parquet', retentionDays: 30 },
-    })
-
+    // Verify the actual CLI workflow telemetry.
     await obs.shutdown()
 
     const traces = await expect.traces()
@@ -363,38 +343,6 @@ export async function run({ harness, expect }) {
         v.retention_days === 90
     )
 
-    const startSpans = traces.filter(
-      (/** @type {any} */ t) => t.name === 'walkthrough.start'
-    )
-    expect.that(
-      'traces: walkthrough.start span emitted with sources_available',
-      startSpans[0]?.attributes?.sources_available,
-      (v) => typeof v === 'number' && v >= 2
-    )
-
-    const finishSpans = traces.filter(
-      (/** @type {any} */ t) => t.name === 'walkthrough.finish'
-    )
-    expect.that(
-      'traces: walkthrough.finish span emitted with picks counts',
-      finishSpans[0]?.attributes,
-      (v) =>
-        v !== undefined &&
-        v.sources_picked === 2 &&
-        v.export_picked === 'local-parquet' &&
-        v.clients_picked === 2 &&
-        v.retention_days === 30
-    )
-
-    const logs = await expect.logs()
-    const pickLogs = logs.filter(
-      (/** @type {any} */ l) => l.body === 'walkthrough.pick'
-    )
-    expect.that(
-      'logs: walkthrough.pick emitted at least once per pick category',
-      new Set(pickLogs.map((/** @type {any} */ l) => l.attributes?.pick_type)),
-      (v) => v instanceof Set && v.has('sources') && v.has('exports')
-    )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

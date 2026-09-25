@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -10,7 +11,6 @@ import { PassThrough } from 'node:stream'
 import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   defaultPromptFactory,
-  runPickerWalkthrough,
 } from '../../src/core/cli/walkthrough.js'
 import { isPromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
@@ -22,8 +22,8 @@ test('picker prompt prints context under source options and defaults export to l
   const stdout = answerDrivenOutput(input, ['5\n'])
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
@@ -292,8 +292,8 @@ test('a dropped terminal at the source picker cancels the run instead of install
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),

@@ -494,7 +494,7 @@ export interface RunWizardPickOptions {
   /**
    * The plugin catalog (T2). Picker rows come from
    * `catalog.pickerDescriptors`; when omitted the phase loads the bundled
-   * catalog itself, matching `runPickerWalkthrough`'s self-loading shape.
+   * catalog itself.
    */
   catalog?: Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors' | 'composeWith'>
   /**
