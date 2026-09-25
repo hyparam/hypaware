@@ -120,7 +120,41 @@ readability pass is optional too.
 
 Return the path to `report.md`, the period and local scope, and any incomplete
 coverage or review. The output is a proposal: do not install recommended skills,
-edit project instructions, change settings, upload logs, or publish the report.
+edit project instructions, change settings, or upload logs. Publishing is an
+optional step only when the user requests it, as described below.
+
+## Optional publishing
+
+When the user asks to publish or share the report with their team, upload the
+reviewed Markdown directory using the existing CLI. Do not run `hyp report
+render` first. The server renders HTML and supplies its own assets.
+
+Use the user's selected remote and the report's actual coverage period. For
+example, a report covering August 2026 can be published with:
+
+```sh
+hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08 --remote <target>
+```
+
+For a custom range, use `YYYY-MM-DD-to-YYYY-MM-DD` as the period. If the team
+or destination is unclear, resolve it with the user before uploading. Reuse
+existing login credentials; if login is needed, direct the user to
+`hyp remote login <target>`. Publishing requires the organization's publisher
+role. Ordinary members do not pass `--org`; that flag is for an operator's
+admin token.
+
+Upload only the supported Markdown pages, with no working ledger, raw logs,
+images, HTML, or assets. The server rejects raw HTML in prose; literal HTML
+examples belong in fenced code blocks. Links may use http(s), mailto, page-local
+fragments, or other pages in this report. Publishing the report does not
+upload its underlying local log dataset.
+
+On success, return the server's report identifier and the CLI receipt's
+`hyp report get` command, including the selected `--remote`. Do not claim a
+browser URL unless the server or an available tool provides one. On failure,
+retain the local report and report the error. Do not silently change its
+content, destination, or format, or loop on permission, quota, or rendering
+errors. Local generation remains useful when publishing is unavailable.
 
 ## Maintenance provenance
 
