@@ -14,6 +14,7 @@ import { readCursors, writeCursors } from '../../hypaware-core/plugins-workspace
 import { runGithubBackfill, runGithubSync } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 
 /** @import { TestContext } from 'node:test' */
+/** @import { StartedSource } from '../../hypaware-core/plugins-workspace/github/src/types.js' */
 
 test('unfinished work resumes on the bounded backlog cadence', () => {
   assert.equal(nextCaptureDelay(24 * 60 * 60_000, true), BACKLOG_RETRY_MS)
@@ -648,4 +649,176 @@ test('a tick that throws keeps the backlog cadence work an earlier tick sized', 
     Object.values(cursors.repos).some((repo) => repo.work !== undefined),
     'the budgeted continuation an earlier tick persisted is still durable on disk',
   )
+})
+
+/**
+ * The three tiny repositories a one-request budget cannot finish in one tick,
+ * shared by the two durable-backlog tests below.
+ */
+const budgetedRepos = {
+  'o/a': { issues: [{ number: 1, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] },
+  'o/b': { issues: [{ number: 2, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] },
+  'o/c': { issues: [{ number: 3, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] },
+}
+
+/**
+ * Release the held tick now in flight and report the delay it scheduled. The
+ * poll interval is widened while that tick runs, so the one scheduling
+ * decision it makes is the only thing that can tell the backlog cadence from a
+ * full poll interval.
+ *
+ * @param {StartedSource} source
+ * @param {{ poll_interval: string }} config
+ * @param {Array<() => void>} held
+ * @param {number} expected how many holds have accumulated once this tick is in flight
+ * @returns {Promise<{ delayMs: number, details: Record<string, any>, lastError: string | undefined }>}
+ */
+async function releaseHeldTick(source, config, held, expected) {
+  for (let i = 0; i < 600 && held.length < expected; i++) await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(held.length, expected, 'the tick under measurement never reached the inventory')
+  config.poll_interval = '30m'
+  held[expected - 1]()
+  assert.ok(source.status)
+  /** @type {any} */
+  let status = {}
+  for (let i = 0; i < 600; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    status = await source.status()
+    if (status.details?.in_flight === false && status.details?.next_tick_at) break
+  }
+  const details = status.details ?? {}
+  assert.ok(details.next_tick_at, 'the tick under measurement never settled on a next delay')
+  return {
+    delayMs: Date.parse(details.next_tick_at) - Date.parse(details.last_tick_at),
+    details,
+    lastError: status.lastError,
+  }
+}
+
+// @ref LLP 0438#readers [tests]: a restarted daemon reads the verdict off the sidecar instead of starting from a blank closure
+test('a restarted source keeps the backlog cadence for work the process before it sized', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backlog-restart-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+
+  // The process before the restart: one tick, a one-request budget, three
+  // repositories. It sizes real bounded work and persists it (LLP 0361#budget).
+  const before = await runCaptureTick(/** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '30m', inventory: 'all_visible' },
+    captureRequestLimit: 1,
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => fakeClient({ viewerRepos: ['o/a', 'o/b', 'o/c'], repos: budgetedRepos }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }), { mode: 'poll' })
+  assert.equal(before.pending, true, 'the pre-restart tick sized bounded work')
+  assert.ok(
+    Object.values(readCursors(stateDir).repos).some((repo) => repo.work !== undefined),
+    'the continuation the pre-restart tick saved is durable on disk',
+  )
+
+  // The restart: a fresh closure with no memory of that tick, whose boot tick
+  // throws before it can size anything of its own.
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'all_visible' }
+  /** @type {Array<() => void>} */
+  const held = []
+  t.after(() => { for (const release of held) release() })
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config,
+    captureRequestLimit: 1,
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => ({
+      ...fakeClient({ repos: budgetedRepos }),
+      async listViewerRepos() {
+        await new Promise((resolve) => held.push(() => resolve(undefined)))
+        throw new Error('ENETDOWN: inventory unreachable')
+      },
+    }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }))
+
+  const source = await startGithubSource()
+  t.after(() => source.stop())
+  const boot = await releaseHeldTick(source, config, held, 1)
+  await source.stop()
+
+  assert.match(String(boot.lastError), /ENETDOWN/, 'the tick under measurement is the one that threw')
+  assert.equal(boot.details.backlog_pending, true,
+    'work the previous process sized and persisted is still due, whatever this process remembers')
+  assert.ok(Math.abs(boot.delayMs - BACKLOG_RETRY_MS) < 60_000,
+    `next tick scheduled in ${boot.delayMs}ms, not the backlog cadence`)
+})
+
+// @ref LLP 0438#writers [tests]: a retirement another process recorded reaches this daemon's cadence without a returning tick of its own
+test('a continuation another process retired returns the source to the configured interval', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backlog-retired-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'all_visible' }
+  let inventoryCalls = 0
+  /** @type {Array<() => void>} */
+  const held = []
+  t.after(() => { for (const release of held) release() })
+
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config,
+    captureRequestLimit: 1,
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => ({
+      ...fakeClient({ repos: budgetedRepos }),
+      async listViewerRepos() {
+        inventoryCalls += 1
+        // Both ticks are held so the interval can be widened before either
+        // makes its own scheduling decision.
+        await new Promise((resolve) => held.push(() => resolve(undefined)))
+        // A one-request budget stops the first tick partway through the
+        // inventory, sizing and persisting real bounded work.
+        if (inventoryCalls === 1) return ['o/a', 'o/b', 'o/c']
+        throw new Error('ENETDOWN: inventory unreachable')
+      },
+    }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }))
+
+  const source = await startGithubSource()
+  t.after(() => source.stop())
+  const sized = await releaseHeldTick(source, config, held, 1)
+  assert.equal(sized.details.backlog_pending, true, 'the budgeted tick put the source on the backlog cadence')
+
+  // `hyp github sync` in its own process against the shared sidecar, while the
+  // daemon is idle between ticks. It has the whole budget, so it retires the
+  // only outstanding continuation.
+  const sidecar = await runCaptureTick(/** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '30m', inventory: 'all_visible' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => fakeClient({ viewerRepos: ['o/a', 'o/b', 'o/c'], repos: budgetedRepos }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }), { mode: 'poll' })
+  assert.equal(sidecar.pending, false, 'the sidecar process finished the rotation')
+  assert.ok(
+    Object.values(readCursors(stateDir).repos).every((repo) => repo.work === undefined),
+    'no continuation is left on disk for the daemon to resume',
+  )
+
+  // The daemon's next tick throws, so nothing it sizes itself can tell it the
+  // backlog is gone.
+  config.poll_interval = '10ms'
+  await source.reload?.(/** @type {any} */ ({}))
+  const after = await releaseHeldTick(source, config, held, 2)
+  await source.stop()
+
+  assert.match(String(after.lastError), /ENETDOWN/, 'the tick under measurement is the one that threw')
+  assert.equal(after.details.backlog_pending, false,
+    'a continuation another process retired is not backlog this source can still claim')
+  assert.ok(Math.abs(after.delayMs - 30 * 60_000) < 60_000,
+    `next tick scheduled in ${after.delayMs}ms, not the configured poll interval`)
 })

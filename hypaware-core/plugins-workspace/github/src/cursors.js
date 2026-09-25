@@ -36,7 +36,16 @@ export function readCursors(stateDir) {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
     if (parsed && parsed.schema_version === SCHEMA_VERSION && parsed.repos && typeof parsed.repos === 'object') {
       const nextRepo = typeof parsed.next_repo === 'string' && parsed.next_repo !== '' ? parsed.next_repo : undefined
-      return { schema_version: SCHEMA_VERSION, repos: readRepos(parsed.repos), ...(nextRepo ? { next_repo: nextRepo } : {}) }
+      // Absent rather than false on a sidecar written before the verdict had a
+      // home: a reader that cannot tell those apart reads every pre-upgrade
+      // continuation as finished.
+      // @ref LLP 0438#readers [implements]: an unrecorded verdict is distinguishable from a negative one
+      return {
+        schema_version: SCHEMA_VERSION,
+        repos: readRepos(parsed.repos),
+        ...(nextRepo ? { next_repo: nextRepo } : {}),
+        ...(typeof parsed.pending === 'boolean' ? { pending: parsed.pending } : {}),
+      }
     }
   } catch {
     // Missing, malformed, or an older schema - start clean (a fresh poll

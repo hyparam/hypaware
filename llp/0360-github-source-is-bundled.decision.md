@@ -20,6 +20,10 @@ future capture)
 that keeps an inclusive `since` from re-appending the watermark second
 recognizes an item by its event id, so an item updated twice inside one second
 never has its second snapshot captured)
+**Extended-by:** [LLP 0438](./0438-github-backlog-verdict-is-durable.decision.md)
+(#cadence gains a home for its verdict: whether bounded work or a failure set
+the cadence is recorded in the cursor sidecar, so a restarted daemon and a
+sidecar process read the same answer)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#capture-regimes and #cursoring together entail that a repeat backfill
 re-appends; 0374 records that as the design and refuses a committed-row dedup)

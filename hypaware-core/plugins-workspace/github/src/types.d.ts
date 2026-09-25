@@ -306,6 +306,13 @@ export interface CursorState {
   schema_version: number
   repos: Record<string, RepoCursor>
   next_repo?: string
+  /**
+   * The last capture verdict any process reached over the whole inventory:
+   * true when that tick ended with bounded work remaining, false when it did
+   * not. Absent on a sidecar written before the field existed, which reads as
+   * "no verdict recorded" rather than as false (LLP 0438#durable-verdict).
+   */
+  pending?: boolean
 }
 
 export interface GithubPullTask {
