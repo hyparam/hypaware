@@ -1027,26 +1027,6 @@ export function resolveClientName(row) {
 }
 
 /**
- * Extract a `YYYY-MM-DD` date string from common timestamp fields.
- * Returns `undefined` when no recognizable timestamp is present.
- *
- * @param {Record<string, unknown>} row
- * @returns {string | undefined}
- */
-export function resolvePartitionDate(row) {
-  const ts = row.timestamp ?? row.created_at ?? row.recorded_at ?? row.date
-  if (typeof ts === 'string') {
-    const match = ts.match(/^(\d{4}-\d{2}-\d{2})/)
-    if (match) return match[1]
-    const d = new Date(ts)
-    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10)
-  }
-  if (ts instanceof Date) return ts.toISOString().slice(0, 10)
-  if (typeof ts === 'number' && Number.isFinite(ts)) return new Date(ts).toISOString().slice(0, 10)
-  return undefined
-}
-
-/**
  * Sanitize a value for use as a filesystem path segment.
  * Replaces path separators, control characters, and reserved names with
  * safe alternatives.
