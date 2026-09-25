@@ -487,3 +487,165 @@ test('a capture that throws keeps its own error, not the closing write failure',
 
   await assert.rejects(runCaptureTick(runtime, { mode: 'poll' }), /inventory refused/)
 })
+
+// @ref LLP 0360#cadence [tests]: a source whose ticks keep throwing retries on the ordinary cadence, not the backlog one
+test('a tick that throws gives up the backlog cadence instead of latching it', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backlog-latch-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'all_visible' }
+  let inventoryCalls = 0
+  /** Releases for the throwing ticks, so a failed assertion never leaves one hung. @type {Array<() => void>} */
+  const held = []
+  let released = 0
+  t.after(() => { for (const release of held) release() })
+
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config,
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => ({
+      ...fakeClient({}),
+      async listViewerRepos() {
+        inventoryCalls += 1
+        if (inventoryCalls === 1) {
+          // `hyp github backfill o/r` in another process, committed after this
+          // tick read the sidecar: the closing write adopts the authorization
+          // and the tick puts the source on the backlog cadence.
+          await writeCursors(stateDir, /** @type {any} */ ({
+            schema_version: 1,
+            repos: { 'o/r': { one_time_import: true, work: { mode: 'backfill', phase: 'issues' } } },
+          }))
+          return []
+        }
+        // Then the network goes, held open so the interval can be widened
+        // before this tick makes its own scheduling decision.
+        await new Promise((resolve) => held.push(() => resolve(undefined)))
+        throw new Error('ENETDOWN: inventory unreachable')
+      },
+    }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }))
+
+  const source = await startGithubSource()
+  t.after(() => source.stop())
+
+  /**
+   * Release the throwing tick now in flight and report the delay it schedules.
+   * The interval is widened while it runs, so that one scheduling decision is
+   * the only thing that can tell the backlog cadence from a full poll interval.
+   *
+   * @returns {Promise<{ delayMs: number, details: Record<string, any>, lastError: string | undefined }>}
+   */
+  async function releaseAndMeasure() {
+    released += 1
+    for (let i = 0; i < 600 && held.length < released; i++) await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(held.length, released, 'the throwing tick never reached the inventory')
+    config.poll_interval = '30m'
+    held[released - 1]()
+    assert.ok(source.status)
+    /** @type {any} */
+    let status = {}
+    for (let i = 0; i < 600; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      status = await source.status()
+      if (status.details?.in_flight === false && status.details?.next_tick_at) break
+    }
+    const details = status.details ?? {}
+    assert.ok(details.next_tick_at, 'the throwing tick never settled on a next delay')
+    return {
+      delayMs: Date.parse(details.next_tick_at) - Date.parse(details.last_tick_at),
+      details,
+      lastError: status.lastError,
+    }
+  }
+
+  const first = await releaseAndMeasure()
+  assert.match(String(first.lastError), /ENETDOWN/, 'the tick under measurement is the one that threw')
+  assert.ok(Math.abs(first.delayMs - 30 * 60_000) < 60_000, `next tick scheduled in ${first.delayMs}ms, not the poll interval`)
+  assert.equal(first.details.backlog_pending, false, 'a tick that threw reports no backlog it can size')
+
+  // And it stays there: a further throwing tick does not rediscover backlog.
+  config.poll_interval = '10ms'
+  await source.reload?.(/** @type {any} */ ({}))
+  const second = await releaseAndMeasure()
+  assert.equal(second.details.backlog_pending, false)
+  assert.ok(Math.abs(second.delayMs - 30 * 60_000) < 60_000, `next tick scheduled in ${second.delayMs}ms, not the poll interval`)
+
+  await source.stop()
+  assert.equal(readCursors(stateDir).repos['o/r']?.one_time_import, true, 'the staged authorization is still durable on disk')
+})
+
+// @ref LLP 0361#cadence [tests]: budgeted work a returning tick sized still resumes on the backlog cadence after a failure
+test('a tick that throws keeps the backlog cadence work an earlier tick sized', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backlog-throw-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'all_visible' }
+  let inventoryCalls = 0
+  /** Release for the throwing tick, so a failed assertion never leaves it hung. @type {Array<() => void>} */
+  const held = []
+  t.after(() => { for (const release of held) release() })
+
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config,
+    captureRequestLimit: 1,
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => ({
+      ...fakeClient({
+        repos: {
+          'o/a': { issues: [{ number: 1, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] },
+          'o/b': { issues: [{ number: 2, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] },
+          'o/c': { issues: [{ number: 3, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] },
+        },
+      }),
+      async listViewerRepos() {
+        inventoryCalls += 1
+        // A one-request budget stops the first tick partway through the
+        // inventory, sizing and persisting real bounded work (LLP 0361#budget).
+        if (inventoryCalls === 1) return ['o/a', 'o/b', 'o/c']
+        // The next tick's own inventory call fails, held open so the interval
+        // can be widened before it makes its own scheduling decision.
+        await new Promise((resolve) => held.push(() => resolve(undefined)))
+        throw new Error('ENETDOWN: inventory unreachable')
+      },
+    }),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }))
+
+  const source = await startGithubSource()
+  t.after(() => source.stop())
+
+  for (let i = 0; i < 600 && held.length < 1; i++) await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(held.length, 1, 'the throwing tick never reached the inventory')
+  config.poll_interval = '30m'
+  held[0]()
+
+  assert.ok(source.status)
+  /** @type {any} */
+  let status = {}
+  for (let i = 0; i < 600; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    status = await source.status()
+    if (status.details?.in_flight === false && status.details?.next_tick_at) break
+  }
+  const details = status.details ?? {}
+  assert.ok(details.next_tick_at, 'the throwing tick never settled on a next delay')
+  assert.match(String(status.lastError), /ENETDOWN/, 'the tick under measurement is the one that threw')
+
+  const delayMs = Date.parse(details.next_tick_at) - Date.parse(details.last_tick_at)
+  assert.equal(details.backlog_pending, true,
+    'work an earlier tick sized and persisted is still due, even though this tick threw before sizing anything of its own')
+  assert.ok(Math.abs(delayMs - BACKLOG_RETRY_MS) < 60_000,
+    `next tick scheduled in ${delayMs}ms, not the backlog cadence`)
+
+  await source.stop()
+  const cursors = readCursors(stateDir)
+  assert.ok(
+    Object.values(cursors.repos).some((repo) => repo.work !== undefined),
+    'the budgeted continuation an earlier tick persisted is still durable on disk',
+  )
+})

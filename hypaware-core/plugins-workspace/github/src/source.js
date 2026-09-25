@@ -35,6 +35,9 @@ export async function startGithubSource() {
   let lastInventoryRepos = 0
   let rowsWritten = 0
   let backlogPending = false
+  // The last RETURNING tick's own `result.pending`, kept apart from a staged
+  // import's one-shot authorization so a throw only drops the latter.
+  let sizedBacklogPending = false
   /** @type {Set<string>} */
   let seenImports = new Set()
   /** @type {string | undefined} */
@@ -48,6 +51,7 @@ export async function startGithubSource() {
     try {
       const result = await runCaptureTick(runtime, { mode: 'poll' })
       rowsWritten += result.events
+      sizedBacklogPending = result.pending
       // A tick's own `pending` is blind to work another process staged while
       // it ran, so the sidecar gets the first word.
       backlogPending = stagedImportPending() || result.pending
@@ -71,6 +75,18 @@ export async function startGithubSource() {
         duration_ms: Date.now() - started,
       })
     } catch (err) {
+      // A tick that threw sized nothing of its own, so the staged-import report
+      // it was carrying is one-shot and does not survive it - leaving it
+      // standing would latch the source at BACKLOG_RETRY_MS for the whole
+      // outage instead of once per configured interval. Budgeted work an
+      // earlier, returning tick already sized and persisted to disk is a
+      // different thing: `runCaptureTick` persists its cursors before
+      // rethrowing, so that continuation is still due, and this keeps it on
+      // the backlog cadence LLP 0361#cadence promises it instead of pushing it
+      // back to a full poll interval.
+      // @ref LLP 0360#cadence [implements]: a failure the source could not size retries on the ordinary cadence rather than in a busy loop
+      // @ref LLP 0361#cadence [constrained-by]: budgeted work a returning tick sized still resumes within BACKLOG_RETRY_MS
+      backlogPending = sizedBacklogPending
       lastError = err instanceof Error ? err.message : String(err)
       runtime.log.error('github.poll_tick_failed', {
         operation: 'poll',
