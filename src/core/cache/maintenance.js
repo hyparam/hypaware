@@ -1656,10 +1656,12 @@ function selectInPlaceVictims(liveFiles, cfg) {
  * Do the victim files hold a committed gateway fallback row that the
  * dataset's settle hook can upgrade RIGHT NOW? A cheap `attributes` scan
  * finds candidate files; only those get a full read, and their fallback
- * rows are offered to the settle hook in memory. Following
- * {@link resettleFallbackRows}' convention, an upgraded row comes back as
- * a new object; a hook that returns every row unchanged has no twin to
- * collapse, so the caller merges in place and the rows survive verbatim.
+ * rows are offered to the settle hook in memory. A hook that returns a new
+ * object did something worth a rewrite; one that returns every row
+ * unchanged has nothing to settle, so the caller merges in place and the
+ * rows survive verbatim. Routing, not drop authority: a fresh object that
+ * is only a relink costs one whole-generation rewrite, and
+ * {@link resettleFallbackRows} still keeps the row.
  * Nothing here is committed: the hook's real run happens inside the
  * whole-generation rewrite this answer routes to.
  *
@@ -2150,11 +2152,16 @@ async function resettleFallbackRows(fallbackRows, settle, emittedPartIds) {
   const survivors = []
   for (let i = 0; i < upgraded.length; i++) {
     const row = upgraded[i]
-    const wasUpgraded = row !== fallbackRows[i]
+    const committed = fallbackRows[i]
     const key = rowPartId(row)
     // Only an UPGRADED row may collapse: its native part_id now matches a
     // twin already emitted (or an earlier survivor in this buffer). A row
-    // whose identity is unchanged is never dropped.
+    // whose identity is unchanged is never dropped, and identity here is the
+    // part identity, not the object: the settle pass hands back a fresh
+    // object for work that leaves identity alone (a relinked predecessor, a
+    // late-resolved cwd, a spawned_by stamp), and such a row has no native
+    // twin to collapse onto. The object compare is a cheap first cut only.
+    const wasUpgraded = row !== committed && key !== rowPartId(committed)
     if (wasUpgraded && key !== undefined && emittedPartIds.has(key)) continue
     if (key !== undefined) emittedPartIds.add(key)
     survivors.push(row)
