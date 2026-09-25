@@ -78,7 +78,7 @@ in a machine you set up as local only, run:
 hyp remote login
 ```
 
-Everyone's history then flows to a shared server, so you can analyze usage,
+Everyone's history then flows to HypAware Cloud, so you can analyze usage,
 spend, and failure patterns across the whole team:
 
 ```sh
@@ -102,7 +102,7 @@ per folder:
 
 ```sh
 hyp privacy ignore              # never record sessions in this repo
-hyp privacy set . local-only    # record, but never send to the team server
+hyp privacy set . local-only    # record, but never send to HypAware Cloud
 hyp session ignore              # stop recording the current session
 hyp privacy purge --session ID  # delete what was already recorded
 ```
@@ -121,14 +121,14 @@ This shows the daemon, attached agents, and what was captured recently. See
 ## Uninstall
 
 ```sh
-hyp leave                  # only if you joined a team server
+hyp leave                  # only if you signed in to HypAware Cloud
 hyp daemon uninstall       # stop the daemon and detach every agent
 npm uninstall -g hypaware
 rm -rf ~/.hyp              # delete all local recordings
 ```
 
-Your agents' settings are restored on the way out. Copies already sent to a
-team server or exported to files are not affected.
+Your agents' settings are restored on the way out. Copies already sent to
+HypAware Cloud or exported to files are not affected.
 
 ## Documentation
 

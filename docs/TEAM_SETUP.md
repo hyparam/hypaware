@@ -2,12 +2,11 @@
 
 [Documentation](README.md)
 
-Get an organization on the central server, then set up each machine to join
-it.
+Get an organization in HypAware Cloud, then set up each machine to join it.
 
 ## Get an organization
 
-Organizations are hosted on the central server and keyed by email domain:
+Organizations live in HypAware Cloud and are keyed by email domain:
 anyone who signs in with a verified email on your claimed domain joins your
 organization automatically.
 
@@ -62,7 +61,7 @@ keypress per screen.
 1. **Choose what to collect and sync.** A checklist of AI tools. Tools your
    team manages are already selected and locked; tools detected on your
    machine are pre-selected as well. A checked tool is recorded here *and*
-   shared with the server. Completing setup clears any
+   shared with HypAware Cloud. Completing setup clears any
    standing `hyp privacy client <name> local-only` for the tools on it;
    cancelling before setup commits preserves those settings.
    `hyp privacy client` changes them afterwards.

@@ -103,7 +103,7 @@ Local-only rows can be withheld depending on the querying session's privacy
 class. `--include-local-only` explicitly includes them in local results, so use
 it only where the output can remain private. See [privacy controls](PRIVACY.md).
 
-## Query a team server
+## Query a remote target
 
 ```sh
 hyp remote list
@@ -120,9 +120,10 @@ Replace `team` with a configured target. A bare `--remote` uses the default.
 machine for forwarding.
 
 `hyp cache status`, `hyp query schema`, and `hyp query overview` describe local
-state. They are not a remote inventory. A server can have different datasets,
-retention, and permissions; query it directly to establish what is available.
-The server enforces visibility and rejects `--include-local-only`.
+state. They are not a remote inventory. A remote can have different
+datasets, retention, and permissions; query it directly to establish what
+is available. The remote enforces visibility and rejects
+`--include-local-only`.
 
 ## Follow relationships in the activity graph
 
@@ -142,7 +143,7 @@ Use the graph for questions such as which sessions touched a file or ran a
 skill. A `Session` node's natural key is the `session_id` to use in the SQL
 examples above. The `node` and `edge` datasets are also queryable with SQL.
 Remote graph traversal uses `--remote`; projecting the local graph does not
-refresh the server's graph.
+refresh the remote's graph.
 
 ## Ask an assistant or connect MCP
 
