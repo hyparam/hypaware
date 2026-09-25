@@ -11,6 +11,7 @@ import { renderStatusJson } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
+import { runDaemonStatus } from '../../src/core/commands/daemon.js'
 import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
 import { DEFAULT_TELEMETRY_PORT } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import {
@@ -333,6 +334,66 @@ test('an unreadable status.json nulls the cross-check for a listener that is sti
   })
 })
 
+/**
+ * Issue #2148: the same two readings on the gateway side, where Codex lives.
+ * Codex reaches HypAware through `base_url`, so the gateway is the recorder
+ * that captures it, and the gateway is missing from `recorders` exactly when
+ * `resolveGatewayEndpointForCli` found no bound port in the live snapshot and
+ * no `listen` pinned in the config. With another recorder live the verb still
+ * exits 0 with `status: "ok"`, so the receipt alone cannot say whether the
+ * gateway was skipped while listening or is simply not listening.
+ *
+ * The second observation is the gateway's own bound address, the same field
+ * `gatewaySourceDetails` resolves recorders by, and `hyp daemon status --json`
+ * is where it is readable: `hyp status --json` renders sources without their
+ * `details`. Both worlds are built here and the payload is required to tell
+ * them apart, so the shapes the codex privacy skill names are measured against
+ * the real command rather than asserted.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: a recorder that is not running is
+ * not a failure - it is recording nothing - so only a listening one that was
+ * skipped is.
+ */
+test('a receipt with no gateway entry cannot say whether the gateway is listening, and the daemon snapshot can', async () => {
+  await withControlServer(/** @type {Set<string>} */ (new Set()), async (listenerBase) => {
+    // The gateway bound nothing; the claude telemetry listener is live and
+    // advertises the route, which is what keeps the receipt an `ok` instead
+    // of the no-recorder-at-all refusal.
+    const hypHome = daemonHome({ listenerBase })
+    const ctx = fakeCtx({ env: { HYP_HOME: hypHome } })
+
+    assert.equal(await runSessionIgnore([SESSION, '--json'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.status, 'ok', 'a gateway that is not listening is not addressed, and that is not a failure')
+    assert.deepEqual(
+      out.recorders.map((/** @type {any} */ r) => r.recorder),
+      ['claude-telemetry'],
+      'so the receipt carries no gateway entry, on the machine that is capturing nothing over base_url'
+    )
+    assert.match(ctx.stderr(), /gateway not addressed:/)
+
+    const down = await daemonStatusJson(hypHome)
+    assert.equal(down.running, true, 'the daemon is up - it is the gateway that is not')
+    const downGateway = gatewaySource(down)
+    assert.equal(downGateway?.details?.listening, false)
+    assert.equal(downGateway?.details?.port, undefined, 'and no port, which is exactly what the recorder resolution reads')
+
+    // The other direction: a gateway that did bind says so in the same place.
+    await withControlServer(/** @type {Set<string>} */ (new Set()), async (gatewayBase) => {
+      const up = await daemonStatusJson(daemonHome({ gatewayBase, listenerBase }))
+      assert.equal(up.running, true)
+      assert.equal(typeof gatewaySource(up)?.details?.port, 'number', 'a listening gateway carries its bound port')
+    })
+
+    // And an unreadable snapshot is not an observation at all: the command
+    // exits nonzero rather than reporting a gateway that is not listening.
+    fs.writeFileSync(statusFilePath(path.join(hypHome, 'hypaware')), 'not json')
+    const broken = fakeCtx({ env: { HYP_HOME: hypHome } })
+    assert.equal(await runDaemonStatus(['--json'], broken.ctx), 1)
+    assert.equal(broken.stdout(), '', 'and prints no payload a reader could mistake for one')
+  })
+})
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
@@ -403,11 +464,15 @@ async function withRefusingServer(fn) {
  * `listener_started_at` because the file that would have said so could not
  * be parsed.
  *
- * @param {{ gatewayBase: string, listenerBase?: string, listenerStartedAt?: string }} args
+ * Omitting `gatewayBase` writes what a gateway that bound nothing writes for
+ * itself: `listening: false` and no address, which is the shape
+ * `gatewaySourceDetails` already reads as "no reachable gateway here".
+ *
+ * @param {{ gatewayBase?: string, listenerBase?: string, listenerStartedAt?: string }} args
  * @returns {string}
  */
 function daemonHome({ gatewayBase, listenerBase, listenerStartedAt }) {
-  const gatewayUrl = new URL(gatewayBase)
+  const gatewayUrl = gatewayBase ? new URL(gatewayBase) : undefined
   const hypHome = temporaryDirectory('hyp-session-both-')
   const stateRoot = path.join(hypHome, 'hypaware')
   fs.mkdirSync(path.join(stateRoot, 'run'), { recursive: true })
@@ -417,7 +482,9 @@ function daemonHome({ gatewayBase, listenerBase, listenerStartedAt }) {
       name: 'ai-gateway',
       plugin: '@hypaware/ai-gateway',
       state: 'ready',
-      details: { host: gatewayUrl.hostname, port: Number(gatewayUrl.port) },
+      details: gatewayUrl
+        ? { host: gatewayUrl.hostname, port: Number(gatewayUrl.port) }
+        : { listening: false },
     },
   ]
   if (listenerBase || listenerStartedAt) {
@@ -520,4 +587,25 @@ async function captureHealth({ hypHome, homeDir }) {
     health: json.capture_health.find((/** @type {any} */ entry) => entry.client === 'claude'),
     daemon: json.daemon,
   }
+}
+
+/**
+ * `hyp daemon status --json` over a `HYP_HOME`, parsed: the daemon's own
+ * snapshot, which is the only surface carrying a source's `details`.
+ *
+ * @param {string} hypHome
+ */
+async function daemonStatusJson(hypHome) {
+  const ctx = fakeCtx({ env: { HYP_HOME: hypHome } })
+  assert.equal(await runDaemonStatus(['--json'], ctx.ctx), 0)
+  return JSON.parse(ctx.stdout())
+}
+
+/**
+ * The gateway's entry in that snapshot, found the way core finds it.
+ *
+ * @param {any} payload
+ */
+function gatewaySource(payload) {
+  return payload.sources.find((/** @type {any} */ s) => s.plugin === '@hypaware/ai-gateway')
 }

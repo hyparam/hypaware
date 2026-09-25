@@ -201,3 +201,87 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
     'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
   )
 })
+
+/**
+ * Issue #2148, the codex half of #1626. The stop above fires on ABSENCE, and
+ * absence has two causes the receipt cannot tell apart. The gateway is missing
+ * from `recorders` exactly when `resolveGatewayEndpointForCli` found no bound
+ * port in the live daemon snapshot and no `listen` pinned in the config, which
+ * is either a gateway that is listening somewhere the verb could not name or a
+ * gateway that is not listening at all - and the second is the ordinary reading
+ * (LLP 0256 #cli-posts-to-both: a recorder that is not running is not a
+ * failure, it is recording nothing). It is reachable in shipped code:
+ * `runMutation` exits 0 with `status: "ok"` and a `gateway not addressed:` line
+ * on stderr whenever another recorder resolves and the gateway does not, so an
+ * unconditional stop tells a user whose gateway is down - and whose Codex
+ * traffic is therefore reaching no recorder over `base_url` - that the review
+ * session is still being recorded.
+ *
+ * The answer is to condition the stop on a second observation, not to delete
+ * it, so both directions are pinned here: a listening gateway still stops the
+ * review, a gateway that bound nothing says plainly that nothing is capturing
+ * this session, and a cross-check that cannot be read fails closed.
+ *
+ * The second observation is the gateway's own bound address, which is the
+ * field the verb's recorder resolution reads (`gatewaySourceDetails` in
+ * `src/core/daemon/status.js`), not the `control_routes` advertisement it
+ * resolves the other recorders by. `hyp status --json` drops source `details`
+ * entirely, so it cannot answer this; the shapes named below are pinned
+ * against the real command in
+ * test/plugins/ai-gateway-session-both-recorders.test.js.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: only a running recorder that was
+ * skipped or refused is a failure.
+ */
+test('Step 1 stops on a missing gateway entry only while the gateway is listening', () => {
+  const at = prose.indexOf(STOP_LIST_OPENER)
+  assert.ok(at >= 0, `Step 1 must gather its stops under "${STOP_LIST_OPENER}"`)
+  const rest = prose.slice(at)
+  const paraEnd = rest.search(/\n\s*\n/)
+  const stops = paraEnd < 0 ? rest : rest.slice(0, paraEnd)
+
+  // The condition rides the list item itself, before the comma that ends it:
+  // an agent acting on the list must not be able to reach the stop without
+  // reading it.
+  const clause = 'no `gateway` entry in `"recorders"`'
+  assert.ok(stops.includes(clause), `"${clause}" must still be one of the stop conditions`)
+  assert.match(
+    stops,
+    new RegExp(clause.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[^,]{0,200}\\b(?:listening|live|running)\\b'),
+    'and it must carry its own liveness condition: absence alone is also what a gateway that is not listening looks like'
+  )
+
+  // The second observation, and both of its answers.
+  const opener = '**Cross-check a missing `gateway` entry'
+  const from = prose.indexOf(opener)
+  assert.ok(from >= 0, `Step 1 must settle the two readings, opening "${opener}"`)
+  const to = prose.indexOf('**Which id, exactly.**')
+  assert.ok(to > from, 'and must do it before it explains which id the opt-out names')
+  const crossCheck = prose.slice(from, to)
+
+  assert.match(crossCheck, /hyp daemon status --json/, 'the cross-check must name the command that answers it')
+  assert.ok(
+    crossCheck.includes('@hypaware/ai-gateway') && crossCheck.includes('"port"'),
+    'and the keys it reads: the gateway source entry and the address it bound'
+  )
+  assert.match(
+    crossCheck,
+    /"running": true[\s\S]{0,400}still being recorded/,
+    'a port the live daemon bound is a gateway that was skipped, so the stop must still fire on it'
+  )
+  assert.match(
+    crossCheck,
+    /gateway is not listening, so nothing is capturing this session/,
+    'and where nothing is listening the user must be told that, not told they are still being recorded'
+  )
+  assert.match(
+    crossCheck,
+    /"running": false/,
+    'a snapshot outlives its daemon, so a port in one must be read as live only beside a running process'
+  )
+  assert.match(
+    crossCheck,
+    /(?:cannot read|do not recognize|nonzero)[\s\S]{0,200}\bstop\b/,
+    'an observation that could not be made is not an answer, so it must fail closed'
+  )
+})
