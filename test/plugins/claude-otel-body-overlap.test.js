@@ -34,6 +34,7 @@ import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plug
 import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import { createClaudeSettlementEnricher } from '../../hypaware-core/plugins-workspace/claude/src/settle.js'
+import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 import { loadSpooledBodies } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/bodies.js'
 import { flattenClaudeTelemetryEvents } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/events.js'
 import { projectClaudeTelemetryEvents } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/projection.js'
@@ -403,8 +404,9 @@ async function stageEnv() {
  * @param {{ homeDir: string, stateFile: string }} env
  * @param {Record<string, unknown>[]} rows
  * @param {string[]} committed
+ * @param {boolean} [resettle]
  */
-async function settleBatch(env, rows, committed) {
+async function settleBatch(env, rows, committed, resettle = false) {
   const state = createGatewayState()
   const api = createAiGatewayApi(state)
   api.registerSettlementEnricher(createClaudeSettlementEnricher({
@@ -421,7 +423,7 @@ async function settleBatch(env, rows, committed) {
     },
   })
   return /** @type {Record<string, unknown>[]} */ (
-    await /** @type {any} */ (registration).settleBatch(rows, ctx)
+    await /** @type {any} */ (registration)[resettle ? 'resettleBatch' : 'settleBatch'](rows, ctx)
   )
 }
 
@@ -554,6 +556,250 @@ test('a [text, tool_use] turn split across the two lanes still totals its tokens
       outputTokens([...sweptTool, ...afterTool]),
       TEXT_USAGE.output_tokens,
       'the collapsed turn must not count its tokens twice either'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+for (const agentName of ['general-purpose', undefined]) {
+  test(`OTEL tool ids recover distinct subagents with agent.name=${agentName}`, async () => {
+    const env = await stageEnv()
+    try {
+      const projectDir = path.join(env.homeDir, '.claude', 'projects', 'some-repo')
+      const transcriptPath = path.join(projectDir, `${SESSION}.jsonl`)
+      await appendSessionContext(env.stateFile, {
+        session_id: SESSION,
+        transcript_path: transcriptPath,
+        cwd: env.homeDir,
+        git_branch: 'main',
+        ts: '2026-09-05T22:36:50.000Z',
+      })
+      const agentsDir = path.join(projectDir, SESSION, 'subagents')
+      await fs.mkdir(agentsDir, { recursive: true })
+      const events = []
+      const expected = []
+      for (const agentId of ['a111111', 'a222222']) {
+        const call = { ...TOOL_BLOCK, id: `toolu_${agentId}` }
+        const result = { ...RESULT_BLOCK, tool_use_id: call.id }
+        const entries = [
+          { role: 'assistant', content: [call], uuid: `${agentId}-call` },
+          { role: 'user', content: [result], uuid: `${agentId}-result` },
+        ]
+        await fs.writeFile(path.join(agentsDir, `agent-${agentId}.jsonl`), entries.map((entry) => JSON.stringify({
+          sessionId: SESSION, agentId, isSidechain: true, type: entry.role,
+          uuid: entry.uuid, message: { role: entry.role, content: entry.content },
+          timestamp: '2026-09-05T22:36:54.000Z',
+        })).join('\n') + '\n')
+        await fs.writeFile(path.join(agentsDir, `agent-${agentId}.meta.json`), JSON.stringify({ toolUseId: `spawn_${agentId}` }))
+        const bodyRef = await spoolBody(env.spoolDir, `${agentId}.json`, {
+          messages: entries.map(({ role, content }) => ({ role, content })),
+        })
+        events.push({
+          name: 'api_request_body', timestamp: '2026-09-05T22:36:55.000Z',
+          attributes: { 'session.id': SESSION, body_ref: bodyRef, ...(agentName ? { 'agent.name': agentName } : {}) },
+        })
+        expected.push(...entries.map(({ uuid }) => ({
+          partId: `${uuid}#0`, agentId, spawnedBy: `spawn_${agentId}`,
+        })))
+      }
+      const { bodies } = await loadSpooledBodies(events, { spoolDir: env.spoolDir })
+      const [projection] = projectClaudeTelemetryEvents(events, {
+        clientName: 'claude', usageByRequestId: new Map(), spooledBodies: bodies,
+      })
+      const rows = aiGatewayRowsFromProjectedExchange(projection)
+      const settled = await settleBatch(env, rows, [])
+      assert.deepEqual(settled.map((row) => ({
+        partId: row.part_id, agentId: row.agent_id,
+        spawnedBy: /** @type {any} */ (row.attributes)?.claude?.spawned_by_tool_use_id,
+      })), expected)
+      assert.ok(settled.every((row) => row.is_sidechain === true))
+      assert.ok(settled.every((row) => !/** @type {any} */ (row.attributes)?.claude?.match_key))
+      const backfilled = await backfillRows(env)
+      const agentRows = backfilled.filter((row) => row.agent_id)
+      assert.deepEqual(partIds(settled, 'tool_call'), partIds(agentRows, 'tool_call'))
+      assert.deepEqual(partIds(settled, 'tool_result'), partIds(agentRows, 'tool_result'))
+      assert.deepEqual(await settleBatch(env, rows, agentRows.map((row) => String(row.part_id))), [])
+      assert.deepEqual(await settleBatch(env, settled, []), settled)
+    } finally {
+      await env.cleanup()
+    }
+  })
+}
+
+test('a late subagent transcript repairs an unsettled tool call before its result exists', async () => {
+  const env = await stageEnv()
+  try {
+    const agentId = 'a333333'
+    const call = { ...TOOL_BLOCK, id: 'toolu_pending' }
+    const bodyRef = await spoolBody(env.spoolDir, 'pending.json', {
+      role: 'assistant', content: [call],
+    })
+    const event = {
+      name: 'api_response_body', timestamp: '2026-09-05T22:36:55.000Z',
+      attributes: { 'session.id': SESSION, body_ref: bodyRef, 'agent.name': 'general-purpose' },
+    }
+    const { bodies } = await loadSpooledBodies([event], { spoolDir: env.spoolDir })
+    const [projection] = projectClaudeTelemetryEvents([event], {
+      clientName: 'claude', usageByRequestId: new Map(), spooledBodies: bodies,
+    })
+    const rows = aiGatewayRowsFromProjectedExchange(projection)
+    assert.deepEqual(await settleBatch(env, rows, []), rows, 'missing transcript keeps the retry marker')
+
+    const dir = path.join(env.homeDir, '.claude', 'projects', 'some-repo', SESSION, 'subagents')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, `agent-${agentId}.jsonl`), JSON.stringify({
+      sessionId: SESSION, agentId, isSidechain: true, type: 'assistant', uuid: 'pending-call',
+      message: { role: 'assistant', content: [call] }, timestamp: event.timestamp,
+    }) + '\n')
+    // Committed fallback rows reach the same enricher through maintenance.
+    // Stored JSON attributes must work as well as the ingest-time object.
+    const stored = rows.map((row) => ({ ...row, attributes: JSON.stringify(row.attributes) }))
+    const [settled] = await settleBatch(env, stored, [], true)
+    assert.equal(settled.agent_id, agentId)
+    assert.equal(settled.part_id, 'pending-call#0')
+    assert.equal(settled.is_sidechain, true)
+    assert.equal(/** @type {any} */ (settled.attributes)?.claude?.match_key, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a parent spawn call replayed in a subagent body retains the parent identity', async () => {
+  const env = await stageEnv()
+  try {
+    const call = { type: 'tool_use', id: 'toolu_spawn', name: 'Agent', input: { prompt: 'inspect' } }
+    const result = { type: 'tool_result', tool_use_id: call.id, content: 'agentId: a444444' }
+    const messages = [{ role: 'assistant', content: [call] }, { role: 'user', content: [result] }]
+    const file = path.join(env.homeDir, '.claude', 'projects', 'some-repo', `${SESSION}.jsonl`)
+    await fs.appendFile(file, messages.map((message, i) => JSON.stringify({
+      sessionId: SESSION, type: message.role, uuid: `spawn-${i}`, message,
+      timestamp: '2026-09-05T22:36:54.000Z',
+      ...(i === 1 ? { toolUseResult: { agentId: 'a444444' } } : {}),
+    })).join('\n') + '\n')
+    const bodyRef = await spoolBody(env.spoolDir, 'replayed-parent.json', { messages })
+    const event = {
+      name: 'api_request_body', timestamp: '2026-09-05T22:36:55.000Z',
+      attributes: { 'session.id': SESSION, body_ref: bodyRef, 'agent.name': 'general-purpose' },
+    }
+    const { bodies } = await loadSpooledBodies([event], { spoolDir: env.spoolDir })
+    const [projection] = projectClaudeTelemetryEvents([event], {
+      clientName: 'claude', usageByRequestId: new Map(), spooledBodies: bodies,
+    })
+    const settled = await settleBatch(env, aiGatewayRowsFromProjectedExchange(projection), [])
+    assert.deepEqual(settled.map((row) => row.part_id), ['spawn-0#0', 'spawn-1#0'])
+    assert.ok(settled.every((row) => !row.agent_id && !row.is_sidechain))
+    assert.equal(/** @type {any} */ (settled[1].attributes)?.claude?.tool_use_result?.agentId, 'a444444')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a header-derived agent_id survives a transcript line that names no agent', async () => {
+  const env = await stageEnv()
+  try {
+    // The proxy lane stamps `agent_id` from the authoritative
+    // `x-claude-code-agent-id` request header; `agent.name` stands in for it
+    // here because settle.js reads only `row.agent_id`, never the header
+    // itself. This row's tool_call_id will match a transcript line, and the
+    // question is what that match is allowed to do to an agent_id the row
+    // already carries from a source better than the transcript.
+    const agentId = 'a555555'
+    const call = { ...TOOL_BLOCK, id: 'toolu_headerid' }
+    const bodyRef = await spoolBody(env.spoolDir, 'header-agent.json', {
+      role: 'assistant', content: [call],
+    })
+    const event = {
+      name: 'api_response_body', timestamp: '2026-09-05T22:36:55.000Z',
+      attributes: { 'session.id': SESSION, body_ref: bodyRef, 'agent.name': agentId },
+    }
+    const { bodies } = await loadSpooledBodies([event], { spoolDir: env.spoolDir })
+    const [projection] = projectClaudeTelemetryEvents([event], {
+      clientName: 'claude', usageByRequestId: new Map(), spooledBodies: bodies,
+    })
+    const rows = aiGatewayRowsFromProjectedExchange(projection)
+    assert.equal(rows[0].agent_id, agentId)
+
+    const projectDir = path.join(env.homeDir, '.claude', 'projects', 'some-repo')
+    await appendSessionContext(env.stateFile, {
+      session_id: SESSION,
+      transcript_path: path.join(projectDir, `${SESSION}.jsonl`),
+      cwd: env.homeDir,
+      git_branch: 'main',
+      ts: '2026-09-05T22:36:50.000Z',
+    })
+
+    // The matched transcript line knows this thread is a sidechain but names
+    // no agent (isSidechain: true, no agentId): a real subagent line can
+    // carry exactly this shape. It knows less than the row's own agent_id.
+    const dir = path.join(projectDir, SESSION, 'subagents')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, `agent-${agentId}.jsonl`), JSON.stringify({
+      sessionId: SESSION, isSidechain: true, type: 'assistant', uuid: 'headerid-call',
+      message: { role: 'assistant', content: [call] }, timestamp: event.timestamp,
+    }) + '\n')
+    await fs.writeFile(path.join(dir, `agent-${agentId}.meta.json`), JSON.stringify({ toolUseId: 'spawn_headerid' }))
+
+    const settled = await settleBatch(env, rows, [])
+    assert.equal(settled[0].part_id, 'headerid-call#0', 'still gains the transcript-native part_id')
+    assert.equal(settled[0].agent_id, agentId, 'the header-derived agent_id must not be cleared')
+    assert.equal(
+      /** @type {any} */ (settled[0].attributes)?.claude?.spawned_by_tool_use_id,
+      'spawn_headerid',
+      'clearing agent_id would also have skipped this late-stamp (wantsSpawnedBy requires a non-empty agent_id)'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a tool-id match with no transcript uuid falls through to the content-key match', async () => {
+  const env = await stageEnv()
+  try {
+    const call = { ...TOOL_BLOCK, id: 'toolu_nouuidmatch' }
+    const bodyRef = await spoolBody(env.spoolDir, 'nouuid.json', {
+      role: 'assistant', content: [call],
+    })
+    const event = {
+      name: 'api_response_body', timestamp: '2026-09-05T22:36:57.000Z',
+      attributes: { 'session.id': SESSION, body_ref: bodyRef, 'agent.name': 'agentB' },
+    }
+    const { bodies } = await loadSpooledBodies([event], { spoolDir: env.spoolDir })
+    const [projection] = projectClaudeTelemetryEvents([event], {
+      clientName: 'claude', usageByRequestId: new Map(), spooledBodies: bodies,
+    })
+    const rows = aiGatewayRowsFromProjectedExchange(projection)
+    assert.equal(rows[0].agent_id, 'agentB')
+
+    // Main-loop transcript line: same block, same tool id, but no uuid - a
+    // shape indexTranscriptEntries admits (it only guards `byUuid` on
+    // provider_uuid, not `byToolCallId`). The later timestamp makes it the
+    // one the flat, agent-unscoped byToolCallId map holds after both lines
+    // are indexed.
+    const file = path.join(env.homeDir, '.claude', 'projects', 'some-repo', `${SESSION}.jsonl`)
+    await fs.appendFile(file, JSON.stringify({
+      sessionId: SESSION, type: 'assistant',
+      message: { role: 'assistant', content: [call] },
+      timestamp: '2026-09-05T22:36:56.000Z',
+    }) + '\n')
+
+    // The subagent's own transcript line: the identical block, scoped to
+    // agentB and carrying a native uuid. byContentKey is agent-scoped, so
+    // this survives independently of the flat byToolCallId collision above.
+    const dir = path.join(env.homeDir, '.claude', 'projects', 'some-repo', SESSION, 'subagents')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'agent-agentB.jsonl'), JSON.stringify({
+      sessionId: SESSION, agentId: 'agentB', isSidechain: true, type: 'assistant',
+      uuid: 'nouuidmatch-call',
+      message: { role: 'assistant', content: [call] },
+      timestamp: '2026-09-05T22:36:54.000Z',
+    }) + '\n')
+
+    const settled = await settleBatch(env, rows, [])
+    assert.equal(
+      settled[0].part_id,
+      'nouuidmatch-call#0',
+      'a uuid-less tool match must not swallow the content-key fallback'
     )
   } finally {
     await env.cleanup()

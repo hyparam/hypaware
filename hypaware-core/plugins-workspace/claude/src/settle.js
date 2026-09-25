@@ -168,47 +168,46 @@ export function createClaudeSettlementEnricher(opts) {
         // `part_id`, the backfill materializer's pre-write `part_id` dedupe
         // skips its own copy, the one that does carry the attribute.
         //
-        // Gated so the lookup is paid only where it can pay off: a group needs
-        // a sidechain row that still lacks the attribute (`.some`
-        // short-circuits, and a main-loop row is rejected on its empty
-        // `agent_id` before its attributes are parsed), and a hook-recorded
-        // `transcript_path` to root the walk. That second guard is the
-        // projector's, and it keeps a session with no context record from
-        // turning the lookup into a projects-wide walk per settle pass.
+        // Load lazily after identity resolution: a tool-id match can discover
+        // a sidechain whose OTEL event carried no agent.name. The hook's
+        // transcript_path still roots the walk, at most once per session.
         /** @type {Map<string, { tool_use_id: string }> | undefined} */
         let agentMeta
-        if (sessionRecord?.transcript_path && indices.some((i) => wantsSpawnedBy(rows[i]))) {
-          agentMeta = loadAgentMeta({
-            transcriptPath: sessionRecord.transcript_path,
-            projectsDir,
-            sessionId,
-            // @ref LLP 0133#attribution [implements]: the same 3p container
-            // roots the transcript load above reaches, sharing its TTL-cached
-            // root discovery, so an attached Desktop's subagent row settles its
-            // provenance where its identity settled.
-            homeDir: opts.homeDir,
-          })
-        }
 
         for (const i of indices) {
           let row = rows[i]
           // 1. Identity upgrade: only fallback rows carry a match_key, and only
-          // once the transcript line has landed. The content-key index is
-          // agent-scoped, so settle a row only against its own thread's entries
-          // (row.agent_id; empty = main loop) - a subagent row must not match a
-          // main-loop entry's uuid and vice versa.
+          // once the transcript line has landed. OTEL's agent.name is not the
+          // transcript's agentId. Tool ids recover the owning thread without
+          // conflating same-name agents; content-only matching stays scoped.
           if (index) {
             const key = readMatchKey(row.attributes)
             if (key) {
-              const match = index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
-              if (match && match.provider_uuid) row = upgradeRow(row, match)
+              const toolMatch = findOtelToolMatch(row, index)
+              // A uuid-less tool match knows less than the content key: fall
+              // through instead of letting `match.provider_uuid` below reject
+              // the row outright. Keep this a ternary, not `??`: `toolMatch`
+              // is truthy even without a `provider_uuid`, so `??` would never
+              // reach the content-key fallback.
+              const match = toolMatch?.provider_uuid
+                ? toolMatch
+                : index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
+              if (match && match.provider_uuid) row = upgradeRow(row, match, match === toolMatch)
             }
           }
 
           // 2. Sidechain provenance late-stamp. After the upgrade: that rebuilds
           // `attributes` from the transcript match, so stamping first would be
           // overwritten.
-          if (agentMeta && wantsSpawnedBy(row)) {
+          if (sessionRecord?.transcript_path && wantsSpawnedBy(row)) {
+            // @ref LLP 0133#attribution [implements]: provenance and identity
+            // resolve through the same Desktop container roots.
+            agentMeta ??= loadAgentMeta({
+              transcriptPath: sessionRecord.transcript_path,
+              projectsDir,
+              sessionId,
+              homeDir: opts.homeDir,
+            })
             const toolUseId = agentMeta.get(stringValue(row.agent_id) ?? '')?.tool_use_id
             if (toolUseId) row = stampSpawnedBy(row, toolUseId)
           }
@@ -427,17 +426,59 @@ function hashCwd(cwd) {
 }
 
 /**
+ * The call and its result share a tool id but have different native uuids.
+ * Look up the row's own kind, never the parent's Agent/Task spawn metadata.
+ * Keep legacy multi-block lines on the content path: a standalone OTEL block
+ * cannot inherit their uuid with its unchanged zero part_index.
+ *
+ * @ref LLP 0026#decision [implements]: native single-block transcript identity
+ * @ref LLP 0435#tool-id-first [implements]: the tool id joins the two sides
+ *   without the agent scope, which `agent.name` can never satisfy
+ * @param {Record<string, unknown>} row
+ * @param {ReturnType<typeof indexTranscriptEntries>} index
+ */
+function findOtelToolMatch(row, index) {
+  if (row.conversation_source !== 'claude_code') return undefined
+  const id = stringValue(row.tool_call_id)
+  if (!id) return undefined
+  const match = row.role === 'assistant' && row.part_type === 'tool_call'
+    ? index.byToolCallId.get(id)
+    : row.role === 'user' && row.part_type === 'tool_result'
+      ? index.byToolUseId.get(id)
+      : undefined
+  return Array.isArray(match?.content) && match.content.length === 1 ? match : undefined
+}
+
+/**
  * Produce an upgraded copy of a fallback row: native identity from the
  * transcript line, a recomputed `part_id`, and a cleaned `attributes`
  * (fallback marker and the now-spent match_key removed).
  *
  * @param {Record<string, unknown>} row
  * @param {TranscriptEntry} match
+ * @param {boolean} [resolveAgent]
  * @returns {Record<string, unknown>}
  */
-function upgradeRow(row, match) {
+function upgradeRow(row, match, resolveAgent = false) {
   const upgraded = { ...row }
   assignTranscriptIdentity(upgraded, match)
+  // A resolved transcript line replaces the event's provisional label: a
+  // replayed parent tool in a subagent body belongs to the main loop, so its
+  // label is cleared as well as replaced for sidechains. But this tool-id
+  // lookup also admits the proxy lane (conversation_source 'claude_code' is
+  // the claude-cli User-Agent, not an OTEL marker), whose agent_id comes from
+  // the authoritative x-claude-code-agent-id request header. A line that
+  // claims `isSidechain: true` while naming no agentId knows less than that
+  // header, so the row keeps its own agent_id in that case - clearing it
+  // would also drop the row's spawned_by late-stamp below. is_sidechain
+  // still follows the line: assignTranscriptIdentity above already copied
+  // it, and true is what such a row already carried.
+  // @ref LLP 0435#line-arbitrates [implements]: the matched line decides
+  // attribution, except where it knows less than the row already did
+  if (resolveAgent && (match.agent_id || !match.is_sidechain)) {
+    upgraded.agent_id = match.agent_id
+    upgraded.is_sidechain = match.is_sidechain ?? (match.agent_id ? true : undefined)
+  }
   const partIndex = upgraded.part_index
   if (typeof upgraded.message_id === 'string' &&
       (typeof partIndex === 'number' || typeof partIndex === 'bigint')) {
