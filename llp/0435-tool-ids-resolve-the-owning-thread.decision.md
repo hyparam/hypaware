@@ -7,6 +7,8 @@
 **Date:** 2026-09-25
 **Related:** LLP 0026 (#decision points 2, 4 and 5), LLP 0027, LLP 0133,
 LLP 0389 (the consequence retired here), LLP 0390
+**Extended-by:** LLP 0439 (a settled row whose `agent_id` changed re-links
+`previous_message_id` from the transcript, retiring the chain consequence below)
 **Tracker:** hyparam/hypaware#2143
 
 > LLP 0389 settled that a body-derived row carries the LLP 0027 match-key and
@@ -112,7 +114,7 @@ the LLP 0133 #attribution container roots.
   the content key folds in the tool id (it is not a `VOLATILE_BLOCK_FIELDS`
   strip), so the pre-fix scoped lookup missed rather than matched the wrong
   line.
-- `previous_message_id` is NOT recomputed. Its chain is built at projection
+- `previous_message_id` is NOT recomputed. **Extended-by: [LLP 0439 #relink-from-the-transcript](./0439-settlement-relinks-a-re-scoped-row.decision.md#relink-from-the-transcript)**, which retires this bullet. Its chain is built at projection
   time over `(conversation_id ?? session_id, agent_id)`, so two same-name
   subagents now get distinct correct `agent_id`s while their chain pointers
   still come from the single merged label. Thread linkage across those two
