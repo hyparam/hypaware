@@ -2356,19 +2356,6 @@ export async function defaultPickerDetect(opts) {
 }
 
 /**
- * Load the manifest-sourced picker descriptors (`@ref LLP 0130#picker-block`)
- * from the bundled plugin catalog, in `PICKER_DISPLAY_ORDER`. This is the
- * replacement for the retired hardcoded `PICKER_SOURCES` table: the picker
- * prompt options and `composePickerConfig`'s fold both read from it.
- * Discovery failure yields an empty map rather than blocking init.
- *
- * @returns {Promise<Map<string, PickerDescriptor>>}
- */
-export async function loadPickerDescriptors() {
-  return (await loadPickerCatalog()).descriptors
-}
-
-/**
  * The picker descriptors plus the `compose_with` riders, read in one
  * discovery pass. `composePickerConfig` needs both: the descriptors to fold
  * the picked rows, the riders to add the plugins that ride those picks
