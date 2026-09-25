@@ -1786,20 +1786,29 @@ export async function runPickerFinale(args) {
       // way the reconciler's attach action calls it.
       const attachEndpoint = adapter.requiresEndpoint === false ? undefined : endpoint
       try {
+        // The adapter's own report names files and capture modes; the
+        // finale says the one thing the user acts on instead. A dry run
+        // keeps the report: the files it would touch are what it is for.
+        let report = ''
         await adapter.attach({
           ...(attachEndpoint ? { endpoint: attachEndpoint } : {}),
           config: {},
-          // The adapter's own report names files and capture modes; the
-          // finale says the one thing the user acts on instead. A dry run
-          // keeps the report: the files it would touch are what it is for.
-          stdout: dryRun ? stdout : { write: () => true },
+          stdout: dryRun ? stdout : { write: (/** @type {string} */ chunk) => { report += chunk; return true } },
           stderr,
           dryRun,
         })
-        summary.attach.push({ client, dryRun, ok: true })
-        if (!dryRun) {
+        if (dryRun) {
+          summary.attach.push({ client, dryRun, ok: true })
+        } else {
+          const outcome = attachReportOutcome(report)
+          summary.attach.push({ client, dryRun, ok: outcome.applied })
           const name = label(client)
-          stdout.write(`✓ ${name} attached (restart open ${name} sessions to start recording)\n`)
+          if (outcome.applied) {
+            stdout.write(outcome.restart
+              ? `✓ ${name} attached\n`
+              : `✓ ${name} attached (restart open ${name} sessions to start recording)\n`)
+          }
+          for (const line of outcome.kept) stdout.write(`${line}\n`)
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -2591,6 +2600,36 @@ function clientAssetLines(installed, pruned, dryRun, label) {
  */
 function plural(count, noun) {
   return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+/**
+ * What the finale keeps from an adapter's attach report, which it otherwise
+ * withholds. The adapter contract returns nothing, so the report is the only
+ * signal: a line opening with `!` at column 0 says the attach did not apply,
+ * an indented `!` line is a warning on one that did, and a line opening with
+ * `restart` is the adapter's own next step, which replaces the finale's
+ * generic one. Those lines are kept verbatim; the rest (paths, settings
+ * values) stays withheld.
+ *
+ * @param {string} report
+ * @returns {{ applied: boolean, restart: boolean, kept: string[] }}
+ */
+export function attachReportOutcome(report) {
+  let applied = true
+  let restart = false
+  /** @type {string[]} */
+  const kept = []
+  for (const line of report.split('\n')) {
+    const text = line.trim()
+    if (text.startsWith('!')) {
+      if (line.startsWith('!')) applied = false
+      kept.push(line)
+    } else if (/^restart\b/i.test(text)) {
+      restart = true
+      kept.push(line)
+    }
+  }
+  return { applied, restart, kept }
 }
 
 /**
