@@ -623,6 +623,8 @@ function byTimestampAsc(a, b) {
  *  - `byToolUseId`   : `tool_use_id` of a user tool_result line →
  *                      entry. Each tool_result is its own line, so
  *                      this is a unique join key.
+ *  - `byToolCallId`  : assistant tool_use id → entry, independent of
+ *                      whether the result has arrived yet.
  *  - `byContentKey`  : canonicalized role+content key → entry.
  *
  * @param {TranscriptEntry[]} entries
@@ -636,6 +638,8 @@ export function indexTranscriptEntries(entries) {
   const byMessageId = new Map()
   /** @type {Map<string, TranscriptEntry>} */
   const byToolUseId = new Map()
+  /** @type {Map<string, TranscriptEntry>} */
+  const byToolCallId = new Map()
   for (const entry of entries) {
     if (entry.provider_uuid) byUuid.set(entry.provider_uuid, entry)
     if (entry.messageId) {
@@ -646,8 +650,15 @@ export function indexTranscriptEntries(entries) {
     if (entry.contentKey) byContentKey.set(agentScopedKey(entry.agent_id, entry.contentKey), entry)
     const toolUseId = entryToolUseId(entry)
     if (toolUseId) byToolUseId.set(toolUseId, entry)
+    if (entry.role === 'assistant' && Array.isArray(entry.content)) {
+      for (const block of entry.content) {
+        if (!isPlainObject(block) || (block.type !== 'tool_use' && block.type !== 'server_tool_use')) continue
+        const id = stringValue(block.id)
+        if (id) byToolCallId.set(id, entry)
+      }
+    }
   }
-  return { byUuid, byContentKey, byMessageId, byToolUseId, ordered: entries }
+  return { byUuid, byContentKey, byMessageId, byToolUseId, byToolCallId, ordered: entries }
 }
 
 /**
