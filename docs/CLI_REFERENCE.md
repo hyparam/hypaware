@@ -330,13 +330,17 @@ hyp report render ~/hypaware-reports
 hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]
 ```
 
-Uploads one HTML or Markdown file, or a directory bundle whose root contains
-`report.html` or `report.md`. The server identifies repeat uploads by content
-hash. `--org` applies only to an operator credential that can name an
-organization.
+Uploads Markdown for the server to render. A single file must be `.md` or
+`.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
+its root and may otherwise contain only `usage.md`, `work.md`, `health.md`,
+and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`); HTML,
+images, client assets, subdirectories, and symlinks are rejected before any
+upload. The server renders the HTML; there is no local render step in the
+publish path. The server identifies repeat uploads by content hash. `--org`
+applies only to an operator credential that can name an organization.
 
 ```sh
-hyp report publish ./html/usage-review --kind usage-review --period 2026-W34
+hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
 ```
 
 ### `hyp report list`

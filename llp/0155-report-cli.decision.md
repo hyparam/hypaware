@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0033, LLP 0058, LLP 0062, LLP 0084, LLP 0104
+**Extended-by:** [LLP 0436](./0436-publish-markdown-report-sources.decision.md) replaces new HTML uploads with Markdown sources rendered by the server.
 
 ## Context
 

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude",
   "version": "2.0.0",
-  "description": "Anthropic Claude Code client adapter for HypAware. Receives Claude Code OTEL events and raw body files through a local telemetry listener, projects exchanges through the AI gateway capability, writes session-context records into plugin state, and ships the hypaware-query, hypaware-reference, and hypaware-privacy skills.",
+  "description": "Anthropic Claude Code client adapter for HypAware. Receives Claude Code OTEL events and raw body files through a local telemetry listener, projects exchanges through the AI gateway capability, writes session-context records into plugin state, and ships the hypaware-query, hypaware-reference, hypaware-privacy, and hypaware-report skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -64,7 +64,8 @@
     "skills": [
       { "name": "hypaware-query", "clients": ["claude"] },
       { "name": "hypaware-reference", "clients": ["claude"] },
-      { "name": "hypaware-privacy", "clients": ["claude"] }
+      { "name": "hypaware-privacy", "clients": ["claude"] },
+      { "name": "hypaware-report", "clients": ["claude"] }
     ],
     "agents": [
       { "name": "hypaware-analyst", "clients": ["claude"] }

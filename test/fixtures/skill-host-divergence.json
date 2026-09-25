@@ -13,5 +13,10 @@
     "claudeOnly": 0,
     "codexOnly": 0,
     "hash": "d8156bae0c4243d3"
+  },
+  "hypaware-report": {
+    "claudeOnly": 13,
+    "codexOnly": 23,
+    "hash": "0c0a14afe75bb615"
   }
 }

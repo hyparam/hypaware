@@ -80,8 +80,8 @@ const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote
  *
  * The one subcommand in this group that is NOT a call to the server's reports plane.
  * It takes no `--remote`, reads and writes only local files, and needs no credential.
- * It lives here anyway because a user's workflow is render-then-publish and splitting
- * those across two command namespaces would serve the implementation, not the reader.
+ * This remains a standalone local preview command. Publishing sends Markdown
+ * directly to the server and does not require this build step (LLP 0436).
  * LLP 0155's "there is no local reports plane" is still true of publish/list/get/delete;
  * this is a local build step, not a plane operation, and the group help says so.
  *
@@ -139,7 +139,7 @@ export async function runReportRender(argv, ctx) {
 
 /**
  * `hyp report publish <file-or-dir>`: publish a report artifact to the org's
- * reports plane. A file publishes a single document (`.html`/`.md`); a
+ * reports plane. A file publishes a single Markdown document; a
  * directory publishes a gzipped ustar bundle built by the system tar.
  *
  * @param {string[]} argv
@@ -185,13 +185,20 @@ export async function runReportPublish(argv, ctx) {
   if (stat.isDirectory()) {
     // A bundle without an entry document is rejected server-side after the
     // whole upload; catch it here in milliseconds instead.
-    const hasEntry = await fileExists(path.join(source, 'report.html')) || await fileExists(path.join(source, 'report.md'))
+    const hasEntry = await fileExists(path.join(source, 'report.md'))
     if (!hasEntry) {
-      ctx.stderr.write(`hyp report publish: ${source} must contain report.html or report.md at its root\n`)
+      ctx.stderr.write(`hyp report publish: ${esc(source)} must contain report.md at its root\n`)
+      return 2
+    }
+    let pages
+    try {
+      pages = await reportSourcePages(source)
+    } catch (err) {
+      ctx.stderr.write(`hyp report publish: ${err instanceof Error ? err.message : String(err)}\n`)
       return 2
     }
     try {
-      body = await packUstarBundle(source)
+      body = await packUstarBundle(source, pages)
     } catch (err) {
       ctx.stderr.write(`hyp report publish: could not build the bundle: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
@@ -199,10 +206,9 @@ export async function runReportPublish(argv, ctx) {
     contentType = 'application/gzip'
   } else {
     const ext = path.extname(source).toLowerCase()
-    if (ext === '.html' || ext === '.htm') contentType = 'text/html'
-    else if (ext === '.md' || ext === '.markdown') contentType = 'text/markdown'
+    if (ext === '.md' || ext === '.markdown') contentType = 'text/markdown'
     else {
-      ctx.stderr.write(`hyp report publish: a single-file report must be .html or .md (got '${ext || source}'); publish a folder for anything richer\n`)
+      ctx.stderr.write(`hyp report publish: a single-file report must be Markdown (.md or .markdown); the server renders HTML (got '${esc(ext || source)}')\n`)
       return 2
     }
     body = await fs.readFile(source)
@@ -1200,17 +1206,35 @@ async function describeErrorResponse(response) {
 }
 
 /**
- * Build a gzipped plain-ustar bundle of `dir` with the system tar. The format
+ * @ref LLP 0436#sources [implements]: reject assets before packing; the server still validates every upload
+ * @param {string} dir
+ * @returns {Promise<string[]>}
+ */
+async function reportSourcePages(dir) {
+  const pages = []
+  const entries = await fs.opendir(dir)
+  for await (const entry of entries) {
+    if (!entry.isFile() || !/^(?:report|usage|work|health|(?:recommendation|change)-[a-z0-9][a-z0-9-]*)\.md$/.test(entry.name)) {
+      throw new Error(`unsupported report entry '${esc(entry.name)}'; upload only report.md, usage.md, work.md, health.md, and recommendation-<slug>.md as regular files, without HTML, assets, directories, or symlinks; names are lowercase, and a slug is [a-z0-9][a-z0-9-]* - remove stray files such as .DS_Store first`)
+    }
+    pages.push(entry.name)
+  }
+  return pages.sort()
+}
+
+/**
+ * Build a gzipped plain-ustar bundle of the validated pages with system tar. The format
  * is pinned because default formats emit pax/GNU extension entries
  * (typeflags x/g/L/K) the server rejects - and only for some inputs, which
  * would make bundles that work in tests and break on the first long filename.
  *
  * @param {string} dir
+ * @param {string[]} pages
  * @returns {Promise<Buffer>}
  * @ref LLP 0155#bundle [implements]: the publish CLI owns bundle creation and pins tar --format=ustar
  */
-async function packUstarBundle(dir) {
-  const { stdout } = await execFileAsync('tar', ['--format=ustar', '-cz', '-C', dir, '.'], {
+async function packUstarBundle(dir, pages) {
+  const { stdout } = await execFileAsync('tar', ['--format=ustar', '-cz', '-C', dir, '--', ...pages], {
     encoding: 'buffer',
     maxBuffer: 1024 * 1024 * 1024,
   })
