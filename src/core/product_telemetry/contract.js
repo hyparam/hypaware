@@ -10,11 +10,6 @@ export const PRODUCT_DATASETS = Object.freeze([
   'product_events',
   'product_metrics'
 ])
-export const RESERVED_DATASETS = new Set([
-  ...PRODUCT_DATASETS,
-  'product_installations',
-  'product_daily'
-])
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
