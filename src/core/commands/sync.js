@@ -373,7 +373,7 @@ export async function runSync(argv, ctx) {
     // Successful file copies are incidental to sharing. Failures still need
     // their diagnostic and continue to determine the command's exit code.
     if (!displayedInstances.has(r.instance) && r.status === 'exported') continue
-    ctx.stdout.write(renderResult(r, described.get(r.instance), volumes.get(r.instance)))
+    ctx.stdout.write(renderResult(r, described.get(r.instance)))
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
 }
@@ -877,14 +877,15 @@ function renderVolume(volume, dest, suffix = '') {
 
 /**
  * One line per destination the tick reached: what went where, in the plan's
- * words, or the failure and its error.
+ * words, or the failure and its error. No row count: the plan's count was
+ * taken before the prompt, the tick sends whatever is pending when it runs,
+ * and the tick report does not say how many rows that was.
  *
  * @param {TickReport['sinks'][number]} r
  * @param {{ text: string, offMachine: boolean | null } | undefined} dest
- * @param {PendingVolume | undefined} volume
  * @returns {string}
  */
-function renderResult(r, dest, volume) {
+function renderResult(r, dest) {
   const where = dest?.text ?? r.instance
   if (r.status === 'failed') {
     return `Could not send to ${where}: ${r.error ?? 'no reason given; see `hyp status`'}\n`
@@ -893,8 +894,7 @@ function renderResult(r, dest, volume) {
   if (r.status === 'partial') {
     return `Partly ${verb} to ${where}${r.error ? ` (${r.error})` : ''}; the rest goes on the next sync\n`
   }
-  const rows = volume?.status === 'counted' && volume.rows > 0 ? ` ${plural(volume.rows, 'row')}` : ''
-  return `✓ ${verb.charAt(0).toUpperCase()}${verb.slice(1)}${rows} to ${where}\n`
+  return `✓ ${verb.charAt(0).toUpperCase()}${verb.slice(1)} to ${where}\n`
 }
 
 /**

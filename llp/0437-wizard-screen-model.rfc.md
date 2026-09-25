@@ -180,8 +180,8 @@ that path naming `hyp sync` and the privacy review (LLP 0100 R1). With history,
 the first look keeps its two tables, and the upload offer is `hyp sync`'s
 own plan, which now reads as one line per destination ("Ready to upload
 1,240 rows (the full history) to HypAware Cloud (automatic by
-...)"), the exclude hint, the question, and one result line ("Uploaded
-1,240 rows to ..."). `hyp sync` run by hand prints the same lines.
+...)"), the exclude hint, the question, and one result line ("Uploaded to ...", with no count:
+the plan's was taken before the prompt, and the tick does not report one). `hyp sync` run by hand prints the same lines.
 
 ### Row accounting {#rows}
 

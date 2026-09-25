@@ -1633,3 +1633,17 @@ for (const scenario of ['plain', 'withholding', 'legacy', 'absent-policy-columns
     }
   })
 }
+
+// The plan's count is taken before the prompt; the tick sends whatever is
+// pending when it runs, so the result line states no count of its own.
+test('the result line names where rows went, not the plan count', async () => {
+  const hypHome = await makeHome('result-no-count')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: fakeStorage({ hypHome, entries: TWELVE_ROWS }),
+  })
+  await runSync(['--yes'], ctx)
+  assert.match(stdout.text, /^Ready to upload 10 rows \(the full history\) to hypaware\.example\.com\.\n/m)
+  assert.match(stdout.text, /^✓ Uploaded to hypaware\.example\.com\n/m)
+})
