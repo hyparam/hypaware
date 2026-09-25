@@ -65,12 +65,9 @@ export type SeedOrigin = 'selection' | 'config' | 'detected'
 export type WizardStepName = 'join' | 'pick' | 'sync' | 'folders' | 'finale'
 
 /**
- * The sync-scope step (LLP 0188 #never-silent, LLP 0190 #sync-gate): after
- * the picker on every enrolled run, a defaults gate stating what will sync,
- * then - on request - a multiselect over the non-locked picked sources
- * where checked means "syncs" and unchecked keeps a source local-only.
- * Locked (org-configured) sources never appear: they always sync
- * (LLP 0188 #locked).
+ * Apply the combined collection and sharing choice after the picker
+ * (LLP 0396 #combined-selection). The lane states what syncs and returns
+ * pending sources for the post-config commit; it never prompts.
  */
 export interface RunWizardSyncScopeOptions {
   /**
@@ -131,8 +128,6 @@ export interface WizardSyncScopeResult {
   pendingSources?: string[]
   /** The step was skipped (corrupt store) rather than answered. */
   skipped?: boolean
-  /** The lane asked nothing; kept for the span and the orchestrator's log. */
-  noQuestion?: true
 }
 
 /**
@@ -494,7 +489,7 @@ export interface RunWizardPickOptions {
   /**
    * The plugin catalog (T2). Picker rows come from
    * `catalog.pickerDescriptors`; when omitted the phase loads the bundled
-   * catalog itself, matching `runPickerWalkthrough`'s self-loading shape.
+   * catalog itself.
    */
   catalog?: Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors' | 'composeWith'>
   /**

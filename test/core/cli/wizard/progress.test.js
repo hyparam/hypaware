@@ -144,7 +144,7 @@ test('wizardStepProgress: a managed machine on the local pathway gains both enro
 // @ref LLP 0396#combined-selection [tests]: the retired lane states its outcome with no position above it
 test('the sync lane states its outcome, with no position line, when it has nothing to ask', async () => {
   const stdout = makeBuf()
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout,
     stderr: makeBuf(),
     env: { HYP_HOME: await tmpHome(), HYP_NO_TUI: '1' },
@@ -152,13 +152,8 @@ test('the sync lane states its outcome, with no position line, when it has nothi
     locked: [{ id: 'claude', label: 'Claude Code' }],
     lockedHidden: 0,
     candidatesHiddenIds: [],
-    // The lane's prompt seam is `prompt`, not `confirm`: a guard on the
-    // wrong field is inert, and a regression in the no-candidates arm
-    // would reach the real stdin instead of failing here.
-    prompt: async () => { throw new Error('a fully fleet-managed machine has nothing to ask') },
   }))
 
-  assert.equal(result.noQuestion, true, 'the lane asked nothing')
   const lines = stdout.text().split('\n').filter((l) => l !== '')
   // The statement alone: no `Step n of m` above it, because the lane is
   // not a counted screen any more.
@@ -172,7 +167,6 @@ test('wizardItinerary: no lane emptiness can reach the denominator', async () =>
   const emptiness = /** @type {any} */ ({
     managed: true,
     syncEmpty: true,
-    noQuestion: true,
     candidates: [],
     picked: { descriptors: [] },
   })

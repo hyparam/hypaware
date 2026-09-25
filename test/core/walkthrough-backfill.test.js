@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { describeBackfillResult, runPickerFinale, runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
+import { describeBackfillResult, runPickerFinale } from '../../src/core/cli/walkthrough.js'
 import { PromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
 /** @import { BackfillFinaleResult } from '../../src/core/cli/types.js' */
@@ -74,17 +74,21 @@ test('onboarding with claude selected runs the backfill step and records stats',
     claude: { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 1 },
   })
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 14 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 14,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   // The finale invoked the runner exactly once, for the claude provider,
   // bounded by the selected retention window and a valid ISO cutoff.
   assert.equal(backfill.calls.length, 1)
@@ -96,7 +100,7 @@ test('onboarding with claude selected runs the backfill step and records stats',
     'until must be a valid ISO timestamp (the attach/start cutoff)'
   )
   // Finale summary carries the per-provider backfill stats.
-  assert.deepEqual(result.finale?.backfill, [
+  assert.deepEqual(result.backfill, [
     { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 1 },
   ])
   // An import that wrote rows is one line; the scan counts stay in the
@@ -113,22 +117,26 @@ test('--dry-run onboarding includes the backfill plan but writes nothing', async
     claude: { provider: 'claude', dryRun: true, ok: true, scanned: 2, rowsWritten: 0, skipped: 0 },
   })
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true, dryRun: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   // Dry-run propagates to the runner; the contract is scan-only (zero rows).
   assert.equal(backfill.calls.length, 1)
   assert.equal(backfill.calls[0].dryRun, true)
-  assert.equal(result.finale?.backfill[0].dryRun, true)
-  assert.equal(result.finale?.backfill[0].rowsWritten, 0)
+  assert.equal(result.backfill[0].dryRun, true)
+  assert.equal(result.backfill[0].rowsWritten, 0)
   // A dry run's zero write is the contract, not a finding about the
   // history on disk, so no result line claims an outcome; the spinner label
   // is what says the dry run scanned.
@@ -143,12 +151,16 @@ test('--yes mode runs bounded backfill automatically without a consent prompt', 
   const backfill = makeBackfill(['claude'])
   let consentAsked = false
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 7 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 7,
+    interactive: false,
     backfill,
     // Supplied but must NOT be consulted in non-interactive mode.
     backfillConsentPrompt: async () => {
@@ -158,7 +170,7 @@ test('--yes mode runs bounded backfill automatically without a consent prompt', 
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   assert.equal(consentAsked, false, 'non-interactive (--yes) must not prompt for consent')
   assert.equal(backfill.calls.length, 1)
   assert.equal(backfill.calls[0].retentionDays, 7, 'backfill is bounded by the retention window')
@@ -170,19 +182,23 @@ test('--no-daemon still backfills - it is a local file import', async () => {
   const stderr = makeBuf()
   const backfill = makeBackfill(['claude'])
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   assert.equal(backfill.calls.length, 1)
-  assert.equal(result.finale?.daemonInstall.skipped, true)
+  assert.equal(result.daemonInstall.skipped, true)
 })
 
 test('interactive onboarding defaults backfill to enabled (consent yes runs it)', async () => {
@@ -193,13 +209,17 @@ test('interactive onboarding defaults backfill to enabled (consent yes runs it)'
   /** @type {Array<{ providers: string[], retentionDays: number }>} */
   const consentCalls = []
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    // No `picks` ⇒ interactive: prompts are driven by injected resolvers.
-    prompt: async (q) => (q.pickType === 'sources' ? ['claude'] : ['keep-local']),
+    // Drive interactive backfill consent directly.
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 90,
+    interactive: true,
     backfillConsentPrompt: async (args) => {
       consentCalls.push(args)
       return true
@@ -208,8 +228,7 @@ test('interactive onboarding defaults backfill to enabled (consent yes runs it)'
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['claude'])
+  assert.notEqual(result.cancelled, true)
   assert.equal(consentCalls.length, 1, 'interactive mode prompts for backfill consent')
   assert.deepEqual(consentCalls[0].providers, ['claude'])
   assert.equal(backfill.calls.length, 1)
@@ -221,20 +240,24 @@ test('interactive onboarding lets the user decline backfill', async () => {
   const stderr = makeBuf()
   const backfill = makeBackfill(['claude'])
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    prompt: async (q) => (q.pickType === 'sources' ? ['claude'] : ['keep-local']),
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 90,
+    interactive: true,
     backfillConsentPrompt: async () => false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   assert.equal(backfill.calls.length, 0, 'declining must skip the backfill run')
-  assert.deepEqual(result.finale?.backfill, [])
+  assert.deepEqual(result.backfill, [])
   assert.match(stdout.text(), /backfill claude: skipped \(declined\)/)
   // The other half of the dead-surface notice below: a decline was read
   // and answered on a surface that still works, so it says so where the
@@ -244,18 +267,22 @@ test('interactive onboarding lets the user decline backfill', async () => {
   assert.doesNotMatch(stderr.text(), /output closed/, 'a decline is not an output failure')
 })
 
-test('interactive onboarding maps cancelled backfill consent to the cancel exit path', async () => {
+test('the finale reports cancelled backfill consent', async () => {
   const env = await tmpEnv('hypaware-bf-interactive-cancel-')
   const stdout = makeBuf()
   const stderr = makeBuf()
   const backfill = makeBackfill(['claude'])
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    prompt: async (q) => (q.pickType === 'sources' ? ['claude'] : ['keep-local']),
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 90,
+    interactive: true,
     backfillConsentPrompt: async () => {
       throw new PromptCancelledError()
     },
@@ -263,15 +290,10 @@ test('interactive onboarding maps cancelled backfill consent to the cancel exit 
     finale: { dryRun: true },
   })
 
-  assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
-  assert.deepEqual(result.sourcesPicked, ['claude'])
-  assert.deepEqual(result.clientsPicked, ['claude'])
-  assert.equal(result.retentionDays, 90)
   assert.equal(backfill.calls.length, 0, 'cancelling consent must skip the backfill run')
-  assert.equal(result.finale?.cancelled, true)
-  assert.deepEqual(result.finale?.backfill, [])
-  assert.deepEqual(result.finale?.daemonRestart, { skipped: false, dryRun: true, ok: true })
-  assert.match(stderr.text(), /Setup cancelled./)
+  assert.equal(result.cancelled, true)
+  assert.deepEqual(result.backfill, [])
+  assert.deepEqual(result.daemonRestart, { skipped: false, dryRun: true, ok: true })
   assert.match(stdout.text(), /Import skipped\./)
   assert.match(stdout.text(), /\(dry-run\) Would restart the daemon/)
 })
@@ -287,20 +309,23 @@ test('picked clients without a registered backfill provider are skipped', async 
   // boot-installed.test.js. This exercises the empty-intersection path.)
   const backfill = makeBackfill(['claude'])
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['codex'])
+  assert.notEqual(result.cancelled, true)
   assert.equal(backfill.calls.length, 0, 'no provider for codex ⇒ no backfill run')
-  assert.deepEqual(result.finale?.backfill, [])
+  assert.deepEqual(result.backfill, [])
 })
 
 test('a throwing backfill runner is caught and recorded as failed', async () => {
@@ -315,20 +340,24 @@ test('a throwing backfill runner is caught and recorded as failed', async () => 
     },
   }
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  // The failure is contained: the walkthrough still completes (exit 0) and
+  // The failure is contained: the finale still completes and
   // the provider is recorded as failed rather than aborting the finale.
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.backfill, [
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.backfill, [
     { provider: 'claude', dryRun: false, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 },
   ])
   assert.match(stderr.text(), /backfill claude failed: boom/)
@@ -339,18 +368,22 @@ test('the finale runs no backfill when no backfill runner is injected', async ()
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     // no `backfill`
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.backfill, [])
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.backfill, [])
 })
 
 test('onboarding with codex selected runs the backfill step and records stats', async () => {
@@ -361,17 +394,21 @@ test('onboarding with codex selected runs the backfill step and records stats', 
     codex: { provider: 'codex', dryRun: false, ok: true, scanned: 4, rowsWritten: 6, skipped: 2 },
   })
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['codex'], exportChoice: 'keep-local', retentionDays: 14 },
+    clientsPicked: ['codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 14,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   // The finale invoked the runner exactly once, for the codex provider,
   // bounded by the selected retention window and a valid ISO cutoff.
   assert.equal(backfill.calls.length, 1)
@@ -383,7 +420,7 @@ test('onboarding with codex selected runs the backfill step and records stats', 
     'until must be a valid ISO timestamp (the attach/start cutoff)'
   )
   // Finale summary carries the per-provider codex backfill stats.
-  assert.deepEqual(result.finale?.backfill, [
+  assert.deepEqual(result.backfill, [
     { provider: 'codex', dryRun: false, ok: true, scanned: 4, rowsWritten: 6, skipped: 2 },
   ])
   assert.match(stdout.text(), /^✓ Imported 6 rows of codex history$/m)
@@ -398,20 +435,24 @@ test('onboarding with both claude and codex selected runs both providers', async
     codex: { provider: 'codex', dryRun: false, ok: true, scanned: 2, rowsWritten: 4, skipped: 1 },
   })
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude', 'codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude', 'codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   // Both providers ran, in the deterministic [claude, codex] pick order.
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['claude', 'codex'])
-  assert.deepEqual(result.finale?.backfill, [
+  assert.deepEqual(result.backfill, [
     { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 0 },
     { provider: 'codex', dryRun: false, ok: true, scanned: 2, rowsWritten: 4, skipped: 1 },
   ])
@@ -427,13 +468,17 @@ test('interactive onboarding prompts codex backfill consent and runs it on yes',
   /** @type {Array<{ providers: string[], retentionDays: number }>} */
   const consentCalls = []
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
     // No `picks` ⇒ interactive: the source resolver picks codex.
-    prompt: async (q) => (q.pickType === 'sources' ? ['codex'] : ['keep-local']),
+    clientsPicked: ['codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 90,
+    interactive: true,
     backfillConsentPrompt: async (args) => {
       consentCalls.push(args)
       return true
@@ -442,8 +487,7 @@ test('interactive onboarding prompts codex backfill consent and runs it on yes',
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['codex'])
+  assert.notEqual(result.cancelled, true)
   assert.equal(consentCalls.length, 1, 'interactive mode prompts for codex backfill consent')
   assert.deepEqual(consentCalls[0].providers, ['codex'])
   assert.equal(backfill.calls.length, 1)
@@ -469,20 +513,24 @@ test('a failing provider does not abort the other selected providers', async () 
     },
   }
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude', 'codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude', 'codex'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/codex' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     backfill,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
+  assert.notEqual(result.cancelled, true)
   // The failing provider did not short-circuit the loop: codex still ran.
   assert.deepEqual(ran, ['claude', 'codex'])
-  assert.deepEqual(result.finale?.backfill, [
+  assert.deepEqual(result.backfill, [
     { provider: 'claude', dryRun: false, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 },
     { provider: 'codex', dryRun: false, ok: true, scanned: 1, rowsWritten: 1, skipped: 0 },
   ])
@@ -511,12 +559,16 @@ test('a sweep-backed provider runs, unannounced, even when consent is declined',
   /** @type {Array<{ providers: string[], retentionDays: number }>} */
   const consentCalls = []
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    prompt: async (q) => (q.pickType === 'sources' ? ['claude', 'openclaw'] : ['keep-local']),
+    clientsPicked: ['claude', 'openclaw'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/openclaw' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 90,
+    interactive: true,
     backfillConsentPrompt: async (args) => {
       consentCalls.push(args)
       return false
@@ -525,8 +577,7 @@ test('a sweep-backed provider runs, unannounced, even when consent is declined',
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['claude', 'openclaw'])
+  assert.notEqual(result.cancelled, true)
   // The question named only the provider the answer can control.
   assert.equal(consentCalls.length, 1)
   assert.deepEqual(consentCalls[0].providers, ['claude'])
@@ -542,7 +593,7 @@ test('a sweep-backed provider runs, unannounced, even when consent is declined',
   const text = stdout.text()
   assert.match(text, /^✓ Imported 3 rows of openclaw history$/m)
   assert.ok(text.indexOf('skipped (declined)') < text.indexOf('Imported 3 rows'))
-  assert.equal(result.finale?.backfill[0]?.provider, 'openclaw')
+  assert.equal(result.backfill[0]?.provider, 'openclaw')
   assert.doesNotMatch(text, /periodic sweep/)
 })
 
@@ -553,12 +604,16 @@ test('an openclaw-only pick asks no backfill question but still runs the first i
   const backfill = makeBackfill(['openclaw'], {}, ['openclaw'])
   let consentAsked = 0
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    prompt: async (q) => (q.pickType === 'sources' ? ['openclaw'] : ['keep-local']),
+    clientsPicked: ['openclaw'],
+    config: { version: 2, plugins: [{ name: '@hypaware/openclaw' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 90,
+    interactive: true,
     backfillConsentPrompt: async () => {
       consentAsked += 1
       return true
@@ -567,15 +622,14 @@ test('an openclaw-only pick asks no backfill question but still runs the first i
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['openclaw'])
+  assert.notEqual(result.cancelled, true)
   assert.equal(consentAsked, 0, 'nothing askable: every picked provider is sweep-backed')
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
   // A zero import prints no result line (LLP 0437 #finish); the run shows
   // on screen as its spinner label and in the summary.
   assert.match(stdout.text(), /^Importing openclaw history…$/m)
   assert.doesNotMatch(stdout.text(), /Imported|nothing to import/)
-  assert.deepEqual(result.finale?.backfill.map((e) => e.provider), ['openclaw'])
+  assert.deepEqual(result.backfill.map((e) => e.provider), ['openclaw'])
   assert.doesNotMatch(stdout.text(), /periodic sweep/)
 })
 
@@ -585,12 +639,16 @@ test('cancelling consent skips sweep-backed providers too', async () => {
   const stderr = makeBuf()
   const backfill = makeBackfill(['claude', 'openclaw'], {}, ['openclaw'])
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: noGateway,
     stdout,
     stderr,
     env,
-    prompt: async (q) => (q.pickType === 'sources' ? ['claude', 'openclaw'] : ['keep-local']),
+    clientsPicked: ['claude', 'openclaw'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/openclaw' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 90,
+    interactive: true,
     backfillConsentPrompt: async () => {
       throw new PromptCancelledError()
     },
@@ -600,7 +658,7 @@ test('cancelling consent skips sweep-backed providers too', async () => {
 
   // Cancel means "stop the wizard", not "skip the question": nothing runs,
   // sweep-backed or not.
-  assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
+  assert.equal(result.cancelled, true)
   assert.equal(backfill.calls.length, 0)
   assert.match(stdout.text(), /Import skipped\./)
 })

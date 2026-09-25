@@ -1,12 +1,11 @@
 // @ts-check
 
-import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 
-import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
+import { Attr, withSpan } from '../observability/index.js'
+import { loadConfigFile } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { DurableBinRequiredError, GlobalInstallError } from './global_install.js'
@@ -52,10 +51,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  *   PickerBackfillRunner,
  *   PickerSource,
  *   PickerExport,
- *   PickerPicks,
  *   PickerFinaleActions,
- *   PickerWalkthroughResult,
- *   RunPickerWalkthroughOptions,
  *   FinaleSummary,
  *   WalkthroughOptions,
  * } from '../../../src/core/cli/types.js'
@@ -155,7 +151,7 @@ function legacyNumberedPromptFactory(opts) {
       const defaulted = () =>
         question.enterKeepsChecked ? question.options.filter((o) => o.checked).map((o) => o.value) : []
       // Only a question that opted in re-asks, and then only once. Every
-      // other caller (the pick menus, `runPickerWalkthrough`) asks exactly
+      // other caller (the pick menus) asks exactly
       // as many times as it did before: once.
       const attempts = 1 + (question.enterKeepsChecked ? MAX_MALFORMED_REASKS : 0)
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -491,300 +487,9 @@ export function backfillConsentTitle(providers, retentionDays) {
 const PICKER_DISPLAY_ORDER = ['claude', 'claude-desktop', 'codex', 'opencode', 'raw-anthropic', 'raw-openai', 'otel']
 
 /**
- * Phase 5 export options.
- *
- * @type {{ value: PickerExport, label: string, summary: string }[]}
- */
-const PICKER_EXPORTS = [
-  {
-    value: 'keep-local',
-    label: 'keep local query cache only',
-    summary: 'Stores recent rows locally for hyp query; nothing is exported elsewhere.',
-  },
-  {
-    value: 'local-parquet',
-    label: 'export local Parquet files',
-    summary: 'Writes scheduled Parquet exports under HYP_HOME/exports for external tools.',
-  },
-  {
-    value: 'configure-later',
-    label: 'configure later',
-    summary: 'Writes capture config now and leaves export sinks for a later config edit.',
-  },
-]
-
-
-/**
- * Drive the Phase 5 first-run picker walkthrough.
- *
- * The picker offers a
- * fixed set of user-facing source labels (Claude Code / Codex / raw
- * Anthropic / raw OpenAI / OTEL) and a fixed set of export labels
- * (`keep-local` / `local-parquet` / `configure-later`). These are
- * translated into a v2 config via {@link composePickerConfig}.
- *
- * When `opts.finale` is provided, the walkthrough also runs the
- * post-write actions described by the bead:
- *   - daemon install (dry-run or real)
- *   - attach for each picked client
- *   - skill install for each picked client
- *   - daemon restart (skipped in dry-run)
- *
- * Spans: `walkthrough.start`, `walkthrough.pick` (logs),
- * `walkthrough.write_config`, `daemon.install`, `client.attach`,
- * `skills.install`, `walkthrough.finish`.
- *
- * Superseded as `hyp init`'s entry point by `runInitWizard`
- * (LLP 0135 #orchestration), which drives the same pick/write/finale
- * machinery through the wizard's pick phase. Kept as the direct
- * programmatic surface existing tests and smokes exercise.
- *
- * @param {RunPickerWalkthroughOptions} opts
- * @returns {Promise<PickerWalkthroughResult>}
- * @ref LLP 0011#interactive-walkthrough [implements]: the pre-wizard walkthrough shape; hyp init now fronts it with runInitWizard
- */
-export async function runPickerWalkthrough(opts) {
-  const { capabilities, stdout, env } = opts
-  const log = getLogger('walkthrough')
-
-  // Autodetect installed client tools so the picker can pre-check them.
-  // Interactive only: when `picks` are supplied (`--yes` / `--dry-run` /
-  // presets) the selection is explicit and must stay deterministic, so
-  // detection is skipped entirely. Best-effort: a detector failure
-  // leaves the set empty rather than blocking onboarding.
-  // @ref LLP 0011#autodetect-vs-default [implements]: detection only seeds the initial checkbox; never forces a source on
-  const interactive = !opts.picks
-  /** @type {Set<PickerSource>} */
-  let detected = new Set()
-  if (interactive) {
-    const detect = opts.detect ?? defaultPickerDetect
-    try {
-      detected = await detect({ env })
-    } catch {
-      detected = new Set()
-    }
-  }
-
-  // The picker table is manifest-sourced now: each plugin declares its
-  // rows in `contributes.picker` (`@ref LLP 0130#picker-block`), replacing
-  // the retired hardcoded PICKER_SOURCES list. Both the interactive prompt
-  // options and `composePickerConfig`'s fold read from these descriptors.
-  const { descriptors: pickerDescriptors, composeWith } = await loadPickerCatalog()
-  const descriptorList = [...pickerDescriptors.values()]
-
-  await withSpan(
-    'walkthrough.start',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.start',
-      sources_available: descriptorList.length,
-      exports_available: PICKER_EXPORTS.length,
-      sources_detected: detected.size,
-      detected_sources: [...detected].join(','),
-      status: 'ok',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-
-  /** @type {PickerPicks} */
-  let picks
-  // Provenance of the export choice, for telemetry. Export is no longer
-  // asked interactively (local-parquet is the out-of-the-box default),
-  // so the origin is `user` only when an explicit `--export` flag was
-  // threaded in on the pre-baked path; otherwise the pick was defaulted.
-  let exportOrigin = 'default'
-  if (opts.picks) {
-    picks = opts.picks
-    exportOrigin = opts.exportOrigin ?? 'default'
-  } else {
-    const ask = opts.prompt ?? defaultPromptFactory(opts)
-
-    stdout.write('HypAware records the sessions, logs, and telemetry from your AI agents into one queryable history.\n\n')
-
-    try {
-      const sourceRaw = await ask({
-        pickType: 'sources',
-        title: 'What do you want to collect?',
-        // Hidden and platform-gated rows are absent from the menu but still
-        // pickable via `--source` (which takes the `opts.picks` path above and
-        // never reaches this prompt). A hidden row carries no probe, so nothing
-        // is silently unchecked by leaving it out. A platform-gated row may
-        // well be detected, and is withheld anyway: the gate answers a question
-        // about the integration that no probe about this machine can overturn
-        // (`@ref LLP 0368#platform-gate`).
-        options: visiblePickerDescriptors(descriptorList, opts.platform).map((d) => ({
-          value: d.id,
-          label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
-          ...(d.summary ? { summary: d.summary } : {}),
-          ...(detected.has(/** @type {PickerSource} */ (d.id)) ? { checked: true } : {}),
-        })),
-      })
-      const sources = /** @type {PickerSource[]} */ (
-        sourceRaw.filter((v) => descriptorList.some((d) => d.id === v))
-      )
-
-      // Export destination is not asked interactively. A local query
-      // cache is always kept; on top of it we default to scheduled local
-      // Parquet exports so `npx hypaware` produces durable files out of
-      // the box. Other destinations (keep-local only, configure-later,
-      // S3, …) remain available via `hyp init --export <choice>` and by
-      // editing the written config later.
-      const exportChoice = /** @type {PickerExport} */ ('local-parquet')
-
-      // Retention is not asked either (LLP 0137): this legacy surface has
-      // no pathway fork, so it takes the flat default. The wizard applies
-      // the pathway-aware defaults; `--retention-days` overrides via picks.
-      picks = { sources, exportChoice, retentionDays: DEFAULT_RETENTION_DAYS }
-    } catch (err) {
-      if (isPromptCancelledError(err)) {
-        return await cancelledResult(opts)
-      }
-      throw err
-    }
-  }
-
-  for (const value of picks.sources) {
-    log.info('walkthrough.pick', {
-      [Attr.COMPONENT]: 'walkthrough',
-      pick_type: 'sources',
-      pick_value: value,
-    })
-  }
-  log.info('walkthrough.pick', {
-    [Attr.COMPONENT]: 'walkthrough',
-    pick_type: 'exports',
-    pick_value: picks.exportChoice,
-    pick_origin: exportOrigin,
-  })
-
-  const hypHome = resolveHypHome(env)
-  const config = composePickerConfig({
-    sources: picks.sources,
-    descriptors: pickerDescriptors,
-    exportChoice: picks.exportChoice,
-    retentionDays: picks.retentionDays,
-    hypHome,
-    composeWith,
-  })
-
-  const obsEnv = readObservabilityEnv(env)
-  const configPath = env.HYP_CONFIG
-    ? path.resolve(env.HYP_CONFIG)
-    : defaultConfigPath(obsEnv.hypHome)
-
-  // Guard against clobbering an existing local config (the non-destructive
-  // half of #111). Non-interactive runs require `--force`; an interactive
-  // run just answered every question, so it saves. Either path backs up
-  // the existing file before replacing it.
-  // @ref LLP 0433#scope [implements]: an attended run backs up and saves without asking
-  const guard = await prepareLocalConfigWrite({
-    targetPath: configPath,
-    force: interactive || opts.force,
-  })
-  if (!guard.proceed) {
-    opts.stderr.write(`hyp setup: ${guard.message}\n`)
-    return overwriteAbortedResult({ opts, configPath, config, picks })
-  }
-  if (guard.backupPath) {
-    stdout.write(`Backed up existing config to ${guard.backupPath}\n`)
-  }
-
-  await withSpan(
-    'walkthrough.write_config',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.write_config',
-      config_path: configPath,
-      plugin_count: config.plugins?.length ?? 0,
-      ...(guard.backupPath ? { config_backed_up: true } : {}),
-      status: 'ok',
-    },
-    async () => {
-      await fs.mkdir(path.dirname(configPath), { recursive: true })
-      await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
-    },
-    { component: 'walkthrough' }
-  )
-
-  // @ref LLP 0180#decision [implements]: client-ness is read from the picked
-  // rows' manifest client contributions, not a name list copied per call site
-  const clientsPicked = derivePickedClients(
-    picks.sources,
-    pickerDescriptors,
-    await buildWalkthroughClientDescriptorMap()
-  )
-
-  /** @type {FinaleSummary | undefined} */
-  let finaleSummary
-  if (opts.finale) {
-    finaleSummary = await runPickerFinale({
-      finale: opts.finale,
-      clientsPicked,
-      capabilities,
-      ...(opts.clients ? { clients: opts.clients } : {}),
-      sources: opts.sources,
-      skills: opts.skills,
-      agents: opts.agents,
-      ...(opts.failedPlugins ? { failedPlugins: opts.failedPlugins } : {}),
-      config,
-      configPath,
-      env,
-      stdout,
-      stderr: opts.stderr,
-      retentionDays: picks.retentionDays,
-      // Interactive mode is the absence of pre-baked picks: only then do
-      // we prompt for backfill consent. `--yes` / `--dry-run` carry picks
-      // and backfill runs automatically.
-      interactive: !opts.picks,
-      force: opts.force,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
-      ...(opts.backfill ? { backfill: opts.backfill } : {}),
-      ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
-    })
-  }
-
-  const cancelled = finaleSummary?.cancelled === true
-  const exitCode = cancelled ? WALKTHROUGH_CANCEL_EXIT_CODE : 0
-
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      sources_picked: picks.sources.length,
-      export_picked: picks.exportChoice,
-      clients_picked: clientsPicked.length,
-      retention_days: picks.retentionDays,
-      config_path: configPath,
-      ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
-      status: cancelled ? 'cancelled' : 'ok',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-
-  if (cancelled) writeCancelledNotice(opts.stderr)
-
-  writeWalkthroughRunSummary({ stdout, configPath, finaleSummary })
-
-  return {
-    exitCode,
-    configPath,
-    config,
-    sourcesPicked: picks.sources,
-    exportPicked: picks.exportChoice,
-    clientsPicked,
-    retentionDays: picks.retentionDays,
-    ...(finaleSummary ? { finale: finaleSummary } : {}),
-  }
-}
-
-/**
  * Print the closing run summary: the written config path plus one line
  * per finale action that ran (daemon target, attaches, skills/agents
- * counts). Shared by `runPickerWalkthrough` and the wizard orchestrator so
- * both entry points end a run identically.
+ * counts), used by the wizard orchestrator.
  *
  * No "next: hyp query sql ..." hint: it named the `logs` dataset, which
  * only exists when `@hypaware/otel` is configured, so most installs ended
@@ -1525,8 +1230,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  * #dead-surface), threaded in because the finale is one *step* but
  * several acts, and the backfill consent question sits behind three of
  * them. A caller that has a consent surface to lose passes it; the
- * standalone picker walkthrough has no guard and passes nothing, which
- * leaves the question exactly as it was.
+ * direct finale caller may omit it.
  *
  * @param {{
  *   finale: PickerFinaleActions,
@@ -2081,8 +1785,6 @@ function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
  * hosts with no central layer (LLP 0185 #status-backstop).
  *
  * Only a caller that printed something substantial in between calls this.
- * `runPickerWalkthrough` writes a short run summary and stops, so it keeps the
- * single finale print and never repeats it onto the same screen.
  *
  * @ref LLP 0230#repeat-at-the-end [implements]: the repeat belongs to the caller whose own output buried the first print
  * @param {{
@@ -2227,7 +1929,7 @@ async function runFinaleBackfill(args) {
       // would claim more than was skipped.
       //
       // Guarded, like the two cancel notices it is modelled on
-      // (`writeCancelledNotice` below, the wizard's post-finale cancel):
+      // (the wizard's post-finale cancel):
       // a terminal that took stdout with it can have taken stderr too,
       // and this arm's whole contract is to warn and let the finale
       // finish - a warning that cannot be written must not cost the run
@@ -2630,99 +2332,4 @@ export function attachReportOutcome(report) {
     }
   }
   return { applied, restart, kept }
-}
-
-/**
- * Result returned when the overwrite guard refuses (non-interactive,
- * `--force` absent) or the user declines the interactive prompt. No
- * config is written; exit code 1 surfaces the refusal to the caller.
- *
- * @param {{
- *   opts: RunPickerWalkthroughOptions,
- *   configPath: string,
- *   config: HypAwareV2Config,
- *   picks: PickerPicks,
- * }} args
- * @returns {Promise<PickerWalkthroughResult>}
- */
-async function overwriteAbortedResult({ opts, configPath, config, picks }) {
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      config_path: configPath,
-      exit_code: 1,
-      status: 'aborted',
-      hyp_reason: 'config_exists',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-  return {
-    exitCode: 1,
-    configPath,
-    config,
-    sourcesPicked: picks.sources,
-    exportPicked: picks.exportChoice,
-    clientsPicked: [],
-    retentionDays: picks.retentionDays,
-  }
-}
-
-/**
- * Build the canonical cancel result returned by {@link runPickerWalkthrough}
- * when the user cancels via escape / ctrl+c. Writes a one-line cancel
- * notice to stderr so the dispatcher does not eat it silently, and
- * surfaces {@link WALKTHROUGH_CANCEL_EXIT_CODE} (130, matching SIGINT
- * convention) as the exit code. The returned object satisfies the
- * required shape of {@link PickerWalkthroughResult} but contains no
- * config (callers that key off `exitCode` already short-circuit on
- * non-zero values).
- *
- * @param {RunPickerWalkthroughOptions} opts
- * @returns {Promise<PickerWalkthroughResult>}
- */
-async function cancelledResult(opts) {
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      sources_picked: 0,
-      export_picked: '',
-      clients_picked: 0,
-      retention_days: DEFAULT_RETENTION_DAYS,
-      config_path: '',
-      exit_code: WALKTHROUGH_CANCEL_EXIT_CODE,
-      status: 'cancelled',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-  writeCancelledNotice(opts.stderr)
-  return {
-    exitCode: WALKTHROUGH_CANCEL_EXIT_CODE,
-    configPath: '',
-    config: /** @type {HypAwareV2Config} */ ({
-      version: 2,
-      plugins: [],
-      query: { cache: { retention: { default_days: DEFAULT_RETENTION_DAYS } } },
-    }),
-    sourcesPicked: [],
-    exportPicked: 'keep-local',
-    clientsPicked: [],
-    retentionDays: DEFAULT_RETENTION_DAYS,
-  }
-}
-
-/**
- * @param {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
- */
-function writeCancelledNotice(stderr) {
-  try {
-    stderr.write('Setup cancelled.\n')
-  } catch {
-    // best-effort: stderr might be closed during cleanup
-  }
 }

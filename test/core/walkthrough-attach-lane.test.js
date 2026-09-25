@@ -6,10 +6,10 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { attachReportOutcome, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { attachReportOutcome, runPickerFinale } from '../../src/core/cli/walkthrough.js'
 
-// The finale attach lane over the real catalog derivation (LLP 0180). The
-// derived `clientsPicked` includes Claude Desktop, whose plugin contributes a
+// The finale attach lane (LLP 0180). `clientsPicked` includes Claude Desktop,
+// whose plugin contributes a
 // client for skill/agent ownership but deliberately registers no runtime
 // adapter (LLP 0115#no-attach-on-join), so the lane must treat "no adapter
 // registered" as not applicable rather than reporting a failure that is not
@@ -57,18 +57,21 @@ test('picking claude-desktop records a not-applicable attach, not a failure', as
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: gatewayCapability({}),
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude-desktop'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude-desktop'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude-desktop' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['claude-desktop'])
-  assert.deepEqual(result.finale?.attach, [
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attach, [
     { client: 'claude-desktop', dryRun: false, ok: true, noAdapter: true },
   ])
   // The run summary says nothing about a lane that was never applicable.
@@ -81,21 +84,24 @@ test('a registered adapter that throws still reports a real attach failure', asy
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     capabilities: gatewayCapability({
       claude: { attach: async () => { throw new Error('boom') } },
     }),
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.attach, [{ client: 'claude', dryRun: false, ok: false }])
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attach, [{ client: 'claude', dryRun: false, ok: false }])
   assert.match(stderr.text(), /attach claude failed: boom/)
-  assert.match(stdout.text(), /attach: claude failed/)
 })
 
 /**
@@ -122,7 +128,7 @@ test('picking only an endpoint-free client still runs the attach lane', async ()
   /** @type {any[]} */
   const calls = []
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     // No gateway at all: before the registry was threaded through, this alone
     // skipped the whole lane and OpenCode was never attached.
     capabilities: /** @type {any} */ ({ has: () => false, require: () => { throw new Error('no gateway') } }),
@@ -132,13 +138,16 @@ test('picking only an endpoint-free client still runs the attach lane', async ()
     stdout,
     stderr,
     env,
-    picks: { sources: ['opencode'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['opencode'],
+    config: { version: 2, plugins: [{ name: '@hypaware/opencode' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.clientsPicked, ['opencode'])
-  assert.deepEqual(result.finale?.attach, [{ client: 'opencode', dryRun: false, ok: true }])
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attach, [{ client: 'opencode', dryRun: false, ok: true }])
   assert.equal(calls.length, 1)
   // An endpoint-free adapter writes a managed file; it is handed no gateway URL,
   // the same way the reconciler's attach action calls it.
@@ -157,7 +166,7 @@ test('a mixed pick attaches both, and never reports the endpoint-free one as noA
   const localCalls = []
   const claudeAdapter = { attach: async (/** @type {any} */ args) => { gatewayCalls.push(args) } }
 
-  const result = await runPickerWalkthrough({
+  const result = await runPickerFinale({
     // The gateway capability sees only `claude`, exactly as the real one does.
     capabilities: gatewayCapability({ claude: claudeAdapter }),
     clients: clientRegistry({
@@ -167,12 +176,16 @@ test('a mixed pick attaches both, and never reports the endpoint-free one as noA
     stdout,
     stderr,
     env,
-    picks: { sources: ['claude', 'opencode'], exportChoice: 'keep-local', retentionDays: 30 },
+    clientsPicked: ['claude', 'opencode'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/opencode' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 30,
+    interactive: false,
     finale: { skipDaemon: true },
   })
 
-  assert.equal(result.exitCode, 0)
-  assert.deepEqual(result.finale?.attach, [
+  assert.notEqual(result.cancelled, true)
+  assert.deepEqual(result.attach, [
     { client: 'claude', dryRun: false, ok: true },
     { client: 'opencode', dryRun: false, ok: true },
   ])

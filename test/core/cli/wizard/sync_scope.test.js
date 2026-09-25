@@ -43,18 +43,12 @@ test('zero candidates with org rows: states the team-set Syncing line, prompts n
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [descriptor('claude')],
   }))
 
-  // `noQuestion` is the part the orchestrator reads: a lane that only
-  // stated its outcome is not a screen, so the new-folder lane behind it
-  // backs past it to the picker rather than re-running it (LLP 0191
-  // #back-edges). Being a recap line and not a screen, it carries no
-  // position line either.
-  assert.deepEqual(result, { noQuestion: true })
   assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
   assert.equal(await readClientSyncEntries({ stateDir: stateDir }), null, 'no store write on the no-question path')
 })
@@ -82,13 +76,12 @@ test('zero candidates and no org rows: says nothing syncs, never names the fleet
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [],
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   assert.equal(stdout.text(), "✓ Nothing syncs to your team's server\n")
   assert.equal(await readClientSyncEntries({ stateDir }), null, 'no store write on the no-question path')
 })
@@ -103,14 +96,13 @@ test('zero candidates with only hidden org rows: does not claim nothing syncs', 
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [],
     lockedHidden: 2,
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   assert.equal(stdout.text(), "✓ Capture your team manages still syncs to your team's server\n")
   assert.doesNotMatch(stdout.text(), /Nothing syncs/)
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld rows are still never named')
@@ -127,7 +119,7 @@ test('zero visible candidates with a hidden picked row: does not claim nothing s
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [],
@@ -135,7 +127,6 @@ test('zero visible candidates with a hidden picked row: does not claim nothing s
     candidatesHiddenIds: ['raw-anthropic'],
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   assert.equal(stdout.text(), "✓ Capture already set up on this machine still syncs to your team's server\n")
   assert.doesNotMatch(stdout.text(), /Nothing syncs/)
   assert.doesNotMatch(stdout.text(), /set by your team|team manages/, 'the fleet owns no row here, so it is never named')
@@ -155,7 +146,7 @@ test('zero visible candidates with a hidden picked row already opted out: says n
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [],
@@ -163,7 +154,6 @@ test('zero visible candidates with a hidden picked row already opted out: says n
     candidatesHiddenIds: ['raw-anthropic'],
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   assert.equal(stdout.text(), "✓ Nothing syncs to your team's server\n")
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
   assert.deepEqual(
@@ -182,7 +172,7 @@ test('zero visible candidates with one hidden pick opted out and one standing: d
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [],
@@ -190,7 +180,6 @@ test('zero visible candidates with one hidden pick opted out and one standing: d
     candidatesHiddenIds: ['raw-anthropic', 'raw-openai'],
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   assert.match(stdout.text(), /still syncs to your team's server/)
   assert.doesNotMatch(stdout.text(), /Nothing syncs/)
 })
@@ -205,7 +194,7 @@ test('a stale opt-out for a hidden locked row does not soften the fleet line', a
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [],
@@ -213,7 +202,6 @@ test('a stale opt-out for a hidden locked row does not soften the fleet line', a
     candidatesHiddenIds: [],
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   assert.equal(stdout.text(), "✓ Capture your team manages still syncs to your team's server\n")
 })
 
@@ -227,7 +215,7 @@ test('zero visible candidates with an org row and a hidden picked row: the fleet
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [descriptor('claude')],
@@ -235,7 +223,6 @@ test('zero visible candidates with an org row and a hidden picked row: the fleet
     candidatesHiddenIds: ['raw-anthropic'],
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   // The org row's line, then the hidden pick disclosed as a fact without
   // being named or handed to the fleet.
   assert.deepEqual(stdout.text().split('\n').filter(Boolean), [
@@ -274,7 +261,7 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
   const stdout = makeBuf()
 
-  const result = await runWizardSyncScope(/** @type {any} */ ({
+  await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [],
     locked: [descriptor('claude')],
@@ -282,7 +269,6 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
     candidatesHiddenIds: ['raw-anthropic'],
   }))
 
-  assert.deepEqual(result, { noQuestion: true })
   // The store answered the shipping question, so the export promise goes.
   assert.equal(stdout.text(), "✓ Syncing it to your team's server (set by your team)\n")
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
@@ -301,7 +287,7 @@ test('a corrupt store skips the step with a warning and is never overwritten', a
   }))
 
   // Skipped and unasked: the lane after it must not try to back into it.
-  assert.deepEqual(result, { skipped: true, noQuestion: true })
+  assert.deepEqual(result, { skipped: true })
   assert.match(stderr.text(), /unreadable/)
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
 })
@@ -328,7 +314,7 @@ test('a corrupt store with a dead stderr still skips instead of throwing', async
 
   // The skip still returns, flags intact: they are what the folder-ask
   // lane and the back edges read.
-  assert.deepEqual(result, { skipped: true, noQuestion: true })
+  assert.deepEqual(result, { skipped: true })
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
 })
 
@@ -349,7 +335,7 @@ test('combined collection and sync clears only selected policies', async (t) => 
     locked: [descriptor('gateway')],
     candidatesHiddenIds: ['raw-anthropic'],
   })
-  assert.deepEqual(result, { noQuestion: true, pendingSources: ['claude'] })
+  assert.deepEqual(result, { pendingSources: ['claude'] })
   // The lane only states; the store is untouched until the commit.
   assert.deepEqual((await readClientSyncEntries({ stateDir }))?.map((entry) => entry.source).sort(),
     ['claude', 'codex', 'raw-anthropic'])

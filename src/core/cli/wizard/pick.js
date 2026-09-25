@@ -251,10 +251,9 @@ export async function resolvePickSeeding(opts) {
 }
 
 /**
- * The wizard pick phase (LLP 0135 #pick). Keeps `runPickerWalkthrough`'s
- * prompt/write/guard/overwrite-confirm shape but sources its rows from the
- * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
- * `PICKER_SOURCES` table, and understands central-layer-locked rows. The
+ * The wizard pick phase (LLP 0135 #pick) sources its rows from the
+ * catalog's picker descriptors (LLP 0130) and understands
+ * central-layer-locked rows. The
  * lane asks one question, the multiselect, seeded by detection and the
  * locked set; the accept-or-customize question lives on the express gate
  * (LLP 0201), whose accept auto-answers this lane (`autoAccept`).
@@ -727,8 +726,8 @@ function configuredRetentionDays(config) {
 }
 
 /**
- * Build the cancel result returned when the user cancels at a prompt. Mirrors
- * `runPickerWalkthrough`'s cancel shape: a cancel notice to stderr, the
+ * Build the cancel result returned when the user cancels at a prompt:
+ * a cancel notice to stderr, the
  * deterministic 130 exit code, and an empty config the orchestrator ignores
  * once it sees `cancelled`.
  *

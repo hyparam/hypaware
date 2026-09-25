@@ -361,7 +361,7 @@ test('runInitWizard: a back from folders skips a sync lane that asked nothing an
     // real lane's `candidates` list is empty and it only states its outcome.
     syncScope: async (/** @type {any} */ o) => {
       assert.deepEqual(o.candidates, [], 'nothing is left for this lane to ask about')
-      return { noQuestion: true }
+      return {}
     },
     folderAsk: async () => {
       folderCalls += 1
