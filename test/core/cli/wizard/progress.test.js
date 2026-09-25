@@ -10,7 +10,7 @@ import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { WIZARD_STEP_LABELS, wizardItinerary, wizardStepProgress } from '../../../../src/core/cli/wizard/steps.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
-import { defaultPromptFactory, runPickerFinale } from '../../../../src/core/cli/walkthrough.js'
+import { defaultPromptFactory } from '../../../../src/core/cli/walkthrough.js'
 import { render } from '../../../../src/core/cli/tui/render.js'
 
 // The wizard's position indicator (LLP 0135 #progress): the denominator is
@@ -227,14 +227,14 @@ test('wizardStepProgress: an uncommitted pathway has no denominator', async () =
 
 // --- orchestrator threading ---
 
-// @ref LLP 0437#headings [tests]: the menus carry the count, the finish step a heading
-test('runInitWizard: the local pathway counts on its menu and heads the finish step', async () => {
+// @ref LLP 0437#headings [tests]: the menus carry the count, the finish step neither a count nor a heading
+test('runInitWizard: the local pathway counts on its menu and opens the finish step bare', async () => {
   const { opts, seen } = wizardOpts(await tmpHome())
   const result = await runInitWizard(opts)
   assert.equal(result.pathway, 'local')
   assert.equal(seen.pick.progress, 'Step 1 of 2 · Choose what to collect')
   assert.equal(seen.finale.progress, undefined)
-  assert.equal(seen.finale.heading, 'Finishing setup')
+  assert.equal(seen.finale.heading, undefined)
 })
 
 test('runInitWizard: the team pathway counts four steps with no separate sync position', async () => {
@@ -249,7 +249,7 @@ test('runInitWizard: the team pathway counts four steps with no separate sync po
   assert.equal(seen.pick.progress, 'Step 2 of 4 · Choose what to collect and sync')
   assert.equal(seen.sync.progress, undefined)
   assert.equal(seen.folders.progress, 'Step 3 of 4 · Choose how new folders are handled')
-  assert.equal(seen.finale.heading, 'Finishing setup')
+  assert.equal(seen.finale.heading, undefined)
 })
 
 test('runInitWizard: the fork never carries a counter, before or after a failed join', async () => {
@@ -316,37 +316,6 @@ test('runWizardJoin: opens with a plain heading, not a step count', async () => 
   }))
   assert.equal(stdout.text().startsWith('Joining your team\n'), true, stdout.text())
   assert.doesNotMatch(stdout.text(), /Step /)
-})
-
-/**
- * The finale with every action skipped: enough to prove the lane prints
- * its own heading, without installing or attaching anything.
- *
- * @param {{ write(chunk: string): unknown, text(): string }} stdout
- * @param {Record<string, unknown>} over
- */
-function finaleArgs(stdout, over = {}) {
-  return /** @type {any} */ ({
-    finale: { skipDaemon: true, skipDaemonInstall: true, skipRestart: true },
-    clientsPicked: [],
-    capabilities: /** @type {any} */ ({ has: () => false }),
-    config: { version: 2, plugins: [] },
-    configPath: '/tmp/x/config.json',
-    env: { HOME: '/tmp/x' },
-    stdout,
-    stderr: makeBuf(),
-    retentionDays: 30,
-    interactive: true,
-    ...over,
-  })
-}
-
-test('runPickerFinale: a heading is written once, ahead of everything else it writes', async () => {
-  const withHeading = makeBuf()
-  const without = makeBuf()
-  await runPickerFinale(finaleArgs(withHeading, { heading: 'Finishing setup' }))
-  await runPickerFinale(finaleArgs(without))
-  assert.equal(withHeading.text(), 'Finishing setup\n' + without.text(), without.text())
 })
 
 test('the legacy numbered picker prompt prints the breadcrumb as plain text', async () => {

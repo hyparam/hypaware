@@ -862,7 +862,6 @@ async function runGuardedInitWizard(opts, guard) {
       // once at the door.
       // @ref LLP 0341#dead-surface [implements]: the boundary reaches the one question the finale opens
       checkBoundary: () => guard.checkpoint(),
-      ...(interactive ? { heading: 'Finishing setup' } : {}),
       clientLabels: new Map([...catalog.pickerDescriptors.values()].map((d) => [d.id, d.label])),
     })
   }
@@ -1164,12 +1163,11 @@ async function resolveWizardDaemonBin(opts, interactive) {
  *   daemonIncomplete: boolean,
  *   daemonBin?: string,
  *   checkBoundary: () => Promise<boolean>,
- *   heading?: string,
  *   clientLabels?: Map<string, string>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, heading, clientLabels }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, clientLabels }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
@@ -1234,7 +1232,6 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
         checkBoundary,
         ...(skipAttachClients ? { skipAttachClients } : {}),
-        ...(heading ? { heading } : {}),
         ...(clientLabels ? { clientLabels } : {}),
       }),
     { component: 'wizard' }

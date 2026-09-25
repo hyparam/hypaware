@@ -1550,7 +1550,6 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
  *   skipAttachClients?: Set<string>,
- *   heading?: string,
  *   clientLabels?: Map<string, string>,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   daemonService?: {
@@ -1569,11 +1568,6 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
-  // Like the join lane, the finale opens with a plain heading rather than a
-  // step count, since the line stays on screen. Only the wizard sets it;
-  // `runPickerWalkthrough` and non-interactive runs print none.
-  // @ref LLP 0437#headings [implements]: permanent lines carry headings, live menus carry the step count
-  if (args.heading) stdout.write(`${args.heading}\n`)
   // Each act is reported in one line, by the names the user picked from
   // (LLP 0437 #finish).
   const label = (/** @type {string} */ client) => args.clientLabels?.get(client) ?? client

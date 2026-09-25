@@ -156,11 +156,12 @@ unreadable layer), the line says "your team's server" rather than guess.
 
 ### Step counts live on menus {#headings}
 
-"Step 2 of 4" helps while a menu is on screen and goes with it. A step that
-leaves permanent lines (the sign-in, the finish) opens with a plain heading
-instead ("Joining your team", "Finishing setup"), so the finished screen
-never shows a count with gaps in it, and an express run, which shows no
-menus, shows no counts at all.
+"Step 2 of 4" helps while a menu is on screen and goes with it. The
+sign-in, which leaves permanent lines, opens with a plain heading instead
+("Joining your team"), so the finished screen never shows a count with
+gaps in it, and an express run, which shows no menus, shows no counts at
+all. The finish step opens with no heading: its first act line already
+says what is happening.
 
 ### The finish step says each act once {#finish}
 
