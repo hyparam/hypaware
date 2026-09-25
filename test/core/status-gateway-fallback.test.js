@@ -159,3 +159,29 @@ test('a fallback address that sanitizes away leaves the generic phrasing', async
   assert.match(diag.message, /its default listen address/, 'the generic antecedent stands in')
   assert.ok(!diag.message.includes('\u200b'), 'and the empty run does not ride along')
 })
+
+// The other fallback in the same read: the gateway source is found by its
+// plugin first and by its `name` second. `readSourceIdentity` degrades a
+// source's `plugin` to `''` when the contribution cannot be read back off the
+// registry, and the daemon writes that degraded identity into `status.json`,
+// so a snapshot of a genuinely bound gateway reaches this read carrying no
+// usable plugin key. Without the name rung it resolves to no endpoint and a
+// listening gateway reads as not listening (issue #2157).
+// @ref LLP 0086#endpoint-discovery [tests]: discovery reads the persisted port, including out of a snapshot whose source identity degraded
+test('the gateway source is found by name when the snapshot carries no plugin', () => {
+  const details = gatewaySourceDetails(/** @type {any} */ ([
+    { name: 'otel', plugin: '@hypaware/otel', state: 'started', details: { port: 4318 } },
+    { name: 'ai-gateway', state: 'started', details: { host: '127.0.0.1', port: 54321 } },
+  ]))
+  assert.ok(details, 'a bound gateway still resolves with no plugin on its snapshot')
+  assert.equal(details.host, '127.0.0.1')
+  assert.equal(details.port, 54321)
+})
+
+test('the gateway source is found by name when the snapshot degraded its plugin to empty', () => {
+  const details = gatewaySourceDetails(/** @type {any} */ ([
+    { name: 'ai-gateway', plugin: '', state: 'started', details: { host: '127.0.0.1', port: 54321 } },
+  ]))
+  assert.ok(details, 'the empty string the identity read degrades to is not a plugin key')
+  assert.equal(details.port, 54321)
+})
