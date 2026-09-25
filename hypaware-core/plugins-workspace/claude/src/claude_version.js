@@ -21,13 +21,6 @@ const execFileAsync = promisify(execFile)
 /** First Claude Code release that emits the telemetry event set. */
 export const CLAUDE_OTEL_MIN_VERSION = '2.1.193'
 
-/**
- * First release that carries `tool_source` on tool-decision events. Above the
- * floor, so it never blocks an attach: a machine between the two captures
- * everything except which surface approved a tool call.
- */
-export const CLAUDE_TOOL_SOURCE_MIN_VERSION = '2.1.214'
-
 /** What the user runs to clear the floor. Kept as one string so every surface prints the same hint. */
 export const CLAUDE_UPDATE_HINT = 'claude update'
 

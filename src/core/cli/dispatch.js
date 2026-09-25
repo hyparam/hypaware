@@ -1430,21 +1430,6 @@ function renderInactivePluginError({ stderr, inactive, discovery, env }) {
 }
 
 /**
- * Does `manifest` declare a command whose first word is `token`?
- *
- * @param {PluginManifest} manifest
- * @param {string} token
- * @returns {boolean}
- */
-function declaresCommandHead(manifest, token) {
-  for (const cmd of manifest.contributes?.commands ?? []) {
-    if (!cmd || typeof cmd.name !== 'string') continue
-    if (cmd.name.split(' ')[0] === token) return true
-  }
-  return false
-}
-
-/**
  * Classify *why* an in-pool plugin is inactive, so the dispatch-miss repair
  * line can advise the right fix. A plugin lands in the pool-but-not-selected
  * set for two config reasons: it is simply absent from the effective
