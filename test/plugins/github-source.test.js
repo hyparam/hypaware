@@ -14,7 +14,7 @@ import { authorizedImports, readCursors, writeCursors } from '../../hypaware-cor
 import { runGithubBackfill, runGithubSync } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 
 /** @import { TestContext } from 'node:test' */
-/** @import { StartedSource } from '../../hypaware-core/plugins-workspace/github/src/types.js' */
+/** @import { GithubClient, StartedSource } from '../../hypaware-core/plugins-workspace/github/src/types.js' */
 
 test('unfinished work resumes on the bounded backlog cadence', () => {
   assert.equal(nextCaptureDelay(24 * 60 * 60_000, true), BACKLOG_RETRY_MS)
@@ -933,5 +933,87 @@ test('a narrowed run may set the verdict but never clears it', async (t) => {
     readCursors(stuckDir).pending,
     true,
     'work left behind in the named subset is real backlog, whether or not the run was narrowed',
+  )
+})
+
+/**
+ * Wraps a fake client so the first method call runs `effect` before
+ * delegating, modelling a concurrent writer (a sidecar `hyp github sync`, or
+ * another tick) that commits to disk while this tick's own capture is still
+ * in flight.
+ *
+ * @param {GithubClient} client
+ * @param {() => void | Promise<void>} effect
+ */
+function withConcurrentWriter(client, effect) {
+  let fired = false
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver)
+      if (typeof value !== 'function') return value
+      return async (...args) => {
+        if (!fired) {
+          fired = true
+          await effect()
+        }
+        return value.apply(target, args)
+      }
+    },
+  })
+}
+
+// @ref LLP 0438#writers [tests]: a narrowed clean run has no verdict of its own to assert, so a concurrent writer's commit survives its closing write in both directions
+test('a narrowed clean run does not clobber a concurrent writer\'s verdict', async (t) => {
+  // Direction 1: disk starts pending, a concurrent writer retires it mid-tick.
+  // The narrowed run's own snapshot (read before the concurrent write) still
+  // says pending, but its clean result covers only the named repo, so the
+  // closing write must not resurrect that stale `true` over the retirement.
+  const retiredDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-narrowed-concurrent-retired-'))
+  t.after(() => fs.rmSync(retiredDir, { recursive: true, force: true }))
+  await writeCursors(retiredDir, { schema_version: 1, pending: true, repos: {} })
+
+  const retiredResult = await runCaptureTick(/** @type {any} */ ({
+    stateDir: retiredDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'all_visible' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => withConcurrentWriter(
+      fakeClient({ repos: { 'o/a': { issues: [{ number: 1, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] } } }),
+      () => writeCursors(retiredDir, { schema_version: 1, pending: false, repos: {} }),
+    ),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }), { mode: 'backfill', only: ['o/a'] })
+  assert.equal(retiredResult.pending, false, 'the one named repo completed in this pass')
+  assert.equal(
+    readCursors(retiredDir).pending,
+    false,
+    'the concurrent retirement survives the narrowed clean run\'s closing write',
+  )
+
+  // Direction 2: disk starts retired, a concurrent writer asserts real backlog
+  // mid-tick. The narrowed run's own snapshot still says retired, so the
+  // closing write must not re-assert that stale `false` over the assertion.
+  const assertedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-narrowed-concurrent-asserted-'))
+  t.after(() => fs.rmSync(assertedDir, { recursive: true, force: true }))
+  await writeCursors(assertedDir, { schema_version: 1, pending: false, repos: {} })
+
+  const assertedResult = await runCaptureTick(/** @type {any} */ ({
+    stateDir: assertedDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'all_visible' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => withConcurrentWriter(
+      fakeClient({ repos: { 'o/a': { issues: [{ number: 1, updated_at: '2024-01-01T00:00:00Z', user: { login: 'x' }, title: 't' }] } } }),
+      () => writeCursors(assertedDir, { schema_version: 1, pending: true, repos: {} }),
+    ),
+    storage: { cacheTablePath() { return '/cache/github_events' }, async appendRows() {} },
+    log: silentLog,
+  }), { mode: 'backfill', only: ['o/a'] })
+  assert.equal(assertedResult.pending, false, 'the one named repo completed in this pass')
+  assert.equal(
+    readCursors(assertedDir).pending,
+    true,
+    'the concurrent backlog assertion survives the narrowed clean run\'s closing write',
   )
 })

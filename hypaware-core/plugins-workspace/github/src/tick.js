@@ -207,9 +207,13 @@ async function captureTick(runtime, opts) {
   // sidecar process read the same answer this tick reached. A run narrowed to
   // named repositories may assert backlog but never retire it, for the reason
   // it publishes no `next_repo`: its verdict covers a subset of the inventory.
+  // A narrowed run that comes back clean has no opinion at all - it records
+  // none, so `writeCursors` takes whatever verdict is on disk now instead of
+  // re-asserting the stale snapshot this tick started from.
   // @ref LLP 0438#writers [implements]: the tick that sized the work records the verdict beside the cursors it advanced
   if (pending) cursors.pending = true
   else if (!opts.only?.length) cursors.pending = false
+  else delete cursors.pending
   const cursorError = await persistCursors()
   if (cursorError !== undefined) result.errors.push({ repo: CURSOR_ERROR_REPO, error: cursorError })
   runtime.log.info('github.capture_tick_completed', {

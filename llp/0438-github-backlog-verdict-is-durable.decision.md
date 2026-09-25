@@ -78,7 +78,12 @@ verdict disagree.
 A tick narrowed by `hyp github backfill owner/repo` may *set* the marker and
 never clears it, for the reason a narrowed run does not publish `next_repo`
 (LLP 0361#budget): its verdict covers a subset, so work remaining in it is real
-while work absent from it says nothing about the rest of the inventory.
+while work absent from it says nothing about the rest of the inventory. A
+narrowed run that comes back clean therefore has no opinion at all to carry
+into the closing write, and deletes the marker from its snapshot before
+committing, the same way the throwing path below does: `writeCursors` takes
+whatever verdict is on disk at that moment rather than the one this tick read
+at the top, which may already be stale.
 
 A tick that throws sized nothing, so it has no verdict of its own to carry into
 the closing write it still makes to save per-repo progress. That write deletes
