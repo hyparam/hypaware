@@ -22,6 +22,17 @@ function makeStdout({ isTTY = false, columns = undefined } = {}) {
   }
 }
 
+const ERASE = /\x1b\[\d+A\r\x1b\[J/
+
+/**
+ * The spinner lines a TTY run drew, one per frame, without their newline.
+ *
+ * @param {string} text
+ */
+function spinnerLines(text) {
+  return text.split(ERASE).filter(Boolean).map((frame) => frame.split('\n').at(-2) ?? '')
+}
+
 test('withSpinner off a TTY prints the label once and nothing else', async () => {
   const stdout = makeStdout()
   const result = await withSpinner({ stdout, label: 'backfill claude: importing…', env: {} }, async () => 42)
@@ -36,7 +47,7 @@ test('withSpinner renders live status and keeps ETA visible on an 80-column term
     status = 'central: 5,000/12,000 rows (41%) | ETA ~14s'
     await new Promise((resolve) => setTimeout(resolve, 20))
   })
-  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  const frames = spinnerLines(stdout.text())
   assert.match(frames[frames.length - 1], /41%.*ETA ~14s$/)
   assert.ok(frames.every((frame) => [...frame].length < 80))
 })
@@ -53,23 +64,21 @@ test('withSpinner on a TTY animates in place and clears the line when done', asy
     await new Promise((resolve) => setTimeout(resolve, 30))
   })
   const text = stdout.text()
-  // Frames render the label behind a line-clearing carriage return, never a
-  // bare newline: the line is transient, so nothing it wrote survives it.
-  assert.match(text, /\r\x1b\[2K.* waiting/)
-  assert.doesNotMatch(text, /waiting\n/)
+  // Each frame after the first erases the one before it, in place.
+  assert.match(text, /\x1b\[1A\r\x1b\[J\S waiting\n/)
   // The last write is the clear, leaving a clean line for the caller.
-  assert.ok(text.endsWith('\r\x1b[2K'))
+  assert.ok(text.endsWith('\x1b[1A\r\x1b[J'))
 })
 
-// A frame wider than the terminal wraps, and `\x1b[2K` cannot erase the row
-// it wrapped from: the spinner would walk down the screen a row per frame.
+// A spinner line wider than the terminal would wrap and push the elapsed
+// counter onto a second row, so the line is clamped to one row.
 test('withSpinner keeps a long label inside the terminal width', async () => {
   const stdout = makeStdout({ isTTY: true, columns: 20 })
   const label = "Replaying 'claude-desktop' history to central-production..."
   await withSpinner({ stdout, label, env: {}, intervalMs: 5 }, async () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
   })
-  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  const frames = spinnerLines(stdout.text())
   // Without this the loop below asserts nothing when no frame was rendered.
   assert.ok(frames.length > 0)
   for (const frame of frames) {
@@ -84,7 +93,7 @@ test('withSpinner clamps at a degenerate terminal width', async () => {
   await withSpinner({ stdout, label: 'waiting for a long time', env: {}, intervalMs: 5 }, async () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
   })
-  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  const frames = spinnerLines(stdout.text())
   assert.ok(frames.length > 0)
   for (const frame of frames) {
     assert.ok(frame.length <= 1, `frame wider than the terminal: ${JSON.stringify(frame)}`)
@@ -99,7 +108,7 @@ test('withSpinner keeps the elapsed counter when it clamps', async () => {
   await withSpinner({ stdout, label, env: {}, intervalMs: 20 }, async () => {
     await new Promise((resolve) => setTimeout(resolve, 1100))
   })
-  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  const frames = spinnerLines(stdout.text())
   const last = frames[frames.length - 1]
   assert.match(last, /^\S Replaying.*… \(1s\)$/)
   assert.ok(last.length <= 23, `frame wider than the terminal: ${JSON.stringify(last)}`)
@@ -113,5 +122,20 @@ test('withSpinner clears the line and rethrows when the work fails', async () =>
     }),
     /boom/
   )
-  assert.ok(stdout.text().endsWith('\r\x1b[2K'))
+  assert.ok(stdout.text().endsWith('\x1b[1A\r\x1b[J'))
+})
+
+test('withSpinner draws its lines above the spinner and erases them with it', async () => {
+  const stdout = makeStdout({ isTTY: true, columns: 20 })
+  await withSpinner({ stdout, label: 'waiting', env: {}, above: ['visit:', `  ${'u'.repeat(30)}`] }, async () => {})
+  const text = stdout.text()
+  assert.ok(text.startsWith(`visit:\n  ${'u'.repeat(30)}\n`))
+  // One row for the heading, two for the wrapped URL, one for the spinner.
+  assert.ok(text.endsWith('\x1b[4A\r\x1b[J'))
+})
+
+test('withSpinner off a TTY prints its lines above once, before the label', async () => {
+  const stdout = makeStdout()
+  await withSpinner({ stdout, label: 'waiting', env: {}, above: ['visit:', '  url'] }, async () => {})
+  assert.equal(stdout.text(), 'visit:\n  url\nwaiting\n')
 })

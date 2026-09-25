@@ -146,11 +146,11 @@ test('compact shows a live waiting indication for the whole poll, then clears it
   await flow
   // And it is gone once the sign-in settles: the last write clears the line,
   // so whatever the lane prints next lands on a clean one.
-  assert.equal(chunks.at(-1), '\r\x1b[2K')
+  assert.match(String(chunks.at(-1)), /^\x1b\[1A\r\x1b\[J$/)
   // The opener boolean is best-effort (a launcher that exists but fails still
   // returns true), so the compact line phrases the open as an attempt rather
   // than asserting a browser is already up, matching the plain lane's wording.
-  assert.equal(chunks[0], 'Opening your browser to sign in; if it did not open, visit:\n')
+  assert.ok(chunks[0].startsWith('Opening your browser to sign in; if it did not open, visit:\n'))
   assert.deepEqual(printed, [], 'the lines it will erase are drawn on the stream that erases them')
 })
 
@@ -251,7 +251,7 @@ test('compact covers the token exchange with a second, differently worded phase'
 
   releaseToken()
   await flow
-  assert.equal(chunks.at(-1), '\r\x1b[2K', 'and the line is cleared once the session is in hand')
+  assert.equal(chunks.at(-1), '\x1b[1A\r\x1b[J', 'and the line is cleared once the session is in hand')
 })
 
 test('the plain lane names the exchange phase too', async () => {
@@ -283,12 +283,16 @@ test('compact erases the sign-in URL once the sign-in succeeds', async () => {
     stdout,
     env: {},
   })
-  // The heading fits one row; the indented URL wraps at 80 columns.
-  const urlRows = Math.ceil((chunks[1].length - 1) / 80)
-  assert.equal(chunks.at(-1), `\x1b[${1 + urlRows}A\r\x1b[J`)
+  // The poll's frame (heading, URL, spinner) is erased whole, wraps included,
+  // before the exchange's one-row spinner draws.
+  const [heading, url] = chunks[0].split('\n')
+  const rows = 1 + Math.ceil(url.length / 80) + 1
+  assert.ok(heading.startsWith('Opening your browser'))
+  assert.ok(chunks.some((chunk) => chunk.startsWith(`\x1b[${rows}A\r\x1b[J`)))
+  assert.equal(chunks.at(-1), '\x1b[1A\r\x1b[J')
 })
 
-test('compact leaves the sign-in URL up off an animating TTY', async () => {
+test('compact prints the sign-in URL once, and erases nothing, off an animating TTY', async () => {
   const { startPoller } = scriptedPoller()
   /** @type {string[]} */
   const chunks = []
@@ -304,4 +308,5 @@ test('compact leaves the sign-in URL up off an animating TTY', async () => {
     env: { HYP_NO_TUI: '1' },
   })
   assert.ok(!chunks.some((chunk) => chunk.includes('\x1b[J')))
+  assert.match(chunks.join(''), /^Opening your browser.*\n  https:.*\nWaiting for the sign-in/)
 })

@@ -58,14 +58,19 @@ region. Clearing a live region must never erase something the user agreed
 on the basis of. Lines that LLP 0387 requires to be adjacent are committed
 together, in order, so nothing can land between them.
 
-### One writer {#one-writer}
+### Nothing writes while the live region is up {#one-writer}
 
-Only the runtime writes to the terminal. Lanes that print today (the login
-lane, the attach wait, sync) report events instead: `url_ready`,
-`waiting`, `signed_in`, `failed`. The step's reducer turns events into
-state, and the runtime decides what that means on screen. A lane's
-standalone command (`hyp remote login` run directly) keeps its own plain
-printer over the same events.
+A live region is scoped: a prompt or a wait (`withSpinner`) owns it for its
+duration, draws everything that belongs to it (the menu, the spinner, the
+sign-in URL above the spinner), and clears it on the way out, error or not.
+Log lines are ordinary writes made between those scopes, when nothing is
+live. The invariant is that nothing else writes while a scope is open, so
+the rows the region counts are always the rows it drew.
+
+This is lighter than routing every lane through events and a reducer, and it
+is enough while each live element belongs to one wait or one prompt. Events
+earn their place when a step needs live content that outlasts a single
+wait, or two live elements at once.
 
 ### The live region is stdout only {#streams}
 
@@ -79,8 +84,7 @@ carries warnings and its death never does (#warnings).
 To show a warning, the runtime clears the live region, writes the warning
 to stderr, and redraws the live region below it. With stderr redirected,
 the warning goes to the file, the screen simply lacks it, and no row count
-is wrong. The interim `clearFallback` follows this: the compact login lane
-draws its fallback URL on stdout, the stream it later erases through.
+is wrong.
 
 ### Off an interactive terminal {#non-tty}
 
@@ -126,9 +130,11 @@ N rows, clear to end".
    (`src/core/cli/tui/live_region.js`: `draw(frame)` and `clear()`), and have
    the prompts use it. No behavior change. Committing lines to the log lands
    with its first user in step 2.
-2. Move the join lane first: the login lane emits events, the join step
-   renders the URL and spinner in the live region, and commits "Signed in".
-   Delete `clearFallback`.
+2. Build the spinner on the live region, with lines that live and die with
+   it (`above`), and draw the sign-in URL above the login wait. This moves
+   every live element of the join lane (the URL, and the sign-in, attach,
+   and org-config waits) onto the one mechanism, and deletes the interim
+   `clearFallback`.
 3. Move the remaining steps one at a time, largest print surface first.
 
 ## Known limits {#limits}
@@ -144,5 +150,5 @@ the live region and never changes what the log says.
 
 - `src/core/cli/tui/runtime.js` (the existing reducer/render/redraw loop)
 - `src/core/cli/spinner.js` (a single-row live element)
-- `src/core/remote/oidc_login.js` (`clearFallback`, the interim fix)
+- `src/core/remote/oidc_login.js` (the sign-in URL drawn above the wait)
 - Ink's `<Static>` component, for the log/live split

@@ -417,11 +417,12 @@ test('the pending preview animates on a TTY and clears before the plan', async (
   assert.equal(await runSync(['--dry-run'], ctx), 0)
 
   const text = stdout.text
-  assert.match(text, /\r\x1b\[2K\S Counting pending rows/, 'the preview wait animates')
-  // Transient: every frame is behind a line-clearing carriage return, and the
-  // plan renders after the last clear rather than under a leftover label.
-  assert.doesNotMatch(text, /Counting pending rows[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /hyp sync:/)
+  assert.match(text, /\S Counting pending rows/, 'the preview wait animates')
+  // Transient: the plan renders after the last erase rather than under a
+  // leftover label.
+  const after = text.split(/\x1b\[\d+A\r\x1b\[J/).pop() ?? ''
+  assert.doesNotMatch(after, /Counting pending rows/)
+  assert.match(after, /hyp sync:/)
 })
 
 test('the pending preview writes nothing off a TTY', async () => {
@@ -432,7 +433,7 @@ test('the pending preview writes nothing off a TTY', async () => {
   assert.equal(await runSync(['--dry-run'], ctx), 0)
 
   assert.doesNotMatch(stdout.text, /Counting pending rows/)
-  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
+  assert.doesNotMatch(stdout.text, /\x1b\[J/)
 })
 
 test('the --history preview animates per destination on a TTY', async () => {
@@ -443,9 +444,10 @@ test('the --history preview animates per destination on a TTY', async () => {
   assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
 
   const text = stdout.text
-  assert.match(text, /\r\x1b\[2K\S Counting retained 'claude' history on central/)
-  assert.doesNotMatch(text, /Counting retained[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /12 rows retained and eligible/)
+  assert.match(text, /\S Counting retained 'claude' history on central/)
+  const after = text.split(/\x1b\[\d+A\r\x1b\[J/).pop() ?? ''
+  assert.doesNotMatch(after, /Counting retained/)
+  assert.match(after, /12 rows retained and eligible/)
 })
 
 test('the --history preview writes nothing off a TTY', async () => {
@@ -456,7 +458,7 @@ test('the --history preview writes nothing off a TTY', async () => {
   assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
 
   assert.doesNotMatch(stdout.text, /Counting retained/)
-  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
+  assert.doesNotMatch(stdout.text, /\x1b\[J/)
 })
 
 // @ref LLP 0345#command [tests]: retained history has its own preview,

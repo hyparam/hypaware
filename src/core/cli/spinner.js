@@ -3,6 +3,7 @@
 import process from 'node:process'
 
 import { isTty } from './stdio.js'
+import { createLiveRegion } from './tui/live_region.js'
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
@@ -34,6 +35,13 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  * would be all a script ever saw of a delay only a person can perceive, and
  * where the elapsed time already reaches the structured log.
  *
+ * `above` is lines that belong to the wait and go when it does, drawn above
+ * the spinner (the sign-in URL over its poll). Off a TTY they are printed
+ * once, before the label.
+ *
+ * On a TTY the spinner is a live region (LLP 0435): each frame redraws the
+ * rows the last one took, and the end of the work erases them all.
+ *
  * The timer never outlives the work: errors clear the line and rethrow.
  *
  * @template T
@@ -44,25 +52,30 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  *   intervalMs?: number,
  *   quietWhenPlain?: boolean,
  *   status?: () => string,
+ *   above?: string[],
  * }} opts
  * @param {() => Promise<T>} work
  * @returns {Promise<T>}
  */
 export async function withSpinner(opts, work) {
-  const { stdout, label, env, intervalMs = 120, quietWhenPlain = false } = opts
+  const { stdout, label, env, intervalMs = 120, quietWhenPlain = false, above = [] } = opts
   const animate = isTty(stdout) && (env ?? process.env).HYP_NO_TUI !== '1'
   if (!animate) {
+    for (const line of above) stdout.write(`${line}\n`)
     if (!quietWhenPlain) stdout.write(`${label}\n`)
     return work()
   }
 
+  const region = createLiveRegion(stdout)
+  const prefix = above.map((line) => `${line}\n`).join('')
   const started = Date.now()
   let frame = 0
   const render = () => {
     const elapsed = Math.floor((Date.now() - started) / 1000)
     const suffix = opts.status ? ` ${opts.status()}` : elapsed >= 1 ? ` (${elapsed}s)` : ''
     const head = `${FRAMES[frame % FRAMES.length]} `
-    stdout.write(`\r\x1b[2K${clampToWidth(head, label, suffix, stdout)}`)
+    const columns = typeof stdout.columns === 'number' && stdout.columns > 0 ? stdout.columns : 80
+    region.draw(`${prefix}${clampToWidth(head, label, suffix, stdout)}\n`, columns)
     frame += 1
   }
   render()
@@ -71,20 +84,19 @@ export async function withSpinner(opts, work) {
     return await work()
   } finally {
     clearInterval(timer)
-    stdout.write('\r\x1b[2K')
+    region.clear()
   }
 }
 
 /**
- * Keep one frame to one terminal row.
+ * Keep the spinner line to one terminal row.
  *
- * `\x1b[2K` erases the row the cursor sits on and nothing above it, so a
- * frame wider than the terminal is unrecoverable: it wraps, the cursor ends
- * on the row below, the next frame clears only that row and wraps again, and
- * the spinner walks down the screen leaving a trail of half-erased labels
- * behind it. The wizard's labels are short enough to make that hard to
- * reach; `hyp sync` names a client and a destination in one label, which
- * wraps on any narrow pane.
+ * The live region counts wrapped rows, so a wide line no longer leaves a
+ * trail; but a wrapped spinner line jitters between one and two rows as the
+ * suffix grows, and on a narrow pane it pushes the suffix onto a second row.
+ * The wizard's labels are short enough to make that hard to reach; `hyp
+ * sync` names a client and a destination in one label, which wraps on any
+ * narrow pane.
  *
  * The label is what gives way first, never the tail. The animating frame and
  * the suffix are the whole signal this helper exists to show, and clamping the
