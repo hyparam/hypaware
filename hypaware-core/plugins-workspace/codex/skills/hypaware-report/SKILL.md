@@ -1,6 +1,6 @@
 ---
 name: hypaware-report
-description: Coordinate hypaware-analyst subagents to investigate local HypAware logs and produce a Markdown report using the server report workflow. Use for a local AI usage or workflow report over a reporting period.
+description: Delegate to the host's available worker type to investigate local HypAware logs and produce a Markdown report using the server report workflow. Use for a local AI usage or workflow report over a reporting period.
 ---
 
 # Local HypAware report
@@ -87,9 +87,10 @@ worker errors in the coordinator, then narrow or reassign within the budget.
 Use the server defaults as ceilings unless the user sets another budget:
 12 investigations delegated, 20 SQL queries per reader, 40 coordinator SQL
 queries, and 4 recommendation pages. These are ceilings, not overrides of the
-installed worker's own instructions: the existing `hypaware-analyst` targets
-at most 5 queries per task and stops on a query error. Size its assignments
-accordingly, and use the tighter applicable limit. Count failed queries and
+installed worker's own instructions: the shipped `hypaware-analyst` agent file
+is the source of truth for its per-task query limit and stop-on-error
+behavior, not this paragraph. Size its assignments accordingly, and use the
+tighter applicable limit. Count failed queries and
 reassignments too. Reserve time/context to write and review all pages. A
 resource refusal means simplify or split the query, not repeat it unchanged.
 If coverage cannot be completed within the budget, disclose the omitted dates
@@ -160,8 +161,12 @@ errors. Local generation remains useful when publishing is unavailable.
 
 ## Maintenance provenance
 
-Adapted from HypAware Server on 2026-09-24: `src/reports/prompts.js`,
-`agent-generator.js`, `tool-schemas.js`, and `time-skeleton.js`; LLPs 0139,
-0143, 0166, 0189, 0190, 0326, 0329, 0333, and 0476. These are maintainer
-references, not runtime dependencies. Preserve the analysis and review contract
-when updating; server HTML components and hosted evidence URLs do not apply.
+Adapted from the **HypAware Server** repository (a separate codebase from this
+one) on 2026-09-24: HypAware Server paths `src/reports/prompts.js`,
+`agent-generator.js`, `tool-schemas.js`, and `time-skeleton.js` (that repository's
+own tree, not this repository's `src/core/reports/`); HypAware Server LLPs 0139,
+0143, 0166, 0189, 0190, 0326, 0329, 0333, and 0476 (that repository's `llp/`
+numbering, not this repository's, where those numbers name unrelated documents).
+These are maintainer references into the server codebase, not runtime
+dependencies of this skill. Preserve the analysis and review contract when
+updating; server HTML components and hosted evidence URLs do not apply.

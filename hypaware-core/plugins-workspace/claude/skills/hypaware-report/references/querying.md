@@ -58,9 +58,10 @@ WHERE role = 'assistant'
   AND date >= '2026-08-01' AND date <= '2026-08-31'
 ```
 
-COALESCE every operand inside addition as well as the aggregate. OpenAI rows
-omit cache-write usage; adding it without COALESCE silently discards their
-cache-read usage. Missing usage is not proof that a response consumed no tokens.
+COALESCE every token sum: COALESCE every operand inside addition as well
+as the aggregate. OpenAI rows omit cache-write usage; adding it without
+COALESCE silently discards their cache-read usage. Missing usage is not
+proof that a response consumed no tokens.
 Reconcile per-day, per-model, and work-category totals to the same baseline.
 Distinct-session counts by day overlap when sessions span days; do not sum them
 to obtain period-wide distinct sessions.
@@ -72,10 +73,13 @@ CTEs, aggregates for counts, and LIMIT for text samples. Split large scans by
 date and combine additive figures; deduplicate session identifiers across
 partitions when counting distinct sessions. Avoid many concurrent heavy scans.
 
-`system_text`, `tools`, and `attributes` dominate decoded size. Avoid per-row
-string transforms, JSON serialization, or multi-key grouping on those wide
-values. Extract the needed JSON field first. Read ordinary text from
-`content_text`. A LIMIT bounds returned rows, not the cost of a scan or sort.
+Never GROUP BY / DISTINCT / row-fetch wide content columns (`cwd`,
+`content_text`) on the messages table at scale: that query shape kills
+servers. `system_text`, `tools`, and `attributes` also dominate decoded size.
+Avoid per-row string transforms, JSON serialization, or multi-key grouping on
+those wide values. Extract the needed JSON field first. Read ordinary text
+from `content_text`. A LIMIT bounds returned rows, not the cost of a scan or
+sort.
 
 The server prompt's conservative SQL subset uses `JSON_EXTRACT`, explicit
 aggregate aliases, and COALESCE. Do not assume DuckDB or BigQuery functions.

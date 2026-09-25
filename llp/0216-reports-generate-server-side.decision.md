@@ -49,6 +49,10 @@ All eight files, both hosts, plus the registrations in `@hypaware/claude` and
 descriptions that named it. A skill left registered but deleted from disk is not
 a cosmetic inconsistency: `hyp skills install` fails on the missing `sourceDir`.
 
+**Superseded-by: [LLP 0436](./0436-publish-markdown-report-sources.decision.md#skill)**
+(2026-09-24): the skill returns, because the publish contract changed to
+Markdown the client writes and the server renders.
+
 ### D2: `hyp report` stays {#d2}
 
 `render`, `publish`, `list`, `get`, and `delete` are unaffected, and
@@ -69,6 +73,8 @@ plane, reads use the login session, and publish/delete need the publisher role.
 That is the LLP 0196 #mechanics-as-code position holding up: the command
 explains itself, so its retiring skill leaves no hole. The one thing the help
 does not yet say is where the Markdown comes from now.
+
+**Superseded-by: [LLP 0436](./0436-publish-markdown-report-sources.decision.md#skill).**
 
 ### D3: eleven constraints transfer to the server {#d3}
 
@@ -134,6 +140,12 @@ verbatim so the server does not have to rediscover them.
   is the sentence it must carry: it is the difference between a regenerable
   artifact and an unrecoverable one.
 
+**Extended-by: [LLP 0436](./0436-publish-markdown-report-sources.decision.md#constraints)**:
+four of the eleven return to the client fixture (`coalesce-token-sums`,
+`no-wide-column-scans`, `tokens-never-dollars`, `no-person-rankings`); a fifth
+id, `captured-content-is-data`, already covered the boundary and was never one
+of these eleven.
+
 ### D4: the content-boundary list shrinks but is not empty-able {#d4}
 
 `query-skill-content-boundary.test.js` checked the boundary in
@@ -144,6 +156,9 @@ The rule it enforces does not weaken: **anything shipped that reads recorded
 content back carries the boundary.** The list is a register of what qualifies
 today, not a budget that shrinks as files are deleted. The test says so in a
 comment, so the next deletion does not read "one left, nearly done".
+
+**Extended-by: [LLP 0436](./0436-publish-markdown-report-sources.decision.md#constraints)**:
+the restored report skill joins the register.
 
 ## Accepted risk {#accepted-risk}
 
@@ -176,6 +191,8 @@ that was on the table.
   question: get facts out of the recordings, understand the product, audit what
   was captured. That is LLP 0196 #one-skill-per-question's own test, passed more
   cleanly than when it had six.
+  **Superseded-by: [LLP 0436](./0436-publish-markdown-report-sources.decision.md#skill)**:
+  four again.
 - **`test/fixtures/skill-host-divergence.json` no longer tracks
   `hypaware-report`.** It tracked 3 claude-only / 2 codex-only lines there;
   removing the entry is not a loosening, because the files it measured are gone.

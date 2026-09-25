@@ -108,14 +108,34 @@ export function skillLineSets(repoRoot, skill) {
  * `SKILL.md` would have reported the merged skill as perfectly in sync while its stage
  * files drifted freely, which is the exact failure this guard exists to prevent.
  *
+ * Recurses into subdirectories such as a skill's `references/` tree: `hypaware-report`
+ * ships one, and a one-level read left its prose invisible to this guard.
+ *
  * @param {string} skillDir
  * @returns {string}
  */
 function skillText(skillDir) {
-  return fs
-    .readdirSync(skillDir)
-    .filter((name) => name.endsWith('.md'))
+  return findMarkdownFiles(skillDir)
     .sort()
-    .map((name) => fs.readFileSync(path.join(skillDir, name), 'utf8'))
+    .map((relPath) => fs.readFileSync(path.join(skillDir, relPath), 'utf8'))
     .join('\n\n')
+}
+
+/**
+ * Markdown file paths under `dir`, relative to `dir`, found by walking
+ * subdirectories recursively.
+ *
+ * @param {string} dir
+ * @param {string} [relDir]
+ * @returns {string[]}
+ */
+function findMarkdownFiles(dir, relDir = '') {
+  /** @type {string[]} */
+  const found = []
+  for (const entry of fs.readdirSync(path.join(dir, relDir), { withFileTypes: true })) {
+    const rel = path.join(relDir, entry.name)
+    if (entry.isDirectory()) found.push(...findMarkdownFiles(dir, rel))
+    else if (entry.name.endsWith('.md')) found.push(rel)
+  }
+  return found
 }
