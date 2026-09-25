@@ -183,7 +183,7 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
   assert.match(
     stops,
     /no `gateway` entry in `"recorders"`/,
-    'and must stop when the recorder that captures this session was never addressed'
+    'and must stop when the gateway was never addressed'
   )
 
   // The stop list is a list of names; the bullets above it are what tell the
@@ -198,10 +198,22 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
     /- `"session_id_source"` is `codex_env_rollout`[\s\S]{0,400}means the verb resolved \*\*a different session\*\*[\s\S]{0,400}`hyp session unignore /,
     'the session_id_source bullet must say a wrong source resolved a different session, and how to undo it'
   )
+  // Issue #2162. `gateway` is not "the recorder that captures this session":
+  // `readCodexCaptureMode` returns `transcript` for anything but an explicit
+  // `gateway`, and in that mode the rollout sweep imports this session out of
+  // `~/.codex/sessions` while nothing reaches the gateway. So the pin spans the
+  // actionable clause, which holds in either capture mode, and rejects the
+  // apposition separately: an absence check alone passes on an emptied bullet,
+  // and the clause pin alone passes on a bullet that reasserts it.
   assert.match(
     prose,
-    /- `"recorders"` contains an entry for `gateway`, the recorder that captures this session\. A list without one means the gateway was never addressed\b/,
+    /- `"recorders"` contains an entry for `gateway`[\s\S]{0,240}A list without one means the gateway was never addressed\b/,
     'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
+  )
+  assert.doesNotMatch(
+    prose,
+    /entry for `gateway`, the recorder that captures this session/,
+    'and must not call the gateway the recorder that captures this session: on the default `transcript` capture_mode nothing reaches it'
   )
 })
 
