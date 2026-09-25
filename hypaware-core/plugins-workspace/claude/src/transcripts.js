@@ -686,7 +686,9 @@ export function indexTranscriptEntries(entries) {
  * agent thread, which is the predecessor the transcript backfill's own
  * expansion chains it to (the gateway keys its `previous_message_id` state by
  * `(thread, agent_id)`). `entries` is already timestamp-sorted, so one pass
- * carrying the last uuid per agent is enough. Roots are simply absent.
+ * carrying the last uuid per agent is enough. Roots are simply absent, and so
+ * is a line that never projects a row (see `projectsAMessage`): it is
+ * skipped entirely, so it neither receives a predecessor nor becomes one.
  *
  * @param {TranscriptEntry[]} entries
  * @returns {Map<string, string>}
@@ -697,13 +699,29 @@ function buildPreviousByUuid(entries) {
   /** @type {Map<string, string>} */
   const lastByAgent = new Map()
   for (const entry of entries) {
-    if (!entry.provider_uuid) continue
+    if (!entry.provider_uuid || !projectsAMessage(entry)) continue
     const scope = entry.agent_id ?? ''
     const previous = lastByAgent.get(scope)
     if (previous !== undefined) previousByUuid.set(entry.provider_uuid, previous)
     lastByAgent.set(scope, entry.provider_uuid)
   }
   return previousByUuid
+}
+
+/**
+ * Whether a line becomes an `ai_gateway_messages` row, and so advances the
+ * gateway's `previous_message_id` chain. The backfill expansion drops a
+ * roleless line and the gateway expansion drops an empty-content one, so a
+ * `system` / `summary` / snapshot line is neither a predecessor nor gets one.
+ * Emptiness mirrors `normalizeContent` without allocating its array.
+ *
+ * @param {TranscriptEntry} entry
+ */
+function projectsAMessage(entry) {
+  if (!entry.role) return false
+  const content = entry.content
+  if (typeof content === 'string') return content.length > 0
+  return Array.isArray(content) && content.length > 0
 }
 
 /**

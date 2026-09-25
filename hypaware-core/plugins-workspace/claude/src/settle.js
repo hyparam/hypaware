@@ -202,7 +202,8 @@ export function createClaudeSettlementEnricher(opts) {
                 // The transcript knows the predecessor in the new scope, and
                 // names the same line the backfill sweep chains this row to.
                 // @ref LLP 0439#relink-from-the-transcript [implements]: the
-                // scope change is what re-links the row, and the only thing that
+                // scope change is what re-links the row, and the only thing
+                // that does
                 if (stringValue(row.agent_id) !== agentBefore) {
                   const previous = index.previousUuid(match.provider_uuid)
                   row.previous_message_id = previous ? [previous] : []

@@ -813,7 +813,8 @@ test('a tool-id match with no transcript uuid falls through to the content-key m
 // the other agent's turns - or, once the predecessor settled too, naming a
 // fallback hash id no row carries any more. Issue #2150.
 // @ref LLP 0439#relink-from-the-transcript [tests]: a settled row that changed
-// agent scope links to its own agent's predecessor, the line the sweep chains it to.
+// agent scope links to its own agent's predecessor, the line the sweep chains
+// it to, and the two lanes must agree on that link even across a roleless line.
 test('settlement keeps each subagent thread\'s previous_message_id inside that agent', async () => {
   const env = await stageEnv()
   try {
@@ -831,16 +832,37 @@ test('settlement keeps each subagent thread\'s previous_message_id inside that a
     for (const agentId of ['a111111', 'a222222']) {
       const call = { ...TOOL_BLOCK, id: `toolu_${agentId}` }
       const result = { ...RESULT_BLOCK, tool_use_id: call.id }
+      // The two real lines that project a row (still the only ones the
+      // spooled body carries). A roleless line sits between them below, in
+      // the transcript only, to prove it neither receives a predecessor nor
+      // becomes one.
       const entries = [
         { role: 'assistant', content: [call], uuid: `${agentId}-call` },
         { role: 'user', content: [result], uuid: `${agentId}-result` },
       ]
-      await fs.writeFile(path.join(agentsDir, `agent-${agentId}.jsonl`), entries.map((entry, i) => JSON.stringify({
-        sessionId: SESSION, agentId, isSidechain: true, type: entry.role,
-        uuid: entry.uuid,
-        message: { role: entry.role, content: entry.content },
-        timestamp: `2026-09-05T22:36:5${4 + i}.000Z`,
-      })).join('\n') + '\n')
+      const transcriptLines = [
+        JSON.stringify({
+          sessionId: SESSION, agentId, isSidechain: true, type: 'assistant',
+          uuid: `${agentId}-call`,
+          message: { role: 'assistant', content: [call] },
+          timestamp: '2026-09-05T22:36:54.000Z',
+        }),
+        // A `system` line: no `message`, so no role, yet still uuid-bearing
+        // (a hook notice is a real example of this shape).
+        JSON.stringify({
+          sessionId: SESSION, agentId, isSidechain: true, type: 'system',
+          uuid: `${agentId}-system`,
+          content: 'hook ran',
+          timestamp: '2026-09-05T22:36:54.500Z',
+        }),
+        JSON.stringify({
+          sessionId: SESSION, agentId, isSidechain: true, type: 'user',
+          uuid: `${agentId}-result`,
+          message: { role: 'user', content: [result] },
+          timestamp: '2026-09-05T22:36:55.000Z',
+        }),
+      ]
+      await fs.writeFile(path.join(agentsDir, `agent-${agentId}.jsonl`), transcriptLines.join('\n') + '\n')
       await fs.writeFile(path.join(agentsDir, `agent-${agentId}.meta.json`), JSON.stringify({ toolUseId: `spawn_${agentId}` }))
       const bodyRef = await spoolBody(env.spoolDir, `chain-${agentId}.json`, {
         messages: entries.map(({ role, content }) => ({ role, content })),
@@ -864,6 +886,7 @@ test('settlement keeps each subagent thread\'s previous_message_id inside that a
     // Read against the agent_ids above: every link names a message of the
     // SAME agent, which is the chain the sweep writes for these lines (each
     // agent's opening turn is its thread root, its result follows its call).
+    // The `system` line between call and result must not appear here either.
     assert.deepEqual(
       settled.map((row) => [row.message_id, row.previous_message_id]),
       [
@@ -873,6 +896,16 @@ test('settlement keeps each subagent thread\'s previous_message_id inside that a
         ['a222222-result', ['a222222-call']],
       ],
       'a settled row must link to its own agent\'s predecessor, not the merged chain\'s'
+    )
+
+    // Two-lane agreement: the backfill sweep's own agent rows must chain to
+    // the same predecessor the settled OTEL rows do, roleless line included.
+    const backfilled = await backfillRows(env)
+    const agentRows = backfilled.filter((row) => row.agent_id)
+    assert.deepEqual(
+      settled.map((row) => [row.part_id, row.agent_id, row.previous_message_id]).sort(),
+      agentRows.map((row) => [row.part_id, row.agent_id, row.previous_message_id]).sort(),
+      'the OTEL relink and the backfill sweep must agree on previous_message_id'
     )
   } finally {
     await env.cleanup()
