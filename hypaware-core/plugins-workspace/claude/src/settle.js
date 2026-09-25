@@ -18,7 +18,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { SessionContextRecord, TranscriptEntry, TranscriptLoader } from './types.js'
+ * @import { SessionContextRecord, SettledIdRewrite, TranscriptEntry, TranscriptLoader } from './types.js'
  * @import { ResolveResult, UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -119,6 +119,10 @@ export function createClaudeSettlementEnricher(opts) {
 
       /** @type {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} */
       const out = rows.slice()
+      // Pre-settlement id -> where that row ended the pass, read by the relink
+      // pass below. Allocated only by a pass that rewrites an identity.
+      /** @type {Map<string, SettledIdRewrite> | undefined} */
+      let rewrittenIds
       for (const [sessionId, indices] of bySession) {
         // Transcript path is session-level (stable across a session's context
         // records), so the session-latest record is fine for the transcript
@@ -194,7 +198,21 @@ export function createClaudeSettlementEnricher(opts) {
                 : index.byContentKey.get(agentScopedKey(stringValue(row.agent_id), key))
               if (match && match.provider_uuid) {
                 const agentBefore = stringValue(row.agent_id)
+                const idBefore = stringValue(row.message_id)
                 row = upgradeRow(row, match, match === toolMatch)
+                // A row chained to `idBefore` now names an id no row carries.
+                // `previous` is the link this row was projected with, which is
+                // what a successor inherits when the upgrade above moved this
+                // row out of that successor's thread.
+                // @ref LLP 0440#successors-follow-the-rewrite [implements]: the
+                // rewrite invalidates a successor's link, scope change or not
+                if (idBefore && idBefore !== match.provider_uuid) {
+                  (rewrittenIds ??= new Map()).set(idBefore, {
+                    id: match.provider_uuid,
+                    agent: stringValue(row.agent_id),
+                    previous: rows[i].previous_message_id,
+                  })
+                }
                 // The chain was built at projection time over
                 // (thread, agent_id), so a row whose agent_id just moved holds
                 // a link computed in a scope it no longer belongs to: with two
@@ -255,6 +273,7 @@ export function createClaudeSettlementEnricher(opts) {
           out[i] = settled.row
         }
       }
+      if (rewrittenIds) relinkRewrittenPredecessors(out, rewrittenIds)
       return out
     },
   }
@@ -508,6 +527,86 @@ function upgradeRow(row, match, resolveAgent = false) {
     ? withToolUseResult(cleaned, match)
     : cleaned
   return upgraded
+}
+
+/**
+ * Point a settled row's `previous_message_id` at where its predecessor ended
+ * the pass, wherever the link still names the id that predecessor started it
+ * with.
+ *
+ * The gateway chained these rows at projection time, when a predecessor whose
+ * transcript line had not landed yet carried a fallback hash id. The identity
+ * upgrade above renames that predecessor to its native uuid, leaving the link
+ * naming an id no row carries, and settlement strips `claude.match_key` from
+ * both rows, which is the flag the LLP 0027 re-settle sweep selects on: without
+ * this the dangling pointer is permanent. LLP 0439 re-derives the link for a
+ * row whose OWN scope moved; this is the same repair seen from the other end,
+ * for the row whose PREDECESSOR moved or was renamed under it.
+ *
+ * @ref LLP 0440#batch-local [constrained-by]: only ids this pass rewrote are
+ * in hand, so a link into an earlier batch is out of reach and stays as it is
+ *
+ * @param {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} out
+ * @param {Map<string, SettledIdRewrite>} rewrittenIds
+ */
+function relinkRewrittenPredecessors(out, rewrittenIds) {
+  for (let i = 0; i < out.length; i++) {
+    const entry = out[i]
+    if (entry === USAGE_POLICY_DROP) continue
+    const row = /** @type {Record<string, unknown>} */ (entry)
+    const previous = row.previous_message_id
+    if (!Array.isArray(previous) || previous.length === 0) continue
+    const agent = stringValue(row.agent_id)
+    /** @type {unknown[] | undefined} */
+    let relinked
+    for (let j = 0; j < previous.length; j++) {
+      const id = previous[j]
+      const moved = typeof id === 'string' ? rewrittenIds.get(id) : undefined
+      if (!moved) continue
+      relinked ??= previous.slice()
+      relinked[j] = followRewrite(moved, agent, rewrittenIds)
+    }
+    // Copy only the rows that actually moved: an untouched row must stay the
+    // object the caller handed in, as every other pass here does. A predecessor
+    // that left the thread with nothing behind it drops out, leaving the empty
+    // array that says "earliest turn of this thread we know of".
+    if (relinked) {
+      out[i] = { ...row, previous_message_id: relinked.filter((id) => id !== undefined) }
+    }
+  }
+}
+
+/**
+ * Where a link into `moved` should point, for a row in agent thread `agent`.
+ *
+ * A predecessor still in the row's thread is simply renamed. One that settled
+ * into a DIFFERENT thread has left this chain, and following it would rebuild
+ * the cross-agent pointer LLP 0439 removed, so the row inherits that
+ * predecessor's own projection-time link instead: the merged chain is a list,
+ * and taking a node out of a list joins its neighbours. That neighbour may
+ * itself have moved, hence the walk, bounded by the map size so a cycle cannot
+ * spin. Links are 0- or 1-element (LLP 0026 #consequences), so `[0]` is the
+ * whole of one.
+ *
+ * @ref LLP 0440#successors-follow-the-rewrite [implements]: follow a renamed
+ * predecessor, splice past one that changed thread
+ *
+ * @param {SettledIdRewrite} moved
+ * @param {string | undefined} agent
+ * @param {Map<string, SettledIdRewrite>} rewrittenIds
+ * @returns {string | undefined}
+ */
+function followRewrite(moved, agent, rewrittenIds) {
+  let current = moved
+  for (let hops = rewrittenIds.size; hops > 0; hops--) {
+    if (current.agent === agent) return current.id
+    const prior = Array.isArray(current.previous) ? current.previous[0] : undefined
+    if (typeof prior !== 'string') return undefined
+    const next = rewrittenIds.get(prior)
+    if (!next) return prior
+    current = next
+  }
+  return undefined
 }
 
 /**
