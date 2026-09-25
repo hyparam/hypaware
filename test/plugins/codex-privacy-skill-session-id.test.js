@@ -286,12 +286,17 @@ test('Step 1 stops on a missing gateway entry only while the gateway is listenin
   )
   assert.match(
     crossCheck,
+    /leave the transcript lane as something this step has not settled/,
+    'the receipt cannot tell a durable recorder from an in-memory one, so the step must not report the transcript lane covered'
+  )
+  assert.match(
+    crossCheck,
     /`"name"` is `"ai-gateway"`/,
     'and the lookup must carry core own name fallback, or a snapshot that recorded no plugin reads as not listening while a port is bound'
   )
   assert.match(
     crossCheck,
-    /\{"running": false, "state": "unknown"\}/,
+    /"running": false[\s\S]{0,160}"state": "unknown"[\s\S]{0,200}not an unreadable shape/,
     'a daemon that never wrote a snapshot must be resolved explicitly: its missing `sources` key otherwise matches both the proceed clause and the fail-closed one'
   )
   assert.match(
