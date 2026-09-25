@@ -154,9 +154,13 @@ test('Step 1 reports the id as inferred and names persistence and the fork bound
  * read from its rollout) or `codex_rollout` (container inferred from a `cwd`
  * match) for a Codex session, and a `claude_env` here means the verb opted out
  * a Claude session sharing this shell while this one kept being recorded.
- * Codex reaches HypAware through `base_url`, so the recorder that captures it
- * is `gateway` (`resolveRecorderTargetsForCli`), where for a Claude session it
- * is the telemetry listener.
+ * Codex reaches HypAware through `base_url` only in `gateway` capture mode;
+ * on the default `transcript` mode nothing reaches the gateway and a rollout
+ * sweep imports the session instead. `resolveRecorderTargetsForCli` still
+ * names `gateway` as the entry to read in either mode, because its control
+ * route writes the shared session-ignore store before it answers and the
+ * sweep reloads that same store at the start of every run. For a Claude
+ * session it is the telemetry listener.
  *
  * The checks are pinned inside the stop paragraph rather than anywhere in
  * Step 1, because a reading the agent is not told to stop on is commentary.
@@ -183,7 +187,7 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
   assert.match(
     stops,
     /no `gateway` entry in `"recorders"`/,
-    'and must stop when the recorder that captures this session was never addressed'
+    'and must stop when the gateway was never addressed'
   )
 
   // The stop list is a list of names; the bullets above it are what tell the
@@ -198,10 +202,26 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
     /- `"session_id_source"` is `codex_env_rollout`[\s\S]{0,400}means the verb resolved \*\*a different session\*\*[\s\S]{0,400}`hyp session unignore /,
     'the session_id_source bullet must say a wrong source resolved a different session, and how to undo it'
   )
+  // Issue #2162. `gateway` is not "the recorder that captures this session":
+  // `readCodexCaptureMode` returns `transcript` for anything but an explicit
+  // `gateway`, and in that mode the rollout sweep imports this session out of
+  // `~/.codex/sessions` while nothing reaches the gateway. So the pin spans the
+  // actionable clause, which holds in either capture mode, and rejects the
+  // apposition separately: an absence check alone passes on an emptied bullet,
+  // and the clause pin alone passes on a bullet that reasserts it.
   assert.match(
     prose,
-    /- `"recorders"` contains an entry for `gateway`, the recorder that captures this session\. A list without one means the gateway was never addressed\b/,
+    /- `"recorders"` contains an entry for `gateway`[\s\S]{0,240}A list without one means the gateway was never addressed\b/,
     'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
+  )
+  // The pin is on the claim, not on its position or its punctuation: it
+  // fires anywhere in Step 1, however the apposition is joined. It is still a
+  // literal, so another verb form of the same claim ("the recorder capturing
+  // this session") is not covered; that gap is issue #2167.
+  assert.doesNotMatch(
+    prose,
+    /recorder that captures this session/,
+    'and must not describe gateway as the recorder that captures this session, anywhere in Step 1 and however it is punctuated: on the default `transcript` capture_mode nothing reaches it'
   )
 })
 
