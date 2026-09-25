@@ -175,16 +175,29 @@ test('wide frontiers cross query batches without losing reachability or fetching
   assert.equal(payload.length, 1, 'evidence is fetched only for the returned neighbor')
 })
 
-test('the shared deadline rejects a late read before starting another hop', async t => {
+test('the shared deadline allows traversal within thirty seconds', async t => {
+  const fixture = memoryGraph()
+  const started = Date.now()
+  let now = started
+  t.mock.method(Date, 'now', () => now)
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    if (name === 'edge') now = started + 29_999
+    return get(name)
+  })
+  assert.equal(ok(await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })).reachable, 5)
+})
+
+test('the shared deadline rejects a read at thirty seconds before starting another hop', async t => {
   const fixture = memoryGraph()
   let now = Date.now()
   t.mock.method(Date, 'now', () => now)
   const get = fixture.query.getDataset
   t.mock.method(fixture.query, 'getDataset', name => {
-    if (name === 'edge') now += 5001
+    if (name === 'edge') now += 30_000
     return get(name)
   })
-  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1', depth: 3 }), /five-second time budget/)
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1', depth: 3 }), /thirty-second time budget/)
   assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 1)
 })
 

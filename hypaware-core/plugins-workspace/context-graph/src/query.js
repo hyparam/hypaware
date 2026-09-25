@@ -140,8 +140,8 @@ export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direct
  */
 export async function queryNeighbors({ query, storage, config, seed, depth = 1, edgeTypes = [], direction = 'both', limit = Infinity, type, callerCwd, includeLocalOnly }) {
   return withSpan('graph.neighbors', { [Attr.COMPONENT]: 'query', [Attr.OPERATION]: 'graph.neighbors', depth, direction, status: 'ok' }, async span => {
-    const visibility = { callerCwd: callerCwd ?? null, includeLocalOnly: includeLocalOnly === true, signal: AbortSignal.timeout(5000) }
-    const deadline = Date.now() + 5000
+    const visibility = { callerCwd: callerCwd ?? null, includeLocalOnly: includeLocalOnly === true, signal: AbortSignal.timeout(30_000) }
+    const deadline = Date.now() + 30_000
     const counts = { node: 0, edge: 0 }
     let payloadBytes = 0
     let queries = 0
@@ -158,7 +158,7 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       visibility.signal.throwIfAborted()
       // A warm in-memory source can keep the event loop busy beyond a timer's
       // deadline. Check elapsed time too, including while processing results.
-      if (Date.now() >= deadline) throw new Error('graph traversal exceeded its five-second time budget')
+      if (Date.now() >= deadline) throw new Error('graph traversal exceeded its thirty-second time budget')
     }
     /** @param {string} value */
     const quote = value => `'${value.replace(/'/g, "''")}'`
