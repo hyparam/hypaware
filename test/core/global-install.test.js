@@ -151,8 +151,9 @@ test('isEphemeralRecordedBinPath adds the vanished-tree arm without reading an u
   await write(path.join(unreadable, 'package.json'))
   const unreadableBin = path.join(unreadable, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
   await write(unreadableBin)
-  if (process.getuid?.() === 0) {
-    // root bypasses the permission bits, so chmod 0o000 proves nothing here.
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    // root bypasses the permission bits, and win32 does not enforce them on
+    // directories, so chmod 0o000 proves nothing on either.
   } else {
     await fs.chmod(unreadable, 0o000)
     try {

@@ -248,9 +248,12 @@ function isEphemeralTreePath(binPath, env, vanishedTreeIsEphemeral) {
   } catch (err) {
     // Absent, not unreadable. `existsSync` collapses every error to `false`,
     // so without this an intact tree whose root is merely unreadable (a
-    // checkout under macOS TCC, a stalled network mount) would read
-    // ephemeral, which is the one direction LLP 0434 does not license and
-    // the opposite of the fail-safe the live predicate keeps.
+    // checkout under macOS TCC, a stalled network mount) would read ephemeral.
+    // LLP 0434#rule licenses this arm only for a confirmed-gone tree; an
+    // unreadable tree is not known-gone, since a denied-search directory
+    // returns EACCES for any child stat, never ENOENT. The residual cost LLP
+    // 0434#cost leaves open: a tree truly deleted under an unreadable ancestor
+    // still reads durable here.
     if (!vanishedTreeIsEphemeral) return false
     if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') return false
     return !existsSync(tree)
