@@ -109,7 +109,7 @@ test('sync threads acknowledged progress through the driver to the terminal', as
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
   assert.equal(await runSync(['--yes'], ctx), 0)
   assert.match(stdout.text, /central: 123 rows sent/)
-  assert.match(stdout.text, /central: exported/)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n/)
   await fs.rm(hypHome, { recursive: true, force: true })
 })
 
@@ -364,7 +364,7 @@ test('confirming during the review window ends it and exports', async () => {
   assert.equal(code, 0)
   assert.equal(sink.exported.length, 1, 'a confirmed sync exports')
   assert.equal(await holdExists(hypHome), false, 'the marker is cleared, not merely bypassed')
-  assert.match(stdout.text, /central: exported/)
+  assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n/)
 })
 
 test('the held prompt states the deadline and the way out', async () => {
@@ -384,9 +384,8 @@ test('the held prompt states the deadline and the way out', async () => {
   // calls "the latest the first sync can happen, not the earliest". Scheduling
   // it directly above a prompt whose bare enter sends now tells the reader the
   // opposite of what enter does.
-  assert.match(text, /Your logs upload by .*, or now if you say yes/)
-  assert.match(text, /hypaware-privacy skill/)
-  assert.match(text, /hyp privacy`/)
+  assert.match(text, /^Ready to upload to hypaware\.example\.com .*\(automatic by [^)]+\)\.\n/m)
+  assert.match(text, /To exclude anything first, use `hyp privacy` or the `\/hypaware-privacy` skill\./)
 })
 
 test('--dry-run prints the plan, exports nothing, and keeps the window open', async () => {
@@ -417,11 +416,12 @@ test('the pending preview animates on a TTY and clears before the plan', async (
   assert.equal(await runSync(['--dry-run'], ctx), 0)
 
   const text = stdout.text
-  assert.match(text, /\r\x1b\[2K\S Counting pending rows/, 'the preview wait animates')
-  // Transient: every frame is behind a line-clearing carriage return, and the
-  // plan renders after the last clear rather than under a leftover label.
-  assert.doesNotMatch(text, /Counting pending rows[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /hyp sync:/)
+  assert.match(text, /\S Counting pending rows/, 'the preview wait animates')
+  // Transient: the plan renders after the last erase rather than under a
+  // leftover label.
+  const after = text.split(/\x1b\[\d+A\r\x1b\[J/).pop() ?? ''
+  assert.doesNotMatch(after, /Counting pending rows/)
+  assert.match(after, /^Ready to upload to hypaware\.example\.com/)
 })
 
 test('the pending preview writes nothing off a TTY', async () => {
@@ -432,7 +432,7 @@ test('the pending preview writes nothing off a TTY', async () => {
   assert.equal(await runSync(['--dry-run'], ctx), 0)
 
   assert.doesNotMatch(stdout.text, /Counting pending rows/)
-  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
+  assert.doesNotMatch(stdout.text, /\x1b\[J/)
 })
 
 test('the --history preview animates per destination on a TTY', async () => {
@@ -443,9 +443,10 @@ test('the --history preview animates per destination on a TTY', async () => {
   assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
 
   const text = stdout.text
-  assert.match(text, /\r\x1b\[2K\S Counting retained 'claude' history on central/)
-  assert.doesNotMatch(text, /Counting retained[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /12 rows retained and eligible/)
+  assert.match(text, /\S Counting retained 'claude' history on central/)
+  const after = text.split(/\x1b\[\d+A\r\x1b\[J/).pop() ?? ''
+  assert.doesNotMatch(after, /Counting retained/)
+  assert.match(after, /12 rows retained and eligible/)
 })
 
 test('the --history preview writes nothing off a TTY', async () => {
@@ -456,7 +457,7 @@ test('the --history preview writes nothing off a TTY', async () => {
   assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
 
   assert.doesNotMatch(stdout.text, /Counting retained/)
-  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
+  assert.doesNotMatch(stdout.text, /\x1b\[J/)
 })
 
 // @ref LLP 0345#command [tests]: retained history has its own preview,
@@ -647,13 +648,13 @@ test('a sharing plan shows upload targets without counting the accompanying file
   await runSync(['--dry-run'], ctx)
 
   const text = stdout.text
-  // A server is named, never spelled as a URL a terminal would autolink
-  // (LLP 0100 R1a's reason, applied to this surface).
-  assert.match(text, /central\s+the 'prod' server\n/)
+  // A server is named by its host, never spelled as a URL a terminal would
+  // autolink (LLP 0100 R1a's reason, applied to this surface; LLP 0437
+  // #server-name).
+  assert.match(text, /^Ready to upload to hypaware\.example\.com[ .]/m)
   assert.doesNotMatch(text, /https:\/\//)
-  assert.match(text, /\(run 'hyp remote list' to see server URLs\)/)
   assert.doesNotMatch(text, /parquet|\/home\/u\/exports|destinations|leaves this machine|stays on this machine|local-only/)
-  assert.match(text, /mystery\s+@hypaware\/fake\n/)
+  assert.match(text, /^Ready to export to @hypaware\/fake[ .]/m)
 })
 
 test('a sharing plan names the built-in target for a sink saved under its previous host', async () => {
@@ -666,7 +667,7 @@ test('a sharing plan names the built-in target for a sink saved under its previo
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /central\s+the 'hyperparam' server\n/)
+  assert.match(stdout.text, /^Ready to upload to HypAware Cloud[ .]/m)
   assert.doesNotMatch(stdout.text, /hypaware\.hyperparam\.app|api\.hypaware\.ai/)
 })
 
@@ -689,7 +690,7 @@ test('sharing shows only upload progress and results but still writes the file c
     })
     assert.equal(await runSync([], ctx), 0)
     assert.match(stdout.text, /central: 123 rows sent/)
-    assert.match(stdout.text, /central: exported/)
+    assert.match(stdout.text, /✓ Uploaded to hypaware\.example\.com\n/)
     // `Preparing upload` alone cannot tell the two orders apart: the spinner
     // renders its first frame before the tick starts, so that line is on
     // screen in both. What distinguishes them is `Finishing`, which only a
@@ -751,7 +752,7 @@ test('a failed accompanying copy remains visible and fails the command', async (
     ],
   })
   assert.equal(await runSync(['--yes'], ctx), 1)
-  assert.match(stdout.text, /archive-copy: failed/)
+  assert.match(stdout.text, /^Could not send to \/home\/u\/exports/m)
   await fs.rm(hypHome, { recursive: true, force: true })
 })
 
@@ -761,8 +762,8 @@ test('a file-only sync still names its target and reports its result', async () 
     hypHome, sinks: [fakeSink('archive', { dir: '/home/u/exports' })],
   })
   assert.equal(await runSync(['--yes'], ctx), 0)
-  assert.match(stdout.text, /archive\s+\/home\/u\/exports/)
-  assert.match(stdout.text, /archive: exported/)
+  assert.match(stdout.text, /^Ready to export to \/home\/u\/exports[ .]/m)
+  assert.match(stdout.text, /^✓ Exported to \/home\/u\/exports\n/m)
   await fs.rm(hypHome, { recursive: true, force: true })
 })
 
@@ -777,7 +778,7 @@ test('an unnamed server falls back to its host, still not a linkifiable URL', as
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /central\s+elsewhere\.example\.com\n/)
+  assert.match(stdout.text, /^Ready to upload to elsewhere\.example\.com[ .]/m)
   assert.doesNotMatch(stdout.text, /https:\/\//)
 })
 
@@ -896,7 +897,7 @@ test('the plan counts the directories being withheld', async () => {
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /excluded: 3 directories/)
+  assert.match(stdout.text, /^Excluded: 3 directories\n/m)
 })
 
 test('the plan names the clients kept local-only (LLP 0188 #never-silent)', async () => {
@@ -916,7 +917,7 @@ test('the plan names the clients kept local-only (LLP 0188 #never-silent)', asyn
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /excluded clients: hermes · openclaw/)
+  assert.match(stdout.text, /^Excluded: hermes, openclaw\n/m)
   assert.doesNotMatch(stdout.text, /no directories or clients are marked/)
 })
 
@@ -1058,5 +1059,5 @@ test('a failed export reports a nonzero exit', async () => {
   const code = await runSync(['--yes'], ctx)
 
   assert.equal(code, 1)
-  assert.match(stdout.text, /parquet: failed/)
+  assert.match(stdout.text, /^Could not send to \/home\/u\/exports/m)
 })

@@ -22,6 +22,8 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { queuedLineAsker } from './line_asker.js'
 import { withSpinner } from './spinner.js'
+import { joinNames } from './wizard/express.js'
+import { groupThousands } from '../util/format_number.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -1547,8 +1549,9 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   skipAttachClients?: Set<string>,
- *   progress?: string,
+ *   clientLabels?: Map<string, string>,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   daemonService?: {
  *     restartServiceDaemon: typeof restartServiceDaemonFn,
@@ -1566,13 +1569,9 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
-  // Like the join lane, the finale is one step made of several actions
-  // (install, attach, assets, backfill consent, restart), so it states its
-  // position once where the lane starts rather than per action. Only the
-  // wizard sets this; `runPickerWalkthrough` and non-interactive runs leave
-  // it unset and the line is not printed.
-  // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
-  if (args.progress) stdout.write(`${args.progress}\n`)
+  // Each act is reported in one line, by the names the user picked from
+  // (LLP 0437 #finish).
+  const label = (/** @type {string} */ client) => args.clientLabels?.get(client) ?? client
   // `?? ''`, not os.homedir(): '' is the "no home, stay inert" sentinel this
   // whole finale keys on - the materialize/prune guards, the attach probe,
   // and the conditional homeDir spreads below all read it as "write
@@ -1782,14 +1781,30 @@ export async function runPickerFinale(args) {
       // way the reconciler's attach action calls it.
       const attachEndpoint = adapter.requiresEndpoint === false ? undefined : endpoint
       try {
+        // The adapter's own report names files and capture modes; the
+        // finale says the one thing the user acts on instead. A dry run
+        // keeps the report: the files it would touch are what it is for.
+        let report = ''
         await adapter.attach({
           ...(attachEndpoint ? { endpoint: attachEndpoint } : {}),
           config: {},
-          stdout,
+          stdout: dryRun ? stdout : { write: (/** @type {string} */ chunk) => { report += chunk; return true } },
           stderr,
           dryRun,
         })
-        summary.attach.push({ client, dryRun, ok: true })
+        if (dryRun) {
+          summary.attach.push({ client, dryRun, ok: true })
+        } else {
+          const outcome = attachReportOutcome(report)
+          summary.attach.push({ client, dryRun, ok: outcome.applied })
+          const name = label(client)
+          if (outcome.applied) {
+            stdout.write(outcome.restart
+              ? `✓ ${name} attached\n`
+              : `✓ ${name} attached (restart open ${name} sessions to start recording)\n`)
+          }
+          for (const line of outcome.kept) stdout.write(`${line}\n`)
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         stderr.write(`attach ${client} failed: ${message}\n`)
@@ -1818,11 +1833,10 @@ export async function runPickerFinale(args) {
         status: 'ok',
       },
       async (span) => {
-        const framed = framedStream(stdout)
         // No `stdout` here on purpose: the materializer's per-copy line is the
         // right output for `hyp skills install`, where the copies are the
         // command's subject, but in the finale a dozen path lines bury the one
-        // fact the step reports. The counts go out instead; the paths stay
+        // fact the step reports. One line goes out instead; the paths stay
         // available in the run summary and the span.
         //
         // Withholding the stream is exactly why the removals have to come back
@@ -1845,7 +1859,7 @@ export async function runPickerFinale(args) {
           dryRun,
           stderr,
         })
-        for (const line of clientAssetCountLines(installed, pruned, dryRun)) framed.write(`${line}\n`)
+        for (const line of clientAssetLines(installed, pruned, dryRun, label)) stdout.write(`${line}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -1856,8 +1870,7 @@ export async function runPickerFinale(args) {
           if (item.kind === 'skill') summary.skillsInstalled.push(entry)
           else summary.agentsInstalled.push(entry)
         }
-        // Trailing blank line so the next step (backfill prompt) stands apart.
-        if (framed.wrote()) stdout.write('\n')
+
         if (span && typeof span.setAttribute === 'function') {
           span.setAttribute('installed_count', installed.length)
         }
@@ -1875,6 +1888,7 @@ export async function runPickerFinale(args) {
     ...(args.backfill ? { backfill: args.backfill } : {}),
     ...(args.backfillConsentPrompt ? { backfillConsentPrompt: args.backfillConsentPrompt } : {}),
     ...(args.checkBoundary ? { checkBoundary: args.checkBoundary } : {}),
+    ...(args.autoAccept ? { autoAccept: true } : {}),
     clientsPicked,
     interactive: args.interactive,
     dryRun,
@@ -1885,6 +1899,7 @@ export async function runPickerFinale(args) {
     stderr,
     env,
     summary,
+    label,
   })
 
   // Re-running the picker regenerates the config from the picks alone, so a
@@ -2105,6 +2120,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   clientsPicked: string[],
  *   interactive: boolean,
  *   dryRun: boolean,
@@ -2115,11 +2131,13 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   env: NodeJS.ProcessEnv,
  *   summary: FinaleSummary,
+ *   label?: (client: string) => string,
  * }} args
  * @returns {Promise<void>}
  */
 async function runFinaleBackfill(args) {
   const { backfill, clientsPicked, interactive, dryRun, retentionDays, until, stdout, stderr, env, summary } = args
+  const label = args.label ?? ((/** @type {string} */ client) => client)
   if (!backfill) return
   const available = new Set(backfill.available)
   const providers = clientsPicked.filter((c) => available.has(c))
@@ -2139,7 +2157,9 @@ async function runFinaleBackfill(args) {
   // places: a decline was read and answered, while this one was never
   // asked and its own "skipped" line goes to the stream that just died.
   let surfaceDead = false
-  if (interactive && asked.length > 0) {
+  // An express accept already said yes to the import (LLP 0201 #finale-import), so
+  // it runs as a scripted run's does, with no question to open.
+  if (interactive && !args.autoAccept && asked.length > 0) {
     // The last consent question in the run, and the only one inside the
     // finale: the install, the attach, and the asset copy above it have
     // each narrated first, so the surface can die between the caller's
@@ -2178,6 +2198,7 @@ async function runFinaleBackfill(args) {
       providers: providers.join(','),
       dry_run: dryRun,
       interactive,
+      auto_accept: args.autoAccept === true,
       consent,
       consent_cancelled: cancelled,
       consent_surface_dead: surfaceDead,
@@ -2249,14 +2270,26 @@ async function runFinaleBackfill(args) {
           // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
           const entry = await withSpinner(
-            { stdout, env, label: `${startTag}backfill ${provider}: importing history…` },
+            {
+              stdout,
+              env,
+              label: `${startTag}Importing ${label(provider)} history…`,
+            },
             () => backfill.run({ provider, dryRun, retentionDays, until })
           )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
-          // The counts matter when something was imported or went wrong;
-          // a clean zero is one short line, not a scan report.
-          stdout.write(`${tag}backfill ${entry.provider}: ${describeBackfillResult(entry)}\n`)
+          // Only an import that wrote rows or failed is news; a zero means
+          // there was nothing to do, and the scan counts go to the span.
+          // @ref LLP 0437#finish [implements]: an import reports only what it imported or a failure
+          if (!entry.ok) {
+            stdout.write(`${tag}${label(provider)} import ${describeBackfillResult(entry)}\n`)
+          } else if (entry.rowsWritten > 0) {
+            const rows = entry.rowsWritten === 1 ? 'row' : 'rows'
+            stdout.write(entry.dryRun
+              ? `(dry-run) would import ${groupThousands(entry.rowsWritten)} ${rows} of ${label(provider)} history\n`
+              : `✓ Imported ${groupThousands(entry.rowsWritten)} ${rows} of ${label(provider)} history\n`)
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           // Guarded for the same reason the dead-surface notice above is,
@@ -2522,58 +2555,40 @@ export async function buildWalkthroughClientDescriptorMap() {
 }
 
 /**
- * One line per client naming how many skills and agents landed there, plus one
- * naming how many retired ones were taken off the machine, in the order the
- * copies were made.
+ * One line naming the clients that got skills (and agents), and one per
+ * client naming how many retired ones were taken off the machine. The
+ * install counts are left out: they describe our packaging, not anything
+ * the user chose. The removals keep their count, since the materializer's
+ * own stream is withheld here and a deletion must still be said.
  *
- * Counted per client rather than summed across them, because the sum is the
- * one number that is true of nobody: six skills copied to two clients is
- * twelve copies, and neither client got twelve. Names are left out entirely -
- * the user picked these clients a screen ago and did not choose the assets,
- * so the roster is not a decision they are being shown for review.
- *
- * The removals get a count and not the paths, unlike everywhere else, for that
- * same reason: this is a step summary in a wizard, and it is the *fact* of a
- * deletion the user needs at this moment, not a roster. What was removed stays
- * on the span and in `client_assets.pruned`.
- *
+ * @ref LLP 0219#automatic-not-gated [implements]: the finale counts its removals out loud rather than reporting them down a stream it withholds
  * @param {ClientAssetInstall[]} installed
  * @param {ClientAssetRemoval[]} pruned
  * @param {boolean} dryRun
+ * @param {(client: string) => string} label
  * @returns {string[]}
  */
-function clientAssetCountLines(installed, pruned, dryRun) {
-  /** @type {Map<string, { skills: number, agents: number, removedSkills: number, removedAgents: number }>} */
-  const byClient = new Map()
-  /** @param {string} client */
-  const counts = (client) => {
-    let entry = byClient.get(client)
-    if (!entry) byClient.set(client, (entry = { skills: 0, agents: 0, removedSkills: 0, removedAgents: 0 }))
-    return entry
+function clientAssetLines(installed, pruned, dryRun, label) {
+  /** @type {string[]} */
+  const lines = []
+  if (installed.length > 0) {
+    const clients = [...new Set(installed.map((i) => label(i.client)))]
+    const what = installed.some((i) => i.kind === 'agent') ? 'skills and agents' : 'skills'
+    lines.push(`${dryRun ? '(dry-run) would install' : '✓ Installed'} ${what} for ${joinNames(clients)}`)
   }
-  for (const item of installed) {
-    const entry = counts(item.client)
+  /** @type {Map<string, { skills: number, agents: number }>} */
+  const removed = new Map()
+  for (const item of pruned) {
+    let entry = removed.get(item.client)
+    if (!entry) removed.set(item.client, (entry = { skills: 0, agents: 0 }))
     if (item.kind === 'skill') entry.skills += 1
     else entry.agents += 1
   }
-  for (const item of pruned) {
-    const entry = counts(item.client)
-    if (item.kind === 'skill') entry.removedSkills += 1
-    else entry.removedAgents += 1
-  }
-  const installVerb = dryRun ? '(dry-run) would install' : 'installed'
-  const removeVerb = dryRun ? '(dry-run) would remove' : 'removed'
-  /** @type {string[]} */
-  const lines = []
-  for (const [client, entry] of byClient) {
-    const landed = []
-    if (entry.skills > 0) landed.push(plural(entry.skills, 'skill'))
-    if (entry.agents > 0) landed.push(plural(entry.agents, 'agent'))
-    if (landed.length > 0) lines.push(`${installVerb} ${landed.join(' and ')} for ${client}`)
+  for (const [client, entry] of removed) {
     const gone = []
-    if (entry.removedSkills > 0) gone.push(plural(entry.removedSkills, 'retired skill'))
-    if (entry.removedAgents > 0) gone.push(plural(entry.removedAgents, 'retired agent'))
-    if (gone.length > 0) lines.push(`${removeVerb} ${gone.join(' and ')} for ${client}`)
+    if (entry.skills > 0) gone.push(plural(entry.skills, 'retired skill'))
+    if (entry.agents > 0) gone.push(plural(entry.agents, 'retired agent'))
+    lines.push(`${dryRun ? '(dry-run) would remove' : 'Removed'} ${gone.join(' and ')} for ${label(client)}`)
   }
   return lines
 }
@@ -2588,26 +2603,33 @@ function plural(count, noun) {
 }
 
 /**
- * Wrap a finale stream so the first write is preceded by a blank line,
- * separating this step's output from the previous step's. A step that turns
- * out to print nothing (no assets matched the picked clients) leaves no empty
- * gap behind, which a plain leading `write('\n')` would.
+ * What the finale keeps from an adapter's attach report, which it otherwise
+ * withholds. The adapter contract returns nothing, so the report is the only
+ * signal: a line opening with `!` at column 0 says the attach did not apply,
+ * an indented `!` line is a warning on one that did, and a line opening with
+ * `restart` is the adapter's own next step, which replaces the finale's
+ * generic one. Those lines are kept verbatim; the rest (paths, settings
+ * values) stays withheld.
  *
- * @param {{ write(chunk: string): unknown }} stdout
- * @returns {{ write(chunk: string): unknown, wrote(): boolean }}
+ * @param {string} report
+ * @returns {{ applied: boolean, restart: boolean, kept: string[] }}
  */
-function framedStream(stdout) {
-  let wrote = false
-  return {
-    write(chunk) {
-      if (!wrote) {
-        stdout.write('\n')
-        wrote = true
-      }
-      return stdout.write(chunk)
-    },
-    wrote() { return wrote },
+export function attachReportOutcome(report) {
+  let applied = true
+  let restart = false
+  /** @type {string[]} */
+  const kept = []
+  for (const line of report.split('\n')) {
+    const text = line.trim()
+    if (text.startsWith('!')) {
+      if (line.startsWith('!')) applied = false
+      kept.push(line)
+    } else if (/^restart\b/i.test(text)) {
+      restart = true
+      kept.push(line)
+    }
   }
+  return { applied, restart, kept }
 }
 
 /**

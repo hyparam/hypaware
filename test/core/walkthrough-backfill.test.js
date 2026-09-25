@@ -99,7 +99,10 @@ test('onboarding with claude selected runs the backfill step and records stats',
   assert.deepEqual(result.finale?.backfill, [
     { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 1 },
   ])
-  assert.match(stdout.text(), /backfill claude: imported 5 rows \(scanned 3, skipped 1\)/)
+  // An import that wrote rows is one line; the scan counts stay in the
+  // summary above (LLP 0437 #finish).
+  assert.match(stdout.text(), /^✓ Imported 5 rows of claude history$/m)
+  assert.doesNotMatch(stdout.text(), /scanned/)
 })
 
 test('--dry-run onboarding includes the backfill plan but writes nothing', async () => {
@@ -127,9 +130,10 @@ test('--dry-run onboarding includes the backfill plan but writes nothing', async
   assert.equal(result.finale?.backfill[0].dryRun, true)
   assert.equal(result.finale?.backfill[0].rowsWritten, 0)
   // A dry run's zero write is the contract, not a finding about the
-  // history on disk, so the line reports the scan and claims no outcome.
-  assert.match(stdout.text(), /\(dry-run\) backfill claude: scanned 2\n/)
-  assert.doesNotMatch(stdout.text(), /nothing new to import/)
+  // history on disk, so no result line claims an outcome; the spinner label
+  // is what says the dry run scanned.
+  assert.match(stdout.text(), /^\(dry-run\) Importing claude history…$/m)
+  assert.doesNotMatch(stdout.text(), /Imported|nothing new to import/)
 })
 
 test('--yes mode runs bounded backfill automatically without a consent prompt', async () => {
@@ -382,7 +386,7 @@ test('onboarding with codex selected runs the backfill step and records stats', 
   assert.deepEqual(result.finale?.backfill, [
     { provider: 'codex', dryRun: false, ok: true, scanned: 4, rowsWritten: 6, skipped: 2 },
   ])
-  assert.match(stdout.text(), /backfill codex: imported 6 rows \(scanned 4, skipped 2\)/)
+  assert.match(stdout.text(), /^✓ Imported 6 rows of codex history$/m)
 })
 
 test('onboarding with both claude and codex selected runs both providers', async () => {
@@ -411,8 +415,8 @@ test('onboarding with both claude and codex selected runs both providers', async
     { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 0 },
     { provider: 'codex', dryRun: false, ok: true, scanned: 2, rowsWritten: 4, skipped: 1 },
   ])
-  assert.match(stdout.text(), /backfill claude: imported 5 rows/)
-  assert.match(stdout.text(), /backfill codex: imported 4 rows/)
+  assert.match(stdout.text(), /^✓ Imported 5 rows of claude history$/m)
+  assert.match(stdout.text(), /^✓ Imported 4 rows of codex history$/m)
 })
 
 test('interactive onboarding prompts codex backfill consent and runs it on yes', async () => {
@@ -494,13 +498,16 @@ test('a failing provider does not abort the other selected providers', async () 
 // @ref LLP 0180#decision [tests]: a sweep-backed provider is disclosed and
 // imported rather than asked, and only a cancel takes it down with the rest
 // @ref LLP 0391#decision [tests]: the finale states results, not plans, so
-// it prints no announce prose before the sweep-backed import; the result
-// line below is the only on-screen evidence the run happened
+// it prints no announce prose before the sweep-backed import; the spinner
+// label and, when rows land, the import line are the only on-screen evidence
+// the run happened
 test('a sweep-backed provider runs, unannounced, even when consent is declined', async () => {
   const env = await tmpEnv('hypaware-bf-sweep-declined-')
   const stdout = makeBuf()
   const stderr = makeBuf()
-  const backfill = makeBackfill(['claude', 'openclaw'], {}, ['openclaw'])
+  const backfill = makeBackfill(['claude', 'openclaw'], {
+    openclaw: { provider: 'openclaw', dryRun: false, ok: true, scanned: 2, rowsWritten: 3, skipped: 0 },
+  }, ['openclaw'])
   /** @type {Array<{ providers: string[], retentionDays: number }>} */
   const consentCalls = []
 
@@ -525,16 +532,18 @@ test('a sweep-backed provider runs, unannounced, even when consent is declined',
   assert.deepEqual(consentCalls[0].providers, ['claude'])
   // Declining skipped claude but not the sweep-backed openclaw.
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
-  // The decline names claude: openclaw's own result line lands directly
-  // below it, so an unqualified "backfill: skipped" is contradicted by
-  // the next line on screen.
+  // The decline names claude: openclaw's own lines land directly below it,
+  // so an unqualified "backfill: skipped" is contradicted by the next line
+  // on screen.
   assert.match(stdout.text(), /backfill claude: skipped \(declined\)/)
   // The sweep announce line is gone (the spinner announces the run); the
-  // result line is the evidence the sweep-backed import still happened.
-  // Matched in full, because the spinner's own label starts `backfill
-  // openclaw: ` too and a prefix match would pass with no result at all.
-  assert.match(stdout.text(), /backfill openclaw: nothing to import/)
-  assert.doesNotMatch(stdout.text(), /periodic sweep/)
+  // result line is the evidence the sweep-backed import still happened, and
+  // it follows the decline.
+  const text = stdout.text()
+  assert.match(text, /^✓ Imported 3 rows of openclaw history$/m)
+  assert.ok(text.indexOf('skipped (declined)') < text.indexOf('Imported 3 rows'))
+  assert.equal(result.finale?.backfill[0]?.provider, 'openclaw')
+  assert.doesNotMatch(text, /periodic sweep/)
 })
 
 test('an openclaw-only pick asks no backfill question but still runs the first import', async () => {
@@ -562,8 +571,11 @@ test('an openclaw-only pick asks no backfill question but still runs the first i
   assert.deepEqual(result.clientsPicked, ['openclaw'])
   assert.equal(consentAsked, 0, 'nothing askable: every picked provider is sweep-backed')
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
-  // Full match for the same reason as the declined case above.
-  assert.match(stdout.text(), /backfill openclaw: nothing to import/)
+  // A zero import prints no result line (LLP 0437 #finish); the run shows
+  // on screen as its spinner label and in the summary.
+  assert.match(stdout.text(), /^Importing openclaw history…$/m)
+  assert.doesNotMatch(stdout.text(), /Imported|nothing to import/)
+  assert.deepEqual(result.finale?.backfill.map((e) => e.provider), ['openclaw'])
   assert.doesNotMatch(stdout.text(), /periodic sweep/)
 })
 
@@ -763,6 +775,29 @@ test('a live surface, and a caller with no boundary check, both still ask', asyn
     assert.equal(asked, true)
     assert.equal(backfill.calls.length, 1)
   }
+})
+
+// @ref LLP 0201#finale-import [tests]: an express accept answers the import question too
+test('an auto-accepted finale imports without asking', async () => {
+  const env = await tmpEnv('hypaware-bf-auto-accept-')
+  const backfill = makeBackfill(['codex', 'opencode'])
+  await runPickerFinale(/** @type {any} */ ({
+    finale: { skipDaemon: true },
+    clientsPicked: ['codex', 'opencode'],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout: makeBuf(),
+    stderr: makeBuf(),
+    retentionDays: 90,
+    interactive: true,
+    autoAccept: true,
+    backfill,
+    backfillConsentPrompt: async () => { throw new Error('an express run must not ask about the import') },
+    checkBoundary: async () => { throw new Error('no question, so no boundary to check') },
+  }))
+  assert.deepEqual(backfill.calls.map((c) => c.provider), ['codex', 'opencode'])
 })
 
 // A dry run previews the real run, so it can only advertise a restart the

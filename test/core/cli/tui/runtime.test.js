@@ -11,7 +11,8 @@ import {
   PromptCancelledError,
   PromptBackRequestedError,
 } from '../../../../src/core/cli/tui/index.js'
-import { isPromptCancelledError, countPhysicalRows } from '../../../../src/core/cli/tui/runtime.js'
+import { isPromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
+import { countPhysicalRows } from '../../../../src/core/cli/tui/live_region.js'
 
 /**
  * Parse the cursor-up row count (`\x1b[<n>A`) the runtime emits at the

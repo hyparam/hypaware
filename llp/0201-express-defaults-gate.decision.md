@@ -95,6 +95,13 @@ enrolled accept is deliberately not in the row copy - it is stated by the
 accept narration (#narrate) - so the row stays one readable sentence
 about the tools.
 
+<a id="finale-import"></a>**The accept also answers the finale's history import.** "Skips
+every remaining question" reaches past the lanes: the finale's "Import the
+... history already on this machine?" is not asked on an express run, and
+the import runs as it does on a scripted one. Only Customize asks it. The
+import is local and bounded by the retention window, and each import that
+writes rows says so in the finish step.
+
 <a id="decline"></a>**Declining asks the real questions, linearly.** The
 per-lane defaults gates ([LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate),
 [#sync-gate](./0190-wizard-defaults-gate.decision.md#sync-gate)) are

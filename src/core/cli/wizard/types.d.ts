@@ -73,13 +73,21 @@ export type WizardStepName = 'join' | 'pick' | 'sync' | 'folders' | 'finale'
  * (LLP 0188 #locked).
  */
 export interface RunWizardSyncScopeOptions {
-  /** Return the combined selection for application after the config commits. */
-  deferWrite?: boolean
-  /** Collection picker already confirmed these sources for sharing. */
-  collectAndSync?: boolean
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0437 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
+  /**
+   * The server the machine syncs to, as the line names it: "HypAware Cloud"
+   * or a host (LLP 0437 #server-name). Absent when the wizard could not tell,
+   * and the line then says "your team's server".
+   */
+  server?: string
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stdin?: NodeJS.ReadableStream
   env: NodeJS.ProcessEnv
   /**
    * The picked, locked-filtered descriptors (the pick result's
@@ -90,9 +98,7 @@ export interface RunWizardSyncScopeOptions {
   /**
    * The org's locked (central-layer) descriptors, already display-filtered
    * (LLP 0276 #sync-gate). Always-sync (LLP 0188 #locked) and never
-   * editable here, but listed - on the gate and as checked, disabled menu
-   * rows - so "these will sync" states the whole picture, not only the
-   * editable slice (LLP 0190 #sync-gate).
+   * editable, but counted and named as the team's on the lane's line.
    */
   locked?: PickerDescriptor[]
   /**
@@ -118,46 +124,14 @@ export interface RunWizardSyncScopeOptions {
    * its count already decides its sentence.
    */
   candidatesHiddenIds?: string[]
-  /** The step's position line, rendered on the prompt like the pick lane's. */
-  progress?: string
-  /**
-   * Offer back-navigation out of the lane (LLP 0191): escape at the menu
-   * returns `back: true` to the orchestrator (which re-runs the pick
-   * lane).
-   */
-  allowBack?: boolean
-  /** Prompt seam (tests); defaults to the walkthrough prompt factory. */
-  prompt?: AsyncPickPrompt
-  /**
-   * Take the stated default without stopping at it (LLP 0201 #narrate):
-   * the express gate already answered this lane, so it narrates the sync
-   * split the menu would have shown and proceeds. On the combined path
-   * (`collectAndSync`, LLP 0396) the picker already stated that split, so
-   * the lane applies the answer without restating it; set it only where the
-   * picker's narration carried the sync claim.
-   */
-  autoAccept?: boolean
 }
 
 export interface WizardSyncScopeResult {
   /** Selected source ids to enable after the config commits; never a store snapshot. */
   pendingSources?: string[]
-  /** The user cancelled at the prompt; the wizard exits 130. */
-  cancelled?: boolean
-  /** The user stepped back out of the lane (LLP 0191); nothing written. */
-  back?: true
-  /** Candidate source ids the user opted out (kept local-only). */
-  optedOut: string[]
   /** The step was skipped (corrupt store) rather than answered. */
   skipped?: boolean
-  /**
-   * The lane reached its outcome without presenting a prompt: everything
-   * picked was fleet-locked, or the store was unreadable. It is then a
-   * statement rather than a screen, so the lane after it steps back *past*
-   * it (LLP 0191 #back-edges: escape reaches the last screen the user could
-   * answer, and a lane that asked nothing is not one). Not set on the
-   * express path, which asks nothing anywhere and never backs.
-   */
+  /** The lane asked nothing; kept for the span and the orchestrator's log. */
   noQuestion?: true
 }
 
@@ -168,6 +142,19 @@ export interface WizardSyncScopeResult {
  * time I work somewhere new" - which is why it is its own step.
  */
 export interface RunWizardFolderAskOptions {
+  /**
+   * On an auto-accepted run, state the answer but leave it unwritten: the
+   * caller records it with `commitWizardFolderAsk` once the statement has
+   * been shown. An answer the user gave on screen is recorded at once.
+   */
+  deferWrite?: boolean
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0437 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
@@ -249,6 +236,8 @@ export interface WizardFolderAskResult {
   back?: true
   /** The answer could not be written; the previous mode stands. */
   skipped?: boolean
+  /** `deferWrite` held the answer back; the caller records `mode`. */
+  pendingWrite?: true
 }
 
 export interface RunWizardForkOptions {
@@ -478,14 +467,6 @@ export interface RunWizardJoinOptions {
    * `--bin` so enrollment neither asks again nor records a different CLI.
    */
   binPath?: string
-  /**
-   * The lane's position line (LLP 0135 #progress), e.g.
-   * `Step 1 of 3 · Join your team`. The join lane owns no prompt spec, so
-   * it prints the line itself where its narration would go, and prints that
-   * plain sentence only when there is no position line. Absent on runs with
-   * no committed pathway, which print the plain sentence instead.
-   */
-  progress?: string
 }
 
 /**
@@ -497,6 +478,13 @@ export interface RunWizardJoinOptions {
  * prompting, matching today's `interactive = !opts.picks` split.
  */
 export interface RunWizardPickOptions {
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0437 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
   /** Checked sources are collected locally and synced remotely. */
   collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
@@ -597,7 +585,7 @@ export interface RunWizardPickOptions {
  */
 export type FirstLookOutcome =
   | { shown: true; providerRows: number; dayRows: number; partial?: true }
-  | { shown: false; reason: 'no-dataset' | 'error' | 'slow' }
+  | { shown: false; reason: 'no-dataset' | 'error' | 'slow' | 'empty' }
 
 /**
  * The outcome plus whether the step wrote anything to stdout, which is a

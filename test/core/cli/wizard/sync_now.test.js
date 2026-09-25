@@ -291,7 +291,8 @@ for (const answer of ['n', 'y']) {
     // previous piped prompt kept canonical mode, so the OS delivered SIGINT.
     assert.deepEqual(rawModes, [], 'onboarding sync must leave terminal signal handling intact')
     assert.equal(questions, 1, stderr.text())
-    assert.match(stdout.text(), /fresh_archive/)
+    // The plan names the newly configured sink by the directory it writes to.
+    assert.ok(stdout.text().includes(` for ${path.join(home, 'exports')}.\n`), stdout.text())
     assert.doesNotMatch(stderr.text(), /not materialized/)
   })
 }

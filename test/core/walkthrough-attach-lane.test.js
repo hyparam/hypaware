@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { attachReportOutcome, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
 
 // The finale attach lane over the real catalog derivation (LLP 0180). The
 // derived `clientsPicked` includes Claude Desktop, whose plugin contributes a
@@ -180,4 +180,31 @@ test('a mixed pick attaches both, and never reports the endpoint-free one as noA
   assert.equal(gatewayCalls[0].endpoint, 'http://127.0.0.1:4317')
   assert.equal(localCalls.length, 1)
   assert.equal(localCalls[0].endpoint, undefined)
+})
+
+// The finale withholds an adapter's attach report, but not the lines that
+// change what the user should do: a refusal, a warning, or the adapter's own
+// restart step.
+test('attachReportOutcome keeps refusals, warnings, and the adapter restart step', () => {
+  assert.deepEqual(
+    attachReportOutcome('! OpenClaw attach did not apply: config is managed\n'),
+    { applied: false, restart: false, kept: ['! OpenClaw attach did not apply: config is managed'] },
+  )
+  assert.deepEqual(
+    attachReportOutcome('✓ Claude Code attached (/x/settings.json)\n  KEY = http://127.0.0.1:1\n  ! spool dir is not writable\n'),
+    { applied: true, restart: false, kept: ['  ! spool dir is not writable'] },
+  )
+  // Claude's displaced setting is marked the same way, so it survives too.
+  assert.deepEqual(
+    attachReportOutcome('✓ Claude Code attached (/x/settings.json)\n  ! previous ANTHROPIC_BASE_URL was https://proxy.corp\n').kept,
+    ['  ! previous ANTHROPIC_BASE_URL was https://proxy.corp'],
+  )
+  assert.deepEqual(
+    attachReportOutcome("✓ OpenClaw attached (/x)\n  models.providers.openai    baseUrl = http://h/v1\n  restart the OpenClaw gateway ('openclaw gateway restart') to apply\n"),
+    { applied: true, restart: true, kept: ["  restart the OpenClaw gateway ('openclaw gateway restart') to apply"] },
+  )
+  assert.deepEqual(
+    attachReportOutcome('✓ Codex attached (/x)\n  Full tool definitions are unavailable. Restart existing Codex clients after changing capture mode.\n'),
+    { applied: true, restart: false, kept: [] },
+  )
 })

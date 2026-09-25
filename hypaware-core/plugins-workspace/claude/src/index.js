@@ -361,6 +361,8 @@ export async function activate(ctx) {
             let launchdEnvRemoved
             /** @type {string[]} */
             const migrationNotes = []
+            /** @type {string | undefined} */
+            let migrationResidue
             if (migratedFrom !== undefined) {
               const unwind = await unwindProxyLaunchdEnv({ homeDir })
               launchdEnvRemoved = unwind.launchdEnvRemoved
@@ -378,7 +380,7 @@ export async function activate(ctx) {
               // a proxy attach whose keychain dialog was refused still ran and
               // still left the CA, so claiming a grant we never verified would
               // be the one false line in the migration's story.
-              migrationNotes.push(
+              migrationResidue = (
                 (process.platform === 'darwin'
                   ? 'The HypAware Local CA, and any login-keychain trust it was granted, ' +
                     'is still in place. '
@@ -435,6 +437,7 @@ export async function activate(ctx) {
               migratedFrom,
               launchdEnvRemoved,
               migrationNotes,
+              ...(migrationResidue !== undefined ? { migrationResidue } : {}),
               warnings,
             })
           } catch (err) {
@@ -823,6 +826,7 @@ export async function unwindProxyLaunchdEnv({
  *   migratedFrom?: 'proxy',
  *   launchdEnvRemoved?: boolean,
  *   migrationNotes?: string[],
+ *   migrationResidue?: string,
  *   warnings?: string[],
  * }} fields
  */
@@ -884,8 +888,11 @@ function writeAttachOutput(attachCtx, fields) {
   } else if (fields.port !== undefined) {
     attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.port}\n`)
   }
+  // Marked `!`, like the residue below: the two lines here that report
+  // something the user did not do or still has to, which is what a caller
+  // that condenses this report (setup's finish step) keeps.
   if (fields.prevValue !== undefined) {
-    attachCtx.stdout.write(`  (previous ${managedKey} was ${fields.prevValue})\n`)
+    attachCtx.stdout.write(`  ! previous ${managedKey} was ${fields.prevValue}\n`)
   }
   // The migration story, told where the user is looking: what the switch
   // released, what was unwound, and the one residue that is theirs to end
@@ -894,6 +901,9 @@ function writeAttachOutput(attachCtx, fields) {
   // @ref LLP 0262#migration [implements]: the offer is a printed step, not an action
   for (const note of fields.migrationNotes ?? []) {
     attachCtx.stdout.write(`  ${note}\n`)
+  }
+  if (fields.migrationResidue !== undefined) {
+    attachCtx.stdout.write(`  ! ${fields.migrationResidue}\n`)
   }
   for (const warning of fields.warnings ?? []) {
     attachCtx.stdout.write(`  ! ${warning}\n`)
