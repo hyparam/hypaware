@@ -363,10 +363,14 @@ export function createSinkRegistry() {
    * separately validated tag sets (issue #1582).
    *
    * `owner` is what `instantiate` read off the `ActivePlugin` record the
-   * kernel's materializer took out of the config row, so it is both the value
-   * every other label on the instance comes from and the `entry.plugin`
+   * kernel's materializer took out of the config row: the value every other
+   * label on the instance comes from, and on the kernel's own path the name
    * `materializeRequest`/`materializeBlob` filtered the listing on to reach
-   * this contribution: the entry selected here is the one the caller chose.
+   * this contribution. That agreement holds only as far as the record does:
+   * `ownerName` reads a live, unfrozen property, so a plugin that rewrites its
+   * own `name` after activation moves this resolution along with every other
+   * label on the instance (issue #2130). Binding the tags to the same value is
+   * what keeps them agreeing with the labels whatever it answers.
    *
    * An identity match under another owner is still preferred over reading the
    * contribution, because a host driving this registry itself records no owner

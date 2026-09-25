@@ -626,6 +626,15 @@ test('a contribution registered by two plugins resolves its own registration\'s 
     registrar = '@third-party/second'
     reg.registeringAs(/** @type {any} */ ('@third-party/second'), () => { reg.register(shared) })
 
+    // Both of `shared`'s getters read `registrar`, so pointing it back at the
+    // first registration makes the live `plugin` and `supports` answer
+    // '@third-party/first' and ['queryable'] from here on. Only a lookup keyed
+    // on the kernel-resolved owner (passed below as '@third-party/second')
+    // still finds the second registration's own []; one keyed on
+    // `contribution.plugin`, or one falling back to the contribution's own
+    // `supports`, would find ['queryable'] instead and fail this test.
+    registrar = '@third-party/first'
+
     // What `materializeRequest` does: select the registration whose `plugin`
     // is the one the config row named, then instantiate it against that
     // plugin's own activation record.
