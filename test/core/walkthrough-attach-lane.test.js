@@ -194,6 +194,11 @@ test('attachReportOutcome keeps refusals, warnings, and the adapter restart step
     attachReportOutcome('✓ Claude Code attached (/x/settings.json)\n  KEY = http://127.0.0.1:1\n  ! spool dir is not writable\n'),
     { applied: true, restart: false, kept: ['  ! spool dir is not writable'] },
   )
+  // Claude's displaced setting is marked the same way, so it survives too.
+  assert.deepEqual(
+    attachReportOutcome('✓ Claude Code attached (/x/settings.json)\n  ! previous ANTHROPIC_BASE_URL was https://proxy.corp\n').kept,
+    ['  ! previous ANTHROPIC_BASE_URL was https://proxy.corp'],
+  )
   assert.deepEqual(
     attachReportOutcome("✓ OpenClaw attached (/x)\n  models.providers.openai    baseUrl = http://h/v1\n  restart the OpenClaw gateway ('openclaw gateway restart') to apply\n"),
     { applied: true, restart: true, kept: ["  restart the OpenClaw gateway ('openclaw gateway restart') to apply"] },
