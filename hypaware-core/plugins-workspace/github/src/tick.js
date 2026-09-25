@@ -116,12 +116,19 @@ async function captureTick(runtime, opts) {
       // with no repository a later tick could select, a saved continuation is
       // not work this source can retire. Falling back to the whole sidecar
       // when the inventory reads empty would restore exactly that pin.
+      // A recorded verdict answers this outright, and more accurately than the
+      // scan can: it was taken over the live inventory by the tick that sized
+      // the work, so it counts no failed repository's residue
+      // (LLP 0360#cadence) and misses no rotation the budget stopped at a
+      // repository boundary, which no cursor records. The scan stays for a
+      // sidecar written before the verdict had a home.
+      // @ref LLP 0438#readers [implements]: the recorded verdict wins, the cursor scan is the pre-verdict fallback
       const ignored = new Set(runtime.config.ignore.map((repo) => repo.toLowerCase()))
       const pending =
         runtime.observedRepos.revalidationPending?.() === true ||
-        (runtime.observedRepos.lastKnown?.() ?? []).some(
+        (cursors.pending ?? (runtime.observedRepos.lastKnown?.() ?? []).some(
           (repo) => !ignored.has(repo) && cursors.repos[repo]?.work !== undefined,
-        )
+        ))
       return { repos: 0, visited: 0, events: 0, requests: 0, pending, errors: [{ repo: '(inventory)', error: message }] }
     }
   }
@@ -188,10 +195,25 @@ async function captureTick(runtime, opts) {
     // The tick ended with no result to carry a report, so still commit whatever
     // per-repo progress it did advance, but never let that write's own failure
     // stand in for the error that actually ended the tick.
+    // This tick sized nothing, so it has no verdict of its own to record; the
+    // snapshot it read at the top may already be stale, so let `writeCursors`
+    // take whatever verdict is on disk now instead of re-asserting this one.
+    delete cursors.pending
     await persistCursors()
     throw err
   }
   const pending = result.pending || inventoryPending
+  // The verdict rides the cursors it belongs to, so a restarted daemon and a
+  // sidecar process read the same answer this tick reached. A run narrowed to
+  // named repositories may assert backlog but never retire it, for the reason
+  // it publishes no `next_repo`: its verdict covers a subset of the inventory.
+  // A narrowed run that comes back clean has no opinion at all - it records
+  // none, so `writeCursors` takes whatever verdict is on disk now instead of
+  // re-asserting the stale snapshot this tick started from.
+  // @ref LLP 0438#writers [implements]: the tick that sized the work records the verdict beside the cursors it advanced
+  if (pending) cursors.pending = true
+  else if (!opts.only?.length) cursors.pending = false
+  else delete cursors.pending
   const cursorError = await persistCursors()
   if (cursorError !== undefined) result.errors.push({ repo: CURSOR_ERROR_REPO, error: cursorError })
   runtime.log.info('github.capture_tick_completed', {

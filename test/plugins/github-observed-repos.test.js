@@ -561,6 +561,53 @@ test('a failed session_repos inventory read keeps an unfinished revalidation on 
   )
 })
 
+// @ref LLP 0438#readers [tests]: the recorded verdict wins over the cursor scan in both directions issue #1305 raised
+test('a failed session_repos inventory read trusts the recorded verdict over the cursor scan (over-report direction)', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-verdict-over-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // A failed repository capture leaves `work` behind but is NOT backlog
+  // (LLP 0360#cadence): the cursor scan would read this as pending, but the
+  // recorded verdict says otherwise and wins.
+  await writeCursors(stateDir, {
+    schema_version: 1,
+    pending: false,
+    repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } },
+  })
+  const sidecarPath = path.join(stateDir, 'github-cursors.json')
+  const before = fs.readFileSync(sidecarPath)
+
+  const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
+  const report = await runCaptureTick(runtime, { mode: 'poll' })
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(report.pending, false, 'the recorded verdict is trusted over the scan, which would say true')
+  assert.deepEqual(
+    fs.readFileSync(sidecarPath),
+    before,
+    'the failed-inventory early return deliberately never persists (LLP 0438#writers)',
+  )
+})
+
+test('a failed session_repos inventory read trusts the recorded verdict over the cursor scan (under-report direction)', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-verdict-under-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // A rotation the budget stopped exactly at a repository boundary is recorded
+  // by no cursor: the scan would read this as no backlog, but the recorded
+  // verdict says otherwise and wins.
+  await writeCursors(stateDir, {
+    schema_version: 1,
+    pending: true,
+    next_repo: 'acme/widgets',
+    repos: { 'acme/widgets': { since: { issues: '2024-01-01T00:00:00Z' } } },
+  })
+
+  const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
+  const report = await runCaptureTick(runtime, { mode: 'poll' })
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(report.pending, true, 'the recorded verdict is trusted over the scan, which would say false')
+})
+
 test('unnamed hyp github backfill reports the inventory failure without contradicting it', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backfill-cli-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
