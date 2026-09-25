@@ -15,6 +15,7 @@ import {
   findInstalledHypawareBin,
   globalHypawareBin,
   isEphemeralBinPath,
+  isEphemeralRecordedBinPath,
   isNpxBinPath,
 } from '../../src/core/cli/global_install.js'
 
@@ -113,6 +114,60 @@ test('isEphemeralBinPath separates a project tree from every durable install', a
     }),
     true
   )
+})
+
+// Issue #1624. `isEphemeralRecordedBinPath` adds the one arm the live
+// predicate cannot have: a recorded tree whose `node_modules` is actually
+// gone. Finding 1 on that arm was that an intact tree merely UNREADABLE (an
+// EACCES on the manifest stat, not an ENOENT) must not fall into it, since
+// `existsSync` collapses every error the same way and would read a fine
+// checkout as drift.
+test('isEphemeralRecordedBinPath adds the vanished-tree arm without reading an unreadable manifest as gone', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ephemeral-recorded-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  /** @param {string} file */
+  const write = async (file) => {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '{}\n')
+  }
+
+  // A project tree that was built and then deleted, manifest and
+  // `node_modules` both: the live predicate still reads durable (it has no
+  // vanished-tree arm and finds no manifest to confirm either), and the
+  // recorded one reads the deletion.
+  const deleted = path.join(root, 'deleted-project')
+  const deletedBin = path.join(deleted, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  await write(deletedBin)
+  await write(path.join(deleted, 'package.json'))
+  await fs.rm(deleted, { recursive: true, force: true })
+  assert.equal(isEphemeralRecordedBinPath(deletedBin, {}), true)
+  assert.equal(isEphemeralBinPath(deletedBin, {}), false)
+
+  // An intact project tree whose root directory is unreadable. The manifest
+  // stat throws EACCES, not ENOENT, so the vanished-tree arm must not run at
+  // all: `existsSync` on an unreadable tree would also say `false`.
+  const unreadable = path.join(root, 'unreadable-project')
+  await write(path.join(unreadable, 'package.json'))
+  const unreadableBin = path.join(unreadable, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  await write(unreadableBin)
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    // root bypasses the permission bits, and win32 does not enforce them on
+    // directories, so chmod 0o000 proves nothing on either.
+  } else {
+    await fs.chmod(unreadable, 0o000)
+    try {
+      assert.equal(isEphemeralRecordedBinPath(unreadableBin, {}), false)
+    } finally {
+      await fs.chmod(unreadable, 0o755)
+    }
+  }
+
+  // A recorded path with no `node_modules` segment at all, gone from disk
+  // entirely: left exactly as the live predicate leaves it, since a moved or
+  // deleted bin outside any dependency tree is not what this arm is for.
+  const noTree = path.join(root, 'nowhere', 'hypaware', 'bin', 'hypaware.js')
+  assert.equal(isEphemeralRecordedBinPath(noTree, {}), false)
 })
 
 // Issue #1625. The verdict above is "a manifest sits beside the outermost

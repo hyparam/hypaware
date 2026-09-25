@@ -6,7 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-12
 **Related:** LLP 0002, LLP 0011, LLP 0017, LLP 0299
-**Extended-by:** LLP 0405 (use an unversioned global install command)
+**Extended-by:** LLP 0405 (use an unversioned global install command), LLP 0434 (#install-policy: a recorded path whose dependency tree is gone is drift)
 
 ## Request
 

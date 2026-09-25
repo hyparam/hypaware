@@ -1,7 +1,7 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync, realpathSync, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -174,48 +174,89 @@ export function isNpxBinPath(binPath, env = process.env) {
  * A manifest that cannot be read answers "durable", so the fail direction is a
  * missed ephemeral path - today's behaviour - and never a warning on a machine
  * with nothing wrong with it. For the entrypoint callers that is the whole
- * story, since nothing can be running out of a tree that is not there. It is
- * weaker for `markerRecordsEphemeralHookBin`, which asks about a path recorded
- * some time ago: delete the whole project and the manifest goes with it, so the
- * recorded command reads durable again and the re-attach that would rewrite it
- * fast-paths at "already attached". `_npx` keeps answering off the path shape
- * alone and survives its own prune; this one does not survive an `rm -rf` of
- * the project root. Closing that would mean calling a recorded path stale for
- * merely not resolving, which is the case that function deliberately leaves
- * alone (a CLI moves for ordinary reasons), so it is a known edge and not an
- * oversight. A global root some other package manager does
- * write a manifest beside (pnpm's `global/<n>` and yarn's `config/yarn/global`
- * are the two) reads as ephemeral. What that costs is the `$PATH` walk each
- * caller already runs: coming back empty it records what it was handed,
- * exactly as before, and pays one warning, which for that reason names no
- * tree it cannot prove ({@link describeEphemeralBinPath}, issue #1625); finding
- * something it records the first durable `hypaware` on `$PATH`, which is the
- * copy a bare `hyp` runs anyway. Neither answer is a path that is not there,
- * which is the only outcome this predicate exists to prevent.
+ * story, since nothing can be running out of a tree that is not there.
+ * {@link isEphemeralRecordedBinPath} is the form for a path written down some
+ * time ago, where a tree that is not there is the whole point. A global root
+ * some other package manager does write a manifest beside (pnpm's `global/<n>`
+ * and yarn's `config/yarn/global` are the two) reads as ephemeral. What that
+ * costs is the `$PATH` walk each caller already runs: coming back empty it
+ * records what it was handed, exactly as before, and pays one warning, which
+ * for that reason names no tree it cannot prove
+ * ({@link describeEphemeralBinPath}, issue #1625); finding something it records
+ * the first durable `hypaware` on `$PATH`, which is the copy a bare `hyp` runs
+ * anyway. Neither answer is a path that is not there, which is the only outcome
+ * this predicate exists to prevent.
  *
  * @param {string} binPath
  * @param {NodeJS.ProcessEnv} env
  * @returns {boolean}
  */
 export function isEphemeralBinPath(binPath, env = process.env) {
+  return isEphemeralTreePath(binPath, env, false)
+}
+
+/**
+ * The same verdict for a path written down earlier rather than one this
+ * process is running from, with one arm the live test cannot have: a recorded
+ * path whose outermost `node_modules` is gone is ephemeral. The manifest that
+ * proves the tree was a project's is deleted with the project, so without it a
+ * deleted checkout reads durable again on exactly the machine whose recorded
+ * command is certainly dead (issue #1624).
+ *
+ * The vanished tree decides, never the vanished bin. A recorded path carrying
+ * no `node_modules` at all is left as it was however little of it is still on
+ * disk: a CLI moves for ordinary reasons, and "gone" cannot tell those apart
+ * from a deletion. Those reasons also leave the old install where it is (a node
+ * version switch and a prefix change only stop resolving one), so the global
+ * roots they move between keep their `node_modules` and go on reading durable.
+ * A manifest that cannot be read still answers durable here too, so this arm
+ * turns only on one confirmed absent, never merely unreadable.
+ *
+ * @ref LLP 0434#rule [implements]: a recorded CLI path whose dependency tree is gone is drift
+ * @param {string} binPath
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+export function isEphemeralRecordedBinPath(binPath, env = process.env) {
+  return isEphemeralTreePath(binPath, env, true)
+}
+
+/**
+ * @param {string} binPath
+ * @param {NodeJS.ProcessEnv} env
+ * @param {boolean} vanishedTreeIsEphemeral whether a `node_modules` no longer
+ *   on disk answers "ephemeral" rather than falling back to "durable"
+ * @returns {boolean}
+ */
+function isEphemeralTreePath(binPath, env, vanishedTreeIsEphemeral) {
   if (isNpxBinPath(binPath, env)) return true
   let dir = path.resolve(binPath)
   /** @type {string | undefined} */
-  let projectRoot
+  let tree
   for (;;) {
     const parent = path.dirname(dir)
     if (parent === dir) break
     // Whole segment, the same rigour as the `_npx` test above: a directory
     // named `node_modules_old` is a directory, not a dependency tree. Climbing
     // upwards, the last match found is the outermost one.
-    if (path.basename(dir) === 'node_modules') projectRoot = parent
+    if (path.basename(dir) === 'node_modules') tree = dir
     dir = parent
   }
-  if (projectRoot === undefined) return false
+  if (tree === undefined) return false
   try {
-    return statSync(path.join(projectRoot, 'package.json')).isFile()
-  } catch {
-    return false
+    return statSync(path.join(path.dirname(tree), 'package.json')).isFile()
+  } catch (err) {
+    // Absent, not unreadable. `existsSync` collapses every error to `false`,
+    // so without this an intact tree whose root is merely unreadable (a
+    // checkout under macOS TCC, a stalled network mount) would read ephemeral.
+    // LLP 0434#rule licenses this arm only for a confirmed-gone tree; an
+    // unreadable tree is not known-gone, since a denied-search directory
+    // returns EACCES for any child stat, never ENOENT. The residual cost LLP
+    // 0434#cost leaves open: a tree truly deleted under an unreadable ancestor
+    // still reads durable here.
+    if (!vanishedTreeIsEphemeral) return false
+    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') return false
+    return !existsSync(tree)
   }
 }
 
