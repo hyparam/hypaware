@@ -942,13 +942,15 @@ async function runGuardedInitWizard(opts, guard) {
   // `offerFollows` mirrors the sync offer's own gate below, so the
   // narration goes quiet exactly when `hyp sync`'s plan is about to state
   // the same things and ask.
-  // With nothing recorded there is nothing to upload, so no offer; the
-  // sign-in already said nothing uploads until the user says so.
+  // With nothing recorded there is nothing to upload, so no offer. The
+  // narration then speaks instead: it is the only line on that path that
+  // names `hyp sync` and the privacy review (LLP 0100 R1).
   // @ref LLP 0437#first-look [implements]: no upload offer when nothing is recorded
+  // @ref LLP 0100#requirements [implements]: R1 - a path that skips the offer keeps the narration's release verb and skill hint
   const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
   const holdDeadline = joined
-    ? await narratePrivacyIfTeamPath(opts, { alreadySaid: offerFollows })
+    ? await narratePrivacyIfTeamPath(opts, { alreadySaid: offerFollows && !nothingRecorded })
     : null
 
   // ...and then the offer to end the wait: `hyp sync` itself, whose plan

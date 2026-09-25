@@ -152,8 +152,9 @@ attended run has just watched each act happen.
 ### The close says only what is news {#first-look}
 
 With nothing recorded yet, the first look prints nothing and there is no
-upload offer: setup's closing line says nothing is recorded yet, and the
-sign-in already said nothing uploads until the user says so. With history,
+upload offer: setup's closing line says nothing is recorded yet. The held
+paragraph then speaks in the offer's place, since it is the only line on
+that path naming `hyp sync` and the privacy review (LLP 0100 R1). With history,
 the first look keeps its two tables, and the upload offer is `hyp sync`'s
 own plan, which now reads as one line per destination ("Ready to upload
 1,240 rows (the full history) to the 'hyperparam' server (automatic by

@@ -1628,7 +1628,8 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
   assert.match(text, /run `hyp sync` any time to send it sooner/)
 })
 
-// @ref LLP 0437#first-look [tests]: nothing recorded, so no upload offer and no held paragraph
+// @ref LLP 0437#first-look [tests]: nothing recorded, so no upload offer
+// @ref LLP 0100#requirements [tests]: R1 - with no offer, the held paragraph still names `hyp sync` and the privacy review
 test('runInitWizard: an enrolled run whose first look finds nothing makes no sync offer', async () => {
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
@@ -1651,8 +1652,11 @@ test('runInitWizard: an enrolled run whose first look finds nothing makes no syn
   // The empty block is not printed; setup's closing note says it once.
   assert.doesNotMatch(text, /First look/, text)
   assert.match(text, /Nothing recorded yet/, text)
-  // The attended close still stands the held paragraph down.
-  assert.doesNotMatch(text, /Nothing has been uploaded yet/, text)
+  // No offer follows, so the held paragraph carries the release verb and
+  // the review hint.
+  assert.match(text, /Nothing has been uploaded yet/, text)
+  assert.match(text, /or sooner if you run `hyp sync`/, text)
+  assert.match(text, /hypaware-privacy/, text)
   assert.doesNotMatch(text, /Nothing was sent\./, text)
 })
 
