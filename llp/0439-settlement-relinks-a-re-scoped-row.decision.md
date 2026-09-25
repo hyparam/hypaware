@@ -8,6 +8,9 @@
 **Related:** LLP 0026 (#consequences, the immediate-predecessor contract this
 extends), LLP 0027, LLP 0262, LLP 0435 (the consequence retired here)
 **Extends:** LLP 0435
+**Extended-by:** LLP 0440 (#relink-from-the-transcript: a scope change is not
+the only thing that invalidates a link, so a rewritten `message_id` also
+carries its batch's successors with it)
 **Tracker:** hyparam/hypaware#2150
 
 > LLP 0435 made a body-derived tool row settle onto the transcript line its

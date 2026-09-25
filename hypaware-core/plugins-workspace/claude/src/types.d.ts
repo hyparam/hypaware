@@ -363,3 +363,26 @@ export interface ClaudeAttachChanged {
 }
 
 export type ClaudeAttachResult = ClaudeAttachChanged | { changed: false }
+
+/**
+ * Where one row ended a settle pass that rewrote its `message_id`, keyed in
+ * that pass by the id the row started with. Read only to repair the rows that
+ * were chained to the old id (LLP 0440); nothing is stored.
+ */
+export interface SettledIdRewrite {
+  /** The native transcript uuid the identity upgrade gave the row. */
+  id: string
+  /**
+   * The agent thread the row ended the pass in. A successor in the same thread
+   * follows the rename; one in a different thread has lost this predecessor
+   * and splices past it to `previous`.
+   */
+  agent: string | undefined
+  /**
+   * The row's projection-time `previous_message_id`, exactly as the column
+   * held it (an array by construction, unknown here because the row is an
+   * untyped cache record). What a successor inherits when this row turned out
+   * to belong to another thread.
+   */
+  previous: unknown
+}
