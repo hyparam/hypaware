@@ -631,8 +631,10 @@ test('a contribution registered by two plugins resolves its own registration\'s 
     // '@third-party/first' and ['queryable'] from here on. Only a lookup keyed
     // on the kernel-resolved owner (passed below as '@third-party/second')
     // still finds the second registration's own []; one keyed on
-    // `contribution.plugin`, or one falling back to the contribution's own
-    // `supports`, would find ['queryable'] instead and fail this test.
+    // `contribution.plugin` would find ['queryable'] instead and fail this
+    // test. The fallback-to-contribution-supports path is pinned by the other
+    // tests in this file, not this one, since this test's owner match always
+    // hits.
     registrar = '@third-party/first'
 
     // What `materializeRequest` does: select the registration whose `plugin`

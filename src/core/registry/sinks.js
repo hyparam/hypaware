@@ -368,9 +368,11 @@ export function createSinkRegistry() {
    * `materializeRequest`/`materializeBlob` filtered the listing on to reach
    * this contribution. That agreement holds only as far as the record does:
    * `ownerName` reads a live, unfrozen property, so a plugin that rewrites its
-   * own `name` after activation moves this resolution along with every other
-   * label on the instance (issue #2130). Binding the tags to the same value is
-   * what keeps them agreeing with the labels whatever it answers.
+   * own `name` after activation moves every label on the instance, and this
+   * resolution moves with them only when the rewritten owner still holds a
+   * registration of this contribution (issue #2130). Otherwise the identity
+   * fallback in the next paragraph applies, and the tags are another
+   * registrant's validated set, a residual of #2130 this fix leaves unchanged.
    *
    * An identity match under another owner is still preferred over reading the
    * contribution, because a host driving this registry itself records no owner
