@@ -23,6 +23,8 @@ import {
 } from '../usage-policy/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { syncDestinationName } from '../remote/builtin_remotes.js'
+import { centralSinkOrigins } from '../remote/gateway_seed.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
@@ -501,9 +503,15 @@ export async function runPolicyClient(argv, ctx) {
     return 0
   }
 
+  // Where this machine's rows actually go, from the central layer this command
+  // already resolved: a self-hosted enrollment is a supported lane, so no line
+  // below may call the destination "the cloud".
+  // @ref LLP 0134#custom-url-deferred [constrained-by]: the receipt names the server this machine forwards to, hosted or not
+  const destination = syncDestinationName(centralSinkOrigins(layered?.centralConfig))
+
   if (parsed.token === 'local-only') {
     if (provenance === 'central') {
-      ctx.stderr.write(`error: '${name}' is set by your team and always syncs to the cloud\n`)
+      ctx.stderr.write(`error: '${name}' is set by your team and always syncs to ${destination}\n`)
       return 1
     }
     const next = [...(entries ?? []), { source: name, class: /** @type {'local-only'} */ ('local-only') }]
@@ -516,7 +524,7 @@ export async function runPolicyClient(argv, ctx) {
     ctx.stdout.write(`${name}: local-only${optedOut.has(name) ? ' (unchanged)' : ''}\n`)
     ctx.stdout.write(`  future ${name} rows stay on this machine; rows already exported are not recalled\n`)
     if (layered && !layered.centralConfig) {
-      ctx.stdout.write('  this machine is not connected to the cloud; the opt-out takes effect if it connects\n')
+      ctx.stdout.write('  this machine is not connected to a HypAware server; the opt-out takes effect if it connects\n')
     }
     return 0
   }
@@ -535,7 +543,7 @@ export async function runPolicyClient(argv, ctx) {
   ctx.stdout.write(`${name}: sync\n`)
   // @ref LLP 0188#no-retroactive-ship [implements]: changing standing policy remains future-only
   // @ref LLP 0345#command [implements]: the policy transition points at the separate attended history replay
-  ctx.stdout.write(`  future ${name} rows sync to the cloud\n`)
+  ctx.stdout.write(`  future ${name} rows sync to ${destination}\n`)
   ctx.stdout.write(`  to upload retained history too: hyp sync --history ${name}\n`)
   return 0
 }

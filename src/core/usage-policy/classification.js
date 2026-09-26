@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { originOf, serverDisplayName } from '../remote/builtin_remotes.js'
+import { syncDestinationName } from '../remote/builtin_remotes.js'
 import { readCentralSinkOrigins } from '../remote/gateway_seed.js'
 import { createUsagePolicyResolver } from './matcher.js'
 import { localOnlyListPath } from './local_only.js'
@@ -98,39 +98,6 @@ export function verbArgvForClass(cls, targetPath) {
 }
 
 /**
- * The name the consent copy gives the place sessions go, resolved from the same
- * central sink origins the enrollment check reads. Self-hosted enrollment is a
- * supported lane, so the destination is not the hosted product's name by
- * default: `serverDisplayName` is the one place that mapping lives, and it
- * calls only the built-in server (under either of its hosts) HypAware Cloud.
- *
- * Every configured origin receives the sessions, so when there are several
- * they are all named, deduplicated and in configuration order: naming the
- * first alone would understate the disclosure. An origin that does not parse is skipped, because
- * `serverDisplayName` returns such a string unchanged and would put whatever
- * is on disk into the consent copy.
- *
- * The neutral fallback is what keeps a caller with nothing nameable from
- * rendering "forwarded to ." or a hosted service it may not be using;
- * `evaluateCwdClassification` never reaches it, since it prompts only when an
- * origin exists.
- *
- * @ref LLP 0134#custom-url-deferred [constrained-by]: self-hosted teams enroll by hand, so the consent copy cannot assume the hosted server
- * @param {ReadonlyArray<string>} [origins] central sink origins for this machine
- * @returns {string}
- */
-function syncDestinationName(origins) {
-  /** @type {string[]} */
-  const names = []
-  for (const origin of origins ?? []) {
-    if (typeof origin !== 'string' || originOf(origin) === null) continue
-    const name = serverDisplayName(origin)
-    if (!names.includes(name)) names.push(name)
-  }
-  return names.length > 0 ? names.join(' and ') : 'your HypAware server'
-}
-
-/**
  * Build the classification prompt copy for a folder. This is the consent
  * surface many users first meet the class vocabulary through (LLP 0106
  * consequences), so it is deliberately explicit: it names the machine's
@@ -147,6 +114,8 @@ function syncDestinationName(origins) {
  * @returns {string}
  */
 export function buildClassificationPrompt({ cwd, origins }) {
+  // The namer's neutral fallback is unreachable here: `evaluateCwdClassification`
+  // prompts only when an origin exists.
   const destination = syncDestinationName(origins)
   const lines = [
     'This machine is enrolled, so by default the AI coding sessions you run here',
