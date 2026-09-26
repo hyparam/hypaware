@@ -45,7 +45,7 @@ To switch a local-only machine to sync later, run `hyp remote login`.
 | Keep a project private, pause recording, or delete local data | [Privacy controls](PRIVACY.md) |
 | Connect a machine to HypAware Cloud | [Team setup](TEAM_SETUP.md) |
 | Capture in CI, containers, or an unattended server | [Headless setup](HEADLESS.md) |
-| Diagnose missing recordings, stale results, or failed exports | [Troubleshooting](TROUBLESHOOTING.md) |
+| Diagnose missing recordings, stale results, failed exports, or a memory refusal | [Troubleshooting](TROUBLESHOOTING.md) |
 | Look up exact command syntax and flags | [CLI reference](CLI_REFERENCE.md) |
 
 ## How the pieces fit

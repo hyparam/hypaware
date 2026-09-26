@@ -162,36 +162,44 @@ test('the service environment carries the projection budget into the daemon proc
   assert.equal(process.env[PROJECTION_KNOB], undefined, 'fixture invariant: the runner must not carry the knob')
 
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-daemon-heap-knob-'))
-  const configPath = path.join(hypHome, 'hypaware-config.json')
-  // No gateway plugin: this is about the half of the daemon that runs
-  // background work, and a configured `listen` would bind a port.
-  await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, plugins: [] }))
-  const probeResult = path.join(hypHome, 'processing-budget.json')
-  const probe = await writeProcessingProbe(hypHome, probeResult)
+  // A whole daemon state root, logs included: removed on the way out like
+  // `gateway-boot-failure-status` does, so a repeated suite run does not grow
+  // one of these per run in the temp directory. Every failure message above
+  // already carries the recorded stderr, so nothing diagnostic is in here.
+  try {
+    const configPath = path.join(hypHome, 'hypaware-config.json')
+    // No gateway plugin: this is about the half of the daemon that runs
+    // background work, and a configured `listen` would bind a port.
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, plugins: [] }))
+    const probeResult = path.join(hypHome, 'processing-budget.json')
+    const probe = await writeProcessingProbe(hypHome, probeResult)
 
-  const run = runGatewayOutsideTestRunner({
-    hypHome,
-    configPath,
-    probe,
-    probeResult,
-    resultPath: path.join(hypHome, 'gateway-budget-run.json'),
-  })
-  assert.equal(run.bootError, null, 'fixture invariant: the gateway must boot')
-  assert.ok(run.childPid, 'the daemon forked a processing child')
-  assert.ok(run.probeSeen, 'the processing child reported its budget')
+    const run = runGatewayOutsideTestRunner({
+      hypHome,
+      configPath,
+      probe,
+      probeResult,
+      resultPath: path.join(hypHome, 'gateway-budget-run.json'),
+    })
+    assert.equal(run.bootError, null, 'fixture invariant: the gateway must boot')
+    assert.ok(run.childPid, 'the daemon forked a processing child')
+    assert.ok(run.probeSeen, 'the processing child reported its budget')
 
-  const observed = JSON.parse(readFileSync(probeResult, 'utf8'))
-  assert.equal(
-    observed.pid,
-    run.childPid,
-    'the budget was read in the forked processing child, across the boundary background work runs behind'
-  )
-  assert.equal(observed.knob, String(SERVICE_MB), 'the service environment reached that child')
-  assert.equal(
-    observed.resolvedBytes,
-    SERVICE_MB * 1024 * 1024,
-    'and the projection resolver in that child returns the operator budget, not the default'
-  )
+    const observed = JSON.parse(readFileSync(probeResult, 'utf8'))
+    assert.equal(
+      observed.pid,
+      run.childPid,
+      'the budget was read in the forked processing child, across the boundary background work runs behind'
+    )
+    assert.equal(observed.knob, String(SERVICE_MB), 'the service environment reached that child')
+    assert.equal(
+      observed.resolvedBytes,
+      SERVICE_MB * 1024 * 1024,
+      'and the projection resolver in that child returns the operator budget, not the default'
+    )
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
 })
 
 /**
