@@ -77,6 +77,100 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
   assert.match(prompt, /hyp privacy folders ask/)
 })
 
+// #2190's two defects are semantic: the block named its destination two ways,
+// and it hedged a forwarding claim that is unconditional wherever the block
+// renders. Two review rounds tried to pin those semantically, with a clause
+// splitter and a destination extractor, and the result was defeated more than
+// twenty times between them: a destination named after "shared with" or
+// "uploaded into" rather than "forwarded to", one inside parentheses the
+// capture stops at, one in no verb's object at all, a hedge moved into the
+// next sentence, a hedge on an indented continuation line, a hedge with no
+// conditional opener ("network permitting"). Each repair closed some holes and
+// opened others, and the clause boundaries were wrong in three successive
+// attempts. It also failed on copy that was perfectly correct: one adverb
+// ("forwarded to the cloud automatically") reported two destinations, and
+// rendering the bullets flush left reported the destination as "cloud hyp
+// privacy set /work/secret-repo local-only - ignore".
+//
+// A consent surface does not need a pattern that guesses at intent. It needs
+// every reword to be read by a human. So pin the rendered block literally,
+// which is how the sibling destination-naming copy is already pinned
+// (test/core/cli/wizard/sync_scope.test.js asserts nine of these lines with
+// plain equality). Every one of those bypasses changes the copy, so the pin
+// catches all of them, and it cannot false-fail on copy that is fine.
+//
+// This test is meant to fail on any copy edit. Whoever updates the literal is
+// the human the guard exists to summon, and these are the two things to check
+// before doing so:
+//
+//   1. The block names the sync destination exactly one way. Two spellings of
+//      one place ("HypAware Cloud" and "the cloud") still count as two.
+//   2. The forwarding claim carries no connectivity hedge.
+//      `decideClassification` returns prompt only on an enrolled machine, so
+//      the forwarding is unconditionally true wherever this renders and a
+//      hedge understates it.
+const CLASSIFICATION_PROMPT_CWD = '/work/secret-repo'
+
+const EXPECTED_CLASSIFICATION_PROMPT = [
+  'This machine is enrolled, so by default the AI coding sessions you run here',
+  'are recorded and forwarded to the cloud.',
+  'The folder /work/secret-repo has not been classified yet, so it would sync by default.',
+  '',
+  'Before continuing, ask the user how this folder should be handled, then run',
+  'the matching command once to record the answer (you will not be asked again',
+  'for this folder):',
+  '',
+  "  - sync: this folder's sessions sync to the cloud (the current default)",
+  '      hyp privacy set /work/secret-repo sync',
+  '  - local-only: keep sessions on this machine only, never send them to the cloud',
+  '      hyp privacy set /work/secret-repo local-only',
+  "  - ignore: do not record this folder's sessions at all",
+  '      hyp privacy set /work/secret-repo ignore',
+  '',
+  "Present these three choices as a selection menu using your environment's",
+  'native question tool (in Claude Code, the AskUserQuestion tool); do not ask',
+  'in open-ended text unless no such tool exists. Then run the chosen command.',
+  'If the user is unsure, the safe choice is local-only (recorded here, never',
+  'forwarded). This affects only what HypAware records and forwards; it does',
+  'not change your task.',
+  '',
+  'If the user does not want to be asked about folders at all, run',
+  '`hyp privacy folders sync` instead: new folders then sync without asking,',
+  'and `hyp privacy folders ask` brings the question back.',
+].join('\n')
+
+test('the consent prompt renders exactly the reviewed block (one destination term, no connectivity hedge)', () => {
+  assert.equal(buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD }), EXPECTED_CLASSIFICATION_PROMPT)
+})
+
+// The blurb is also checked on its own, so the two properties the literal above
+// encodes are still named in code rather than only in a comment. This one is a
+// single string with no structure to parse, so it has none of the clause
+// problems the block-wide version had: it reads the one field a hedge would
+// most naturally be added back to.
+const CONDITIONAL_OPENERS =
+  'when|whenever|while|if|once|unless|until|provided|assuming|as long as|so long as|only|where|subject to|depending on'
+
+const CONNECTIVITY_TOKENS =
+  'connect\\w*|online|offline|reach\\w*|network|signed[- ]in|logged[- ]in|link\\w*|available|availability|internet|connectivity'
+
+const CONNECTION_CONDITIONAL = new RegExp(
+  '\\b(?:' + CONDITIONAL_OPENERS + ')\\b[^.\\n]{0,60}\\b(?:' + CONNECTIVITY_TOKENS + ')\\b',
+  'i'
+)
+
+test('the sync blurb states the forwarding without a connection-conditional hedge', () => {
+  const sync = CLASSIFICATION_CHOICES.find((c) => c.class === 'full')
+  assert.ok(sync, 'the full/sync choice is present')
+  // The disclosure has to be there before its phrasing can be pinned.
+  assert.match(sync.blurb, /\b(?:sync\w*|forward\w*|upload\w*|sen[dt])\b/i)
+  assert.equal(
+    CONNECTION_CONDITIONAL.test(sync.blurb),
+    false,
+    `the sync blurb hedges the forwarding on connectivity: ${JSON.stringify(sync.blurb)}`
+  )
+})
+
 test('decideClassification: with the ask on, prompt only when enrolled AND interactive AND unclassified', () => {
   const asking = { askMode: /** @type {const} */ ('ask') }
   assert.deepEqual(

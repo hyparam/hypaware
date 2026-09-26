@@ -53,7 +53,7 @@ export const CLASSIFICATION_CHOICES = [
     class: 'full',
     token: 'sync',
     label: 'sync',
-    blurb: "this folder's sessions sync to the cloud when this machine is connected (the current default)",
+    blurb: "this folder's sessions sync to the cloud (the current default)",
   },
   {
     class: 'local-only',
@@ -110,8 +110,8 @@ export function verbArgvForClass(cls, targetPath) {
  */
 export function buildClassificationPrompt({ cwd }) {
   const lines = [
-    'This machine is enrolled with a shared HypAware server, so by default the',
-    'AI coding sessions you run here are recorded and forwarded to that server.',
+    'This machine is enrolled, so by default the AI coding sessions you run here',
+    'are recorded and forwarded to the cloud.',
     `The folder ${cwd} has not been classified yet, so it would sync by default.`,
     '',
     'Before continuing, ask the user how this folder should be handled, then run',
