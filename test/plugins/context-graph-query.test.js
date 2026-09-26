@@ -474,3 +474,91 @@ test('an ordinary not-found still renders its own error and candidates', () => {
   assert.match(rendered.stderr ?? '', /x\.js/)
   assert.doesNotMatch(rendered.stderr ?? '', /graph is empty/)
 })
+
+/**
+ * A walk whose frontier and output both exceed the 256-id batch size, so the
+ * traversal genuinely issues many reads per dataset rather than one.
+ * @param {number} width
+ */
+function wideGraph(width) {
+  const nodes = [n('root', 'Session', 'root', 'root-label')]
+  const edges = []
+  for (let i = 0; i < width; i++) {
+    nodes.push(n(`m${i}`, 'Tool', `mid-${i}`, null), n(`l${i}`, 'File', `leaf-${i}`, null))
+    edges.push(e('root', `m${i}`, 'used'), e(`m${i}`, `l${i}`, 'touched'))
+  }
+  return { nodes, edges }
+}
+
+/**
+ * `memoryGraph` with the refresh path instrumented: each dataset reports one
+ * partition and the declared no-op `refreshPartition` the graph datasets
+ * register, and the storage models a spool a live writer keeps pending, so a
+ * forced settle flushes on every read and a debounced one does not.
+ * @param {any[]} nodes
+ * @param {any[]} edges
+ */
+function refreshCountingGraph(nodes, edges) {
+  const base = memoryGraph(nodes, edges)
+  /** @type {{ refreshPartition: any[], flushTable: any[] }} */
+  const calls = { refreshPartition: [], flushTable: [] }
+  const tablePath = dataset => `${base.storage.cacheRoot}/datasets/${dataset}/label`
+  const getDataset = base.query.getDataset
+  const query = /** @type {any} */ ({
+    ...base.query,
+    getDataset: name => ({
+      ...getDataset(name),
+      discoverPartitions: async () => [{ dataset: name, partition: { partition: 'label' }, tablePath: tablePath(name) }],
+      refreshPartition: async (_partition, ctx) => {
+        calls.refreshPartition.push({ dataset: name, force: ctx.force === true })
+        return { status: 'skipped', rows: 0 }
+      },
+    }),
+  })
+  /** @type {Map<string, number>} */
+  const lastFlushAtMs = new Map()
+  const storage = /** @type {any} */ ({
+    ...base.storage,
+    pendingInfo: async path => ({ pending: true, lastFlushAtMs: lastFlushAtMs.get(path) ?? null, flushFailedAtMs: null }),
+    flushTable: async (path, options) => {
+      calls.flushTable.push({ path, force: options?.force === true })
+      lastFlushAtMs.set(path, Date.now())
+    },
+  })
+  const dataset = name => ({
+    forcedRefreshes: calls.refreshPartition.filter(c => c.dataset === name && c.force).length,
+    forcedFlushes: calls.flushTable.filter(c => c.path === tablePath(name) && c.force).length,
+    reads: base.scans.filter(s => s.dataset === name).length,
+  })
+  return { ...base, query, storage, dataset }
+}
+
+test('a depth-3 multi-batch traversal forces a refresh at most once per graph dataset', async () => {
+  const { nodes, edges } = wideGraph(300)
+  const fixture = refreshCountingGraph(nodes, edges)
+  // Seeded by label, the tier that reads all three times: a fixture resolving
+  // at the node_id tier cannot see a force reintroduced on the seed read.
+  const result = ok(await queryNeighbors({ ...fixture, seed: 'root-label', depth: 3 }))
+
+  // The walk itself, unchanged by the refresh mode: 300 mids at hop 1 and 300
+  // leaves at hop 2, reached over multiple frontier and output batches.
+  assert.equal(result.reachable, 600)
+  assert.equal(result.totalNodes, 601)
+  assert.equal(result.totalEdges, 600)
+  assert.equal(result.neighbors.length, 600)
+  assert.equal(result.truncated, false)
+  assert.equal(result.neighbors.filter(x => x.hop === 1).length, 300)
+  assert.equal(result.neighbors.filter(x => x.hop === 2).length, 300)
+  assert.deepEqual(idsOf(result.neighbors.slice(0, 2)), new Set(['m0', 'm1']))
+  assert.equal(result.neighbors[0].node.natural_key, 'mid-0')
+
+  // Not vacuous: each dataset really is read many times over.
+  const node = fixture.dataset('node'), edge = fixture.dataset('edge')
+  assert.equal(node.reads, 6)
+  assert.equal(edge.reads, 8)
+
+  assert.equal(node.forcedRefreshes, 1, `node forced refreshes: want 1, got ${node.forcedRefreshes}`)
+  assert.equal(edge.forcedRefreshes, 1, `edge forced refreshes: want 1, got ${edge.forcedRefreshes}`)
+  assert.equal(node.forcedFlushes, 1, `node forced flushes: want 1, got ${node.forcedFlushes}`)
+  assert.equal(edge.forcedFlushes, 1, `edge forced flushes: want 1, got ${edge.forcedFlushes}`)
+})
