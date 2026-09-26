@@ -2,6 +2,7 @@
 
 import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
+import { isGatewayFallbackRow } from '../../../../src/core/cache/gateway_fallback.js'
 import { getLogger } from '../../../../src/core/observability/index.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import {
@@ -76,10 +77,14 @@ export const OPENCLAW_SETTLEMENT_MTIME_SLACK_MS = 60 * 60 * 1000
  *    distinct rows the same native `message_id`.
  *
  * @ref LLP 0161#settlement-enricher [implements]: per-session file read,
- * match-key index, identity upgrade, and the single-header-cwd policy drop
+ * match-key index, identity upgrade, and the single-header-cwd policy drop,
+ * applied to every fallback/null-cwd row this pass settles - LLP 0441
+ * narrows "every row" to exclude an already-native row that carries its
+ * own cwd, which this pass must leave untouched
  * @ref LLP 0157#requirements [implements]: R14 (resolve the session's cwd
  * through the LLP 0158 reader and drop a policy-ignored row before it is
- * committed) and R9 (both reads go through the one reader, never a private
+ * committed, narrowed by LLP 0441 to the fallback/null-cwd rows this pass
+ * settles) and R9 (both reads go through the one reader, never a private
  * parse)
  *
  * @param {{
@@ -166,17 +171,27 @@ export function createOpenclawSettlementEnricher(opts) {
         const gate = index.cwd ? { cwd: index.cwd, policy: resolver.resolve(index.cwd) } : undefined
         let contentMatches = 0
         let ordinalMatches = 0
+        let skipped = 0
+        let droppedRows = 0
 
         for (const i of indices) {
           const row = rows[i]
 
-          // @ref LLP 0441#no-new-drop-authority [constrained-by]: the gateway's
-          // settle selection now also hands this pass the in-batch successors
-          // of the rows it can rename. Such a row is already native and
-          // already governed by the cwd it carries, so this pass must return
-          // it untouched for the relink to find - no ordinal/time match, and
-          // no header-cwd drop.
-          if (!isFallbackRow(row.attributes) && stringValue(row.cwd)) continue
+          // @ref LLP 0441#no-new-drop-authority [constrained-by]: the
+          // gateway's settle selection is registered on the dataset, so it
+          // is client-agnostic and now also hands this pass in-batch rows
+          // that are already native and already carry their own cwd. Such
+          // a row is already governed by the cwd it carries, so nothing in
+          // this pass may touch it - no ordinal/time match, and no
+          // header-cwd drop. The discriminator must be the gateway's
+          // `identity_source === 'gateway_fallback'` marker, not "has no
+          // `openclaw.match_key`": a backfill fallback row has no
+          // match_key either, and such a row must still be settled and
+          // still be gated by the header cwd below.
+          if (stringValue(row.cwd) && !isGatewayFallbackRow(row)) {
+            skipped++
+            continue
+          }
 
           // 1. Identity upgrade. Content match first (strong evidence);
           // only on a miss does the ordinal/time fallback run, as a
@@ -209,6 +224,7 @@ export function createOpenclawSettlementEnricher(opts) {
               ...(gate.policy.warn ? { warn: gate.policy.warn } : {}),
             })
             out[i] = USAGE_POLICY_DROP
+            droppedRows++
             continue
           }
 
@@ -218,14 +234,18 @@ export function createOpenclawSettlementEnricher(opts) {
         logger.info('plugin.openclaw.settlement', {
           component: CLIENT_NAME,
           operation: 'settlement',
-          status: gate?.policy.class === 'ignore' ? 'dropped' : 'ok',
+          // Honest per-group outcome, not the gate's class: the LLP 0441
+          // guard above can skip a row without dropping it, so "the gate
+          // was ignore" no longer implies "every row in the group dropped".
+          status: droppedRows > 0 ? 'dropped' : 'ok',
           session_id: sessionId,
           native_session_id: index.sessionId,
           rows: indices.length,
           match_keys: keys.size,
           content_matches: contentMatches,
           ordinal_matches: ordinalMatches,
-          unmatched: indices.length - contentMatches - ordinalMatches,
+          skipped,
+          unmatched: indices.length - contentMatches - ordinalMatches - skipped,
           transcript_messages: index.messageCount,
           ...(gate ? { cwd_hash: hashCwd(gate.cwd), usage_class: gate.policy.class } : {}),
         })
@@ -543,22 +563,6 @@ function readMatchKey(attributes) {
   const openclaw = parsed.openclaw
   if (!isPlainObject(openclaw)) return undefined
   return stringValue(openclaw.match_key)
-}
-
-/**
- * Whether a row still carries the gateway's fallback-identity marker,
- * matching the gateway dataset's own `isFallbackRow` test exactly (the two
- * must agree: a backfill fallback row has no `openclaw.match_key` either, so
- * "has no match_key" is not a safe substitute here - it would also match a
- * row this test correctly leaves alone).
- *
- * @param {unknown} attributes
- */
-function isFallbackRow(attributes) {
-  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
-  if (!isPlainObject(parsed)) return false
-  const gateway = parsed.gateway
-  return isPlainObject(gateway) && gateway.identity_source === 'gateway_fallback'
 }
 
 /**

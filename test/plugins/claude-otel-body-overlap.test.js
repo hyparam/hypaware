@@ -1174,12 +1174,12 @@ test('a message whose only-partly-settled part shares an id with a surviving row
 
 // A successor whose own transcript line HAD landed at projection time is
 // projected under its native uuid, with a cwd, so it is neither a fallback row
-// nor a null-cwd row: `settleSelect` never handed it to the enricher, and the
-// LLP 0440 relink pass only ever sees selected rows. Its link to a predecessor
-// the same pass renamed therefore stayed naming the vacated fallback hash, and
-// settlement strips `claude.match_key` from the renamed predecessor, which is
-// what the LLP 0027 re-settle sweep selects on: the dangle was permanent
-// (issue #2178).
+// nor a null-cwd row: before this fix, `planSettleSelection` never handed it
+// to the enricher, and the LLP 0440 relink pass only ever sees selected rows.
+// Its link to a predecessor the same pass renamed therefore stayed naming the
+// vacated fallback hash, and settlement strips `claude.match_key` from the
+// renamed predecessor, which is what the LLP 0027 re-settle sweep selects on:
+// the dangle was permanent (issue #2178).
 // @ref LLP 0441#select-the-successors [tests]: the settle pass selects the
 // in-batch successors of the rows whose ids it can rewrite, so the relink
 // reaches a successor that needed no settling of its own

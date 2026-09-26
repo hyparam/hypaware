@@ -8,6 +8,7 @@
 **Related:** LLP 0167 (the accepted RFC), LLP 0168, LLP 0169, LLP 0170 (the decisions this spec makes implementable), LLP 0157 (the prior spec; R8, R9, R10, R11, R14 remain binding), LLP 0163, LLP 0044, LLP 0045
 **Extended-by:** LLP 0407 (#dropped: R12 is satisfied by plain wording)
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0441 (R14, carried over at #carried-over: the settlement enricher no longer resolves or applies cwd against a row that is already native and already carries one)
 
 > Requirements for implementing LLP 0168 (config override), LLP 0169
 > (attach surface), and LLP 0170 (scheduled sweep), replacing the dead
@@ -18,6 +19,11 @@
 > rewrites.
 
 ## Carried-over requirements {#carried-over}
+
+> **Extended-by [LLP 0441](./0441-settle-selects-a-renamed-rows-successors.decision.md):**
+> R14 below now excludes a row that is already native and already carries
+> its own `cwd`: the settle pass no longer resolves or applies cwd against
+> such a row. R8, R9, R10, and R11 are unaffected.
 
 LLP 0157's R8 (projector shapes behind the header gate), R9 (the one
 LLP 0158 reader), R10 (backfill policy gate and CLI-backend exclusion),

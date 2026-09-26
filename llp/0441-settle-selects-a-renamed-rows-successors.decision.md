@@ -8,7 +8,10 @@
 **Related:** LLP 0026 (#consequences, the immediate-predecessor contract), LLP
 0027 (the re-settle sweep that cannot retry these rows), LLP 0085 (the drop
 authority this widening is bounded by), LLP 0435, LLP 0439
-**Extends:** LLP 0440
+**Extends:** LLP 0440, LLP 0157 (R14: the policy drop now governs only
+the rows this pass still reaches), LLP 0161 (#settlement-enricher: the per-row
+loop no longer applies the header cwd to every row in the group), LLP 0171
+(#carried-over: the same narrowing of R14)
 **Tracker:** hyparam/hypaware#2178
 
 > LLP 0440 points a settled row's link at the id settlement gave its
@@ -51,22 +54,34 @@ null-cwd row, and every row whose `previous_message_id` names the
 `message_id` of a `gateway_fallback` row of the same batch.**
 
 The third shape is derived, not declared. The ids a settle pass can rewrite are
-exactly the pre-settlement `message_id`s of its fallback rows: a row is
-upgraded only if it carries a `claude.match_key`, and only a fallback row
-carries one. So the successors that LLP 0440's repair could possibly move are
-knowable before the pass runs, from the batch alone, with no transcript read
-and no cache scan.
+exactly the pre-settlement `message_id`s of its fallback rows. In the claude
+enricher a row is upgraded only if it carries a `claude.match_key`, and only a
+fallback row carries one; the OpenClaw enricher's own bound on this is
+different, and is recorded at {#no-new-drop-authority} rather than here. So
+the successors that LLP 0440's repair could possibly move are knowable before
+the pass runs, from the batch alone, with no transcript read and no cache
+scan.
 
 One level is enough. A selected successor is not itself renamed (its identity
 is already native, and settlement does not touch it), so nothing chains off it:
-there is no fixpoint to reach. The same holds for LLP 0440's splice case, which
-changes a successor's link and not its id.
+there is no fixpoint to reach. That holds unconditionally in the claude
+enricher; in the OpenClaw enricher it holds only because of the explicit skip
+{#no-new-drop-authority} records, not because nothing there would otherwise
+touch it. The same holds for LLP 0440's splice case, which changes a
+successor's link and not its id.
 
-Nothing else about the pass changes. The enricher's own steps still test each
-row on its own terms, and a row selected for this reason fails every one of
-them: no `match_key`, so no identity upgrade; a known `cwd`, so the late
-`.hypignore` resolve returns it untouched. It is in the group to be reachable,
-and LLP 0440's repair is the only thing that reaches it.
+In the claude enricher, nothing else about the pass changes: its own steps
+still test each row on its own terms, and a row selected for this reason
+fails every one of them there: no `match_key`, so no identity upgrade; a known
+`cwd`, so the late `.hypignore` resolve returns it untouched. It is in the
+group to be reachable, and LLP 0440's repair is the only thing that reaches
+it. The OpenClaw enricher has no such natural exclusion: a missing
+`match_key` there does not block the identity upgrade (a miss falls through
+to `ordinalFallbackMatch` in
+`hypaware-core/plugins-workspace/openclaw/src/settle.js`), and its drop gate
+resolves the session header's `index.cwd`, never the row's own.
+{#no-new-drop-authority} records how that enricher holds the same bound
+instead, by an explicit skip rather than an incidental one.
 
 ### The widening grants no new drop authority {#no-new-drop-authority}
 
@@ -116,6 +131,19 @@ itself renamed, so none of its own successors need selecting in turn.
 
 ## Consequences
 
+- **The relink repair is claude-only.** LLP 0440's `previous_message_id`
+  relink (`relinkRewrittenPredecessors`,
+  `hypaware-core/plugins-workspace/claude/src/settle.js:559`) exists only in
+  the claude enricher; `upgradeFallbackRows`
+  (`hypaware-core/plugins-workspace/ai-gateway/src/dataset.js:472`) groups
+  selected rows by `client_name` and hands each group to the enricher
+  registered for that client, so an OpenClaw row can never reach claude's
+  relink. The OpenClaw enricher has no `previous_message_id` handling at all,
+  and `openclaw/src/backfill.js:645` states the field is deliberately not
+  set. OpenClaw's participation in this widening is therefore limited to
+  holding the bound {#no-new-drop-authority} describes; the dangling-successor
+  pointer LLP 0440 fixes for claude is unchanged, and still stands, on the
+  OpenClaw path.
 - LLP 0440's scoped consequence ("a successor that already carries native
   identity and a known cwd is never handed to the enricher, so it never reaches
   this repair") is retired for the in-batch case. Its cross-batch sibling

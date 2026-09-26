@@ -138,8 +138,8 @@ export function createClaudeSettlementEnricher(opts) {
         let index
         // Resolve the transcript only for a group that actually reads the
         // index, i.e. one holding a match_key row. `planSettleSelection` also
-        // admits two match_key-less shapes: pure null-cwd rows (the #258
-        // race) and successor rows whose `previous_message_id` names a
+        // admits match_key-less rows, among them pure null-cwd rows (the
+        // #258 race) and successor rows whose `previous_message_id` names a
         // fallback row's `message_id` (LLP 0441). A group made only of those
         // would otherwise resolve a whole transcript to build an index
         // nothing consults - which, with `homeDir` armed below, is a Desktop

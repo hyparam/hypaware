@@ -8,6 +8,7 @@
 **Related:** LLP 0016, LLP 0027, LLP 0037, LLP 0049, LLP 0085, LLP 0103, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148, LLP 0149, LLP 0152, LLP 0158, LLP 0159
 **Extended-by:** LLP 0313 (the upstream is selected by path AND credential, not path alone; an upstream may declare a declarative outbound path rewrite). Also: LLP 0167 / LLP 0171 (two-lane capture: R1-R6 void, R7 reversed, R12 replaced, R13 retired; R8, R9, R10, R11, R14 remain binding, disposition in LLP 0171#carried-over)
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0441 (R14: the settlement enricher no longer resolves or applies cwd against a row that is already native and already carries one; see R14's inline note)
 
 > Requirements for implementing the Accepted OpenClaw full-capture decision
 > set (LLP 0143 through 0149 and 0152), plus the backfill route those
@@ -262,6 +263,11 @@ Named by the decisions as verify-before-relying-on:
   the LLP 0158 reader, stamp it on settled rows, and drop a row whose
   resolved cwd is policy-ignored before it is committed
   (LLP 0049 R1 as extended by LLP 0085).
+  **Extended-by [LLP 0441](./0441-settle-selects-a-renamed-rows-successors.decision.md):**
+  a row that is already native and already carries its own `cwd` is now
+  excluded before this resolution runs, so R14 governs cwd resolution and
+  the policy drop only for a row the settle pass still reaches. R14 is
+  otherwise unchanged.
 
 ## References
 
