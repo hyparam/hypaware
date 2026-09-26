@@ -90,8 +90,10 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
 // structure: a blank line, or an indented line, closes the current unit, and
 // only consecutive prose lines get joined before the sentence split. That
 // keeps the line-wrap protection for prose while still isolating each bullet
-// and each command line from its neighbors.
-function promptClauses(text) {
+// and each command line from its neighbors. The units are returned grouped
+// rather than flattened because the hedge check below needs to know which
+// clauses sit in the same paragraph as a forwarding claim.
+function promptUnits(text) {
   const lines = text.split('\n')
   const units = []
   let current = []
@@ -121,14 +123,16 @@ function promptClauses(text) {
     current.push(trimmed)
   }
   flush()
-  const clauses = []
-  for (const unit of units) {
-    for (const clause of unit.split(/(?<=[.!?])\s+/)) {
-      const normalized = clause.replace(/\s+/g, ' ').trim()
-      if (normalized) clauses.push(normalized)
-    }
-  }
-  return clauses
+  return units.map((unit) =>
+    unit
+      .split(/(?<=[.!?])\s+/)
+      .map((clause) => clause.replace(/\s+/g, ' ').trim())
+      .filter((clause) => clause !== '')
+  )
+}
+
+function promptClauses(text) {
+  return promptUnits(text).flat()
 }
 
 // A closed list of destination "families" (server/cloud/remote) is exactly
@@ -153,6 +157,21 @@ const FORWARDING_DESTINATION = new RegExp(
   'gi'
 )
 
+// A forwarding verb's object is not the only place this block can name the
+// destination, and #2190 is about naming it two ways. The wording this PR
+// replaced put one of its two namings in the enrollment clause ("enrolled
+// with a shared HypAware server ... forwarded to that server"), so a guard
+// that reads only forwarding objects passes a partial revert that restores
+// "enrolled with a shared HypAware server" and leaves "forwarded to the
+// cloud" alone: two terms for one destination, which is the defect. Count the
+// enrollment object as a destination naming too, bounded the same way.
+const ENROLLMENT_DESTINATION = new RegExp(
+  '\\benrolled\\s+(?:with|in|into|to|against|on)\\s+' +
+    '([^,.():`]+?)' +
+    '(?=[,.():`]|\\s+\\b(?:' + CONDITIONAL_OPENERS + ')\\b|$)',
+  'gi'
+)
+
 // Normalize a captured object so "the cloud", "the cloud " and "The Cloud"
 // all count as the same destination, and only differ when they actually name
 // a different place.
@@ -168,11 +187,14 @@ function extractDestinations(text) {
   const found = []
   for (const clause of promptClauses(text)) {
     let m
-    // A fresh RegExp per clause: the pattern is /g, and a shared exec-stateful
-    // instance would carry lastIndex across calls in the same process.
-    const re = new RegExp(FORWARDING_DESTINATION)
-    while ((m = re.exec(clause))) {
-      found.push(normalizeDestination(m[1]))
+    // A fresh RegExp per clause: the patterns are /g, and a shared
+    // exec-stateful instance would carry lastIndex across calls in the same
+    // process.
+    for (const pattern of [FORWARDING_DESTINATION, ENROLLMENT_DESTINATION]) {
+      const re = new RegExp(pattern)
+      while ((m = re.exec(clause))) {
+        found.push(normalizeDestination(m[1]))
+      }
     }
   }
   return found
@@ -202,8 +224,26 @@ const CONNECTION_CONDITIONAL = new RegExp(
 // never reaches across into a different bullet's forwarding verb.
 const FORWARDING_VERB = /\b(?:forward\w*|sync\w*|sen[dt]s?|sent|upload\w*)\b/i
 
+// A hedge does not have to sit inside the sentence that makes the forwarding
+// claim. An author told not to hedge the claim writes the hedge as the next
+// sentence instead ("... forwarded to the cloud. That happens when this
+// machine is connected."), and a strictly per-clause filter reads that
+// continuation as an innocent clause because it carries no forwarding verb of
+// its own. So scan from a paragraph's first forwarding claim to the end of
+// that paragraph. That still excludes the menu-presentation clause, which
+// precedes its paragraph's first forwarding claim, so the false positive the
+// per-clause narrowing was added for stays closed.
+//
+// Residual, recorded rather than left unknown: a hedge placed *before* a
+// paragraph's first forwarding claim is not scanned, because widening to the
+// whole paragraph puts the menu clause back in range.
 function forwardingClauses(text) {
-  return promptClauses(text).filter((clause) => FORWARDING_VERB.test(clause))
+  const scanned = []
+  for (const unit of promptUnits(text)) {
+    const first = unit.findIndex((clause) => FORWARDING_VERB.test(clause))
+    if (first >= 0) scanned.push(...unit.slice(first))
+  }
+  return scanned
 }
 
 test('the consent prompt names the sync destination exactly one way', () => {
