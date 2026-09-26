@@ -78,12 +78,55 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
 })
 
 // The prose array wraps sentences across several pushed lines joined with
-// '\n' (see buildClassificationPrompt). A phrase that straddles that join
-// (a destination word on one push, a hedge word on the next) would dodge any
-// pattern that treats '\n' as a hard stop, so every check below runs against
-// this collapsed form instead of the raw rendered string.
-function normalizeWhitespace(text) {
-  return text.replace(/\s+/g, ' ').trim()
+// '\n' (see buildClassificationPrompt): a phrase that straddles that join (a
+// destination word on one push, a hedge word on the next) has to survive
+// being read as one clause. But the prompt also has a bullet/command region
+// with no sentence-terminating punctuation at all ('  - sync: ...' and
+// '      hyp privacy set ...'), where collapsing everything into one string
+// would glue unrelated bullets and commands into a single ~700-character
+// pseudo-sentence, letting a word in one bullet pair with an opener from a
+// different bullet or an unrelated command line. So instead of collapsing
+// all whitespace uniformly, split the raw prompt into clauses along its own
+// structure: a blank line or a structural line (a bullet, or a command line
+// naming the binary under either spelling) closes the current unit, and only
+// consecutive prose lines get joined before the sentence split. That keeps
+// the line-wrap protection for prose while still isolating each bullet and
+// each command line from its neighbors.
+function promptClauses(text) {
+  const lines = text.split('\n')
+  const units = []
+  let current = []
+  const flush = () => {
+    if (current.length > 0) {
+      units.push(current.join(' '))
+      current = []
+    }
+  }
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed === '') {
+      flush()
+      continue
+    }
+    // A bullet ('  - sync: ...') or a command line (either binary spelling)
+    // names exactly one thing and never continues onto the next line, so it
+    // is its own unit and closes whatever prose unit came before it.
+    if (/^-\s/.test(trimmed) || /^hypaware?\b/.test(trimmed)) {
+      flush()
+      units.push(trimmed)
+      continue
+    }
+    current.push(trimmed)
+  }
+  flush()
+  const clauses = []
+  for (const unit of units) {
+    for (const clause of unit.split(/(?<=[.!?])\s+/)) {
+      const normalized = clause.replace(/\s+/g, ' ').trim()
+      if (normalized) clauses.push(normalized)
+    }
+  }
+  return clauses
 }
 
 // A closed list of destination "families" (server/cloud/remote) is exactly
@@ -92,9 +135,11 @@ function normalizeWhitespace(text) {
 // destination for free. So instead of banning known-bad terms, assert a
 // positive fact: every forwarding verb in the block names an object, and all
 // of those objects are the same place. The capture is bounded to one clause
-// (stops at , . ( ` : or a conditional-opener / command word) so it can
-// never run past the sentence that actually names the destination into
-// unrelated prose, such as the next bullet's `hyp ...` command line.
+// (stops at , . ( ` : or a conditional-opener) so it can never run past the
+// sentence that actually names the destination into unrelated prose; running
+// per-clause (via promptClauses) rather than over the whole collapsed prompt
+// is what keeps a bullet's destination from reaching into the next bullet's
+// command line, so no binary-name stop word is needed here either.
 const CONDITIONAL_OPENERS =
   'when|whenever|while|if|once|unless|until|provided|assuming|as long as|so long as|only|where|subject to|depending on'
 
@@ -102,7 +147,7 @@ const FORWARDING_DESTINATION = new RegExp(
   '\\b(?:forward|forwards|forwarded|sync|syncs|synced|send|sends|sent|upload|uploads|uploaded)' +
     '\\s+(?:it\\s+|them\\s+)?to\\s+' +
     '([^,.():`]+?)' +
-    '(?=[,.():`]|\\s+\\b(?:' + CONDITIONAL_OPENERS + '|hyp)\\b|$)',
+    '(?=[,.():`]|\\s+\\b(?:' + CONDITIONAL_OPENERS + ')\\b|$)',
   'gi'
 )
 
@@ -118,14 +163,15 @@ function normalizeDestination(raw) {
 }
 
 function extractDestinations(text) {
-  const normalized = normalizeWhitespace(text)
   const found = []
-  let m
-  // A fresh RegExp per call: the pattern is /g, and a shared exec-stateful
-  // instance would carry lastIndex across calls in the same process.
-  const re = new RegExp(FORWARDING_DESTINATION)
-  while ((m = re.exec(normalized))) {
-    found.push(normalizeDestination(m[1]))
+  for (const clause of promptClauses(text)) {
+    let m
+    // A fresh RegExp per clause: the pattern is /g, and a shared exec-stateful
+    // instance would carry lastIndex across calls in the same process.
+    const re = new RegExp(FORWARDING_DESTINATION)
+    while ((m = re.exec(clause))) {
+      found.push(normalizeDestination(m[1]))
+    }
   }
   return found
 }
@@ -144,17 +190,18 @@ const CONNECTION_CONDITIONAL = new RegExp(
   'i'
 )
 
-// The block also contains bare instances of some opener words in sentences
+// The block also contains bare instances of some opener words in clauses
 // that say nothing about forwarding ("keep sessions on this machine only",
 // "run the matching command once"). Broadening CONNECTIVITY_TOKENS without
-// narrowing where it is allowed to fire would make those innocent sentences
-// trip the guard. So the whole-block check below only evaluates sentences
-// that themselves make a forwarding claim.
+// narrowing where it is allowed to fire would make those innocent clauses
+// trip the guard. So the whole-block check below only evaluates clauses
+// that themselves make a forwarding claim, and it draws those clauses from
+// promptClauses so a bullet's own opener (or "only" inside "local-only")
+// never reaches across into a different bullet's forwarding verb.
 const FORWARDING_VERB = /\b(?:forward\w*|sync\w*|sen[dt]s?|sent|upload\w*)\b/i
 
-function forwardingSentences(text) {
-  const normalized = normalizeWhitespace(text)
-  return normalized.split(/(?<=[.!?])\s+/).filter((s) => FORWARDING_VERB.test(s))
+function forwardingClauses(text) {
+  return promptClauses(text).filter((clause) => FORWARDING_VERB.test(clause))
 }
 
 test('the consent prompt names the sync destination exactly one way', () => {
@@ -190,13 +237,13 @@ test('the sync blurb states the forwarding without a connection-conditional hedg
   )
   // And nowhere else in the block either, so the hedge cannot simply move -
   // including across the prose array's line wrap, which is why this runs
-  // against the normalized, sentence-split text rather than the raw prompt.
+  // against promptClauses's structural split rather than the raw prompt.
   const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
-  const hedgedForwardingSentence = forwardingSentences(prompt).find((s) => CONNECTION_CONDITIONAL.test(s))
+  const hedgedForwardingClause = forwardingClauses(prompt).find((c) => CONNECTION_CONDITIONAL.test(c))
   assert.equal(
-    hedgedForwardingSentence,
+    hedgedForwardingClause,
     undefined,
-    `the rendered consent prompt hedges a disclosure that is unconditional where it renders: ${JSON.stringify(hedgedForwardingSentence)}`
+    `the rendered consent prompt hedges a disclosure that is unconditional where it renders: ${JSON.stringify(hedgedForwardingClause)}`
   )
 })
 
