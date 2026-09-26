@@ -161,7 +161,13 @@ test('a bootstrap import failure larger than the pipe buffer reaches a piped rea
   await Promise.race([exited, delay(1000, null, { ref: false })])
   child.stderr.on('data', (chunk) => chunks.push(chunk))
 
-  assert.equal(await closed, 1)
+  // Bounded like the `spawnSync` above: the flush this test exercises is the
+  // one thing on the boot-failure path that can wait on a reader, and `npm
+  // test` passes no `--test-timeout`, so an unbounded wait here would wedge
+  // the whole suite instead of failing this test.
+  const code = await Promise.race([closed, delay(60000, 'timeout', { ref: false })])
+  if (code === 'timeout') child.kill('SIGKILL')
+  assert.equal(code, 1, 'the child did not exit 1 within 60s')
   const report = Buffer.concat(chunks)
   assert.ok(
     report.length > PAD,
