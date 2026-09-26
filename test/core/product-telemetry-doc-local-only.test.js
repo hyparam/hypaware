@@ -16,7 +16,14 @@
  * The facts are asserted as concepts rather than as sentences: a guard that
  * pins one verbatim sentence passes again as soon as the disclosure is
  * reworded around it, and prose is reworded for reasons that have nothing to
- * do with privacy.
+ * do with privacy. Matching is scoped to the single paragraph that raises the
+ * `local-only` case (a blank-line-separated block), not the whole `##`
+ * section, so pre-existing prose several paragraphs away cannot satisfy a
+ * concept for free. Fact 1's polarity is bound to that paragraph too: an
+ * inclusion spelling has to appear, and a bare exclusion claim (an exclusion
+ * verb applied with no adjacent negation) fails the fact even if an inclusion
+ * spelling also appears elsewhere in the paragraph, so a doc that asserts the
+ * opposite of the truth cannot pass by also hedging the right way.
  *
  * @ref LLP 0393#contract [tests]: the channel forwards approved aggregate fields and never customer content, so the doc may promise exactly that much
  * @ref LLP 0393#policy [tests]: collection defaults off and `local` grants no network permission, so the disclosure is scoped to organization collection
@@ -36,11 +43,38 @@ const DOC = 'docs/PRODUCT_TELEMETRY.md'
 /** The subject: prose that raises the local-only case at all. */
 const LOCAL_ONLY = [/local-only/i, /local_only/]
 
+/** An exclusion verb applied to the local-only marking or to the work it covers. */
+const EXCLUDE_VERB = '(?:filter\\w*|exclud\\w*|remov\\w*|withh\\w*|omit\\w*)'
+
+/**
+ * A bare "marking <verb>s them" claim with no negation between "marking" and
+ * the verb: the shape an inverted disclosure takes ("a `local-only` marking
+ * filters them"). The negative lookahead lets a genuinely negated claim
+ * ("marking does not filter them") through.
+ */
+const MARKING_EXCLUDES = new RegExp(
+  `\\bmarking\\b(?!` +
+  `[^.]{0,15}\\b(?:not|never|no)\\b[^.]{0,15}\\b${EXCLUDE_VERB}` +
+  `)[^.]{0,15}\\b${EXCLUDE_VERB}`,
+  'i'
+)
+
+/**
+ * A "describes/covers/counts work that <excludes/filters/...>" claim: the
+ * shape the per-series enumeration takes when its verb is inverted ("all
+ * describe work that excludes rows ... marked `local-only`").
+ */
+const WORK_EXCLUDES = new RegExp(
+  `\\b(?:describe|describes|cover|covers|count|counts)\\b[^.]{0,20}\\bwork\\b[^.]{0,10}\\bthat\\b[^.]{0,20}\\b${EXCLUDE_VERB}`,
+  'i'
+)
+
 /**
  * The three facts the disclosure has to carry, as concepts rather than
- * sentences: a concept is satisfied by any one of its spellings, and a fact
- * only when every concept matches, so a reword survives and a deletion does
- * not.
+ * sentences: a concept is satisfied when its `any` spellings have a match and
+ * none of its `none` spellings do, and a fact only when every concept is
+ * satisfied, so a reword survives, a deletion does not, and an inversion does
+ * not pass just because it also happens to contain the right words elsewhere.
  */
 const DISCLOSURE = [
   {
@@ -53,10 +87,17 @@ const DISCLOSURE = [
         any: [
           /\binclud\w*/i,
           /\bcontribut\w*/i,
+          /\bcover\w*/i,
+          /\btake(?:s|n)?\s+in\b/i,
           /\bcount(?:s|ed)\b[^.]{0,80}\bevery\b/i,
           /\b(?:are|is|sits?|stays?|remains?)\b[^.]{0,40}\b(?:inside|within|part of)\b/i,
-          /\b(?:not|never|no)\b[^.]{0,60}\b(?:filter\w*|exclud\w*|remov\w*|withh\w*|omit\w*)/i,
+          new RegExp(`\\b(?:not|never|no)\\b[^.]{0,15}\\b${EXCLUDE_VERB}`, 'i'),
         ],
+        // A doc that asserts the marking or the work it covers is EXCLUDED,
+        // with no adjacent negation, states the opposite of this fact, even
+        // if it also contains an inclusion spelling somewhere else in the
+        // same paragraph.
+        none: [MARKING_EXCLUDES, WORK_EXCLUDES],
       },
     ],
   },
@@ -67,15 +108,16 @@ const DISCLOSURE = [
         of: 'the aggregate-only bound',
         any: [
           /\baggregate\b/i,
+          /\bsummed\b/i,
+          /\bsingle\b[^.]{0,20}\b(?:value|number|figure|reading|record)\b/i,
           /\b(?:number|count|total)s?\b[^.]{0,30}\b(?:alone|only)\b/i,
           /\bonly\b[^.]{0,40}\b(?:number|count|total)s?\b/i,
-          /\bvolume, not content\b/i,
         ],
       },
       { of: 'the stage label', any: [/`stage`/, /\bstage\b[^.]{0,20}\b(?:label|attribute|dimension)\b/i] },
       {
         of: 'what does not travel with it',
-        any: [/\b(?:no|not|never|nothing)\b[^.]{0,120}\b(?:path|dataset|source id|session|content)/i],
+        any: [/\b(?:no|not|never|nothing)\b[^.]{0,120}\b(?:path|dataset|source id|session)\b/i],
       },
     ],
   },
@@ -97,77 +139,104 @@ const DISCLOSURE = [
 ]
 
 /**
- * The document's `##` sections, each carrying its whole body (nested headings
- * included), with whitespace collapsed so a claim split over several lines
- * still reads as one sentence to the patterns above.
+ * The document's paragraphs (blank-line-separated blocks), tagged with the
+ * `##` section each falls under, with whitespace collapsed so a claim split
+ * over several lines still reads as one string to the patterns above. Code
+ * fences are tracked so a blank line inside one does not split a paragraph.
  *
  * @param {string} text
- * @returns {{ title: string, text: string }[]}
+ * @returns {{ section: string, text: string }[]}
  */
-function sections(text) {
-  const out = [{ title: '(preamble)', lines: /** @type {string[]} */ ([]) }]
+function paragraphs(text) {
+  const out = []
+  let section = '(preamble)'
   let fenced = false
+  let lines = /** @type {string[]} */ ([])
+  const flush = () => {
+    if (lines.length > 0) out.push({ section, lines })
+    lines = []
+  }
   for (const raw of text.split('\n')) {
     if (/^```/.test(raw)) fenced = !fenced
     const heading = fenced ? null : /^## +(.*?)\s*$/.exec(raw)
-    if (heading) out.push({ title: heading[1], lines: [] })
-    else out[out.length - 1].lines.push(raw)
+    if (heading) {
+      flush()
+      section = heading[1]
+      continue
+    }
+    if (!fenced && raw.trim() === '') {
+      flush()
+      continue
+    }
+    lines.push(raw)
   }
-  return out.map((s) => ({ title: s.title, text: s.lines.join(' ').replace(/\s+/g, ' ') }))
+  flush()
+  return out.map((p) => ({ section: p.section, text: p.lines.join(' ').replace(/\s+/g, ' ') }))
 }
 
-/** @param {{ of: string, any: RegExp[] }[]} concepts @param {string} text */
+/** @param {{ of: string, any: RegExp[], none?: RegExp[] }[]} concepts @param {string} text */
 function missingConcepts(concepts, text) {
-  return concepts.filter((c) => !c.any.some((re) => re.test(text))).map((c) => c.of)
+  return concepts
+    .filter((c) => !c.any.some((re) => re.test(text)) || (c.none || []).some((re) => re.test(text)))
+    .map((c) => c.of)
+}
+
+/**
+ * Whether `stage` is listed in a closed-set/vocabulary enumeration, not just
+ * present anywhere in the paragraph: `capture`, `write` and `export` are
+ * ordinary English words that already appear in this paragraph's unrelated
+ * prose ("the capture and write stages sit upstream of the export seam"), so
+ * a plain `\bstage\b` test never fails no matter how the actual enumeration
+ * is edited.
+ *
+ * @param {string} stage @param {string} text
+ */
+function stageListed(stage, text) {
+  return new RegExp(`\\b(?:closed set|vocabulary)\\b[^.]{0,150}\\b${stage}\\b`, 'i').test(text)
 }
 
 test('the product telemetry doc discloses that pipeline counts include local-only capture', () => {
   const text = fs.readFileSync(path.join(REPO_ROOT, DOC), 'utf8')
 
-  // One section has to carry all three facts: a reader who reaches the
+  // One paragraph has to carry all three facts: a reader who reaches the
   // local-only sentence and stops there has still been told the whole thing.
-  const candidates = sections(text).filter((s) => LOCAL_ONLY.some((re) => re.test(s.text)))
+  const candidates = paragraphs(text).filter((p) => LOCAL_ONLY.some((re) => re.test(p.text)))
   assert.ok(
     candidates.length > 0,
     `${DOC} never mentions local-only capture, so a reader is not told that the ` +
     'pipeline.* counts include volume from directories they marked local-only'
   )
 
+  // Both enumerations are read from the contract rather than copied, so a
+  // renamed series or a new stage value has to reach the promise the doc
+  // makes about what the series carry.
+  const series = Object.keys(METRICS).filter((name) => name.startsWith('pipeline.'))
+  assert.ok(series.length > 0, 'contract.js declares no pipeline.* series, so this guard is aimed at nothing')
+
   const failures = []
-  for (const section of candidates) {
-    const gaps = DISCLOSURE.map((claim) => ({ claim, missing: missingConcepts(claim.concepts, section.text) })).filter(
+  for (const candidate of candidates) {
+    const gaps = DISCLOSURE.map((claim) => ({ claim, missing: missingConcepts(claim.concepts, candidate.text) })).filter(
       (g) => g.missing.length > 0
     )
-    if (gaps.length > 0) {
-      failures.push(
-        `section "${section.title}": ` +
-        gaps.map((g) => `${g.claim.fact} is not stated (missing ${g.missing.join(', ')})`).join('; ')
-      )
-      continue
+    const missingSeries = series.filter((name) => !candidate.text.includes(name))
+    const missingStages = PIPELINE_STAGES.filter((stage) => !stageListed(stage, candidate.text))
+
+    if (gaps.length === 0 && missingSeries.length === 0 && missingStages.length === 0) return
+
+    const parts = gaps.map((g) => `${g.claim.fact} is not stated (missing ${g.missing.join(', ')})`)
+    if (missingSeries.length > 0) {
+      parts.push(`the disclosure does not name ${missingSeries.join(', ')}, so it does not cover everything sent`)
     }
-    // Both enumerations are read from the contract rather than copied, so a
-    // renamed series or a new stage value has to reach the promise the doc
-    // makes about what the series carry.
-    const series = Object.keys(METRICS).filter((name) => name.startsWith('pipeline.'))
-    assert.ok(series.length > 0, 'contract.js declares no pipeline.* series, so this guard is aimed at nothing')
-    for (const name of series) {
-      assert.ok(
-        text.includes(name),
-        `${DOC} does not name the ${name} series, so its disclosure does not cover everything sent`
+    if (missingStages.length > 0) {
+      parts.push(
+        `the disclosure's closed set of stage values does not list ${missingStages.join(', ')}`
       )
     }
-    for (const stage of PIPELINE_STAGES) {
-      assert.ok(
-        new RegExp(`\\b${stage}\\b`, 'i').test(section.text),
-        `${DOC} section "${section.title}" promises only a stage label leaves, but does not say ` +
-        `that '${stage}' is one of the values it can take`
-      )
-    }
-    return
+    failures.push(`paragraph in section "${candidate.section}": ${parts.join('; ')}`)
   }
 
   assert.fail(
-    `${DOC} mentions local-only capture but no one section states all three facts a reader needs ` +
+    `${DOC} mentions local-only capture but no one paragraph states all three facts a reader needs ` +
     '(the counts include it, only aggregate counts and a stage label are sent, and only under ' +
     `organization collection). ${failures.join(' | ')}`
   )
