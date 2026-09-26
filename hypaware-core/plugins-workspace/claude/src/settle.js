@@ -137,13 +137,15 @@ export function createClaudeSettlementEnricher(opts) {
         /** @type {ReturnType<typeof indexTranscriptEntries> | undefined} */
         let index
         // Resolve the transcript only for a group that actually reads the
-        // index, i.e. one holding a match_key row. `settleSelect` also admits
-        // pure null-cwd rows (the #258 race), and a group of those alone would
-        // otherwise resolve a whole transcript to build an index nothing
-        // consults - which, with `homeDir` armed below, is a Desktop container
-        // sweep whose cost grows with every conversation the machine has held.
-        // `.some` short-circuits, so a group that does need the index pays one
-        // extra key read.
+        // index, i.e. one holding a match_key row. `planSettleSelection` also
+        // admits match_key-less rows, among them pure null-cwd rows (the
+        // #258 race) and successor rows whose `previous_message_id` names a
+        // fallback row's `message_id` (LLP 0441). A group made only of those
+        // would otherwise resolve a whole transcript to build an index
+        // nothing consults - which, with `homeDir` armed below, is a Desktop
+        // container sweep whose cost grows with every conversation the
+        // machine has held. `.some` short-circuits, so a group that does need
+        // the index pays one extra key read.
         if (indices.some((i) => readMatchKey(rows[i].attributes))) {
           try {
             const entries = await transcriptLoader.load({
@@ -543,8 +545,13 @@ function upgradeRow(row, match, resolveAgent = false) {
  * row whose OWN scope moved; this is the same repair seen from the other end,
  * for the row whose PREDECESSOR moved or was renamed under it.
  *
+ * A successor that already had native identity and a cwd asks for nothing
+ * else in this pass; it is in the group only so this can reach it.
+ *
  * @ref LLP 0440#batch-local [constrained-by]: only ids this pass rewrote are
  * in hand, so a link into an earlier batch is out of reach and stays as it is
+ * @ref LLP 0441#select-the-successors [constrained-by]: this repair reaches
+ * exactly the rows `planSettleSelection` hands the enricher
  *
  * @param {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} out
  * @param {Map<string, SettledIdRewrite>} rewrittenIds

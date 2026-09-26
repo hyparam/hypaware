@@ -198,10 +198,11 @@ test('settleBatch collapses an attached-Desktop wire row onto the sweep uuid row
 test('a session group with no match_key row never resolves a transcript', async () => {
   const env = await stageEnv()
   try {
-    // `settleSelect` admits pure null-cwd rows (the #258 race) alongside fallback
-    // rows, and those never read the transcript index. Resolving one for them
-    // is not free: with `homeDir` passed, a shared-tree miss sweeps the Desktop
-    // container, whose per-session sandbox homes grow with every conversation.
+    // `planSettleSelection` admits pure null-cwd rows (the #258 race) alongside
+    // fallback rows, and those never read the transcript index. Resolving one
+    // for them is not free: with `homeDir` passed, a shared-tree miss sweeps
+    // the Desktop container, whose per-session sandbox homes grow with every
+    // conversation.
     let loads = 0
     const transcriptLoader = { load: async () => { loads += 1; return [] } }
     const enricher = createClaudeSettlementEnricher({

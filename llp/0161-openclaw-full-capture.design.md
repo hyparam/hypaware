@@ -11,6 +11,7 @@
 LLP 0103, LLP 0109, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148,
 LLP 0149, LLP 0150, LLP 0152, LLP 0157, LLP 0158, LLP 0159
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0441 (#settlement-enricher: the flush-time settle pass now selects a settled row's in-batch successors too; an already-native successor that already carries a `cwd` is excluded from Section 6's per-row loop rather than matched or cwd-resolved)
 
 > Technical design for the two deliverables and one removal LLP 0157 specifies:
 > the OpenClaw-side steering plugin, the `@hypaware/openclaw` adapter rework,
@@ -491,6 +492,16 @@ normalization rather than a single shared parser, because the two sides
 start from genuinely different message shapes.
 
 ## 6. The settlement enricher {#settlement-enricher}
+
+> **Extended-by [LLP 0441](./0441-settle-selects-a-renamed-rows-successors.decision.md):**
+> the settle pass now also hands this enricher the in-batch successors of
+> rows it can rename (LLP 0027 fallback rows). Steps 2 and 3's "applies it to
+> every row that session settles" and step 4's "independent of match
+> success" below hold only for a row this pass still reaches: an already
+> native row that already carries its own `cwd` is skipped outright, no
+> ordinal/time match attempted and no header `cwd` applied or resolved
+> against it. The read-once-per-file design and the match/cwd steps
+> themselves are otherwise unchanged.
 
 New module `hypaware-core/plugins-workspace/openclaw/src/settle.js`,
 `createOpenclawSettlementEnricher(opts)` returning
