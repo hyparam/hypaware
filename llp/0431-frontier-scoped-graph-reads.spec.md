@@ -33,7 +33,7 @@ follows from that: each graph dataset is force-refreshed once, at the walk's
 first read of it, and every later read in the same walk uses the automatic mode.
 A walk does not re-flush each pending partition per seed tier, per frontier
 batch and per output batch. Rows already spooled when the walk starts are still
-read; rows appended after it has begun belong to the next walk.
+read; a row appended after it has begun may not appear until the next walk.
 
 The 100,000 physical-result-row budget per dataset is cumulative across the
 request, including duplicate rows, repeated endpoint reads and evidence
