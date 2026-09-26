@@ -21,9 +21,12 @@
  * section, so pre-existing prose several paragraphs away cannot satisfy a
  * concept for free. Fact 1's polarity is bound to that paragraph too: an
  * inclusion spelling has to appear, and a bare exclusion claim (an exclusion
- * verb applied with no adjacent negation) fails the fact even if an inclusion
- * spelling also appears elsewhere in the paragraph, so a doc that asserts the
- * opposite of the truth cannot pass by also hedging the right way.
+ * verb, or a restriction phrase like "leaves ... out" or "only ... you
+ * agreed to share", applied to the marking or to the counters it covers,
+ * however each is named, with no adjacent negation) fails the fact even if
+ * an inclusion spelling also appears elsewhere in the paragraph, so a doc
+ * that asserts the opposite of the truth cannot pass by also hedging the
+ * right way.
  *
  * @ref LLP 0393#contract [tests]: the channel forwards approved aggregate fields and never customer content, so the doc may promise exactly that much
  * @ref LLP 0393#policy [tests]: collection defaults off and `local` grants no network permission, so the disclosure is scoped to organization collection
@@ -43,29 +46,49 @@ const DOC = 'docs/PRODUCT_TELEMETRY.md'
 /** The subject: prose that raises the local-only case at all. */
 const LOCAL_ONLY = [/local-only/i, /local_only/]
 
-/** An exclusion verb applied to the local-only marking or to the work it covers. */
+/** An exclusion verb applied to the local-only marking or to the counters it covers. */
 const EXCLUDE_VERB = '(?:filter\\w*|exclud\\w*|remov\\w*|withh\\w*|omit\\w*)'
 
 /**
- * A bare "marking <verb>s them" claim with no negation between "marking" and
- * the verb: the shape an inverted disclosure takes ("a `local-only` marking
- * filters them"). The negative lookahead lets a genuinely negated claim
- * ("marking does not filter them") through.
+ * A noun that names the local-only marking itself, however the prose spells
+ * it: not just the literal word "marking", but a flag, a label, a
+ * designation, a setting, a mark, or the "directory marked"/"folder marked"
+ * phrasing used elsewhere in this same doc.
  */
-const MARKING_EXCLUDES = new RegExp(
-  `\\bmarking\\b(?!` +
-  `[^.]{0,15}\\b(?:not|never|no)\\b[^.]{0,15}\\b${EXCLUDE_VERB}` +
-  `)[^.]{0,15}\\b${EXCLUDE_VERB}`,
-  'i'
-)
+const MARKING_NOUN = '(?:marking|flag|label|designation|setting|mark|directory marked|folder marked)'
 
 /**
- * A "describes/covers/counts work that <excludes/filters/...>" claim: the
- * shape the per-series enumeration takes when its verb is inverted ("all
- * describe work that excludes rows ... marked `local-only`").
+ * A noun that names the counters the marking might be claimed to touch:
+ * either a `pipeline.*` series by name, the generic "counters"/"counts", or
+ * the "work" paraphrase the per-series enumeration used before.
  */
-const WORK_EXCLUDES = new RegExp(
-  `\\b(?:describe|describes|cover|covers|count|counts)\\b[^.]{0,20}\\bwork\\b[^.]{0,10}\\bthat\\b[^.]{0,20}\\b${EXCLUDE_VERB}`,
+const COUNTERS_NOUN = '(?:pipeline\\.[a-z_]+|counters?|counts?|gauges?|\\bwork\\b)'
+
+/** Either subject an exclusion claim can be pinned to. */
+const EXCLUSION_SUBJECT = `(?:${MARKING_NOUN}|${COUNTERS_NOUN})`
+
+/**
+ * A restriction-style phrase that amounts to an exclusion claim without using
+ * one of the `EXCLUDE_VERB` words: "leaves/keeps a row out", or an "only ...
+ * you agreed to share"/"only ... shareable" restriction.
+ */
+const RESTRICTION_PHRASE = '(?:(?:leaves?|leaving|keeps?|keeping)\\b[^.]{0,10}\\bout\\b|only\\b[^.]{0,40}\\b(?:you (?:agreed|opted|chose)|shareable)\\b)'
+
+/**
+ * A bare "<subject> <excludes/leaves out/only ...>" claim with no negation
+ * between the subject and the exclusion, whatever noun names the marking or
+ * the counters and whatever verb or restriction phrase carries the
+ * exclusion: the shape an inverted disclosure takes ("a `local-only` marking
+ * filters them", "a `local-only` flag excludes those rows", "`pipeline.rows`
+ * ... cover only rows you agreed to share"). The negative lookahead lets a
+ * genuinely negated claim ("marking does not filter them") through, and the
+ * bound on every quantifier keeps the match a single sentence's width so it
+ * cannot walk across unrelated prose or backtrack unboundedly.
+ */
+const SUBJECT_EXCLUDES = new RegExp(
+  `\\b${EXCLUSION_SUBJECT}\\b(?!` +
+  `[^.]{0,40}\\b(?:not|never|no)\\b[^.]{0,40}(?:${EXCLUDE_VERB}|${RESTRICTION_PHRASE})` +
+  `)[^.]{0,40}(?:${EXCLUDE_VERB}|${RESTRICTION_PHRASE})`,
   'i'
 )
 
@@ -93,11 +116,11 @@ const DISCLOSURE = [
           /\b(?:are|is|sits?|stays?|remains?)\b[^.]{0,40}\b(?:inside|within|part of)\b/i,
           new RegExp(`\\b(?:not|never|no)\\b[^.]{0,15}\\b${EXCLUDE_VERB}`, 'i'),
         ],
-        // A doc that asserts the marking or the work it covers is EXCLUDED,
-        // with no adjacent negation, states the opposite of this fact, even
-        // if it also contains an inclusion spelling somewhere else in the
-        // same paragraph.
-        none: [MARKING_EXCLUDES, WORK_EXCLUDES],
+        // A doc that asserts the marking or the counters it covers is
+        // EXCLUDED, with no adjacent negation, states the opposite of this
+        // fact, even if it also contains an inclusion spelling somewhere
+        // else in the same paragraph.
+        none: [SUBJECT_EXCLUDES],
       },
     ],
   },
@@ -174,15 +197,35 @@ function paragraphs(text) {
   return out.map((p) => ({ section: p.section, text: p.lines.join(' ').replace(/\s+/g, ' ') }))
 }
 
-/** @param {{ of: string, any: RegExp[], none?: RegExp[] }[]} concepts @param {string} text */
+/**
+ * Which concepts a paragraph fails, and why: a concept with no `any` match at
+ * all is reported as missing, but a concept that matches `any` and ALSO
+ * matches one of its `none` patterns is reported as an asserted exclusion, so
+ * a CI reader is not told a word is missing when the real problem is that the
+ * paragraph states the opposite of the fact.
+ *
+ * @param {{ of: string, any: RegExp[], none?: RegExp[] }[]} concepts @param {string} text
+ */
 function missingConcepts(concepts, text) {
-  return concepts
-    .filter((c) => !c.any.some((re) => re.test(text)) || (c.none || []).some((re) => re.test(text)))
-    .map((c) => c.of)
+  const out = []
+  for (const c of concepts) {
+    const hasAny = c.any.some((re) => re.test(text))
+    const hasNone = (c.none || []).some((re) => re.test(text))
+    if (hasNone) out.push(`${c.of} (an exclusion is asserted here, not merely unstated)`)
+    else if (!hasAny) out.push(c.of)
+  }
+  return out
 }
 
 /**
- * Whether `stage` is listed in a closed-set/vocabulary enumeration, not just
+ * An anchor naming a closed enumeration, in any of the natural ways prose
+ * names one, not just the two spellings ("closed set", "vocabulary") the
+ * shipped doc happens to use today.
+ */
+const ENUM_ANCHOR = '(?:closed set|fixed set|fixed list|fixed vocabulary|vocabulary|enumeration|one of|drawn from|set of|list of|among|either)'
+
+/**
+ * Whether `stage` is listed as a member of a closed enumeration, not just
  * present anywhere in the paragraph: `capture`, `write` and `export` are
  * ordinary English words that already appear in this paragraph's unrelated
  * prose ("the capture and write stages sit upstream of the export seam"), so
@@ -192,7 +235,7 @@ function missingConcepts(concepts, text) {
  * @param {string} stage @param {string} text
  */
 function stageListed(stage, text) {
-  return new RegExp(`\\b(?:closed set|vocabulary)\\b[^.]{0,150}\\b${stage}\\b`, 'i').test(text)
+  return new RegExp(`\\b${ENUM_ANCHOR}\\b[^.]{0,150}\\b${stage}\\b`, 'i').test(text)
 }
 
 test('the product telemetry doc discloses that pipeline counts include local-only capture', () => {
