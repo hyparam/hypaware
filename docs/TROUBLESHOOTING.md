@@ -114,6 +114,60 @@ cache, exported files, retry state, and logs. Cache retention does not reclaim
 exported copies. Inspect a maintenance dry run before applying it, and use
 `hyp privacy purge` only when you intend to delete recorded data.
 
+## A query or graph projection refuses for memory
+
+Execution memory is bounded, and work that outgrows its budget refuses instead
+of returning a partial answer. The refusal names the budget it hit and, where
+one applies, the variable that raises it. Each is read from the environment of
+the process doing the work, in MB:
+
+- `HYP_QUERY_MAX_HEAP_MB` (default 1024) bounds a query you run. Work that
+  carries its own budget, such as a graph read or projection, ignores it.
+- `HYP_GRAPH_PROJECTION_MAX_HEAP_MB` (default 3072) bounds a graph projection,
+  which scans whole source tables.
+
+Narrow the work first: add a `WHERE` or date filter, a `LIMIT`, or aggregate
+instead of selecting raw rows. Raise a budget only when the work genuinely
+needs the memory. A value that is blank or not a number is ignored and the
+default applies.
+
+For a command you run yourself, set it in the same shell:
+
+```sh
+HYP_GRAPH_PROJECTION_MAX_HEAP_MB=6144 hyp graph project
+```
+
+The installed daemon does not read your shell. It runs scheduled work, such as
+the projection after a GitHub poll, in a child of the service process, and that
+child inherits the service environment. `hyp daemon install` writes no
+environment block of its own, so set the variable where your service manager
+builds that environment, then restart the daemon so it starts with the new
+value.
+
+On macOS (launchd):
+
+```sh
+launchctl setenv HYP_GRAPH_PROJECTION_MAX_HEAP_MB 6144
+hyp daemon restart
+```
+
+On Linux (systemd user service):
+
+```sh
+systemctl --user set-environment HYP_GRAPH_PROJECTION_MAX_HEAP_MB=6144
+hyp daemon restart
+```
+
+Either setting applies only to processes started afterwards, which is what the
+restart is for, and both are forgotten at logout or reboot. To keep a value,
+set it where the login session environment is built: an
+`~/.config/environment.d/hypaware.conf` entry under systemd, or a login-time
+`launchctl setenv` under launchd. Remove one with
+`launchctl unsetenv HYP_GRAPH_PROJECTION_MAX_HEAP_MB` or
+`systemctl --user unset-environment HYP_GRAPH_PROJECTION_MAX_HEAP_MB`, then
+restart the daemon again. A foreground `hyp daemon run` takes the environment of
+the shell that started it, so it needs neither step.
+
 ## Find diagnostic logs
 
 With the default `HYP_HOME`, service output is under
