@@ -24,9 +24,18 @@
  * verb, or a restriction phrase like "leaves ... out" or "only ... you
  * agreed to share", applied to the marking or to the counters it covers,
  * however each is named, with no adjacent negation) fails the fact even if
- * an inclusion spelling also appears elsewhere in the paragraph, so a doc
- * that asserts the opposite of the truth cannot pass by also hedging the
- * right way.
+ * an inclusion spelling also appears elsewhere in the paragraph.
+ *
+ * What this guard does not do, recorded here because a reader who trusts it
+ * to do more is worse off than one who knows the edges. The exclusion
+ * spellings are a list, not a closed account of English, so an inversion
+ * phrased with a verb the list does not name still passes: substituting one
+ * word in the shipped sentence is enough. Facts 2 and 3 are checked for
+ * presence, not for polarity, so a paragraph that says the session id
+ * travels, or that `local` delivers over the network, also passes. And one
+ * qualifying paragraph passes the file, so a second paragraph contradicting
+ * the first is unpoliced. What this guard does hold is deletion, reword, a
+ * dropped series, and a dropped or renamed stage value.
  *
  * @ref LLP 0393#contract [tests]: the channel forwards approved aggregate fields and never customer content, so the doc may promise exactly that much
  * @ref LLP 0393#policy [tests]: collection defaults off and `local` grants no network permission, so the disclosure is scoped to organization collection
@@ -218,24 +227,27 @@ function missingConcepts(concepts, text) {
 }
 
 /**
- * An anchor naming a closed enumeration, in any of the natural ways prose
- * names one, not just the two spellings ("closed set", "vocabulary") the
- * shipped doc happens to use today.
- */
-const ENUM_ANCHOR = '(?:closed set|fixed set|fixed list|fixed vocabulary|vocabulary|enumeration|one of|drawn from|set of|list of|among|either)'
-
-/**
- * Whether `stage` is listed as a member of a closed enumeration, not just
- * present anywhere in the paragraph: `capture`, `write` and `export` are
- * ordinary English words that already appear in this paragraph's unrelated
- * prose ("the capture and write stages sit upstream of the export seam"), so
- * a plain `\bstage\b` test never fails no matter how the actual enumeration
- * is edited.
+ * Whether `stage` is named as one of the contract's literal values, not just
+ * present as an English word: `capture`, `write` and `export` already appear
+ * in this paragraph's unrelated prose ("the capture and write stages sit
+ * upstream of the export seam"), so a plain `\bstage\b` test never fails no
+ * matter how the actual enumeration is edited.
+ *
+ * A value counts when the doc writes it as code, inline or inside a fenced
+ * block, which is how this doc denotes every other contract literal. Reading
+ * the notation beats guessing at the English, because the English is not
+ * guessable in either direction: a phrase list wide enough to accept "one of"
+ * or "either" is wide enough for an unrelated sentence in the same paragraph
+ * to supply for free, which is the vacuity this check exists to remove, and
+ * one narrow enough to exclude them rejects a truthful enumeration that
+ * phrases itself as "always" or "limited to".
  *
  * @param {string} stage @param {string} text
  */
 function stageListed(stage, text) {
-  return new RegExp(`\\b${ENUM_ANCHOR}\\b[^.]{0,150}\\b${stage}\\b`, 'i').test(text)
+  if (text.includes('`' + stage + '`')) return true
+  const fenced = text.split('```').filter((_, i) => i % 2 === 1)
+  return fenced.some((block) => new RegExp(`\\b${stage}\\b`).test(block))
 }
 
 test('the product telemetry doc discloses that pipeline counts include local-only capture', () => {
