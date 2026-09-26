@@ -70,6 +70,40 @@ export function serverDisplayName(url) {
 }
 
 /**
+ * The name a destination surface gives the place this machine's rows go,
+ * resolved from the central sink origins it forwards to. Self-hosted
+ * enrollment is a supported lane, so the destination is not the hosted
+ * product's name by default: {@link serverDisplayName} is the one place that
+ * mapping lives, and it calls only the built-in server (under either of its
+ * hosts) HypAware Cloud.
+ *
+ * Every configured origin receives the rows, so when there are several they
+ * are all named, deduplicated and in configuration order: naming the first
+ * alone would understate the disclosure. An origin that does not parse is
+ * skipped, because `serverDisplayName` returns such a string unchanged and
+ * would put whatever is on disk into user-facing copy.
+ *
+ * The neutral fallback is what keeps a caller with nothing nameable from
+ * rendering "forwarded to ." or a hosted service it may not be using, and it
+ * is one spelling, so every surface that resolves a destination says the same
+ * thing about a machine whose layer names nothing.
+ *
+ * @ref LLP 0134#custom-url-deferred [constrained-by]: self-hosted teams enroll by hand, so destination copy cannot assume the hosted server
+ * @param {ReadonlyArray<string>} [origins] central sink origins for this machine
+ * @returns {string}
+ */
+export function syncDestinationName(origins) {
+  /** @type {string[]} */
+  const names = []
+  for (const origin of origins ?? []) {
+    if (typeof origin !== 'string' || originOf(origin) === null) continue
+    const name = serverDisplayName(origin)
+    if (!names.includes(name)) names.push(name)
+  }
+  return names.length > 0 ? names.join(' and ') : 'your HypAware server'
+}
+
+/**
  * The origin of a URL, or null when it does not parse or has no origin to
  * compare (an opaque origin such as `file:` serializes as the string 'null',
  * which would otherwise read as a match between any two such URLs).
