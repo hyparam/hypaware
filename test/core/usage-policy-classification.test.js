@@ -99,8 +99,8 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
 // plain equality). Every one of those bypasses changes the copy, so the pin
 // catches all of them, and it cannot false-fail on copy that is fine.
 //
-// This test is meant to fail on any copy edit. Whoever updates the literal is
-// the human the guard exists to summon, and these are the two things to check
+// This test is meant to fail on any copy edit. Whoever updates a literal is
+// the human the guard exists to summon, and these are the three things to check
 // before doing so:
 //
 //   1. The block names the sync destination exactly one way. Two spellings of
