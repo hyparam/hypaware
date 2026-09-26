@@ -87,11 +87,10 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
 // pseudo-sentence, letting a word in one bullet pair with an opener from a
 // different bullet or an unrelated command line. So instead of collapsing
 // all whitespace uniformly, split the raw prompt into clauses along its own
-// structure: a blank line or a structural line (a bullet, or a command line
-// naming the binary under either spelling) closes the current unit, and only
-// consecutive prose lines get joined before the sentence split. That keeps
-// the line-wrap protection for prose while still isolating each bullet and
-// each command line from its neighbors.
+// structure: a blank line, or an indented line, closes the current unit, and
+// only consecutive prose lines get joined before the sentence split. That
+// keeps the line-wrap protection for prose while still isolating each bullet
+// and each command line from its neighbors.
 function promptClauses(text) {
   const lines = text.split('\n')
   const units = []
@@ -108,10 +107,13 @@ function promptClauses(text) {
       flush()
       continue
     }
-    // A bullet ('  - sync: ...') or a command line (either binary spelling)
-    // names exactly one thing and never continues onto the next line, so it
-    // is its own unit and closes whatever prose unit came before it.
-    if (/^-\s/.test(trimmed) || /^hypaware?\b/.test(trimmed)) {
+    // buildClassificationPrompt emits its prose flush left and indents
+    // exactly the lines that stand alone: bullets ('  - sync: ...') and the
+    // command under each ('      hyp privacy set ...'). Keying on that
+    // emitted shape rather than on the binary's name is deliberate: `hyp`
+    // and `hypaware` are both bound, so a name-matching rule silently stops
+    // covering one of them, which is the bug this split exists to fix.
+    if (/^\s/.test(line)) {
       flush()
       units.push(trimmed)
       continue
