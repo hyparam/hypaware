@@ -4,6 +4,7 @@ import path from 'node:path'
 
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { originOf, serverDisplayName } from '../remote/builtin_remotes.js'
 import { readCentralSinkOrigins } from '../remote/gateway_seed.js'
 import { createUsagePolicyResolver } from './matcher.js'
 import { localOnlyListPath } from './local_only.js'
@@ -44,28 +45,32 @@ import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe } from './folder_ask.js'
  * two use. The token is the CLI-edge vocabulary (`sync` maps onto the stored
  * `full`); the deprecated `hyp ignore --sync` misnomer is gone from the copy.
  *
+ * The two destination-bearing blurbs take the resolved destination name
+ * instead of naming one, so the whole block says where this machine actually
+ * forwards, in one vocabulary.
+ *
  * @ref LLP 0106 [implements]: the hook's answer is written via the same CLI verb, landing an LLP 0103 entry
  * @ref LLP 0111#teaching [implements]: the consent copy teaches `hyp policy set <path> <token>`, not the `hyp ignore --sync` misnomer
- * @type {ReadonlyArray<{ class: UsageClass, token: 'sync' | 'local-only' | 'ignore', label: string, blurb: string }>}
+ * @type {ReadonlyArray<{ class: UsageClass, token: 'sync' | 'local-only' | 'ignore', label: string, blurb: (destination: string) => string }>}
  */
 export const CLASSIFICATION_CHOICES = [
   {
     class: 'full',
     token: 'sync',
     label: 'sync',
-    blurb: "this folder's sessions sync to the cloud (the current default)",
+    blurb: (destination) => `this folder's sessions sync to ${destination} (the current default)`,
   },
   {
     class: 'local-only',
     token: 'local-only',
     label: 'local-only',
-    blurb: 'keep sessions on this machine only, never send them to the cloud',
+    blurb: (destination) => `keep sessions on this machine only, never send them to ${destination}`,
   },
   {
     class: 'ignore',
     token: 'ignore',
     label: 'ignore',
-    blurb: 'do not record this folder\'s sessions at all',
+    blurb: () => 'do not record this folder\'s sessions at all',
   },
 ]
 
@@ -93,6 +98,39 @@ export function verbArgvForClass(cls, targetPath) {
 }
 
 /**
+ * The name the consent copy gives the place sessions go, resolved from the same
+ * central sink origins the enrollment check reads. Self-hosted enrollment is a
+ * supported lane, so the destination is not the hosted product's name by
+ * default: `serverDisplayName` is the one place that mapping lives, and it
+ * calls only the built-in server (under either of its hosts) HypAware Cloud.
+ *
+ * Every configured origin receives the sessions, so when there are several
+ * they are all named, deduplicated and in configuration order: naming the
+ * first alone would understate the disclosure. An origin that does not parse is skipped, because
+ * `serverDisplayName` returns such a string unchanged and would put whatever
+ * is on disk into the consent copy.
+ *
+ * The neutral fallback is what keeps a caller with nothing nameable from
+ * rendering "forwarded to ." or a hosted service it may not be using;
+ * `evaluateCwdClassification` never reaches it, since it prompts only when an
+ * origin exists.
+ *
+ * @ref LLP 0134#custom-url-deferred [constrained-by]: self-hosted teams enroll by hand, so the consent copy cannot assume the hosted server
+ * @param {ReadonlyArray<string>} [origins] central sink origins for this machine
+ * @returns {string}
+ */
+function syncDestinationName(origins) {
+  /** @type {string[]} */
+  const names = []
+  for (const origin of origins ?? []) {
+    if (typeof origin !== 'string' || originOf(origin) === null) continue
+    const name = serverDisplayName(origin)
+    if (!names.includes(name)) names.push(name)
+  }
+  return names.length > 0 ? names.join(' and ') : 'your HypAware server'
+}
+
+/**
  * Build the classification prompt copy for a folder. This is the consent
  * surface many users first meet the class vocabulary through (LLP 0106
  * consequences), so it is deliberately explicit: it names the machine's
@@ -105,13 +143,14 @@ export function verbArgvForClass(cls, targetPath) {
  * @ref LLP 0111#teaching [implements]: prints `hyp policy set <cwd> <token>`; the exit criterion is that no non-ignore class is ever taught with an ignore-spelled command
  * @ref LLP 0113 [implements]: the copy itself mandates menu presentation, tool-neutral with the Claude tool named, so tool-less clients degrade to prose
  * @ref LLP 0200#escape-hatch [implements]: the prompt names its own off switch, so "stop asking me" is answerable in the session that asked
- * @param {{ cwd: string }} args
+ * @param {{ cwd: string, origins?: ReadonlyArray<string> }} args
  * @returns {string}
  */
-export function buildClassificationPrompt({ cwd }) {
+export function buildClassificationPrompt({ cwd, origins }) {
+  const destination = syncDestinationName(origins)
   const lines = [
     'This machine is enrolled, so by default the AI coding sessions you run here',
-    'are recorded and forwarded to the cloud.',
+    `are recorded and forwarded to ${destination}.`,
     `The folder ${cwd} has not been classified yet, so it would sync by default.`,
     '',
     'Before continuing, ask the user how this folder should be handled, then run',
@@ -120,7 +159,7 @@ export function buildClassificationPrompt({ cwd }) {
     '',
   ]
   for (const choice of CLASSIFICATION_CHOICES) {
-    lines.push(`  - ${choice.label}: ${choice.blurb}`)
+    lines.push(`  - ${choice.label}: ${choice.blurb(destination)}`)
     lines.push(`      hyp privacy set ${cwd} ${choice.token}`)
   }
   lines.push('')
@@ -211,15 +250,19 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
   const listPath = localOnlyListPath(stateDir)
   const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
 
-  let enrolled = false
+  // The origins answer two questions, so they are read once and kept: whether
+  // this machine is enrolled, and what the consent copy names as its
+  // destination.
+  /** @type {ReadonlyArray<string>} */
+  let origins = []
   try {
-    const origins = await (deps.readCentralSinkOrigins ?? readCentralSinkOrigins)({ stateDir, configPath })
-    enrolled = Array.isArray(origins) && origins.length > 0
+    const read = await (deps.readCentralSinkOrigins ?? readCentralSinkOrigins)({ stateDir, configPath })
+    if (Array.isArray(read)) origins = read
   } catch {
-    // Can't read the central layer -> treat as not enrolled (inert), never
-    // fail the session on it.
-    enrolled = false
+    // Can't read the central layer -> the empty list stands, so the machine
+    // reads as not enrolled (inert); never fail the session on it.
   }
+  const enrolled = origins.length > 0
 
   // The standing answer, if the user gave one (LLP 0200). The safe reader
   // never throws and falls back to `ask`, so a corrupt preference costs a
@@ -259,6 +302,6 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     governed,
     askMode,
   }
-  if (decision.prompt) out.promptText = buildClassificationPrompt({ cwd })
+  if (decision.prompt) out.promptText = buildClassificationPrompt({ cwd, origins })
   return out
 }
