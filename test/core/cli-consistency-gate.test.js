@@ -633,11 +633,17 @@ const DESTINATION_FAMILIES = [
  * commands both appear legitimately in report help and neither says where a
  * report goes.
  *
+ * The command blanking stops after the one subcommand token `hyp remote`
+ * takes (add, login, mint, list, remove). Letting it run over every following
+ * lowercase word would blank the prose after the command too, so
+ * "run hyp remote list and the server renders the report" would read as
+ * naming no destination at all.
+ *
  * @param {string} help
  * @returns {string[]}
  */
 function destinationFamilies(help) {
-  const prose = help.replace(/--remote/g, '--OPTION').replace(/hyp remote(?:\s+[a-z][a-z-]*)*/g, 'hyp COMMAND')
+  const prose = help.replace(/--remote/g, '--OPTION').replace(/hyp remote(?:\s+[a-z][a-z-]*)?/g, 'hyp COMMAND')
   return DESTINATION_FAMILIES.filter(([, pattern]) => pattern.test(prose)).map(([family]) => family)
 }
 
@@ -646,8 +652,11 @@ function destinationFamilies(help) {
  * render" and "The server renders the report for the team", under a group help
  * that said "Reports are server-hosted" (#2189).
  *
- * The surfaces come from the registry, so a new report subcommand is held to
- * the same rule. The second assertion keeps the first from passing vacuously:
+ * The surfaces are every registration in the `report` family, taken from the
+ * registry, so a new report subcommand is held to the same rule: a hidden one
+ * and a deeper one (`report publish folder`) included, because
+ * `listGroupChildren` lists neither and `--help` renders both.
+ * The second assertion keeps the first from passing vacuously:
  * the group help and the publish help are the two surfaces whose subject is
  * where a report goes, so deleting the destination word rather than fixing it
  * fails here.
@@ -655,13 +664,17 @@ function destinationFamilies(help) {
 test('the report help surfaces name the destination in one vocabulary', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const registry = coreRegistry()
   const { run } = await harness(registry)
-  const children = listGroupChildren(registry, 'report')
+  const surfaces = registry
+    .list()
+    .map((command) => command.name)
+    .filter((name) => name === 'report' || name.startsWith('report '))
+    .sort()
   /** @type {Map<string, string[]>} */
   const families = new Map()
-  for (const argv of [['report'], ...children.map((child) => ['report', child.name])]) {
-    const { code, out } = await run([...argv, '--help'])
-    assert.equal(code, 0, `hyp ${argv.join(' ')} --help exited ${code}`)
-    families.set(argv.join(' '), destinationFamilies(out))
+  for (const surface of surfaces) {
+    const { code, out } = await run([...surface.split(' '), '--help'])
+    assert.equal(code, 0, `hyp ${surface} --help exited ${code}`)
+    families.set(surface, destinationFamilies(out))
   }
   for (const [surface, found] of families) {
     assert.deepEqual(
