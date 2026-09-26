@@ -69,11 +69,13 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
   // applied at all three scan sites (shared scan, raw-SQL rules, dedup read).
   const maxHeapBytes = resolveProjectionMaxHeapBytes()
   // The kernel's budget refusal deliberately cannot say which caller set the
-  // budget it enforced; this is that caller. Both of its operator surfaces
-  // (`hyp graph project` stderr and the scheduler's
-  // `graph_projection.scope_failed` log) print err.message verbatim, so the
-  // projection appends its own lever here once, and the one injected executor
-  // covers every scan site with no per-call-site handling.
+  // budget it enforced; this is that caller. Every surface a projection
+  // refusal reaches prints err.message verbatim: `hyp graph project` stderr
+  // (command.js), the scheduled poll's `github.projection_failed` log, and the
+  // `(graph)` row that log's tick also pushes onto the errors `hyp github
+  // sync|backfill` reports (github/src/tick.js). So the projection appends its
+  // own lever here once, and the one injected executor covers every scan site
+  // with no per-call-site handling.
   // @ref LLP 0056 [constrained-by]: the refusal is the kernel's; the actionable next step is this caller's to name
   const rawExecuteSql = __executeSql
   /**
