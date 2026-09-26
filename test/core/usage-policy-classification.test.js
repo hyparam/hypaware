@@ -165,6 +165,16 @@ const FORWARDING_DESTINATION = new RegExp(
 // "enrolled with a shared HypAware server" and leaves "forwarded to the
 // cloud" alone: two terms for one destination, which is the defect. Count the
 // enrollment object as a destination naming too, bounded the same way.
+//
+// Two limits, recorded rather than left to be rediscovered. This over-reads an
+// enrollment clause whose object is not a place at all ("enrolled with the
+// folder ask turned on"), and the assertion below quotes every captured phrase
+// precisely so that failure explains itself. That direction is the right one to
+// err in on a consent surface: the cost is an author reading a message that
+// names the phrase it objected to, against shipping two names for one
+// destination. And a second naming in neither position ("your organisation's
+// HypAware server keeps the history") is still missed; catching that needs a
+// closed list of destination nouns, which is the thing this guard replaced.
 const ENROLLMENT_DESTINATION = new RegExp(
   '\\benrolled\\s+(?:with|in|into|to|against|on)\\s+' +
     '([^,.():`]+?)' +
