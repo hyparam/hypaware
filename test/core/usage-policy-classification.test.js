@@ -77,28 +77,101 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
   assert.match(prompt, /hyp privacy folders ask/)
 })
 
-// Destination vocabularies, matched as families rather than as one verbatim
-// sentence so a reworded reintroduction trips too (#2167, #2174).
-const DESTINATION_VOCABULARIES = [
-  { name: 'server', pattern: /\b(?:server|servers|on-?prem\w*|upstream|backend)\b/i },
-  { name: 'cloud', pattern: /\bclouds?\b/i },
-  { name: 'remote', pattern: /\bremotes?\b/i },
-]
+// The prose array wraps sentences across several pushed lines joined with
+// '\n' (see buildClassificationPrompt). A phrase that straddles that join
+// (a destination word on one push, a hedge word on the next) would dodge any
+// pattern that treats '\n' as a hard stop, so every check below runs against
+// this collapsed form instead of the raw rendered string.
+function normalizeWhitespace(text) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+// A closed list of destination "families" (server/cloud/remote) is exactly
+// as strong as the list is complete: a fourth term (a product name, "the
+// service") never appears in it and slips through naming a second
+// destination for free. So instead of banning known-bad terms, assert a
+// positive fact: every forwarding verb in the block names an object, and all
+// of those objects are the same place. The capture is bounded to one clause
+// (stops at , . ( ` : or a conditional-opener / command word) so it can
+// never run past the sentence that actually names the destination into
+// unrelated prose, such as the next bullet's `hyp ...` command line.
+const CONDITIONAL_OPENERS =
+  'when|whenever|while|if|once|unless|until|provided|assuming|as long as|so long as|only|where|subject to|depending on'
+
+const FORWARDING_DESTINATION = new RegExp(
+  '\\b(?:forward|forwards|forwarded|sync|syncs|synced|send|sends|sent|upload|uploads|uploaded)' +
+    '\\s+(?:it\\s+|them\\s+)?to\\s+' +
+    '([^,.():`]+?)' +
+    '(?=[,.():`]|\\s+\\b(?:' + CONDITIONAL_OPENERS + '|hyp)\\b|$)',
+  'gi'
+)
+
+// Normalize a captured object so "the cloud", "the cloud " and "The Cloud"
+// all count as the same destination, and only differ when they actually name
+// a different place.
+function normalizeDestination(raw) {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:the|that|a|an|your|our|its)\s+/, '')
+    .trim()
+}
+
+function extractDestinations(text) {
+  const normalized = normalizeWhitespace(text)
+  const found = []
+  let m
+  // A fresh RegExp per call: the pattern is /g, and a shared exec-stateful
+  // instance would carry lastIndex across calls in the same process.
+  const re = new RegExp(FORWARDING_DESTINATION)
+  while ((m = re.exec(normalized))) {
+    found.push(normalizeDestination(m[1]))
+  }
+  return found
+}
 
 // A conditional keyword within one clause of a connectivity word, so any
 // synonym of "when this machine is connected" trips, not just that spelling.
-const CONNECTION_CONDITIONAL =
-  /\b(?:when|whenever|while|if|once|unless|until|provided|assuming|as long as|so long as|only)\b[^.\n]{0,60}\b(?:connect\w*|online|offline|reachable|network|signed[- ]in|logged[- ]in)\b/i
+// Broadened past the original connect*/online/offline/reachable/network/
+// signed-in/logged-in set to also catch "once linked", "where available",
+// "subject to connectivity" and "when ... can reach it": a hedge does not
+// have to reuse "connect" or "reachable" to say the same thing.
+const CONNECTIVITY_TOKENS =
+  'connect\\w*|online|offline|reach\\w*|network|signed[- ]in|logged[- ]in|link\\w*|available|availability|internet|connectivity'
+
+const CONNECTION_CONDITIONAL = new RegExp(
+  '\\b(?:' + CONDITIONAL_OPENERS + ')\\b[^.\\n]{0,60}\\b(?:' + CONNECTIVITY_TOKENS + ')\\b',
+  'i'
+)
+
+// The block also contains bare instances of some opener words in sentences
+// that say nothing about forwarding ("keep sessions on this machine only",
+// "run the matching command once"). Broadening CONNECTIVITY_TOKENS without
+// narrowing where it is allowed to fire would make those innocent sentences
+// trip the guard. So the whole-block check below only evaluates sentences
+// that themselves make a forwarding claim.
+const FORWARDING_VERB = /\b(?:forward\w*|sync\w*|sen[dt]s?|sent|upload\w*)\b/i
+
+function forwardingSentences(text) {
+  const normalized = normalizeWhitespace(text)
+  return normalized.split(/(?<=[.!?])\s+/).filter((s) => FORWARDING_VERB.test(s))
+}
 
 test('the consent prompt names the sync destination exactly one way', () => {
   // The choice blurbs are rendered into the prompt, so the whole block is what
   // the user reads and what has to agree with itself.
   const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
-  const named = DESTINATION_VOCABULARIES.filter((v) => v.pattern.test(prompt)).map((v) => v.name)
+  const destinations = extractDestinations(prompt)
+  // A forwarding claim with no named destination at all (e.g. "forwarded off
+  // this machine") is not a pass by default: the guard below only checks
+  // distinctness among what was found, so an empty set has to fail loudly
+  // here rather than vacuously satisfying "at most one".
+  assert.ok(destinations.length > 0, 'the rendered prompt makes a forwarding claim but names no destination for it')
+  const distinct = [...new Set(destinations)]
   assert.equal(
-    named.length,
+    distinct.length,
     1,
-    `the rendered prompt names the destination ${named.length} ways (${named.join(', ') || 'none'}); one consent surface gets one term`
+    `the rendered prompt names ${distinct.length} distinct destinations (${distinct.join(', ')}); one consent surface gets one term`
   )
 })
 
@@ -115,12 +188,15 @@ test('the sync blurb states the forwarding without a connection-conditional hedg
     false,
     `the sync blurb hedges the forwarding on connectivity: ${JSON.stringify(sync.blurb)}`
   )
-  // And nowhere else in the block either, so the hedge cannot simply move.
+  // And nowhere else in the block either, so the hedge cannot simply move -
+  // including across the prose array's line wrap, which is why this runs
+  // against the normalized, sentence-split text rather than the raw prompt.
   const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
+  const hedgedForwardingSentence = forwardingSentences(prompt).find((s) => CONNECTION_CONDITIONAL.test(s))
   assert.equal(
-    CONNECTION_CONDITIONAL.test(prompt),
-    false,
-    'the rendered consent prompt hedges a disclosure that is unconditional where it renders'
+    hedgedForwardingSentence,
+    undefined,
+    `the rendered consent prompt hedges a disclosure that is unconditional where it renders: ${JSON.stringify(hedgedForwardingSentence)}`
   )
 })
 
