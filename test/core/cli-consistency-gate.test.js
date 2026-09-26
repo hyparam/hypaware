@@ -633,11 +633,18 @@ const DESTINATION_FAMILIES = [
  * commands both appear legitimately in report help and neither says where a
  * report goes.
  *
- * The command blanking stops after the one subcommand token `hyp remote`
- * takes (add, login, mint, list, remove). Letting it run over every following
- * lowercase word would blank the prose after the command too, so
- * "run hyp remote list and the server renders the report" would read as
- * naming no destination at all.
+ * The command blanking stops after one token, which is as far as a `hyp
+ * remote` subcommand reaches (add, login, mint, list, remove). Letting it run
+ * over every following lowercase word would blank the prose after the command
+ * too, so "run hyp remote list and the server renders the report" would read
+ * as naming no destination at all.
+ *
+ * One token is positional, not lexical: it blanks whatever word follows,
+ * subcommand or not. So a target name that is itself a family word ("hyp
+ * remote login onprem") reads as a second vocabulary that is not there, and a
+ * family word sitting immediately after the command is still erased. Both are
+ * the same tradeoff from opposite ends, and closing either means classifying
+ * the words rather than counting them.
  *
  * @param {string} help
  * @returns {string[]}
@@ -652,10 +659,12 @@ function destinationFamilies(help) {
  * render" and "The server renders the report for the team", under a group help
  * that said "Reports are server-hosted" (#2189).
  *
- * The surfaces are every registration in the `report` family, taken from the
- * registry, so a new report subcommand is held to the same rule: a hidden one
- * and a deeper one (`report publish folder`) included, because
- * `listGroupChildren` lists neither and `--help` renders both.
+ * The surfaces are every `report`-family help surface the registry knows, so a
+ * new report subcommand is held to the same rule. That is both registrations
+ * and group descriptions: `listGroupChildren` skips a hidden child and lists a
+ * deeper one (`report publish folder`) only as its first token, while
+ * `registry.list()` holds no group described with `registerGroup` and no bare
+ * command of its own (the `client history` shape). `--help` renders all three.
  * The second assertion keeps the first from passing vacuously:
  * the group help and the publish help are the two surfaces whose subject is
  * where a report goes, so deleting the destination word rather than fixing it
@@ -664,9 +673,7 @@ function destinationFamilies(help) {
 test('the report help surfaces name the destination in one vocabulary', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const registry = coreRegistry()
   const { run } = await harness(registry)
-  const surfaces = registry
-    .list()
-    .map((command) => command.name)
+  const surfaces = [...new Set([...registry.list(), ...registry.listGroups()].map((entry) => entry.name))]
     .filter((name) => name === 'report' || name.startsWith('report '))
     .sort()
   /** @type {Map<string, string[]>} */
