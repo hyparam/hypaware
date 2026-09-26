@@ -21,8 +21,10 @@
  *
  * Assertions stay structural (names, usage tokens, option spellings, child
  * sets, exit codes) rather than one prose snapshot, so a wording change to a
- * single summary does not fail the whole gate. The two exceptions are the
- * destructive commands, whose warnings are pinned exactly.
+ * single summary does not fail the whole gate. The exceptions are the
+ * destructive commands, whose warnings are pinned exactly, and the report
+ * family's destination vocabulary, matched by word family rather than by
+ * sentence.
  *
  * @ref LLP 0009#layered-help [tests]: one row per top-level token, subcommand summaries only in group help, both read the one registry so they cannot drift
  * @ref LLP 0009#central-help-interception [tests]: dispatch renders help for every registration instead of running it, so no command body prints its own
@@ -603,6 +605,98 @@ test('a public alias dispatches to its owner, help included', async () => {
   const { code, out } = await run([alias, '--help'])
   assert.equal(code, 0)
   assert.ok(out.startsWith(`hyp ${aliased.name} - ${aliased.summary}\n`))
+})
+
+// --- destination vocabulary -------------------------------------------------
+
+/**
+ * The words a help surface can use for the place a `--remote` command talks
+ * to, by family. `docs/CLI_REFERENCE.md` ("Render and manage reports")
+ * settles `the remote` for the report family, so every other family is a
+ * second name for the same place.
+ *
+ * Families, not sentences: a guard pinned to one phrasing goes green the
+ * moment the phrasing changes while the contradiction survives.
+ *
+ * @type {[string, RegExp][]}
+ */
+const DESTINATION_FAMILIES = [
+  ['remote', /\bremotes?\b/i],
+  ['server', /\bservers?\b|\bon-?prem\w*\b|\bupstream\b|\bback-?end\b/i],
+  ['cloud', /\bclouds?\b/i],
+]
+
+/**
+ * The families a rendered help surface names, with the spellings where
+ * `remote` is a token of the interface rather than a name for the
+ * destination blanked first: the `--remote` option and the `hyp remote ...`
+ * commands both appear legitimately in report help and neither says where a
+ * report goes.
+ *
+ * The command blanking stops after one token, which is as far as a `hyp
+ * remote` subcommand reaches (add, login, mint, list, remove). Letting it run
+ * over every following lowercase word would blank the prose after the command
+ * too, so "run hyp remote list and the server renders the report" would read
+ * as naming no destination at all.
+ *
+ * One token is positional, not lexical: it blanks whatever word follows,
+ * subcommand or not. So a target name that is itself a family word ("hyp
+ * remote login onprem") reads as a second vocabulary that is not there, and a
+ * family word sitting immediately after the command is still erased. Both are
+ * the same tradeoff from opposite ends, and closing either means classifying
+ * the words rather than counting them.
+ *
+ * @param {string} help
+ * @returns {string[]}
+ */
+function destinationFamilies(help) {
+  const prose = help.replace(/--remote/g, '--OPTION').replace(/hyp remote(?:\s+[a-z][a-z-]*)?/g, 'hyp COMMAND')
+  return DESTINATION_FAMILIES.filter(([, pattern]) => pattern.test(prose)).map(([family]) => family)
+}
+
+/**
+ * One render of `hyp report publish --help` said both "for the remote to
+ * render" and "The server renders the report for the team", under a group help
+ * that said "Reports are server-hosted" (#2189).
+ *
+ * The surfaces are every `report`-family help surface the registry knows, so a
+ * new report subcommand is held to the same rule. That is both registrations
+ * and group descriptions: `listGroupChildren` skips a hidden child and lists a
+ * deeper one (`report publish folder`) only as its first token, while
+ * `registry.list()` holds no group described with `registerGroup` and no bare
+ * command of its own (the `client history` shape). `--help` renders all three.
+ * The second assertion keeps the first from passing vacuously:
+ * the group help and the publish help are the two surfaces whose subject is
+ * where a report goes, so deleting the destination word rather than fixing it
+ * fails here.
+ */
+test('the report help surfaces name the destination in one vocabulary', { timeout: SWEEP_TIMEOUT_MS }, async () => {
+  const registry = coreRegistry()
+  const { run } = await harness(registry)
+  const surfaces = [...new Set([...registry.list(), ...registry.listGroups()].map((entry) => entry.name))]
+    .filter((name) => name === 'report' || name.startsWith('report '))
+    .sort()
+  /** @type {Map<string, string[]>} */
+  const families = new Map()
+  for (const surface of surfaces) {
+    const { code, out } = await run([...surface.split(' '), '--help'])
+    assert.equal(code, 0, `hyp ${surface} --help exited ${code}`)
+    families.set(surface, destinationFamilies(out))
+  }
+  for (const [surface, found] of families) {
+    assert.deepEqual(
+      found.filter((family) => family !== 'remote'),
+      [],
+      `hyp ${surface} --help names the destination in a second vocabulary: ${found.join(', ')}`
+    )
+  }
+  for (const surface of ['report', 'report publish']) {
+    assert.deepEqual(
+      families.get(surface),
+      ['remote'],
+      `hyp ${surface} --help no longer names the destination the reference docs settle`
+    )
+  }
 })
 
 // --- active-plugin fixture --------------------------------------------------

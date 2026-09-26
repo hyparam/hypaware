@@ -781,7 +781,7 @@ function buildCoreCommands(registry) {
         "'render' is a LOCAL build step: it turns a reports tree's Markdown into\n" +
         'a static HTML site and takes no --remote and no credential.\n' +
         '\n' +
-        'The rest talk to the server. Reports are server-hosted (there is no\n' +
+        'The rest talk to the remote. Reports are hosted there (there is no\n' +
         'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
         '<target> and default to the default remote target, the same resolution\n' +
         'as bare --remote on queries. Reads use your login session; publish and\n' +
@@ -791,7 +791,7 @@ function buildCoreCommands(registry) {
     {
       // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
       name: 'report render',
-      summary: 'Build the static HTML site for a local reports tree (no server involved)',
+      summary: 'Build the static HTML site for a local reports tree (no remote involved)',
       usage: coreUsage('report render'),
       help: [
         'Renders every top-level <slug>.md (plus its optional <slug>/ section',
@@ -817,7 +817,7 @@ function buildCoreCommands(registry) {
         'lowercase and matches [a-z0-9][a-z0-9-]*. Folders must contain only',
         'supported Markdown files. HTML, raw HTML inside Markdown, images,',
         'and client assets are not accepted. Put HTML examples in code',
-        'fences. The server renders the report for the team; no local',
+        'fences. The remote renders the report for the team; no local',
         'rendering step is needed. Folder uploads use system tar',
         "with --format=ustar. kind names the report family (e.g.",
         "usage-review); period is the covered slice (e.g. 2026-W29).",
