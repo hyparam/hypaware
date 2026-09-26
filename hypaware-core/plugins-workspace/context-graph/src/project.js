@@ -68,6 +68,29 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
   // user-query default without stripping the guard (never 0). Resolved once and
   // applied at all three scan sites (shared scan, raw-SQL rules, dedup read).
   const maxHeapBytes = resolveProjectionMaxHeapBytes()
+  // The kernel's budget refusal deliberately cannot say which caller set the
+  // budget it enforced; this is that caller. Both of its operator surfaces
+  // (`hyp graph project` stderr and the scheduler's
+  // `graph_projection.scope_failed` log) print err.message verbatim, so the
+  // projection appends its own lever here once, and the one injected executor
+  // covers every scan site with no per-call-site handling.
+  // @ref LLP 0056 [constrained-by]: the refusal is the kernel's; the actionable next step is this caller's to name
+  const rawExecuteSql = __executeSql
+  /**
+   * @param {ExecuteSqlOptions} args
+   * @returns {Promise<ExecuteSqlResult>}
+   */
+  __executeSql = async (args) => {
+    try {
+      return await rawExecuteSql(args)
+    } catch (err) {
+      if (err instanceof Error && err.name === 'QueryExecutionBudgetError') {
+        err.message +=
+          ' - that caller is the graph projection: raise its budget with HYP_GRAPH_PROJECTION_MAX_HEAP_MB (MB) if it truly needs more'
+      }
+      throw err
+    }
+  }
   return withSpan(
     'graph.project',
     {

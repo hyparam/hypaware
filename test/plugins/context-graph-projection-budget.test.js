@@ -7,6 +7,7 @@ import {
   projectGraph,
   resolveProjectionMaxHeapBytes,
 } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
+import { QueryExecutionBudgetError } from '../../src/core/query/sql.js'
 
 // Regression for issue #376 step 1: graph projection must pass its OWN finite
 // heap budget (HYP_GRAPH_PROJECTION_MAX_HEAP_MB, default 3 GiB) to every
@@ -124,6 +125,58 @@ test('HYP_GRAPH_PROJECTION_MAX_HEAP_MB overrides the projection budget at every 
     if (prev === undefined) delete process.env[KNOB]
     else process.env[KNOB] = prev
   }
+})
+
+test("a projection budget refusal names the projection's own lever, HYP_GRAPH_PROJECTION_MAX_HEAP_MB", async () => {
+  /** @type {any} */
+  const storage = {
+    cacheTablePath: (dataset) => `/fake/${dataset}`,
+    appendRows: async () => {},
+  }
+  await assert.rejects(
+    projectGraph({
+      query: /** @type {any} */ ({}),
+      storage,
+      contracts: [probeContract()],
+      __executeSql: async () => {
+        // The four-arg caller-budgeted form: the kernel's message already says
+        // the budget came from a caller; the projection must say which one.
+        throw new QueryExecutionBudgetError(64 * 1048576, 128 * 1048576, undefined, true)
+      },
+    }),
+    (err) => {
+      assert.ok(err instanceof Error)
+      // The typed identity the scheduler and command.js key on survives.
+      assert.equal(err.name, 'QueryExecutionBudgetError')
+      assert.ok(err.message.includes('budget set by its caller'), 'the kernel caller clause survives')
+      assert.match(err.message, /HYP_GRAPH_PROJECTION_MAX_HEAP_MB/)
+      return true
+    }
+  )
+})
+
+test('a non-budget scan failure propagates without the projection lever appended', async () => {
+  /** @type {any} */
+  const storage = {
+    cacheTablePath: (dataset) => `/fake/${dataset}`,
+    appendRows: async () => {},
+  }
+  await assert.rejects(
+    projectGraph({
+      query: /** @type {any} */ ({}),
+      storage,
+      contracts: [probeContract()],
+      __executeSql: async () => {
+        throw new Error('scan exploded')
+      },
+    }),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.equal(err.name, 'Error')
+      assert.equal(err.message, 'scan exploded')
+      return true
+    }
+  )
 })
 
 test('resolveProjectionMaxHeapBytes defaults to 3 GiB and never returns 0', () => {
