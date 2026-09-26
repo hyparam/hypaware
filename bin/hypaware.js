@@ -8,13 +8,15 @@ import { withProductInvocation } from '../src/core/product_telemetry/client.js'
 // imports and bootstrap as well as dispatch and command-body work.
 const invocationStarted = 0
 
-// The two leaf modules the palette needs, imported statically because they
-// are pure - no observability, no HYP_HOME, nothing the `__smoke_internal`
-// branch below is careful to load late. Everything else here stays a lazy
-// dynamic import.
+// The leaf modules imported statically, because they are pure - no
+// observability, no HYP_HOME, nothing the `__smoke_internal` branch below is
+// careful to load late. Two of them the palette needs; `flushStream` is here
+// because the boot-failure catch cannot import the flush it needs when a failed
+// import is what it reports. Everything else here stays a lazy dynamic import.
 // @ref LLP 0189#choke-point [implements]: the entry's own diagnostics get the same colouring dispatch gives commands
 import { ANSI, colorizeStderr, paint } from '../src/core/cli/style.js'
 import { useColor } from '../src/core/cli/stdio.js'
+import { flushStream } from '../src/core/cli/flush-streams.js'
 
 const argv = process.argv.slice(2)
 
@@ -159,7 +161,6 @@ const result = await withProductInvocation(
       const { installObservability } = await import(
         '../src/core/observability/index.js'
       )
-      const { flushStream } = await import('../src/core/cli/flush-streams.js')
       const { installStreamErrorHandlers } = await import(
         '../src/core/cli/stream_errors.js'
       )
@@ -201,6 +202,9 @@ const result = await withProductInvocation(
     } catch (error) {
       try {
         stderr.write(`hyp: ${describeBootFailure(error)}\n`)
+        // The same flush the success path takes: `process.exit` below would
+        // drop whatever of this report is still buffered in a pipe.
+        await flushStream(process.stderr)
       } catch {}
       return 1
     }
