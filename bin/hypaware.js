@@ -115,6 +115,41 @@ if (argv[0] === 'daemon' && argv[1] === 'run') {
   }
 }
 
+/**
+ * The failure text for an error caught outside dispatch: the stack the runtime
+ * built, then every `cause` behind it. The catch below is the only report on
+ * stderr such a failure gets, because the invocation-counting wrapper has to
+ * see the boot fail rather than let the rejection escape to Node. The wrapper
+ * still records the failure in the product-telemetry outbox.
+ *
+ * Most of what reaches it is a bootstrap import failure, where the frames are
+ * the only thing naming the module that would not load. Observability setup and
+ * shutdown reach it too, and there the actionable text is still the first line.
+ *
+ * The depth cap keeps a self-referential `cause` from spinning, and the
+ * fallback keeps a thrown `undefined` or `null` from printing nothing at all.
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+function describeBootFailure(error) {
+  const parts = []
+  let current = error
+  for (
+    let depth = 0;
+    depth < 8 && current !== undefined && current !== null;
+    depth += 1
+  ) {
+    const text =
+      current instanceof Error
+        ? current.stack || `${current.name}: ${current.message}`
+        : String(current)
+    parts.push(depth === 0 ? text : `caused by: ${text}`)
+    current = current instanceof Error ? current.cause : undefined
+  }
+  return parts.join('\n') || String(error)
+}
+
 const result = await withProductInvocation(
   argv,
   process.env,
@@ -165,9 +200,7 @@ const result = await withProductInvocation(
       return exitCode
     } catch (error) {
       try {
-        stderr.write(
-          `hyp: ${error instanceof Error ? error.message : String(error)}\n`
-        )
+        stderr.write(`hyp: ${describeBootFailure(error)}\n`)
       } catch {}
       return 1
     }
