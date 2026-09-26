@@ -78,7 +78,7 @@ test('a bootstrap import failure reports its stack and cause, and still counts a
   // The regression: a stack frame, not only the message. `\n at` rather than a
   // bare `at`, because a message can contain the word.
   assert.match(run.stderr, /\n\s+at /, 'the bootstrap failure printed no stack frames')
-  assert.match(run.stderr, /injected root cause/, 'the cause chain was dropped')
+  assert.match(run.stderr, /\ncaused by: Error: injected root cause/, 'the cause chain was dropped')
 
   // And why the catch cannot simply be removed: the invocation is still
   // accounted for, once, as a nonzero failure.

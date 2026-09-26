@@ -117,12 +117,16 @@ if (argv[0] === 'daemon' && argv[1] === 'run') {
 
 /**
  * The failure text for an error caught outside dispatch: the stack the runtime
- * built, then every `cause` behind it. The catch below is the only report a
- * bootstrap import failure gets, because the invocation-counting wrapper has to
- * see the boot fail rather than let the rejection escape to Node, and on the
- * broken install such a failure indicates the frames are the only thing naming
- * the module that would not load. The depth cap keeps a self-referential
- * `cause` from spinning.
+ * built, then every `cause` behind it. This catch is the only report such a
+ * failure gets, because the invocation-counting wrapper has to see the boot
+ * fail rather than let the rejection escape to Node.
+ *
+ * Most of what reaches it is a bootstrap import failure, where the frames are
+ * the only thing naming the module that would not load. Observability setup and
+ * shutdown reach it too, and there the actionable text is still the first line.
+ *
+ * The depth cap keeps a self-referential `cause` from spinning, and the
+ * fallback keeps a thrown `undefined` or `null` from printing nothing at all.
  *
  * @param {unknown} error
  * @returns {string}
@@ -142,7 +146,7 @@ function describeBootFailure(error) {
     parts.push(depth === 0 ? text : `caused by: ${text}`)
     current = current instanceof Error ? current.cause : undefined
   }
-  return parts.join('\n')
+  return parts.join('\n') || String(error)
 }
 
 const result = await withProductInvocation(
