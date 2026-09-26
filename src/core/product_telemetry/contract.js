@@ -193,6 +193,15 @@ const ROUTES = [
   'other'
 ]
 
+/** The closed set of `stage` values a `pipeline.*` record may carry. */
+export const PIPELINE_STAGES = Object.freeze([
+  'capture',
+  'write',
+  'export',
+  'archive',
+  'mover'
+])
+
 /** @type {Record<string, { type: string, unit: string, max: number }>} */
 export const METRICS = Object.freeze({
   'pipeline.rows': { type: 'sum', unit: '{row}', max: 1e9 },
@@ -456,9 +465,7 @@ function metric(r, server) {
   if (r.name.startsWith('pipeline.')) {
     if (
       !keys(r.attributes, ['stage']) ||
-      !['capture', 'write', 'export', 'archive', 'mover'].includes(
-        r.attributes.stage
-      )
+      !PIPELINE_STAGES.includes(r.attributes.stage)
     )
       return false
   } else if (r.name.startsWith('server.')) {
