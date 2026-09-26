@@ -77,6 +77,53 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
   assert.match(prompt, /hyp privacy folders ask/)
 })
 
+// Destination vocabularies, matched as families rather than as one verbatim
+// sentence so a reworded reintroduction trips too (#2167, #2174).
+const DESTINATION_VOCABULARIES = [
+  { name: 'server', pattern: /\b(?:server|servers|on-?prem\w*|upstream|backend)\b/i },
+  { name: 'cloud', pattern: /\bclouds?\b/i },
+  { name: 'remote', pattern: /\bremotes?\b/i },
+]
+
+// A conditional keyword within one clause of a connectivity word, so any
+// synonym of "when this machine is connected" trips, not just that spelling.
+const CONNECTION_CONDITIONAL =
+  /\b(?:when|whenever|while|if|once|unless|until|provided|assuming|as long as|so long as|only)\b[^.\n]{0,60}\b(?:connect\w*|online|offline|reachable|network|signed[- ]in|logged[- ]in)\b/i
+
+test('the consent prompt names the sync destination exactly one way', () => {
+  // The choice blurbs are rendered into the prompt, so the whole block is what
+  // the user reads and what has to agree with itself.
+  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
+  const named = DESTINATION_VOCABULARIES.filter((v) => v.pattern.test(prompt)).map((v) => v.name)
+  assert.equal(
+    named.length,
+    1,
+    `the rendered prompt names the destination ${named.length} ways (${named.join(', ') || 'none'}); one consent surface gets one term`
+  )
+})
+
+test('the sync blurb states the forwarding without a connection-conditional hedge', () => {
+  // `decideClassification` never returns prompt on an unenrolled machine, so
+  // the forwarding is unconditionally true wherever this block renders and a
+  // connectivity hedge understates it.
+  const sync = CLASSIFICATION_CHOICES.find((c) => c.class === 'full')
+  assert.ok(sync, 'the full/sync choice is present')
+  // The disclosure has to be there before its phrasing can be pinned.
+  assert.match(sync.blurb, /\b(?:sync\w*|forward\w*|upload\w*|sen[dt])\b/i)
+  assert.equal(
+    CONNECTION_CONDITIONAL.test(sync.blurb),
+    false,
+    `the sync blurb hedges the forwarding on connectivity: ${JSON.stringify(sync.blurb)}`
+  )
+  // And nowhere else in the block either, so the hedge cannot simply move.
+  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
+  assert.equal(
+    CONNECTION_CONDITIONAL.test(prompt),
+    false,
+    'the rendered consent prompt hedges a disclosure that is unconditional where it renders'
+  )
+})
+
 test('decideClassification: with the ask on, prompt only when enrolled AND interactive AND unclassified', () => {
   const asking = { askMode: /** @type {const} */ ('ask') }
   assert.deepEqual(
