@@ -75,14 +75,25 @@ export class QueryExecutionBudgetError extends Error {
    * @param {number} limitBytes
    * @param {number} observedBytes
    * @param {{ site: string, rawBytes: number, baselineBytes: number, gcMode: 'confirmed' | 'unavailable' }} [diagnostics]
+   * @param {boolean} [budgetFromOption] the refused budget came from an
+   *   explicit `maxHeapBytes`, not from the environment or the default
    */
-  constructor(limitBytes, observedBytes, diagnostics) {
+  constructor(limitBytes, observedBytes, diagnostics, budgetFromOption = false) {
     const limitMb = Math.round(limitBytes / 1048576)
     const observedMb = Math.round(observedBytes / 1048576)
+    // resolveHeapBudgetBytes returns an explicit maxHeapBytes before it ever
+    // reads the environment, so on a caller-budgeted path (graph reads and the
+    // graph projection both pass one) advising HYP_QUERY_MAX_HEAP_MB sends the
+    // reader to a knob that does nothing at any value. Name where the budget
+    // came from instead, claiming nothing about how that caller chose it.
+    // @ref LLP 0097 [constrained-by]: the env override applies to the default ceiling only, an explicit maxHeapBytes wins ahead of it
+    const escape = budgetFromOption
+      ? '(this query kind runs under a budget set by its caller, not the operator query-budget default)'
+      : '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
     let message =
       `query exceeded its execution memory budget (${observedMb}MB used of ${limitMb}MB) - ` +
       'add a WHERE/date filter, a LIMIT, or aggregate instead of selecting raw rows ' +
-      '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
+      escape
     // The suffix is the refusal's own diagnosis, and it matters most when
     // the refusal happens on a machine the investigator cannot inspect (a
     // remote daemon surfacing this message through MCP): which check site
@@ -564,7 +575,7 @@ export async function executeQuerySql(args) {
               rawBytes: crossing.raw,
               baselineBytes: baselineHeap,
               gcMode: crossing.gcMode,
-            })
+            }, args.maxHeapBytes !== undefined)
             span.setAttribute('budget_trip_site', site)
             span.setAttribute('budget_raw_mb', Math.round(crossing.raw / 1048576))
             span.setAttribute('budget_settled_mb', Math.round(crossing.settled / 1048576))
