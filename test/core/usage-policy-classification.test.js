@@ -110,7 +110,10 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
 //      the forwarding is unconditionally true wherever this renders and a
 //      hedge understates it.
 //   3. The destination is the one this enrollment actually forwards to, so
-//      there is a literal per lane (#2197) and an edit has to land in both.
+//      every lane is pinned (#2197): a full-block literal for the built-in and
+//      the self-hosted lane, and the header plus occurrence assertions for the
+//      unresolvable-destination fallback. An edit has to land in every lane it
+//      changes, and a reword of the fallback name lands in neither literal.
 const CLASSIFICATION_PROMPT_CWD = '/work/secret-repo'
 
 // The hosted default server, and a self-hosted one. `serverDisplayName` maps
