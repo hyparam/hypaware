@@ -117,9 +117,10 @@ if (argv[0] === 'daemon' && argv[1] === 'run') {
 
 /**
  * The failure text for an error caught outside dispatch: the stack the runtime
- * built, then every `cause` behind it. This catch is the only report such a
- * failure gets, because the invocation-counting wrapper has to see the boot
- * fail rather than let the rejection escape to Node.
+ * built, then every `cause` behind it. The catch below is the only report on
+ * stderr such a failure gets, because the invocation-counting wrapper has to
+ * see the boot fail rather than let the rejection escape to Node. The wrapper
+ * still records the failure in the product-telemetry outbox.
  *
  * Most of what reaches it is a bootstrap import failure, where the frames are
  * the only thing naming the module that would not load. Observability setup and
