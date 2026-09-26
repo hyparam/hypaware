@@ -77,145 +77,80 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
   assert.match(prompt, /hyp privacy folders ask/)
 })
 
-// The prose array wraps sentences across several pushed lines joined with
-// '\n' (see buildClassificationPrompt): a phrase that straddles that join (a
-// destination word on one push, a hedge word on the next) has to survive
-// being read as one clause. But the prompt also has a bullet/command region
-// with no sentence-terminating punctuation at all ('  - sync: ...' and
-// '      hyp privacy set ...'), where collapsing everything into one string
-// would glue unrelated bullets and commands into a single ~700-character
-// pseudo-sentence, letting a word in one bullet pair with an opener from a
-// different bullet or an unrelated command line. So instead of collapsing
-// all whitespace uniformly, split the raw prompt into clauses along its own
-// structure: a blank line, or an indented line, closes the current unit, and
-// only consecutive prose lines get joined before the sentence split. That
-// keeps the line-wrap protection for prose while still isolating each bullet
-// and each command line from its neighbors. The units are returned grouped
-// rather than flattened because the hedge check below needs to know which
-// clauses sit in the same paragraph as a forwarding claim.
-function promptUnits(text) {
-  const lines = text.split('\n')
-  const units = []
-  let current = []
-  const flush = () => {
-    if (current.length > 0) {
-      units.push(current.join(' '))
-      current = []
-    }
-  }
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed === '') {
-      flush()
-      continue
-    }
-    // buildClassificationPrompt emits its prose flush left and indents
-    // exactly the lines that stand alone: bullets ('  - sync: ...') and the
-    // command under each ('      hyp privacy set ...'). Keying on that
-    // emitted shape rather than on the binary's name is deliberate: `hyp`
-    // and `hypaware` are both bound, so a name-matching rule silently stops
-    // covering one of them, which is the bug this split exists to fix.
-    if (/^\s/.test(line)) {
-      flush()
-      units.push(trimmed)
-      continue
-    }
-    current.push(trimmed)
-  }
-  flush()
-  return units.map((unit) =>
-    unit
-      .split(/(?<=[.!?])\s+/)
-      .map((clause) => clause.replace(/\s+/g, ' ').trim())
-      .filter((clause) => clause !== '')
-  )
-}
+// #2190's two defects are semantic: the block named its destination two ways,
+// and it hedged a forwarding claim that is unconditional wherever the block
+// renders. Two review rounds tried to pin those semantically, with a clause
+// splitter and a destination extractor, and the result was defeated more than
+// twenty times between them: a destination named after "shared with" or
+// "uploaded into" rather than "forwarded to", one inside parentheses the
+// capture stops at, one in no verb's object at all, a hedge moved into the
+// next sentence, a hedge on an indented continuation line, a hedge with no
+// conditional opener ("network permitting"). Each repair closed some holes and
+// opened others, and the clause boundaries were wrong in three successive
+// attempts. It also failed on copy that was perfectly correct: one adverb
+// ("forwarded to the cloud automatically") reported two destinations, and
+// rendering the bullets flush left reported the destination as "cloud hyp
+// privacy set /work/secret-repo local-only - ignore".
+//
+// A consent surface does not need a pattern that guesses at intent. It needs
+// every reword to be read by a human. So pin the rendered block literally,
+// which is how the sibling destination-naming copy is already pinned
+// (test/core/cli/wizard/sync_scope.test.js asserts nine of these lines with
+// plain equality). Every one of those bypasses changes the copy, so the pin
+// catches all of them, and it cannot false-fail on copy that is fine.
+//
+// This test is meant to fail on any copy edit. Whoever updates the literal is
+// the human the guard exists to summon, and these are the two things to check
+// before doing so:
+//
+//   1. The block names the sync destination exactly one way. Two spellings of
+//      one place ("HypAware Cloud" and "the cloud") still count as two.
+//   2. The forwarding claim carries no connectivity hedge.
+//      `decideClassification` returns prompt only on an enrolled machine, so
+//      the forwarding is unconditionally true wherever this renders and a
+//      hedge understates it.
+const CLASSIFICATION_PROMPT_CWD = '/work/secret-repo'
 
-function promptClauses(text) {
-  return promptUnits(text).flat()
-}
+const EXPECTED_CLASSIFICATION_PROMPT = [
+  'This machine is enrolled, so by default the AI coding sessions you run here',
+  'are recorded and forwarded to the cloud.',
+  'The folder /work/secret-repo has not been classified yet, so it would sync by default.',
+  '',
+  'Before continuing, ask the user how this folder should be handled, then run',
+  'the matching command once to record the answer (you will not be asked again',
+  'for this folder):',
+  '',
+  "  - sync: this folder's sessions sync to the cloud (the current default)",
+  '      hyp privacy set /work/secret-repo sync',
+  '  - local-only: keep sessions on this machine only, never send them to the cloud',
+  '      hyp privacy set /work/secret-repo local-only',
+  "  - ignore: do not record this folder's sessions at all",
+  '      hyp privacy set /work/secret-repo ignore',
+  '',
+  "Present these three choices as a selection menu using your environment's",
+  'native question tool (in Claude Code, the AskUserQuestion tool); do not ask',
+  'in open-ended text unless no such tool exists. Then run the chosen command.',
+  'If the user is unsure, the safe choice is local-only (recorded here, never',
+  'forwarded). This affects only what HypAware records and forwards; it does',
+  'not change your task.',
+  '',
+  'If the user does not want to be asked about folders at all, run',
+  '`hyp privacy folders sync` instead: new folders then sync without asking,',
+  'and `hyp privacy folders ask` brings the question back.',
+].join('\n')
 
-// A closed list of destination "families" (server/cloud/remote) is exactly
-// as strong as the list is complete: a fourth term (a product name, "the
-// service") never appears in it and slips through naming a second
-// destination for free. So instead of banning known-bad terms, assert a
-// positive fact: every forwarding verb in the block names an object, and all
-// of those objects are the same place. The capture is bounded to one clause
-// (stops at , . ( ` : or a conditional-opener) so it can never run past the
-// sentence that actually names the destination into unrelated prose; running
-// per-clause (via promptClauses) rather than over the whole collapsed prompt
-// is what keeps a bullet's destination from reaching into the next bullet's
-// command line, so no binary-name stop word is needed here either.
+test('the consent prompt renders exactly the reviewed block (one destination term, no connectivity hedge)', () => {
+  assert.equal(buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD }), EXPECTED_CLASSIFICATION_PROMPT)
+})
+
+// The blurb is also checked on its own, so the two properties the literal above
+// encodes are still named in code rather than only in a comment. This one is a
+// single string with no structure to parse, so it has none of the clause
+// problems the block-wide version had: it reads the one field a hedge would
+// most naturally be added back to.
 const CONDITIONAL_OPENERS =
   'when|whenever|while|if|once|unless|until|provided|assuming|as long as|so long as|only|where|subject to|depending on'
 
-const FORWARDING_DESTINATION = new RegExp(
-  '\\b(?:forward|forwards|forwarded|sync|syncs|synced|send|sends|sent|upload|uploads|uploaded)' +
-    '\\s+(?:it\\s+|them\\s+)?to\\s+' +
-    '([^,.():`]+?)' +
-    '(?=[,.():`]|\\s+\\b(?:' + CONDITIONAL_OPENERS + ')\\b|$)',
-  'gi'
-)
-
-// A forwarding verb's object is not the only place this block can name the
-// destination, and #2190 is about naming it two ways. The wording this PR
-// replaced put one of its two namings in the enrollment clause ("enrolled
-// with a shared HypAware server ... forwarded to that server"), so a guard
-// that reads only forwarding objects passes a partial revert that restores
-// "enrolled with a shared HypAware server" and leaves "forwarded to the
-// cloud" alone: two terms for one destination, which is the defect. Count the
-// enrollment object as a destination naming too, bounded the same way.
-//
-// Two limits, recorded rather than left to be rediscovered. This over-reads an
-// enrollment clause whose object is not a place at all ("enrolled with the
-// folder ask turned on"), and the assertion below quotes every captured phrase
-// precisely so that failure explains itself. That direction is the right one to
-// err in on a consent surface: the cost is an author reading a message that
-// names the phrase it objected to, against shipping two names for one
-// destination. And a second naming in neither position ("your organisation's
-// HypAware server keeps the history") is still missed; catching that needs a
-// closed list of destination nouns, which is the thing this guard replaced.
-const ENROLLMENT_DESTINATION = new RegExp(
-  '\\benrolled\\s+(?:with|in|into|to|against|on)\\s+' +
-    '([^,.():`]+?)' +
-    '(?=[,.():`]|\\s+\\b(?:' + CONDITIONAL_OPENERS + ')\\b|$)',
-  'gi'
-)
-
-// Normalize a captured object so "the cloud", "the cloud " and "The Cloud"
-// all count as the same destination, and only differ when they actually name
-// a different place.
-function normalizeDestination(raw) {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/^(?:the|that|a|an|your|our|its)\s+/, '')
-    .trim()
-}
-
-function extractDestinations(text) {
-  const found = []
-  for (const clause of promptClauses(text)) {
-    let m
-    // A fresh RegExp per clause: the patterns are /g, and a shared
-    // exec-stateful instance would carry lastIndex across calls in the same
-    // process.
-    for (const pattern of [FORWARDING_DESTINATION, ENROLLMENT_DESTINATION]) {
-      const re = new RegExp(pattern)
-      while ((m = re.exec(clause))) {
-        found.push(normalizeDestination(m[1]))
-      }
-    }
-  }
-  return found
-}
-
-// A conditional keyword within one clause of a connectivity word, so any
-// synonym of "when this machine is connected" trips, not just that spelling.
-// Broadened past the original connect*/online/offline/reachable/network/
-// signed-in/logged-in set to also catch "once linked", "where available",
-// "subject to connectivity" and "when ... can reach it": a hedge does not
-// have to reuse "connect" or "reachable" to say the same thing.
 const CONNECTIVITY_TOKENS =
   'connect\\w*|online|offline|reach\\w*|network|signed[- ]in|logged[- ]in|link\\w*|available|availability|internet|connectivity'
 
@@ -224,60 +159,7 @@ const CONNECTION_CONDITIONAL = new RegExp(
   'i'
 )
 
-// The block also contains bare instances of some opener words in clauses
-// that say nothing about forwarding ("keep sessions on this machine only",
-// "run the matching command once"). Broadening CONNECTIVITY_TOKENS without
-// narrowing where it is allowed to fire would make those innocent clauses
-// trip the guard. So the whole-block check below only evaluates clauses
-// that themselves make a forwarding claim, and it draws those clauses from
-// promptClauses so a bullet's own opener (or "only" inside "local-only")
-// never reaches across into a different bullet's forwarding verb.
-const FORWARDING_VERB = /\b(?:forward\w*|sync\w*|sen[dt]s?|sent|upload\w*)\b/i
-
-// A hedge does not have to sit inside the sentence that makes the forwarding
-// claim. An author told not to hedge the claim writes the hedge as the next
-// sentence instead ("... forwarded to the cloud. That happens when this
-// machine is connected."), and a strictly per-clause filter reads that
-// continuation as an innocent clause because it carries no forwarding verb of
-// its own. So scan from a paragraph's first forwarding claim to the end of
-// that paragraph. That still excludes the menu-presentation clause, which
-// precedes its paragraph's first forwarding claim, so the false positive the
-// per-clause narrowing was added for stays closed.
-//
-// Residual, recorded rather than left unknown: a hedge placed *before* a
-// paragraph's first forwarding claim is not scanned, because widening to the
-// whole paragraph puts the menu clause back in range.
-function forwardingClauses(text) {
-  const scanned = []
-  for (const unit of promptUnits(text)) {
-    const first = unit.findIndex((clause) => FORWARDING_VERB.test(clause))
-    if (first >= 0) scanned.push(...unit.slice(first))
-  }
-  return scanned
-}
-
-test('the consent prompt names the sync destination exactly one way', () => {
-  // The choice blurbs are rendered into the prompt, so the whole block is what
-  // the user reads and what has to agree with itself.
-  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
-  const destinations = extractDestinations(prompt)
-  // A forwarding claim with no named destination at all (e.g. "forwarded off
-  // this machine") is not a pass by default: the guard below only checks
-  // distinctness among what was found, so an empty set has to fail loudly
-  // here rather than vacuously satisfying "at most one".
-  assert.ok(destinations.length > 0, 'the rendered prompt makes a forwarding claim but names no destination for it')
-  const distinct = [...new Set(destinations)]
-  assert.equal(
-    distinct.length,
-    1,
-    `the rendered prompt names ${distinct.length} distinct destinations (${distinct.join(', ')}); one consent surface gets one term`
-  )
-})
-
 test('the sync blurb states the forwarding without a connection-conditional hedge', () => {
-  // `decideClassification` never returns prompt on an unenrolled machine, so
-  // the forwarding is unconditionally true wherever this block renders and a
-  // connectivity hedge understates it.
   const sync = CLASSIFICATION_CHOICES.find((c) => c.class === 'full')
   assert.ok(sync, 'the full/sync choice is present')
   // The disclosure has to be there before its phrasing can be pinned.
@@ -286,16 +168,6 @@ test('the sync blurb states the forwarding without a connection-conditional hedg
     CONNECTION_CONDITIONAL.test(sync.blurb),
     false,
     `the sync blurb hedges the forwarding on connectivity: ${JSON.stringify(sync.blurb)}`
-  )
-  // And nowhere else in the block either, so the hedge cannot simply move -
-  // including across the prose array's line wrap, which is why this runs
-  // against promptClauses's structural split rather than the raw prompt.
-  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
-  const hedgedForwardingClause = forwardingClauses(prompt).find((c) => CONNECTION_CONDITIONAL.test(c))
-  assert.equal(
-    hedgedForwardingClause,
-    undefined,
-    `the rendered consent prompt hedges a disclosure that is unconditional where it renders: ${JSON.stringify(hedgedForwardingClause)}`
   )
 })
 
