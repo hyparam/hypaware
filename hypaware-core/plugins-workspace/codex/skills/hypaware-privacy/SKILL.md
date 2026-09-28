@@ -276,7 +276,7 @@ hyp privacy set <dir> ignore && hyp privacy purge <dir>
 
 ## After the review
 
-- Nothing you did sends data anywhere: markings stay on this machine, and a `--session` purge reaches configured, signed-in and enrolled servers only to delete that session there. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
+- Nothing you did sends captured data anywhere: markings stay on this machine, and a `--session` purge sends only the session id to configured, signed-in and enrolled servers so they delete that session there. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.

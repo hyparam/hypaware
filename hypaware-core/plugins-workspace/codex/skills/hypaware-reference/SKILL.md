@@ -64,9 +64,10 @@ rather than replacing it.
 A default install keeps everything on the machine. Two deliberate config
 choices change that:
 
-- **Enrolling with the cloud** (HypAware Cloud by default, or the URL given to
-  `hyp join`) turns on the `@hypaware/central` sink, which forwards cache
-  partitions to it. `hyp remote login` (attended, and what the install wizard
+- **Enrolling with a sync server** (HypAware Cloud, unless
+  `query.default_remote` or the `<name>` given to `hyp remote login <name>`
+  points elsewhere, or the URL given to `hyp join`) turns on the
+  `@hypaware/central` sink, which forwards cache partitions to it. `hyp remote login` (attended, and what the install wizard
   wraps) and `hyp join <url> <token>` (unattended / MDM) reach the same
   enrolled state.
 - **Bundled plugins that are off by default**, several of which send content
