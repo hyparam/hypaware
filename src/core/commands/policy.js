@@ -24,7 +24,7 @@ import {
 import { defaultConfigPath } from '../config/schema.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { syncDestinationName } from '../remote/builtin_remotes.js'
-import { centralSinkOrigins } from '../remote/gateway_seed.js'
+import { centralLayerUnreadable, centralSinkOrigins } from '../remote/gateway_seed.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
@@ -524,7 +524,14 @@ export async function runPolicyClient(argv, ctx) {
     ctx.stdout.write(`${name}: local-only${optedOut.has(name) ? ' (unchanged)' : ''}\n`)
     ctx.stdout.write(`  future ${name} rows stay on this machine; rows already exported are not recalled\n`)
     if (layered && !layered.centralConfig) {
-      ctx.stdout.write('  this machine is not connected to a HypAware server; the opt-out takes effect if it connects\n')
+      // A layer yielding no config is either verifiably absent or merely
+      // unreadable, and only the first is "not connected": an enrollment
+      // nobody can read is not evidence that there is none (issue #2223).
+      // The opt-out above is already written in both cases.
+      const unreadable = centralLayerUnreadable({ stateDir, centralLoaded: layered.centralLoaded })
+      ctx.stdout.write(unreadable
+        ? `  this machine's central config layer (${unreadable.configPath}) cannot be read, so whether it syncs to a HypAware server cannot be verified; the opt-out is recorded either way\n`
+        : '  this machine is not connected to a HypAware server; the opt-out takes effect if it connects\n')
     }
     return 0
   }

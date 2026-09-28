@@ -25,6 +25,7 @@ import { originOf, sameServer } from './builtin_remotes.js'
  *
  * @import { HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CentralEnrollment, LoginGatewayCredential, SeededGateway } from '../../../src/core/remote/types.js'
+ * @import { LoadConfigResult } from '../../../src/core/config/types.js'
  * @import { PersistedIdentity } from '../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
 
@@ -140,10 +141,26 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
  */
 export async function readCentralEnrollment({ stateDir, configPath }) {
   const { centralConfig, centralLoaded } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
-  const unreadable = centralLoaded && centralLoaded.ok === false
-    ? { configPath: centralLoaded.configPath, errorKind: centralLoaded.errorKind, message: centralLoaded.message }
-    : centralLoaded === null ? centralLayerResolutionFailure({ stateRoot: stateDir }) : null
-  return { origins: centralSinkOrigins(centralConfig), unreadable }
+  return { origins: centralSinkOrigins(centralConfig), unreadable: centralLayerUnreadable({ stateDir, centralLoaded }) }
+}
+
+/**
+ * {@link readCentralEnrollment}'s unreadable half, over a resolution the
+ * caller already has: a command that resolved the layered config for its own
+ * reasons answers "could the layer be read" from that same `centralLoaded`,
+ * rather than a second read that can disagree with the first. See
+ * {@link readCentralEnrollment} for why every load failure counts as
+ * unreadable and why a null `centralLoaded` is re-checked against the control
+ * directory instead of read as an absence.
+ *
+ * @param {{ stateDir: string, centralLoaded: LoadConfigResult | null }} args
+ * @returns {CentralEnrollment['unreadable']}
+ */
+export function centralLayerUnreadable({ stateDir, centralLoaded }) {
+  if (centralLoaded && centralLoaded.ok === false) {
+    return { configPath: centralLoaded.configPath, errorKind: centralLoaded.errorKind, message: centralLoaded.message }
+  }
+  return centralLoaded === null ? centralLayerResolutionFailure({ stateRoot: stateDir }) : null
 }
 
 /**
