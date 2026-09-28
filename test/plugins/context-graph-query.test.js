@@ -244,13 +244,41 @@ test('the budget signal firing inside a blocked read refuses with the same guida
   await assert.rejects(queryNeighbors({ ...fixture, seed: 's1', depth: 3 }), /thirty-second time budget/)
 })
 
+test('a source throwing its own abort on a blocked read refuses with the same guidance', async t => {
+  // icebird and the parquet source throw a fresh AbortError of their own when
+  // a row-group read finds the signal down, rather than relaying its reason,
+  // so demanding the reason's own object would leave the real graph datasets
+  // reporting a bare 'Aborted' - the symptom, on the path that has it.
+  const own = new AbortController()
+  t.mock.method(AbortSignal, 'timeout', () => own.signal)
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => {
+    own.abort()
+    throw new DOMException('Aborted', 'AbortError')
+  } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), /thirty-second time budget/)
+})
+
 test('an unrelated abort is not relabelled as the traversal time budget', async t => {
   // The shared query path relays whatever reason aborted it, and another
-  // caller's timeout carries the same name and text as this traversal's.
+  // caller's timeout carries the same name and text as this traversal's. This
+  // traversal's own signal is untouched, so nothing here is out of time.
   const foreign = new DOMException('The operation was aborted due to timeout', 'TimeoutError')
   const fixture = memoryGraph()
   wrapSources(fixture, t, source => ({ ...source, scan: () => { throw foreign } }))
   await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => err === foreign)
+})
+
+test('a read failing for its own reason while out of time keeps its own error', async t => {
+  // Being out of time is not a licence to relabel: only an abort-shaped
+  // failure is the budget expiring. A heap-budget trip arrives as
+  // QueryExecutionBudgetError and a bad read as itself, and both stay so.
+  const own = new AbortController()
+  const broken = new Error('parquet footer is unreadable')
+  t.mock.method(AbortSignal, 'timeout', () => own.signal)
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => { own.abort(); throw broken } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => err === broken)
 })
 
 test('large labels are subject to the cumulative payload budget', async () => {

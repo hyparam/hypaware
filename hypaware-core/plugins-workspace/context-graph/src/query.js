@@ -229,11 +229,16 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
     } catch (err) {
       markSpanStatus(span, 'error')
       if (refusal && err === refusal) return { ok: /** @type {const} */ (false), error: refusal.message, localOnly }
-      // A read blocked in the engine when the budget expires aborts mid-stream
-      // and rethrows this signal's own reason, so checkTime never sees it.
-      // Identity keeps an unrelated abort relayed by the shared query path (a
-      // heap-budget trip, a caller's cancellation) reported as itself.
-      if (visibility.signal.aborted && err === visibility.signal.reason) throw outOfTime()
+      // A read blocked in the engine when the budget expires aborts mid-stream,
+      // so checkTime never sees it. Nothing but this traversal's own timer can
+      // abort this signal, so an abort surfacing once it has fired is that
+      // budget expiring, whether the layer relayed the signal's reason
+      // (squirreling) or threw an abort of its own (icebird, the parquet
+      // source). Anything not abort-shaped keeps its own identity: a
+      // heap-budget trip arrives as QueryExecutionBudgetError, not as this.
+      const abortShaped = err instanceof Error && (err === visibility.signal.reason
+        || err.name === 'AbortError' || err.name === 'TimeoutError')
+      if (visibility.signal.aborted && abortShaped) throw outOfTime()
       throw err
     } finally {
       span.setAttribute('query_count', queries)
