@@ -14,7 +14,7 @@ Routing is **your responsibility**, decided from the user's question before the 
 
 - **Local** answers questions about this machine's own activity: "what was I doing yesterday", "have I hit this error before", this machine's sessions, costs, and files touched here.
 - **Remote** answers questions whose scope is wider than one machine: the user's team ("our", "the team", a coworker by name), activity across the user's machines, a named host, or data this machine never recorded (GitHub enrichment this host does not capture, rows outside local retention). Discover targets with `hyp remote list`.
-- **Ambiguous scope is a question for the user, not a guess.** "How much did we spend on tokens this month" or "which sessions touched auth.js" reads either way. If the wording does not settle it and the answer would differ, ask ("this machine only, or your team's history in HypAware Cloud?") before running anything expensive. A local result silently presented as the answer to a fleet-scoped question is a wrong answer, not a partial one.
+- **Ambiguous scope is a question for the user, not a guess.** "How much did we spend on tokens this month" or "which sessions touched auth.js" reads either way. If the wording does not settle it and the answer would differ, ask ("this machine only, or across your team?") before running anything expensive. A local result silently presented as the answer to a fleet-scoped question is a wrong answer, not a partial one.
 
 Whichever you choose, the answer you give the user must **say what you actually queried**: local or which remote target, and what date range or window the SQL covered. See [Response Format](#response-format).
 
