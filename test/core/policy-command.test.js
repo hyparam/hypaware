@@ -802,6 +802,112 @@ test('hyp policy client refuses to opt out a central-configured source (LLP 0188
   })
 })
 
+/**
+ * Enroll the sandbox machine: a central config layer whose `@hypaware/central`
+ * sinks target `urls`, which is what `hyp privacy client` reads to name where
+ * this machine's rows go. `plugins` are the extra central-layer plugin
+ * declarations that make a client org-managed (LLP 0188 #locked).
+ *
+ * @param {string} hypHome
+ * @param {{ urls?: string[], plugins?: string[] }} [layer]
+ */
+function enrollMachine(hypHome, layer = {}) {
+  const seedPath = centralSeedPath(stateDirOf(hypHome))
+  mkdirSync(path.dirname(seedPath), { recursive: true })
+  /** @type {Record<string, unknown>} */
+  const sinks = {}
+  for (const [i, url] of (layer.urls ?? []).entries()) {
+    sinks[`forward${i}`] = { plugin: '@hypaware/central', config: { url, identity: {} } }
+  }
+  writeFileSync(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }, ...(layer.plugins ?? []).map((name) => ({ name }))],
+    sinks,
+  }))
+}
+
+// Issue #2211: every destination-bearing line of this verb said "the cloud" on
+// a machine that may be enrolled at a server the hosted product has never heard
+// of (LLP 0134 #custom-url-deferred). Both write lanes are checked from one
+// enrollment, and the sweep for /cloud/i is what catches a second vocabulary
+// surviving in one line while the other is fixed.
+test('hyp privacy client names the self-hosted server its rows go to, never "the cloud"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hyp.acme.dev'], plugins: ['@hypaware/claude'] })
+
+    // The locked refusal: the source the org set always syncs - to the org's
+    // own server, which is the only place this machine forwards.
+    const locked = await run('policy client', ['claude', 'local-only'], { cwd: root, hypHome })
+    assert.equal(locked.code, 1)
+    assert.equal(locked.stderr, "error: 'claude' is set by your team and always syncs to hyp.acme.dev\n")
+
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    // The receipt itself, pinned as a whole line: a bare substring match
+    // would pass on "sync to hyp.acme.dev and the cloud".
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to hyp\.acme\.dev$/m)
+
+    const printed = [locked.stdout, locked.stderr, out.stdout, res.stdout].join('')
+    assert.equal(/cloud/i.test(printed), false,
+      'a destination-bearing line still says "the cloud": ' + JSON.stringify(printed))
+  })
+})
+
+// The hosted default keeps its product name, under either of its hosts, and
+// two origins that are the same server are named once (the dedupe): a machine
+// enrolled under the previous host must not read "HypAware Cloud and
+// HypAware Cloud".
+test('hyp privacy client names a built-in enrollment HypAware Cloud, once, under either host', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://api.hypaware.ai'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to HypAware Cloud$/m)
+  })
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hypaware.hyperparam.app', 'https://api.hypaware.ai'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to HypAware Cloud$/m)
+  })
+})
+
+// Several destinations all receive the rows, so the receipt names all of
+// them: naming the first alone would under-disclose.
+test('hyp privacy client names every server the machine forwards to', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hyp.acme.dev', 'https://hyp.beta.dev:8443'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to hyp\.acme\.dev and hyp\.beta\.dev:8443$/m)
+  })
+})
+
+// The unnameable cases get one spelling, the same one the classification
+// prompt uses: a machine with no central layer, and a layer whose sink URL
+// does not parse (whose raw value must never reach the copy).
+test('hyp privacy client falls back to "your HypAware server" when nothing nameable is configured', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    assert.match(out.stdout, /^ {2}this machine is not connected to a HypAware server; /m)
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to your HypAware server$/m)
+    assert.equal(/cloud/i.test(out.stdout + res.stdout), false, out.stdout + res.stdout)
+  })
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['not a url'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to your HypAware server$/m)
+    assert.doesNotMatch(res.stdout, /not a url/)
+  })
+})
+
 test('hyp policy client fails loudly on a corrupt store', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir

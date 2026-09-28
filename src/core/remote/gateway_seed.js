@@ -23,6 +23,7 @@ import { originOf, sameServer } from './builtin_remotes.js'
  * a server-pushed sink block seeds the same file a locally-configured one
  * does.
  *
+ * @import { HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CentralEnrollment, LoginGatewayCredential, SeededGateway } from '../../../src/core/remote/types.js'
  * @import { PersistedIdentity } from '../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
@@ -142,15 +143,33 @@ export async function readCentralEnrollment({ stateDir, configPath }) {
   const unreadable = centralLoaded && centralLoaded.ok === false
     ? { configPath: centralLoaded.configPath, errorKind: centralLoaded.errorKind, message: centralLoaded.message }
     : centralLoaded === null ? centralLayerResolutionFailure({ stateRoot: stateDir }) : null
-  const sinks = centralConfig?.sinks ?? {}
+  return { origins: centralSinkOrigins(centralConfig), unreadable }
+}
+
+/**
+ * The origins this machine's `@hypaware/central` sinks target, as the central
+ * config layer records them, deduplicated and in configuration order. A caller
+ * that has already resolved the layered config and only needs to *name* where
+ * rows go takes this directly, so naming a destination costs no second read of
+ * the layer and cannot disagree with the enrollment answer the same command
+ * computed.
+ *
+ * Takes the **central** layer alone, never the effective config, for
+ * {@link readCentralEnrollment}'s reason: a hand-authored central sink in the
+ * user's own local layer is not an enrollment.
+ *
+ * @param {HypAwareV2Config | null | undefined} centralConfig
+ * @returns {string[]}
+ */
+export function centralSinkOrigins(centralConfig) {
   const origins = new Set()
-  for (const entry of Object.values(sinks)) {
+  for (const entry of Object.values(centralConfig?.sinks ?? {})) {
     if (!entry || /** @type {any} */ (entry).plugin !== CENTRAL_PLUGIN) continue
     const config = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
     const origin = typeof config.url === 'string' ? originOf(config.url) : null
     if (origin) origins.add(origin)
   }
-  return { origins: [...origins], unreadable }
+  return [...origins]
 }
 
 /**

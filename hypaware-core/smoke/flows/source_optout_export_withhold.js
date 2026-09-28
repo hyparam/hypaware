@@ -307,10 +307,16 @@ export async function run({ harness, expect }) {
         env: process.env,
       })
       expect.that('cli: hyp privacy client openclaw sync exited 0', code, (v) => v === 0)
+      // The receipt names where the rows go (#2211). This flow's enrollment is
+      // the in-memory layered config the withhold resolver reads, so the CLI,
+      // which resolves the central layer off disk, finds no sink to name and
+      // renders the fallback. The named lanes are pinned in
+      // test/core/policy-command.test.js, which can write a central layer
+      // without making this flow's opt-out target org-managed.
       expect.that(
-        'cli: the flip-back names the future-only property',
+        'cli: the flip-back names the future-only property and its destination',
         stdout.text(),
-        (v) => v.includes('future openclaw rows sync to the cloud')
+        (v) => v.includes('future openclaw rows sync to your HypAware server')
       )
       // LLP 0345 moved retained history to its own consent-gated command, so the
       // flip-back no longer promises history is never uploaded: it promises it
