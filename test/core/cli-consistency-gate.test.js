@@ -707,9 +707,10 @@ test('the report help surfaces name the destination in one vocabulary', { timeou
  * conclude their clients do not sync by default, understating egress on a
  * privacy surface inside one invocation (#2222).
  *
- * These four surfaces are registered with no HYP_HOME and no layered config in
- * scope, so unlike the receipts their commands print they cannot name the
- * server this machine forwards to; they have to say *a* server. Which words do
+ * These four surfaces are constants in the command registry, fixed before any
+ * HYP_HOME is read and with no layered config in scope, so unlike the receipts
+ * their commands print they cannot name the server this machine forwards to;
+ * they have to say *a* server. Which words do
  * that is already settled by the receipts: the destination `hyp privacy client`
  * prints falls back to "your HypAware server", and its not-enrolled line reads
  * "this machine is not connected to a HypAware server".
