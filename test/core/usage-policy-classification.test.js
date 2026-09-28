@@ -421,6 +421,11 @@ test('evaluateCwdClassification prompts for an enrolled, interactive, unclassifi
     env: { HYP_HOME: '/tmp/does-not-matter' },
     deps: {
       readCentralSinkOrigins: async () => ['https://central.example'],
+      // Injected too, so this stays a pure-dep test: the prompting path now
+      // reads the effective config from disk, and a fixed `HYP_HOME` path is
+      // not a directory this test owns. The effective config always carries
+      // the central layer's sinks, so it answers with the enrollment origin.
+      readForwardSinkOrigins: async () => ['https://central.example'],
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       readFolderAskMode: async () => 'ask',
     },

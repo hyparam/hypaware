@@ -151,7 +151,9 @@ export async function readCentralEnrollment({ stateDir, configPath }) {
  * and in configuration order. A caller that has already resolved the layered
  * config and only needs to *name* where rows go takes this directly, so naming
  * a destination costs no second read of the layer and cannot disagree with the
- * enrollment answer the same command computed.
+ * enrollment answer the same command computed. A caller that has not already
+ * resolved it ({@link readForwardSinkOrigins}) pays a read of its own and buys
+ * no such agreement: that is the price of naming from a different layer.
  *
  * Which config to hand it is the caller's decision, and the two answers differ:
  * {@link readCentralEnrollment} passes the **central** layer alone, because a
