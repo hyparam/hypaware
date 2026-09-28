@@ -4,16 +4,17 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
-import { isPlainObject, parseMaybeJson } from 'hypaware/core/util'
+import { compareStrings, isPlainObject, parseMaybeJson } from 'hypaware/core/util'
+import { listSqliteSessions, sqliteOwnedSessions, readSqliteSession, OpenclawStorageError } from './session_db.js'
 import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_settings_path.js'
 
 /**
- * @import { OpenclawSessionHeader, OpenclawSessionMessage } from './types.js'
+ * @import { OpenclawSessionHeader, OpenclawSessionMessage, OpenclawSessionSource } from '../../../../hypaware-core/plugins-workspace/openclaw/src/types.js'
  */
 
 /**
- * The one reader of an OpenClaw session JSONL file
- * (`~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`).
+ * Shared OpenClaw session discovery and normalization. SQLite snapshots and
+ * verified cold archives come from session_db.js; legacy JSONL remains local.
  *
  * Two `@hypaware/openclaw` consumers are about to read this file for
  * identity and policy decisions: the settlement enricher (upgrading
@@ -149,6 +150,7 @@ export function openclawSessionCwd(value) {
  * @returns {string}
  */
 export function defaultOpenclawAgentsDir(env, homeDir) {
+  if (env?.OPENCLAW_STATE_DIR?.trim()) return path.join(path.resolve(env.OPENCLAW_STATE_DIR.trim().replace(/^~(?=\/|$)/, homeDir)), 'agents')
   return resolveClientSettingsPath('openclaw', '.openclaw/agents', env, homeDir)
 }
 
@@ -301,7 +303,7 @@ export async function readOpenclawSessionMessages(filePath) {
  * and both dropped every real session (#543). A field whose *address* is the
  * thing that is easy to get wrong belongs to the one reader.
  *
- * @param {string} line
+ * @param {unknown} line
  * @returns {OpenclawSessionMessage | undefined}
  */
 function parseOpenclawSessionMessage(line) {
@@ -488,4 +490,113 @@ function readFirstLineBounded(filePath, maxBytes) {
       try { fs.closeSync(fd) } catch { /* already closed */ }
     }
   }
+}
+
+/**
+ * @ref LLP 0444#precedence [implements]: SQLite owns its sessions, including
+ * cold sessions, even when migration left an older JSONL copy beside it.
+ * @param {string} agentsDir
+ * @param {{ floorMs?: number }} [opts]
+ * @returns {AsyncGenerator<OpenclawSessionSource>}
+ */
+export async function* listOpenclawSessions(agentsDir, opts = {}) {
+  try { yield* discoverSessions(agentsDir, opts) }
+  catch (error) {
+    if (error instanceof OpenclawStorageError) throw error
+    throw new OpenclawStorageError('session_discovery_failed')
+  }
+}
+
+/**
+ * @param {string} agentsDir
+ * @param {{ floorMs?: number }} opts
+ * @returns {AsyncGenerator<OpenclawSessionSource>}
+ */
+async function* discoverSessions(agentsDir, opts) {
+  let agents
+  try { agents = await fsp.readdir(agentsDir, { withFileTypes: true }) }
+  catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return
+    throw new OpenclawStorageError('agents_unreadable')
+  }
+  for (const agent of agents.sort((a, b) => compareStrings(a.name, b.name))) {
+    if (!agent.isDirectory()) continue
+    const sqlitePath = path.join(agentsDir, agent.name, 'agent', 'openclaw-agent.sqlite')
+    let stat
+    try { stat = await fsp.stat(sqlitePath) }
+    catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw new OpenclawStorageError('sqlite_unreadable')
+    }
+    // Checked outside the try so this refusal reaches the caller as itself,
+    // rather than being caught below and relabelled `sqlite_unreadable`.
+    if (stat && !stat.isFile()) throw new OpenclawStorageError('sqlite_not_a_file')
+    const sqlite = stat !== undefined
+    if (sqlite) yield* listSqliteSessions(sqlitePath, agent.name, opts)
+    const sessionsDir = path.join(agentsDir, agent.name, 'sessions')
+    let names
+    try { names = await fsp.readdir(sessionsDir) }
+    catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') continue
+      throw new OpenclawStorageError('sessions_unreadable')
+    }
+    names.sort()
+    for (let offset = 0; offset < names.length; offset += 128) {
+      /** @type {OpenclawSessionSource[]} */
+      const batch = []
+      for (const name of names.slice(offset, offset + 128)) {
+        const match = SESSION_FILE_NAME.exec(name)
+        if (!match) continue
+        const file = path.join(sessionsDir, name)
+        let stat
+        try { stat = await fsp.stat(file) }
+        catch (error) {
+          if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') continue
+          throw error
+        }
+        if (!stat.isFile() || stat.mtimeMs < (opts.floorMs ?? -Infinity)) continue
+        // The header read is a SYNCHRONOUS first-line read, and this runs on
+        // the flush path. Only the SQLite-ownership check below needs the
+        // authoritative id, so an agent with no database pays the filename
+        // instead; every consumer treats `sessionId` here as a fallback and
+        // re-reads the header from the transcript it actually projects.
+        const sessionId = sqlite ? readOpenclawSessionHeader(file)?.sessionId ?? match[1] : match[1]
+        batch.push({ path: file, agentId: agent.name, sessionId, mtimeMs: stat.mtimeMs })
+      }
+      const owned = sqlite && batch.length ? await sqliteOwnedSessions(sqlitePath, batch.map(source => source.sessionId ?? '')) : new Set()
+      for (const source of batch) if (!owned.has(source.sessionId)) yield source
+    }
+  }
+}
+
+/**
+ * @param {OpenclawSessionSource} source
+ * @param {{ maxBytes?: number, quietBeforeMs?: number, includeMessages?: (header: OpenclawSessionHeader | undefined) => boolean }} [opts]
+ * @returns {Promise<{ header: OpenclawSessionHeader | undefined, messages: OpenclawSessionMessage[], bytes: number } | undefined>}
+ */
+export async function readOpenclawSession(source, opts = {}) {
+  if (!source.sqlitePath) {
+    if (opts.quietBeforeMs !== undefined && source.mtimeMs > opts.quietBeforeMs) return undefined
+    const header = readOpenclawSessionHeader(source.path)
+    const messages = opts.includeMessages?.(header) === false ? [] : await readOpenclawSessionMessages(source.path)
+    return { header, messages, bytes: 0 }
+  }
+  const lines = await readSqliteSession(source, { ...opts, acceptHeaderLine: line => opts.includeMessages?.(parseOpenclawSessionHeader(line)) !== false })
+  if (!lines?.length) return undefined
+  const header = parseOpenclawSessionHeader(lines[0])
+  if (!header?.sessionId || header.sessionId !== source.sessionId) throw new OpenclawStorageError('session_header_missing_or_mismatched')
+  const messages = []
+  let bytes = 0
+  const includeMessages = opts.includeMessages?.(header) !== false
+  for (const line of lines) {
+    bytes += Buffer.byteLength(line)
+    let record
+    try { record = JSON.parse(line) }
+    catch { throw new OpenclawStorageError('invalid_transcript_json') }
+    if (includeMessages && record?.type === 'message') {
+      const message = parseOpenclawSessionMessage(record)
+      if (!message) throw new OpenclawStorageError('invalid_message')
+      messages.push(message)
+    }
+  }
+  return { header, messages, bytes }
 }
