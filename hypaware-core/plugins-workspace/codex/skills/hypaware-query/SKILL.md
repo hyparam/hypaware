@@ -6,7 +6,7 @@ user-invocable: false
 
 # HypAware Query
 
-Use `hyp query` to inspect local HypAware recordings. By default it reads local JSONL recordings and an explicit local query cache, not the central server. To run the same query against a remote HypAware host, add `--remote <target>`: see [Remote queries](#remote-queries-other-hypaware-hosts).
+Use `hyp query` to inspect local HypAware recordings. By default it reads local JSONL recordings and an explicit local query cache, not HypAware Cloud or any other remote. To run the same query against a remote HypAware host, add `--remote <target>`: see [Remote queries](#remote-queries-other-hypaware-hosts).
 
 ## Local or remote: decide before you query
 
@@ -14,7 +14,7 @@ Routing is **your responsibility**, decided from the user's question before the 
 
 - **Local** answers questions about this machine's own activity: "what was I doing yesterday", "have I hit this error before", this machine's sessions, costs, and files touched here.
 - **Remote** answers questions whose scope is wider than one machine: the user's team ("our", "the team", a coworker by name), activity across the user's machines, a named host, or data this machine never recorded (GitHub enrichment this host does not capture, rows outside local retention). Discover targets with `hyp remote list`.
-- **Ambiguous scope is a question for the user, not a guess.** "How much did we spend on tokens this month" or "which sessions touched auth.js" reads either way. If the wording does not settle it and the answer would differ, ask ("this machine only, or the team server?") before running anything expensive. A local result silently presented as the answer to a fleet-scoped question is a wrong answer, not a partial one.
+- **Ambiguous scope is a question for the user, not a guess.** "How much did we spend on tokens this month" or "which sessions touched auth.js" reads either way. If the wording does not settle it and the answer would differ, ask ("this machine only, or across your team?") before running anything expensive. A local result silently presented as the answer to a fleet-scoped question is a wrong answer, not a partial one.
 
 Whichever you choose, the answer you give the user must **say what you actually queried**: local or which remote target, and what date range or window the SQL covered. See [Response Format](#response-format).
 
@@ -56,7 +56,7 @@ Provided by `@hypaware/grep`, included in new capture configurations and enabled
 
 - **Coverage: only nine columns are searched** (`content_text`, `tool_name`, `session_id`, `conversation_id`, `agent_id`, `model`, `cwd`, `git_branch`, `git_remote`). **Zero hits is not evidence the text is absent** from system prompts (`system_text`), tool definitions (`tools`), tool arguments (`tool_args`), `attributes`, or `raw_frame`; read those with `hyp query sql`.
 - **Two stderr completeness notices, neither an error, and they mean different things.** `grep: more matches exist beyond the limit` means the limit cut the answer: only the newest matches were shown, so narrow with `--from`/`--to` or `--session-id`, or raise `--limit` within its ceiling. `grep: the search stopped before covering every file` is the other one: the walk aborted or ran out of time, so hits can be missing from anywhere in the range and a wider limit will not recover them; narrow the search and rerun.
-- **Local searches scan directly without indexes.** Narrow `--from`/`--to` on large histories to reduce scan work. Remote servers retain their own indexed search implementation.
+- **Local searches scan directly without indexes.** Narrow `--from`/`--to` on large histories to reduce scan work. A remote keeps its own indexed search implementation.
 - Local-only rows are withheld with a stderr count, exactly as in SQL; `--include-local-only` is the same informed-consent override.
 
 ## Remote queries (other HypAware hosts)
