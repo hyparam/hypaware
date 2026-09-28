@@ -522,14 +522,15 @@ async function* discoverSessions(agentsDir, opts) {
   for (const agent of agents.sort((a, b) => compareStrings(a.name, b.name))) {
     if (!agent.isDirectory()) continue
     const sqlitePath = path.join(agentsDir, agent.name, 'agent', 'openclaw-agent.sqlite')
-    let sqlite = false
-    try {
-      if (!(await fsp.stat(sqlitePath)).isFile()) throw new OpenclawStorageError('sqlite_not_a_file')
-      sqlite = true
-    }
+    let stat
+    try { stat = await fsp.stat(sqlitePath) }
     catch (error) {
       if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw new OpenclawStorageError('sqlite_unreadable')
     }
+    // Checked outside the try so this refusal reaches the caller as itself,
+    // rather than being caught below and relabelled `sqlite_unreadable`.
+    if (stat && !stat.isFile()) throw new OpenclawStorageError('sqlite_not_a_file')
+    const sqlite = stat !== undefined
     if (sqlite) yield* listSqliteSessions(sqlitePath, agent.name, opts)
     const sessionsDir = path.join(agentsDir, agent.name, 'sessions')
     let names
@@ -553,7 +554,12 @@ async function* discoverSessions(agentsDir, opts) {
           throw error
         }
         if (!stat.isFile() || stat.mtimeMs < (opts.floorMs ?? -Infinity)) continue
-        const sessionId = readOpenclawSessionHeader(file)?.sessionId ?? match[1]
+        // The header read is a SYNCHRONOUS first-line read, and this runs on
+        // the flush path. Only the SQLite-ownership check below needs the
+        // authoritative id, so an agent with no database pays the filename
+        // instead; every consumer treats `sessionId` here as a fallback and
+        // re-reads the header from the transcript it actually projects.
+        const sessionId = sqlite ? readOpenclawSessionHeader(file)?.sessionId ?? match[1] : match[1]
         batch.push({ path: file, agentId: agent.name, sessionId, mtimeMs: stat.mtimeMs })
       }
       const owned = sqlite && batch.length ? await sqliteOwnedSessions(sqlitePath, batch.map(source => source.sessionId ?? '')) : new Set()

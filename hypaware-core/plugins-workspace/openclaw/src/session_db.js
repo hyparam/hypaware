@@ -180,7 +180,9 @@ function coldEvents(archive, source, maxBytes) {
   let rawBytes = 0
   let first = true
   for (const line of text.trimEnd().split('\n')) {
-    const record = JSON.parse(line)
+    let record
+    try { record = JSON.parse(line) }
+    catch { throw new OpenclawStorageError('invalid_archive_event') }
     if (first) {
       first = false
       if (record.kind !== 'header' || record.version !== 1 || record.sessionId !== source.sessionId || record.generation !== archive.generation) throw new OpenclawStorageError('archive_identity_mismatch')
@@ -216,15 +218,19 @@ export async function readSqliteSession(source, opts = {}) {
       if (archive) return coldEvents(archive, source, maxBytes)
     }
     const selected = schema.compressed ? 'event_json, event_zstd, event_utf8_bytes' : 'event_json'
-    const firstSize = db.prepare(`SELECT length(CAST(event_json AS BLOB)) AS bytes${schema.compressed ? ', length(event_zstd) AS compressed, event_utf8_bytes AS decoded' : ''} FROM transcript_events WHERE session_id = ? ORDER BY seq LIMIT 1`).get(source.sessionId ?? '')
+    // `octet_length` answers from the value header, so a size pre-pass never
+    // pulls a payload off its overflow pages; `length(CAST(x AS BLOB))` does.
+    const firstSize = db.prepare(`SELECT octet_length(event_json) AS bytes${schema.compressed ? ', octet_length(event_zstd) AS compressed, event_utf8_bytes AS decoded' : ''} FROM transcript_events WHERE session_id = ? ORDER BY seq LIMIT 1`).get(source.sessionId ?? '')
     if (Number(firstSize?.bytes) > maxBytes || Number(firstSize?.compressed) > EVENT_MAX_BYTES || Number(firstSize?.decoded) > maxBytes) throw new OpenclawStorageError('transcript_limit')
     const first = db.prepare(`SELECT ${selected} FROM transcript_events WHERE session_id = ? ORDER BY seq LIMIT 1`).get(source.sessionId ?? '')
     const firstText = first ? eventText(first, maxBytes) : undefined
     if (firstText && opts.acceptHeaderLine?.(firstText) === false) return [firstText]
     // SQLite measures sizes before transferring any potentially large text or
     // blob to JS. This also bounds metadata-only records and malformed stores.
-    const sizeSql = schema.compressed ? 'CASE WHEN event_json IS NOT NULL THEN length(CAST(event_json AS BLOB)) ELSE event_utf8_bytes END' : 'length(CAST(event_json AS BLOB))'
-    const totals = db.prepare(`SELECT count(*) AS n, sum(${sizeSql}) AS bytes${schema.compressed ? ', max(length(event_zstd)) AS compressed' : ''} FROM (SELECT * FROM transcript_events WHERE session_id = ? ORDER BY seq LIMIT 100001)`).get(source.sessionId ?? '')
+    const sizeSql = schema.compressed ? 'CASE WHEN event_json IS NOT NULL THEN octet_length(event_json) ELSE event_utf8_bytes END' : 'octet_length(event_json)'
+    // The inner query projects sizes only: `SELECT *` hands every payload to
+    // the aggregate, reading the whole transcript once more before `iterate`.
+    const totals = db.prepare(`SELECT count(*) AS n, sum(sz) AS bytes${schema.compressed ? ', max(zsz) AS compressed' : ''} FROM (SELECT ${sizeSql} AS sz${schema.compressed ? ', octet_length(event_zstd) AS zsz' : ''} FROM transcript_events WHERE session_id = ? ORDER BY seq LIMIT 100001)`).get(source.sessionId ?? '')
     if (Number(totals?.n) > 100000 || Number(totals?.bytes) > maxBytes || Number(totals?.compressed ?? 0) > EVENT_MAX_BYTES) throw new OpenclawStorageError('transcript_limit')
     const rows = db.prepare(`SELECT ${selected} FROM transcript_events WHERE session_id = ? ORDER BY seq`).iterate(source.sessionId ?? '')
     const out = []

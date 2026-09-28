@@ -143,12 +143,33 @@ export function createOpenclawSettlementEnricher(opts) {
         /** @type {Map<string, OpenclawSessionIndex>} */
         const indexCache = new Map()
         const budget = { remaining: OPENCLAW_TRANSCRIPT_MAX_BYTES }
+        // A candidate that will not read is remembered, not thrown: the scan
+        // walks up to 32 newest sessions that mostly have nothing to do with
+        // this batch, so one unreadable neighbour must not decide the fate of
+        // a group that binds cleanly somewhere else.
+        /** @type {OpenclawStorageError[]} */
+        const unreadable = []
         /** @type {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} */
         const out = rows.slice()
 
         for (const [sessionId, indices] of bySession) {
           const keys = matchKeysOf(rows, indices)
-          const index = await bindSessionFile(candidates, indexCache, keys, budget)
+          const index = await bindSessionFile(candidates, indexCache, keys, budget, unreadable)
+          if (!index && unreadable.length > 0) {
+            // @ref LLP 0444#failure-policy [implements]: the sentinel covers
+            // the rows whose OWN directory policy a storage failure prevented
+            // settling, which is exactly a group that found no readable
+            // candidate to bind to - not every row in the flush.
+            logger.warn('plugin.openclaw.storage_unavailable', {
+              component: CLIENT_NAME, operation: 'settlement', status: 'skipped',
+              session_id: sessionId, error_kind: unreadable[0].code,
+              rows: indices.length, recovery: 'scheduled_backfill',
+            })
+            for (const i of indices) {
+              if (!stringValue(rows[i].cwd) || isGatewayFallbackRow(rows[i])) out[i] = USAGE_POLICY_DROP
+            }
+            continue
+          }
           if (!index) {
             // No file claims this session's content. Settling on time alone
             // would risk applying an unrelated session's cwd verdict, and a
@@ -261,7 +282,10 @@ export function createOpenclawSettlementEnricher(opts) {
           component: CLIENT_NAME, operation: 'settlement', status: 'skipped',
           error_kind: error.code, rows: rows.length, recovery: 'scheduled_backfill',
         })
-        return rows.map(row => stringValue(row.cwd) && !isGatewayFallbackRow(row) ? row : USAGE_POLICY_DROP)
+        // Only the rows this pass would have settled: a row with no
+        // session_id never entered `bySession` and is untouched on the
+        // healthy path, so a discovery failure must not remove it either.
+        return rows.map(row => !stringValue(row.session_id) || (stringValue(row.cwd) && !isGatewayFallbackRow(row)) ? row : USAGE_POLICY_DROP)
       }
     },
   }
@@ -292,6 +316,10 @@ async function candidateSessionFiles(agentsDir, rows, limit) {
   /** @type {OpenclawSessionSource[]} */
   const newest = []
   for await (const source of listOpenclawSessions(agentsDir, { floorMs: floor })) {
+    // Only a session that can still make the cut pays for a sort. OpenClaw
+    // never prunes, so sorting on every discovered session would make each
+    // flush scale with the whole accumulated history instead of the bound.
+    if (newest.length === limit && source.mtimeMs <= newest[limit - 1].mtimeMs) continue
     newest.push(source)
     newest.sort((a, b) => b.mtimeMs - a.mtimeMs)
     if (newest.length > limit) newest.pop()
@@ -324,9 +352,10 @@ async function candidateSessionFiles(agentsDir, rows, limit) {
  * @param {Map<string, OpenclawSessionIndex>} cache per-flush, keyed by file path
  * @param {Set<string>} keys the group's distinct match keys
  * @param {{ remaining: number }} budget
+ * @param {OpenclawStorageError[]} unreadable collects per-candidate failures
  * @returns {Promise<OpenclawSessionIndex | undefined>}
  */
-async function bindSessionFile(candidates, cache, keys, budget) {
+async function bindSessionFile(candidates, cache, keys, budget, unreadable) {
   if (keys.size === 0) return undefined
   /** @type {OpenclawSessionIndex | undefined} */
   let best
@@ -334,7 +363,7 @@ async function bindSessionFile(candidates, cache, keys, budget) {
   for (const candidate of candidates) {
     let index = cache.get(candidate.path)
     if (!index) {
-      index = await readOpenclawSessionIndex(candidate, budget)
+      index = await readOpenclawSessionIndex(candidate, budget, unreadable)
       cache.set(candidate.path, index)
     }
     let score = 0
@@ -351,15 +380,30 @@ async function bindSessionFile(candidates, cache, keys, budget) {
 }
 
 /**
- * Read and index one session snapshot. SQLite failures propagate to the
- * privacy-safe recovery path; legacy JSONL keeps its best-effort behavior.
+ * Read and index one session snapshot. A SQLite failure makes THIS candidate
+ * unusable and is recorded in `unreadable` for the privacy-safe recovery path;
+ * legacy JSONL keeps its best-effort behavior.
  *
  * @param {OpenclawSessionSource} candidate
  * @param {{ remaining: number }} budget
+ * @param {OpenclawStorageError[]} unreadable
  * @returns {Promise<OpenclawSessionIndex>}
  */
-async function readOpenclawSessionIndex(candidate, budget) {
-  const session = await readOpenclawSession(candidate, { maxBytes: budget.remaining })
+async function readOpenclawSessionIndex(candidate, budget, unreadable) {
+  // An exhausted budget would make the read throw by construction; say so
+  // directly rather than issuing a query whose only outcome is the error.
+  if (candidate.sqlitePath && budget.remaining <= 0) {
+    unreadable.push(new OpenclawStorageError('transcript_limit'))
+    return buildOpenclawSessionIndex(candidate, undefined, [])
+  }
+  let session
+  try {
+    session = await readOpenclawSession(candidate, { maxBytes: budget.remaining })
+  } catch (error) {
+    if (!(error instanceof OpenclawStorageError)) throw error
+    unreadable.push(error)
+    return buildOpenclawSessionIndex(candidate, undefined, [])
+  }
   budget.remaining -= session?.bytes ?? 0
   return buildOpenclawSessionIndex(candidate, session?.header, session?.messages ?? [])
 }

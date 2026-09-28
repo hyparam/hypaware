@@ -15,7 +15,7 @@ import {
   readOpenclawSession,
   SESSION_FILE_NAME,
 } from './session_file.js'
-import { compareStrings, isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
+import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillPlan, BackfillPlanContext, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
@@ -194,7 +194,7 @@ export function createOpenclawBackfillProvider(opts) {
     async *run(ctx) {
       try { yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config }) }
       catch (error) {
-        ctx.log.warn('openclaw.backfill.storage_unavailable', { component: COMPONENT, operation: 'backfill.scan', status: 'error', error_kind: 'storage_unavailable', error: errMessage(error) })
+        ctx.log.warn('openclaw.backfill.storage_unavailable', { component: COMPONENT, operation: 'backfill.scan', agents_dir: agentsDir, status: 'error', error_kind: 'storage_unavailable', error: errMessage(error) })
         throw error
       }
     },
@@ -249,6 +249,9 @@ async function* runOpenclawBackfill(args) {
   let sessionsIgnored = 0
   let messagesProjected = 0
   let recordsExcluded = 0
+  let sessionsFailed = 0
+  /** @type {unknown} */
+  let firstFailure
 
   for await (const source of listOpenclawSessions(agentsDir)) {
     const { agentId, path: filePath } = source
@@ -262,8 +265,16 @@ async function* runOpenclawBackfill(args) {
     try {
       session = await readOpenclawSession(source, { quietBeforeMs: quiesceBeforeMs, includeMessages: header => !header?.cwd || resolver.resolve(header.cwd).class !== 'ignore' })
     } catch (error) {
-      log.warn('openclaw.backfill.session_read_failed', { component: COMPONENT, operation: 'backfill.scan', status: 'error', error_kind: 'session_read_failed', error: errMessage(error) })
-      throw error
+      // @ref LLP 0444#failure-policy [constrained-by]: the run still fails
+      // visibly, but only once every READABLE session has been yielded.
+      // Discovery is ordered, so throwing here would permanently strand
+      // every session sorted after the broken one - and the privacy drop
+      // this policy authorises at flush is paid for by exactly that
+      // recovery import, which must therefore still happen.
+      sessionsFailed += 1
+      firstFailure ??= error
+      log.warn('openclaw.backfill.session_read_failed', { component: COMPONENT, operation: 'backfill.scan', source_path: filePath, session_id: source.sessionId, status: 'error', error_kind: 'session_read_failed', error: errMessage(error) })
+      continue
     }
     if (!session) continue
     const { header, messages: records } = session
@@ -374,8 +385,11 @@ async function* runOpenclawBackfill(args) {
     sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,
     records_excluded: recordsExcluded,
-    status: 'ok',
+    sessions_failed: sessionsFailed,
+    status: sessionsFailed > 0 ? 'error' : 'ok',
+    ...(sessionsFailed > 0 ? { error_kind: 'session_read_failed' } : {}),
   })
+  if (firstFailure !== undefined) throw firstFailure
 }
 
 /**

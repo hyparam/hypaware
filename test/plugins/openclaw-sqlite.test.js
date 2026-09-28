@@ -222,3 +222,43 @@ test('reset windows and independent agents retain distinct native sessions', asy
   assert.deepEqual(sources.map(x => [x.agentId, x.sessionId]), [['main','native-session'], ['main','reset-session'], ['other','native-session'], ['other','reset-session']])
   assert.equal((await e.run()).length, 4)
 })
+
+// An OpenClaw install accumulates sessions, so both lanes routinely meet a
+// window they cannot read: settlement scans the 32 newest whatever the batch
+// is about, and the sweep walks every one of them in session_id order. A
+// single such window must cost only itself.
+test('one unreadable window costs only itself, not the flush batch or the rest of the sweep', async t => {
+  const e = await stage(t)
+  // Sorts before `native-session`, so discovery reaches it first.
+  e.db.prepare('INSERT INTO session_windows VALUES (?, ?, ?)').run('aaa-broken', stamp + 2000, stamp + 2000)
+  e.db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL, NULL)').run('aaa-broken', 0, JSON.stringify(records[1]), stamp)
+
+  // Settlement binds the group to the candidate that actually claims its
+  // content instead of dropping the row over an unrelated neighbour.
+  assert.equal((/** @type {any} */ ((await e.settle())[0])).session_id, 'native-session')
+
+  // The sweep still fails visibly (LLP 0444#failure-policy), but only after
+  // the readable sessions have been yielded: otherwise the recovery import
+  // the settlement drop is paid for by could never reach them.
+  const items = []
+  await assert.rejects(async () => {
+    for await (const item of e.provider.run({ env: {}, cacheRoot: e.root, storage: /** @type {any} */ ({}), dryRun: false, log: /** @type {any} */ (e.log) })) {
+      if (item.type !== 'event') items.push(item)
+    }
+  }, /session_header_missing_or_mismatched/)
+  assert.equal(items.length, 1)
+  assert.ok(e.events.some(x => x.event === 'openclaw.backfill.session_read_failed' && x.attrs?.session_id === 'aaa-broken'))
+  assert.ok(e.events.some(x => x.event === 'openclaw.backfill.scan_complete' && x.attrs?.sessions_failed === 1))
+})
+
+test('a discovery failure leaves rows this pass never settles alone', async t => {
+  const e = await stage(t)
+  e.db.exec('DROP TABLE session_windows')
+  // No `session_id` means the row never entered `bySession`, so the healthy
+  // path never touches it and the failure path must not remove it either.
+  const orphan = { ...e.row, session_id: null }
+  const out = await createOpenclawSettlementEnricher({ homeDir: e.root, agentsDir: e.agentsDir, logger: /** @type {any} */ (e.log) })
+    .settle([structuredClone(e.row), orphan], /** @type {any} */ ({}))
+  assert.equal(out[0], USAGE_POLICY_DROP)
+  assert.deepEqual(out[1], orphan)
+})
