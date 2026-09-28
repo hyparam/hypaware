@@ -9,7 +9,7 @@ import { Attr, markSpanStatus, withSpan } from '../../../../src/core/observabili
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
- * @import { LocalOnlyVisibilityReport } from '../../../../src/core/query/types.js'
+ * @import { LocalOnlyVisibilityReport, RefreshMode } from '../../../../src/core/query/types.js'
  * @import { GraphNode, Direction, Neighbor, TraversalOk, TraversalErr } from './types.js'
  */
 
@@ -85,6 +85,11 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       // deadline. Check elapsed time too, including while processing results.
       if (Date.now() >= deadline) throw new Error('graph traversal exceeded its thirty-second time budget')
     }
+    // A walk is a point-in-time question, not a transaction (LLP 0431), and it
+    // reads once per seed tier, per frontier batch and per output batch, so
+    // freshness is forced once per graph dataset instead of once per read.
+    /** @type {Set<'node' | 'edge'>} */
+    const forced = new Set()
     /** @param {string} value */
     const quote = value => `'${value.replace(/'/g, "''")}'`
     /** @param {string[]} values */
@@ -103,8 +108,10 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       await yieldToEventLoop()
       checkTime()
       queries++
+      const refresh = forced.has(dataset) ? 'auto' : 'always'
+      forced.add(dataset)
       const result = await loadRows(query, storage, config,
-        `SELECT ${columns} FROM ${dataset}${where ? ` WHERE ${where}` : ''} LIMIT ${maxRows}`, visibility)
+        `SELECT ${columns} FROM ${dataset}${where ? ` WHERE ${where}` : ''} LIMIT ${maxRows}`, visibility, refresh)
       checkTime()
       localOnly.callerClass = result.localOnly.callerClass
       localOnly.filtered ||= result.localOnly.filtered
@@ -245,15 +252,16 @@ function graphNode(row) {
  * @param {HypAwareV2Config | undefined} config
  * @param {string} sql
  * @param {{ callerCwd: string | null, includeLocalOnly: boolean, signal?: AbortSignal }} visibility
+ * @param {RefreshMode} refresh
  * @returns {Promise<{ rows: Record<string, unknown>[], localOnly: LocalOnlyVisibilityReport }>}
  */
-async function loadRows(query, storage, config, sql, visibility) {
+async function loadRows(query, storage, config, sql, visibility, refresh) {
   const res = await executeQuerySql({
     query: sql,
     registry: query,
     storage,
     config,
-    refresh: 'always',
+    refresh,
     callerCwd: visibility.callerCwd,
     includeLocalOnly: visibility.includeLocalOnly,
     signal: visibility.signal,
@@ -275,7 +283,7 @@ export async function queryEvidence({ query, storage, config, kind, id, callerCw
   if (!['node', 'edge'].includes(kind) || id.length > 4096) throw new Error('invalid graph evidence identity')
   const quote = value => `'${String(value).replace(/'/g, "''")}'`
   const visibility = { callerCwd: callerCwd ?? null, includeLocalOnly: includeLocalOnly === true, signal: AbortSignal.timeout(5000) }
-  const read = sql => loadRows(query, storage, config, sql, visibility)
+  const read = sql => loadRows(query, storage, config, sql, visibility, 'always')
   let rows = (await read(`SELECT source_dataset, source_keys FROM ${kind} WHERE ${kind}_id = ${quote(id)} LIMIT 2`)).rows
   if (rows.length !== 1) return [] // stale duplicate exemplars need compaction
   for (let hop = 0; hop < 2; hop++) {
