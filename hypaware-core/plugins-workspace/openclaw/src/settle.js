@@ -155,11 +155,18 @@ export function createOpenclawSettlementEnricher(opts) {
         for (const [sessionId, indices] of bySession) {
           const keys = matchKeysOf(rows, indices)
           const index = await bindSessionFile(candidates, indexCache, keys, budget, unreadable)
-          if (!index && unreadable.length > 0) {
+          if (!index && keys.size > 0 && unreadable.length > 0) {
             // @ref LLP 0444#failure-policy [implements]: the sentinel covers
             // the rows whose OWN directory policy a storage failure prevented
             // settling, which is exactly a group that found no readable
             // candidate to bind to - not every row in the flush.
+            //
+            // `keys.size > 0` is what makes "found no readable candidate" a
+            // statement about THIS group: with keys, an unbound group has
+            // necessarily read every candidate (the early break needs a
+            // winning score), so a recorded failure is one it met. A group
+            // with no match key reads nothing, and the doc's carve-out for
+            // "a healthy scan with no content match" keeps its fallback.
             logger.warn('plugin.openclaw.storage_unavailable', {
               component: CLIENT_NAME, operation: 'settlement', status: 'skipped',
               session_id: sessionId, error_kind: unreadable[0].code,

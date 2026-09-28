@@ -262,3 +262,22 @@ test('a discovery failure leaves rows this pass never settles alone', async t =>
   assert.equal(out[0], USAGE_POLICY_DROP)
   assert.deepEqual(out[1], orphan)
 })
+
+// LLP 0444#failure-policy carves out "a healthy scan with no content match",
+// and a group with no match key at all is exactly that: it reads no candidate,
+// so no storage failure ever prevented settling it. Only a group that actually
+// met the unreadable window pays the sentinel.
+test('a group with no match key keeps its fallback when an unrelated window is unreadable', async t => {
+  const e = await stage(t)
+  e.db.prepare('INSERT INTO session_windows VALUES (?, ?, ?)').run('aaa-broken', stamp + 2000, stamp + 2000)
+  e.db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL, NULL)').run('aaa-broken', 0, JSON.stringify(records[1]), stamp)
+
+  // Distinct `session_id`s, so each is its own group and the keyed one runs
+  // first and records the failure the keyless one must not inherit.
+  const keyed = { ...e.row, session_id: 'keyed', attributes: { gateway: { identity_source: 'gateway_fallback' }, openclaw: { match_key: wireMatchKey('user', [{ type: 'text', text: 'matches no transcript' }]) } } }
+  const keyless = { ...e.row, session_id: 'keyless', attributes: { gateway: { identity_source: 'gateway_fallback' } } }
+  const out = await createOpenclawSettlementEnricher({ homeDir: e.root, agentsDir: e.agentsDir, logger: /** @type {any} */ (e.log) })
+    .settle([keyed, keyless], /** @type {any} */ ({}))
+  assert.equal(out[0], USAGE_POLICY_DROP)
+  assert.deepEqual(out[1], keyless)
+})
