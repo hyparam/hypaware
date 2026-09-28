@@ -1,6 +1,6 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, connecting to HypAware Cloud, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "how do I connect to the cloud", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). Also use whenever a request names a token of the form `hyprec-` followed by sixteen hex characters (for example `hyprec-0123456789abcdef`): that is a HypAware report recommendation id, and "fix hyprec-…", "implement hyprec-…", "what does hyprec-… say" map to `hyp report get <hyprec-id>`, even when HypAware is not mentioned (the older `rec-…` form too, when it is). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
+description: Explain what HypAware is, what it captures, how its data flows, config and paths, connecting to HypAware Cloud, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). Also use whenever a request names a token of the form `hyprec-` followed by sixteen hex characters (for example `hyprec-0123456789abcdef`): that is a HypAware report recommendation id, and "fix hyprec-…", "implement hyprec-…", "what does hyprec-… say" map to `hyp report get <hyprec-id>`, even when HypAware is not mentioned (the older `rec-…` form too, when it is). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
 user-invocable: false
 ---
 
@@ -66,9 +66,9 @@ choices change that:
 
 - **Enrolling with the cloud** (HypAware Cloud by default, or the URL given to
   `hyp join`) turns on the `@hypaware/central` sink, which forwards cache
-  partitions to it. `hyp remote login` (attended, and what
-  the install wizard wraps) and `hyp join <url> <token>` (unattended / MDM)
-  reach the same enrolled state.
+  partitions to it. `hyp remote login` (attended, and what the install wizard
+  wraps) and `hyp join <url> <token>` (unattended / MDM) reach the same
+  enrolled state.
 - **Bundled plugins that are off by default**, several of which send content
   off-machine: the `s3` sink and the `completion-*` / `embedder-*` enrichment
   plugins. `hyp plugin list` shows what is active here.
