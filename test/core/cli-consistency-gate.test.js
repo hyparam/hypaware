@@ -699,6 +699,40 @@ test('the report help surfaces name the destination in one vocabulary', { timeou
   }
 })
 
+/**
+ * `hyp privacy client --help` opened on "On a machine connected to the cloud,
+ * every configured client syncs by default" while the same command's receipt
+ * named a self-hosted server ("future claude rows sync to hyp.acme.dev"), so a
+ * self-hosted reader could take the premise as not describing their machine and
+ * conclude their clients do not sync by default, understating egress on a
+ * privacy surface inside one invocation (#2222).
+ *
+ * These four surfaces are constants in the command registry, fixed before any
+ * HYP_HOME is read and with no layered config in scope, so unlike the receipts
+ * their commands print they cannot name the server this machine forwards to;
+ * they have to say *a* server. Which words do
+ * that is already settled by the receipts: the destination `hyp privacy client`
+ * prints falls back to "your HypAware server", and its not-enrolled line reads
+ * "this machine is not connected to a HypAware server".
+ *
+ * The second assertion is what keeps the family check from passing vacuously:
+ * deleting the premise, or spelling the destination a second way ("a central
+ * server"), fails there rather than here.
+ */
+test('the enrollment premise in static help names a server, never a cloud', { timeout: SWEEP_TIMEOUT_MS }, async () => {
+  const { run } = await harness()
+  for (const surface of ['join', 'leave', 'privacy client', 'privacy folders']) {
+    const { code, out } = await run([...surface.split(' '), '--help'])
+    assert.equal(code, 0, `hyp ${surface} --help exited ${code}`)
+    assert.deepEqual(
+      destinationFamilies(out),
+      ['server'],
+      `hyp ${surface} --help does not state the enrollment premise in the server vocabulary: ${JSON.stringify(out)}`
+    )
+    assert.match(out, /\ba HypAware server\b/, `hyp ${surface} --help spells the server a second way: ${JSON.stringify(out)}`)
+  }
+})
+
 // --- active-plugin fixture --------------------------------------------------
 
 /**

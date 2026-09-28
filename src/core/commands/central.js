@@ -393,9 +393,10 @@ export async function runLeave(argv, ctx) {
   const parsedArgv = parseCommandArgv(argv, { type: 'object', properties: {} })
   if ('help' in parsedArgv) {
     ctx.stdout.write('usage: hyp leave\n')
-    ctx.stdout.write('  disconnect this machine from the cloud: stop forwarding and\n')
-    ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
-    ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
+    ctx.stdout.write('  disconnect this machine from a HypAware server: stop forwarding\n')
+    ctx.stdout.write('  and config pull, undo org-driven client attaches, and remove the\n')
+    ctx.stdout.write('  forward credential. Keeps query sessions, the local config, and the\n')
+    ctx.stdout.write('  daemon service.\n')
     return 0
   }
   if (!parsedArgv.ok) {
