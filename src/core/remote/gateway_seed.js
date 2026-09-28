@@ -147,26 +147,27 @@ export async function readCentralEnrollment({ stateDir, configPath }) {
 }
 
 /**
- * The origins this machine's `@hypaware/central` sinks target, as the central
- * config layer records them, deduplicated and in configuration order. A caller
- * that has already resolved the layered config and only needs to *name* where
- * rows go takes this directly, so naming a destination costs no second read of
- * the layer and cannot disagree with the enrollment answer the same command
- * computed.
+ * The origins the `@hypaware/central` sinks in `config` target, deduplicated
+ * and in configuration order. A caller that has already resolved the layered
+ * config and only needs to *name* where rows go takes this directly, so naming
+ * a destination costs no second read of the layer and cannot disagree with the
+ * enrollment answer the same command computed.
  *
- * Takes the **central** layer alone, never the effective config, for
- * {@link readCentralEnrollment}'s reason: a hand-authored central sink in the
- * user's own local layer is not an enrollment.
+ * Which config to hand it is the caller's decision, and the two answers differ:
+ * {@link readCentralEnrollment} passes the **central** layer alone, because a
+ * hand-authored central sink in the user's own local layer is not an
+ * enrollment, while {@link readForwardSinkOrigins} passes the **effective**
+ * config, because that sink still forwards.
  *
- * @param {HypAwareV2Config | null | undefined} centralConfig
+ * @param {HypAwareV2Config | null | undefined} config
  * @returns {string[]}
  */
-export function centralSinkOrigins(centralConfig) {
+export function centralSinkOrigins(config) {
   const origins = new Set()
-  for (const entry of Object.values(centralConfig?.sinks ?? {})) {
+  for (const entry of Object.values(config?.sinks ?? {})) {
     if (!entry || /** @type {any} */ (entry).plugin !== CENTRAL_PLUGIN) continue
-    const config = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
-    const origin = typeof config.url === 'string' ? originOf(config.url) : null
+    const sinkConfig = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
+    const origin = typeof sinkConfig.url === 'string' ? originOf(sinkConfig.url) : null
     if (origin) origins.add(origin)
   }
   return [...origins]
@@ -186,6 +187,28 @@ export function centralSinkOrigins(centralConfig) {
 export async function readCentralSinkOrigins({ stateDir, configPath }) {
   const { origins } = await readCentralEnrollment({ stateDir, configPath })
   return origins
+}
+
+/**
+ * Every origin an `@hypaware/central` sink targets in the **effective**
+ * (central + local) config the daemon boots: where this machine actually
+ * forwards. `mergeConfigLayers` unions a hand-authored local sink in under
+ * its own instance name and the plugin honors that block's own
+ * `identity.persisted_path`, so it ships to its own server.
+ *
+ * For *naming* destinations only. Enrollment stays the central layer alone
+ * ({@link readCentralEnrollment}, LLP 0063 D4), because counting a local sink
+ * as connected would reject a login with `hyp leave` advice that cannot clear
+ * it. Disclosure carries no such duty, and a surface that named the enrolling
+ * layer alone would offer "never send them to A" on a folder B keeps
+ * receiving (#2208).
+ *
+ * @param {{ stateDir: string, configPath: string | null }} args
+ * @returns {Promise<string[]>}
+ */
+export async function readForwardSinkOrigins({ stateDir, configPath }) {
+  const { effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
+  return centralSinkOrigins(effective)
 }
 
 /**

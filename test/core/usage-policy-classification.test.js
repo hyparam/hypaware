@@ -533,6 +533,77 @@ test('the classification answer lands via the real hyp policy set verb (LLP 0106
   }
 })
 
+// #2208: `mergeConfigLayers` unions a local-layer `@hypaware/central` sink
+// under its own instance name into the effective config the daemon boots, and
+// the plugin honors that block's own `identity.persisted_path`, so a machine
+// enrolled at A with a hand-authored sink to B forwards to both and the copy
+// has to name both. Widening the disclosure is not widening enrollment: the
+// gate still reads the central layer alone (LLP 0063 D4), which the second
+// half of this test pins against exactly the same fixture.
+test('the consent copy names a hand-authored local central sink, not only the enrolled one (#2208)', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-two-layer-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    writeJsonFile(path.join(hypHome, 'hypaware-config.json'), {
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: {
+        central_b: {
+          plugin: '@hypaware/central',
+          config: { url: 'https://b.dev', identity: { persisted_path: path.join(stateDir, 'b-identity.json') } },
+        },
+      },
+    })
+    const seedPath = path.join(stateDir, 'config-control', 'seed.json')
+    writeJsonFile(seedPath, {
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://a.dev', identity: {} } } },
+    })
+
+    const evaluate = () => evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+        readFolderAskMode: async () => 'ask',
+      },
+    })
+
+    const both = await evaluate()
+    assert.equal(both.prompt, true)
+    const prompt = both.promptText ?? ''
+    // Each destination stands in all three destination slots (the header
+    // disclosure and the two destination-bearing blurbs), so neither is named
+    // only in passing while the promise is made about the other.
+    assert.equal(countOccurrences(prompt, 'a.dev'), 3)
+    assert.equal(countOccurrences(prompt, 'b.dev'), 3)
+
+    // Same fixture minus the enrollment: the widened disclosure must not stand
+    // in for the gate. A machine whose only `@hypaware/central` sink is its own
+    // local one is not enrolled (LLP 0063 D4) and is never asked.
+    rmSync(seedPath)
+    const localSinkOnly = await evaluate()
+    assert.equal(localSinkOnly.prompt, false)
+    assert.equal(localSinkOnly.reason, 'unenrolled')
+    assert.equal(localSinkOnly.enrolled, false)
+    assert.equal(localSinkOnly.promptText, undefined)
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Write `value` as JSON at `filePath`, creating its directory.
+ * @param {string} filePath
+ * @param {unknown} value
+ */
+function writeJsonFile(filePath, value) {
+  mkdirSync(path.dirname(filePath), { recursive: true })
+  writeFileSync(filePath, JSON.stringify(value))
+}
+
 /**
  * How many times `needle` occurs in `haystack`.
  * @param {string} haystack
