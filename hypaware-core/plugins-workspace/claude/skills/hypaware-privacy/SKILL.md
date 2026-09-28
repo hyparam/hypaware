@@ -183,7 +183,7 @@ hyp privacy unset <dir> [class]   # remove markings (class-neutral by default; a
 
 `hyp privacy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
 
-**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp privacy purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive and cache-only (it never contacts any server); confirm each purge on its own.
+**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp privacy purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive. A directory or `--ignored` purge touches only the local cache; a `--session` purge also deletes that session on configured and enrolled servers unless you add `--local-only`. Confirm each purge on its own.
 
 ```bash
 hyp privacy purge <dir>              # delete cached rows for a directory subtree
@@ -199,7 +199,7 @@ hyp privacy set <dir> ignore && hyp privacy purge <dir>
 
 ## After the review
 
-- Nothing you did contacts any server. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
+- Nothing you did sends data anywhere: markings stay on this machine, and a `--session` purge reaches configured servers only to delete that session there. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.
