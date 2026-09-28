@@ -164,8 +164,10 @@ test('the service environment carries the projection budget into the daemon proc
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-daemon-heap-knob-'))
   // A whole daemon state root, logs included: removed on the way out like
   // `gateway-boot-failure-status` does, so a repeated suite run does not grow
-  // one of these per run in the temp directory. Every failure message above
-  // already carries the recorded stderr, so nothing diagnostic is in here.
+  // one of these per run in the temp directory. The helper's own failures read
+  // the daemon's stderr into the message before this runs, and a boot error is
+  // the assertion's actual value, so a failure still says what went wrong
+  // without the tree.
   try {
     const configPath = path.join(hypHome, 'hypaware-config.json')
     // No gateway plugin: this is about the half of the daemon that runs
