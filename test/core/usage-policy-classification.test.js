@@ -423,9 +423,11 @@ test('evaluateCwdClassification prompts for an enrolled, interactive, unclassifi
       readCentralSinkOrigins: async () => ['https://central.example'],
       // Injected too, so this stays a pure-dep test: the prompting path now
       // reads the effective config from disk, and a fixed `HYP_HOME` path is
-      // not a directory this test owns. The effective config always carries
-      // the central layer's sinks, so it answers with the enrollment origin.
-      readForwardSinkOrigins: async () => ['https://central.example'],
+      // not a directory this test owns. Empty, and deliberately not a repeat
+      // of the enrollment origin: the count below is what proves the
+      // enrollment origins survive the trip to the copy (#2197), and a stub
+      // that named them again would let a drop of them pass unnoticed.
+      readForwardSinkOrigins: async () => [],
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       readFolderAskMode: async () => 'ask',
     },
