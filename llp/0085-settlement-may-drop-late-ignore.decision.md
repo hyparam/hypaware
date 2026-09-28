@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-07-07
+**Extended-by:** LLP 0444 (SQLite transcript storage and explicit storage-failure privacy handling)
 **Related:** LLP 0027, LLP 0049, LLP 0050, LLP 0070, LLP 0083
 **Extended-by:** LLP 0312 (#settle-purity: an enricher's `settle` must be pure
 and idempotent, because compaction calls it speculatively and discards the

@@ -11,16 +11,16 @@ import {
   sessionMatchKey,
   withRoleOrdinals,
 } from './match_key.js'
+import { OpenclawStorageError, OPENCLAW_TRANSCRIPT_MAX_BYTES } from './session_db.js'
 import {
   defaultOpenclawAgentsDir,
-  listOpenclawSessionFiles,
-  readOpenclawSessionHeader,
-  readOpenclawSessionMessages,
+  listOpenclawSessions,
+  readOpenclawSession,
 } from './session_file.js'
 
 /**
  * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { OpenclawSessionHeader, OpenclawSessionIndex, OpenclawSessionMessage } from './types.js'
+ * @import { OpenclawSessionHeader, OpenclawSessionIndex, OpenclawSessionMessage, OpenclawSessionSource } from '../../../../hypaware-core/plugins-workspace/openclaw/src/types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -136,128 +136,140 @@ export function createOpenclawSettlementEnricher(opts) {
       }
       if (bySession.size === 0) return rows
 
-      const candidates = await candidateSessionFiles(agentsDir, rows, candidateLimit)
-      if (candidates.length === 0) return rows
+      try {
+        const candidates = await candidateSessionFiles(agentsDir, rows, candidateLimit)
+        if (candidates.length === 0) return rows
 
-      /** @type {Map<string, OpenclawSessionIndex>} */
-      const indexCache = new Map()
-      /** @type {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} */
-      const out = rows.slice()
+        /** @type {Map<string, OpenclawSessionIndex>} */
+        const indexCache = new Map()
+        const budget = { remaining: OPENCLAW_TRANSCRIPT_MAX_BYTES }
+        /** @type {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} */
+        const out = rows.slice()
 
-      for (const [sessionId, indices] of bySession) {
-        const keys = matchKeysOf(rows, indices)
-        const index = await bindSessionFile(candidates, indexCache, keys)
-        if (!index) {
-          // No file claims this session's content. Settling on time alone
-          // would risk applying an unrelated session's cwd verdict, and a
-          // settlement drop is destructive: decline both the upgrade and
-          // the drop, leaving the rows at fallback identity (the residue
-          // LLP 0159 accepts, never a lost row).
+        for (const [sessionId, indices] of bySession) {
+          const keys = matchKeysOf(rows, indices)
+          const index = await bindSessionFile(candidates, indexCache, keys, budget)
+          if (!index) {
+            // No file claims this session's content. Settling on time alone
+            // would risk applying an unrelated session's cwd verdict, and a
+            // settlement drop is destructive: decline both the upgrade and
+            // the drop, leaving the rows at fallback identity (the residue
+            // LLP 0159 accepts, never a lost row).
+            logger.info('plugin.openclaw.settlement', {
+              component: CLIENT_NAME,
+              operation: 'settlement',
+              status: 'unbound',
+              session_id: sessionId,
+              rows: indices.length,
+              match_keys: keys.size,
+              candidates: candidates.length,
+            })
+            continue
+          }
+
+          // One resolve per session file: the header states exactly one cwd,
+          // so there is nothing to re-pick per row (the Claude precedent's
+          // pickRecordForRow has no counterpart here).
+          const gate = index.cwd ? { cwd: index.cwd, policy: resolver.resolve(index.cwd) } : undefined
+          let contentMatches = 0
+          let ordinalMatches = 0
+          let skipped = 0
+          let droppedRows = 0
+
+          for (const i of indices) {
+            const row = rows[i]
+
+            // @ref LLP 0441#no-new-drop-authority [constrained-by]: the
+            // gateway's settle selection is registered on the dataset, so it
+            // is client-agnostic and now also hands this pass in-batch rows
+            // that are already native and already carry their own cwd. Such
+            // a row is already governed by the cwd it carries, so nothing in
+            // this pass may touch it - no ordinal/time match, and no
+            // header-cwd drop. The discriminator must be the gateway's
+            // `identity_source === 'gateway_fallback'` marker, not "has no
+            // `openclaw.match_key`": a backfill fallback row has no
+            // match_key either, and such a row must still be settled and
+            // still be gated by the header cwd below.
+            if (stringValue(row.cwd) && !isGatewayFallbackRow(row)) {
+              skipped++
+              continue
+            }
+
+            // 1. Identity upgrade. Content match first (strong evidence);
+            // only on a miss does the ordinal/time fallback run, as a
+            // separate second pass (LLP 0161 Section 5), never merged into
+            // one score with the content match.
+            const key = readMatchKey(row.attributes)
+            let match = key ? index.byContentKey.get(key) : undefined
+            if (match) contentMatches++
+            else {
+              match = ordinalFallbackMatch(index, row)
+              if (match) ordinalMatches++
+            }
+
+            // 2. cwd policy, independent of match success: it is the session
+            // header's, not the matched message's, so a row that never
+            // matched is still governed by the directory its session ran in.
+            if (gate && gate.policy.class === 'ignore') {
+              // @ref LLP 0085#telemetry [implements]: observable as a drop
+              // with a hashed cwd, never a raw local path - the same shape
+              // the Claude enricher's drop log carries, so one query spans
+              // both adapters.
+              logger.info('plugin.openclaw.usage_policy_drop', {
+                component: CLIENT_NAME,
+                operation: 'usage_policy_drop',
+                policy_source: 'settlement_late_resolve',
+                session_id: sessionId,
+                cwd_hash: hashCwd(gate.cwd),
+                declared: gate.policy.declared,
+                governed_by: gate.policy.governedBy,
+                ...(gate.policy.warn ? { warn: gate.policy.warn } : {}),
+              })
+              out[i] = USAGE_POLICY_DROP
+              droppedRows++
+              continue
+            }
+
+            out[i] = settleRow(row, match, index)
+          }
+
           logger.info('plugin.openclaw.settlement', {
             component: CLIENT_NAME,
             operation: 'settlement',
-            status: 'unbound',
+            // Honest per-group outcome, not the gate's class: the LLP 0441
+            // guard above can skip a row without dropping it, so "the gate
+            // was ignore" no longer implies "every row in the group dropped".
+            status: droppedRows > 0 ? 'dropped' : 'ok',
             session_id: sessionId,
+            native_session_id: index.sessionId,
             rows: indices.length,
             match_keys: keys.size,
-            candidates: candidates.length,
+            content_matches: contentMatches,
+            ordinal_matches: ordinalMatches,
+            skipped,
+            unmatched: indices.length - contentMatches - ordinalMatches - skipped,
+            transcript_messages: index.messageCount,
+            ...(gate ? { cwd_hash: hashCwd(gate.cwd), usage_class: gate.policy.class } : {}),
           })
-          continue
         }
-
-        // One resolve per session file: the header states exactly one cwd,
-        // so there is nothing to re-pick per row (the Claude precedent's
-        // pickRecordForRow has no counterpart here).
-        const gate = index.cwd ? { cwd: index.cwd, policy: resolver.resolve(index.cwd) } : undefined
-        let contentMatches = 0
-        let ordinalMatches = 0
-        let skipped = 0
-        let droppedRows = 0
-
-        for (const i of indices) {
-          const row = rows[i]
-
-          // @ref LLP 0441#no-new-drop-authority [constrained-by]: the
-          // gateway's settle selection is registered on the dataset, so it
-          // is client-agnostic and now also hands this pass in-batch rows
-          // that are already native and already carry their own cwd. Such
-          // a row is already governed by the cwd it carries, so nothing in
-          // this pass may touch it - no ordinal/time match, and no
-          // header-cwd drop. The discriminator must be the gateway's
-          // `identity_source === 'gateway_fallback'` marker, not "has no
-          // `openclaw.match_key`": a backfill fallback row has no
-          // match_key either, and such a row must still be settled and
-          // still be gated by the header cwd below.
-          if (stringValue(row.cwd) && !isGatewayFallbackRow(row)) {
-            skipped++
-            continue
-          }
-
-          // 1. Identity upgrade. Content match first (strong evidence);
-          // only on a miss does the ordinal/time fallback run, as a
-          // separate second pass (LLP 0161 Section 5), never merged into
-          // one score with the content match.
-          const key = readMatchKey(row.attributes)
-          let match = key ? index.byContentKey.get(key) : undefined
-          if (match) contentMatches++
-          else {
-            match = ordinalFallbackMatch(index, row)
-            if (match) ordinalMatches++
-          }
-
-          // 2. cwd policy, independent of match success: it is the session
-          // header's, not the matched message's, so a row that never
-          // matched is still governed by the directory its session ran in.
-          if (gate && gate.policy.class === 'ignore') {
-            // @ref LLP 0085#telemetry [implements]: observable as a drop
-            // with a hashed cwd, never a raw local path - the same shape
-            // the Claude enricher's drop log carries, so one query spans
-            // both adapters.
-            logger.info('plugin.openclaw.usage_policy_drop', {
-              component: CLIENT_NAME,
-              operation: 'usage_policy_drop',
-              policy_source: 'settlement_late_resolve',
-              session_id: sessionId,
-              cwd_hash: hashCwd(gate.cwd),
-              declared: gate.policy.declared,
-              governed_by: gate.policy.governedBy,
-              ...(gate.policy.warn ? { warn: gate.policy.warn } : {}),
-            })
-            out[i] = USAGE_POLICY_DROP
-            droppedRows++
-            continue
-          }
-
-          out[i] = settleRow(row, match, index)
-        }
-
-        logger.info('plugin.openclaw.settlement', {
-          component: CLIENT_NAME,
-          operation: 'settlement',
-          // Honest per-group outcome, not the gate's class: the LLP 0441
-          // guard above can skip a row without dropping it, so "the gate
-          // was ignore" no longer implies "every row in the group dropped".
-          status: droppedRows > 0 ? 'dropped' : 'ok',
-          session_id: sessionId,
-          native_session_id: index.sessionId,
-          rows: indices.length,
-          match_keys: keys.size,
-          content_matches: contentMatches,
-          ordinal_matches: ordinalMatches,
-          skipped,
-          unmatched: indices.length - contentMatches - ordinalMatches - skipped,
-          transcript_messages: index.messageCount,
-          ...(gate ? { cwd_hash: hashCwd(gate.cwd), usage_class: gate.policy.class } : {}),
+        return out
+      } catch (error) {
+        if (!(error instanceof OpenclawStorageError)) throw error
+        // @ref LLP 0444#failure-policy [implements]: recovery owns retry;
+        // unsafe live copies must not cross the policy boundary at flush.
+        logger.warn('plugin.openclaw.storage_unavailable', {
+          component: CLIENT_NAME, operation: 'settlement', status: 'skipped',
+          error_kind: error.code, rows: rows.length, recovery: 'scheduled_backfill',
         })
+        return rows.map(row => stringValue(row.cwd) && !isGatewayFallbackRow(row) ? row : USAGE_POLICY_DROP)
       }
-      return out
     },
   }
 }
 
 /**
- * The session files a flush batch could plausibly belong to: everything
- * under the `agents/` root whose `mtime` is not older than the batch's
+ * The sessions a flush batch could plausibly belong to: JSONL mtime or
+ * SQLite transcript activity must not be older than the batch's
  * earliest row (less a skew slack), newest first, capped at `limit`.
  *
  * Both bounds exist for cost, not correctness: a file the window excludes
@@ -268,21 +280,23 @@ export function createOpenclawSettlementEnricher(opts) {
  * @param {string} agentsDir
  * @param {Record<string, unknown>[]} rows
  * @param {number} limit
- * @returns {Promise<Array<{ path: string, mtimeMs: number }>>}
+ * @returns {Promise<OpenclawSessionSource[]>}
  */
 async function candidateSessionFiles(agentsDir, rows, limit) {
-  const files = await listOpenclawSessionFiles(agentsDir)
-  if (files.length === 0) return files
   let earliest = Infinity
   for (const row of rows) {
     const ms = toEpochMs(row.message_created_at)
     if (ms !== undefined && ms < earliest) earliest = ms
   }
   const floor = earliest === Infinity ? -Infinity : earliest - OPENCLAW_SETTLEMENT_MTIME_SLACK_MS
-  return files
-    .filter((file) => file.mtimeMs >= floor)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .slice(0, limit)
+  /** @type {OpenclawSessionSource[]} */
+  const newest = []
+  for await (const source of listOpenclawSessions(agentsDir, { floorMs: floor })) {
+    newest.push(source)
+    newest.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    if (newest.length > limit) newest.pop()
+  }
+  return newest
 }
 
 /**
@@ -306,12 +320,13 @@ async function candidateSessionFiles(agentsDir, rows, limit) {
  * Scans stop early on a candidate that contains every key in the group
  * (nothing can beat it), so the common case reads one file.
  *
- * @param {Array<{ path: string, mtimeMs: number }>} candidates newest-first
+ * @param {OpenclawSessionSource[]} candidates newest-first
  * @param {Map<string, OpenclawSessionIndex>} cache per-flush, keyed by file path
  * @param {Set<string>} keys the group's distinct match keys
+ * @param {{ remaining: number }} budget
  * @returns {Promise<OpenclawSessionIndex | undefined>}
  */
-async function bindSessionFile(candidates, cache, keys) {
+async function bindSessionFile(candidates, cache, keys, budget) {
   if (keys.size === 0) return undefined
   /** @type {OpenclawSessionIndex | undefined} */
   let best
@@ -319,7 +334,7 @@ async function bindSessionFile(candidates, cache, keys) {
   for (const candidate of candidates) {
     let index = cache.get(candidate.path)
     if (!index) {
-      index = await readOpenclawSessionIndex(candidate)
+      index = await readOpenclawSessionIndex(candidate, budget)
       cache.set(candidate.path, index)
     }
     let score = 0
@@ -336,26 +351,17 @@ async function bindSessionFile(candidates, cache, keys) {
 }
 
 /**
- * Read and index one session file. Best-effort end to end (the reader
- * itself never throws): an unreadable file yields an empty index and an
- * absent cwd, which settles nothing and drops nothing.
+ * Read and index one session snapshot. SQLite failures propagate to the
+ * privacy-safe recovery path; legacy JSONL keeps its best-effort behavior.
  *
- * @param {{ path: string, mtimeMs: number }} candidate
+ * @param {OpenclawSessionSource} candidate
+ * @param {{ remaining: number }} budget
  * @returns {Promise<OpenclawSessionIndex>}
  */
-async function readOpenclawSessionIndex(candidate) {
-  /** @type {OpenclawSessionHeader | undefined} */
-  let header
-  /** @type {OpenclawSessionMessage[]} */
-  let messages = []
-  try {
-    header = readOpenclawSessionHeader(candidate.path)
-    messages = await readOpenclawSessionMessages(candidate.path)
-  } catch {
-    header = undefined
-    messages = []
-  }
-  return buildOpenclawSessionIndex(candidate, header, messages)
+async function readOpenclawSessionIndex(candidate, budget) {
+  const session = await readOpenclawSession(candidate, { maxBytes: budget.remaining })
+  budget.remaining -= session?.bytes ?? 0
+  return buildOpenclawSessionIndex(candidate, session?.header, session?.messages ?? [])
 }
 
 /**

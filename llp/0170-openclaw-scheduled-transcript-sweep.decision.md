@@ -5,6 +5,7 @@
 **Systems:** Plugins, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-31
+**Extended-by:** LLP 0444 (SQLite transcript storage and explicit storage-failure privacy handling)
 **Related:** LLP 0167 (the accepted RFC this decision realizes), LLP 0149 (superseded), LLP 0158 (the one reader), LLP 0159 (route agreement, extended by the quiesce window), LLP 0146 (deferrals, now live-lane-only), LLP 0147 (sibling territory, unchanged), LLP 0171 (requirements)
 
 > The OpenClaw session-file backfill runs on a daemon schedule, every
