@@ -908,6 +908,26 @@ test('hyp privacy client falls back to "your HypAware server" when nothing namea
   })
 })
 
+// Issue #2223: a central layer on disk that does not parse resolves to the
+// same `centralConfig: null` an absent one does, and `readCentralEnrollment`'s
+// `unreadable` record is what keeps an enrollment nobody can read from being
+// reported as no enrollment at all.
+test('hyp privacy client says an unreadable central layer cannot be read, not "not connected"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = stateDirOf(hypHome)
+    const seedPath = centralSeedPath(stateDir)
+    mkdirSync(path.dirname(seedPath), { recursive: true })
+    writeFileSync(seedPath, '{ this is not json')
+
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    assert.match(out.stdout, /^openclaw: local-only$/m, 'the opt-out is still written')
+    assert.deepEqual(await readClientSyncEntries({ stateDir }), [{ source: 'openclaw', class: 'local-only' }])
+    assert.doesNotMatch(out.stdout, /not connected to a HypAware server/)
+    assert.match(out.stdout, new RegExp('^ {2}this machine\'s central config layer \\(' + escapeRe(seedPath) + '\\) cannot be read', 'm'))
+  })
+})
+
 test('hyp policy client fails loudly on a corrupt store', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
