@@ -571,6 +571,17 @@ test('leave help exits 0 and rejects unknown arguments', async () => {
     assert.match(stdout.text(), /Keeps query sessions/)
   }
   {
+    // A help flag that is not the first token misses dispatch's registry
+    // render and reaches `runLeave`'s own help block, so that copy states the
+    // enrollment premise in the same server vocabulary the registered help
+    // uses; a self-hosted reader must not be told they left "the cloud"
+    // (#2222).
+    const { stdout, opts } = await makeDispatchOpts()
+    assert.equal(await dispatch(['leave', 'x', '--help'], opts), 0)
+    assert.match(stdout.text(), /a HypAware server/)
+    assert.doesNotMatch(stdout.text(), /\bcloud\b/)
+  }
+  {
     const { stderr, opts } = await makeDispatchOpts()
     assert.equal(await dispatch(['leave', '--force'], opts), 2)
     assert.match(stderr.text(), /unknown flag --force/)
