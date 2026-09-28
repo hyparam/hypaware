@@ -86,8 +86,9 @@ export async function runWizardSuggestSkill(opts) {
           opts.stdout.write('\n')
           answer = await confirm({
             title: 'Suggest a new skill?',
+            items: ['HypAware can scan your logs for workflows you keep repeating and recommend a skill your agents can reuse, to save on repeated work.'],
             options: [
-              { value: 'yes', label: 'Scan my logs and recommend a new skill' },
+              { value: 'yes', label: 'Recommend a new skill', summary: 'Starts an agent in a separate folder.' },
               { value: 'no', label: 'Not now' },
             ],
             default: 'yes',
