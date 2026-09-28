@@ -79,11 +79,11 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
     }
     /** @type {LocalOnlyVisibilityReport} */
     const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
+    const outOfTime = () => new Error('graph traversal exceeded its thirty-second time budget')
     const checkTime = () => {
-      visibility.signal.throwIfAborted()
       // A warm in-memory source can keep the event loop busy beyond a timer's
       // deadline. Check elapsed time too, including while processing results.
-      if (Date.now() >= deadline) throw new Error('graph traversal exceeded its thirty-second time budget')
+      if (visibility.signal.aborted || Date.now() >= deadline) throw outOfTime()
     }
     // A walk is a point-in-time question, not a transaction (LLP 0431), and it
     // reads once per seed tier, per frontier batch and per output batch, so
@@ -229,6 +229,11 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
     } catch (err) {
       markSpanStatus(span, 'error')
       if (refusal && err === refusal) return { ok: /** @type {const} */ (false), error: refusal.message, localOnly }
+      // A read blocked in the engine when the budget expires aborts mid-stream
+      // and rethrows this signal's own reason, so checkTime never sees it.
+      // Identity keeps an unrelated abort relayed by the shared query path (a
+      // heap-budget trip, a caller's cancellation) reported as itself.
+      if (visibility.signal.aborted && err === visibility.signal.reason) throw outOfTime()
       throw err
     } finally {
       span.setAttribute('query_count', queries)
