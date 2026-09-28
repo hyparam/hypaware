@@ -90,7 +90,7 @@ the day you sign in, so you can review what will be sent and mark anything
 private first.
 
 One person can sign in and sync on their own. To put more than one person in
-an organization, [contact us](https://hypaware.ai/contact) and we'll set it
+an organization, [contact us](https://hypaware.ai/contact/?utm_source=github&utm_medium=readme) and we'll set it
 up; there is no self-serve invite yet. See the
 [team setup guide](./docs/TEAM_SETUP.md).
 
