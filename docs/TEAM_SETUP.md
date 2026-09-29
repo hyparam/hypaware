@@ -12,8 +12,8 @@ organization automatically.
 
 You don't need an organization to start: one person can run the setup below
 and sync their own machines. To put more than one person in an organization,
-[contact us](https://hypaware.ai/contact) and we will set one up for your
-domain. There is no self-serve invite yet.
+[contact us](https://hypaware.ai/contact/?utm_medium=docs) and we will set
+one up for your domain. There is no self-serve invite yet.
 
 ## Run the setup
 

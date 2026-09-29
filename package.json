@@ -4,6 +4,14 @@
   "type": "module",
   "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
   "license": "MIT",
+  "homepage": "https://hypaware.ai/?utm_source=npm&utm_medium=package",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hyparam/hypaware.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hyparam/hypaware/issues"
+  },
   "bin": {
     "hypaware": "./bin/hypaware.js",
     "hyp": "./bin/hypaware.js"
