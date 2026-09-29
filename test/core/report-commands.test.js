@@ -819,11 +819,14 @@ test('generate cancellation does not create a directory or start a client', asyn
   await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
   // A picker answer that is not one of the clients it offered exits the same
   // way rather than throwing past the command: the user sees 'Nothing
-  // started.', not a stack trace, and no client is spawned.
+  // started.', not a stack trace, and no client is spawned. Only the output
+  // of this second run is inspected; the cancel above already wrote the same
+  // line, so asserting over the whole buffer would pass without it.
+  const before = out.length
   deps.select = async () => 'a-client-that-was-never-offered'
   assert.equal(await runReportGenerate([], ctx, deps), 0)
   assert.equal(launches.length, 0)
-  assert.match(out.join(''), /Nothing started./)
+  assert.match(out.slice(before).join(''), /Nothing started\./)
 })
 
 test('generate reports spawn failures', async (t) => {

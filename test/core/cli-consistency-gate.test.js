@@ -611,7 +611,7 @@ test('a public alias dispatches to its owner, help included', async () => {
 
 /**
  * The words a help surface can use for the place a `--remote` command talks
- * to, by family. `docs/CLI_REFERENCE.md` ("Render and manage reports")
+ * to, by family. `docs/CLI_REFERENCE.md` ("Generate and manage reports")
  * settles `the remote` for the report family, so every other family is a
  * second name for the same place.
  *
