@@ -413,8 +413,10 @@ async function readOpenclawSessionIndex(candidate, budget, unreadable) {
     // managed to index. The charge is contained to the candidate that failed:
     // the scan is not aborted, and the next candidate is still read. The
     // budget itself is per flush, though, so enough failed transfer ahead of
-    // a healthy candidate exhausts it and the short-circuit above reports
-    // that candidate unreadable. Exceeding the bound is a visible storage
+    // a healthy candidate leaves that candidate a `maxBytes` its own
+    // transcript exceeds, and it is reported unreadable too: by
+    // `transcript_limit` inside its own read, or by the short-circuit above
+    // on the exact residue of 0. Exceeding the bound is a visible storage
     // failure by design (LLP 0444#failure-policy), recovered by the
     // scheduled backfill.
     budget.remaining -= error.bytes
