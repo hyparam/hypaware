@@ -103,9 +103,11 @@ export function clearPidFile(stateRoot) {
 }
 
 /**
- * Send signal 0 to probe whether `pid` is still running. Returns
- * false when the process is gone or when we don't have permission to
- * signal it (in which case it isn't *our* daemon anyway).
+ * Send signal 0 to probe whether `pid` is still running. True when the
+ * signal lands, and true on `EPERM`: a pid we lack permission to signal
+ * is a pid some process still holds, and reading it as dead would let a
+ * stale-pid clear delete the pid file of a live, reissued pid. False on
+ * `ESRCH` and on any other error.
  *
  * @param {number} pid
  */
