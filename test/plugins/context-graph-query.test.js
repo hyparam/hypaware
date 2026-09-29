@@ -7,6 +7,8 @@ import path from 'node:path'
 import test from 'node:test'
 import { asyncRow } from 'squirreling'
 
+import { TracerProvider } from '../../src/core/observability/runtime.js'
+
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
@@ -213,6 +215,45 @@ test('the shared deadline refuses a read at thirty seconds before starting anoth
   })
   assert.match(refused(await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })), GUIDED_TIME_BUDGET)
   assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 1)
+})
+
+/**
+ * Collect the traversal spans `run` emits, so a claim about telemetry is
+ * asserted rather than described.
+ * @param {() => Promise<unknown>} run
+ */
+async function graphSpans(run) {
+  /** @type {any[]} */
+  const captured = []
+  const provider = new TracerProvider({ resource: { attributes: {} },
+    exporters: [{ exportBatch(spans) { captured.push(...spans) } }] })
+  provider.register()
+  try {
+    await run()
+  } finally {
+    await provider.shutdown()
+  }
+  return captured.filter(span => span.name === 'graph.neighbors')
+}
+
+test('a budget refusal names its error_kind, and a clean traversal names none', async t => {
+  // A refusal returns, and returning takes withSpan's success arm, which
+  // records no exception and no kind. Without naming it on the refusal
+  // branches, a thirty-second trip reads in telemetry exactly like an
+  // unresolved seed, which also returns.
+  const [clean] = await graphSpans(() => queryNeighbors({ ...memoryGraph(), seed: 's1', depth: 3 }))
+  assert.equal(clean.attributes.error_kind, undefined)
+
+  const fixture = memoryGraph()
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    if (name === 'edge') now += 30_000
+    return get(name)
+  })
+  const [trip] = await graphSpans(() => queryNeighbors({ ...fixture, seed: 's1', depth: 3 }))
+  assert.equal(trip.attributes.error_kind, 'budget_refused')
 })
 
 /**
