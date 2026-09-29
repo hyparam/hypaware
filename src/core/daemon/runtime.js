@@ -36,8 +36,10 @@ import {
 } from './control.js'
 import {
   clearPidFile,
+  clearStalePidFile,
   pidFilePath,
   processIsAlive,
+  processingStateRoot,
   readPidFile,
   writePidFile,
 } from './pid.js'
@@ -1940,6 +1942,11 @@ export async function requestDaemonStop({
   while (Date.now() < deadline) {
     if (!processIsAlive(entry.pid)) {
       clearPidFile(stateRoot)
+      // The supervised processing child dies with the gateway that spawned it
+      // and leaves its own pid file below `processing/` behind whenever it got
+      // no shutdown to run (#2288). Reconciled rather than deleted: that pid
+      // may be one a restarted child is still holding.
+      clearStalePidFile(processingStateRoot(stateRoot))
       return 'stopped'
     }
     await sleep(pollIntervalMs)

@@ -16,9 +16,11 @@ import {
   writeControlRequest,
 } from '../../src/core/daemon/control.js'
 import { requestDaemonStop, runDaemon } from '../../src/core/daemon/runtime.js'
-import { pidFilePath, writePidFile, readPidFile } from '../../src/core/daemon/pid.js'
+import { pidFilePath, processIsAlive, processingStateRoot, writePidFile, readPidFile } from '../../src/core/daemon/pid.js'
 import { resolveHypHome } from '../../src/core/cli/walkthrough.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+
+/** @import { TestContext } from 'node:test' */
 
 /**
  * Poll until `predicate` returns true, or fail after `timeoutMs`. The
@@ -373,4 +375,75 @@ test('resolveHypHome prefers HYP_HOME, then HOME, then os.homedir()', () => {
   const fallback = resolveHypHome({})
   assert.equal(fallback, path.join(os.homedir(), '.hyp'))
   assert.equal(path.isAbsolute(fallback), true)
+})
+
+/**
+ * A pid file no daemon got to clear, as a kill of the control group leaves it.
+ *
+ * @param {string} stateRoot
+ * @param {number} pid
+ */
+function stageAbandonedPidFile(stateRoot, pid) {
+  writePidFile(stateRoot, { pid, startedAt: new Date().toISOString(), runId: 'hard-kill', mode: 'foreground' })
+}
+
+/**
+ * A child that outlives nothing but this test: the pid a pid file may point at
+ * without the suite killing itself when a regression signals what it names.
+ *
+ * @param {TestContext} t
+ */
+function spawnIdleChild(t) {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+  t.after(() => child.kill('SIGKILL'))
+  assert.ok(child.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+  return child.pid
+}
+
+// Issue #2288 on the control-channel transport. The supervised processing
+// child keeps its own pid file below `processing/`, and the kill that ends the
+// gateway ends it too without a shutdown. `requestDaemonStop` reconciled only
+// the gateway's file on a confirmed exit, leaving a second dead pid on disk
+// for anyone reading the state dir.
+test('requestDaemonStop clears a stale processing pid file on a confirmed exit', async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-stale-processing-'))
+  try {
+    stageAbandonedPidFile(stateRoot, spawnIdleChild(t))
+    const processingRoot = processingStateRoot(stateRoot)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(processingRoot, deadPid)
+
+    const outcome = await requestDaemonStop({ stateRoot, timeoutMs: 10_000, pollIntervalMs: 20 })
+
+    assert.equal(outcome, 'stopped')
+    assert.equal(fsSync.existsSync(pidFilePath(processingRoot)), false, 'the stale processing pid file survived the stop')
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+// The guard that makes the clear safe, on this transport too: only a pid
+// nothing holds takes its file with it. Proved against a real spawned process
+// rather than a stubbed liveness check, because what is under test is what the
+// OS says about a running pid.
+test('requestDaemonStop leaves a live processing pid file byte-identical', async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-live-processing-'))
+  try {
+    stageAbandonedPidFile(stateRoot, spawnIdleChild(t))
+    const processingRoot = processingStateRoot(stateRoot)
+    stageAbandonedPidFile(processingRoot, spawnIdleChild(t))
+    const before = fsSync.readFileSync(pidFilePath(processingRoot), 'utf8')
+
+    const outcome = await requestDaemonStop({ stateRoot, timeoutMs: 10_000, pollIntervalMs: 20 })
+
+    assert.equal(outcome, 'stopped')
+    assert.equal(
+      fsSync.readFileSync(pidFilePath(processingRoot), 'utf8'),
+      before,
+      'a live processing daemon keeps its pid file',
+    )
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
 })
