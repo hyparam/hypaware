@@ -131,8 +131,8 @@ optional step only when the user requests it, as described below.
 ## Optional publishing
 
 When the user asks to publish or share the report with their team, upload the
-reviewed Markdown directory using the existing CLI. Do not run `hyp report
-render` first. The server renders HTML and supplies its own assets.
+reviewed Markdown directory using the existing CLI. There is no local render
+step: the server renders HTML and supplies its own assets.
 
 Use the user's selected remote and the report's actual coverage period. For
 example, a report covering August 2026 can be published with:

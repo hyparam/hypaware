@@ -6,6 +6,7 @@
 **Author:** Brendan / Codex
 **Date:** 2026-09-29
 **Extends:** LLP 0436, LLP 0450, LLP 0196, LLP 0393
+**Supersedes-in-part:** LLP 0155 (#core-group: the group's one local member is no longer `render`)
 
 ## Server rendering {#server-rendering}
 

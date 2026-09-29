@@ -187,5 +187,5 @@ hyp report list --kind usage-review --limit 10 --remote team
 ```
 
 Publishing uploads the file and requires a write-capable credential. Review
-the report for private content first. See the [report command reference](CLI_REFERENCE.md#render-and-manage-reports)
+the report for private content first. See the [report command reference](CLI_REFERENCE.md#generate-and-manage-reports)
 for bundles, downloads, and organization-wide deletion.

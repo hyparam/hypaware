@@ -114,6 +114,7 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
     }
     let chosen = launchers[0]
     if (launchers.length > 1 && isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1') {
+      let picked
       try {
         const client = await (deps.select ?? select)({
           box: true,
@@ -123,15 +124,21 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
           stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
           env: ctx.env,
         })
-        const picked = launchers.find(({ launcher }) => launcher.client === client)
-        if (!picked) throw new Error('client picker returned an unavailable client')
-        chosen = picked
+        picked = launchers.find(({ launcher }) => launcher.client === client)
       } catch (err) {
         if (!(err instanceof PromptCancelledError) && !isPromptBackError(err) && !(err instanceof Error && err.name === 'PromptCancelledError')) throw err
+      }
+      // An escape, a back request, and an answer that is not on the list all
+      // mean the same thing: no client was chosen, so nothing starts. Turning
+      // the third into a throw would hand the user a stack trace on the one
+      // path the other two exit cleanly; 'hyp report fix' treats all three
+      // alike (runReportFix's picker leaves 'launcher' undefined and returns 0).
+      if (!picked) {
         markSpanStatus(span, 'cancelled')
         ctx.stdout.write('Nothing started.\n')
         return 0
       }
+      chosen = picked
     }
     const instructions = String(gate.params.instructions ?? '')
     const prompt = `Use the hypaware-report skill at ${JSON.stringify(chosen.skill)} to generate a report from this machine's local HypAware recordings. ` +

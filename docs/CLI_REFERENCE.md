@@ -14,7 +14,7 @@ For installation, upgrade, recovery, and task-oriented workflows, see
 - [Plugin-owned commands](#plugin-owned-commands)
 - [Set up and inspect HypAware](#set-up-and-inspect-hypaware)
 - [Query recorded data](#query-recorded-data)
-- [Render and manage reports](#render-and-manage-reports)
+- [Generate and manage reports](#generate-and-manage-reports)
 - [Send data now](#send-data-now)
 - [Control the current session](#control-the-current-session)
 - [Manage AI clients](#manage-ai-clients)
@@ -294,7 +294,7 @@ remote execution.
 hyp query vector search "daemon restart failure" --top-k 5 --format json
 ```
 
-## Render and manage reports
+## Generate and manage reports
 
 ```text
 hyp report <subcommand> [args...]
@@ -306,9 +306,9 @@ Use `hyp report --help` to list report operations:
 hyp report --help
 ```
 
-`render` is local. The other report commands use a remote target and resolve
-the default remote if `--remote` is omitted. Publishing and deletion require a
-write-capable credential.
+`generate` is local. The other report commands use a remote target and
+resolve the default remote if `--remote` is omitted. Publishing and deletion
+require a write-capable credential.
 
 ### `hyp report generate`
 

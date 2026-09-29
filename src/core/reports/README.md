@@ -1,7 +1,8 @@
 # Report renderer (canonical source)
 
-<!-- @ref LLP 0196#mechanics-as-code [implements]: deterministic steps ship as code the
-     skill can call, not as prose the skill has to re-derive -->
+<!-- @ref LLP 0196#mechanics-as-code [implements]: rendering ships as versioned code, not
+     as prose a caller re-derives; LLP 0451 moved the caller from the local CLI to
+     the server, which is why the library outlived the command -->
 
 This directory owns the shared renderer exported as `hypaware/core/reports`.
 HypAware Server imports `renderReports` to turn Markdown into HTML. Keep the

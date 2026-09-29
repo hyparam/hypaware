@@ -804,7 +804,7 @@ test('generate chooses a client on a terminal and uses the first without a TUI',
 })
 
 test('generate cancellation does not create a directory or start a client', async (t) => {
-  const { ctx, home } = await generateFixture(t)
+  const { ctx, home, out } = await generateFixture(t)
   ctx.stdin.isTTY = true
   ctx.stdout.isTTY = true
   const { deps, launches } = fixDeps({
@@ -817,6 +817,13 @@ test('generate cancellation does not create a directory or start a client', asyn
   assert.equal(await runReportGenerate([], ctx, deps), 0)
   assert.equal(launches.length, 0)
   await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+  // A picker answer that is not one of the clients it offered exits the same
+  // way rather than throwing past the command: the user sees 'Nothing
+  // started.', not a stack trace, and no client is spawned.
+  deps.select = async () => 'a-client-that-was-never-offered'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches.length, 0)
+  assert.match(out.join(''), /Nothing started./)
 })
 
 test('generate reports spawn failures', async (t) => {
