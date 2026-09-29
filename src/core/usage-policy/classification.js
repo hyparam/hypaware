@@ -5,7 +5,7 @@ import path from 'node:path'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { syncDestinationName } from '../remote/builtin_remotes.js'
-import { readCentralSinkOrigins } from '../remote/gateway_seed.js'
+import { readCentralSinkOrigins, readForwardSinkOrigins } from '../remote/gateway_seed.js'
 import { createUsagePolicyResolver } from './matcher.js'
 import { localOnlyListPath } from './local_only.js'
 import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe } from './folder_ask.js'
@@ -189,7 +189,9 @@ export function decideClassification({ enrolled, interactive, governed, askMode 
  * the state the CLI marking verbs and the export seam read: the machine-local
  * list under `readObservabilityEnv(env).stateDir` (so a mark made by any writer
  * is honored), and the central-layer sink origins (the LLP 0063 D4 enrollment
- * gate) for the enrolled check.
+ * gate) for the enrolled check. What the copy *names* is read separately and
+ * wider, from the effective config the daemon boots, because a sink the
+ * central layer never authored forwards all the same (#2208).
  *
  * Defensive throughout: a hook must never hang or fail a session (LLP 0106
  * #interactive). An enrollment lookup that throws is treated as unenrolled
@@ -207,6 +209,7 @@ export function decideClassification({ enrolled, interactive, governed, askMode 
  *   deps?: {
  *     readObservabilityEnv?: typeof readObservabilityEnv,
  *     readCentralSinkOrigins?: typeof readCentralSinkOrigins,
+ *     readForwardSinkOrigins?: typeof readForwardSinkOrigins,
  *     createResolver?: (listPath: string) => UsagePolicyResolver,
  *     readFolderAskMode?: typeof readFolderAskModeSafe,
  *   },
@@ -219,9 +222,9 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
   const listPath = localOnlyListPath(stateDir)
   const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
 
-  // The origins answer two questions, so they are read once and kept: whether
-  // this machine is enrolled, and what the consent copy names as its
-  // destination.
+  // Enrollment is the central layer alone (LLP 0063 D4). The origins are kept
+  // past the check because the copy has to name them too: whatever else
+  // forwards, where the enrollment forwards is always disclosed.
   /** @type {ReadonlyArray<string>} */
   let origins = []
   try {
@@ -271,6 +274,21 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     governed,
     askMode,
   }
-  if (decision.prompt) out.promptText = buildClassificationPrompt({ cwd, origins })
+  if (decision.prompt) {
+    // Read only on the prompting path, which is the rare one, so a session
+    // that is never asked costs no second config read. The enrollment origins
+    // lead and are never dropped, so a disclosure read that fails still names
+    // where the enrollment forwards; a repeated origin is harmless, because
+    // `syncDestinationName` dedupes by display name.
+    let destinations = origins
+    try {
+      const readForwarded = deps.readForwardSinkOrigins ?? readForwardSinkOrigins
+      destinations = [...origins, ...await readForwarded({ stateDir, configPath })]
+    } catch {
+      // Same inert posture as the enrollment read: never fail the session on
+      // a config this hook could not resolve (LLP 0106 #interactive).
+    }
+    out.promptText = buildClassificationPrompt({ cwd, origins: destinations })
+  }
   return out
 }
