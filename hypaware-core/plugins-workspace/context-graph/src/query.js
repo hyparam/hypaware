@@ -228,7 +228,15 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
         totalNodes: visited.size, totalEdges: seenEdges.size, localOnly }
     } catch (err) {
       markSpanStatus(span, 'error')
-      if (refusal && err === refusal) return { ok: /** @type {const} */ (false), error: refusal.message, localOnly }
+      // A refusal returns rather than throws, so withSpan's throwing arm never
+      // reaches it and the span would carry no error_kind at all. Name the kind
+      // here, so a budget trip is distinguishable from an unresolved seed.
+      /** @param {string} error */
+      const refused = error => {
+        span.setAttribute(Attr.ERROR_KIND, 'budget_refused')
+        return { ok: /** @type {const} */ (false), error, localOnly }
+      }
+      if (refusal && err === refusal) return refused(refusal.message)
       // A read blocked in the engine when the budget expires aborts mid-stream,
       // so checkTime never sees it. Nothing but this traversal's own timer can
       // abort this signal, so an abort surfacing once it has fired is that
@@ -238,7 +246,7 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       // a heap-budget trip arrives as QueryExecutionBudgetError, not as this.
       const abortShaped = err instanceof Error
         && (err.name === 'AbortError' || err.name === 'TimeoutError')
-      if (visibility.signal.aborted && abortShaped) return { ok: /** @type {const} */ (false), error: outOfTime, localOnly }
+      if (visibility.signal.aborted && abortShaped) return refused(outOfTime)
       throw err
     } finally {
       span.setAttribute('query_count', queries)
