@@ -618,6 +618,11 @@ function parseJsonlRollout(text, filePath) {
     } else if (type === 'turn_context' && payload) {
       turnPayloads.push(payload)
     } else if (type === 'response_item' && payload) {
+      // Codex v0.159.0 encodes Guardian delivery evidence as assistant messages,
+      // including placeholder text for truncated sends. These are retained
+      // context, not model output, and must not become rows or usage carriers.
+      // @ref LLP 0035#one-carrier [constrained-by]: usage stays on the model's last assistant item
+      if (isPlainObject(row.metadata) && stringValue(row.metadata.delivered_assistant_message)) continue
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
     } else if (type === 'event_msg' && payload) {
       if (payload.type === 'task_started') tracksLifecycle = true

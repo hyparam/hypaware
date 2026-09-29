@@ -67,7 +67,7 @@ async function stageEnv() {
  * @param {{
  *   meta: Record<string, unknown>,
  *   turns?: Array<Record<string, unknown>>,
- *   items: Array<{ type?: string, timestamp?: string, payload: Record<string, unknown> }>,
+ *   items: Array<{ type?: string, timestamp?: string, payload: Record<string, unknown>, metadata?: unknown }>,
  * }} doc
  */
 async function writeModernRollout(env, relPath, doc) {
@@ -80,7 +80,7 @@ async function writeModernRollout(env, relPath, doc) {
     lines.push(JSON.stringify({ type: 'turn_context', timestamp: doc.meta.timestamp, payload: turn }))
   }
   for (const item of doc.items) {
-    lines.push(JSON.stringify({ type: item.type ?? 'response_item', timestamp: item.timestamp, payload: item.payload }))
+    lines.push(JSON.stringify({ type: item.type ?? 'response_item', timestamp: item.timestamp, payload: item.payload, metadata: item.metadata }))
   }
   await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
   return filePath
@@ -680,6 +680,96 @@ test('token_count event folds per-turn usage (net of cache) onto the turn assist
       reasoning_tokens: 189,
       total_tokens: 14245,
     })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+for (const sweep of [false, true]) {
+  for (const deliveryBeforeUsage of [false, true]) {
+    test(`delivered assistant records are excluded from ${sweep ? 'scheduled capture' : 'manual import'} ${deliveryBeforeUsage ? 'before' : 'after'} usage`, async () => {
+      const env = await stageEnv()
+      try {
+        const doc = modernConversation('sess-delivery')
+        doc.meta.cli_version = '0.159.0'
+        const started = { type: 'event_msg', payload: { type: 'task_started' } }
+        const usage = { type: 'event_msg', payload: {
+          type: 'token_count', info: { last_token_usage: {
+            input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110,
+          } },
+        } }
+        const complete = { type: 'event_msg', payload: { type: 'task_complete' } }
+        const deliveries = [
+          ['codex:code-mode-delivery:v1:complete', 'Here are the files.'],
+          ['codex:code-mode-delivery:v1:incomplete:retained prefix',
+            'The content of a confirmed assistant message is unavailable. Do not infer what was asked or authorized.'],
+        ].map(([marker, text], index) => ({
+          metadata: { delivered_assistant_message: marker, user_input_order: index + 1 },
+          payload: {
+            type: 'message', role: 'assistant', id: `nested-send-${index}`,
+            content: [{ type: 'output_text', text }],
+            internal_chat_message_metadata_passthrough: { turn_id: 't-1' },
+          },
+        }))
+        const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+        await writeModernRollout(env, 'rollout-delivery.jsonl', {
+          ...doc, items: [started, ...doc.items, usage, complete],
+        })
+        const baselineContext = runContext()
+        baselineContext.ctx.sweep = sweep
+        const baseline = await collect(provider.run(baselineContext.ctx))
+        const expectedRows = await materialize(baseline.items[0])
+
+        await writeModernRollout(env, 'rollout-delivery.jsonl', {
+          ...doc, items: [started, ...doc.items,
+            ...(deliveryBeforeUsage ? [...deliveries, usage] : [usage, ...deliveries]), complete],
+        })
+        const { ctx, entries } = runContext()
+        ctx.sweep = sweep
+        const { items } = await collect(provider.run(ctx))
+        assert.equal(items.length, 1)
+        const rows = await materialize(items[0])
+        assert.deepEqual(rows, expectedRows, 'synthetic records must not change row identity, content or usage')
+        const usageRows = rows.filter(row => /** @type {any} */ (row.attributes)?.usage)
+        assert.equal(usageRows.length, 1)
+        assert.equal(usageRows[0].content_text, 'Here are the files.')
+        assert.equal(/** @type {any} */ (usageRows[0].attributes).usage.total_tokens, 110)
+        assert.equal(entries.find(entry => entry.message === 'codex.backfill.session_projected')?.fields?.message_count, 4)
+
+        // Existing live rows already carry usage. Import must not add another
+        // usage carrier under a nested send's distinct message/part id.
+        const storage = {
+          async discoverCachePartitions() { return [{ path: '/fixture', rowCount: expectedRows.length }] },
+          async *readRows() { yield* expectedRows },
+        }
+        const materializer = aiGatewayBackfillMaterializer()
+        assert.deepEqual(await materializer.materialize(items[0], /** @type {any} */ ({
+          env: {}, log: captureLog().log, storage, runId: 'delivery-dedup', runToken: {},
+        })), [])
+      } finally {
+        await env.cleanup()
+      }
+    })
+  }
+}
+
+test('ordinary assistant messages keep their text when delivery metadata is absent or null', async () => {
+  const env = await stageEnv()
+  try {
+    const text = 'The content of a confirmed assistant message is unavailable. Do not infer what was asked or authorized.'
+    const metadata = [undefined, null, {}, { user_input_order: 1 }, { delivered_assistant_message: null }]
+    await writeModernRollout(env, 'rollout-unmarked.jsonl', {
+      meta: { id: 'sess-unmarked' },
+      items: metadata.map((metadata, index) => ({
+        metadata,
+        payload: { type: 'message', role: 'assistant', id: `ordinary-${index}`, content: [{ type: 'output_text', text }] },
+      })),
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const rows = await materialize(items[0])
+    assert.equal(rows.length, metadata.length)
+    assert.ok(rows.every(row => row.content_text === text))
   } finally {
     await env.cleanup()
   }
