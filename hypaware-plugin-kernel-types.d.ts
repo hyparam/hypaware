@@ -2826,11 +2826,11 @@ export interface InitPresetContribution {
 }
 
 // =============================================================================
-// Backfill (first-class client history import)
+// Backfill (first-class `hyp backfill`)
 // =============================================================================
 
 /**
- * Plugin-registered backfill providers. Each provider plans and yields
+ * Plugin-registered backfill providers. Each provider scans and yields
  * `BackfillItem` envelopes (and optional `BackfillEvent` lifecycle
  * signals) for one or more datasets. Core owns the runner, telemetry
  * envelope, dry-run behavior, and dataset materialization; providers

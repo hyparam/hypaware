@@ -17,7 +17,8 @@ For installation, upgrade, recovery, and task-oriented workflows, see
 - [Render and manage reports](#render-and-manage-reports)
 - [Send data now](#send-data-now)
 - [Control the current session](#control-the-current-session)
-- [Manage AI clients and history](#manage-ai-clients-and-history)
+- [Manage AI clients](#manage-ai-clients)
+- [Import past client history](#import-past-client-history)
 - [Control privacy](#control-privacy)
 - [Connect to or leave HypAware Cloud](#connect-to-or-leave-hypaware-cloud)
 - [Manage the daemon](#manage-the-daemon)
@@ -536,7 +537,7 @@ still prevent recording.
 hyp session unignore
 ```
 
-## Manage AI clients and history
+## Manage AI clients
 
 ```text
 hyp client <subcommand> [args...]
@@ -607,83 +608,6 @@ reattach through a proxy.
 ```sh
 hyp client detach codex --dry-run
 ```
-
-### Backfill commands
-
-Use backfill to import local history, list providers, or preview a scan:
-
-```text
-hyp backfill [provider...] [flags]
-hyp backfill list [--json]
-```
-
-```sh
-hyp backfill --help
-```
-
-`hyp client history providers` remains a compatibility alias of `hyp backfill list`.
-Preview a scan with `hyp backfill <provider> --dry-run`.
-
-#### `hyp backfill`
-
-```text
-hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]
-```
-
-Scans selected providers, materializes records into live datasets, appends
-rows, and flushes the cache. Provider failures don't stop sibling providers.
-`--dry-run` scans without writing.
-
-```sh
-hyp backfill claude codex --since 2026-08-01T00:00:00Z --dry-run
-```
-
-#### `hyp backfill list`
-
-```text
-hyp backfill list [--json]
-```
-
-Lists every registered backfill provider, not only providers selected as
-configuration defaults.
-
-```sh
-hyp backfill list --json
-```
-
-#### Scheduled recovery sweeps and `backfill.window_days`
-
-Some adapters rerun their history provider on a schedule, so history the live
-capture lane never saw is recovered without you running
-`hyp backfill` by hand. `@hypaware/claude` (which also serves
-Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
-sweep every five minutes by default.
-
-A positive `backfill.window_days` on a plugin entry bounds that scheduled
-sweep as well as the join-time import. This is deliberate:
-a `window_days` set only to keep the first import
-small also caps every later recovery, so a session older than the window is
-never swept up, OpenClaw's Lane B included. Nothing is removed from disk. The
-history is only left unimported, and widening or dropping `window_days` lets
-the next sweep take it.
-
-```json
-{ "name": "@hypaware/openclaw", "config": {
-  "backfill": { "window_days": 30 }
-} }
-```
-
-With no `window_days`, the sweep falls back to the cache retention window:
-`query.cache.retention.default_days` if set, otherwise 90 days. A
-`default_days` of `0` is the open window rather than a zero-day one, so a
-sweep that falls back to it scans all history.
-
-Setting the same block's `on_join` to false stops `@hypaware/claude`'s
-scheduled sweep as well as its join-time import: that adapter contributes no
-schedule at all when the flag is off. It does not stop `@hypaware/openclaw`'s.
-That adapter contributes its Lane B schedule unconditionally, so an OpenClaw
-entry with `backfill.on_join: false` still sweeps on its `sweep_cron` cadence;
-today the only way to bound it is `window_days`.
 
 ### Client skill commands
 
@@ -896,6 +820,84 @@ desktop directories.
 ```sh
 hyp client claude-desktop install-helper
 ```
+
+## Import past client history
+
+Use backfill to import local history, list providers, or preview a scan:
+
+```text
+hyp backfill [provider...] [flags]
+hyp backfill list [--json]
+```
+
+```sh
+hyp backfill --help
+```
+
+`hyp client history providers` remains a compatibility alias of `hyp backfill list`.
+Preview a scan with `hyp backfill <provider> --dry-run`.
+
+### `hyp backfill`
+
+```text
+hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]
+```
+
+Scans selected providers, materializes records into live datasets, appends
+rows, and flushes the cache. Provider failures don't stop sibling providers.
+`--dry-run` runs the same full scan and projection and writes no row, so it
+reports what an import would take but costs what the import costs.
+
+```sh
+hyp backfill claude codex --since 2026-08-01T00:00:00Z --dry-run
+```
+
+### `hyp backfill list`
+
+```text
+hyp backfill list [--json]
+```
+
+Lists every registered backfill provider, not only providers selected as
+configuration defaults.
+
+```sh
+hyp backfill list --json
+```
+
+### Scheduled recovery sweeps and `backfill.window_days`
+
+Some adapters rerun their history provider on a schedule, so history the live
+capture lane never saw is recovered without you running
+`hyp backfill` by hand. `@hypaware/claude` (which also serves
+Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
+sweep every five minutes by default.
+
+A positive `backfill.window_days` on a plugin entry bounds that scheduled
+sweep as well as the join-time import. This is deliberate:
+a `window_days` set only to keep the first import
+small also caps every later recovery, so a session older than the window is
+never swept up, OpenClaw's Lane B included. Nothing is removed from disk. The
+history is only left unimported, and widening or dropping `window_days` lets
+the next sweep take it.
+
+```json
+{ "name": "@hypaware/openclaw", "config": {
+  "backfill": { "window_days": 30 }
+} }
+```
+
+With no `window_days`, the sweep falls back to the cache retention window:
+`query.cache.retention.default_days` if set, otherwise 90 days. A
+`default_days` of `0` is the open window rather than a zero-day one, so a
+sweep that falls back to it scans all history.
+
+Setting the same block's `on_join` to false stops `@hypaware/claude`'s
+scheduled sweep as well as its join-time import: that adapter contributes no
+schedule at all when the flag is off. It does not stop `@hypaware/openclaw`'s.
+That adapter contributes its Lane B schedule unconditionally, so an OpenClaw
+entry with `backfill.on_join: false` still sweeps on its `sweep_cron` cadence;
+today the only way to bound it is `window_days`.
 
 ## Control privacy
 

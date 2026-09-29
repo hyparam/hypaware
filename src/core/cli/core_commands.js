@@ -240,6 +240,12 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       summary: 'Import client history from backfill providers',
       usage: 'hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
+      help: [
+        'Backfill reads history a client wrote before HypAware was capturing,',
+        'from the transcript files the client keeps on disk. Start with list,',
+        'which names every registered provider, then run one with --dry-run:',
+        'the scan reports what it found and writes no row.',
+      ].join('\n'),
       run: runBackfill,
     },
     {
