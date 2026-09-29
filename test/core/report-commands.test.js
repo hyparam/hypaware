@@ -17,9 +17,11 @@ import {
   runReportDelete,
   runReportFix,
   runReportGet,
+  runReportGenerate,
   runReportList,
   runReportPublish,
 } from '../../src/core/cli/report_commands.js'
+import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
 
 /* ---------- endpoint derivation ---------- */
@@ -676,6 +678,165 @@ function fixDeps({ launchers = [{ client: 'claude', label: 'Claude Code', bin: '
     }),
   }
 }
+
+/** @param {TestContext} t */
+async function generateFixture(t) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-generate-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  for (const client of ['claude', 'codex']) {
+    const dir = path.join(home, `.${client}`, 'skills', 'hypaware-report')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'SKILL.md'), '# Report skill\n')
+  }
+  // The caller's directory is deliberately outside HOME: the whole point of
+  // this command is that the client starts where it was typed, so a fixture
+  // where cwd and HOME are the same path cannot tell a preserved cwd from a
+  // relocation into a HypAware-owned folder.
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-generate-cwd-'))
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }))
+  const io = ctxWith({ HOME: home, HYP_HOME: undefined })
+  io.ctx.config = { version: 2 }
+  io.ctx.cwd = cwd
+  return { ...io, home, cwd }
+}
+
+test('generate launches locally with the skill and preserves optional instructions verbatim', async (t) => {
+  const { ctx, home, cwd: where } = await generateFixture(t)
+  const { calls } = stubServer(t, () => { throw new Error('generation must not contact a server') })
+  const { deps, launches } = fixDeps()
+  // A sentinel the command never reads: it can only reach the spawn by being
+  // passed through, so its presence is the environment's inheritance, which
+  // comparing ctx.env to itself could never show.
+  ctx.env.HYP_TEST_INHERITED = 'sentinel'
+  const instructions = 'Cover August 2026\nFocus on `debugging`, $HOME, and "retries".'
+  assert.equal(await runReportGenerate([instructions], ctx, deps), 0)
+  assert.equal(calls.length, 0)
+  assert.equal(launches.length, 1)
+  const { cwd, prompt, env } = launches[0]
+  assert.equal(cwd, where)
+  assert.notEqual(cwd, home)
+  assert.ok((await fs.stat(cwd)).isDirectory())
+  assert.ok(prompt.includes(JSON.stringify(path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md'))))
+  // The destination the skill is told to write into is the caller's
+  // directory, not HOME and not a directory the CLI chose.
+  assert.ok(prompt.includes(JSON.stringify(where)))
+  assert.ok(prompt.endsWith(instructions))
+  assert.equal(env.HYP_TEST_INHERITED, 'sentinel')
+  // The CLI creates no workspace: neither a state directory under HOME nor
+  // anything at all in the directory it was typed in.
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readdir(where), [])
+})
+
+test('generate preserves cwd and environment even with a custom or relative HYP_HOME', async (t) => {
+  const { ctx, home } = await generateFixture(t)
+  ctx.env.HYP_HOME = path.join(home, 'custom')
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[0].cwd, ctx.cwd)
+  assert.match(launches[0].prompt, /default reporting period/)
+  assert.doesNotMatch(launches[0].prompt, /Additional instructions/)
+  ctx.env.HYP_HOME = 'relative-home'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[1].cwd, ctx.cwd)
+  assert.equal(launches[1].env.HYP_HOME, 'relative-home')
+})
+
+test('generate telemetry distinguishes a launch failure from success without recording instructions', async (t) => {
+  const { ctx } = await generateFixture(t)
+  const captured = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch(spans) { captured.push(...spans) } }],
+  })
+  provider.register()
+  t.after(() => provider.shutdown())
+  const { deps } = fixDeps()
+  assert.equal(await runReportGenerate(['private-instruction-marker'], ctx, deps), 0)
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  const spans = captured.filter((span) => span.name === 'report.generate')
+  assert.equal(spans.length, 2)
+  assert.equal(spans[0].attributes.status, 'ok')
+  assert.equal(spans[0].status.code, SpanStatusCode.OK)
+  assert.equal(spans[1].attributes.error_kind, 'client-launch')
+  assert.equal(spans[1].status.code, SpanStatusCode.ERROR)
+  assert.ok(!JSON.stringify(spans).includes('private-instruction-marker'))
+})
+
+test('generate rejects invalid arguments before probing or launching', async () => {
+  for (const args of [['--unknown'], ['one', 'two']]) {
+    const { ctx } = ctxWith()
+    const { deps, launches } = fixDeps()
+    deps.collectStatus = async () => { throw new Error('must not probe') }
+    deps.resolveLaunchers = async () => { throw new Error('must not resolve') }
+    assert.equal(await runReportGenerate(args, ctx, deps), 2)
+    assert.equal(launches.length, 0)
+  }
+})
+
+test('generate requires an available client with an installed report skill', async (t) => {
+  const { ctx, home, err } = await generateFixture(t)
+  await fs.rm(path.join(home, '.claude'), { recursive: true })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  assert.equal(launches.length, 0)
+  assert.match(err.join(''), /no attached client with the hypaware-report skill/)
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+})
+
+test('generate chooses a client on a terminal and uses the first without a TUI', async (t) => {
+  const { ctx } = await generateFixture(t)
+  const launchers = [
+    { client: 'claude', label: 'Claude', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
+    { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
+  ]
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ launchers, pick: async () => 'codex' })
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[0].launcher.client, 'codex')
+  assert.match(launches[0].prompt, /\.codex/)
+  assert.equal(prompts.length, 1)
+  ctx.env.HYP_NO_TUI = '1'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[1].launcher.client, 'claude')
+  assert.equal(prompts.length, 1)
+})
+
+test('generate cancellation does not create a directory or start a client', async (t) => {
+  const { ctx, home, out } = await generateFixture(t)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches } = fixDeps({
+    launchers: [
+      { client: 'claude', label: 'Claude' },
+      { client: 'codex', label: 'Codex' },
+    ],
+    pick: async () => { throw new PromptCancelledError() },
+  })
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches.length, 0)
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+  // A picker answer that is not one of the clients it offered exits the same
+  // way rather than throwing past the command: the user sees 'Nothing
+  // started.', not a stack trace, and no client is spawned. Only the output
+  // of this second run is inspected; the cancel above already wrote the same
+  // line, so asserting over the whole buffer would pass without it.
+  const before = out.length
+  deps.select = async () => 'a-client-that-was-never-offered'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches.length, 0)
+  assert.match(out.slice(before).join(''), /Nothing started\./)
+})
+
+test('generate reports spawn failures', async (t) => {
+  const { ctx, err } = await generateFixture(t)
+  const { deps } = fixDeps()
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  assert.match(err.join(''), /could not start claude: ENOENT/)
+})
 
 test('fix <id> resolves the id, checks the page exists, and starts the client here with the read command', async (t) => {
   const { calls } = stubFixServer(t)

@@ -14,7 +14,7 @@ For installation, upgrade, recovery, and task-oriented workflows, see
 - [Plugin-owned commands](#plugin-owned-commands)
 - [Set up and inspect HypAware](#set-up-and-inspect-hypaware)
 - [Query recorded data](#query-recorded-data)
-- [Render and manage reports](#render-and-manage-reports)
+- [Generate and manage reports](#generate-and-manage-reports)
 - [Send data now](#send-data-now)
 - [Control the current session](#control-the-current-session)
 - [Manage AI clients](#manage-ai-clients)
@@ -294,7 +294,7 @@ remote execution.
 hyp query vector search "daemon restart failure" --top-k 5 --format json
 ```
 
-## Render and manage reports
+## Generate and manage reports
 
 ```text
 hyp report <subcommand> [args...]
@@ -306,24 +306,33 @@ Use `hyp report --help` to list report operations:
 hyp report --help
 ```
 
-`render` is local. The other report commands use a remote target and resolve
-the default remote if `--remote` is omitted. Publishing and deletion require a
-write-capable credential.
+`generate` is local. The other report commands use a remote target and
+resolve the default remote if `--remote` is omitted. Publishing and deletion
+require a write-capable credential.
 
-### `hyp report render`
-
-```text
-hyp report render [<dir>] [--no-refresh-assets]
-```
-
-Builds a static HTML site from a local reports tree. The directory defaults to
-`~/hypaware-reports`. It replaces the derived `html/` directory, preserves
-source Markdown and `assets/theme.css`, and refuses an empty source tree.
-`--no-refresh-assets` also preserves the other copied assets.
+### `hyp report generate`
 
 ```sh
-hyp report render ~/hypaware-reports
+hyp report generate
+hyp report generate "Cover last week and focus on repeated debugging work"
 ```
+
+Launches an attached AI client with its installed `hypaware-report` skill in
+the caller's current working directory. Optional quoted instructions set the
+period or focus; otherwise the skill uses the previous calendar month.
+Multiple eligible clients produce a picker on a terminal; noninteractive mode
+uses the first. The client keeps its normal permissions, and the session is
+recorded under the current directory's own usage class: this is not session
+isolation, so excerpts it reads out of `local-only` history are quoted into a
+transcript that syncs if the directory you typed the command in does
+([PRIVACY.md](PRIVACY.md#marking-directories)). No remote login is required,
+and nothing is published unless requested.
+
+The skill writes `./hypaware-report-<from>-to-<to>/report.md` and linked pages,
+using `-2`, `-3`, etc. if the folder already exists, unless you request another
+destination. The command's exit status indicates whether the client launched,
+not whether report generation completed. `hyp report list` continues to list
+published reports only; use `hyp report publish <folder> ...` to share one.
 
 ### `hyp report publish`
 

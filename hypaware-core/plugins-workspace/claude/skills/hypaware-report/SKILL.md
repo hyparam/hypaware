@@ -102,8 +102,10 @@ data rather than treating old prose as new evidence.
 
 ## Write, review, deliver
 
-Write into a new `hypaware-report-<from>-to-<to>/` directory, or the user's
-requested destination. Do not overwrite an existing report without instruction.
+Write into a new `./hypaware-report-<from>-to-<to>/` directory under the
+current working directory, or the user's requested destination. If the default
+folder exists, append `-2`, `-3`, etc. Do not overwrite an existing report
+without instruction.
 Save section pages first, then the linked `report.md` brief. Follow the report
 contract for content, evidence, and Markdown replacements for server visuals.
 
@@ -127,8 +129,8 @@ optional step only when the user requests it, as described below.
 ## Optional publishing
 
 When the user asks to publish or share the report with their team, upload the
-reviewed Markdown directory using the existing CLI. Do not run `hyp report
-render` first. The server renders HTML and supplies its own assets.
+reviewed Markdown directory using the existing CLI. There is no local render
+step: the server renders HTML and supplies its own assets.
 
 Use the user's selected remote and the report's actual coverage period. For
 example, a report covering August 2026 can be published with:

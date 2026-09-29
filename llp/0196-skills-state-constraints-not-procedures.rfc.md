@@ -8,6 +8,7 @@
 **Related:** LLP 0074, LLP 0075, LLP 0102, LLP 0107, LLP 0142, LLP 0155
 **Planned-by:** LLP 0197
 **Superseded-in-part-by:** LLP 0208 (open question 1's keep-pandoc resolution)
+**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 
 > The bundled skill surface has grown to 18 `SKILL.md` files across two
 > hand-synced trees, ~290 KB of prose, with the two largest skills at 25 KB

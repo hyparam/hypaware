@@ -611,7 +611,7 @@ test('a public alias dispatches to its owner, help included', async () => {
 
 /**
  * The words a help surface can use for the place a `--remote` command talks
- * to, by family. `docs/CLI_REFERENCE.md` ("Render and manage reports")
+ * to, by family. `docs/CLI_REFERENCE.md` ("Generate and manage reports")
  * settles `the remote` for the report family, so every other family is a
  * second name for the same place.
  *
@@ -653,6 +653,16 @@ function destinationFamilies(help) {
   const prose = help.replace(/--remote/g, '--OPTION').replace(/hyp remote(?:\s+[a-z][a-z-]*)?/g, 'hyp COMMAND')
   return DESTINATION_FAMILIES.filter(([, pattern]) => pattern.test(prose)).map(([family]) => family)
 }
+
+test('report render is retired while the shared server renderer remains exported', async () => {
+  const registry = coreRegistry()
+  assert.equal(registry.list().some((entry) => entry.name === 'report render'), false)
+  const { run } = await harness(registry)
+  const { code } = await run(['report', 'render'])
+  assert.notEqual(code, 0)
+  const { renderReports } = await import('hypaware/core/reports')
+  assert.equal(typeof renderReports, 'function')
+})
 
 /**
  * One render of `hyp report publish --help` said both "for the remote to

@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 
 import { askYesNo } from './confirm.js'
 import { parseCoreCommandArgv } from './command_args.js'
+import { Attr, markSpanStatus, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
 import {
@@ -73,68 +74,95 @@ const PERIOD_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/
 const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote', '--limit', '--before', '--output'])
 
 /**
- * `hyp report render [<dir>]`: build the static HTML site for a local reports tree.
- *
- * @ref LLP 0196#mechanics-as-code [implements]: the deterministic half of rendering is a
- * command, so the skill calls it instead of narrating a shell script it cannot version
- *
- * The one subcommand in this group that is NOT a call to the server's reports plane.
- * It takes no `--remote`, reads and writes only local files, and needs no credential.
- * This remains a standalone local preview command. Publishing sends Markdown
- * directly to the server and does not require this build step (LLP 0436).
- * LLP 0155's "there is no local reports plane" is still true of publish/list/get/delete;
- * this is a local build step, not a plane operation, and the group help says so.
- *
- * Not destructive in the way `delete` is, so it does not prompt: it rebuilds `html/`
- * (derived output, wiped and regenerated every run) and refreshes the command-owned
- * assets. It never touches the report `.md` sources, and never `assets/theme.css`,
- * which is the user's (LLP 0196 #theme-layer).
- *
+ * @ref LLP 0450#launch [implements]: the skill owns analysis; the CLI starts a client in the caller's directory
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {Parameters<typeof runReportFix>[2]} [deps]
  * @returns {Promise<number>}
  */
-export async function runReportRender(argv, ctx) {
-  const parsed = parseCoreCommandArgv('report render', argv, ctx)
-  if (!parsed.ok) return parsed.code
-  const { renderReports, discoverReports } = await import('../reports/render.js')
-
-  const dir = path.resolve(
-    /** @type {string | undefined} */ (parsed.params.dir) ?? path.join(os.homedir(), 'hypaware-reports')
-  )
-
-  /** @type {Stats} */
-  let stat
-  try {
-    stat = await fs.stat(dir)
-  } catch {
-    ctx.stderr.write(`hyp report render: no such directory: ${dir}\n`)
-    return 2
-  }
-  if (!stat.isDirectory()) {
-    ctx.stderr.write(`hyp report render: not a directory: ${dir}\n`)
-    return 2
-  }
-
-  // Refuse before wiping html/. An empty tree usually means the reports were just
-  // archived, and rebuilding would replace a good site with an empty one.
-  const found = discoverReports(dir)
-  if (found.length === 0) {
-    ctx.stderr.write(
-      `hyp report render: no reports in ${dir} (expected a top-level <slug>.md).\n` +
-        'Nothing was changed. If the reports were archived, generate new ones first.\n',
-    )
-    return 1
-  }
-
-  try {
-    const result = renderReports({ dir, refreshAssets: parsed.params['no-refresh-assets'] !== true })
-    ctx.stdout.write(`Built html/ : ${result.reports} report(s) into html/<slug>/ (index + sections + assets)\n`)
+export async function runReportGenerate(argv, ctx, deps = {}) {
+  const gate = parseCoreCommandArgv('report generate', argv, ctx)
+  if (!gate.ok) return gate.code
+  return withSpan('report.generate', {
+    [Attr.COMPONENT]: 'reports',
+    [Attr.OPERATION]: 'report.generate',
+    status: 'error',
+  }, async (span) => {
+    const home = ctx.env.HOME || os.homedir()
+    const cwd = ctx.cwd
+    const clients = await askableClients(ctx, deps.collectStatus ? { collectStatus: deps.collectStatus } : {})
+    const descriptors = await buildWalkthroughClientDescriptorMap()
+    const candidates = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
+    const launchers = []
+    for (const launcher of candidates) {
+      const descriptor = descriptors.get(launcher.client)
+      if (!descriptor) continue
+      const skill = path.join(home, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
+      try {
+        await fs.access(skill)
+        launchers.push({ launcher, skill })
+      } catch {
+        // Only offer clients that can read the report workflow.
+      }
+    }
+    span.setAttribute('launcher_count', launchers.length)
+    if (launchers.length === 0) {
+      span.setAttribute('error_kind', 'no-launcher')
+      ctx.stderr.write('hyp report generate: no attached client with the hypaware-report skill can be started.\n')
+      ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
+      return 1
+    }
+    let chosen = launchers[0]
+    if (launchers.length > 1 && isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1') {
+      let picked
+      let cancelled = false
+      try {
+        const client = await (deps.select ?? select)({
+          box: true,
+          title: 'Which client should generate the report?',
+          options: launchers.map(({ launcher }) => ({ value: launcher.client, label: launcher.label })),
+          ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+          stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
+          env: ctx.env,
+        })
+        picked = launchers.find(({ launcher }) => launcher.client === client)
+      } catch (err) {
+        if (!(err instanceof PromptCancelledError) && !isPromptBackError(err) && !(err instanceof Error && err.name === 'PromptCancelledError')) throw err
+        cancelled = true
+      }
+      // An escape, a back request, and an answer that is not on the list all
+      // mean the same thing to the user: no client was chosen, so nothing
+      // starts. Turning the third into a throw would hand back a stack trace
+      // on the one path the other two exit cleanly, so it exits quietly like
+      // runReportFix's client picker (which leaves 'launcher' undefined and
+      // returns 0). It is still a defect rather than a choice, so unlike a
+      // cancel it is recorded on the span: runReportFix's recommendation
+      // picker, whose ids come off a server page instead of a fixed local
+      // list, goes further and exits 1.
+      if (!picked) {
+        if (!cancelled) span.setAttribute('error_kind', 'picker-off-list')
+        markSpanStatus(span, 'cancelled')
+        ctx.stdout.write('Nothing started.\n')
+        return 0
+      }
+      chosen = picked
+    }
+    const instructions = String(gate.params.instructions ?? '')
+    const prompt = `Use the hypaware-report skill at ${JSON.stringify(chosen.skill)} to generate a report from this machine's local HypAware recordings. ` +
+      `Follow its analysis, review, and delivery workflow. Unless the user requests another destination, save the report in a new hypaware-report-<from>-to-<to> directory under ${JSON.stringify(cwd)}, using a numbered suffix if it already exists. ` +
+      'Use the skill\'s default reporting period unless the instructions below specify one.' +
+      (instructions ? `\n\nAdditional instructions from the user:\n${instructions}` : '')
+    span.setAttribute('client', chosen.launcher.client)
+    ctx.stdout.write(`\nStarting ${chosen.launcher.label} to generate a local report...\n\n`)
+    const result = await (deps.launchClient ?? launchClient)({ launcher: chosen.launcher, prompt, cwd, env: ctx.env })
+    if (!result.ok) {
+      span.setAttribute('error_kind', 'client-launch')
+      ctx.stderr.write(`hyp report generate: could not start ${chosen.launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
+      return 1
+    }
+    markSpanStatus(span, 'ok')
     return 0
-  } catch (err) {
-    ctx.stderr.write(`hyp report render: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
-  }
+  })
 }
 
 /**

@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportFix, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportPublish } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -771,11 +771,10 @@ function buildCoreCommands(registry) {
       name: 'report',
       category: 'explore-share',
       audience: 'everyday',
-      summary: 'Render and manage reports',
+      summary: 'Generate and manage reports',
       help:
-        "'render' is a LOCAL build step: it turns a reports tree's Markdown into\n" +
-        'a static HTML site and takes no --remote and no credential.\n' +
-        '\n' +
+        "'generate' starts an attached AI client with the report skill in the\n" +
+        "current directory. Optional instructions set its period and focus.\n\n" +
         'The rest talk to the remote. Reports are hosted there (there is no\n' +
         'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
         '<target> and default to the default remote target, the same resolution\n' +
@@ -784,22 +783,22 @@ function buildCoreCommands(registry) {
         "stored via 'hyp remote login <target> --token-file <path>').",
     }),
     {
-      // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
-      name: 'report render',
-      summary: 'Build the static HTML site for a local reports tree (no remote involved)',
-      usage: coreUsage('report render'),
+      name: 'report generate',
+      summary: 'Start an attached AI client to generate a local report',
+      usage: coreUsage('report generate'),
       help: [
-        'Renders every top-level <slug>.md (plus its optional <slug>/ section',
-        'directory) into html/<slug>/, and refreshes the shared assets. <dir>',
-        'defaults to ~/hypaware-reports.',
-        '',
-        'html/ is wiped and rebuilt every run, so a deleted or renamed report',
-        'never leaves stale HTML behind. Report .md sources are never modified,',
-        'and assets/theme.css is yours: it is copied into each page but never',
-        'overwritten. Pass --no-refresh-assets to leave the other assets alone',
-        'too.',
+        'Starts an attached client with the hypaware-report skill in the current',
+        'working directory. Optional quoted instructions can specify',
+        'the reporting period and focus; the skill defaults to the previous',
+        'calendar month. Publishing requires an explicit request.',
+        'If multiple attached clients have the skill, asks which on a terminal;',
+        'otherwise uses the first available client. The client takes over the',
+        'terminal with its normal permissions and is recorded under the current',
+        'directory\'s own usage class. This is not session isolation: excerpts it',
+        'reads out of local-only history are quoted into a transcript that syncs',
+        'if this directory does. No remote login is required.',
       ].join('\n'),
-      run: runReportRender,
+      run: runReportGenerate,
     },
     {
       name: 'report publish',
