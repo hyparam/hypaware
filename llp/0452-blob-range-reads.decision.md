@@ -20,8 +20,11 @@ or credential path.
 `GetObjectInput.range` is an optional single HTTP byte range. It accepts
 `bytes=start-end`, `bytes=start-`, and `bytes=-length`; the end is inclusive.
 Omitting it preserves whole-object reads. Missing keys still return null.
-Providers may ignore the option for backward compatibility, but must then
-return the whole object without `contentRange`.
+A BlobStore implementation predating this field ignores it and returns the
+whole object without `contentRange`, which stays a valid implementation of
+the capability. That is distinct from a provider that does support ranges:
+it must either honor the range or fail, never answer with a whole object
+that a caller could mistake for the slice it asked for.
 
 Providers honoring the range return `GetObjectResult.contentRange` as
 `bytes start-end/total`, with `contentLength` describing the returned body,
@@ -47,6 +50,7 @@ whole-object callers. No runtime dependency or global cache is added.
 Provider tests cover inclusive ends, suffixes, open ends, EOF clamping,
 invalid ranges, empty and missing files, unlink-after-open behavior, S3
 header mapping through a scoped key, and the rejection of an S3 response
-that carries no ContentRange for a requested range. Server reader tests
-verify byte counts, projection over real Parquet, legacy fallback and
-invalid range responses.
+that carries no ContentRange for a requested range. There is no ranged
+reader in this repository yet; the reader that consumes this contract, and
+its tests for byte counts and projection over real Parquet, land with the
+server change that motivated the field.

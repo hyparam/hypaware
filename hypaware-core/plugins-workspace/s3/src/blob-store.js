@@ -123,13 +123,19 @@ export function createS3BlobStore({ bucket, prefix, client }) {
           `s3 blob-store: getObject failed for '${input.key}'`, input.key)
       }
       if (!result || result.Body === null || result.Body === undefined) return null
-      // @ref LLP 0452#range-contract [implements]: a store that ignored Range answers 200 with the whole object and no Content-Range
-      // Passing that body back as though it were the requested slice would
-      // hand a Parquet reader the wrong bytes at the right offsets, which
-      // reads as a decode error at best and as wrong query results at
+      // `S3CommandsHandle` is an injectable seam, and a handle may report an
+      // absent header as null or '' rather than undefined. Reduce all three
+      // to one sentinel before anything branches on it.
+      const contentRange = typeof result.ContentRange === 'string' && result.ContentRange !== ''
+        ? result.ContentRange
+        : undefined
+      // Passing a whole object back as though it were the requested slice
+      // would hand a Parquet reader the wrong bytes at the right offsets,
+      // which reads as a decode error at best and as wrong query results at
       // worst. A 206 must carry Content-Range, so its absence means the
       // range was not honored and the only safe answer is to fail.
-      if (input.range !== undefined && result.ContentRange === undefined) {
+      // @ref LLP 0452#range-contract [implements]: a ranged read never degrades to a whole object
+      if (input.range !== undefined && contentRange === undefined) {
         const body = /** @type {{ destroy?: () => void }} */ (result.Body)
         if (typeof body.destroy === 'function') body.destroy()
         throw tagS3Error(undefined, 'blob_range_not_honored',
@@ -139,7 +145,7 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       return {
         body: toReadable(result.Body),
         contentLength: result.ContentLength,
-        ...(result.ContentRange !== undefined ? { contentRange: result.ContentRange } : {}),
+        ...(contentRange !== undefined ? { contentRange } : {}),
         etag: result.ETag,
       }
     },

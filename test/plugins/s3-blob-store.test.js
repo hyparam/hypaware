@@ -133,25 +133,33 @@ test('s3 BlobStore rejects a response that ignored the requested range', async (
   // A store may legally answer a ranged GET with 200 and the whole object.
   // Handing that body back as the requested slice would feed a reader the
   // wrong bytes at the right offsets, so the provider must fail instead.
-  let destroyed = false
-  const body = Readable.from([Buffer.from('0123456789')])
-  body.destroy = () => { destroyed = true; return body }
-  const client = {
-    ...makeFakeS3Client(),
-    async getObject() {
-      return { Body: body, ContentLength: 10, ETag: '"whole"' }
-    },
+  // A seam handle may report an absent header as undefined, null or '';
+  // every one of them means the body is not the slice that was asked for.
+  // null is off-contract on purpose: the guard has to hold for a handle
+  // that does not respect the declared shape, which is why it is cast.
+  for (const ContentRange of /** @type {Array<string | undefined>} */ (
+    /** @type {unknown} */ ([undefined, null, ''])
+  )) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from('0123456789')])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength: 10, ContentRange, ETag: '"whole"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
+      (err) => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        assert.match(/** @type {Error} */ (err).message, /Content-Range/)
+        return true
+      },
+    )
+    assert.equal(destroyed, true, 'the unusable body is released, not leaked')
   }
-  const store = createS3BlobStore({ bucket: 'bucket', client })
-  await assert.rejects(
-    store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
-    (err) => {
-      assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
-      assert.match(/** @type {Error} */ (err).message, /Content-Range/)
-      return true
-    },
-  )
-  assert.equal(destroyed, true, 'the unusable body is released, not leaked')
 })
 
 test('s3 BlobStore leaves whole-object reads without a contentRange key', async () => {

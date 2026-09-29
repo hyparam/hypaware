@@ -88,7 +88,11 @@ test('local-fs BlobStore serves byte ranges from the opened file', async () => {
       assert.equal(got.contentLength, expected.length)
       assert.equal(Buffer.from(await collectStream(got.body)).toString(), expected)
     }
-    for (const range of ['bytes=-', 'bytes=1-2,4-5', 'bytes=10-', 'bytes=10-10', 'bytes=5-2', 'bytes=-0']) {
+    for (const range of [
+      'bytes=-', 'bytes=1-2,4-5', 'bytes=10-', 'bytes=10-10', 'bytes=5-2', 'bytes=-0',
+      'BYTES=0-1', 'bytes= 0-1', 'bytes=+0-1', 'bytes=1e1-', 'bytes 0-1', '',
+      'bytes=0-9007199254740992', 'bytes=9007199254740992-',
+    ]) {
       await assert.rejects(store.getObject({ key: 'data', range }), /range/i)
     }
     assert.equal(await store.getObject({ key: 'missing', range: 'bytes=-8' }), null)

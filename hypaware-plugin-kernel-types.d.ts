@@ -1390,6 +1390,9 @@ export interface GetObjectInput {
 }
 
 export interface GetObjectResult {
+  /** Caller owns the stream: consume it or destroy() it. A provider may hold
+   * an open file handle or socket until one of those happens, and a range
+   * reader makes many such reads per object. */
   body: NodeJS.ReadableStream
   /** Length of the returned body, which may be only a range. */
   contentLength?: number
