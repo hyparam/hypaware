@@ -408,6 +408,10 @@ async function readOpenclawSessionIndex(candidate, budget, unreadable) {
     session = await readOpenclawSession(candidate, { maxBytes: budget.remaining })
   } catch (error) {
     if (!(error instanceof OpenclawStorageError)) throw error
+    // A failed read moved its bytes too, so the budget bounds what the scan
+    // actually transfers rather than only what it managed to index. It still
+    // costs this candidate alone: the next one is read while budget is left.
+    budget.remaining -= error.bytes
     unreadable.push(error)
     return buildOpenclawSessionIndex(candidate, undefined, [])
   }

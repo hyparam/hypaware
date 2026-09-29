@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import zlib from 'node:zlib'
 import { createHash } from 'node:crypto'
 import { defaultOpenclawAgentsDir, listOpenclawSessions, readOpenclawSession } from '../../hypaware-core/plugins-workspace/openclaw/src/session_file.js'
+import { OPENCLAW_TRANSCRIPT_MAX_BYTES } from '../../hypaware-core/plugins-workspace/openclaw/src/session_db.js'
 import test from 'node:test'
 import { createOpenclawBackfillProvider } from '../../hypaware-core/plugins-workspace/openclaw/src/backfill.js'
 import { createOpenclawSettlementEnricher } from '../../hypaware-core/plugins-workspace/openclaw/src/settle.js'
@@ -280,4 +281,36 @@ test('a group with no match key keeps its fallback when an unrelated window is u
     .settle([keyed, keyless], /** @type {any} */ ({}))
   assert.equal(out[0], USAGE_POLICY_DROP)
   assert.deepEqual(out[1], keyless)
+})
+
+// A candidate that fails still pulls its whole transcript out of SQLite, so a
+// flush that meets a run of corrupt neighbours would keep reading long past
+// the 64 MiB the settlement budget exists to impose. Four 16 MiB failures
+// spend it exactly, and the healthy session behind them is never read.
+test('a failed candidate read spends the settlement byte budget', { skip: !zlib.zstdCompressSync }, async t => {
+  const e = await stage(t)
+  const event = Buffer.alloc(4 * 1024 * 1024, 'x')
+  const blob = zlib.zstdCompressSync(event)
+  const perSession = OPENCLAW_TRANSCRIPT_MAX_BYTES / 4
+  const window = e.db.prepare('INSERT INTO session_windows VALUES (?, ?, ?)')
+  const write = e.db.prepare('INSERT INTO transcript_events VALUES (?, ?, NULL, ?, ?, ?)')
+  for (let i = 0; i < 4; i++) {
+    // Newer than `native-session`, so the scan meets these first.
+    window.run(`big-${i}`, stamp + 3000 + i, stamp + 3000 + i)
+    // No session header, so the read fails only once the transfer is paid for.
+    for (let seq = 0; seq < perSession / event.length; seq++) write.run(`big-${i}`, seq, stamp, blob, event.length)
+  }
+
+  const sources = []
+  for await (const source of listOpenclawSessions(e.agentsDir)) sources.push(source)
+  const big = sources.find(source => source.sessionId === 'big-0')
+  await assert.rejects(() => readOpenclawSession(/** @type {any} */ (big)), (/** @type {any} */ error) => {
+    assert.equal(error.code, 'session_header_missing_or_mismatched')
+    assert.equal(error.bytes, perSession)
+    return true
+  })
+
+  // Reads stop at the bound: `native-session` claims this row's content and
+  // would settle it, but the budget is gone before the scan reaches it.
+  assert.equal((await e.settle())[0], USAGE_POLICY_DROP)
 })

@@ -569,6 +569,20 @@ async function* discoverSessions(agentsDir, opts) {
 }
 
 /**
+ * What a read moved out of SQLite, for the failures that discard it. Summed
+ * here rather than tracked as the lines are walked, so a successful read
+ * still pays for exactly one pass over them.
+ *
+ * @param {string[]} lines
+ * @returns {number}
+ */
+function transferredBytes(lines) {
+  let bytes = 0
+  for (const line of lines) bytes += Buffer.byteLength(line)
+  return bytes
+}
+
+/**
  * @param {OpenclawSessionSource} source
  * @param {{ maxBytes?: number, quietBeforeMs?: number, includeMessages?: (header: OpenclawSessionHeader | undefined) => boolean }} [opts]
  * @returns {Promise<{ header: OpenclawSessionHeader | undefined, messages: OpenclawSessionMessage[], bytes: number } | undefined>}
@@ -583,7 +597,7 @@ export async function readOpenclawSession(source, opts = {}) {
   const lines = await readSqliteSession(source, { ...opts, acceptHeaderLine: line => opts.includeMessages?.(parseOpenclawSessionHeader(line)) !== false })
   if (!lines?.length) return undefined
   const header = parseOpenclawSessionHeader(lines[0])
-  if (!header?.sessionId || header.sessionId !== source.sessionId) throw new OpenclawStorageError('session_header_missing_or_mismatched')
+  if (!header?.sessionId || header.sessionId !== source.sessionId) throw new OpenclawStorageError('session_header_missing_or_mismatched', transferredBytes(lines))
   const messages = []
   let bytes = 0
   const includeMessages = opts.includeMessages?.(header) !== false
@@ -591,10 +605,10 @@ export async function readOpenclawSession(source, opts = {}) {
     bytes += Buffer.byteLength(line)
     let record
     try { record = JSON.parse(line) }
-    catch { throw new OpenclawStorageError('invalid_transcript_json') }
+    catch { throw new OpenclawStorageError('invalid_transcript_json', transferredBytes(lines)) }
     if (includeMessages && record?.type === 'message') {
       const message = parseOpenclawSessionMessage(record)
-      if (!message) throw new OpenclawStorageError('invalid_message')
+      if (!message) throw new OpenclawStorageError('invalid_message', transferredBytes(lines))
       messages.push(message)
     }
   }
