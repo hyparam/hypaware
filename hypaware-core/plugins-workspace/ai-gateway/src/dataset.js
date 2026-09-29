@@ -694,7 +694,9 @@ export function aiGatewayBackfillMaterializer() {
       const rows = aiGatewayRowsFromProjectedExchange(projection, {
         gatewayAttributes: backfillGatewayAttributes(item),
       })
-      return dedupe.skipExisting(rows, ctx)
+      // @ref LLP 0449#reconciliation [implements]: a mutable snapshot must reach
+      // storage whole, including old identities whose payload or position changed.
+      return item.reconcile ? rows : dedupe.skipExisting(rows, ctx)
     },
   }
 }
