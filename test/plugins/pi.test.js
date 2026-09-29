@@ -494,6 +494,60 @@ test('Pi live positions agree with recovery when the session_tree snapshot lags 
   } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
 })
 
+test('Pi live capture stays bounded while the reported leaf stays absent from the snapshot', async () => {
+  const originalFetch = globalThis.fetch
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return new Response('{}') }
+  const hooks = new Map()
+  const raw = copy()
+  raw.entries = []
+  /** @type {string | null} */
+  let head = null
+  let snapshots = 0
+  let walked = 0
+  const byId = new Map()
+  // Pi holds its snapshot one entry behind the leaf it names for the whole
+  // session, so no ordinary turn ever sees a leaf the snapshot holds.
+  const ctx = { mode: 'print', sessionManager: {
+    getEntries() { const view = raw.entries.slice(0, raw.entries.length - 1); snapshots++; walked += view.length; return view },
+    getLeafId: () => head,
+    getEntry(id) { walked++; return byId.get(id) },
+    getHeader: () => raw.session, getSessionFile: () => '/session.jsonl',
+  } }
+  const append = () => {
+    const entry = { type: 'message', id: `live-${raw.entries.length}`, parentId: head, timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, 0, raw.entries.length)).toISOString(), message: { role: 'user', content: 'text' } }
+    raw.entries.push(entry)
+    byId.set(entry.id, entry)
+    head = entry.id
+  }
+  try {
+    for (let i = 0; i < 300; i++) append()
+    extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
+    hooks.get('session_start')({}, ctx)
+    const settled = walked
+    const turns = 120
+    for (let i = 0; i < turns; i++) { append(); hooks.get('turn_end')({}, ctx) }
+    await hooks.get('session_shutdown')({}, ctx)
+    // Bounded per turn and independent of history: no snapshot beyond the
+    // startup checkpoint, and each turn's delta walks only what it added.
+    assert.ok(snapshots <= 2, `steady capture took ${snapshots} snapshots over ${turns} turns`)
+    assert.ok(walked - settled <= turns * 4, `steady capture walked ${walked - settled} entry references over ${turns} turns`)
+    const recoveredProjection = projectPiEntries(raw)
+    assert.ok(recoveredProjection)
+    const recovered = aiGatewayRowsFromProjectedExchange(recoveredProjection)
+    const byPart = new Map(recovered.map(row => [row.part_id, row.message_index]))
+    const live = sent.flatMap(batch => {
+      const projection = projectPiEntries(batch)
+      assert.ok(projection)
+      return aiGatewayRowsFromProjectedExchange(projection)
+    })
+    assert.ok(live.length >= turns)
+    for (const row of live) assert.equal(row.message_index, byPart.get(row.part_id))
+    assert.equal(new Set(live.map(row => row.message_index)).size, live.length)
+    assert.equal(live.at(-1)?.message_index, recovered.at(-1)?.message_index)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+})
+
 test('Pi live positions agree with recovery when session_start reports a null leaf over a non-empty snapshot', async () => {
   const originalFetch = globalThis.fetch
   const sent = []
@@ -542,6 +596,59 @@ test('Pi live positions agree with recovery when session_start reports a null le
     assert.ok(live.length >= 1)
     for (const row of live) assert.equal(row.message_index, byPart.get(row.part_id))
     assert.equal(new Set(live.map(row => row.message_index)).size, live.length)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+})
+
+test('Pi live capture refuses a snapshot tail that carries no id of its own', async () => {
+  const originalFetch = globalThis.fetch
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return new Response('{}') }
+  const hooks = new Map()
+  const raw = copy()
+  raw.entries = []
+  /** @type {string | null} */
+  let head = null
+  const byId = new Map()
+  // Pi's list ends in an entry with no id of its own, over a session whose
+  // root carries no parentId key at all. Accepting that tail as the
+  // checkpoint would leave `leaf` null or undefined, and a later walk reaches
+  // both at the root, reading as a successful walk over the counted prefix.
+  /** @type {any} */
+  let tail = { type: 'model_change', timestamp: new Date(Date.UTC(2026, 8, 17, 10, 1, 0)).toISOString() }
+  const ctx = { mode: 'print', sessionManager: {
+    getEntries: () => [...raw.entries, tail], getLeafId: () => head,
+    getEntry: id => byId.get(id), getHeader: () => raw.session, getSessionFile: () => '/session.jsonl',
+  } }
+  const append = () => {
+    /** @type {any} */
+    const entry = { type: 'message', id: `live-${raw.entries.length}`, timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, raw.entries.length)).toISOString(), message: { role: 'user', content: 'text' } }
+    if (head) entry.parentId = head
+    raw.entries.push(entry)
+    byId.set(entry.id, entry)
+    head = entry.id
+  }
+  try {
+    for (let i = 0; i < 4; i++) append()
+    extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
+    hooks.get('session_start')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    await hooks.get('session_shutdown')({}, ctx)
+    const delivered = sent.flatMap(batch => batch.entries.map(entry => entry?.id))
+    const counted = ['live-0', 'live-1', 'live-2', 'live-3']
+    assert.deepEqual(delivered.filter(id => counted.includes(id)), [], `counted prefix re-appended: ${delivered.join(',')}`)
+    const ids = delivered.filter(id => typeof id === 'string')
+    assert.equal(new Set(ids).size, ids.length)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+  // The same tail as a hole in the array is not an error the hook may throw
+  // into Pi: a snapshot it cannot check out reconciles on the next walk.
+  try {
+    tail = null
+    const restart = new Map()
+    extension({ on(name, fn) { restart.set(name, fn) }, registerCommand() {} })
+    restart.get('session_start')({}, ctx)
   } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
 })
 
