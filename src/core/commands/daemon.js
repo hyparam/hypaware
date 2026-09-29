@@ -237,9 +237,9 @@ export async function runDaemonStatus(argv, ctx) {
  * performs on a confirmed exit, for the stop that goes through the service
  * manager instead of the control channel.
  *
- * Best-effort, because the stop it follows already happened: a pid file this
- * cannot read or unlink is `hyp daemon status`'s to report, not a reason to
- * call a completed stop a failure.
+ * Best-effort through the module load too, because the stop it follows already
+ * happened: a pid file this cannot read or unlink is `hyp daemon status`'s to
+ * report, and nothing in here is a reason to call a completed stop a failure.
  *
  * @param {string} stateRoot
  */
@@ -248,7 +248,7 @@ async function clearStaleDaemonPidFile(stateRoot) {
     const { readPidFile, clearPidFile, processIsAlive } = await import('../daemon/pid.js')
     const entry = readPidFile(stateRoot)
     if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
-  } catch { /* an unreadable or undeletable pid file outlives this stop */ }
+  } catch { /* an unreadable pid file, or an unloadable pid module, outlives this stop */ }
 }
 
 /**
