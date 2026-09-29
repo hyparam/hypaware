@@ -212,6 +212,75 @@ test('the shared deadline rejects a read at thirty seconds before starting anoth
   assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 1)
 })
 
+/**
+ * Serve every dataset through `wrap(source)`, so a test can control what a
+ * read does inside the engine without restating the registry.
+ * @param {any} fixture @param {any} t @param {(source: any) => any} wrap
+ */
+function wrapSources(fixture, t, wrap) {
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    const dataset = get(name)
+    return { ...dataset, createDataSource: async (...args) => wrap(await dataset.createDataSource(...args)) }
+  })
+}
+
+test('the budget signal firing inside a blocked read refuses with the same guidance', async t => {
+  // Arm this traversal's own signal in milliseconds rather than thirty
+  // seconds. Date.now is untouched, so the wall-clock branch cannot fire and
+  // the assertion sees a real timer aborting a read still in flight.
+  const arm = AbortSignal.timeout.bind(AbortSignal)
+  t.mock.method(AbortSignal, 'timeout', ms => arm(ms === 30_000 ? 20 : ms))
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: options => {
+    const handle = source.scan(options)
+    return { ...handle, async *rows() {
+      for await (const row of handle.rows()) {
+        await new Promise(resolve => setTimeout(resolve, 40))
+        yield row
+      }
+    } }
+  } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1', depth: 3 }), /thirty-second time budget/)
+})
+
+test('a source throwing its own abort on a blocked read refuses with the same guidance', async t => {
+  // icebird and the parquet source throw a fresh AbortError of their own when
+  // a row-group read finds the signal down, rather than relaying its reason,
+  // so demanding the reason's own object would leave the real graph datasets
+  // reporting a bare 'Aborted' - the symptom, on the path that has it.
+  const own = new AbortController()
+  t.mock.method(AbortSignal, 'timeout', () => own.signal)
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => {
+    own.abort()
+    throw new DOMException('Aborted', 'AbortError')
+  } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), /thirty-second time budget/)
+})
+
+test('an unrelated abort is not relabelled as the traversal time budget', async t => {
+  // The shared query path relays whatever reason aborted it, and another
+  // caller's timeout carries the same name and text as this traversal's. This
+  // traversal's own signal is untouched, so nothing here is out of time.
+  const foreign = new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => { throw foreign } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => err === foreign)
+})
+
+test('a read failing for its own reason while out of time keeps its own error', async t => {
+  // Being out of time is not a licence to relabel: only an abort-shaped
+  // failure is the budget expiring. A heap-budget trip arrives as
+  // QueryExecutionBudgetError and a bad read as itself, and both stay so.
+  const own = new AbortController()
+  const broken = new Error('parquet footer is unreadable')
+  t.mock.method(AbortSignal, 'timeout', () => own.signal)
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => { own.abort(); throw broken } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => err === broken)
+})
+
 test('large labels are subject to the cumulative payload budget', async () => {
   // A repeated string stays cheap to allocate in the fixture but represents
   // a large decoded payload; one cell cannot evade a row-count-only guard.
