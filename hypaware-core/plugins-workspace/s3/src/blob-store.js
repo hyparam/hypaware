@@ -20,7 +20,7 @@ export const BLOB_STORE_KIND = 's3'
  * The 416 unsatisfiable form states no offsets, so it does not qualify.
  * Anything else cannot be checked against what was asked for.
  */
-const RANGED_RESPONSE = /^bytes \d+-\d+\/(?:\d+|\*)$/
+const RANGED_RESPONSE = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/
 
 /**
  * Construct an S3-backed `BlobStore`. The factory is injectable so the
@@ -140,22 +140,37 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       // Passing a whole object back as though it were the requested slice
       // would hand a Parquet reader the wrong bytes at the right offsets,
       // which reads as a decode error at best and as wrong query results at
-      // worst. A 206 must carry a well-formed Content-Range, so anything
-      // else means the range was not honored and the only safe answer is to
-      // fail. Presence alone is not enough: a header the consumer cannot
-      // parse leaves it unable to run the offset check the contract assigns
-      // it, and a whole object forwarded under a junk header corrupts just
-      // as silently as one forwarded under no header at all.
-      // @ref LLP 0452#range-contract [implements]: a ranged read never degrades to a whole object
-      if (input.range !== undefined && !RANGED_RESPONSE.test(contentRange ?? '')) {
-        const body = /** @type {{ destroy?: () => void }} */ (result.Body)
-        if (typeof body.destroy === 'function') body.destroy()
-        const detail = contentRange === undefined
-          ? 'response carried no Content-Range'
-          : `response carried an unusable Content-Range '${contentRange}'`
-        throw tagS3Error(undefined, 'blob_range_not_honored',
-          `s3 blob-store: byte range '${input.range}' was not honored for '${input.key}' (${detail})`,
-          input.key)
+      // worst. So a ranged read accepts only a response that states the
+      // slice it delivered: a well-formed Content-Range whose span agrees
+      // with ContentLength. Presence alone is not enough, on either half. A
+      // header the consumer cannot parse leaves it unable to run the offset
+      // check the contract assigns it, and a header contradicted by the
+      // declared body length is not describing this body at all. Checking
+      // that those offsets are the ones asked for stays with the consumer,
+      // which is why this rejects a response that describes no slice rather
+      // than one that describes the wrong slice.
+      // @ref LLP 0452#range-contract [implements]: a response that does not state the slice it delivered is rejected, never passed off as one
+      if (input.range !== undefined) {
+        const stated = contentRange === undefined ? null : RANGED_RESPONSE.exec(contentRange)
+        const span = stated === null ? undefined : Number(stated[2]) - Number(stated[1]) + 1
+        /** @type {string | undefined} */
+        let detail
+        if (contentRange === undefined) {
+          detail = 'response carried no Content-Range'
+        } else if (stated === null) {
+          detail = `response carried an unusable Content-Range '${contentRange}'`
+        } else if (!(/** @type {number} */ (span) >= 1)) {
+          detail = `response carried a reversed Content-Range '${contentRange}'`
+        } else if (typeof result.ContentLength === 'number' && result.ContentLength !== span) {
+          detail = `response declared ContentLength ${result.ContentLength} against Content-Range '${contentRange}'`
+        }
+        if (detail !== undefined) {
+          const body = /** @type {{ destroy?: () => void }} */ (result.Body)
+          if (typeof body.destroy === 'function') body.destroy()
+          throw tagS3Error(undefined, 'blob_range_not_honored',
+            `s3 blob-store: byte range '${input.range}' was not honored for '${input.key}' (${detail})`,
+            input.key)
+        }
       }
       return {
         body: toReadable(result.Body),
