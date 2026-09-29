@@ -770,8 +770,9 @@ test('a service stop leaves a live processing pid file byte-identical', async (t
 /**
  * Run `fn` with `process.kill` raising `code` for `pid`, so the branch under
  * test is reached whatever this host's process table happens to look like.
- * Restored synchronously rather than in a `t.after`, because the spawned
- * children in this file signal through the real one.
+ * Restored in a `finally` rather than in a `t.after`, because the stubbed
+ * region is synchronous: the real `process.kill` is back before any other
+ * test or hook can observe it.
  *
  * @param {number} pid
  * @param {string} code
