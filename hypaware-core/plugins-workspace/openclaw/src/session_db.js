@@ -14,15 +14,21 @@ export const OPENCLAW_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
 const EVENT_MAX_BYTES = 4 * 1024 * 1024
 const PAGE_SIZE = 128
 
-/** A storage failure is never evidence of an empty or policy-safe session. */
+/**
+ * A storage failure is never evidence of an empty or policy-safe session.
+ *
+ * `bytes` is what the read had already pulled out of SQLite before it failed,
+ * so a caller metering its reads charges a failure the transfer it cost.
+ */
 export class OpenclawStorageError extends Error {
-  /** @param {string} code */
-  constructor(code) {
+  /** @param {string} code @param {number} [bytes] */
+  constructor(code, bytes = 0) {
     super(code === 'zstd_unavailable_upgrade_node'
       ? 'OpenClaw compressed transcripts require a Node runtime with built-in zstd support; upgrade the HypAware daemon runtime'
       : `OpenClaw transcript storage unavailable (${code}); recovery will retry`)
     this.name = 'OpenclawStorageError'
     this.code = code
+    this.bytes = bytes
   }
 }
 
@@ -235,11 +241,17 @@ export async function readSqliteSession(source, opts = {}) {
     const rows = db.prepare(`SELECT ${selected} FROM transcript_events WHERE session_id = ? ORDER BY seq`).iterate(source.sessionId ?? '')
     const out = []
     let bytes = 0
-    for (const row of rows) {
-      const text = eventText(row, maxBytes - bytes)
-      bytes += Buffer.byteLength(text)
-      if (out.length >= 100000) throw new OpenclawStorageError('transcript_limit')
-      out.push(text)
+    try {
+      for (const row of rows) {
+        const text = eventText(row, maxBytes - bytes)
+        bytes += Buffer.byteLength(text)
+        if (out.length >= 100000) throw new OpenclawStorageError('transcript_limit')
+        out.push(text)
+      }
+    } catch (error) {
+      // The events before the failing one were transferred all the same.
+      if (error instanceof OpenclawStorageError) error.bytes = bytes
+      throw error
     }
     return out
   })
