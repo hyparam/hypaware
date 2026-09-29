@@ -11,6 +11,7 @@ import {
   CAPTURE_GAP_WARNING_MS,
   assessCaptureHealth,
   collectHypAwareStatus,
+  confirmClientActivityFromDescriptor,
   formatGapDuration,
   probeClientActivityFromDescriptor,
   writeStatusFile,
@@ -54,10 +55,32 @@ async function makeHome() {
 }
 
 /**
+ * One conversation record: the shape that establishes a turn telemetry
+ * should have carried.
+ *
+ * @param {Date | string} at
+ * @param {string} [uuid]
+ */
+function assistantRecord(at, uuid = "a1") {
+  return {
+    type: "assistant",
+    sessionId: "sess",
+    uuid,
+    message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+    timestamp: typeof at === "string" ? at : at.toISOString(),
+  }
+}
+
+/**
  * A fake $HOME whose `.claude/settings.json` carries an attach marker, and
  * whose `.claude/projects` tree holds one transcript with a chosen mtime.
  *
- * @param {{ mode?: string, attachedAt?: string, transcriptMtime?: Date }} [opts]
+ * `transcriptLines` overrides the file body, which defaults to a single
+ * conversation record stamped at `transcriptMtime`: the mtime alone no
+ * longer establishes activity, so a transcript that is supposed to read as
+ * active has to say so in its own records.
+ *
+ * @param {{ mode?: string, attachedAt?: string, transcriptMtime?: Date, transcriptLines?: unknown[] }} [opts]
  */
 async function makeClientHome(opts = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-capture-home-'))
@@ -78,7 +101,8 @@ async function makeClientHome(opts = {}) {
     const dir = path.join(home, '.claude', 'projects', '-Users-t-proj')
     await fs.mkdir(dir, { recursive: true })
     const file = path.join(dir, 'aaaa-session.jsonl')
-    await fs.writeFile(file, '{}\n')
+    const lines = opts.transcriptLines ?? [assistantRecord(opts.transcriptMtime)]
+    await fs.writeFile(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
     await fs.utimes(file, opts.transcriptMtime, opts.transcriptMtime)
   }
   return home
@@ -569,6 +593,361 @@ test('a dead daemon makes no restart excuse: its listener start bounds nothing n
     assert.equal(report.captureHealth[0]?.state, 'gap')
     assert.equal(report.captureHealth[0]?.listenerStartedAt, null)
     assert.equal(report.diagnostics.find((d) => d.kind === 'capture_gap')?.severity, 'error')
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+/* ---------- confirmClientActivityFromDescriptor: mtime nominates, content decides ---------- */
+// Issue #2290: a transcript file is rewritten for reasons that produce no
+// conversation and so owe no telemetry, and every one of them moves the mtime.
+// The observed report had telemetry at 18:04:55, an informational
+// `/auto-mode-setup` record at 18:06:27, an mtime of 18:24:50, and a last real
+// assistant turn at 17:26:48 - a 20-minute "capture gap" over a conversation
+// that had been idle for an hour, with `hyp daemon restart` offered as the fix.
+// @ref LLP 0257#status-and-health [tests]:
+
+/** @param {string} home @param {unknown[]} lines @param {Date | string} mtime @param {string} [name] */
+async function writeTranscript(home, lines, mtime, name = 'aaaa-session.jsonl') {
+  const dir = path.join(home, '.claude', 'projects', '-Users-t-proj')
+  await fs.mkdir(dir, { recursive: true })
+  const file = path.join(dir, name)
+  const body = lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n')
+  await fs.writeFile(file, body + '\n')
+  const at = typeof mtime === 'string' ? new Date(mtime) : mtime
+  await fs.utimes(file, at, at)
+  return file
+}
+
+const CONFIRM_DESCRIPTOR = /** @type {any} */ ({
+  plugin: '@hypaware/claude',
+  name: 'claude',
+  skillDir: '.claude/skills',
+  activityProbe: { dir: '.claude/projects', file_suffix: '.jsonl' },
+})
+
+/** @param {string} home @param {string | number} since */
+function confirmIn(home, since) {
+  return confirmClientActivityFromDescriptor({
+    descriptor: CONFIRM_DESCRIPTOR,
+    homeDir: home,
+    env: {},
+    sinceMs: typeof since === 'string' ? Date.parse(since) : since,
+  })
+}
+
+/** @returns {Promise<string>} */
+function makeProbeHome() {
+  return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-confirm-activity-'))
+}
+
+test('metadata, local commands, and informational records do not establish activity', async () => {
+  const home = await makeProbeHome()
+  try {
+    const lastAssistant = '2026-09-29T17:26:48.756Z'
+    await writeTranscript(home, [
+      assistantRecord(lastAssistant),
+      // The record from the report: a local slash command's own output.
+      {
+        type: 'system',
+        subtype: 'local_command',
+        level: 'info',
+        isMeta: false,
+        sessionId: 'sess',
+        uuid: 'c1',
+        content: '<local-command-stdout>auto-mode-setup: ready</local-command-stdout>',
+        timestamp: '2026-09-29T18:06:27.075Z',
+      },
+      // An expanded skill body injected into the context, not something said.
+      {
+        type: 'user',
+        isMeta: true,
+        sessionId: 'sess',
+        uuid: 'm1',
+        message: { role: 'user', content: [{ type: 'text', text: '# /loop' }] },
+        timestamp: '2026-09-29T18:06:28.000Z',
+      },
+      { type: 'attachment', sessionId: 'sess', uuid: 'x1', attachment: { type: 'model' }, timestamp: '2026-09-29T18:06:29.000Z' },
+      { type: 'file-history-snapshot', sessionId: 'sess', uuid: 'f1', timestamp: '2026-09-29T18:06:30.000Z' },
+      { type: 'queue-operation', sessionId: 'sess', uuid: 'q1', timestamp: '2026-09-29T18:06:31.000Z' },
+    ], '2026-09-29T18:24:50.310Z')
+
+    const confirmed = await confirmIn(home, '2026-09-29T18:04:55.122Z')
+    assert.deepEqual(confirmed, { activityAt: lastAssistant, certain: true })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a touched but otherwise unchanged transcript confirms only the turn it holds', async () => {
+  const home = await makeProbeHome()
+  try {
+    const lastAssistant = '2026-09-29T17:26:48.756Z'
+    await writeTranscript(home, [assistantRecord(lastAssistant)], '2026-09-29T18:24:50.310Z')
+    const confirmed = await confirmIn(home, '2026-09-29T18:04:55.122Z')
+    assert.equal(confirmed.activityAt, lastAssistant)
+    assert.equal(confirmed.certain, true)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('the newest conversation record wins across files, and older files are not opened', async () => {
+  const home = await makeProbeHome()
+  try {
+    const since = '2026-09-29T18:00:00.000Z'
+    await writeTranscript(home, [assistantRecord('2026-09-29T18:10:00.000Z', 'a-old')], '2026-09-29T18:11:00.000Z', 'old.jsonl')
+    await writeTranscript(home, [assistantRecord('2026-09-29T18:30:00.000Z', 'a-new')], '2026-09-29T18:31:00.000Z', 'new.jsonl')
+    // Predates the baseline, so it cannot hold a record that matters and is
+    // never opened - a file whose content would otherwise win.
+    await writeTranscript(home, [assistantRecord('2026-09-29T19:00:00.000Z', 'a-stale')], '2026-09-29T17:00:00.000Z', 'stale.jsonl')
+    const confirmed = await confirmIn(home, since)
+    assert.deepEqual(confirmed, { activityAt: '2026-09-29T18:30:00.000Z', certain: true })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('malformed, truncated, and timestamp-less lines are skipped, not fatal', async () => {
+  const home = await makeProbeHome()
+  try {
+    const lastAssistant = '2026-09-29T17:26:48.756Z'
+    await writeTranscript(home, [
+      assistantRecord(lastAssistant),
+      'not json at all',
+      '{"type":"assistant","timestamp":"2026-09-29T18:10:00.000Z","message":{"role":"assis',
+      { type: 'assistant', sessionId: 'sess', uuid: 'n1', message: { role: 'assistant' } },
+      { type: 'user', sessionId: 'sess', uuid: 'n2', timestamp: 'not a date' },
+      '',
+    ], '2026-09-29T18:24:50.310Z')
+    const confirmed = await confirmIn(home, '2026-09-29T18:04:55.122Z')
+    assert.deepEqual(confirmed, { activityAt: lastAssistant, certain: true })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a tail that runs out of budget before the baseline answers uncertain, not healthy', async () => {
+  const home = await makeProbeHome()
+  try {
+    const since = '2026-09-29T18:00:00.000Z'
+    /** @type {unknown[]} */
+    const lines = [assistantRecord('2026-09-29T17:00:00.000Z')]
+    // Past 64 KiB of post-baseline metadata the read can no longer see back to
+    // the baseline, so whether a turn sits below the window is unknown.
+    for (let i = 0; i < 400; i++) {
+      lines.push({
+        type: 'system',
+        subtype: 'local_command',
+        sessionId: 'sess',
+        uuid: `p${i}`,
+        content: 'x'.repeat(400),
+        timestamp: new Date(Date.parse(since) + 60_000 + i).toISOString(),
+      })
+    }
+    await writeTranscript(home, lines, '2026-09-29T18:30:00.000Z')
+    const confirmed = await confirmIn(home, since)
+    assert.equal(confirmed.activityAt, undefined)
+    assert.equal(confirmed.certain, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a timestamp-less oversized tail is uncertain, and a timestamp-less small one is not', async () => {
+  const big = await makeProbeHome()
+  const small = await makeProbeHome()
+  try {
+    /** @type {unknown[]} */
+    const lines = []
+    for (let i = 0; i < 400; i++) lines.push({ type: 'mode', sessionId: 'sess', uuid: `p${i}`, note: 'y'.repeat(400) })
+    await writeTranscript(big, lines, '2026-09-29T18:30:00.000Z')
+    assert.deepEqual(await confirmIn(big, '2026-09-29T18:00:00.000Z'), { certain: false })
+
+    await writeTranscript(small, [{ type: 'mode', sessionId: 'sess', uuid: 'p0' }], '2026-09-29T18:30:00.000Z')
+    assert.deepEqual(await confirmIn(small, '2026-09-29T18:00:00.000Z'), { certain: true })
+  } finally {
+    await fs.rm(big, { recursive: true, force: true })
+    await fs.rm(small, { recursive: true, force: true })
+  }
+})
+
+test('more candidate files than the read budget answers uncertain', async () => {
+  const home = await makeProbeHome()
+  try {
+    const since = Date.parse('2026-09-29T18:00:00.000Z')
+    for (let i = 0; i < 20; i++) {
+      await writeTranscript(
+        home,
+        [{ type: 'attachment', sessionId: 'sess', uuid: `x${i}`, timestamp: new Date(since + 60_000 + i * 1000).toISOString() }],
+        new Date(since + 120_000 + i * 1000),
+        `s${i}.jsonl`
+      )
+    }
+    const confirmed = await confirmIn(home, since)
+    assert.equal(confirmed.activityAt, undefined)
+    assert.equal(confirmed.certain, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('an unreadable tree and a missing probe both answer uncertain, never healthy', async () => {
+  const home = await makeProbeHome()
+  try {
+    assert.deepEqual(await confirmIn(home, Date.now()), { certain: true })
+    const base = /** @type {any} */ ({ plugin: '@hypaware/claude', name: 'claude', skillDir: '.claude/skills' })
+    assert.deepEqual(
+      await confirmClientActivityFromDescriptor({ descriptor: base, homeDir: home, env: {}, sinceMs: 0 }),
+      { certain: false }
+    )
+    assert.deepEqual(
+      await confirmClientActivityFromDescriptor({
+        descriptor: { ...base, activityProbe: { dir: '../outside' } },
+        homeDir: home,
+        env: {},
+        sinceMs: 0,
+      }),
+      { certain: false }
+    )
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/* ---------- collect + render: the false warning, end to end ---------- */
+
+test('a metadata-only write after an idle conversation raises no capture gap', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const lastEventAt = new Date(now - 21 * MIN)
+  const lastAssistant = new Date(now - 80 * MIN)
+  const home = await makeClientHome({
+    mode: 'otel',
+    attachedAt: new Date(now - 24 * HOUR).toISOString(),
+    // The mtime is a minute old and twenty minutes past the last event: the
+    // filesystem pass suspects a gap.
+    transcriptMtime: new Date(now - 1 * MIN),
+    transcriptLines: [
+      assistantRecord(lastAssistant),
+      {
+        type: 'system',
+        subtype: 'local_command',
+        level: 'info',
+        sessionId: 'sess',
+        uuid: 'c1',
+        content: '<local-command-stdout>auto-mode-setup: ready</local-command-stdout>',
+        timestamp: new Date(now - 19 * MIN).toISOString(),
+      },
+    ],
+  })
+  try {
+    writeDaemonStatus(stateRoot, lastEventAt.toISOString())
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    const health = report.captureHealth[0]
+    assert.equal(health?.state, 'ok')
+    assert.equal(health?.gapMs, 0)
+    // The line quotes the turn it confirmed, not the write that moved the mtime.
+    assert.equal(health?.lastTranscriptActivityAt, lastAssistant.toISOString())
+    assert.equal(report.diagnostics.some((d) => d.kind === 'capture_gap'), false)
+    assert.equal(report.overall, 'healthy')
+
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    assert.doesNotMatch(stdout.text(), /\[capture gap\]/)
+    assert.doesNotMatch(stdout.text(), /\[capture unconfirmed\]/)
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+test('a healthy install is judged on the mtime alone: no transcript is opened', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const mtime = new Date(now - 1 * MIN)
+  const home = await makeClientHome({
+    mode: 'otel',
+    attachedAt: new Date(now - 6 * HOUR).toISOString(),
+    transcriptMtime: mtime,
+    // Content that would change the answer if it were read.
+    transcriptLines: [assistantRecord(new Date(now - 10 * HOUR))],
+  })
+  try {
+    writeDaemonStatus(stateRoot, new Date(now - 2 * MIN).toISOString())
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    assert.equal(report.captureHealth[0]?.state, 'ok')
+    assert.equal(report.captureHealth[0]?.lastTranscriptActivityAt?.slice(0, 19), mtime.toISOString().slice(0, 19))
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+test('a confirmed turn past the threshold still warns, and still escalates', async () => {
+  for (const [sinceEvent, severity, overall] of /** @type {[number, string, string][]} */ ([
+    [40 * MIN, 'warning', 'healthy'],
+    [5 * HOUR, 'error', 'degraded'],
+  ])) {
+    const { hypHome, stateRoot } = await makeHome()
+    const now = Date.now()
+    const home = await makeClientHome({
+      mode: 'otel',
+      attachedAt: new Date(now - 24 * HOUR).toISOString(),
+      transcriptMtime: new Date(now - 1 * MIN),
+      transcriptLines: [
+        assistantRecord(new Date(now - 2 * MIN)),
+        { type: 'attachment', sessionId: 'sess', uuid: 'x1', attachment: { type: 'model' }, timestamp: new Date(now - 1 * MIN).toISOString() },
+      ],
+    })
+    try {
+      writeDaemonStatus(stateRoot, new Date(now - sinceEvent).toISOString())
+      const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+      assert.equal(report.captureHealth[0]?.state, 'gap')
+      assert.equal(report.diagnostics.find((d) => d.kind === 'capture_gap')?.severity, severity)
+      assert.equal(report.overall, overall)
+    } finally {
+      await cleanup(hypHome, home)
+    }
+  }
+})
+
+test('an unconfirmable suspicion reports unknown: no gap claimed, no health claimed', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const lastEventAt = new Date(now - 5 * HOUR)
+  /** @type {unknown[]} */
+  const lines = [assistantRecord(new Date(now - 6 * HOUR))]
+  for (let i = 0; i < 400; i++) {
+    lines.push({
+      type: 'system',
+      subtype: 'local_command',
+      sessionId: 'sess',
+      uuid: `p${i}`,
+      content: 'x'.repeat(400),
+      timestamp: new Date(lastEventAt.getTime() + 60_000 + i).toISOString(),
+    })
+  }
+  const home = await makeClientHome({
+    mode: 'otel',
+    attachedAt: new Date(now - 24 * HOUR).toISOString(),
+    transcriptMtime: new Date(now - 1 * MIN),
+    transcriptLines: lines,
+  })
+  try {
+    writeDaemonStatus(stateRoot, lastEventAt.toISOString())
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    assert.equal(report.captureHealth[0]?.state, 'unknown')
+    // Neither half of the claim: no diagnostic accusing the capture path, and
+    // no `ok` certifying it.
+    assert.equal(report.diagnostics.some((d) => d.kind === 'capture_gap'), false)
+    assert.equal(report.overall, 'healthy')
+
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    assert.match(stdout.text(), /\[capture unconfirmed\]/)
+
+    const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
+    assert.equal(json.capture_health[0].state, 'unknown')
   } finally {
     await cleanup(hypHome, home)
   }
