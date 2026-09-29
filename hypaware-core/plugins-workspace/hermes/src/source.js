@@ -49,6 +49,17 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000
 export const HERMES_PARTITION_SEGMENT = 'hermes'
 
 /**
+ * How many reconciled sessions a poll tick accumulates before flushing the
+ * watermark sidecar. Each flush rewrites the whole map, so it costs
+ * O(tracked sessions) whatever it carries: 0.63ms at 1000 sessions, 2.6ms at
+ * 5000. Flushing per session would make the passes that touch every session
+ * (a first tick, a lost sidecar, the LLP 0449 fingerprint upgrade) quadratic,
+ * 13s of blocking writes at 5000; batching holds that to 0.21s and still
+ * bounds a crash to re-scanning under 64 already-converged sessions.
+ */
+export const WATERMARK_FLUSH_SESSIONS = 64
+
+/**
  * Mutable poll-tick state for one `startHermesSource` lifetime. Exported
  * (via {@link createHermesPollRunner}) and threaded explicitly through
  * {@link runHermesPollTick} rather than closed over privately, so tests can
@@ -235,9 +246,10 @@ export function createHermesPollRunner(ctx) {
  * Run one poll tick against `runner`, mutating it in place: probe/open when
  * idle, list changed sessions against the persisted watermark, re-project
  * each changed session whole and write through the shared
- * `ai_gateway.projected_exchange` materializer, then persist the advanced
- * watermark. Never throws: a `state_db` read/open error degrades
- * `runner.lastError` + logs, matching LLP 0122#sqlite's "degrade status
+ * `ai_gateway.projected_exchange` materializer, persisting the advanced
+ * watermark every {@link WATERMARK_FLUSH_SESSIONS} sessions and again when
+ * the loop leaves, by either exit. Never throws: a `state_db` read/open
+ * error degrades `runner.lastError` + logs, matching LLP 0122#sqlite's "degrade status
  * rather than error the daemon" and spec R9's "idle cleanly, no error
  * noise" for the specific missing-file case.
  *
@@ -278,36 +290,66 @@ export async function runHermesPollTick(runner, ctx) {
         let rowsAppended = 0
         if (changed.length > 0) {
           const sessionsById = new Map(sessions.map((s) => [s.id, s]))
-          for (const change of changed) {
-            const session = sessionsById.get(change.session_id)
-            if (!session) continue
-            const messages = await db.listMessagesForSession(change.session_id)
-            // @ref LLP 0449#reconciliation [implements]: replace shifted parts
-            // and removed suffixes from a complete visible transcript.
-            const item = await projectHermesSession({
-              session,
-              messages,
-              sourcePath: runner.stateDbPath,
-              clientName: HERMES_CLIENT_NAME,
-              homeDir: runner.homeDir,
-              resolver: runner.resolver,
-              log: ctx.log,
-            })
-            if (item) {
-              rowsAppended += await writeProjectedItem(runner, ctx, item)
-            }
-            // Watermark advances whether or not the item produced rows
-            // (usage-policy drop, or nothing new to write): the session
-            // was still examined through to its current state, and not
-            // advancing would re-examine (and, for a drop, re-log) it
-            // every tick forever.
-            runner.watermark[String(change.session_id)] = {
-              max_message_id: change.max_message_id,
-              ended_at: change.ended_at,
-              fingerprint: change.fingerprint,
-            }
+          // @ref LLP 0449#detection [constrained-by]: a fingerprint is persisted
+          // only after its session reconciled, so a flush inside the loop can
+          // never make a restart skip work that did not finish.
+          let pendingMarks = 0
+          let sessionsPersisted = 0
+          let failingSessionId = changed[0].session_id
+          const flushMarks = () => {
+            if (pendingMarks === 0) return
+            writeHermesWatermark(runner.stateDir, runner.watermark)
+            sessionsPersisted += pendingMarks
+            pendingMarks = 0
           }
-          writeHermesWatermark(runner.stateDir, runner.watermark)
+          try {
+            for (const change of changed) {
+              failingSessionId = change.session_id
+              const session = sessionsById.get(change.session_id)
+              if (!session) continue
+              const messages = await db.listMessagesForSession(change.session_id)
+              // @ref LLP 0449#reconciliation [implements]: replace shifted parts
+              // and removed suffixes from a complete visible transcript.
+              const item = await projectHermesSession({
+                session,
+                messages,
+                sourcePath: runner.stateDbPath,
+                clientName: HERMES_CLIENT_NAME,
+                homeDir: runner.homeDir,
+                resolver: runner.resolver,
+                log: ctx.log,
+              })
+              if (item) {
+                rowsAppended += await writeProjectedItem(runner, ctx, item)
+              }
+              // Watermark advances whether or not the item produced rows
+              // (usage-policy drop, or nothing new to write): the session
+              // was still examined through to its current state, and not
+              // advancing would re-examine (and, for a drop, re-log) it
+              // every tick forever.
+              runner.watermark[String(change.session_id)] = {
+                max_message_id: change.max_message_id,
+                ended_at: change.ended_at,
+                fingerprint: change.fingerprint,
+              }
+              if (++pendingMarks >= WATERMARK_FLUSH_SESSIONS) flushMarks()
+            }
+          } catch (err) {
+            // The sessions before this one reconciled fully; dropping their
+            // fingerprints would make the next start repeat all of them.
+            flushMarks()
+            ctx.log.warn('hermes.session_reconcile_failed', {
+              component: 'hermes',
+              operation: 'hermes.poll',
+              status: 'partial',
+              error_kind: errorKind(err),
+              session_id: String(failingSessionId),
+              sessions_persisted: sessionsPersisted,
+              sessions_examined: changed.length,
+            })
+            throw err
+          }
+          flushMarks()
         }
 
         runner.rowsWritten += rowsAppended
