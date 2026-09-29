@@ -534,18 +534,6 @@ async function runProvider(args) {
             markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`)
           }
         }
-
-        if (!dryRun) {
-          for (const dataset of datasetsTouched) {
-            await flushDataset({
-              dataset,
-              provider: provider.name,
-              devRunId,
-              ctx,
-              log,
-            })
-          }
-        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         markProviderFailed(result, message)
@@ -555,6 +543,43 @@ async function runProvider(args) {
           error_kind: 'provider_run_failed',
           error: message,
         })
+      }
+
+      // Outside the scan's try, so a provider that throws mid-stream still
+      // makes the rows it already appended queryable instead of leaving them
+      // invisible until some later natural flush. The provider is already
+      // marked failed, and `markProviderFailed` keeps the first error, so a
+      // throwing flush cannot mask the provider's.
+      //
+      // The guard is per dataset, not around the loop: a provider may touch
+      // several datasets, and aborting at the first failing one would strand
+      // the rest behind it in exactly the delayed-visibility state this flush
+      // exists to prevent.
+      // @ref LLP 0333#every-table-before-failure [constrained-by]: every
+      //   touched table gets its forced-flush attempt before the failure is
+      //   declared; strictness constrains the outcome, not the abort order
+      if (!dryRun) {
+        for (const dataset of datasetsTouched) {
+          try {
+            await flushDataset({
+              dataset,
+              provider: provider.name,
+              devRunId,
+              ctx,
+              log,
+            })
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            markProviderFailed(result, message)
+            log.error('backfill.flush_error', {
+              [Attr.COMPONENT]: 'backfill',
+              provider: provider.name,
+              [Attr.DATASET]: dataset,
+              error_kind: 'flush_failed',
+              error: message,
+            })
+          }
+        }
       }
 
       const finalStatus = result.status === 'ok' ? 'ok' : 'failed'
