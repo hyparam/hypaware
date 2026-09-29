@@ -781,8 +781,8 @@ test('runInitWizard: a back replaces a lane statement instead of stacking it', a
   assert.equal(result.exitCode, 0)
   const text = stdout.text()
   assert.doesNotMatch(text, /sync statement 1/, 'the statement from before the back is gone')
-  // One block, led by a blank line, lane order, no blank lines between.
-  assert.match(text, /(?:^|\n)\n✓ Recording Claude Code\n✓ sync statement 2\n✓ New folders sync automatically\n/)
+  // One block, lane order, no blank line above it or between its lines.
+  assert.match(text, /(?:^|[^\n]\n)✓ Recording Claude Code\n✓ sync statement 2\n✓ New folders sync automatically\n/)
   assert.equal(text.match(/✓ Recording Claude Code/g)?.length, 1)
 })
 
@@ -797,7 +797,7 @@ test('runInitWizard: a local run recaps that everything stays on this machine', 
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.equal(calls.includes('syncScope'), false)
-  assert.match(stdout.text(), /\n✓ Recording Claude Code\n✓ Everything stays on this machine\n/)
+  assert.match(stdout.text(), /(?:^|\n)✓ Recording Claude Code\n✓ Everything stays on this machine\n/)
 })
 
 // @ref LLP 0437#recap [tests]: the local line is a claim, so a carried off-machine sink withholds it
@@ -818,6 +818,6 @@ test('runInitWizard: a local run with an off-machine sink does not claim everyth
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
-  assert.match(stdout.text(), /\n✓ Recording Claude Code\n/)
+  assert.match(stdout.text(), /(?:^|\n)✓ Recording Claude Code\n/)
   assert.doesNotMatch(stdout.text(), /Everything stays on this machine/)
 })
