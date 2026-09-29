@@ -136,46 +136,51 @@ test('a bootstrap import failure reports its stack and cause, and still counts a
   assertOneFailedInvocation(outbox)
 })
 
-// Past the pipe buffer, a catch that returned without flushing cost the report
-// outright: the reader below saw the first pipeful and nothing after it.
-const PAD = 200000
+// Exercise both a child that can exit before the reader starts and one that
+// needs the reader to drain its output before the flush can finish.
+for (const PAD of [100000, 200000]) {
+  test(`a bootstrap import failure reaches a paused piped reader whole (${PAD} bytes of padding)`, async (t) => {
+    if (typeof nodeModule.registerHooks !== 'function') {
+      return t.skip('node:module registerHooks is unavailable on this runtime')
+    }
+    const { args, env, outbox } = await brokenBoot(t, PAD)
 
-test('a bootstrap import failure larger than the pipe buffer reaches a piped reader whole', async (t) => {
-  if (typeof nodeModule.registerHooks !== 'function') {
-    return t.skip('node:module registerHooks is unavailable on this runtime')
-  }
-  const { args, env, outbox } = await brokenBoot(t, PAD)
+    const child = spawn(process.execPath, args, {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe']
+    })
+    const chunks = []
+    // Node resumes unread child streams on exit, before an awaiting promise
+    // resumes. Install the collector now so that automatic drain cannot drop
+    // bytes, but pause it to preserve backpressure until the read point below.
+    child.stderr.on('data', (chunk) => chunks.push(chunk))
+    child.stderr.pause()
+    const exited = new Promise((resolve) => child.once('exit', resolve))
+    const closed = new Promise((resolve) => child.once('close', resolve))
+    // Nothing is read until the child exits, because a reader that keeps draining
+    // makes room in the pipe and hides the loss. An unflushed child exits in
+    // milliseconds; a flushing one waits for this reader, so the grace period is
+    // only there to keep that from deadlocking, and firing it early would read
+    // more rather than fail.
+    await Promise.race([exited, delay(1000, null, { ref: false })])
+    child.stderr.resume()
 
-  const child = spawn(process.execPath, args, {
-    env,
-    stdio: ['ignore', 'ignore', 'pipe']
+    // Bounded like the `spawnSync` above: the flush this test exercises is the
+    // one thing on the boot-failure path that can wait on a reader, and `npm
+    // test` passes no `--test-timeout`, so an unbounded wait here would wedge
+    // the whole suite instead of failing this test.
+    const code = await Promise.race([closed, delay(60000, 'timeout', { ref: false })])
+    if (code === 'timeout') child.kill('SIGKILL')
+    assert.equal(code, 1, 'the child did not exit 1 within 60s')
+    const report = Buffer.concat(chunks)
+    assert.ok(
+      report.length > PAD,
+      `stderr stopped at ${report.length} bytes of a report longer than ${PAD}`
+    )
+    // Truncation falls inside the padding, so the tail of the chain proves the
+    // whole report arrived, not only that the byte count grew.
+    assert.match(report.toString('utf8'), /\ncaused by: Error: injected root cause\n\s+at /)
+
+    assertOneFailedInvocation(outbox)
   })
-  const chunks = []
-  const exited = new Promise((resolve) => child.once('exit', resolve))
-  const closed = new Promise((resolve) => child.once('close', resolve))
-  // Nothing is read until the child exits, because a reader that keeps draining
-  // makes room in the pipe and hides the loss. An unflushed child exits in
-  // milliseconds; a flushing one waits for this reader, so the grace period is
-  // only there to keep that from deadlocking, and firing it early would read
-  // more rather than fail.
-  await Promise.race([exited, delay(1000, null, { ref: false })])
-  child.stderr.on('data', (chunk) => chunks.push(chunk))
-
-  // Bounded like the `spawnSync` above: the flush this test exercises is the
-  // one thing on the boot-failure path that can wait on a reader, and `npm
-  // test` passes no `--test-timeout`, so an unbounded wait here would wedge
-  // the whole suite instead of failing this test.
-  const code = await Promise.race([closed, delay(60000, 'timeout', { ref: false })])
-  if (code === 'timeout') child.kill('SIGKILL')
-  assert.equal(code, 1, 'the child did not exit 1 within 60s')
-  const report = Buffer.concat(chunks)
-  assert.ok(
-    report.length > PAD,
-    `stderr stopped at ${report.length} bytes of a report longer than ${PAD}`
-  )
-  // Truncation falls inside the padding, so the tail of the chain proves the
-  // whole report arrived, not only that the byte count grew.
-  assert.match(report.toString('utf8'), /\ncaused by: Error: injected root cause\n\s+at /)
-
-  assertOneFailedInvocation(outbox)
-})
+}
