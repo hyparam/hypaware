@@ -671,9 +671,11 @@ test('a service stop clears the pid file a hard-killed daemon left behind', asyn
 })
 
 // The property that makes the clear safe: the file goes only when the pid it
-// names is gone. A daemon still winding down inside the manager's grace owns
-// its pid file, and a stop that deleted it would blind every liveness check to
-// a process that is running.
+// names is gone. Both managers return from the stop with the process already
+// gone, so the live pid this keeps a file for is somebody else's: a foreground
+// `hyp daemon run` that claimed it while the unit sat in its restart gap, or
+// one the OS has reissued. A stop that deleted it would blind every liveness
+// check to a process that is running.
 test('a service stop leaves the pid file of a daemon that is still alive', async (t) => {
   const home = tmpHome('live-pid')
   try {
