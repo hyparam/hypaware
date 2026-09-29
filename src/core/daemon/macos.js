@@ -256,12 +256,12 @@ const SPAWN_POLL_INTERVAL_MS = 100
  * @param {LaunchctlAdapter} launchctl
  * @param {string} target
  * @param {(ms: number) => Promise<void>} sleep
- * @returns {Promise<void>}
+ * @returns {Promise<LaunchctlResult | undefined>}
  */
 async function waitUntilUnloaded(launchctl, target, sleep) {
   for (let i = 0; i < UNLOAD_POLL_ATTEMPTS; i += 1) {
     const res = await launchctl.print([target])
-    if (res.exitCode !== 0) return // launchd has released it
+    if (res.exitCode !== 0) return res // launchd has released it, or the probe failed
     await sleep(UNLOAD_POLL_INTERVAL_MS)
   }
 }
@@ -408,14 +408,39 @@ export async function uninstallLaunchAgent(options) {
 }
 
 /**
- * Kickstart the installed LaunchAgent so it begins running.
+ * Load an unloaded installation, then kickstart it so it begins running.
  *
- * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
+ * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, plistDir?: string }} options
  * @returns {Promise<void>}
  */
 export async function startLaunchAgent(options) {
-  const { launchctl, label, target } = resolveTarget(options)
+  const { launchctl, label, target, userDomain } = resolveTarget(options)
+  const status = await launchctl.print([target])
+  if (status.exitCode === 113) {
+    const plistPath = plistPathFor(options.plistDir ?? defaultPlistDir(options.homeDir), label)
+    ensure(await launchctl.bootstrap([userDomain, plistPath]), `bootstrap ${label}`)
+  } else {
+    ensure(status, `print ${label}`)
+  }
   ensure(await launchctl.kickstart([target]), `kickstart ${label}`)
+}
+
+/**
+ * Unload the service so KeepAlive cannot respawn it. Preserve the plist.
+ * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, sleep?: (ms: number) => Promise<void> }} options
+ * @returns {Promise<void>}
+ */
+export async function stopLaunchAgent(options) {
+  const { launchctl, label, target } = resolveTarget(options)
+  const status = await launchctl.print([target])
+  if (status.exitCode === 113) return
+  ensure(status, `print ${label}`)
+  ensure(await launchctl.bootout([target]), `bootout ${label}`)
+  const unloaded = await waitUntilUnloaded(launchctl, target, options.sleep ?? defaultSleep)
+  if (!unloaded) {
+    throw new LaunchAgentError(`bootout ${label}: service did not unload`)
+  }
+  if (unloaded.exitCode !== 113) ensure(unloaded, `print ${label}`)
 }
 
 /**
@@ -423,11 +448,14 @@ export async function startLaunchAgent(options) {
  * the running process is terminated and then re-started without
  * touching the loaded plist.
  *
- * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
+ * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, plistDir?: string }} options
  * @returns {Promise<void>}
  */
 export async function restartLaunchAgent(options) {
   const { launchctl, label, target } = resolveTarget(options)
+  const status = await launchctl.print([target])
+  if (status.exitCode === 113) return startLaunchAgent(options)
+  ensure(status, `print ${label}`)
   ensure(await launchctl.kickstart(['-k', target]), `kickstart -k ${label}`)
 }
 

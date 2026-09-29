@@ -359,6 +359,16 @@ export async function startSystemdUnit(options) {
 }
 
 /**
+ * Stop without disabling or removing the installed unit.
+ * @param {{ label?: string, systemctl?: SystemctlAdapter }} options
+ * @returns {Promise<void>}
+ */
+export async function stopSystemdUnit(options) {
+  const { systemctl, unitName } = resolveUnit(options)
+  ensure(await systemctl.stop(unitName), `stop ${unitName}`)
+}
+
+/**
  * Restart an installed systemd user unit.
  *
  * @param {{ label?: string, systemctl?: SystemctlAdapter }} options

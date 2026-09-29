@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { installLaunchAgent } from '../../src/core/daemon/macos.js'
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
+import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 
 // Regression for #1036: `hyp daemon install` over a running daemon booted the
 // old instance out, bootstrapped the label back in, and then trusted
@@ -123,6 +124,63 @@ function fakeSystemd(opts) {
 }
 
 const tmpHome = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), `hyp-${tag}-`))
+
+for (const platform of ['darwin', 'linux']) {
+  test(`${platform}: stop preserves the installation and start/restart brings it back`, async (t) => {
+    const home = tmpHome('service-stop')
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+    const launchctl = fakeLaunchd()
+    const systemctl = fakeSystemd()
+    const adapter = platform === 'darwin' ? launchctl : systemctl
+    const options = platform === 'darwin'
+      ? { ...darwinOpts(home, launchctl), platform: /** @type {const} */ ('darwin') }
+      : { ...linuxOpts(home, systemctl), platform: /** @type {const} */ ('linux') }
+    const plan = platform === 'darwin'
+      ? await installLaunchAgent(options)
+      : await installSystemdUnit(options)
+    const content = fs.readFileSync(plan.targetPath, 'utf8')
+    for (const resume of [startServiceDaemon, restartServiceDaemon]) {
+      adapter.calls.length = 0
+      await stopServiceDaemon(options)
+      await stopServiceDaemon(options)
+      const stopped = await serviceDaemonStatus(options)
+      assert.equal(stopped.installed, true)
+      assert.equal(stopped.pid, undefined)
+      assert.equal(fs.readFileSync(plan.targetPath, 'utf8'), content)
+      assert.equal(count(adapter.calls, 'disable'), 0)
+      assert.equal(count(adapter.calls, 'kickstart'), 0)
+      assert.equal(count(adapter.calls, 'start'), 0)
+      await resume(options)
+      assert.equal((await serviceDaemonStatus(options)).pid, RUNNING_PID)
+    }
+  })
+}
+
+test('service stop surfaces manager failures', async () => {
+  const failed = { exitCode: 5, stdout: '', stderr: 'permission denied' }
+  const launchctl = fakeLaunchd({ loadedAtStart: true })
+  launchctl.bootout = async () => failed
+  await assert.rejects(stopServiceDaemon({ platform: 'darwin', launchctl }), /permission denied/)
+  const systemctl = fakeSystemd()
+  systemctl.stop = async () => failed
+  await assert.rejects(stopServiceDaemon({ platform: 'linux', systemctl }), /permission denied/)
+})
+
+test('macOS stop waits for asynchronous unload and rejects a stuck service', async () => {
+  const launchctl = fakeLaunchd({ loadedAtStart: true })
+  const options = darwinOpts('/unused', launchctl)
+  const { stopLaunchAgent } = await import('../../src/core/daemon/macos.js')
+  launchctl.bootout = async () => OK
+  await assert.rejects(stopLaunchAgent(options), /service did not unload/)
+  assert.ok(count(launchctl.calls, 'print') < 100, 'unload polling is bounded')
+  const print = launchctl.print
+  let remaining = 2
+  launchctl.print = async (args) => --remaining > 0
+    ? print(args)
+    : { exitCode: 113, stdout: '', stderr: 'Could not find service' }
+  await stopLaunchAgent(options)
+})
+
 /** @param {string[][]} calls @param {string} verb */
 const count = (calls, verb) => calls.filter((c) => c[0] === verb).length
 /** @param {string[][]} calls @param {string} verb */

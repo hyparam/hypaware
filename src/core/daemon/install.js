@@ -258,6 +258,24 @@ export async function startServiceDaemon(options) {
 }
 
 /**
+ * Stop the installed service while preserving its installation.
+ * @param {DaemonServiceOptions} options
+ * @returns {Promise<void>}
+ */
+export async function stopServiceDaemon(options) {
+  const platform = options.platform ?? process.platform
+  if (!platformIsSupported(platform)) {
+    throw new DaemonInstallError(`unsupported platform: ${platform}`)
+  }
+  await withDaemonOp(
+    'stop',
+    platform,
+    options.label ?? defaultLabelFor(platform),
+    () => platform === 'darwin' ? macos.stopLaunchAgent(options) : linux.stopSystemdUnit(options),
+  )
+}
+
+/**
  * Restart the installed service.
  *
  * @param {DaemonServiceOptions} options

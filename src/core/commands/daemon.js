@@ -238,6 +238,20 @@ export async function runDaemonStatus(argv, ctx) {
 export async function runDaemonStop(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
   if (!parsed.ok) return parsed.code
+  const { serviceDaemonStatus, stopServiceDaemon } = await import('../daemon/install.js')
+  const options = { homeDir: ctx.env.HOME }
+  const status = await serviceDaemonStatus(options)
+  if (status.installed) {
+    try {
+      await stopServiceDaemon(options)
+      ctx.stdout.write('daemon: stopped\n')
+      return 0
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp daemon stop: ${message}\n`)
+      return 1
+    }
+  }
   const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   // The requester-side control-dir warnings (a chmod it could not apply)
