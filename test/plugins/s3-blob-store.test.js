@@ -208,11 +208,23 @@ test('s3 BlobStore rejects a Content-Range its own ContentLength contradicts', a
   // forwarding it is the same wrong-bytes-at-the-right-offsets corruption
   // as forwarding one with no header at all. Both values are already in
   // hand, so this costs a subtraction and never reads the body.
-  for (const [ContentRange, ContentLength, expected] of /** @type {Array<[string, number, RegExp]>} */ ([
+  // The seam is injectable and public, so ContentLength arrives in whatever
+  // shape the handle produced: a handle forwarding a raw content-length
+  // header hands over the string '16', not the number. A typeof test would
+  // skip this whole check for every such value and return the whole object
+  // as the slice, which is the corruption the check exists to stop.
+  for (const [ContentRange, ContentLength, expected] of /** @type {Array<[string, number, RegExp]>} */ (/** @type {unknown} */ ([
     ['bytes 2-4/16', 16, /ContentLength 16 against Content-Range/],
     ['bytes 2-4/16', 0, /ContentLength 0 against Content-Range/],
     ['bytes 4-2/16', 16, /reversed Content-Range/],
-  ])) {
+    // off-contract shapes the seam can still produce
+    ['bytes 2-4/16', '16', /ContentLength 16 against Content-Range/],
+    ['bytes 2-4/16', null, /ContentLength null against Content-Range/],
+    ['bytes 2-4/16', false, /ContentLength false against Content-Range/],
+    ['bytes 2-4/16', '', /ContentLength  against Content-Range/],
+    ['bytes 2-4/16', 'sixteen', /ContentLength sixteen against Content-Range/],
+    ['bytes 2-4/16', 16.5, /ContentLength 16.5 against Content-Range/],
+  ]))) {
     let destroyed = false
     const body = Readable.from([Buffer.from('0123456789ABCDEF')])
     body.destroy = () => { destroyed = true; return body }
@@ -345,6 +357,25 @@ test('s3 BlobStore leaves whole-object reads without a contentRange key', async 
   assert.ok(got)
   assert.equal('contentRange' in got, false)
   assert.deepEqual(client.calls.at(-1)?.input, { Bucket: 'bucket', Key: 'whole.bin' })
+})
+
+test('s3 BlobStore drops a contentRange volunteered on a whole-object read', async () => {
+  // The guard only runs for a ranged read, so a header a store volunteers on
+  // a read that asked for no range would reach the consumer unchecked. LLP
+  // 0452#range-contract makes an absent contentRange mean "whole object", so
+  // forwarding one here states the opposite of the truth.
+  for (const ContentRange of ['bytes 0-2/3', 'garbage', 'bytes 0-15/16']) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: Readable.from([Buffer.from('0123456789ABCDEF')]), ContentLength: 16, ContentRange, ETag: '"whole"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    const got = await store.getObject({ key: 'whole.bin' })
+    assert.ok(got)
+    assert.equal('contentRange' in got, false, `volunteered '${ContentRange}' must not reach a whole-object result`)
+  }
 })
 
 test('s3 BlobStore getObject returns null when AWS reports NotFound', async () => {

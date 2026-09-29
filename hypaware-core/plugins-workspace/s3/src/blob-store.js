@@ -198,6 +198,15 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       if (input.range !== undefined) {
         const stated = contentRange === undefined ? null : RANGED_RESPONSE.exec(contentRange)
         const span = stated === null ? undefined : Number(stated[2]) - Number(stated[1]) + 1
+        // ContentLength comes off the same injectable seam, where a handle
+        // forwarding a raw content-length header yields the string '16'
+        // rather than a number. A typeof test would skip the cross-check for
+        // every such value and hand the whole object back as the slice, so
+        // reduce anything the store did declare to one number, the way the
+        // sentinel above reduces ContentRange. Only an undeclared length
+        // skips the check; a value that will not coerce becomes NaN and
+        // fails closed.
+        const declared = result.ContentLength === undefined ? undefined : Number(result.ContentLength)
         /** @type {string | undefined} */
         let detail
         if (contentRange === undefined) {
@@ -206,7 +215,7 @@ export function createS3BlobStore({ bucket, prefix, client }) {
           detail = `response carried an unusable Content-Range '${contentRange}'`
         } else if (!(/** @type {number} */ (span) >= 1)) {
           detail = `response carried a reversed Content-Range '${contentRange}'`
-        } else if (typeof result.ContentLength === 'number' && result.ContentLength !== span) {
+        } else if (declared !== undefined && declared !== span) {
           detail = `response declared ContentLength ${result.ContentLength} against Content-Range '${contentRange}'`
         } else {
           const total = stated[3] === '*' ? undefined : Number(stated[3])
@@ -226,7 +235,12 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       return {
         body: toReadable(result.Body),
         contentLength: result.ContentLength,
-        ...(contentRange !== undefined ? { contentRange } : {}),
+        // Only a ranged read can carry a contentRange, and only one the
+        // guard above validated. LLP 0452#range-contract makes an absent
+        // contentRange mean "whole object", so forwarding a header a store
+        // volunteered on a read that asked for no range would tell the
+        // consumer the opposite of the truth, unchecked.
+        ...(input.range !== undefined && contentRange !== undefined ? { contentRange } : {}),
         etag: result.ETag,
       }
     },
