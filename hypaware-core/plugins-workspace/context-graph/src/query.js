@@ -79,11 +79,11 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
     }
     /** @type {LocalOnlyVisibilityReport} */
     const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
-    const outOfTime = () => new Error('graph traversal exceeded its thirty-second time budget')
+    const outOfTime = 'graph traversal exceeded its thirty-second time budget; reduce depth or narrow --edge-type'
     const checkTime = () => {
       // A warm in-memory source can keep the event loop busy beyond a timer's
       // deadline. Check elapsed time too, including while processing results.
-      if (visibility.signal.aborted || Date.now() >= deadline) throw outOfTime()
+      if (visibility.signal.aborted || Date.now() >= deadline) refuse(outOfTime)
     }
     // A walk is a point-in-time question, not a transaction (LLP 0431), and it
     // reads once per seed tier, per frontier batch and per output batch, so
@@ -238,7 +238,7 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       // a heap-budget trip arrives as QueryExecutionBudgetError, not as this.
       const abortShaped = err instanceof Error
         && (err.name === 'AbortError' || err.name === 'TimeoutError')
-      if (visibility.signal.aborted && abortShaped) throw outOfTime()
+      if (visibility.signal.aborted && abortShaped) return { ok: /** @type {const} */ (false), error: outOfTime, localOnly }
       throw err
     } finally {
       span.setAttribute('query_count', queries)
