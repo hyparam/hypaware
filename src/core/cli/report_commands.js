@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 
 import { askYesNo } from './confirm.js'
 import { parseCoreCommandArgv } from './command_args.js'
+import { Attr, markSpanStatus, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
 import {
@@ -135,6 +136,84 @@ export async function runReportRender(argv, ctx) {
     ctx.stderr.write(`hyp report render: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
+}
+
+/**
+ * @ref LLP 0450#launch [implements]: the skill owns analysis; the CLI starts a client in the caller's directory
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {Parameters<typeof runReportFix>[2]} [deps]
+ * @returns {Promise<number>}
+ */
+export async function runReportGenerate(argv, ctx, deps = {}) {
+  const gate = parseCoreCommandArgv('report generate', argv, ctx)
+  if (!gate.ok) return gate.code
+  return withSpan('report.generate', {
+    [Attr.COMPONENT]: 'reports',
+    [Attr.OPERATION]: 'report.generate',
+    status: 'error',
+  }, async (span) => {
+    const home = ctx.env.HOME || os.homedir()
+    const cwd = ctx.cwd
+    const clients = await askableClients(ctx, deps.collectStatus ? { collectStatus: deps.collectStatus } : {})
+    const descriptors = await buildWalkthroughClientDescriptorMap()
+    const candidates = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
+    const launchers = []
+    for (const launcher of candidates) {
+      const descriptor = descriptors.get(launcher.client)
+      if (!descriptor) continue
+      const skill = path.join(home, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
+      try {
+        await fs.access(skill)
+        launchers.push({ launcher, skill })
+      } catch {
+        // Only offer clients that can read the report workflow.
+      }
+    }
+    span.setAttribute('launcher_count', launchers.length)
+    if (launchers.length === 0) {
+      span.setAttribute('error_kind', 'no-launcher')
+      ctx.stderr.write('hyp report generate: no attached client with the hypaware-report skill can be started.\n')
+      ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
+      return 1
+    }
+    let chosen = launchers[0]
+    if (launchers.length > 1 && isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1') {
+      try {
+        const client = await (deps.select ?? select)({
+          box: true,
+          title: 'Which client should generate the report?',
+          options: launchers.map(({ launcher }) => ({ value: launcher.client, label: launcher.label })),
+          ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+          stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
+          env: ctx.env,
+        })
+        const picked = launchers.find(({ launcher }) => launcher.client === client)
+        if (!picked) throw new Error('client picker returned an unavailable client')
+        chosen = picked
+      } catch (err) {
+        if (!(err instanceof PromptCancelledError) && !isPromptBackError(err) && !(err instanceof Error && err.name === 'PromptCancelledError')) throw err
+        markSpanStatus(span, 'cancelled')
+        ctx.stdout.write('Nothing started.\n')
+        return 0
+      }
+    }
+    const instructions = String(gate.params.instructions ?? '')
+    const prompt = `Use the hypaware-report skill at ${JSON.stringify(chosen.skill)} to generate a report from this machine's local HypAware recordings. ` +
+      `Follow its analysis, review, and delivery workflow. Unless the user requests another destination, save the report in a new hypaware-report-<from>-to-<to> directory under ${JSON.stringify(cwd)}, using a numbered suffix if it already exists. ` +
+      'Use the skill\'s default reporting period unless the instructions below specify one.' +
+      (instructions ? `\n\nAdditional instructions from the user:\n${instructions}` : '')
+    span.setAttribute('client', chosen.launcher.client)
+    ctx.stdout.write(`\nStarting ${chosen.launcher.label} to generate a local report...\n\n`)
+    const result = await (deps.launchClient ?? launchClient)({ launcher: chosen.launcher, prompt, cwd, env: ctx.env })
+    if (!result.ok) {
+      span.setAttribute('error_kind', 'client-launch')
+      ctx.stderr.write(`hyp report generate: could not start ${chosen.launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
+      return 1
+    }
+    markSpanStatus(span, 'ok')
+    return 0
+  })
 }
 
 /**

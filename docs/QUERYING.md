@@ -164,6 +164,17 @@ intended `HYP_HOME`. MCP configuration file syntax belongs to your MCP client;
 
 ## Turn findings into a report
 
+Generate a report with an attached AI client in your current directory:
+
+```sh
+hyp report generate "Cover last week and focus on repeated debugging work"
+```
+
+The report skill writes `./hypaware-report-<from>-to-<to>/`, adding a numbered
+suffix if needed. It follows the current directory's recording and sync policy.
+Publishing remains a separate action, using `hyp report publish <folder> ...`.
+
+
 The report renderer builds HTML from a local Markdown report tree. For a small
 report, create `./usage-reports/weekly-usage.md` with your findings, query scope,
 and tables, then run:

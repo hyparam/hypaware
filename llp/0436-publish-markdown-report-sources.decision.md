@@ -7,6 +7,8 @@
 **Date:** 2026-09-24
 **Related:** LLP 0155, LLP 0107, LLP 0196, LLP 0216 (the removal this reverses)
 
+**Extended-by:** LLP 0450 (launch the local report skill in the caller's directory)
+
 ## Decision
 
 ### Sources {#sources}

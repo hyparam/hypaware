@@ -195,6 +195,14 @@ export const CORE_COMMAND_ARGS = {
       positional: ['name'],
     },
   },
+  'report generate': {
+    usage: 'hyp report generate [instructions]',
+    schema: {
+      type: 'object',
+      properties: { instructions: { type: 'string' } },
+      positional: ['instructions'],
+    },
+  },
   'report render': {
     usage: 'hyp report render [<dir>] [--no-refresh-assets]',
     schema: {

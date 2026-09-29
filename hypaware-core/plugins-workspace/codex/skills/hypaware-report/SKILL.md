@@ -104,8 +104,10 @@ data rather than treating old prose as new evidence.
 
 ## Write, review, deliver
 
-Write into a new `hypaware-report-<from>-to-<to>/` directory, or the user's
-requested destination. Do not overwrite an existing report without instruction.
+Write into a new `./hypaware-report-<from>-to-<to>/` directory under the
+current working directory, or the user's requested destination. If the default
+folder exists, append `-2`, `-3`, etc. Do not overwrite an existing report
+without instruction.
 Save section pages first, then the linked `report.md` brief. Follow the report
 contract for content, evidence, and Markdown replacements for server visuals.
 

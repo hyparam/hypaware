@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportFix, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportPublish, runReportRender } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -771,8 +771,10 @@ function buildCoreCommands(registry) {
       name: 'report',
       category: 'explore-share',
       audience: 'everyday',
-      summary: 'Render and manage reports',
+      summary: 'Generate, render, and manage reports',
       help:
+        "'generate' starts an attached AI client with the report skill in the\n" +
+        "current directory. Optional instructions set its period and focus.\n\n" +
         "'render' is a LOCAL build step: it turns a reports tree's Markdown into\n" +
         'a static HTML site and takes no --remote and no credential.\n' +
         '\n' +
@@ -783,6 +785,22 @@ function buildCoreCommands(registry) {
         'delete need the publisher role (or an operator-minted publish token\n' +
         "stored via 'hyp remote login <target> --token-file <path>').",
     }),
+    {
+      name: 'report generate',
+      summary: 'Start an attached AI client to generate a local report',
+      usage: coreUsage('report generate'),
+      help: [
+        'Starts an attached client with the hypaware-report skill in the current',
+        'working directory. Optional quoted instructions can specify',
+        'the reporting period and focus; the skill defaults to the previous',
+        'calendar month. Publishing requires an explicit request.',
+        'If multiple attached clients have the skill, asks which on a terminal;',
+        'otherwise uses the first available client. The client takes over the',
+        'terminal with its normal permissions and the current directory\'s',
+        'recording and sync policy. No remote login is required.',
+      ].join('\n'),
+      run: runReportGenerate,
+    },
     {
       // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
       name: 'report render',

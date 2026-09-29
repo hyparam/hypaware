@@ -9,6 +9,8 @@
 **Extended-by:** LLP 0408 (automatic organization reporting for enrolled SaaS users)
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
+**Extended-by:** LLP 0450 (adds report generate to the finite command vocabulary)
+
 ## Contract {#contract}
 
 This request adds a product reporting channel without changing operational OTEL

@@ -310,6 +310,26 @@ hyp report --help
 the default remote if `--remote` is omitted. Publishing and deletion require a
 write-capable credential.
 
+### `hyp report generate`
+
+```sh
+hyp report generate
+hyp report generate "Cover last week and focus on repeated debugging work"
+```
+
+Launches an attached AI client with its installed `hypaware-report` skill in
+the caller's current working directory. Optional quoted instructions set the
+period or focus; otherwise the skill uses the previous calendar month.
+Multiple eligible clients produce a picker on a terminal; noninteractive mode
+uses the first. The client keeps its normal permissions and recording policy.
+No remote login is required, and nothing is published unless requested.
+
+The skill writes `./hypaware-report-<from>-to-<to>/report.md` and linked pages,
+using `-2`, `-3`, etc. if the folder already exists, unless you request another
+destination. The command's exit status indicates whether the client launched,
+not whether report generation completed. `hyp report list` continues to list
+published reports only; use `hyp report publish <folder> ...` to share one.
+
 ### `hyp report render`
 
 ```text
