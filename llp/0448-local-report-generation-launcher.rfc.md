@@ -58,8 +58,8 @@ before. Local discovery is an addition to this listing, never a precondition
 for it: an unreadable reports root warns and lists the remote anyway, and one
 unreadable folder is skipped rather than aborting the scan; only `--local`,
 which has nothing else to answer with, takes that failure as its exit code. A
-remote row that is not an object is dropped where the page is parsed, so no
-consumer dereferences it.
+remote row that carries no fields (a null, a primitive, or an array) is
+dropped where the page is parsed, so no consumer dereferences it.
 
 After a successful publish of a managed folder (or its `report.md`), atomically
 save a small receipt outside the uploaded directory, in `reports/.publications/`.

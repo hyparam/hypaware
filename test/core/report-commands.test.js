@@ -689,12 +689,18 @@ test('a single unreadable report folder does not abort the local listing', async
   await fs.mkdir(blocked)
   await fs.writeFile(path.join(blocked, 'report.md'), '# blocked\n')
   await fs.chmod(blocked, 0o000)
-  stubServer(t, () => { throw new Error('local listing contacted remote') })
-  assert.equal(await runReportList(['--local', '--json'], ctx), 0)
-  const rows = JSON.parse(out.join(''))
-  const canonical = await fs.realpath(dir)
-  assert.ok(rows.some((/** @type {any} */ row) => row.path === canonical))
-  await fs.chmod(blocked, 0o700)
+  try {
+    stubServer(t, () => { throw new Error('local listing contacted remote') })
+    assert.equal(await runReportList(['--local', '--json'], ctx), 0)
+    const rows = JSON.parse(out.join(''))
+    const canonical = await fs.realpath(dir)
+    assert.ok(rows.some((/** @type {any} */ row) => row.path === canonical))
+  } finally {
+    // The fixture removes this tree, and rm cannot recurse into a 0o000
+    // directory while `force` swallows only ENOENT. An assertion that throws
+    // above must not turn one failure into a wedged cleanup.
+    await fs.chmod(blocked, 0o700)
+  }
 })
 
 test('--json keeps a remote failure exit code even when local rows are printed', async (t) => {
@@ -708,8 +714,11 @@ test('--json keeps a remote failure exit code even when local rows are printed',
 
 test('a malformed remote page is dropped, not dereferenced into a crash', async (t) => {
   const { ctx, out } = await localListFixture(t)
-  stubServer(t, () => ({ status: 200, json: { reports: [null, 'nope', { id: 'rpt', org: 'acme', kind: 'usage-review', period: '2026-08', bytes: 1, publishedAt: '2026-09-01T00:00:00.000Z' }] } }))
+  // An array is `typeof 'object'`, so it needs its own case: it crashes nothing
+  // but would print a row of `undefined`s if it reached the terminal loop.
+  stubServer(t, () => ({ status: 200, json: { reports: [null, 'nope', [1, 2, 3], { id: 'rpt', org: 'acme', kind: 'usage-review', period: '2026-08', bytes: 1, publishedAt: '2026-09-01T00:00:00.000Z' }] } }))
   assert.equal(await runReportList([], ctx), 0)
+  assert.doesNotMatch(out.join(''), /undefined/)
   assert.match(out.join(''), /Local reports:/)
 })
 

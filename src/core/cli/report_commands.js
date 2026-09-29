@@ -636,10 +636,12 @@ export async function runReportList(argv, ctx, deps = {}) {
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   // Same policy as `esc` at the top of this file: the page is remote text. Every
   // consumer below dereferences a row (the receipt join deletes a field on it,
-  // the terminal loop reads its title), so a non-object is dropped once, here,
-  // rather than crashing the listing it was meant to decorate.
+  // the terminal loop reads its title), so a row that carries no fields is
+  // dropped once, here, rather than crashing or decorating the listing with
+  // nulls. An array is `typeof 'object'` and would survive a bare type test,
+  // then print a line of `undefined`s, so it goes with the rest.
   const reports = Array.isArray(parsed?.reports)
-    ? parsed.reports.filter((/** @type {unknown} */ r) => r !== null && typeof r === 'object')
+    ? parsed.reports.filter((/** @type {unknown} */ r) => r !== null && typeof r === 'object' && !Array.isArray(r))
     : []
   const unmatched = await linkLocalReports(local.reports, reports, resolved.endpoint)
   // Read the mode the gate parsed, not argv: the codec also accepts
