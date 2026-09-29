@@ -3516,11 +3516,16 @@ export async function probeClientActivityFromDescriptor({ descriptor, homeDir, e
  * entry: a probe that cannot read a corner of the tree still answers from
  * the rest of it.
  *
- * Returns whether the whole tree was actually walked. A corner that could
- * not be listed or stat'd is skipped either way, but the confirmation read
- * may not call a tree it could not see healthy, so the skip has to be
- * reported rather than swallowed. A missing entry is not a gap in the walk:
- * it holds no records at all.
+ * Returns whether the whole tree was actually walked. Everything skipped is
+ * still skipped, but the confirmation read may not call a tree it could not
+ * see healthy, so a skip that could have hidden a record has to be reported
+ * rather than swallowed: a directory that would not list, a file that would
+ * not stat, a symlink left unfollowed, a level past `depth`. Two skips are
+ * not gaps in the walk. A missing entry holds no records at all, and neither
+ * does a fifo or a socket that happens to match the suffix. Missing is a
+ * steady-state answer, though, not one that survives the gap between this
+ * walk and the confirmation's: a file rotated away in between reads as
+ * covered.
  *
  * @param {string} dir
  * @param {string | undefined} suffix
@@ -3554,6 +3559,11 @@ async function eachActivityFile(dir, suffix, depth, visit) {
         // Raced deletion or unreadable file: skip, but say so.
         if (!isMissingEntryError(err)) complete = false
       }
+    } else if (entry.isSymbolicLink()) {
+      // Not followed, as before - but a link can point at a whole tree of
+      // records, so an unfollowed one is a corner this did not look at, the
+      // same as a directory it could not list.
+      complete = false
     }
   }
   return complete

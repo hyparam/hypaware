@@ -246,8 +246,10 @@ export interface PluginClientManifest {
 }
 
 /**
- * A client-written directory core may stat (never parse) to answer
- * "when was this client last active?". Same home-relative contract as
+ * A client-written directory core reads to answer "when was this client
+ * last active?": every matching file's mtime, and, only when those mtimes
+ * would report a capture gap, the tail of the newest few (see
+ * `activity_probe` above). Same home-relative contract as
  * `attach_probe.settings_file`: relative to `$HOME`, first segment
  * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
  */

@@ -893,6 +893,24 @@ test('a corner of the tree the walk could not read answers uncertain, never heal
   }
 })
 
+test('a symlinked transcript the walk will not follow answers uncertain, never healthy', async () => {
+  const home = await makeProbeHome()
+  try {
+    // Symlinks are deliberately not followed, so the turn behind this one is
+    // never read - which is a corner unlooked-at, not a tree with no turns
+    // in it. The readable file carries the mtime that raised the suspicion.
+    await writeTranscript(home, [
+      { type: 'mode', sessionId: 'sess', uuid: 'm0', timestamp: '2026-09-29T18:20:00.000Z' },
+    ], '2026-09-29T18:20:00.000Z')
+    const outside = path.join(home, 'elsewhere.jsonl')
+    await fs.writeFile(outside, JSON.stringify(assistantRecord('2026-09-29T18:40:00.000Z')) + '\n')
+    await fs.symlink(outside, path.join(home, '.claude', 'projects', '-Users-t-proj', 'linked.jsonl'))
+    assert.deepEqual(await confirmIn(home, '2026-09-29T18:00:00.000Z'), { certain: false })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('a tail read that comes back short is uncertain, not a clean bill of health', async () => {
   const home = await makeProbeHome()
   const realOpen = fsp.open
