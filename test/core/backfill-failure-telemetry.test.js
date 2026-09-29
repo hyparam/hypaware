@@ -15,13 +15,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { runRoot } from '../../src/core/observability/index.js'
-import { logs, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
+import { TracerProvider } from '../../src/core/observability/runtime.js'
 import { runBackfillProvider } from '../../src/core/commands/backfill.js'
 import { createBackfillSweepDriver } from '../../src/core/daemon/backfill_sweep.js'
 import {
   createBackfillMaterializerRegistry,
   createBackfillRegistry,
 } from '../../src/core/registry/backfills.js'
+import { withLogRecords } from '../helpers/log_records.js'
 
 const ITEM = { dataset: 'ds', kind: 'test.kind', value: { x: 1 } }
 
@@ -31,6 +32,7 @@ const ITEM = { dataset: 'ds', kind: 'test.kind', value: { x: 1 } }
  *
  * @param {{
  *   providerThrows?: boolean,
+ *   providerThrowsAfterYield?: boolean,
  *   flushThrows?: boolean,
  *   registerMaterializer?: boolean,
  *   materializerDataset?: string,
@@ -46,6 +48,7 @@ function runnerCtx(opts = {}) {
     async *run() {
       if (opts.providerThrows) throw new Error('provider generator blew up')
       yield ITEM
+      if (opts.providerThrowsAfterYield) throw new Error('provider generator blew up mid-stream')
     },
   })
   const backfillMaterializers = createBackfillMaterializerRegistry()
@@ -128,7 +131,7 @@ for (const scenario of [
   {
     name: 'the write finds no registered dataset',
     opts: { registeredDatasets: [] },
-    errorKind: 'item_write_failed',
+    errorKind: 'dataset_not_registered',
   },
 ]) {
   test(`provider_finish names the step that failed when ${scenario.name}`, async () => {
@@ -137,6 +140,32 @@ for (const scenario of [
     assert.equal(finish.attributes.status, 'failed')
     assert.equal(finish.attributes.error_kind, scenario.errorKind)
     assert.equal(result.ok, false)
+    assert.equal(result.errorKind, scenario.errorKind, 'the compact result carries the same kind')
+  })
+}
+
+/**
+ * Two failures in one run. `markProviderFailed` sets `error` and
+ * `error_kind` with `??=` on adjacent lines, so the first failure has to
+ * win both and neither can be set without the other. Swap either `??=`
+ * for `=` and these two are what notices.
+ */
+for (const scenario of [
+  {
+    name: 'a provider that throws after yielding beats a later flush failure',
+    opts: { providerThrowsAfterYield: true, flushThrows: true },
+    errorKind: 'provider_run_failed',
+  },
+  {
+    name: 'an item failure beats a later flush failure',
+    opts: { registerMaterializer: false, flushThrows: true },
+    errorKind: 'materializer_missing',
+  },
+]) {
+  test(`provider_finish reports the first failure when ${scenario.name}`, async () => {
+    const { result, finish } = await runWithSpans(runnerCtx(scenario.opts))
+    assert.equal(finish.attributes.status, 'failed')
+    assert.equal(finish.attributes.error_kind, scenario.errorKind)
     assert.equal(result.errorKind, scenario.errorKind, 'the compact result carries the same kind')
   })
 }
@@ -152,45 +181,37 @@ test('provider_finish leaves a clean run unmarked', async () => {
 /* ---------------------------- the sweep driver ---------------------------- */
 
 test('the sweep settlement log reports the step the run reported, not provider_run_failed', async () => {
-  /** @type {any[]} */
-  const records = []
-  const provider = new LoggerProvider({
-    resource: { attributes: {} },
-    exporters: [{ exportBatch(batch) { records.push(...batch) } }],
+  const contribution = {
+    name: 'openclaw',
+    plugin: '@hypaware/openclaw',
+    datasets: ['ai_gateway_messages'],
+    sweep: { cron: '*/5 * * * *' },
+    async *run() {},
+  }
+  const driver = createBackfillSweepDriver({
+    backfills: /** @type {any} */ ({
+      register() {},
+      get: (/** @type {string} */ name) => (name === contribution.name ? contribution : undefined),
+      list: () => [contribution],
+    }),
+    backfillMaterializers: /** @type {any} */ ({ register() {}, get: () => undefined, list: () => [] }),
+    env: /** @type {any} */ ({ HYP_HOME: '/nonexistent-home' }),
+    storage: /** @type {any} */ ({ cacheRoot: '/nonexistent-cache' }),
+    query: /** @type {any} */ ({ getDataset: () => undefined }),
+    runBackfill: async () => ({ ok: false, scanned: 1, rowsWritten: 1, skipped: 0, errorKind: 'flush_failed' }),
   })
-  logs.setGlobalLoggerProvider(provider)
-  try {
-    const contribution = {
-      name: 'openclaw',
-      plugin: '@hypaware/openclaw',
-      datasets: ['ai_gateway_messages'],
-      sweep: { cron: '*/5 * * * *' },
-      async *run() {},
-    }
-    const driver = createBackfillSweepDriver({
-      backfills: /** @type {any} */ ({
-        register() {},
-        get: (/** @type {string} */ name) => (name === contribution.name ? contribution : undefined),
-        list: () => [contribution],
-      }),
-      backfillMaterializers: /** @type {any} */ ({ register() {}, get: () => undefined, list: () => [] }),
-      env: /** @type {any} */ ({ HYP_HOME: '/nonexistent-home' }),
-      storage: /** @type {any} */ ({ cacheRoot: '/nonexistent-cache' }),
-      query: /** @type {any} */ ({ getDataset: () => undefined }),
-      runBackfill: async () => ({ ok: false, scanned: 1, rowsWritten: 1, skipped: 0, errorKind: 'flush_failed' }),
-    })
-    const report = await driver.tick({ now: new Date('2026-08-01T10:05:00.000Z') })
-    assert.deepEqual(report.fired, ['openclaw'])
+  const { result: report, records } = await withLogRecords(async () => {
+    const fired = await driver.tick({ now: new Date('2026-08-01T10:05:00.000Z') })
     // Two macrotask turns: the run is fired, not awaited, so its settlement
     // handler (which is what logs) runs after the tick resolves.
     await new Promise((resolve) => setTimeout(resolve, 0))
     await new Promise((resolve) => setTimeout(resolve, 0))
+    return fired
+  })
 
-    const settled = records.find((record) => record.body === 'backfill.sweep_finished')
-    assert.ok(settled, 'the sweep logged a settlement for the fired run')
-    assert.equal(settled.attributes.status, 'failed')
-    assert.equal(settled.attributes.error_kind, 'flush_failed')
-  } finally {
-    await provider.shutdown()
-  }
+  assert.deepEqual(report.fired, ['openclaw'])
+  const settled = records.find((record) => record.body === 'backfill.sweep_finished')
+  assert.ok(settled, 'the sweep logged a settlement for the fired run')
+  assert.equal(settled.attributes.status, 'failed')
+  assert.equal(settled.attributes.error_kind, 'flush_failed')
 })

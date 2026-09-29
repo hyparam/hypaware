@@ -540,7 +540,7 @@ async function runProvider(args) {
           })
           result.rows_written += written.rowsWritten
           if (written.status === 'failed') {
-            markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`, 'item_write_failed')
+            markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`, 'dataset_not_registered')
           }
         }
       } catch (err) {
