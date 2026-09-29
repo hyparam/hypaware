@@ -8,11 +8,9 @@ import test from 'node:test'
 
 import { DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import {
-  parsePlanArgv,
   parseRunArgv,
   resolveRetentionDays,
   runBackfill,
-  runBackfillPlan,
   runBackfillProvider,
   selectProviders,
 } from '../../src/core/commands/backfill.js'
@@ -68,18 +66,6 @@ test('parseRunArgv accepts an equal since/until boundary', () => {
     dryRun: false,
     json: false,
   })
-})
-
-/* ------------------------------ parsePlanArgv ----------------------------- */
-
-test('parsePlanArgv accepts retention-days but rejects since/until', () => {
-  assert.deepEqual(parsePlanArgv(['claude', '--retention-days=14', '--json']), {
-    providers: ['claude'],
-    retentionDays: 14,
-    json: true,
-  })
-  assert.ok('error' in parsePlanArgv(['--since', '2026-01-01']))
-  assert.ok('error' in parsePlanArgv(['--until', '2026-01-01']))
 })
 
 /* ----------------------------- selectProviders ---------------------------- */
@@ -151,16 +137,10 @@ function makeCtx(options = {}) {
   const backfills = createBackfillRegistry()
   /** @type {any[]} */
   const runContexts = []
-  /** @type {any[]} */
-  const planContexts = []
   backfills.register({
     name: 'tester',
     plugin: '@test/plugin',
     datasets: extraItem ? [item.dataset, extraItem.dataset] : [item.dataset],
-    async plan(planCtx) {
-      planContexts.push(planCtx)
-      return undefined
-    },
     async *run(runCtx) {
       runContexts.push(runCtx)
       yield item
@@ -238,7 +218,7 @@ function makeCtx(options = {}) {
     query,
     storage,
   }))
-  return { ctx, appended, flushed, out, err, runContexts, planContexts }
+  return { ctx, appended, flushed, out, err, runContexts }
 }
 
 test('runBackfill materializes rows, appends to the dataset path, and flushes', async () => {
@@ -507,20 +487,4 @@ test('a plugin listed with enabled:false is not configured', async () => {
   })
   await runBackfillProvider({ ctx, provider: 'tester', dryRun: true })
   assert.equal(runContexts[0]?.entrypointOwners.get('claude-desktop')?.configured, false)
-})
-
-// `entrypointOwners` is declared on `BackfillPlanContext`, so a provider
-// that consults it while planning has to see the same answer the run will,
-// or `hyp backfill plan` estimates over sessions the run then gates out.
-test('hyp backfill plan hands providers the same entrypoint owner map the run gets', async () => {
-  const { ctx, planContexts } = makeCtx({
-    env: envWithConfig(['@hypaware/claude']),
-    plugins: [{ name: '@hypaware/claude' }],
-    config: { version: 2, plugins: [{ name: '@test/plugin' }] },
-  })
-  const code = await runBackfillPlan(['tester'], ctx)
-  assert.equal(code, 0)
-  const owners = planContexts[0]?.entrypointOwners
-  assert.ok(owners instanceof Map, 'the plan context carries the resolved owner map')
-  assert.equal(owners.get('claude-desktop')?.configured, false)
 })

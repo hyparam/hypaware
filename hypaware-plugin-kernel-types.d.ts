@@ -2826,11 +2826,11 @@ export interface InitPresetContribution {
 }
 
 // =============================================================================
-// Backfill (first-class client history import)
+// Backfill (first-class `hyp backfill`)
 // =============================================================================
 
 /**
- * Plugin-registered backfill providers. Each provider plans and yields
+ * Plugin-registered backfill providers. Each provider scans and yields
  * `BackfillItem` envelopes (and optional `BackfillEvent` lifecycle
  * signals) for one or more datasets. Core owns the runner, telemetry
  * envelope, dry-run behavior, and dataset materialization; providers
@@ -2851,12 +2851,6 @@ export interface BackfillContribution {
   datasets: string[]
   /** Short human-readable description for `hyp backfill list`. */
   summary?: string
-  /**
-   * Optional planning hook. Called by `hyp backfill plan` to surface
-   * what would be scanned without committing to writes. Returning
-   * `undefined` means the provider has no planning information.
-   */
-  plan?(ctx: BackfillPlanContext): Promise<BackfillPlan | undefined>
   /**
    * Stream `BackfillItem` envelopes (one per scanned record) and
    * optional `BackfillEvent` lifecycle signals. The runner consumes
@@ -2881,7 +2875,7 @@ export interface BackfillContribution {
   sweep?: { cron: string }
 }
 
-export interface BackfillPlanContext {
+export interface BackfillRunContext {
   env: NodeJS.ProcessEnv
   cacheRoot: string
   /** Effective lower bound for record timestamps (ISO string). */
@@ -2924,9 +2918,6 @@ export interface BackfillPlanContext {
    * while the shared-tree gate keeps its own fail-open rules.
    */
   isPluginConfigured?: (plugin: PluginName) => boolean
-}
-
-export interface BackfillRunContext extends BackfillPlanContext {
   storage: QueryStorageService
   /** True only for a daemon-scheduled provider pass. */
   sweep?: boolean
@@ -2995,15 +2986,6 @@ export interface BackfillEvent {
   event: string
   /** Optional structured attributes. */
   attributes?: Record<string, unknown>
-}
-
-export interface BackfillPlan {
-  /** Provider-supplied estimate of records that would be scanned. */
-  estimated_items?: number
-  /** Free-form scan-location descriptors (e.g. file paths). */
-  sources?: string[]
-  /** Optional human-readable notes (`hyp backfill plan` surfaces these). */
-  notes?: string[]
 }
 
 /**

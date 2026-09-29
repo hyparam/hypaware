@@ -547,7 +547,7 @@ test('top-level help renders journey sections and a compact operations list', as
   assert.ok(gettingStarted < explore && explore < control && control < additional)
   assert.match(out, /Getting started:\n  setup\s+.*\n  status\s+/)
   assert.match(out, /Explore and share:\n  ask\s+.*\n  query\s+.*\n  report\s+/)
-  assert.match(out, /Control capture and movement:\n  client\s+.*\n  privacy\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
+  assert.match(out, /Control capture and movement:\n  client\s+.*\n  backfill\s+.*\n  privacy\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
   // `graph` is plugin-contributed (`@hypaware/context-graph`) and only
   // appears once the plugin is config-active; this dispatch has no config,
   // so only core commands show up here.
@@ -584,18 +584,64 @@ test('group --help lists subcommands with their registry summaries', async () =>
   assert.doesNotMatch(out, /^ {2}(maintain|refresh|status)\s/m)
 })
 
-test('a legacy action alias renders canonical leaf help', async () => {
+test('backfill is canonical and removed history commands do not resolve', async () => {
   const { kernel, registry } = coreKernelAndRegistry()
+  for (const { canonical, alias } of [
+    { canonical: 'backfill' },
+    { canonical: 'backfill list', alias: 'client history providers' },
+  ]) {
+    if (alias) assert.equal(registry.get(alias), registry.get(canonical))
+    assert.equal(registry.get(canonical)?.name, canonical)
+    for (const spelling of alias ? [canonical, alias] : [canonical]) {
+      const stdout = makeBuf()
+      const stderr = makeBuf()
+      const code = await dispatch([...spelling.split(' '), '--help'], { stdout, stderr, registry, kernel })
+      assert.equal(code, 0)
+      assert.equal(stderr.text(), '')
+      assert.ok(stdout.text().startsWith(`hyp ${canonical} - `))
+      assert.ok(stdout.text().includes(`usage: hyp ${canonical} `))
+      assert.equal(stdout.text().includes('hyp client history'), false)
+      if (canonical === 'backfill') {
+        assert.match(stdout.text(), /^ {2}list\s+/m)
+        assert.doesNotMatch(stdout.text(), /^ {2}plan\s+/m)
+      }
+    }
+  }
+  assert.equal(registry.get('client history import'), undefined)
+  const removedOut = makeBuf()
+  const removedErr = makeBuf()
+  assert.equal(await dispatch(['client', 'history', 'import', 'codex'], {
+    stdout: removedOut, stderr: removedErr, registry, kernel,
+  }), 2)
+  assert.match(removedErr.text(), /unknown subcommand/)
+  assert.equal(registry.get('backfill plan'), undefined)
+  assert.equal(registry.get('client history plan'), undefined)
   const stdout = makeBuf()
-  const stderr = makeBuf()
+  await dispatch(['client', '--help'], { stdout, stderr: makeBuf(), registry, kernel })
+  assert.doesNotMatch(stdout.text(), /^ {2}history\s+/m)
+})
 
-  const code = await dispatch(['backfill', '--help'], { stdout, stderr, registry, kernel })
-
-  assert.equal(code, 0)
-  const out = stdout.text()
-  assert.match(out, /^hyp client history import - Import client history/)
-  assert.match(out, /usage: hyp client history import \[provider\.\.\.\]/)
-  assert.doesNotMatch(out, /^Subcommands:/m)
+// The removed plan spelling has to land on an error, not on an import: with
+// `plan` gone from the registry, `hyp backfill plan` falls through to the
+// import's greedy provider list, where the word can only be read as a
+// provider name, and an unknown name refuses the whole run before any
+// provider is driven. This registry activates no plugins, so `claude` is
+// unknown here too; both spellings only have to reach that refusal.
+// @ref LLP 0446#surface [tests]: no compatibility handler turns a former plan into an import
+test('the removed plan spellings fail rather than importing', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  for (const argv of [['backfill', 'plan'], ['backfill', 'plan', 'claude']]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    assert.equal(await dispatch([...argv], { stdout, stderr, registry, kernel }), 1)
+    assert.match(stderr.text(), /^hyp backfill: unknown provider\(s\): plan/)
+    assert.equal(stdout.text(), '', 'a refused selection prints no import report')
+  }
+  const planErr = makeBuf()
+  assert.equal(await dispatch(['client', 'history', 'plan'], {
+    stdout: makeBuf(), stderr: planErr, registry, kernel,
+  }), 2)
+  assert.match(planErr.text(), /^hyp client: unknown subcommand 'history'/)
 })
 
 test('leaf command --help renders summary, usage, and long help', async () => {

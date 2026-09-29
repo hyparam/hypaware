@@ -27,6 +27,8 @@ const ADAPTERS = [
 ]
 export const COMMANDS = Object.freeze([
   'ask',
+  'backfill',
+  'backfill list',
   'cache maintain',
   'cache refresh',
   'cache status',
@@ -44,9 +46,6 @@ export const COMMANDS = Object.freeze([
   'client claude-desktop status',
   'client claude-desktop verify',
   'client detach',
-  'client history import',
-  'client history plan',
-  'client history providers',
   'client skills',
   'client skills install',
   'client status',

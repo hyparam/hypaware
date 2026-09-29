@@ -45,7 +45,7 @@ by dates, hit count, searchable columns, privacy, or local retention.
 
 - Confirm the correct `HYP_HOME` and local versus remote target.
 - Read stderr for withheld-row, freshness, and truncation notices.
-- Use `hyp client history providers` and a provider-specific import dry run to
+- Use `hyp backfill list` and a provider-specific import dry run to
   check whether older transcripts are available. Cache refresh is not a history import.
 - Refresh the affected local dataset with
   `hyp cache refresh ai_gateway_messages` when freshness warnings call for it.

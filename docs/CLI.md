@@ -293,14 +293,14 @@ For the full privacy model, see
 
 ## Use canonical command names
 
-Use the task-oriented names in new scripts and documentation. Older spellings
+Use the canonical names below in new scripts and documentation. Other spellings
 remain compatibility aliases and use the same runners:
 
 | Compatibility spelling | Canonical spelling |
 | --- | --- |
 | `hyp init` | `hyp setup` |
 | `hyp unattach` | `hyp detach` |
-| `hyp backfill`, `hyp backfill plan`, `hyp backfill list` | `hyp client history import`, `hyp client history plan`, `hyp client history providers` |
+| `hyp client history providers` | `hyp backfill list` |
 | `hyp skills install` | `hyp client skills install` |
 | `hyp policy ...`, `hyp ignore`, `hyp unignore`, `hyp purge` | `hyp privacy ...` |
 | `hyp query status`, `hyp query refresh`, `hyp query maintain` | `hyp cache status`, `hyp cache refresh`, `hyp cache maintain` |

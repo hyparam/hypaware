@@ -422,7 +422,7 @@ test('hyp --help renders the exact journey order and compact operations list', a
   assert.deepEqual(helpSectionNames(out, 'Getting started:'), ['setup', 'status'])
   assert.deepEqual(helpSectionNames(out, 'Explore and share:'), ['ask', 'query', 'report'])
   assert.deepEqual(helpSectionNames(out, 'Control capture and movement:'), [
-    'client', 'privacy', 'session', 'join', 'leave', 'sync',
+    'client', 'backfill', 'privacy', 'session', 'join', 'leave', 'sync',
   ])
   assert.deepEqual(additionalCommandNames(out), [
     'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'version', 'update', 'dev', 'telemetry',
@@ -502,7 +502,7 @@ test('every visible group renders its registry-backed subcommand table', { timeo
  * only a shared prefix speaks through the description registered for it.
  * Neither is optional: a group with no voice opens its help on a naked
  * `usage:` line and never says what it is for, which is what `hyp cache
- * --help` and `hyp client history --help` did before core registered theirs,
+ * --help` and `hyp dev plugin --help` did before core registered theirs,
  * and what `hyp client claude-desktop --help` did before its plugin did.
  *
  * @param {ReturnType<typeof coreRegistry>} registry
@@ -664,7 +664,7 @@ function destinationFamilies(help) {
  * and group descriptions: `listGroupChildren` skips a hidden child and lists a
  * deeper one (`report publish folder`) only as its first token, while
  * `registry.list()` holds no group described with `registerGroup` and no bare
- * command of its own (the `client history` shape). `--help` renders all three.
+ * command of its own (the `dev plugin` shape). `--help` renders all three.
  * The second assertion keeps the first from passing vacuously:
  * the group help and the publish help are the two surfaces whose subject is
  * where a report goes, so deleting the destination word rather than fixing it

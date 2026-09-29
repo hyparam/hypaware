@@ -29,7 +29,7 @@ choices are locked; local additions remain yours to configure.
 | Pi (`pi`) | A managed Pi extension plus bounded recovery of native sessions, including recent history. |
 
 Available integrations depend on active plugins and the installed version.
-Check `hyp plugin list` and `hyp client history providers` for your
+Check `hyp plugin list` and `hyp backfill list` for your
 installation. Raw proxy sources do not configure an AI client; use a client
 integration for conversation capture.
 
@@ -65,19 +65,19 @@ control those shared behaviors and documents the optional experimental live rout
 
 ## Bring in existing history
 
-Discover provider IDs and inspect the plan before importing:
+Discover provider IDs and preview the scan before importing:
 
 ```sh
-hyp client history providers
-hyp client history plan codex --json
-hyp client history import codex --since 2026-09-01T00:00:00Z --dry-run
-hyp client history import codex --since 2026-09-01T00:00:00Z
+hyp backfill list
+hyp backfill codex --since 2026-09-01T00:00:00Z --dry-run
+hyp backfill codex --since 2026-09-01T00:00:00Z
 hyp cache status
 ```
 
-Choose the provider and dates you actually want. `plan` uses provider planning
-hooks; `import --dry-run` scans without writing. Inspect each provider's output
-because one provider can fail while others succeed.
+Choose the provider and dates you actually want. `backfill --dry-run` scans and
+projects without writing, so it previews the result but is not a cheap probe.
+Inspect each provider's output because one provider can fail while others
+succeed.
 
 Import writes the local cache. If exports are configured, eligible imported
 rows can subsequently leave through those sinks. Apply your

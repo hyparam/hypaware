@@ -6,6 +6,9 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-18
 **Related:** LLP 0005, LLP 0009, LLP 0011, LLP 0034, LLP 0117, LLP 0135
+**Extended-by:** LLP 0445 (restore canonical backfill commands)
+**Extended-by:** LLP 0446 (remove backfill planning; use import dry runs)
+**Extended-by:** LLP 0447 (#aliases: the client history import spelling is removed, not deferred)
 
 ## Context {#context}
 

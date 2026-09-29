@@ -390,7 +390,7 @@ function relationColumns(relation, registry, ctes) {
   if (ctes.has(key)) return ctes.get(key)
   // `?.columns` rather than a bare deref: a registration that hands the kernel
   // a malformed schema must not turn every query touching it into a TypeError,
-  // the same way `hyp client history import` reads it.
+  // the same way `hyp backfill` reads it.
   const columns = registry.getDataset(relation.table)?.schema?.columns
   if (!columns) return undefined
   return columns.map((column) => ({ name: column.name, isTimestamp: column.type === 'TIMESTAMP' }))

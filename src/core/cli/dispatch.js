@@ -893,7 +893,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   renderJourneyHelpSection(stdout, 'Getting started:', rows, 'getting-started', ['setup', 'status'])
   renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'query', 'report'])
   renderJourneyHelpSection(stdout, 'Control capture and movement:', rows, 'capture-movement', [
-    'client', 'privacy', 'session', 'join', 'leave', 'sync',
+    'client', 'backfill', 'privacy', 'session', 'join', 'leave', 'sync',
   ])
   const preferredAdditional = [
     'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'graph',
