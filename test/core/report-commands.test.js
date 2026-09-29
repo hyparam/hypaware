@@ -225,7 +225,8 @@ for (const extension of ['html', 'htm', 'HTML', 'pdf', 'css']) {
   })
 }
 
-for (const entry of ['report.html', 'style.css', 'image.png', 'notes.md', 'assets', 'usage.md', '.DS_Store', 'report.MD']) {
+// Use work.MD so the case fixture cannot overwrite report.md on case-insensitive filesystems.
+for (const entry of ['report.html', 'style.css', 'image.png', 'notes.md', 'assets', 'usage.md', '.DS_Store', 'work.MD']) {
   test(`publish rejects unsupported bundle entry ${entry} before any upload`, async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-invalid-entry-'))
     t.after(() => fs.rm(dir, { recursive: true, force: true }))
