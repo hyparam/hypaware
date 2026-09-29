@@ -447,3 +447,40 @@ test('requestDaemonStop leaves a live processing pid file byte-identical', async
     await fs.rm(stateRoot, { recursive: true, force: true })
   }
 })
+
+// The arm of #2288 a hard kill actually reaches on this transport: the
+// gateway is already dead by the time the stop runs, so `requestDaemonStop`
+// never gets a confirmed exit to reconcile on. It cleared the gateway's own
+// stale file there and left the child's, which is the same asymmetry the
+// issue is about.
+test('requestDaemonStop clears a stale processing pid file when the daemon is already gone', async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-gone-processing-'))
+  try {
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(stateRoot, deadPid)
+    const processingRoot = processingStateRoot(stateRoot)
+    stageAbandonedPidFile(processingRoot, deadPid)
+
+    const outcome = await requestDaemonStop({ stateRoot, timeoutMs: 10_000, pollIntervalMs: 20 })
+
+    assert.equal(outcome, 'not_running')
+    assert.equal(fsSync.existsSync(pidFilePath(stateRoot)), false, 'the stale gateway pid file survived the stop')
+    assert.equal(fsSync.existsSync(pidFilePath(processingRoot)), false, 'the stale processing pid file survived the stop')
+
+    // And the guard holds on this arm too: a pid something still runs keeps
+    // its file, against a real spawned child rather than a stubbed liveness.
+    stageAbandonedPidFile(stateRoot, deadPid)
+    stageAbandonedPidFile(processingRoot, spawnIdleChild(t))
+    const before = fsSync.readFileSync(pidFilePath(processingRoot), 'utf8')
+
+    assert.equal(await requestDaemonStop({ stateRoot, timeoutMs: 10_000, pollIntervalMs: 20 }), 'not_running')
+    assert.equal(
+      fsSync.readFileSync(pidFilePath(processingRoot), 'utf8'),
+      before,
+      'a live processing daemon keeps its pid file',
+    )
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})

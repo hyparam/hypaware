@@ -1922,6 +1922,11 @@ export async function requestDaemonStop({
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
     if (entry) clearPidFile(stateRoot)
+    // A gateway that is already gone is what a hard kill leaves behind, so
+    // this is the arm of #2288 that actually accumulates: the child it
+    // supervised went with it and its pid file below `processing/` is
+    // stranded, on the same guard as every other clear here.
+    clearStalePidFile(processingStateRoot(stateRoot))
     return 'not_running'
   }
   if (platform === 'win32') {
@@ -1933,6 +1938,7 @@ export async function requestDaemonStop({
       const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
       if (code === 'ESRCH') {
         clearPidFile(stateRoot)
+        clearStalePidFile(processingStateRoot(stateRoot))
         return 'not_running'
       }
       throw err
