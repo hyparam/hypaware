@@ -1517,7 +1517,7 @@ function createRecap() {
     /** @param {{ write(chunk: string): unknown }} stdout */
     print(stdout) {
       const lines = order.map((key) => said[key]).join('')
-      if (lines) stdout.write(`\n${lines}`)
+      if (lines) stdout.write(lines)
     },
   }
 }
