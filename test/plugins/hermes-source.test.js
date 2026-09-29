@@ -453,3 +453,39 @@ test('the watermark is flushed inside the loop, not only when the loop ends', as
   assert.equal(onDiskAtLastSession, WATERMARK_FLUSH_SESSIONS, 'one flush per completed batch, mid-loop')
   assert.equal(Object.keys(readHermesWatermark(dir)).length, total, 'the trailing partial batch is flushed once the loop ends')
 })
+
+test('a sidecar write that fails while degrading does not replace the error that caused the degrade', async () => {
+  const dir = await tmpDir()
+  const stateDbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(stateDbPath)
+  for (const id of [1, 2]) {
+    insertSession(db, { id, cwd: `/home/dev/p${id}` })
+    insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
+  }
+  db.close()
+
+  const boom = new Error('reconcile exploded')
+  // A state dir under a regular file makes every watermark write throw ENOTDIR,
+  // so the flush in the degrade path fails on the same tick the reconcile does.
+  const { ctx, logs } = makeCtx({
+    stateDbPath,
+    stateDir: path.join(stateDbPath, 'unwritable'),
+    beforeReconcile(sessionId) {
+      if (sessionId === 'hermes-2') throw boom
+    },
+  })
+
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+
+  assert.equal(runner.lastError, boom.message, 'the reconcile failure is reported, not the failed sidecar write')
+  const partial = logs.find((entry) => entry.message === 'hermes.session_reconcile_failed')
+  assert.ok(partial, 'the partial-progress record survives a failed flush')
+  assert.equal(partial.fields?.component, 'hermes')
+  assert.equal(partial.fields?.operation, 'hermes.poll')
+  assert.equal(partial.fields?.status, 'partial')
+  assert.equal(partial.fields?.error_kind, 'unknown')
+  assert.equal(partial.fields?.session_id, '2')
+  assert.equal(partial.fields?.sessions_persisted, 0, 'nothing reached disk, and the count says so')
+  assert.equal(partial.fields?.sessions_examined, 2)
+})

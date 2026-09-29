@@ -336,8 +336,15 @@ export async function runHermesPollTick(runner, ctx) {
             }
           } catch (err) {
             // The sessions before this one reconciled fully; dropping their
-            // fingerprints would make the next start repeat all of them.
-            flushMarks()
+            // fingerprints would make the next start repeat all of them. The
+            // flush is best-effort: a sidecar write that fails here must not
+            // replace the error that got us here, which is the one worth
+            // reporting. `sessions_persisted` then counts only what landed.
+            try {
+              flushMarks()
+            } catch {
+              // The marks stay in memory; the next tick flushes them.
+            }
             ctx.log.warn('hermes.session_reconcile_failed', {
               component: 'hermes',
               operation: 'hermes.poll',
