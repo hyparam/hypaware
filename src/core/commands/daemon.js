@@ -11,7 +11,7 @@ import { sanitizeLabel } from '../util/json_util.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
- * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { DaemonInstallOptions, DaemonServiceOptions } from '../../../src/core/daemon/types.js'
  * @import { uninstallDaemon as uninstallDaemonFn } from '../../../src/core/daemon/install.js'
  */
 
@@ -232,10 +232,31 @@ export async function runDaemonStatus(argv, ctx) {
 }
 
 /**
+ * Drop the daemon pid file when the pid it names is no longer running, and
+ * leave it exactly as it is otherwise: the reconciliation `requestDaemonStop`
+ * performs on a confirmed exit, for the stop that goes through the service
+ * manager instead of the control channel.
+ *
+ * Best-effort, because the stop it follows already happened: a pid file this
+ * cannot read or unlink is `hyp daemon status`'s to report, not a reason to
+ * call a completed stop a failure.
+ *
+ * @param {string} stateRoot
+ */
+async function clearStaleDaemonPidFile(stateRoot) {
+  const { readPidFile, clearPidFile, processIsAlive } = await import('../daemon/pid.js')
+  try {
+    const entry = readPidFile(stateRoot)
+    if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
+  } catch { /* an unreadable or undeletable pid file outlives this stop */ }
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ service?: DaemonServiceOptions }} [deps] test seam for the service manager
  */
-export async function runDaemonStop(argv, ctx) {
+export async function runDaemonStop(argv, ctx, deps = {}) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
   if (!parsed.ok) return parsed.code
   // A daemon the service manager is supervising is stopped through that
@@ -270,22 +291,32 @@ export async function runDaemonStop(argv, ctx) {
   // the two by `ActiveState` instead.
   // @ref LLP 0300#posix-keeps-signals [constrained-by]: the control file stays the transport for every daemon the service manager is not supervising, foreground sessions included
   const { serviceDaemonStatus, stopServiceDaemon } = await import('../daemon/install.js')
-  const options = { homeDir: ctx.env.HOME }
+  const options = { homeDir: ctx.env.HOME, ...deps.service }
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
   const status = await serviceDaemonStatus(options)
   const supervised = status.platform === 'darwin' ? status.loaded : status.active === true
   if (supervised) {
     try {
       await stopServiceDaemon(options)
-      ctx.stdout.write('daemon: stopped\n')
-      return 0
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       ctx.stderr.write(`hyp daemon stop: ${message}\n`)
       return 1
     }
+    // A manager that had to hard-kill a wedged daemon (systemd's
+    // `TimeoutStopSec`, launchd's grace) left it no shutdown to run, so the pid
+    // file it clears for itself on an orderly stop still names a process that
+    // is gone while this reports `stopped` (#2266).
+    //
+    // Not the gate above asked twice: that one is whether the manager is
+    // supervising the service, this one is whether the pid the file names is
+    // running. Only a pid nothing holds takes its file with it, so a daemon
+    // still winding down inside the manager's grace keeps its own.
+    await clearStaleDaemonPidFile(stateDir)
+    ctx.stdout.write('daemon: stopped\n')
+    return 0
   }
   const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
-  const stateDir = readObservabilityEnv(ctx.env).stateDir
   // The requester-side control-dir warnings (a chmod it could not apply)
   // land on stderr; they do not change the exit code.
   const outcome = await requestDaemonStop({
