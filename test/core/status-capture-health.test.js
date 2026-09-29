@@ -1069,3 +1069,62 @@ test('an unconfirmable suspicion reports unknown: no gap claimed, no health clai
     await cleanup(hypHome, home)
   }
 })
+
+test('a subtree whose readdir reports no file type is a corner unlooked-at, not a clean tree', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const lastEventAt = new Date(now - 5 * HOUR)
+  const mtime = new Date(now - 1 * MIN)
+  // Mixed tree. The half that reports dirent types carries a metadata-only
+  // write, which is what moves the mtime and raises the suspicion; the real
+  // uncaptured turn sits in the half that reports none. Certifying the whole
+  // tree healthy off the half it could read is the failure this guards: a
+  // walk that never looked at the file holding the turn cannot say there is
+  // no turn.
+  const home = await makeClientHome({
+    mode: 'otel',
+    attachedAt: new Date(now - 24 * HOUR).toISOString(),
+    transcriptMtime: mtime,
+    transcriptLines: [
+      { type: 'file-history-snapshot', sessionId: 'sess', uuid: 'm0', timestamp: mtime.toISOString() },
+    ],
+  })
+  const typeless = path.join(home, '.claude', 'projects', '-Users-t-nfs')
+  await fs.mkdir(typeless, { recursive: true })
+  const real = path.join(typeless, 'b-session.jsonl')
+  await fs.writeFile(real, JSON.stringify(assistantRecord(mtime)) + '\n')
+  await fs.utimes(real, mtime, mtime)
+  const realReaddir = fsp.readdir
+  try {
+    writeDaemonStatus(stateRoot, lastEventAt.toISOString())
+    // The dirent libuv yields wherever the filesystem's `readdir` reports no
+    // `d_type` (NFS in many configurations, XFS made with `ftype=0`, several
+    // FUSE filesystems): every `is*()` predicate answers false. Injected,
+    // rather than mounted, because the shape is all that matters here.
+    fsp.readdir = /** @type {any} */ (async (/** @type {any} */ dir, /** @type {any} */ opts) => {
+      const entries = /** @type {any[]} */ (await realReaddir(dir, opts))
+      if (!opts?.withFileTypes || !String(dir).endsWith('-Users-t-nfs')) return entries
+      return entries.map((entry) => ({
+        name: entry.name,
+        isDirectory: () => false,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+        isFIFO: () => false,
+        isSocket: () => false,
+        isBlockDevice: () => false,
+        isCharacterDevice: () => false,
+      }))
+    })
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    fsp.readdir = realReaddir
+    const entry = report.captureHealth[0]
+    assert.equal(entry?.state, 'unknown')
+    // Neither half of the claim, and the filesystem's suspicion is still the
+    // number reported alongside it.
+    assert.equal(report.diagnostics.some((d) => d.kind === 'capture_gap'), false)
+    assert.ok((entry?.gapMs ?? 0) > 4 * HOUR)
+  } finally {
+    fsp.readdir = realReaddir
+    await cleanup(hypHome, home)
+  }
+})

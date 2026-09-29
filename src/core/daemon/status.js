@@ -3520,12 +3520,13 @@ export async function probeClientActivityFromDescriptor({ descriptor, homeDir, e
  * still skipped, but the confirmation read may not call a tree it could not
  * see healthy, so a skip that could have hidden a record has to be reported
  * rather than swallowed: a directory that would not list, a file that would
- * not stat, a symlink left unfollowed, a level past `depth`. Two skips are
- * not gaps in the walk. A missing entry holds no records at all, and neither
- * does a fifo or a socket that happens to match the suffix. Missing is a
- * steady-state answer, though, not one that survives the gap between this
- * walk and the confirmation's: a file rotated away in between reads as
- * covered.
+ * not stat, a symlink left unfollowed, a level past `depth`, an entry whose
+ * kind readdir did not report. Only two skips are not gaps in the walk, and
+ * both are named rather than left to fall through. A missing entry holds no
+ * records at all, and neither does a fifo, a socket, or a device node that
+ * happens to match the suffix. Missing is a steady-state answer, though, not
+ * one that survives the gap between this walk and the confirmation's: a file
+ * rotated away in between reads as covered.
  *
  * @param {string} dir
  * @param {string | undefined} suffix
@@ -3559,14 +3560,37 @@ async function eachActivityFile(dir, suffix, depth, visit) {
         // Raced deletion or unreadable file: skip, but say so.
         if (!isMissingEntryError(err)) complete = false
       }
-    } else if (entry.isSymbolicLink()) {
-      // Not followed, as before - but a link can point at a whole tree of
+    } else if (!holdsNoRecords(entry)) {
+      // Everything this walk did not classify and handle above. A symlink is
+      // deliberately not followed, but it can point at a whole tree of
       // records, so an unfollowed one is a corner this did not look at, the
-      // same as a directory it could not list.
+      // same as a directory it could not list. So is an entry whose kind
+      // readdir never reported: `UV_DIRENT_UNKNOWN`, which libuv yields
+      // wherever the filesystem omits `d_type` (NFS in many configurations,
+      // XFS made with `ftype=0`, several FUSE filesystems). There every
+      // predicate above answers false, and a real transcript sitting in that
+      // subtree is invisible to this walk. The condition is written as the
+      // negative of the kinds that are genuinely covered, not as a list of
+      // the kinds that are not, so an entry nobody anticipated - a dirent
+      // kind added after this was written included - reports the tree
+      // unwalked instead of silently reading as fully covered.
       complete = false
     }
   }
   return complete
+}
+
+/**
+ * Is this entry one the walk can skip without leaving a corner unlooked-at?
+ * A named pipe, a socket, or a device node holds no transcript records
+ * however it is named, so passing one over costs the walk nothing. Every
+ * other kind has to be either handled or reported.
+ *
+ * @param {Dirent} entry
+ * @returns {boolean}
+ */
+function holdsNoRecords(entry) {
+  return entry.isFIFO() || entry.isSocket() || entry.isBlockDevice() || entry.isCharacterDevice()
 }
 
 /**
