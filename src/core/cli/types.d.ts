@@ -463,3 +463,10 @@ export interface FixRecommendation {
   evidence: FixEvidence[]
   basis: FixBasisQuery[]
 }
+
+/** A discovered report folder; its Markdown is not read during listing. */
+export interface LocalReport {
+  source: 'local'
+  path: string
+  modifiedAt: string
+}

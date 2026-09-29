@@ -3,9 +3,10 @@
 <!-- @ref LLP 0196#mechanics-as-code [implements]: deterministic steps ship as code the
      skill can call, not as prose the skill has to re-derive -->
 
-This directory owns the static-site renderer for `~/hypaware-reports`: the
-script that turns each dated report's Markdown into a browsable HTML site, and
-the assets every built page carries.
+This directory owns the shared report renderer exported as `hypaware/core/reports`.
+HypAware Server imports `renderReports` from that entry point to turn Markdown
+into HTML. Keep the renderer, its types, and its assets when changing the CLI;
+the local `hyp report render` command has been retired (LLP 0448).
 
 ## Why this exists
 
@@ -38,7 +39,7 @@ cut the skill from 28 KB to 13 KB (T10 finished the trim).
 
 - **These assets live here and nowhere else.** They used to ship a second and
   third time inside the bundled report skills, back when the skill copied the
-  stylesheet into the reports tree itself. `hyp report render` installs them
+  stylesheet into the reports tree itself. `renderReports` installs them
   from this directory, so the skill needs none of them; both copies were
   deleted (64 KB of dead weight in the published package), and
   `test/core/report-assets-canonical.test.js` fails if one comes back. Three

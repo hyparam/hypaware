@@ -8,7 +8,7 @@
  *
  * They used to ship three times: the canonical copy under `src/core/reports/assets/`
  * and one inside each host's bundled report skill, because the skill copied the
- * stylesheet into the reports tree itself. That copy step is gone. `hyp report render`
+ * stylesheet into the reports tree itself. That copy step is gone. `renderReports`
  * installs assets from its own directory, so the skill needs none of them, and the two
  * bundled copies were 64 KB of dead weight in the published package.
  *

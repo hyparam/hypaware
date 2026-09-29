@@ -16,11 +16,13 @@ import { deriveReportsEndpoint } from '../../src/core/remote/credentials.js'
 import {
   runReportDelete,
   runReportFix,
+  runReportGenerate,
   runReportGet,
   runReportList,
   runReportPublish,
 } from '../../src/core/cli/report_commands.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
+import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
 
 /* ---------- endpoint derivation ---------- */
 
@@ -399,6 +401,285 @@ test('a 201 answer with no id leaves the <id> placeholder bare for the reader to
 
 /* ---------- list ---------- */
 
+/** @param {TestContext} t */
+async function localListFixture(t) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-local-list-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const root = path.join(home, 'reports')
+  const dir = path.join(root, 'hypaware-report-2026-08-01-to-2026-08-31')
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, 'report.md'), '# August review\n')
+  const io = ctxWith({ HYP_HOME: home })
+  const record = { id: 'rpt-local', org: 'acme', kind: 'usage-review', period: '2026-08', title: 'August review', bytes: 100, publishedAt: '2026-09-01T00:00:00.000Z' }
+  return { ...io, home, root, dir, record }
+}
+
+test('list --local discovers report folders without remote access or reading arbitrary files', async (t) => {
+  const { ctx, dir, root, out } = await localListFixture(t)
+  ctx.env.HYP_REMOTE_TOKEN_PROD = undefined
+  await fs.mkdir(path.join(root, 'unfinished'))
+  await fs.writeFile(path.join(root, 'loose.md'), '# not a report folder')
+  await fs.symlink(dir, path.join(root, 'linked-folder'))
+  const { calls } = stubServer(t, () => { throw new Error('local listing contacted remote') })
+  assert.equal(await runReportList(['--local', '--json'], ctx), 0)
+  const rows = JSON.parse(out.join(''))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].source, 'local')
+  assert.equal(rows[0].path, await fs.realpath(dir))
+  assert.ok(rows[0].modifiedAt)
+  assert.equal(calls.length, 0)
+  assert.equal(await runReportList(['--local', '--remote', 'prod'], ctx), 2)
+})
+
+test('list keeps unrelated local and published reports in separate sections', async (t) => {
+  const { ctx, dir, record, out } = await localListFixture(t)
+  stubServer(t, () => ({ status: 200, json: { reports: [record] } }))
+  assert.equal(await runReportList([], ctx), 0)
+  const text = out.join('')
+  assert.match(text, /Published reports:/)
+  assert.match(text, /Local reports:/)
+  assert.ok(text.includes(await fs.realpath(dir)))
+  assert.doesNotMatch(text, /local copy:/)
+})
+
+test('interactive list selects a local report and publishes only after the action is chosen', async (t) => {
+  const { ctx, dir, record, out } = await localListFixture(t)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const canonical = await fs.realpath(dir)
+  const { calls } = stubServer(t, (method) => method === 'POST'
+    ? { status: 201, json: { report: record } }
+    : { status: 200, json: { reports: [] } })
+  const choices = [canonical, 'publish']
+  assert.equal(await runReportList(['--remote', 'prod', '--org', 'acme'], ctx, {
+    select: async (spec) => {
+      assert.equal(calls.filter((call) => call.method === 'POST').length, 0)
+      const choice = choices.shift()
+      assert.ok(choice)
+      if (choice === 'publish') {
+        assert.ok(spec.items?.includes('Remote: prod'))
+        assert.ok(spec.items?.includes('Organization: acme'))
+        assert.ok(spec.items?.includes('Kind: usage-review'))
+        assert.ok(spec.items?.includes('Period: 2026-08-01-to-2026-08-31'))
+      }
+      return choice
+    },
+  }), 0)
+  const [published] = calls.filter((call) => call.method === 'POST')
+  assert.equal(calls.filter((call) => call.method === 'POST').length, 1)
+  assert.equal(published.url.searchParams.get('kind'), 'usage-review')
+  assert.equal(published.url.searchParams.get('period'), '2026-08-01-to-2026-08-31')
+  assert.equal(published.url.searchParams.get('org'), 'acme')
+  assert.match(out.join(''), /published usage-review/)
+})
+
+test('local picker edits unknown periods and destinations before showing Publish', async (t) => {
+  const { ctx, dir, root, record } = await localListFixture(t)
+  const custom = path.join(root, 'custom-review')
+  await fs.rename(dir, custom)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  ctx.config.query.remotes.other = { url: 'https://other.internal' }
+  ctx.env.HYP_REMOTE_TOKEN_OTHER = 'other-token'
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: record } }))
+  const choices = [await fs.realpath(custom), 'edit', 'other', 'publish']
+  assert.equal(await runReportList(['--local'], ctx, {
+    select: async (spec) => {
+      assert.equal(calls.length, 0, 'even --local contacts a remote only after choosing Publish')
+      const choice = choices.shift()
+      assert.ok(choice)
+      if (choice === 'edit') assert.ok(!spec.options.some((option) => option.value === 'publish'))
+      if (choice === 'publish') {
+        assert.ok(spec.items?.includes('Remote: other'))
+        assert.ok(spec.items?.includes('Period: 2026-08'))
+        assert.ok(spec.items?.includes('Kind: retrospective'))
+      }
+      return choice
+    },
+    text: async (spec) => {
+      assert.notEqual(spec.validate?.(''), null)
+      return spec.title === 'Report kind' ? 'retrospective' : '2026-08'
+    },
+  }), 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].method, 'POST')
+  assert.equal(calls[0].url.host, 'other.internal')
+  assert.equal(calls[0].url.searchParams.get('kind'), 'retrospective')
+  assert.equal(calls[0].url.searchParams.get('period'), '2026-08')
+})
+
+test('local picker Back, Escape, and cancellation never publish', async (t) => {
+  const { ctx, dir } = await localListFixture(t)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const canonical = await fs.realpath(dir)
+  const { calls } = stubServer(t, () => { throw new Error('must not publish') })
+  for (const back of ['back', new PromptBackRequestedError(), new PromptCancelledError()]) {
+    const choices = [canonical, back, 'done']
+    assert.equal(await runReportList(['--local'], ctx, {
+      select: async () => {
+        const choice = choices.shift()
+        assert.ok(choice)
+        if (choice instanceof Error) throw choice
+        return choice
+      },
+    }), 0)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('JSON, piped output, and HYP_NO_TUI list without prompting or publishing', async (t) => {
+  const { ctx } = await localListFixture(t)
+  const { calls } = stubServer(t, () => { throw new Error('must not publish') })
+  const deps = { select: async () => { throw new Error('must not prompt') } }
+  assert.equal(await runReportList(['--local'], ctx, deps), 0)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  assert.equal(await runReportList(['--local', '--json'], ctx, deps), 0)
+  ctx.env.HYP_NO_TUI = '1'
+  assert.equal(await runReportList(['--local'], ctx, deps), 0)
+  assert.equal(calls.length, 0)
+})
+
+test('local picker refuses an off-list path and reports publish failures without retrying', async (t) => {
+  const { ctx, dir, err } = await localListFixture(t)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { calls } = stubServer(t, () => ({ status: 403, json: { error: 'org_mismatch' } }))
+  assert.equal(await runReportList(['--local'], ctx, { select: async () => '/not-offered' }), 1)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /unavailable report/)
+  const choices = [await fs.realpath(dir), 'publish']
+  assert.equal(await runReportList(['--local'], ctx, { select: async () => {
+    const choice = choices.shift()
+    assert.ok(choice)
+    return choice
+  } }), 1)
+  assert.equal(calls.length, 1)
+  assert.match(err.join(''), /org_mismatch/)
+})
+
+test('publish receipt joins a local folder to its remote record without polluting the upload', async (t) => {
+  const { ctx, dir, root, record, out } = await localListFixture(t)
+  const { calls } = stubServer(t, (method) => method === 'POST'
+    ? { status: 201, json: { report: record } }
+    : { status: 200, json: { reports: [record] } })
+  const args = [dir, '--kind', record.kind, '--period', record.period]
+  assert.equal(await runReportPublish(args, ctx), 0)
+  assert.deepEqual(await fs.readdir(dir), ['report.md'])
+  const receipts = await fs.readdir(path.join(root, '.publications'))
+  assert.equal(receipts.length, 1)
+  const saved = JSON.parse(await fs.readFile(path.join(root, '.publications', receipts[0]), 'utf8'))
+  assert.equal(saved.id, record.id)
+  assert.equal(saved.org, 'acme')
+  assert.ok(!JSON.stringify(saved).includes('tok'))
+  out.length = 0
+  assert.equal(await runReportList(['--json'], ctx), 0)
+  const rows = JSON.parse(out.join(''))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].id, record.id)
+  assert.deepEqual(rows[0].localPaths, [await fs.realpath(dir)])
+  out.length = 0
+  assert.equal(await runReportList([], ctx), 0)
+  assert.match(out.join(''), /local copy:/)
+  assert.doesNotMatch(out.join(''), /Local reports:/)
+  // Receipt files are outside the Markdown folder, so a repeated publish still works.
+  assert.equal(await runReportPublish(args, ctx), 0)
+  assert.equal(calls.filter((call) => call.method === 'POST').length, 2)
+})
+
+test('a deduplicated single-file publication also records the local association', async (t) => {
+  const { ctx, dir, record, out } = await localListFixture(t)
+  stubServer(t, (method) => method === 'POST'
+    ? { status: 200, json: { report: record } }
+    : { status: 200, json: { reports: [record] } })
+  assert.equal(await runReportPublish([path.join(dir, 'report.md'), '--kind', record.kind, '--period', record.period], ctx), 0)
+  out.length = 0
+  assert.equal(await runReportList(['--json'], ctx), 0)
+  assert.equal(JSON.parse(out.join('')).length, 1)
+})
+
+test('publication links respect endpoint, org and report identity and never hide a missing remote row', async (t) => {
+  const { ctx, dir, record, out } = await localListFixture(t)
+  let listed = [record]
+  stubServer(t, (method) => method === 'POST'
+    ? { status: 201, json: { report: record } }
+    : { status: 200, json: { reports: listed } })
+  assert.equal(await runReportPublish([dir, '--kind', record.kind, '--period', record.period], ctx), 0)
+  for (const changed of [{ ...record, org: 'other' }, { ...record, id: 'rpt-other' }]) {
+    listed = [changed]
+    out.length = 0
+    assert.equal(await runReportList(['--json'], ctx), 0)
+    assert.equal(JSON.parse(out.join('')).length, 2)
+  }
+  listed = [record]
+  ctx.config.query.remotes.prod.url = 'https://different.internal'
+  out.length = 0
+  assert.equal(await runReportList(['--json'], ctx), 0)
+  assert.equal(JSON.parse(out.join('')).length, 2)
+  listed = []
+  out.length = 0
+  assert.equal(await runReportList(['--json'], ctx), 0)
+  assert.equal(JSON.parse(out.join(''))[0].source, 'local')
+})
+
+test('failed publication and corrupt receipts leave the local report visible', async (t) => {
+  const { ctx, dir, root, record, out } = await localListFixture(t)
+  let publishStatus = 500
+  stubServer(t, (method) => method === 'POST'
+    ? { status: publishStatus, json: { report: record } }
+    : { status: 200, json: { reports: [record] } })
+  const args = [dir, '--kind', record.kind, '--period', record.period]
+  assert.equal(await runReportPublish(args, ctx), 1)
+  await assert.rejects(fs.stat(path.join(root, '.publications')), { code: 'ENOENT' })
+  publishStatus = 201
+  assert.equal(await runReportPublish(args, ctx), 0)
+  const [receipt] = await fs.readdir(path.join(root, '.publications'))
+  for (const bytes of ['{invalid JSON', 'x'.repeat(20000)]) {
+    await fs.writeFile(path.join(root, '.publications', receipt), bytes)
+    out.length = 0
+    assert.equal(await runReportList(['--json'], ctx), 0)
+    assert.equal(JSON.parse(out.join('')).length, 2)
+  }
+})
+
+test('receipt write failure warns without turning a successful publication into a failure', async (t) => {
+  const { ctx, dir, root, record, err } = await localListFixture(t)
+  await fs.writeFile(path.join(root, '.publications'), 'blocked')
+  stubServer(t, () => ({ status: 201, json: { report: record } }))
+  assert.equal(await runReportPublish([dir, '--kind', record.kind, '--period', record.period], ctx), 0)
+  assert.match(err.join(''), /published successfully, but could not save/)
+})
+
+test('list preserves local visibility on a remote failure and explicit remote requests still fail', async (t) => {
+  const { ctx, out, err } = await localListFixture(t)
+  stubServer(t, () => ({ status: 503, json: { error: 'unavailable' } }))
+  assert.equal(await runReportList(['--json'], ctx), 0)
+  assert.equal(JSON.parse(out.join(''))[0].source, 'local')
+  assert.match(err.join(''), /remote reports unavailable/)
+  out.length = 0
+  assert.equal(await runReportList(['--remote', 'prod', '--json'], ctx), 1)
+  assert.equal(JSON.parse(out.join(''))[0].source, 'local')
+})
+
+test('local list retains a bounded newest set and discloses truncation', async (t) => {
+  const { ctx, root, dir, out, err } = await localListFixture(t)
+  await fs.utimes(path.join(dir, 'report.md'), 1, 1)
+  for (let i = 0; i < 101; i++) {
+    const folder = path.join(root, `run-${i}`)
+    await fs.mkdir(folder)
+    const brief = path.join(folder, 'report.md')
+    await fs.writeFile(brief, '# Brief')
+    await fs.utimes(brief, 100 + i, 100 + i)
+  }
+  assert.equal(await runReportList(['--local', '--json'], ctx), 0)
+  const rows = JSON.parse(out.join(''))
+  assert.equal(rows.length, 100)
+  assert.ok(rows[0].path.endsWith('run-100'))
+  assert.ok(!rows.some((row) => row.path === dir))
+  assert.match(err.join(''), /newest 100 of 102/)
+})
+
 test('list renders the index newest first and passes filters through', async (t) => {
   const { calls } = stubServer(t, () => ({
     status: 200,
@@ -675,6 +956,144 @@ function fixDeps({ launchers = [{ client: 'claude', label: 'Claude Code', bin: '
     }),
   }
 }
+
+/** @param {TestContext} t */
+async function generateFixture(t) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-generate-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  for (const client of ['claude', 'codex']) {
+    const dir = path.join(home, `.${client}`, 'skills', 'hypaware-report')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'SKILL.md'), '# Report skill\n')
+  }
+  const io = ctxWith({ HOME: home, HYP_HOME: undefined })
+  io.ctx.config = { version: 2 }
+  io.ctx.cwd = home
+  return { ...io, home }
+}
+
+test('generate launches locally with the skill and preserves optional instructions verbatim', async (t) => {
+  const { ctx, home } = await generateFixture(t)
+  const { calls } = stubServer(t, () => { throw new Error('generation must not contact a server') })
+  const { deps, launches } = fixDeps()
+  const instructions = 'Cover August 2026\nFocus on `debugging`, $HOME, and "retries".'
+  assert.equal(await runReportGenerate([instructions], ctx, deps), 0)
+  assert.equal(calls.length, 0)
+  assert.equal(launches.length, 1)
+  const { cwd, prompt, env } = launches[0]
+  assert.equal(cwd, path.join(home, '.hyp', 'reports'))
+  assert.ok((await fs.stat(cwd)).isDirectory())
+  assert.ok(prompt.includes(JSON.stringify(path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md'))))
+  assert.ok(prompt.endsWith(instructions))
+  assert.deepEqual(env, { ...ctx.env, HYP_HOME: path.join(home, '.hyp') })
+  assert.deepEqual(await fs.readdir(cwd), [])
+})
+
+test('generate without instructions defers the period to the skill and respects HYP_HOME', async (t) => {
+  const { ctx, home } = await generateFixture(t)
+  ctx.env.HYP_HOME = path.join(home, 'custom')
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[0].cwd, path.join(home, 'custom', 'reports'))
+  assert.match(launches[0].prompt, /default reporting period/)
+  assert.doesNotMatch(launches[0].prompt, /Additional instructions/)
+  ctx.env.HYP_HOME = 'relative-home'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[1].cwd, path.join(home, 'relative-home', 'reports'))
+  assert.equal(launches[1].env.HYP_HOME, path.join(home, 'relative-home'))
+})
+
+test('generate telemetry distinguishes a launch failure from success without recording instructions', async (t) => {
+  const { ctx } = await generateFixture(t)
+  const captured = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch(spans) { captured.push(...spans) } }],
+  })
+  provider.register()
+  t.after(() => provider.shutdown())
+  const { deps } = fixDeps()
+  assert.equal(await runReportGenerate(['private-instruction-marker'], ctx, deps), 0)
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  const spans = captured.filter((span) => span.name === 'report.generate')
+  assert.equal(spans.length, 2)
+  assert.equal(spans[0].attributes.status, 'ok')
+  assert.equal(spans[0].status.code, SpanStatusCode.OK)
+  assert.equal(spans[1].attributes.error_kind, 'client-launch')
+  assert.equal(spans[1].status.code, SpanStatusCode.ERROR)
+  assert.ok(!JSON.stringify(spans).includes('private-instruction-marker'))
+})
+
+test('generate rejects invalid arguments before probing or launching', async () => {
+  for (const args of [['--unknown'], ['one', 'two']]) {
+    const { ctx } = ctxWith()
+    const { deps, launches } = fixDeps()
+    deps.collectStatus = async () => { throw new Error('must not probe') }
+    deps.resolveLaunchers = async () => { throw new Error('must not resolve') }
+    assert.equal(await runReportGenerate(args, ctx, deps), 2)
+    assert.equal(launches.length, 0)
+  }
+})
+
+test('generate requires an available client with an installed report skill', async (t) => {
+  const { ctx, home, err } = await generateFixture(t)
+  await fs.rm(path.join(home, '.claude'), { recursive: true })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  assert.equal(launches.length, 0)
+  assert.match(err.join(''), /no attached client with the hypaware-report skill/)
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+})
+
+test('generate chooses a client on a terminal and uses the first without a TUI', async (t) => {
+  const { ctx } = await generateFixture(t)
+  const launchers = [
+    { client: 'claude', label: 'Claude', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
+    { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
+  ]
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ launchers, pick: async () => 'codex' })
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[0].launcher.client, 'codex')
+  assert.match(launches[0].prompt, /\.codex/)
+  assert.equal(prompts.length, 1)
+  ctx.env.HYP_NO_TUI = '1'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[1].launcher.client, 'claude')
+  assert.equal(prompts.length, 1)
+})
+
+test('generate cancellation does not create a directory or start a client', async (t) => {
+  const { ctx, home } = await generateFixture(t)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches } = fixDeps({
+    launchers: [
+      { client: 'claude', label: 'Claude' },
+      { client: 'codex', label: 'Codex' },
+    ],
+    pick: async () => { throw new PromptCancelledError() },
+  })
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches.length, 0)
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+})
+
+test('generate identifies directory creation and spawn failures', async (t) => {
+  const { ctx, home, err } = await generateFixture(t)
+  ctx.env.HYP_HOME = path.join(home, 'blocked')
+  await fs.writeFile(ctx.env.HYP_HOME, 'file')
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  assert.equal(launches.length, 0)
+  assert.match(err.join(''), /could not create reports directory/)
+  ctx.env.HYP_HOME = path.join(home, 'okay')
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  assert.match(err.join(''), /could not start claude: ENOENT/)
+})
 
 test('fix <id> resolves the id, checks the page exists, and starts the client here with the read command', async (t) => {
   const { calls } = stubFixServer(t)

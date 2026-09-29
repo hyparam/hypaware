@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportFix, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGenerate, runReportGet, runReportList, runReportPublish } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -771,41 +771,39 @@ function buildCoreCommands(registry) {
       usage: coreUsage('remote remove'),
       run: runRemoteRemove,
     },
-    // @ref LLP 0155#not-verbs [constrained-by]: report subcommands stay REST commands, never ctx.verbs; MCP report tools are the server's to register
+    // @ref LLP 0155#not-verbs [constrained-by]: remote report operations stay CLI commands, never ctx.verbs; MCP report tools are the server's to register
     makeGroupCommand({
       registry,
       name: 'report',
       category: 'explore-share',
       audience: 'everyday',
-      summary: 'Render and manage reports',
+      summary: 'Generate and manage reports',
       help:
-        "'render' is a LOCAL build step: it turns a reports tree's Markdown into\n" +
-        'a static HTML site and takes no --remote and no credential.\n' +
+        "'generate' starts an attached AI client to write a local report using\n" +
+        'the hypaware-report skill. Optional instructions set the period and focus.\n' +
         '\n' +
-        'The rest talk to the remote. Reports are hosted there (there is no\n' +
-        'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
+        "'list' shows local folders alongside published reports, joining local\n" +
+        'copies to their publication when a publish receipt is available.\n' +
+        'Published reports live on the remote; publish/list/get/fix/delete take --remote\n' +
         '<target> and default to the default remote target, the same resolution\n' +
         'as bare --remote on queries. Reads use your login session; publish and\n' +
         'delete need the publisher role (or an operator-minted publish token\n' +
         "stored via 'hyp remote login <target> --token-file <path>').",
     }),
     {
-      // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
-      name: 'report render',
-      summary: 'Build the static HTML site for a local reports tree (no remote involved)',
-      usage: coreUsage('report render'),
+      name: 'report generate',
+      summary: 'Start an attached AI client to generate a local report',
+      usage: coreUsage('report generate'),
       help: [
-        'Renders every top-level <slug>.md (plus its optional <slug>/ section',
-        'directory) into html/<slug>/, and refreshes the shared assets. <dir>',
-        'defaults to ~/hypaware-reports.',
-        '',
-        'html/ is wiped and rebuilt every run, so a deleted or renamed report',
-        'never leaves stale HTML behind. Report .md sources are never modified,',
-        'and assets/theme.css is yours: it is copied into each page but never',
-        'overwritten. Pass --no-refresh-assets to leave the other assets alone',
-        'too.',
+        'Starts a client with the hypaware-report skill in ~/.hyp/reports',
+        '(or $HYP_HOME/reports). Optional quoted instructions can specify',
+        'the reporting period and focus; the skill defaults to the previous',
+        'calendar month. Reports remain local unless you request publishing.',
+        'If multiple attached clients have the skill, asks which on a terminal;',
+        'otherwise uses the first available client. The client takes over the',
+        'terminal with its normal permissions. No remote login is required.',
       ].join('\n'),
-      run: runReportRender,
+      run: runReportGenerate,
     },
     {
       name: 'report publish',
@@ -829,8 +827,21 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'report list',
-      summary: "List the org's published reports (newest first)",
+      summary: 'List published reports and local report folders',
       usage: coreUsage('report list'),
+      help: [
+        'Shows published reports and local reports in separate sections. A local',
+        'folder linked by a successful publish appears as a local copy under the',
+        'published report, instead of a second entry. Older publications without',
+        'a local receipt remain separate until republished.',
+        'Local discovery reads the newest 100 report folders in $HYP_HOME/reports',
+        '(default ~/.hyp/reports). --local skips remote listing. The other',
+        'filters apply to published reports. --json keeps the remote record array,',
+        'adds localPaths to linked records, and appends unmatched source: local rows.',
+        'On a terminal, select a local report to publish it or edit its publish',
+        'details. The destination and period are shown before choosing Publish.',
+        'Piped output, --json, and HYP_NO_TUI=1 do not open the picker.',
+      ].join('\n'),
       run: runReportList,
     },
     {

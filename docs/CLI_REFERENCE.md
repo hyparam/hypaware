@@ -14,7 +14,7 @@ For installation, upgrade, recovery, and task-oriented workflows, see
 - [Plugin-owned commands](#plugin-owned-commands)
 - [Set up and inspect HypAware](#set-up-and-inspect-hypaware)
 - [Query recorded data](#query-recorded-data)
-- [Render and manage reports](#render-and-manage-reports)
+- [Generate and manage reports](#generate-and-manage-reports)
 - [Send data now](#send-data-now)
 - [Control the current session](#control-the-current-session)
 - [Manage AI clients and history](#manage-ai-clients-and-history)
@@ -293,7 +293,7 @@ remote execution.
 hyp query vector search "daemon restart failure" --top-k 5 --format json
 ```
 
-## Render and manage reports
+## Generate and manage reports
 
 ```text
 hyp report <subcommand> [args...]
@@ -305,24 +305,29 @@ Use `hyp report --help` to list report operations:
 hyp report --help
 ```
 
-`render` is local. The other report commands use a remote target and resolve
+`generate` is local; `list` includes local folders alongside remote reports.
+Remote operations resolve
 the default remote if `--remote` is omitted. Publishing and deletion require a
 write-capable credential.
 
-### `hyp report render`
-
-```text
-hyp report render [<dir>] [--no-refresh-assets]
-```
-
-Builds a static HTML site from a local reports tree. The directory defaults to
-`~/hypaware-reports`. It replaces the derived `html/` directory, preserves
-source Markdown and `assets/theme.css`, and refuses an empty source tree.
-`--no-refresh-assets` also preserves the other copied assets.
+### `hyp report generate`
 
 ```sh
-hyp report render ~/hypaware-reports
+hyp report generate
+hyp report generate "Cover August 2026 and focus on repeated debugging work"
 ```
+
+Starts an attached AI client with the installed `hypaware-report` skill.
+Optional quoted instructions specify the period or focus; without them the
+skill uses the previous calendar month. On a terminal, multiple available
+clients produce a picker; otherwise the first is used. The client inherits
+the terminal and keeps its normal permissions. No server login is required.
+
+The session starts in `$HYP_HOME/reports` (default `~/.hyp/reports`). The skill
+writes `hypaware-report-<from>-to-<to>/report.md` and linked Markdown pages,
+adding `-2`, `-3`, etc. for repeat runs. Nothing is published unless requested.
+The command reports whether the client launched, not whether its report was
+completed.
 
 ### `hyp report publish`
 
@@ -340,22 +345,45 @@ publish path. The remote identifies repeat uploads by content hash. `--org`
 applies only to an operator credential that can name an organization.
 
 ```sh
-hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
+hyp report publish "${HYP_HOME:-$HOME/.hyp}/reports/hypaware-report-2026-08-01-to-2026-08-31" --kind usage-review --period 2026-08
 ```
 
 ### `hyp report list`
 
 ```text
-hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]
+hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]
 ```
 
-Lists the newest reports visible to the selected organization. An empty list
-succeeds. Each report's recommendations follow its line, one per line, as the
+Lists published reports and local report folders in separate sections. Local
+discovery shows the newest 100 immediate folders containing `report.md` under
+`$HYP_HOME/reports` (default `~/.hyp/reports`), ordered by the brief's modification
+time. `--local` skips remote listing and cannot combine with remote selection or
+filters. The other filters apply only to published reports.
+
+On a terminal, select a local report to see **Publish**, **Edit details**, and
+**Back to reports**. The action screen shows the remote, kind, and reporting
+period before upload. Generated folder names supply the default date range;
+other folders require a period through Edit details. Editing also lets you choose
+another remote. Selecting Publish calls the normal publish flow, including when
+the list was opened with `--local`. Piped output, `--json`, and `HYP_NO_TUI=1`
+remain noninteractive. Selecting or cancelling a report does not upload it.
+
+A successful publish saves a receipt outside the uploaded folder. When that
+publication appears in the remote results, its row includes the local path and
+the folder is omitted from the local section. This denotes a local copy, which
+may have been edited since publishing. Older publications without receipts stay
+separate until republished; titles and dates are not used to guess a match.
+If the remote is unavailable, local reports still appear with a warning.
+Explicit remote selection or filters retain a failure exit code.
+
+An empty list succeeds. Each published report's recommendations follow its line, one per line, as the
 minted id, the `recommendation-<slug>` page the id names, and the page's
 title, with its thesis on the line below. The page is the artifact path
 `hyp report get` takes. A remote that does not read the page's opening at
 publish, or a report published before it did, lists the id and page alone.
-`--json` prints the records whole, `recommendations` included.
+`--json` prints an array of remote records, `recommendations` included, with
+`localPaths` on linked records. Unmatched local rows have `source: "local"`,
+`path`, and `modifiedAt`.
 
 ```text
   2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review

@@ -195,15 +195,12 @@ export const CORE_COMMAND_ARGS = {
       positional: ['name'],
     },
   },
-  'report render': {
-    usage: 'hyp report render [<dir>] [--no-refresh-assets]',
+  'report generate': {
+    usage: 'hyp report generate [instructions]',
     schema: {
       type: 'object',
-      properties: {
-        dir: { type: 'string' },
-        'no-refresh-assets': { type: 'boolean', default: false },
-      },
-      positional: ['dir'],
+      properties: { instructions: { type: 'string' } },
+      positional: ['instructions'],
     },
   },
   'report publish': {
@@ -222,7 +219,7 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'report list': {
-    usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
+    usage: 'hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -230,6 +227,7 @@ export const CORE_COMMAND_ARGS = {
         period: { type: 'string' },
         limit: { type: 'string' },
         before: { type: 'string' },
+        local: { type: 'boolean', default: false },
         org: { type: 'string' },
         json: { type: 'boolean', default: false },
         remote: { type: 'string' },

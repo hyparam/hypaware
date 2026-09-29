@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-24
 **Related:** LLP 0155, LLP 0107, LLP 0196, LLP 0216 (the removal this reverses)
+**Extended-by:** LLP 0448 (local generation CLI launcher; retires the local render command while preserving the shared renderer)
 
 ## Decision
 

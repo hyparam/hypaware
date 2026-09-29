@@ -102,8 +102,11 @@ data rather than treating old prose as new evidence.
 
 ## Write, review, deliver
 
-Write into a new `hypaware-report-<from>-to-<to>/` directory, or the user's
-requested destination. Do not overwrite an existing report without instruction.
+Write into `~/.hyp/reports/hypaware-report-<from>-to-<to>/` by default, using
+`$HYP_HOME/reports/` instead when `HYP_HOME` is set, or use the user's requested
+destination. Create the parent directory as needed. If the default report
+directory already exists, append `-2`, `-3`, etc., choosing the first unused
+name. Do not overwrite an existing report without instruction.
 Save section pages first, then the linked `report.md` brief. Follow the report
 contract for content, evidence, and Markdown replacements for server visuals.
 
@@ -134,7 +137,7 @@ Use the user's selected remote and the report's actual coverage period. For
 example, a report covering August 2026 can be published with:
 
 ```sh
-hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08 --remote <target>
+hyp report publish "${HYP_HOME:-$HOME/.hyp}/reports/hypaware-report-2026-08-01-to-2026-08-31" --kind usage-review --period 2026-08 --remote <target>
 ```
 
 For a custom range, use `YYYY-MM-DD-to-YYYY-MM-DD` as the period. If the team

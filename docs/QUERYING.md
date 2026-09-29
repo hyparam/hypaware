@@ -164,25 +164,28 @@ intended `HYP_HOME`. MCP configuration file syntax belongs to your MCP client;
 
 ## Turn findings into a report
 
-The report renderer builds HTML from a local Markdown report tree. For a small
-report, create `./usage-reports/weekly-usage.md` with your findings, query scope,
-and tables, then run:
+Generate a local Markdown report with an attached AI client:
 
 ```sh
-hyp report render ./usage-reports
+hyp report generate "Cover last week and focus on repeated debugging work"
 ```
 
-Open `./usage-reports/index.html`. The renderer rebuilds `html/`, so edit
-the source Markdown instead of generated HTML. It renders findings you write;
-it does not run SQL or invent a report from an empty directory.
+The report skill writes the brief and linked pages under `~/.hyp/reports`
+(or `$HYP_HOME/reports`). You can also write a Markdown report yourself,
+including your findings, query scope, and tables.
 
-To share a reviewed Markdown report with your organization:
+To share a generated report, run `hyp report list` in a terminal, select the
+local report, and choose **Publish**. The action screen shows the destination
+and reporting period; **Edit details** lets you change them before publishing.
+Use `hyp report list --local` to skip the remote listing.
+
+You can also publish a reviewed Markdown file directly:
 
 ```sh
 hyp report publish ./usage-reports/weekly-usage.md --kind usage-review --period 2026-W36 --remote team
 hyp report list --kind usage-review --limit 10 --remote team
 ```
 
-Publishing uploads the file and requires a write-capable credential. Review
-the report for private content first. See the [report command reference](CLI_REFERENCE.md#render-and-manage-reports)
+Publishing uploads the Markdown for the remote to render and requires a write-capable credential. Review
+the report for private content first. See the [report command reference](CLI_REFERENCE.md#generate-and-manage-reports)
 for bundles, downloads, and organization-wide deletion.

@@ -11,6 +11,7 @@ import { promisify } from 'node:util'
 import { askYesNo } from './confirm.js'
 import { parseCoreCommandArgv } from './command_args.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { Attr, markSpanStatus, withSpan } from '../observability/index.js'
 import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
@@ -23,18 +24,20 @@ import {
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { positionals } from './remote_commands.js'
 import { isTty } from './stdio.js'
-import { PromptCancelledError, select } from './tui/index.js'
+import { PromptCancelledError, select, text } from './tui/index.js'
 import { isPromptBackError } from './tui/runtime.js'
 import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
 import { askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
+import { atomicWriteJson } from '../util/fs_atomic.js'
+import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * @import { Stats } from 'node:fs'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { FirstAskLauncher } from '../../../src/core/cli/wizard/types.js'
- * @import { FixBasisQuery, FixEvidence, FixRecommendation } from '../../../src/core/cli/types.js'
+ * @import { FixBasisQuery, FixEvidence, FixRecommendation, LocalReport } from '../../../src/core/cli/types.js'
  */
 
 const execFileAsync = promisify(execFile)
@@ -58,8 +61,8 @@ const esc = (value) => escapeForDisplay(String(value))
  * made `remote` core: `hyp` is the human-CLI client of the server's
  * self-authenticating planes, and these commands reuse the whole `--remote`
  * credential stack (target registry, 0600 store, silent refresh). Reports are
- * server-specific, so there is no local mode: `--remote` selects a server, it
- * never switches one on.
+ * server-specific: `--remote` selects a server, it never switches one on.
+ * Local generation does not use this reports plane.
  *
  * @ref LLP 0155#core-group [implements]: report commands are core and ride the remote credential machinery verbatim
  */
@@ -72,69 +75,308 @@ const PERIOD_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/
 /** The value-taking flags shared across the `report` subcommands. */
 const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote', '--limit', '--before', '--output'])
 
+/** @param {CommandRunContext} ctx */
+function localReportsRoot(ctx) {
+  return path.resolve(ctx.cwd || process.cwd(), ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp'), 'reports')
+}
+
 /**
- * `hyp report render [<dir>]`: build the static HTML site for a local reports tree.
- *
- * @ref LLP 0196#mechanics-as-code [implements]: the deterministic half of rendering is a
- * command, so the skill calls it instead of narrating a shell script it cannot version
- *
- * The one subcommand in this group that is NOT a call to the server's reports plane.
- * It takes no `--remote`, reads and writes only local files, and needs no credential.
- * This remains a standalone local preview command. Publishing sends Markdown
- * directly to the server and does not require this build step (LLP 0436).
- * LLP 0155's "there is no local reports plane" is still true of publish/list/get/delete;
- * this is a local build step, not a plane operation, and the group help says so.
- *
- * Not destructive in the way `delete` is, so it does not prompt: it rebuilds `html/`
- * (derived output, wiped and regenerated every run) and refreshes the command-owned
- * assets. It never touches the report `.md` sources, and never `assets/theme.css`,
- * which is the user's (LLP 0196 #theme-layer).
- *
- * @param {string[]} argv
+ * @ref LLP 0448#local-list [implements]: discover immediate report folders without reading their contents
  * @param {CommandRunContext} ctx
+ * @returns {Promise<{ reports: LocalReport[], total: number }>}
+ */
+async function localReports(ctx) {
+  /** @type {LocalReport[]} */
+  const reports = []
+  let root
+  let entries
+  try {
+    root = await fs.realpath(localReportsRoot(ctx))
+    entries = await fs.opendir(root)
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return { reports, total: 0 }
+    throw err
+  }
+  let total = 0
+  for await (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+    const dir = path.join(root, entry.name)
+    let stat
+    try {
+      stat = await fs.lstat(path.join(dir, 'report.md'))
+    } catch (err) {
+      if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') continue
+      throw err
+    }
+    if (!stat.isFile()) continue
+    total++
+    const modifiedAt = stat.mtime.toISOString()
+    if (reports.length === 100 && (modifiedAt < reports[99].modifiedAt ||
+      (modifiedAt === reports[99].modifiedAt && compareStrings(dir, reports[99].path) >= 0))) continue
+    reports.push({ source: 'local', path: dir, modifiedAt })
+    reports.sort((a, b) => compareStrings(b.modifiedAt, a.modifiedAt) || compareStrings(a.path, b.path))
+    if (reports.length > 100) reports.pop()
+  }
+  return { reports, total }
+}
+
+/**
+ * Receipts sit beside report folders, so the Markdown-only upload stays clean.
+ * One slot per source, endpoint and org records the latest publication there.
+ * @param {string} source
+ * @param {string} endpoint
+ * @param {string} org
+ */
+function publicationReceiptPath(source, endpoint, org) {
+  const key = crypto.createHash('sha256').update(JSON.stringify([source, endpoint, org])).digest('hex')
+  return path.join(path.dirname(source), '.publications', `${key}.json`)
+}
+
+/**
+ * @ref LLP 0448#local-list [implements]: only a successful publish links a local folder to a remote identity
+ * @param {CommandRunContext} ctx
+ * @param {string} source
+ * @param {boolean} directory
+ * @param {string} endpoint
+ * @param {{ id?: unknown, kind?: unknown, period?: unknown, org?: unknown }} record
+ */
+async function savePublicationReceipt(ctx, source, directory, endpoint, record) {
+  if (![record.id, record.kind, record.period, record.org].every((value) => typeof value === 'string')) return
+  if (!directory && path.basename(source) !== 'report.md') return
+  let root
+  try {
+    root = await fs.realpath(localReportsRoot(ctx))
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return
+    throw err
+  }
+  const dir = await fs.realpath(directory ? source : path.dirname(source))
+  if (path.dirname(dir) !== root) return
+  const receipt = { endpoint, org: record.org, id: record.id, kind: record.kind, period: record.period }
+  if (Buffer.byteLength(JSON.stringify(receipt, null, 2)) > 16000) throw new Error('publication receipt exceeds the size limit')
+  await atomicWriteJson(publicationReceiptPath(dir, endpoint, String(record.org)), receipt, { mode: 0o600, dirMode: 0o700 })
+}
+
+/**
+ * Match only identities present in this remote page. Missing, corrupt, or
+ * obsolete receipts leave the local report visible rather than hiding it.
+ * @param {LocalReport[]} locals
+ * @param {any[]} reports
+ * @param {string} endpoint
+ * @returns {Promise<LocalReport[]>}
+ */
+async function linkLocalReports(locals, reports, endpoint) {
+  // This field describes this machine, never a path supplied by the remote.
+  for (const report of reports) delete report.localPaths
+  const byIdentity = new Map(reports.filter((r) => typeof r.org === 'string').map((r) => [JSON.stringify([r.org, r.kind, r.period, r.id]), r]))
+  const orgs = new Set(reports.map((r) => r.org).filter((org) => typeof org === 'string'))
+  const unmatched = []
+  for (const local of locals) {
+    let linked = false
+    for (const org of orgs) {
+      let file
+      try {
+        file = await fs.open(publicationReceiptPath(local.path, endpoint, org), 'r')
+        const buffer = Buffer.alloc(16385)
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
+        if (bytesRead > 16384) continue
+        const receipt = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'))
+        if (receipt.endpoint !== endpoint || receipt.org !== org) continue
+        const report = byIdentity.get(JSON.stringify([org, receipt.kind, receipt.period, receipt.id]))
+        if (!report) continue
+        report.localPaths = [...(report.localPaths ?? []), local.path]
+        linked = true
+      } catch {
+        // No trustworthy link: retain the local entry.
+      } finally {
+        await file?.close()
+      }
+    }
+    if (!linked) unmatched.push(local)
+  }
+  return unmatched
+}
+
+/** @param {CommandRunContext} ctx @param {LocalReport[]} reports @param {number} total */
+function printLocalReports(ctx, reports, total) {
+  if (reports.length === 0) return
+  ctx.stdout.write(`Local reports${total > 100 ? ' (among the newest 100; older folders omitted)' : ''}:\n`)
+  for (const report of reports) ctx.stdout.write(`  ${report.modifiedAt}\t${esc(report.path)}\n`)
+}
+
+/**
+ * @ref LLP 0448#local-actions [implements]: listing is read-only until the user chooses Publish with the destination and scope visible
+ * @param {CommandRunContext} ctx
+ * @param {LocalReport[]} reports
+ * @param {Record<string, unknown>} params
+ * @param {Parameters<typeof runReportList>[2]} deps
  * @returns {Promise<number>}
  */
-export async function runReportRender(argv, ctx) {
-  const parsed = parseCoreCommandArgv('report render', argv, ctx)
-  if (!parsed.ok) return parsed.code
-  const { renderReports, discoverReports } = await import('../reports/render.js')
-
-  const dir = path.resolve(
-    /** @type {string | undefined} */ (parsed.params.dir) ?? path.join(os.homedir(), 'hypaware-reports')
-  )
-
-  /** @type {Stats} */
-  let stat
-  try {
-    stat = await fs.stat(dir)
-  } catch {
-    ctx.stderr.write(`hyp report render: no such directory: ${dir}\n`)
-    return 2
+async function localReportPicker(ctx, reports, params, deps = {}) {
+  if (!reports.length || params.json === true || !isTty(ctx.stdin) || !isTty(ctx.stdout) || ctx.env.HYP_NO_TUI === '1') return 0
+  const ask = deps.select ?? select
+  const input = deps.text ?? text
+  const io = {
+    ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+    stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
+    env: ctx.env,
+    box: true,
   }
-  if (!stat.isDirectory()) {
-    ctx.stderr.write(`hyp report render: not a directory: ${dir}\n`)
-    return 2
+  while (true) {
+    try {
+      const picked = await ask({
+        title: 'Select a local report',
+        options: [
+          ...reports.map((report) => ({ value: report.path, label: esc(path.basename(report.path)), summary: esc(report.path) })),
+          { value: 'done', label: 'Done' },
+        ],
+        ...io,
+      })
+      if (picked === 'done') return 0
+      const report = reports.find((item) => item.path === picked)
+      if (!report) throw new Error('report picker returned an unavailable report')
+      const range = /^hypaware-report-(\d{4}-\d{2}-\d{2})-to-(\d{4}-\d{2}-\d{2})(?:-\d+)?$/.exec(path.basename(report.path))
+      let kind = String(params.kind ?? 'usage-review')
+      let period = String(params.period ?? (range ? `${range[1]}-to-${range[2]}` : ''))
+      let remote = String(params.remote ?? effectiveDefaultRemote(ctx.config))
+      let org = params.org === undefined ? undefined : String(params.org)
+      while (true) {
+        const ready = KIND_RE.test(kind) && PERIOD_RE.test(period) && org !== '*'
+        const action = await ask({
+          title: esc(path.basename(report.path)),
+          items: [
+            `Remote: ${esc(remote)}`,
+            ...(org !== undefined ? [`Organization: ${esc(org || '(default)')}`] : []),
+            `Kind: ${esc(kind)}`,
+            `Period: ${esc(period || '(choose a period)')}`,
+          ],
+          options: [
+            ...(ready ? [{ value: 'publish', label: 'Publish' }] : []),
+            { value: 'edit', label: 'Edit details' },
+            { value: 'back', label: 'Back to reports' },
+          ],
+          allowBack: true,
+          ...io,
+        })
+        if (action === 'back') break
+        if (action === 'publish' && ready) {
+          const argv = [report.path, '--kind', kind, '--period', period, '--remote', remote]
+          if (org !== undefined) argv.push('--org', org)
+          return await runReportPublish(argv, ctx)
+        }
+        if (action !== 'edit') throw new Error('report action picker returned an unavailable action')
+        kind = await input({ title: 'Report kind', default: kind, validate: (value) => KIND_RE.test(value) ? null : 'Use a lowercase name with letters, numbers, and hyphens (max 64).', allowBack: true, ...io })
+        period = await input({ title: 'Reporting period', default: period, validate: (value) => PERIOD_RE.test(value) ? null : 'Enter a period such as 2026-08 or 2026-08-01-to-2026-08-31 (max 64).', allowBack: true, ...io })
+        const remotes = effectiveRemotes(ctx.config)
+        const target = await ask({
+          title: 'Publish to which remote?',
+          options: Object.keys(remotes).map((name) => ({ value: name, label: esc(name) })),
+          default: remote,
+          allowBack: true,
+          ...io,
+        })
+        if (typeof target !== 'string' || !Object.hasOwn(remotes, target)) throw new Error('remote picker returned an unavailable remote')
+        remote = target
+        if (org !== undefined) org = await input({ title: 'Organization', default: org === '*' ? '' : org, validate: (value) => value === '*' ? 'Choose one organization to publish to.' : null, allowBack: true, ...io })
+      }
+    } catch (err) {
+      if (isPromptBackError(err)) continue
+      if (err instanceof PromptCancelledError || (err instanceof Error && err.name === 'PromptCancelledError')) {
+        ctx.stdout.write('Nothing published.\n')
+        return 0
+      }
+      ctx.stderr.write(`hyp report list: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
   }
+}
 
-  // Refuse before wiping html/. An empty tree usually means the reports were just
-  // archived, and rebuilding would replace a good site with an empty one.
-  const found = discoverReports(dir)
-  if (found.length === 0) {
-    ctx.stderr.write(
-      `hyp report render: no reports in ${dir} (expected a top-level <slug>.md).\n` +
-        'Nothing was changed. If the reports were archived, generate new ones first.\n',
-    )
-    return 1
-  }
-
-  try {
-    const result = renderReports({ dir, refreshAssets: parsed.params['no-refresh-assets'] !== true })
-    ctx.stdout.write(`Built html/ : ${result.reports} report(s) into html/<slug>/ (index + sections + assets)\n`)
+/**
+ * @ref LLP 0448#launch [implements]: the skill owns analysis; the CLI starts a client in the reports folder
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {Parameters<typeof runReportFix>[2]} [deps]
+ * @returns {Promise<number>}
+ */
+export async function runReportGenerate(argv, ctx, deps = {}) {
+  const gate = parseCoreCommandArgv('report generate', argv, ctx)
+  if (!gate.ok) return gate.code
+  return withSpan('report.generate', {
+    [Attr.COMPONENT]: 'reports',
+    [Attr.OPERATION]: 'report.generate',
+    status: 'error',
+  }, async (span) => {
+    const home = ctx.env.HOME || os.homedir()
+    const cwd = localReportsRoot(ctx)
+    const hypHome = path.dirname(cwd)
+    const clients = await askableClients(ctx, deps.collectStatus ? { collectStatus: deps.collectStatus } : {})
+    const descriptors = await buildWalkthroughClientDescriptorMap()
+    const candidates = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
+    const launchers = []
+    for (const launcher of candidates) {
+      const descriptor = descriptors.get(launcher.client)
+      if (!descriptor) continue
+      const skill = path.join(home, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
+      try {
+        await fs.access(skill)
+        launchers.push({ launcher, skill })
+      } catch {
+        // Only offer clients that can read the report workflow.
+      }
+    }
+    span.setAttribute('launcher_count', launchers.length)
+    if (launchers.length === 0) {
+      span.setAttribute('error_kind', 'no-launcher')
+      ctx.stderr.write('hyp report generate: no attached client with the hypaware-report skill can be started.\n')
+      ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
+      return 1
+    }
+    let chosen = launchers[0]
+    if (launchers.length > 1 && isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1') {
+      try {
+        const client = await (deps.select ?? select)({
+          box: true,
+          title: 'Which client should generate the report?',
+          options: launchers.map(({ launcher }) => ({ value: launcher.client, label: launcher.label })),
+          ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+          stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
+          env: ctx.env,
+        })
+        const picked = launchers.find(({ launcher }) => launcher.client === client)
+        if (!picked) throw new Error('client picker returned an unavailable client')
+        chosen = picked
+      } catch (err) {
+        if (!(err instanceof PromptCancelledError) && !isPromptBackError(err) && !(err instanceof Error && err.name === 'PromptCancelledError')) throw err
+        markSpanStatus(span, 'cancelled')
+        ctx.stdout.write('Nothing started.\n')
+        return 0
+      }
+    }
+    try {
+      await fs.mkdir(cwd, { recursive: true })
+    } catch (err) {
+      span.setAttribute('error_kind', 'report-directory')
+      ctx.stderr.write(`hyp report generate: could not create reports directory: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+    const instructions = String(gate.params.instructions ?? '')
+    const prompt = `Use the hypaware-report skill at ${JSON.stringify(chosen.skill)} to generate a report from this machine's local HypAware recordings. ` +
+      `Follow its analysis, review, and delivery workflow. Save the report in a new hypaware-report-<from>-to-<to> directory under ${JSON.stringify(cwd)}, using a numbered suffix if it already exists. ` +
+      'Use the skill\'s default reporting period unless the instructions below specify one.' +
+      (instructions ? `\n\nAdditional instructions from the user:\n${instructions}` : '')
+    span.setAttribute('client', chosen.launcher.client)
+    ctx.stdout.write(`\nStarting ${chosen.launcher.label} to generate a local report...\n\n`)
+    // Keep a relative HYP_HOME anchored to the caller when the child changes cwd.
+    const env = { ...ctx.env, HYP_HOME: hypHome }
+    const result = await (deps.launchClient ?? launchClient)({ launcher: chosen.launcher, prompt, cwd, env })
+    if (!result.ok) {
+      span.setAttribute('error_kind', 'client-launch')
+      ctx.stderr.write(`hyp report generate: could not start ${chosen.launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
+      return 1
+    }
+    markSpanStatus(span, 'ok')
     return 0
-  } catch (err) {
-    ctx.stderr.write(`hyp report render: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
-  }
+  })
 }
 
 /**
@@ -258,6 +500,11 @@ export async function runReportPublish(argv, ctx) {
   // run nothing.
   const recordKind = record.kind ?? kind
   const recordPeriod = record.period ?? period
+  try {
+    await savePublicationReceipt(ctx, source, stat.isDirectory(), resolved.endpoint, { ...record, kind: recordKind, period: recordPeriod })
+  } catch (err) {
+    ctx.stderr.write(`hyp report publish: published successfully, but could not save the local publication receipt: ${err instanceof Error ? err.message : String(err)}\n`)
+  }
   const where = `${esc(recordKind)}/${esc(recordPeriod)}/${esc(record.id ?? '?')}`
   if (response.status === 200) {
     ctx.stdout.write(`already published as ${where} (same content) - nothing new uploaded\n`)
@@ -274,19 +521,48 @@ export async function runReportPublish(argv, ctx) {
 }
 
 /**
- * `hyp report list`: list the org's published reports, newest first.
+ * `hyp report list`: published reports and local folders, joined by publish receipts.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ select?: typeof select, text?: typeof text }} [deps]
  * @returns {Promise<number>}
  */
-export async function runReportList(argv, ctx) {
+export async function runReportList(argv, ctx, deps = {}) {
   const gate = parseCoreCommandArgv('report list', argv, ctx)
   if (!gate.ok) return gate.code
+  if (gate.params.local === true && ['remote', 'org', 'kind', 'period', 'limit', 'before'].some((key) => gate.params[key] !== undefined)) {
+    ctx.stderr.write('hyp report list: --local cannot be combined with remote selection or filters\n')
+    return 2
+  }
+  let local
+  try {
+    local = await localReports(ctx)
+  } catch (err) {
+    ctx.stderr.write(`hyp report list: could not read local reports: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
+  if (local.total > 100) ctx.stderr.write(`hyp report list: showing the newest 100 of ${local.total} local reports\n`)
+  if (gate.params.local === true) {
+    if (gate.params.json === true) ctx.stdout.write(JSON.stringify(local.reports, null, 2) + '\n')
+    else if (local.reports.length) printLocalReports(ctx, local.reports, local.total)
+    else ctx.stdout.write("no local reports - generate one with 'hyp report generate'\n")
+    return localReportPicker(ctx, local.reports, gate.params, deps)
+  }
+  /** @param {string} error @param {number} code */
+  const remoteUnavailable = async (error, code) => {
+    ctx.stderr.write(`${error}\n`)
+    if (local.reports.length) {
+      if (gate.params.json === true) ctx.stdout.write(JSON.stringify(local.reports, null, 2) + '\n')
+      else printLocalReports(ctx, local.reports, local.total)
+      // An explicit remote request still fails; a local-only user can list.
+      if (['remote', 'org', 'kind', 'period', 'limit', 'before'].every((key) => gate.params[key] === undefined)) return localReportPicker(ctx, local.reports, gate.params, deps)
+    }
+    return code
+  }
   const resolved = resolveReportsTarget(gate.params, ctx, 'report list')
   if ('error' in resolved) {
-    ctx.stderr.write(`${resolved.error}\n`)
-    return 2
+    return remoteUnavailable(resolved.error, 2)
   }
   const url = new URL(resolved.endpoint)
   // Same reason `--json` below reads the gate: `valueFlag()` drops a value
@@ -302,29 +578,34 @@ export async function runReportList(argv, ctx) {
     fetch(url, { headers: { authorization: `Bearer ${token}` } })
   )
   if (!outcome.ok) {
-    ctx.stderr.write(`hyp report list: ${outcome.error}\n`)
-    return outcome.exitCode
+    return remoteUnavailable(`hyp report list: remote reports unavailable: ${outcome.error}`, outcome.exitCode)
   }
   const { response } = outcome
   if (response.status !== 200) {
-    ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response)}\n`)
-    return 1
+    return remoteUnavailable(`hyp report list: remote reports unavailable: ${await describeErrorResponse(response)}`, 1)
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
+  const unmatched = await linkLocalReports(local.reports, reports, resolved.endpoint)
   // Read the mode the gate parsed, not argv: the codec also accepts
   // `--json=true`, and a token it blessed must not be dropped downstream.
   if (gate.params.json === true) {
-    ctx.stdout.write(JSON.stringify(reports, null, 2) + '\n')
+    ctx.stdout.write(JSON.stringify([...reports, ...unmatched], null, 2) + '\n')
     return 0
   }
   if (reports.length === 0) {
+    if (unmatched.length) {
+      printLocalReports(ctx, unmatched, local.total)
+      return localReportPicker(ctx, unmatched, gate.params, deps)
+    }
     ctx.stdout.write("no reports published - publish one with 'hyp report publish <file-or-dir> --kind <kind> --period <period>'\n")
     return 0
   }
+  if (local.reports.length) ctx.stdout.write('Published reports:\n')
   for (const r of reports) {
     const title = typeof r.title === 'string' && r.title ? `\t${esc(r.title)}` : ''
     ctx.stdout.write(`  ${esc(r.publishedAt)}\t${esc(r.kind)}/${esc(r.period)}\t${esc(r.id)}\t${esc(r.bytes)} bytes${title}\n`)
+    for (const localPath of r.localPaths ?? []) ctx.stdout.write(`      local copy: ${esc(localPath)}\n`)
     // The server mints one id per `recommendation-<slug>` page and lists them
     // on the record, in page order, so a report's recommendations read
     // beneath it without fetching the report; the id is the token a caller
@@ -341,7 +622,8 @@ export async function runReportList(argv, ctx) {
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${esc(c.summary)}\n`)
     }
   }
-  return 0
+  printLocalReports(ctx, unmatched, local.total)
+  return localReportPicker(ctx, unmatched, gate.params, deps)
 }
 
 /**
