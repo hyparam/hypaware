@@ -25,14 +25,18 @@ const RUNNING_PID = 4242
  * *loaded* (bootstrapped, `print` succeeds) and *running* (has a pid).
  * `spawnOnBootstrap: false` is the pended-spawn state from #1036.
  *
- * @param {{ loadedAtStart?: boolean, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean, kickstartStderr?: string }} [opts]
+ * `pidAtStart: 0` is the third state, and the only one that tells the two
+ * apart: launchd holding the label with nothing running under it, which is
+ * what a throttled respawn and a pended spawn both look like.
+ *
+ * @param {{ loadedAtStart?: boolean, pidAtStart?: number, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean, kickstartStderr?: string }} [opts]
  */
 function fakeLaunchd(opts) {
   const { loadedAtStart = false, spawnOnBootstrap = false, spawnOnKickstart = true, kickstartStderr } = opts ?? {}
   /** @type {string[][]} */
   const calls = []
   let loaded = loadedAtStart
-  let pid = loadedAtStart ? RUNNING_PID : 0
+  let pid = opts?.pidAtStart ?? (loadedAtStart ? RUNNING_PID : 0)
   return {
     calls,
     /** @param {string[]} args */
@@ -84,6 +88,7 @@ function fakeSystemd(opts) {
   /** @type {string[][]} */
   const calls = []
   let pid = 0
+  let stopped = false
   return {
     calls,
     daemonReload() { calls.push(['daemon-reload']); return Promise.resolve(OK) },
@@ -94,6 +99,7 @@ function fakeSystemd(opts) {
     /** @param {string} unit */
     start(unit) {
       calls.push(['start', unit])
+      stopped = false
       if (spawnOnStart) pid = RUNNING_PID
       if (startStderr !== undefined) {
         return Promise.resolve({ exitCode: 5, stdout: '', stderr: startStderr })
@@ -101,10 +107,11 @@ function fakeSystemd(opts) {
       return Promise.resolve(OK)
     },
     /** @param {string} unit */
-    stop(unit) { calls.push(['stop', unit]); pid = 0; return Promise.resolve(OK) },
+    stop(unit) { calls.push(['stop', unit]); pid = 0; stopped = true; return Promise.resolve(OK) },
     /** @param {string} unit */
     restart(unit) {
       calls.push(['restart', unit])
+      stopped = false
       if (spawnOnRestart) pid = RUNNING_PID
       return Promise.resolve(OK)
     },
@@ -113,7 +120,10 @@ function fakeSystemd(opts) {
     /** @param {string} unit */
     show(unit) {
       calls.push(['show', unit])
-      const state = pid > 0 ? 'active' : 'activating'
+      // A stopped unit stays `loaded` and goes `inactive`; a unit systemd is
+      // still bringing up reports `activating` with no MainPID, which is the
+      // `Restart=` gap a crash loop spends most of its time in.
+      const state = stopped ? 'inactive' : pid > 0 ? 'active' : 'activating'
       return Promise.resolve({
         exitCode: 0,
         stdout: `LoadState=loaded\nActiveState=${state}\nMainPID=${pid}\n`,
@@ -156,6 +166,48 @@ for (const platform of ['darwin', 'linux']) {
   })
 }
 
+// What `hyp daemon stop` gates on: is the service manager supervising this
+// daemon right now. Neither "a unit is on disk" nor "a pid exists" answers it.
+// `Restart=always` / `KeepAlive` means a crashing daemon has no pid for the
+// whole throttle gap and is still coming back, so a stop routed past the
+// manager during that gap is a stop that does not happen - which is the bug
+// this PR exists to fix, reached from the other side.
+test('a unit systemd will respawn reads as supervised, a stopped one does not', async () => {
+  const home = tmpHome('supervised')
+  const systemctl = fakeSystemd()
+  const options = { ...linuxOpts(home, systemctl), platform: /** @type {const} */ ('linux') }
+  try {
+    await installSystemdUnit(options)
+    const running = await serviceDaemonStatus(options)
+    assert.equal(running.active, true)
+    assert.equal(running.pid, RUNNING_PID)
+
+    // The crash-loop gap: `ActiveState=activating`, no MainPID. A pid gate
+    // would send this stop to the control file and report `not running`.
+    systemctl.show = async (unit) => {
+      systemctl.calls.push(['show', unit])
+      return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=activating\nMainPID=0\n', stderr: '' }
+    }
+    const respawning = await serviceDaemonStatus(options)
+    assert.equal(respawning.pid, undefined, 'no pid during the RestartSec gap')
+    assert.equal(respawning.active, true, 'but systemd is still going to bring it back')
+
+    // And the stop this PR preserves: still `loaded`, so `hyp daemon start`
+    // and `restart` recover it, but no longer supervised, so a foreground
+    // `hyp daemon run` beside it is reached by the control file instead.
+    systemctl.show = async (unit) => {
+      systemctl.calls.push(['show', unit])
+      return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=inactive\nMainPID=0\n', stderr: '' }
+    }
+    const idle = await serviceDaemonStatus(options)
+    assert.equal(idle.installed, true)
+    assert.equal(idle.loaded, true, 'a stopped unit stays loaded, which is why loaded cannot be the gate')
+    assert.equal(idle.active, false)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
 // A refused bootout is told from an accepted one by what it left behind, not
 // by its exit code: the service is still loaded after the wait. Its stderr is
 // still what the operator needs, so it rides the failure.
@@ -172,12 +224,6 @@ test('service stop surfaces manager failures', async () => {
   await assert.rejects(stopServiceDaemon({ platform: 'linux', systemctl }), /permission denied/)
 })
 
-// launchd answers a teardown it has not finished with `36: Operation now in
-// progress`, and one the job completed a moment before bootout ran with `3:
-// No such process`. Both are stops that worked, and the second is a race the
-// print above cannot close. Reading either as a failure would have made
-// `hyp daemon stop` exit 1 over its own happy path on a real Mac, which no
-// fake that returns 0 from bootout can show.
 // #1036 again, reached the other way. `hyp daemon start` after a stop has to
 // bootstrap the label back in, and a label bootstrapped seconds after an
 // instance of it was booted out is exactly where launchd leaves the initial
@@ -191,13 +237,41 @@ test('macOS start proves a pid for the label it had to bootstrap', async () => {
     /never started it/,
   )
   assert.equal(count(launchctl.calls, 'bootstrap'), 1)
-  // The other arm is unchanged: a job launchd is already holding is
-  // kickstarted and reported, as it was before stop existed.
-  const loaded = fakeLaunchd({ loadedAtStart: true, spawnOnKickstart: false })
+  // The other arm is unchanged, and `pidAtStart: 0` is what makes that an
+  // assertion rather than a coincidence: this job is loaded with nothing
+  // running under it, so it would fail the pid proof if the proof reached it.
+  // It kickstarts, reports, and is believed, as it was before stop existed.
+  const loaded = fakeLaunchd({ loadedAtStart: true, pidAtStart: 0, spawnOnKickstart: false })
   await startServiceDaemon({ ...darwinOpts('/unused', loaded), platform: /** @type {const} */ ('darwin') })
   assert.equal(count(loaded.calls, 'bootstrap'), 0)
+  assert.equal(count(loaded.calls, 'print'), 1, 'no pid poll on the arm launchd was already holding')
 })
 
+// The other half of that pid gate, and the same race `hyp daemon stop` hit on
+// bootout: the plist a start bootstraps carries `RunAtLoad`, so launchd can
+// spawn the job before the kickstart lands and answer the kickstart with
+// `3: No such process`. `installLaunchAgent` has never read that exit code
+// (see 'a kickstart that errors over a job launchd did start'), and the arm
+// that just bootstrapped must not either, or `hyp daemon start` after a stop
+// exits 1 over a daemon that is running.
+test('macOS start after a stop is not failed by a kickstart that lost the race', async () => {
+  const launchctl = fakeLaunchd({
+    spawnOnBootstrap: true,
+    spawnOnKickstart: false,
+    kickstartStderr: 'Operation already in progress',
+  })
+  await startServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') })
+  assert.equal(count(launchctl.calls, 'bootstrap'), 1)
+  assert.equal(count(launchctl.calls, 'kickstart'), 1, 'forced the spawn without raising on its exit code')
+  assert.match((await launchctl.print(['gui/501/com.hyperparam.hypaware'])).stdout, /pid = 4242/)
+})
+
+// launchd answers a teardown it has not finished with `36: Operation now in
+// progress`, and one the job completed a moment before bootout ran with `3:
+// No such process`. Both are stops that worked, and the second is a race the
+// print above cannot close. Reading either as a failure would have made
+// `hyp daemon stop` exit 1 over its own happy path on a real Mac, which no
+// fake that returns 0 from bootout can show.
 test('macOS stop reads the unload, not bootout\'s exit code', async () => {
   for (const booted of [
     { exitCode: 36, stdout: '', stderr: 'Boot-out failed: 36: Operation now in progress' },

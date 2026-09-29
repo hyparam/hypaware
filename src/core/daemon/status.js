@@ -1477,7 +1477,17 @@ export async function collectHypAwareStatus(opts = {}) {
     // daemon's own last snapshot. `shutdown()` persists `state: 'stopped'` as
     // its final write whatever asked for the stop, and a process that died
     // cannot. Read as a record of how the run ended, not as a claim about now.
-    // @ref LLP 0383#the-signal-is-the-daemons-last-state [implements]: a completed stop is not an outage, whether or not the service manager still holds the unit
+    //
+    // 0383 settled that signal for the shape where the probe reports the unit
+    // *loaded*, which is the block below. Reusing it here, where the probe
+    // reports the opposite, is an extension of it rather than an application:
+    // it is the borrowed signal, but a wider claim, and it carries a cost 0383
+    // never had to weigh (a `stopped` snapshot is unbounded in age, and a clean
+    // shutdown writes one, so a LaunchAgent that fails to load after a reboot
+    // is warned about rather than raised). That trade is recorded in the 0300
+    // amendment, which is where this PR's stop design lives and is still Draft.
+    // @ref LLP 0383#the-signal-is-the-daemons-last-state [constrained-by]: the crash-versus-stopped signal this borrows, settled there for the loaded shape
+    // @ref LLP 0300#posix-keeps-signals [implements]: the stop that creates this shape on macOS, and the accepted cost of reading it this way
     // Platform-gated, because the shape is only ambiguous on one of them.
     // On Linux a stop never lands here at all, so a snapshot that ends in a
     // stop is no evidence about *this* pair of facts and reading it as such

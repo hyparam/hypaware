@@ -430,7 +430,13 @@ export async function startLaunchAgent(options) {
     ensure(status, `print ${label}`)
   }
   const kickRes = await launchctl.kickstart([target])
-  ensure(kickRes, `kickstart ${label}`)
+  // The arm that kickstarts a job launchd is already holding has no pid of its
+  // own to check, so its kickstart's exit code is the only verdict available
+  // and it is left reading it, exactly as it did before.
+  if (!bootstrapped) {
+    ensure(kickRes, `kickstart ${label}`)
+    return
+  }
   // Only the path that just bootstrapped has to prove a pid, and it is the
   // exact shape #1036 was: a label bootstrapped seconds after an instance of
   // it was booted out, whose initial spawn launchd can leave pended forever
@@ -438,10 +444,18 @@ export async function startLaunchAgent(options) {
   // speculative`) while both bootstrap and kickstart exit 0. Stop-then-start
   // is now a documented pair, and `hyp daemon start` is what `hyp status`
   // recommends after a stop, so the reassurance has to be worth something.
-  // The other arm kickstarts a job launchd is already holding and is left as
-  // it was.
+  //
+  // Which also means the kickstart's exit code stops being the gate here, for
+  // the reason `installLaunchAgent` above already does not read it: the plist
+  // this just bootstrapped carries `RunAtLoad`, so launchd may well have
+  // spawned the job before the kickstart landed, and launchd answers that with
+  // `3: No such process` or `Operation already in progress`. Raising on it
+  // would fail `hyp daemon start` over a daemon that is running - the same
+  // wrong verdict `hyp daemon stop` used to return on bootout's exit code, and
+  // reached by the same race, since a stop is what bootstraps here seconds
+  // later. The pid is the gate; the kickstart's stderr rides the failure.
   // @ref LLP 0317#install-means-running [implements]: a bootstrap+kickstart reports success only once launchd shows a pid
-  if (!bootstrapped) return
+  // @ref LLP 0317#kickstart-then-verify [implements]: the kickstart's exit code is not the gate, and its stderr is carried only when no pid ever appeared
   const pid = await waitForRunningPid(launchctl, target, options.sleep ?? defaultSleep)
   if (pid !== undefined) return
   const why = (kickRes.stderr || '').trim().replace(/\.+$/, '')

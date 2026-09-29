@@ -396,7 +396,7 @@ export function isSystemdUnitInstalled(options) {
  * `systemctl --user show <unit>`.
  *
  * @param {{ label?: string, systemctl?: SystemctlAdapter, homeDir?: string, platform?: NodeJS.Platform }} options
- * @returns {Promise<{ loaded: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number }>}
  */
 export async function systemdUnitStatus(options) {
   const { systemctl, unitName } = resolveUnit(options)
@@ -405,7 +405,35 @@ export async function systemdUnitStatus(options) {
   const props = parseShowOutput(result.stdout)
   if (props.LoadState !== 'loaded') return { loaded: false }
   const pid = parsePid(props.MainPID)
-  return pid === undefined ? { loaded: true } : { loaded: true, pid }
+  const active = unitIsSupervised(props.ActiveState)
+  return pid === undefined ? { loaded: true, active } : { loaded: true, active, pid }
+}
+
+/**
+ * Is systemd currently keeping this unit up? `LoadState` cannot answer it: a
+ * unit stopped by `systemctl --user stop` stays `loaded`, which is the whole
+ * reason `hyp daemon stop` preserves the installation. `ActiveState` is what
+ * separates them, and `show` has always asked for it (it is in the same
+ * `--property` list as `MainPID`), so this reads a value already on the wire.
+ *
+ * It is not `MainPID > 0` either: `Restart=always` leaves a crash-looping unit
+ * with no MainPID for the whole `RestartSec` gap while systemd is still very
+ * much going to respawn it. That gap is exactly when an operator reaches for
+ * `hyp daemon stop`, and a stop routed anywhere but through systemd during it
+ * is a stop that does not happen.
+ *
+ * Named forwards, not as `!== 'inactive'`: an unrecognised or missing
+ * `ActiveState` is not evidence of supervision, and `failed` is systemd having
+ * given up (`StartLimitBurst` spent), which is not supervision either.
+ *
+ * @param {string | undefined} activeState
+ * @returns {boolean}
+ */
+function unitIsSupervised(activeState) {
+  return activeState === 'active'
+    || activeState === 'activating'
+    || activeState === 'reloading'
+    || activeState === 'deactivating'
 }
 
 /**
