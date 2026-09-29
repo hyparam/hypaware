@@ -374,7 +374,9 @@ the folder is omitted from the local section. This denotes a local copy, which
 may have been edited since publishing. Older publications without receipts stay
 separate until republished; titles and dates are not used to guess a match.
 If the remote is unavailable, local reports still appear with a warning.
-Explicit remote selection or filters retain a failure exit code.
+Explicit remote selection, filters, or `--json` retain a failure exit code.
+An unreadable reports root warns and lists the remote anyway; only `--local`
+takes that failure as its exit code.
 
 An empty list succeeds. Each published report's recommendations follow its line, one per line, as the
 minted id, the `recommendation-<slug>` page the id names, and the page's

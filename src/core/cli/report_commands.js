@@ -26,7 +26,7 @@ import { positionals } from './remote_commands.js'
 import { isTty } from './stdio.js'
 import { PromptCancelledError, select, text } from './tui/index.js'
 import { isPromptBackError } from './tui/runtime.js'
-import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
+import { buildWalkthroughClientDescriptorMap, resolveHypHome } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
 import { askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
@@ -75,9 +75,15 @@ const PERIOD_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/
 /** The value-taking flags shared across the `report` subcommands. */
 const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote', '--limit', '--before', '--output'])
 
-/** @param {CommandRunContext} ctx */
+/**
+ * The reports root, off the one home-resolution rule the rest of the CLI uses.
+ * Resolved against `ctx.cwd` so a relative `HYP_HOME` still names the caller's
+ * home after the launched client changes directory.
+ *
+ * @param {CommandRunContext} ctx
+ */
 function localReportsRoot(ctx) {
-  return path.resolve(ctx.cwd || process.cwd(), ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp'), 'reports')
+  return path.resolve(ctx.cwd || process.cwd(), resolveHypHome(ctx.env), 'reports')
 }
 
 /**
@@ -104,9 +110,9 @@ async function localReports(ctx) {
     let stat
     try {
       stat = await fs.lstat(path.join(dir, 'report.md'))
-    } catch (err) {
-      if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') continue
-      throw err
+    } catch {
+      // An unreadable folder is one folder, not a broken listing.
+      continue
     }
     if (!stat.isFile()) continue
     total++
@@ -189,7 +195,9 @@ async function linkLocalReports(locals, reports, endpoint) {
       } catch {
         // No trustworthy link: retain the local entry.
       } finally {
-        await file?.close()
+        // A rejection here would escape the catch above and fail the whole
+        // listing, which is the opposite of what that catch is for.
+        await file?.close().catch(() => {})
       }
     }
     if (!linked) unmatched.push(local)
@@ -197,7 +205,11 @@ async function linkLocalReports(locals, reports, endpoint) {
   return unmatched
 }
 
-/** @param {CommandRunContext} ctx @param {LocalReport[]} reports @param {number} total */
+/**
+ * @param {CommandRunContext} ctx
+ * @param {LocalReport[]} reports
+ * @param {number} total
+ */
 function printLocalReports(ctx, reports, total) {
   if (reports.length === 0) return
   ctx.stdout.write(`Local reports${total > 100 ? ' (among the newest 100; older folders omitted)' : ''}:\n`)
@@ -561,12 +573,16 @@ export async function runReportList(argv, ctx, deps = {}) {
     ctx.stderr.write('hyp report list: --local cannot be combined with remote selection or filters\n')
     return 2
   }
-  let local
+  // Local discovery is an addition to this listing, not a precondition for it:
+  // a stray file or an unreadable directory at the reports root must not stop
+  // `hyp report list` from answering with what the server has. Only `--local`,
+  // which has nothing else to print, takes the failure as its exit code.
+  let local = { reports: /** @type {LocalReport[]} */ ([]), total: 0 }
   try {
     local = await localReports(ctx)
   } catch (err) {
     ctx.stderr.write(`hyp report list: could not read local reports: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
+    if (gate.params.local === true) return 1
   }
   if (local.total > 100) ctx.stderr.write(`hyp report list: showing the newest 100 of ${local.total} local reports\n`)
   if (gate.params.local === true) {
@@ -575,15 +591,22 @@ export async function runReportList(argv, ctx, deps = {}) {
     else ctx.stdout.write("no local reports - generate one with 'hyp report generate'\n")
     return localReportPicker(ctx, local.reports, gate.params, deps)
   }
-  /** @param {string} error @param {number} code */
+  /**
+   * @param {string} error
+   * @param {number} code
+   */
   const remoteUnavailable = async (error, code) => {
     ctx.stderr.write(`${error}\n`)
-    if (local.reports.length) {
-      if (gate.params.json === true) ctx.stdout.write(JSON.stringify(local.reports, null, 2) + '\n')
-      else printLocalReports(ctx, local.reports, local.total)
-      // An explicit remote request still fails; a local-only user can list.
-      if (['remote', 'org', 'kind', 'period', 'limit', 'before'].every((key) => gate.params[key] === undefined)) return localReportPicker(ctx, local.reports, gate.params, deps)
+    if (local.reports.length === 0) return code
+    if (gate.params.json === true) {
+      // A machine reader cannot tell a partial array from a whole one, so the
+      // rows are still printed but the failure keeps its exit code.
+      ctx.stdout.write(JSON.stringify(local.reports, null, 2) + '\n')
+      return code
     }
+    printLocalReports(ctx, local.reports, local.total)
+    // An explicit remote request still fails; a local-only user can list.
+    if (['remote', 'org', 'kind', 'period', 'limit', 'before'].every((key) => gate.params[key] === undefined)) return localReportPicker(ctx, local.reports, gate.params, deps)
     return code
   }
   const resolved = resolveReportsTarget(gate.params, ctx, 'report list')
@@ -611,7 +634,13 @@ export async function runReportList(argv, ctx, deps = {}) {
     return remoteUnavailable(`hyp report list: remote reports unavailable: ${await describeErrorResponse(response)}`, 1)
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
-  const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
+  // Same policy as `esc` at the top of this file: the page is remote text. Every
+  // consumer below dereferences a row (the receipt join deletes a field on it,
+  // the terminal loop reads its title), so a non-object is dropped once, here,
+  // rather than crashing the listing it was meant to decorate.
+  const reports = Array.isArray(parsed?.reports)
+    ? parsed.reports.filter((/** @type {unknown} */ r) => r !== null && typeof r === 'object')
+    : []
   const unmatched = await linkLocalReports(local.reports, reports, resolved.endpoint)
   // Read the mode the gate parsed, not argv: the codec also accepts
   // `--json=true`, and a token it blessed must not be dropped downstream.

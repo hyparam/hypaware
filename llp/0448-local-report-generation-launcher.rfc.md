@@ -51,8 +51,15 @@ do not follow symlinks or read report contents. Keep the newest 100 by the brief
 mtime and disclose truncation. Remote filters retain their existing meaning.
 `--local` lists without a remote read and cannot combine with remote
 selection or filters. A failed implicit remote read still lists available local
-reports with a stderr warning; explicit remote selection or filters retain the
-remote failure exit code. With no local rows, remote failures behave as before.
+reports with a stderr warning; explicit remote selection, filters, or `--json`
+retain the remote failure exit code, because a machine reader cannot tell a
+partial array from a whole one. With no local rows, remote failures behave as
+before. Local discovery is an addition to this listing, never a precondition
+for it: an unreadable reports root warns and lists the remote anyway, and one
+unreadable folder is skipped rather than aborting the scan; only `--local`,
+which has nothing else to answer with, takes that failure as its exit code. A
+remote row that is not an object is dropped where the page is parsed, so no
+consumer dereferences it.
 
 After a successful publish of a managed folder (or its `report.md`), atomically
 save a small receipt outside the uploaded directory, in `reports/.publications/`.

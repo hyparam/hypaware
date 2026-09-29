@@ -662,12 +662,55 @@ test('receipt write failure warns without turning a successful publication into 
 test('list preserves local visibility on a remote failure and explicit remote requests still fail', async (t) => {
   const { ctx, out, err } = await localListFixture(t)
   stubServer(t, () => ({ status: 503, json: { error: 'unavailable' } }))
-  assert.equal(await runReportList(['--json'], ctx), 0)
+  assert.equal(await runReportList(['--json'], ctx), 1)
   assert.equal(JSON.parse(out.join(''))[0].source, 'local')
   assert.match(err.join(''), /remote reports unavailable/)
   out.length = 0
   assert.equal(await runReportList(['--remote', 'prod', '--json'], ctx), 1)
   assert.equal(JSON.parse(out.join(''))[0].source, 'local')
+})
+
+test('an unreadable reports root warns but still lists what the server has', async (t) => {
+  const { ctx, home, err } = await localListFixture(t)
+  await fs.rm(path.join(home, 'reports'), { recursive: true })
+  await fs.writeFile(path.join(home, 'reports'), 'not a directory')
+  const record = { id: 'rpt', org: 'acme', kind: 'usage-review', period: '2026-08', bytes: 1, publishedAt: '2026-09-01T00:00:00.000Z' }
+  const { calls } = stubServer(t, () => ({ status: 200, json: { reports: [record] } }))
+  assert.equal(await runReportList([], ctx), 0)
+  assert.equal(calls.length, 1)
+  assert.match(err.join(''), /could not read local reports/)
+  // --local has nothing else to answer with, so there the failure is the exit code.
+  assert.equal(await runReportList(['--local'], ctx), 1)
+})
+
+test('a single unreadable report folder does not abort the local listing', async (t) => {
+  const { ctx, root, dir, out } = await localListFixture(t)
+  const blocked = path.join(root, 'blocked')
+  await fs.mkdir(blocked)
+  await fs.writeFile(path.join(blocked, 'report.md'), '# blocked\n')
+  await fs.chmod(blocked, 0o000)
+  stubServer(t, () => { throw new Error('local listing contacted remote') })
+  assert.equal(await runReportList(['--local', '--json'], ctx), 0)
+  const rows = JSON.parse(out.join(''))
+  const canonical = await fs.realpath(dir)
+  assert.ok(rows.some((/** @type {any} */ row) => row.path === canonical))
+  await fs.chmod(blocked, 0o700)
+})
+
+test('--json keeps a remote failure exit code even when local rows are printed', async (t) => {
+  const { ctx, out, err } = await localListFixture(t)
+  stubServer(t, () => ({ status: 500, json: { error: 'boom' } }))
+  // A machine reader cannot tell a partial array from a whole one.
+  assert.equal(await runReportList(['--json'], ctx), 1)
+  assert.equal(JSON.parse(out.join('')).length, 1)
+  assert.match(err.join(''), /remote reports unavailable/)
+})
+
+test('a malformed remote page is dropped, not dereferenced into a crash', async (t) => {
+  const { ctx, out } = await localListFixture(t)
+  stubServer(t, () => ({ status: 200, json: { reports: [null, 'nope', { id: 'rpt', org: 'acme', kind: 'usage-review', period: '2026-08', bytes: 1, publishedAt: '2026-09-01T00:00:00.000Z' }] } }))
+  assert.equal(await runReportList([], ctx), 0)
+  assert.match(out.join(''), /Local reports:/)
 })
 
 test('local list retains a bounded newest set and discloses truncation', async (t) => {
