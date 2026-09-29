@@ -408,9 +408,15 @@ async function readOpenclawSessionIndex(candidate, budget, unreadable) {
     session = await readOpenclawSession(candidate, { maxBytes: budget.remaining })
   } catch (error) {
     if (!(error instanceof OpenclawStorageError)) throw error
-    // A failed read moved its bytes too, so the budget bounds what the scan
-    // actually transfers rather than only what it managed to index. It still
-    // costs this candidate alone: the next one is read while budget is left.
+    // @ref LLP 0444#reads [implements]: a failed read moved its bytes too, so
+    // the 64 MiB bound tracks what the scan transfers, not only what it
+    // managed to index. The charge is contained to the candidate that failed:
+    // the scan is not aborted, and the next candidate is still read. The
+    // budget itself is per flush, though, so enough failed transfer ahead of
+    // a healthy candidate exhausts it and the short-circuit above reports
+    // that candidate unreadable. Exceeding the bound is a visible storage
+    // failure by design (LLP 0444#failure-policy), recovered by the
+    // scheduled backfill.
     budget.remaining -= error.bytes
     unreadable.push(error)
     return buildOpenclawSessionIndex(candidate, undefined, [])

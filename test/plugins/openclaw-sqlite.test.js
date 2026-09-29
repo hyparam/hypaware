@@ -112,7 +112,13 @@ test('SQLite WAL commits are visible without a checkpoint or gateway restart', a
 test('oversized or malformed compressed records fail visibly', async t => {
   const e = await stage(t)
   e.db.prepare('UPDATE transcript_events SET event_json=NULL,event_zstd=?,event_utf8_bytes=? WHERE seq=1').run(Buffer.from('invalid'), 4194305)
-  await assert.rejects(e.run(), /invalid_or_oversized_event/)
+  // The events the read transferred before the failing one are what a budget
+  // metering this read gets to charge; the failing event itself is not one.
+  await assert.rejects(e.run(), (/** @type {any} */ error) => {
+    assert.match(error.message, /invalid_or_oversized_event/)
+    assert.equal(error.bytes, Buffer.byteLength(JSON.stringify(records[0])))
+    return true
+  })
   assert.equal((await e.settle())[0], USAGE_POLICY_DROP)
 })
 test('read failures preserve already native rows with their own policy context', async t => {
