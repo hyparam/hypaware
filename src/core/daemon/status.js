@@ -3580,10 +3580,11 @@ function isMissingEntryError(err) {
  *
  * Sixteen files covers a sitting's worth of concurrently-written sessions (a
  * main transcript plus its subagents). 128 KiB per tail is sized off real
- * transcripts, where the newest conversation record sits within 16 KiB of the
- * end and all but a thousandth of records are under 53 KiB: the window clears
- * both by a wide margin, and a tail that still defeats it answers `unknown`
- * rather than guessing.
+ * transcripts: over 320 of them the newest conversation record sits within
+ * 17 KiB of the end in 99 cases out of 100 and within 40 KiB in the worst
+ * one, and all but a thousandth of records are under 53 KiB. The window
+ * clears both by better than 3x, and a tail that still defeats it answers
+ * `unknown` rather than guessing.
  */
 const MAX_CONFIRM_FILES = 16
 const MAX_CONFIRM_TAIL_BYTES = 128 * 1024
@@ -3674,10 +3675,11 @@ export async function confirmClientActivityFromDescriptor({ descriptor, homeDir,
  * Scanned backwards, so the first conversation record found is the newest and
  * the read stops there. `certain` is false only when the tail could still be
  * hiding one: the read was truncated and never reached back past `sinceMs`,
- * the file could not be opened at all, or it gave back fewer bytes than its
- * own size promised. A truncated tail whose oldest timestamp already predates
- * the baseline has seen everything that could matter, and a fully-read tail
- * from byte zero has seen the whole file.
+ * the file could not be opened at all, it gave back fewer bytes than its own
+ * size promised, or a line above the newest turn would not parse. A truncated
+ * tail whose oldest timestamp already predates the baseline has seen
+ * everything that could matter, and a fully-read tail from byte zero has seen
+ * the whole file.
  *
  * @param {string} file
  * @param {number} sinceMs
@@ -3689,7 +3691,11 @@ async function confirmActivityInFile(file, sinceMs) {
   try {
     handle = await fsp.open(file, 'r')
     const size = (await handle.stat()).size
-    const start = size > MAX_CONFIRM_TAIL_BYTES ? size - MAX_CONFIRM_TAIL_BYTES : 0
+    // One byte earlier than the tail, as `readFileTail` does: a boundary that
+    // happens to land on a record edge is otherwise indistinguishable from a
+    // mid-record cut, and the discard below would eat a whole valid line.
+    const offset = size > MAX_CONFIRM_TAIL_BYTES ? size - MAX_CONFIRM_TAIL_BYTES : 0
+    const start = offset > 0 ? offset - 1 : 0
     const length = size - start
     if (length <= 0) return { certain: true }
     const buf = Buffer.allocUnsafe(length)
@@ -3708,18 +3714,27 @@ async function confirmActivityInFile(file, sinceMs) {
     if (start > 0) lines.shift()
     /** @type {number | undefined} */
     let oldestSeenMs
+    // A line that will not parse, or a turn that will not date, is content
+    // this did not read - and the newest record of a live transcript is the
+    // one most likely to be half-written when status runs. Skipping it is
+    // right; counting the skip as "no turn here" is not.
+    let unread = false
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i]
       if (!line) continue
       /** @type {unknown} */
       let row
-      try { row = JSON.parse(line) } catch { continue }
-      if (!isPlainObject(row)) continue
+      try { row = JSON.parse(line) } catch { unread = true; continue }
+      if (!isPlainObject(row)) { unread = true; continue }
       const ms = parseIsoMs(row.timestamp)
-      if (ms === undefined) continue
+      if (ms === undefined) {
+        if (isConversationRecord(row)) unread = true
+        continue
+      }
       oldestSeenMs = ms
-      if (isConversationRecord(row)) return { activityMs: ms, certain: true }
+      if (isConversationRecord(row)) return { activityMs: ms, certain: !unread }
     }
+    if (unread) return { certain: false }
     if (start === 0) return { certain: true }
     return { certain: oldestSeenMs !== undefined && oldestSeenMs <= sinceMs }
   } catch {

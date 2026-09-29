@@ -452,7 +452,13 @@ export interface CaptureHealthReport {
    * can be weeks old.
    */
   listenerStartedAt: string | null
-  /** Milliseconds of activity past the capture baseline (0 when none). */
+  /**
+   * Milliseconds of activity past the capture baseline (0 when none).
+   *
+   * Under `state: 'unknown'` this is still the filesystem's unconfirmed
+   * suspicion, which is all it ever was: it is `state`, not this number,
+   * that says whether anything stands behind it.
+   */
   gapMs: number
   /**
    * `gap` is confirmed against transcript content, never against an mtime

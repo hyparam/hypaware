@@ -62,13 +62,13 @@ async function makeHome() {
  * @param {Date | string} at
  * @param {string} [uuid]
  */
-function assistantRecord(at, uuid = "a1") {
+function assistantRecord(at, uuid = 'a1') {
   return {
-    type: "assistant",
-    sessionId: "sess",
+    type: 'assistant',
+    sessionId: 'sess',
     uuid,
-    message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
-    timestamp: typeof at === "string" ? at : at.toISOString(),
+    message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    timestamp: typeof at === 'string' ? at : at.toISOString(),
   }
 }
 
@@ -722,7 +722,65 @@ test('malformed, truncated, and timestamp-less lines are skipped, not fatal', as
       '',
     ], '2026-09-29T18:24:50.310Z')
     const confirmed = await confirmIn(home, '2026-09-29T18:04:55.122Z')
-    assert.deepEqual(confirmed, { activityAt: lastAssistant, certain: true })
+    // Skipped, so the turn below them is still found and still dates the
+    // activity. Not certain, though: each of those lines sits above that turn
+    // and any of them could have been a newer one, so the answer is the turn
+    // plus an admission, never the turn plus a clean bill of health.
+    assert.deepEqual(confirmed, { activityAt: lastAssistant, certain: false })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a tail boundary that lands on a record edge does not eat that record', async () => {
+  const home = await makeProbeHome()
+  try {
+    const since = Date.parse('2026-09-29T18:00:00.000Z')
+    // The oldest line of the tail is the one that proves the read reached
+    // back past the baseline. Start the read at the boundary itself and it is
+    // indistinguishable from a mid-record cut, so the discard eats it and a
+    // settled answer degrades to `unknown`; start one byte earlier and the
+    // newline is there to tell them apart.
+    const anchorLine = JSON.stringify({ type: 'mode', sessionId: 'sess', uuid: 'edge', timestamp: new Date(since - 60_000).toISOString() })
+    /** @type {string[]} */
+    const filler = []
+    let tailBytes = Buffer.byteLength(anchorLine) + 1
+    for (let i = 0; tailBytes < 128 * 1024 - 2_000; i++) {
+      const line = JSON.stringify({ type: 'mode', sessionId: 'sess', uuid: `f${i}`, note: 'z'.repeat(300), timestamp: new Date(since + 60_000 + i).toISOString() })
+      filler.push(line)
+      tailBytes += Buffer.byteLength(line) + 1
+    }
+    // Pad the last record so the tail is exactly the read window: the
+    // boundary then falls on `anchorLine`'s first byte.
+    const shortfall = 128 * 1024 - tailBytes
+    const padded = JSON.stringify({ type: 'mode', sessionId: 'sess', uuid: 'pad', note: '' , timestamp: new Date(since + 120_000).toISOString() })
+    filler.push(padded.replace('"note":""', `"note":"${'z'.repeat(Math.max(0, shortfall - 1 - Buffer.byteLength(padded)))}"`))
+    const body = 'x'.repeat(4_000) + '\n' + [anchorLine, ...filler].join('\n') + '\n'
+    assert.equal(Buffer.byteLength(body) - Buffer.byteLength('x'.repeat(4_000) + '\n'), 128 * 1024)
+    const dir = path.join(home, '.claude', 'projects', '-Users-t-proj')
+    await fs.mkdir(dir, { recursive: true })
+    const file = path.join(dir, 'edge.jsonl')
+    await fs.writeFile(file, body)
+    const mtime = new Date(since + 600_000)
+    await fs.utimes(file, mtime, mtime)
+
+    assert.deepEqual(await confirmIn(home, since), { certain: true })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a half-written last record is not read as the absence of a turn', async () => {
+  const home = await makeProbeHome()
+  try {
+    // What a live transcript looks like mid-append: the newest record is the
+    // one most likely to be partly on disk when `hyp status` runs, and it is
+    // exactly the record that would decide this.
+    await writeTranscript(home, [
+      { type: 'mode', sessionId: 'sess', uuid: 'm0', timestamp: '2026-09-29T17:00:00.000Z' },
+      '{"type":"assistant","timestamp":"2026-09-29T18:10:00.000Z","message":{"role":"assis',
+    ], '2026-09-29T18:24:50.310Z')
+    assert.deepEqual(await confirmIn(home, '2026-09-29T18:04:55.122Z'), { certain: false })
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
