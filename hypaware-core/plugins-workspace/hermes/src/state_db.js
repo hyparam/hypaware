@@ -204,18 +204,21 @@ export class HermesStateDb {
       this.snapshot = await withBusyRetry(() => {
         this.db.exec('BEGIN')
         try {
-          const sessions = this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions ORDER BY id ASC`).all()
           const statement = this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE session_id = ? AND ${this.visibleClause()} ORDER BY id ASC`)
-          const marks = sessions.map(session => {
+          // Stream the sessions too: a mark is small, but a session row carries
+          // its whole `system_prompt`, and `.all()` would hold every one of
+          // them resident for the length of the full-history hash.
+          const marks = []
+          for (const session of this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions ORDER BY id ASC`).iterate()) {
             const hash = createHash('sha256').update(JSON.stringify(session))
             let maxMessageId = 0
             for (const message of statement.iterate(session.id)) {
               hash.update(JSON.stringify(message))
               maxMessageId = Math.max(maxMessageId, Number(message.id))
             }
-            return { session_id: session.id, reason: 'changed', max_message_id: maxMessageId,
-              ended_at: session.ended_at ?? null, fingerprint: hash.digest('hex') }
-          })
+            marks.push({ session_id: session.id, reason: 'changed', max_message_id: maxMessageId,
+              ended_at: session.ended_at ?? null, fingerprint: hash.digest('hex') })
+          }
           this.db.exec('COMMIT')
           return /** @type {HermesChangedSession[]} */ (/** @type {unknown} */ (marks))
         } catch (error) {
