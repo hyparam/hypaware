@@ -21,6 +21,8 @@ import {
   withPartitionMutationLocks,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
+import { createIngestSeqAllocator } from './ingest-seq.js'
+import { reconcileCacheRows } from './reconcile.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
@@ -119,8 +121,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
   const partitionDropCounter = meter.createCounter('hyp_partition_validation_drops', {
     description: 'Rows dropped due to missing required Iceberg partition fields',
   })
+  const seqAllocator = createIngestSeqAllocator({ cacheRoot })
   const spool = createCacheSpool({
     cacheRoot,
+    nextSeq: seqAllocator.next,
     async appendChunk(tablePath, columns, rows) {
       const beforePurge = rows.length
       rows = survivingRows(rows)
@@ -629,6 +633,16 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         },
         { component: 'cache' }
       )
+    },
+
+    async reconcileRows(dataset, columns, rows, scope) {
+      // Drain legacy captured rows before reconciling them, so they cannot
+      // reappear on the next flush. New snapshot writes bypass the spool.
+      for (const table of await discoverSpoolTables(cacheRoot)) {
+        if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
+      }
+      return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
+        declaration: getDeclaration?.(dataset), filterRows: survivingRows, nextSeq: seqAllocator.next })
     },
 
     discoverCachePartitions(scope) {

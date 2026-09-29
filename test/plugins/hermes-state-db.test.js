@@ -371,7 +371,7 @@ test('listChangedSessions flags every session on an empty watermark', async () =
     const changed = await reader.listChangedSessions({})
     // Session 2 has no messages and is not ended: nothing to catch up on yet.
     const bySession = new Map(changed.map((c) => [c.session_id, c]))
-    assert.equal(bySession.has(2), false, 'session with no messages and not ended is not "changed"')
+    assert.equal(bySession.has(2), true, 'empty sessions must reconcile an older captured transcript')
     assert.equal(bySession.get(1)?.reason, 'new_messages')
     assert.equal(bySession.get(1)?.max_message_id, 3)
     assert.equal(bySession.get(3)?.reason, 'new_messages')
@@ -385,9 +385,11 @@ test('listChangedSessions is empty once the watermark matches current state', as
   const dbPath = await buildFixtureStateDb(dir)
   const reader = await openHermesStateDb(dbPath)
   try {
+    const marks = Object.fromEntries((await reader.listChangedSessions()).map(mark => [mark.session_id, mark]))
     const changed = await reader.listChangedSessions({
-      1: { max_message_id: 3, ended_at: null },
-      3: { max_message_id: 5, ended_at: '2026-07-20T09:05:00Z' },
+      ...marks,
+      1: { ...marks[1], max_message_id: 3, ended_at: null },
+      3: { ...marks[3], max_message_id: 5, ended_at: '2026-07-20T09:05:00Z' },
     })
     assert.deepEqual(changed, [])
   } finally {
@@ -400,9 +402,11 @@ test('listChangedSessions catches a new message appended to an open session', as
   const dbPath = await buildFixtureStateDb(dir)
   const reader = await openHermesStateDb(dbPath)
   try {
+    const marks = Object.fromEntries((await reader.listChangedSessions()).map(mark => [mark.session_id, mark]))
     const changed = await reader.listChangedSessions({
-      1: { max_message_id: 2, ended_at: null },
-      3: { max_message_id: 5, ended_at: '2026-07-20T09:05:00Z' },
+      ...marks,
+      1: { ...marks[1], max_message_id: 2, ended_at: null, fingerprint: 'older' },
+      3: { ...marks[3], max_message_id: 5, ended_at: '2026-07-20T09:05:00Z' },
     })
     assert.equal(changed.length, 1)
     assert.equal(changed[0].session_id, 1)
@@ -418,10 +422,12 @@ test('listChangedSessions catches the ended_at NULL -> set transition with no ne
   const dbPath = await buildFixtureStateDb(dir)
   const reader = await openHermesStateDb(dbPath)
   try {
+    const marks = Object.fromEntries((await reader.listChangedSessions()).map(mark => [mark.session_id, mark]))
     const changed = await reader.listChangedSessions({
-      1: { max_message_id: 3, ended_at: null },
+      ...marks,
+      1: { ...marks[1], max_message_id: 3, ended_at: null },
       // stale watermark: same message count as now, but recorded before the session ended
-      3: { max_message_id: 5, ended_at: null },
+      3: { ...marks[3], max_message_id: 5, ended_at: null, fingerprint: 'older' },
     })
     assert.equal(changed.length, 1)
     assert.equal(changed[0].session_id, 3)

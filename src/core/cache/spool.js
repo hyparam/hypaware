@@ -41,6 +41,7 @@ const FLUSH_FAILURE_MESSAGE_MAX = 512
  * @param {{
  *   cacheRoot: string,
  *   appendChunk(tablePath: string, columns: readonly ColumnSpec[], rows: Record<string, unknown>[]): Promise<{ bytesWritten: number, droppedCount?: number }>,
+ *   nextSeq?: () => Promise<bigint>,
  *   batchRowLimit?: number,
  *   batchByteLimit?: number,
  * }} args
@@ -111,7 +112,7 @@ export function createCacheSpool(args) {
       const batchId = `flush-${Date.now()}-${process.pid}`
       let fileMalformed = 0
 
-      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
+      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: args.nextSeq ?? seqAllocator.next })) {
         const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
         noteProductPipeline('write', { rows: batch.chunk.rows.length - (written.droppedCount ?? 0), bytes: written.bytesWritten })
         totals.rowCount += batch.chunk.rows.length

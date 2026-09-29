@@ -22,8 +22,8 @@
  *     LLP 0122#watermark whole-session re-projection re-appends the
  *     already-written prefix instead of dropping it. A fresh scan per tick
  *     makes re-projection drop the already-committed prefix.
- *     @ref LLP 0122#watermark [tests]: whole-session re-projection leans on the
- *       materializer's pre-write dedupe dropping the already-imported prefix.
+ *     @ref LLP 0449#reconciliation [tests]: scoped snapshots now supersede
+ *       that seen-set and retain the same no-duplicates guarantee.
  *     @ref LLP 0118#requirements [tests]: spec R2, capture is idempotent, a
  *       re-poll over already-imported data writes no duplicate rows.
  */
@@ -35,6 +35,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createHermesBackfillProvider } from '../../hypaware-core/plugins-workspace/hermes/src/backfill.js'
 import { activate } from '../../hypaware-core/plugins-workspace/hermes/src/index.js'
 import {
   createHermesPollRunner,
@@ -99,11 +101,11 @@ function createFixtureSchema(dbPath) {
   const db = new DatabaseSync(dbPath)
   db.exec(`
     CREATE TABLE sessions (
-      id INTEGER PRIMARY KEY,
+      id TEXT PRIMARY KEY,
       source TEXT NOT NULL,
       model TEXT,
       cwd TEXT,
-      parent_session_id INTEGER,
+      parent_session_id TEXT,
       started_at TEXT NOT NULL,
       ended_at TEXT,
       end_reason TEXT,
@@ -123,7 +125,7 @@ function createFixtureSchema(dbPath) {
   db.exec(`
     CREATE TABLE messages (
       id INTEGER PRIMARY KEY,
-      session_id INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
       role TEXT NOT NULL,
       content TEXT,
       tool_calls TEXT,
@@ -138,7 +140,7 @@ function createFixtureSchema(dbPath) {
   return db
 }
 
-/** @param {DatabaseSync} db @param {number} id */
+/** @param {DatabaseSync} db @param {number | string} id */
 function insertOpenSession(db, id) {
   db.prepare(`
     INSERT INTO sessions (id, source, model, cwd, parent_session_id, started_at, ended_at, end_reason, billing_provider, billing_base_url, system_prompt, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, estimated_cost_usd, actual_cost_usd, api_call_count)
@@ -146,7 +148,7 @@ function insertOpenSession(db, id) {
   `).run(id)
 }
 
-/** @param {DatabaseSync} db @param {{ id: number, sessionId: number, role: string, content: string }} opts */
+/** @param {DatabaseSync} db @param {{ id: number, sessionId: number | string, role: string, content: string }} opts */
 function insertMessage(db, opts) {
   db.prepare(`
     INSERT INTO messages (id, session_id, role, content, tool_calls, tool_name, tool_call_id, reasoning, timestamp, token_count, finish_reason)
@@ -171,6 +173,15 @@ function createSharedDisk() {
       /** @type {Array<{ rows: Record<string, unknown>[] }>} */
       const appended = []
       const storage = {
+        async reconcileRows(_dataset, _columns, rows, scope) {
+          const fresh = rows.filter(row => !committed.some(old => JSON.stringify(old) === JSON.stringify(row)))
+          for (let i = committed.length - 1; i >= 0; i--) {
+            if (Object.entries(scope.where).every(([key, value]) => committed[i][key] === value)) committed.splice(i, 1)
+          }
+          committed.push(...rows)
+          if (fresh.length) appended.push({ rows: fresh })
+          return fresh.length
+        },
         async appendRowsToPartition(_dataset, _segments, _columns, rows) {
           appended.push({ rows })
           committed.push(...rows)
@@ -274,4 +285,80 @@ test('a re-projection after another writer committed the tail appends zero dupli
   )
 
   db.close()
+})
+
+// @ref LLP 0449#reconciliation [tests]: real SQLite -> poll -> Iceberg snapshots.
+test('Hermes edits, rewinds and compaction reconcile real local cache rows', async t => {
+  const dir = await tmpDir()
+  const dbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(dbPath)
+  db.exec('ALTER TABLE messages ADD COLUMN active INTEGER DEFAULT 1')
+  db.exec('ALTER TABLE messages ADD COLUMN compacted INTEGER DEFAULT 0')
+  insertOpenSession(db, 'native-session-uuid')
+  insertMessage(db, { id: 1, sessionId: 'native-session-uuid', role: 'assistant', content: 'first' })
+  const call = id => ({ id, name: 'lookup', arguments: '{}' })
+  db.prepare('UPDATE messages SET tool_calls = ?, token_count = 7 WHERE id = 1').run(JSON.stringify([call('c1')]))
+  const storage = createQueryStorageService({ cacheRoot: path.join(dir, 'cache') })
+  const ctx = makeCtx({ stateDbPath: dbPath, stateDir: dir, storage })
+  const runner = createHermesPollRunner(ctx)
+  t.after(async () => {
+    runner.db?.close()
+    db.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+  const read = async () => {
+    const rows = []
+    for (const part of await storage.discoverCachePartitions()) for await (const row of storage.readRows(part.path)) rows.push(row)
+    return rows
+  }
+  const poll = async () => {
+    await runHermesPollTick(runner, ctx)
+    assert.equal(runner.lastError, undefined)
+  }
+  await poll()
+  assert.equal((await read()).length, 2)
+  db.prepare('UPDATE messages SET content = ?, tool_calls = ?, reasoning = ?, token_count = 11 WHERE id = 1')
+    .run('merged', JSON.stringify([call('c1'), call('c2')]), 'merged reasoning')
+  const priorMark = { ...runner.watermark['native-session-uuid'] }
+  const reconcile = storage.reconcileRows
+  storage.reconcileRows = async () => { throw new Error('injected write failure') }
+  await runHermesPollTick(runner, ctx)
+  assert.match(runner.lastError ?? '', /injected write failure/)
+  assert.deepEqual(runner.watermark['native-session-uuid'], priorMark, 'failed writes never advance the snapshot')
+  assert.equal((await read()).length, 2)
+  storage.reconcileRows = reconcile
+  await poll()
+  let rows = await read()
+  assert.equal(rows.length, 4)
+  assert.deepEqual(rows.filter(row => row.part_type === 'reasoning').map(row => row.content_text), ['merged reasoning'])
+  assert.deepEqual(rows.filter(row => row.part_type === 'text').map(row => row.content_text), ['merged'])
+  assert.deepEqual(rows.filter(row => row.part_type === 'tool_call').map(row => row.tool_call_id).sort(), ['c1', 'c2'])
+  const text = rows.find(row => row.part_type === 'text')
+  assert.equal(text?.attributes?.usage?.total_tokens, 11)
+  const written = runner.rowsWritten
+  const snapshot = runner.db?.snapshot
+  await poll()
+  assert.equal(runner.db?.snapshot, snapshot, 'unchanged database reuses digests without scanning payloads')
+  assert.equal(runner.rowsWritten, written, 'unchanged store does no cache writes')
+  db.exec('UPDATE messages SET active = 0, compacted = 1')
+  await poll()
+  assert.equal((await read()).length, 4, 'compaction retains visible history')
+  db.exec('UPDATE messages SET compacted = 0')
+  await poll()
+  assert.equal((await read()).length, 0, 'all-message rewind retracts every part without a new ID')
+  insertMessage(db, { id: 2, sessionId: 'native-session-uuid', role: 'user', content: 'replacement' })
+  await poll()
+  rows = await read()
+  assert.deepEqual(rows.map(row => row.content_text), ['replacement'])
+  // Backfill follows the same authoritative path and cannot resurrect rewound rows.
+  const provider = createHermesBackfillProvider({ stateDbPath: dbPath, homeDir: dir })
+  const runCtx = { storage, env: {}, log: ctx.log, dryRun: false }
+  for await (const item of provider.run(/** @type {any} */ (runCtx))) {
+    if (!('kind' in item)) continue
+    const materialized = await aiGatewayBackfillMaterializer().materialize(item, /** @type {any} */ ({ storage, log: ctx.log, env: {} }))
+    assert.ok(item.reconcile)
+    assert.ok(storage.reconcileRows)
+    assert.equal(await storage.reconcileRows(item.dataset, [...AI_GATEWAY_MESSAGE_COLUMNS], materialized, item.reconcile), 0)
+  }
+  assert.deepEqual((await read()).map(row => row.content_text), ['replacement'])
 })

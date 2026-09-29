@@ -424,7 +424,7 @@ async function runProvider(args) {
             runToken,
             sweep,
           })
-          if (!Array.isArray(rows) || rows.length === 0) {
+          if (!Array.isArray(rows) || (rows.length === 0 && !yielded.reconcile)) {
             result.rows_skipped += 1
             continue
           }
@@ -432,6 +432,7 @@ async function runProvider(args) {
           const written = await writeRows({
             rows,
             dataset: yielded.dataset,
+            reconcile: yielded.reconcile,
             provider: provider.name,
             devRunId,
             ctx,
@@ -566,6 +567,7 @@ async function materializeItem(args) {
  *
  * @param {{
  *   rows: Record<string, unknown>[],
+ *   reconcile?: BackfillItem['reconcile'],
  *   dataset: string,
  *   provider: string,
  *   devRunId: string,
@@ -608,6 +610,11 @@ async function writeRows(args) {
       // path plus the dataset's schema columns.
       const tablePath = ctx.storage.cacheTablePath(dataset, [BACKFILL_PARTITION_SEGMENT])
       const schemaColumns = registered.schema?.columns ?? []
+      if (args.reconcile) {
+        if (!ctx.storage.reconcileRows) throw new Error('This capture requires local snapshot reconciliation support')
+        const count = await ctx.storage.reconcileRows(dataset, schemaColumns, rows, args.reconcile)
+        return { rowsWritten: count, status: 'ok' }
+      }
       await ctx.storage.appendRows(tablePath, schemaColumns, rows)
       return { rowsWritten: rows.length, status: 'ok' }
     },

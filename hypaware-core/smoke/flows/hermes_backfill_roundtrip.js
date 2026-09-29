@@ -246,6 +246,40 @@ export async function run({ harness, expect }) {
       (v) => Array.isArray(v) && v.length === 1 && Number(v[0].row_count) === 0,
     )
 
+    // @ref LLP 0449#reconciliation [tests]: mutations survive the real CLI and SQL path.
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite')
+    const writer = new DatabaseSync(stateDbPath)
+    const reimport = async (step, dryRun = false) => runRoot('smoke.hermes.reconcile', {
+      [Attr.DEV_RUN_ID]: harness.devRunId, smoke_name: harness.smokeName, smoke_step: step,
+    }, async () => {
+      const out = makeBuf()
+      const err = makeBuf()
+      const code = await dispatch(['backfill', 'hermes', '--since', since, '--json', ...(dryRun ? ['--dry-run'] : [])],
+        { stdout: out, stderr: err, kernel, registry, env })
+      expect.that(`${step}: backfill succeeds`, { code, error: err.text() }, value => value.code === 0 && !value.error)
+    })
+    try {
+      writer.prepare('UPDATE messages SET content = ? WHERE id = 2').run('edited answer')
+      await reimport('dry_run', true)
+      const dryRows = await queryRows({ dispatch, sql: includedSql, kernel, registry, env, expect, label: 'dry-run preserves cache' })
+      expect.that('dry run leaves old content intact', dryRows, value => value.some(row => row.content_text === 'a.txt and b.txt'))
+      await reimport('edit')
+      const editedRows = await queryRows({ dispatch, sql: includedSql, kernel, registry, env, expect, label: 'edited session' })
+      expect.that('edit replaces the same message identity', editedRows, value => value.length === 2 && value.some(row => row.content_text === 'edited answer'))
+      writer.exec('ALTER TABLE messages ADD COLUMN active INTEGER DEFAULT 1')
+      writer.exec('ALTER TABLE messages ADD COLUMN compacted INTEGER DEFAULT 0')
+      writer.exec('UPDATE messages SET active = 0, compacted = 1 WHERE session_id = 1')
+      await reimport('compact')
+      const compactedRows = await queryRows({ dispatch, sql: includedSql, kernel, registry, env, expect, label: 'compacted session' })
+      expect.that('compaction preserves visible history', compactedRows, value => value.length === 2)
+      writer.exec('UPDATE messages SET compacted = 0 WHERE session_id = 1')
+      await reimport('rewind')
+      const rewoundRows = await queryRows({ dispatch, sql: includedSql, kernel, registry, env, expect, label: 'rewound session' })
+      expect.that('all-message rewind removes the captured session content', rewoundRows, value => value.length === 0)
+    } finally {
+      writer.close()
+    }
+
     // ----- 5. Internal telemetry -----
     await obs.shutdown()
     const traces = await expect.traces()
@@ -275,6 +309,9 @@ export async function run({ harness, expect }) {
       (v) => v !== undefined && Number(v.row_count) >= 2,
     )
 
+    const reconciliation = traces.filter(t => t.name === 'cache.reconcile')
+    expect.that('traces: reconciliation records removed rows', reconciliation,
+      rows => rows.some(row => Number(row.attributes?.rows_deleted) >= 2))
     const logs = await expect.logs()
 
     const finishLogs = logs.filter(

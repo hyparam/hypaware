@@ -2,6 +2,8 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import { fileMightMatch } from 'icebird/src/prune.js'
 import { executePlan, readBatchColumn, selectedRowCount, valueAt } from 'squirreling'
 
 import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
@@ -12,6 +14,7 @@ import {
   icebergDataSource,
   icebergDelete,
   icebergRead,
+  icebergTransaction,
   loadLatestFileCatalogMetadata,
 } from 'icebird'
 // Deep imports for in-place schema evolution. icebird's public top-level API
@@ -46,7 +49,7 @@ import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
  * @import { AppendOptions } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, Manifest, ManifestEntry, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow, ExprNode } from 'squirreling'
- * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
+ * @import { AsyncBuffer, FileMetaData, ParquetQueryFilter } from 'hyparquet'
  */
 
 /**
@@ -934,4 +937,75 @@ function addedFilesSize(metadata) {
   const raw = snapshot?.summary?.['added-files-size']
   const value = raw === undefined ? 0 : Number(raw)
   return Number.isFinite(value) ? value : 0
+}
+
+/**
+ * Reconcile one exact scope in one table. The partition guard belongs to the
+ * caller. A transaction publishes deletions and replacements together; a failed
+ * commit leaves the prior snapshot readable and the source retries its snapshot.
+ * @ref LLP 0449#reconciliation [implements]: unchanged keys retain their rows and ingest sequences
+ * @param {string} tablePath
+ * @param {readonly ColumnSpec[]} columns
+ * @param {Record<string, unknown>[]} rows
+ * @param {{ where: Record<string, string>, key: string }} scope
+ * @param {() => Promise<bigint>} nextSeq
+ * @param {AppendOptions} [options]
+ */
+export async function reconcileRowsInTable(tablePath, columns, rows, scope, nextSeq, options) {
+  const records = rowsToIcebergRecords(columns, rows)
+  const pending = new Map(records.map(row => [String(row[scope.key]), row]))
+  if (pending.size !== rows.length) throw new Error('Duplicate snapshot row identity')
+  const tablePresent = tableExists(tablePath)
+  if (!tablePresent && !rows.length) return { rowsWritten: 0, rowsDeleted: 0, rowCount: 0 }
+  // Create the table, or evolve an existing one in place. The transaction
+  // below stages its append against the table's CURRENT schema, so a column
+  // the dataset gained since this table was created would be dropped from
+  // every reconciled row with no error. An empty append is the same switch
+  // point a spool flush goes through (LLP 0029#in-place-evolution).
+  if (!tablePresent || (rows.length && options?.declaration)) {
+    await appendRowsToTable(tablePath, [...columns, INGEST_SEQ_COLUMN], [], options)
+  }
+  const { resolver, lister } = await getLocalIO()
+  const url = tableUrlForDir(tablePath)
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+  const schema = currentSchema(metadata)
+  const files = await findDataFileEntries(metadata, resolver)
+  const deleted = await loadDeletedPositions(metadata, resolver, files)
+  /** @type {{ file_path: string, pos: number }[]} */
+  const deletes = []
+  const matched = new Set()
+  const names = columns.map(column => column.name)
+  const scopeEntries = Object.entries(scope.where)
+  let rowCount = 0
+  for (const [filePath, { entry }] of files) rowCount += Number(entry.data_file.record_count) - (deleted.get(filePath)?.size ?? 0)
+  for (const [filePath, { entry }] of files) {
+    if (schema && !fileMightMatch(/** @type {ParquetQueryFilter} */ (scope.where), entry, schema)) continue
+    const predicate = (/** @type {Record<string, unknown>} */ row) => {
+      if (!scopeEntries.every(([key, value]) => row[key] === value)) return false
+      const key = String(row[scope.key])
+      const desired = pending.get(key)
+      if (desired && !matched.has(key)) {
+        matched.add(key)
+        if (isDeepStrictEqual(rowsToIcebergRecords(columns, [row])[0], desired)) {
+          pending.delete(key)
+          return false
+        }
+      }
+      return true
+    }
+    for await (const pos of scanFileForMatchingRows(filePath, resolver, predicate, names, deleted.get(filePath))) {
+      deletes.push({ file_path: filePath, pos })
+    }
+  }
+  if (!deletes.length && !pending.size) return { rowsWritten: 0, rowsDeleted: 0, rowCount }
+  const writes = [...pending.values()]
+  for (const row of writes) row[INGEST_SEQ_COLUMN.name] = await nextSeq()
+  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+  await icebergTransaction({ catalog, tableUrl: url }, async tx => {
+    for (let i = 0; i < deletes.length; i += PURGE_DELETE_BATCH_SIZE) {
+      await tx.delete({ deletes: deletes.slice(i, i + PURGE_DELETE_BATCH_SIZE) })
+    }
+    if (writes.length) await tx.append({ records: writes })
+  })
+  return { rowsWritten: writes.length, rowsDeleted: deletes.length, rowCount: rowCount + writes.length - deletes.length }
 }

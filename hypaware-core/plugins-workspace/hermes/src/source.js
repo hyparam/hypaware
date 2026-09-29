@@ -9,14 +9,8 @@
  * @ref LLP 0122#source [implements]: start probes `state_db` (missing ->
  *   idle, present -> open + load watermark + start the poll timer),
  *   `status()`/`reload()`/`stop()`.
- * @ref LLP 0122#watermark [implements]: the per-tick change-detection and
- *   whole-session re-projection loop, leaning on the shared
- *   `ai_gateway.projected_exchange` materializer's pre-write `part_id`
- *   dedupe (`aiGatewayBackfillMaterializer`, ai-gateway `dataset.js`) to
- *   turn a whole-session re-projection into "append only the new tail".
- *   The watermark itself persists in the plugin's kernel-managed state
- *   dir (`watermark.js`), the same sidecar-file pattern
- *   `context-graph-enrich`/`vector-search` use for their own cursors.
+ * @ref LLP 0449#reconciliation [implements]: reconcile whole visible sessions,
+ *   including rewinds and in-place edits, through the shared cache writer.
  * @ref LLP 0118#requirements [implements]: spec R9, no `~/.hermes/state.db`
  *   -> idle mode, `status()` reports it, no error noise, and the same poll
  *   timer re-probes each tick so an install that appears later is picked up
@@ -225,8 +219,7 @@ export function createHermesPollRunner(ctx) {
     homeDir,
     stateDir: ctx.paths.stateDir,
     resolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyList }),
-    // Seed only: `runHermesPollTick` re-mints this per tick so the shared
-    // materializer re-scans committed rows every tick (LLP 0122#watermark).
+    // Diagnostic identity, refreshed once per poll.
     devRunId: randomUUID(),
     db: null,
     watermark: {},
@@ -248,25 +241,13 @@ export function createHermesPollRunner(ctx) {
  * rather than error the daemon" and spec R9's "idle cleanly, no error
  * noise" for the specific missing-file case.
  *
- * @ref LLP 0122#watermark [implements]
+ * @ref LLP 0449#detection [implements]
  * @ref LLP 0118#requirements [implements]: spec R9
  * @param {HermesPollRunner} runner
  * @param {PluginActivationContext} ctx
  * @returns {Promise<void>}
  */
 export async function runHermesPollTick(runner, ctx) {
-  // @ref LLP 0122#watermark [implements]: refresh the dedupe scan every tick.
-  // The shared `ai_gateway.projected_exchange` materializer memoizes its
-  // committed-`part_id` seen-set per `devRunId` and never refreshes it while
-  // the id is stable. A daemon runner that reused one id for its whole
-  // lifetime therefore never re-observed rows committed between ticks (by an
-  // earlier tick, a `hyp backfill`, or - before the activation fix - a
-  // concurrent CLI poll), so whole-session re-projection re-appended the
-  // already-written prefix instead of dropping it (issue #348). Minting a
-  // fresh id per tick forces a fresh committed scan, so an already-written
-  // prefix is dropped on every re-projection (spec R2). The id is minted once
-  // per tick (not per session), so sessions within a tick still share one scan
-  // and dedupe against each other.
   runner.devRunId = randomUUID()
   try {
     await withSpan(
@@ -301,10 +282,8 @@ export async function runHermesPollTick(runner, ctx) {
             const session = sessionsById.get(change.session_id)
             if (!session) continue
             const messages = await db.listMessagesForSession(change.session_id)
-            // @ref LLP 0122#watermark [implements]: the whole session is
-            // re-projected every time, never a partial batch, so identity
-            // (message_index / previous_message_id chains / part ids)
-            // never depends on when the session was first observed.
+            // @ref LLP 0449#reconciliation [implements]: replace shifted parts
+            // and removed suffixes from a complete visible transcript.
             const item = await projectHermesSession({
               session,
               messages,
@@ -325,6 +304,7 @@ export async function runHermesPollTick(runner, ctx) {
             runner.watermark[String(change.session_id)] = {
               max_message_id: change.max_message_id,
               ended_at: change.ended_at,
+              fingerprint: change.fingerprint,
             }
           }
           writeHermesWatermark(runner.stateDir, runner.watermark)
@@ -400,11 +380,10 @@ async function tryOpen(runner, ctx) {
 /**
  * Materialize one projected-exchange `BackfillItem` through the shared
  * `ai_gateway.projected_exchange` materializer (`@hypaware/ai-gateway`,
- * required by hermes's manifest) and append the resulting rows.
+ * required by hermes's manifest) and reconcile the resulting snapshot.
  *
- * @ref LLP 0122#watermark [implements]: relies on the materializer's
- *   pre-write `part_id` dedupe to turn a whole-session re-projection into
- *   "append only the new tail".
+ * @ref LLP 0449#reconciliation [implements]: authoritative snapshots retain
+ *   equal parts, replace changed parts and remove withdrawn parts.
  * @param {HermesPollRunner} runner
  * @param {PluginActivationContext} ctx
  * @param {BackfillItem} item
@@ -426,7 +405,7 @@ async function writeProjectedItem(runner, ctx, item) {
     storage: ctx.storage,
     devRunId: runner.devRunId,
   })
-  if (!Array.isArray(rows) || rows.length === 0) return 0
+  if (!Array.isArray(rows) || (rows.length === 0 && !item.reconcile)) return 0
 
   const dataset = ctx.query.getDataset?.(AI_GATEWAY_MESSAGES_DATASET)
   if (!dataset) {
@@ -438,6 +417,10 @@ async function writeProjectedItem(runner, ctx, item) {
     return 0
   }
   const schemaColumns = dataset.schema?.columns ?? []
+  if (item.reconcile) {
+    if (!ctx.storage.reconcileRows) throw new Error('Hermes capture requires local snapshot reconciliation support')
+    return ctx.storage.reconcileRows(AI_GATEWAY_MESSAGES_DATASET, schemaColumns, rows, item.reconcile)
+  }
   await ctx.storage.appendRowsToPartition(
     AI_GATEWAY_MESSAGES_DATASET,
     [HERMES_PARTITION_SEGMENT],

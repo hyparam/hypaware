@@ -19,10 +19,8 @@ import { AI_GATEWAY_MESSAGE_COLUMNS } from '../../hypaware-core/plugins-workspac
 import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
- * @ref LLP 0122#watermark [tests]: change-detection + per-tick whole-session
- * re-projection, leaning on the real `ai_gateway.projected_exchange`
- * materializer's pre-write `part_id` dedupe to turn a re-projection into
- * "append only the new tail".
+ * @ref LLP 0449#reconciliation [tests]: whole-session projection through the
+ * real materializer and a scoped snapshot writer, retaining unchanged parts.
  * @ref LLP 0118#requirements [tests]: spec R9, missing state.db idles cleanly, no error noise.
  * @ref LLP 0122#session-end-part [tests]: an `ended_at` transition with no
  * new messages still triggers re-projection and lands the synthetic
@@ -144,6 +142,15 @@ function createFakeStorage() {
   /** @type {Array<{ rows: Record<string, unknown>[] }>} */
   const appended = []
   const storage = {
+    async reconcileRows(_dataset, _columns, rows, scope) {
+      const fresh = rows.filter(row => !committedRows.some(old => JSON.stringify(old) === JSON.stringify(row)))
+      for (let i = committedRows.length - 1; i >= 0; i--) {
+        if (Object.entries(scope.where).every(([key, value]) => committedRows[i][key] === value)) committedRows.splice(i, 1)
+      }
+      committedRows.push(...rows)
+      if (fresh.length) appended.push({ rows: fresh })
+      return fresh.length
+    },
     async appendRowsToPartition(_dataset, _partitionSegments, _columns, rows) {
       appended.push({ rows })
       committedRows.push(...rows)
@@ -252,15 +259,16 @@ test('a poll tick advances the per-session watermark to the store\'s current sta
   const runner = createHermesPollRunner(ctx)
   await runHermesPollTick(runner, ctx)
 
-  assert.deepEqual(runner.watermark['1'], { max_message_id: 2, ended_at: null })
+  assert.deepEqual(runner.watermark['1'], { max_message_id: 2, ended_at: null, fingerprint: runner.watermark['1'].fingerprint })
+  assert.match(runner.watermark['1'].fingerprint ?? '', /^[a-f0-9]{64}$/)
   assert.equal(runner.sessionsTracked, 1)
 
   const persisted = readHermesWatermark(dir)
-  assert.deepEqual(persisted['1'], { max_message_id: 2, ended_at: null }, 'watermark persists to plugin kernel storage')
+  assert.deepEqual(persisted['1'], { max_message_id: 2, ended_at: null, fingerprint: runner.watermark['1'].fingerprint }, 'watermark persists to plugin kernel storage')
 
   // A tick with nothing changed leaves the watermark untouched and appends nothing.
   await runHermesPollTick(runner, ctx)
-  assert.deepEqual(runner.watermark['1'], { max_message_id: 2, ended_at: null })
+  assert.deepEqual(runner.watermark['1'], { max_message_id: 2, ended_at: null, fingerprint: runner.watermark['1'].fingerprint })
 })
 
 // ---------------------------------------------------------------------------
@@ -292,7 +300,7 @@ test('re-projecting a whole session on each tick appends only the new tail (mate
   assert.equal(appended.length, 2, 'second tick appends once more')
   assert.equal(appended[1].rows.length, 1, 'only the new tail (message 3) is appended, not a re-write of 1-2')
   assert.equal(runner.rowsWritten, 3, 'rows written accumulates across ticks')
-  assert.deepEqual(runner.watermark['1'], { max_message_id: 3, ended_at: null })
+  assert.deepEqual(runner.watermark['1'], { max_message_id: 3, ended_at: null, fingerprint: runner.watermark['1'].fingerprint })
 
   db.close()
 })
@@ -315,7 +323,7 @@ test('a session ending with no new messages still triggers re-projection and lan
   await runHermesPollTick(runner, ctx)
   assert.equal(appended.length, 1)
   assert.equal(appended[0].rows.length, 2, 'the two messages land while the session is open')
-  assert.deepEqual(runner.watermark['7'], { max_message_id: 11, ended_at: null })
+  assert.deepEqual(runner.watermark['7'], { max_message_id: 11, ended_at: null, fingerprint: runner.watermark['7'].fingerprint })
 
   // No new messages: only sessions.ended_at transitions from NULL to set.
   endSession(db, { id: 7, endedAt: '2026-07-20T09:05:00Z', endReason: 'completed' })
@@ -327,9 +335,10 @@ test('a session ending with no new messages still triggers re-projection and lan
   assert.equal(endRow.part_id, `${mintHermesSessionEndId(7)}#0`)
   assert.equal(endRow.part_type, 'status')
 
-  assert.deepEqual(runner.watermark['7'], { max_message_id: 11, ended_at: '2026-07-20T09:05:00Z' })
+  assert.deepEqual(runner.watermark['7'], { max_message_id: 11, ended_at: '2026-07-20T09:05:00Z', fingerprint: runner.watermark['7'].fingerprint })
   const persisted = readHermesWatermark(dir)
-  assert.deepEqual(persisted['7'], { max_message_id: 11, ended_at: '2026-07-20T09:05:00Z' })
+  assert.equal(persisted['7'].ended_at, '2026-07-20T09:05:00Z')
+  assert.match(persisted['7'].fingerprint ?? '', /^[a-f0-9]{64}$/)
 
   db.close()
 })

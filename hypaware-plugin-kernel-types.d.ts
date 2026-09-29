@@ -1754,6 +1754,9 @@ export interface ReadRowsOptions {
  * long as those helpers keep their contract.
  */
 export interface QueryStorageService {
+  /** Reconcile a complete scoped snapshot, including removals, in the local cache. */
+  reconcileRows?(dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[], scope: { where: Record<string, string>; key: string }): Promise<number>
+
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string
   appendRows(tablePath: string, columns: ColumnSpec[], rows: Record<string, unknown>[]): Promise<void>
@@ -2960,6 +2963,9 @@ export interface BackfillRunContext {
  * and asks the registered materializer to produce canonical rows.
  */
 export interface BackfillItem {
+  /** Authoritative local snapshot. Empty rows retract this exact scope; dry-run never writes. */
+  reconcile?: { where: Record<string, string>; key: string }
+
   type?: 'item'
   /** Target dataset (must match the materializer's `dataset`). */
   dataset: string

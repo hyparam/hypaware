@@ -11,6 +11,8 @@ import { pathToFileURL } from 'node:url'
 import { collect, executeSql } from 'squirreling'
 
 import { readCursorSync } from '../../src/core/cache/partition.js'
+import { reconcileRowsInTable } from '../../src/core/cache/iceberg/store.js'
+import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
 import { createLocalIcebergIO } from '../../src/core/cache/iceberg/resolver.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { DEFAULT_SPOOL_BYTES_THRESHOLD, SPOOL_DIR } from '../../src/core/cache/spool.js'
@@ -507,4 +509,76 @@ test('readSpooledRows streams a large spool file rather than reading it whole (b
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
+})
+
+// @ref LLP 0449#reconciliation [tests]: real legacy/spooled rows, isolation and failure atomicity.
+test('snapshot reconciliation drains legacy spool, isolates sessions, rolls back failed replacement and respects purge', async t => {
+  const cacheRoot = await makeTmpDir('reconcile')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  assert.ok(storage.reconcileRows)
+  /** @type {ColumnSpec[]} */
+  const columns = ['client_name', 'session_id', 'part_id', 'content_text'].map(name => ({ name, type: 'STRING', nullable: false }))
+  const scope = { where: { client_name: 'hermes', session_id: 'hermes-s' }, key: 'part_id' }
+  const original = { ...scope.where, part_id: 'p1', content_text: 'old' }
+  const other = { ...original, session_id: 'hermes-other', part_id: 'p2', content_text: 'keep' }
+  const fresh = { ...original, content_text: 'new' }
+  await storage.appendRowsToPartition('messages', ['hermes'], columns, [original, other])
+  const spoolPath = storage.cacheTablePath('messages', ['backfill'])
+  await storage.appendRows(spoolPath, columns, [original])
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 1)
+  await storage.flushAll({ force: true })
+  const read = async () => {
+    const rows = []
+    for (const part of await storage.discoverCachePartitions()) for await (const row of storage.readRows(part.path)) rows.push(row)
+    return rows
+  }
+  assert.deepEqual((await read()).map(row => row.content_text).sort(), ['keep', 'new'])
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 0)
+  const canonical = path.join(cacheRoot, 'datasets/messages/source=hermes')
+  // A committed table can outlive a failed first cursor publication.
+  await fs.rm(path.join(canonical, 'cursor.json'))
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 0)
+  assert.equal(readCursorSync(canonical).rowCount, 1)
+  assert.deepEqual((await read()).map(row => row.content_text).sort(), ['keep', 'new'])
+  const reconcile = storage.reconcileRows
+  await assert.rejects(() => reconcile('messages', columns, [other], scope), /outside/)
+  const table = path.join(cacheRoot, 'datasets/messages/source=hermes/table')
+  // An invalid append fails after the transaction staged deletes, before publish.
+  await assert.rejects(() => reconcileRowsInTable(table, columns, [{ ...fresh, content_text: 'bad' }], scope,
+    async () => /** @type {any} */ ('invalid int64')))
+  assert.deepEqual((await read()).map(row => row.content_text).sort(), ['keep', 'new'])
+  await storage.reconcileRows('messages', columns, [], scope)
+  assert.deepEqual((await read()).map(row => row.content_text), ['keep'])
+  createSessionPurgeStore(cacheRoot).add('hermes-s')
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 0)
+  assert.deepEqual((await read()).map(row => row.content_text), ['keep'])
+})
+
+// @ref LLP 0449#reconciliation [tests]: a reconciled snapshot carries the dataset's current columns.
+test('snapshot reconciliation evolves the table schema for a column the dataset gained', async t => {
+  const cacheRoot = await makeTmpDir('reconcile-evolve')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  /** @type {CachePartitioningDeclaration} */
+  const declaration = {
+    source: { columns: ['client_name'], fallback: 'unknown' },
+    iceberg: { fields: [{ column: 'session_id', transform: 'identity', required: true, sortOnly: true }] },
+  }
+  const storage = createQueryStorageService({ cacheRoot, getDeclaration: () => declaration })
+  /** @param {string[]} names @returns {ColumnSpec[]} */
+  const cols = names => names.map(name => ({ name, type: 'STRING', nullable: true }))
+  const base = ['client_name', 'session_id', 'part_id', 'content_text']
+  const scope = { where: { client_name: 'hermes', session_id: 'hermes-s' }, key: 'part_id' }
+  const row = { client_name: 'hermes', session_id: 'hermes-s', part_id: 'p1', content_text: 'old' }
+  assert.ok(storage.reconcileRows)
+  await storage.reconcileRows('messages', cols(base), [row], scope)
+  // The dataset gains a nullable column; the snapshot writer must widen the
+  // table in place rather than silently drop the value it cannot store.
+  await storage.reconcileRows('messages', cols([...base, 'extra']), [{ ...row, content_text: 'new', extra: 'kept' }], scope)
+  const rows = []
+  for (const part of await storage.discoverCachePartitions()) {
+    for await (const read of storage.readRows(part.path)) rows.push(read)
+  }
+  assert.deepEqual(rows.map(r => r.content_text), ['new'])
+  assert.deepEqual(rows.map(r => r.extra), ['kept'])
 })
