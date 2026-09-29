@@ -112,20 +112,35 @@ export function createS3BlobStore({ bucket, prefix, client }) {
      */
     async getObject(input) {
       const Key = composeKey(input.key)
+      /** @type {Awaited<ReturnType<S3CommandsHandle['getObject']>>} */
+      let result
       try {
         // @ref LLP 0452#range-contract [implements]: preserve the byte range through the same credential and prefix path as whole reads
-        const result = await client.getObject({ Bucket: bucket, Key, ...(input.range !== undefined ? { Range: input.range } : {}) })
-        if (!result || result.Body === null || result.Body === undefined) return null
-        return {
-          body: toReadable(result.Body),
-          contentLength: result.ContentLength,
-          contentRange: result.ContentRange,
-          etag: result.ETag,
-        }
+        result = await client.getObject({ Bucket: bucket, Key, ...(input.range !== undefined ? { Range: input.range } : {}) })
       } catch (err) {
         if (isNotFound(err)) return null
         throw tagS3Error(err, classifyAwsError(err),
           `s3 blob-store: getObject failed for '${input.key}'`, input.key)
+      }
+      if (!result || result.Body === null || result.Body === undefined) return null
+      // @ref LLP 0452#range-contract [implements]: a store that ignored Range answers 200 with the whole object and no Content-Range
+      // Passing that body back as though it were the requested slice would
+      // hand a Parquet reader the wrong bytes at the right offsets, which
+      // reads as a decode error at best and as wrong query results at
+      // worst. A 206 must carry Content-Range, so its absence means the
+      // range was not honored and the only safe answer is to fail.
+      if (input.range !== undefined && result.ContentRange === undefined) {
+        const body = /** @type {{ destroy?: () => void }} */ (result.Body)
+        if (typeof body.destroy === 'function') body.destroy()
+        throw tagS3Error(undefined, 'blob_range_not_honored',
+          `s3 blob-store: byte range '${input.range}' was not honored for '${input.key}' (response carried no Content-Range)`,
+          input.key)
+      }
+      return {
+        body: toReadable(result.Body),
+        contentLength: result.ContentLength,
+        ...(result.ContentRange !== undefined ? { contentRange: result.ContentRange } : {}),
+        etag: result.ETag,
       }
     },
 

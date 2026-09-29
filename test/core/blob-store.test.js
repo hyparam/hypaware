@@ -72,6 +72,10 @@ test('local-fs BlobStore serves byte ranges from the opened file', async () => {
     const store = createLocalFsBlobStore({ baseDir: base })
     await store.putObject({ key: 'data', body: Buffer.from('0123456789') })
     for (const [range, expected, contentRange] of [
+      ['bytes=0-0', '0', 'bytes 0-0/10'],
+      ['bytes=9-9', '9', 'bytes 9-9/10'],
+      ['bytes=0-9', '0123456789', 'bytes 0-9/10'],
+      ['bytes=0-', '0123456789', 'bytes 0-9/10'],
       ['bytes=2-4', '234', 'bytes 2-4/10'],
       ['bytes=-3', '789', 'bytes 7-9/10'],
       ['bytes=8-', '89', 'bytes 8-9/10'],
@@ -84,7 +88,7 @@ test('local-fs BlobStore serves byte ranges from the opened file', async () => {
       assert.equal(got.contentLength, expected.length)
       assert.equal(Buffer.from(await collectStream(got.body)).toString(), expected)
     }
-    for (const range of ['bytes=-', 'bytes=1-2,4-5', 'bytes=10-', 'bytes=5-2', 'bytes=-0']) {
+    for (const range of ['bytes=-', 'bytes=1-2,4-5', 'bytes=10-', 'bytes=10-10', 'bytes=5-2', 'bytes=-0']) {
       await assert.rejects(store.getObject({ key: 'data', range }), /range/i)
     }
     assert.equal(await store.getObject({ key: 'missing', range: 'bytes=-8' }), null)

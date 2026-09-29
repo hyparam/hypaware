@@ -129,6 +129,41 @@ test('s3 BlobStore preserves range headers and scoped keys', async () => {
   }
 })
 
+test('s3 BlobStore rejects a response that ignored the requested range', async () => {
+  // A store may legally answer a ranged GET with 200 and the whole object.
+  // Handing that body back as the requested slice would feed a reader the
+  // wrong bytes at the right offsets, so the provider must fail instead.
+  let destroyed = false
+  const body = Readable.from([Buffer.from('0123456789')])
+  body.destroy = () => { destroyed = true; return body }
+  const client = {
+    ...makeFakeS3Client(),
+    async getObject() {
+      return { Body: body, ContentLength: 10, ETag: '"whole"' }
+    },
+  }
+  const store = createS3BlobStore({ bucket: 'bucket', client })
+  await assert.rejects(
+    store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
+    (err) => {
+      assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+      assert.match(/** @type {Error} */ (err).message, /Content-Range/)
+      return true
+    },
+  )
+  assert.equal(destroyed, true, 'the unusable body is released, not leaked')
+})
+
+test('s3 BlobStore leaves whole-object reads without a contentRange key', async () => {
+  const client = makeFakeS3Client()
+  const store = createS3BlobStore({ bucket: 'bucket', client })
+  await store.putObject({ key: 'whole.bin', body: Buffer.from('payload') })
+  const got = await store.getObject({ key: 'whole.bin' })
+  assert.ok(got)
+  assert.equal('contentRange' in got, false)
+  assert.deepEqual(client.calls.at(-1)?.input, { Bucket: 'bucket', Key: 'whole.bin' })
+})
+
 test('s3 BlobStore getObject returns null when AWS reports NotFound', async () => {
   const client = makeFakeS3Client()
   const store = createS3BlobStore({ bucket: 'my-bucket', client })

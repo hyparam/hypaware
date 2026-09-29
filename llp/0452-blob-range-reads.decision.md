@@ -1,7 +1,7 @@
 # LLP 0452: Optional Byte Ranges for BlobStore Reads
 
 **Type:** decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sinks, Query
 **Author:** Phil / Codex
 **Date:** 2026-09-29
@@ -30,9 +30,13 @@ before using the bytes. An unsatisfiable range is an error, including a
 range over an empty object. Multi-range reads are outside this contract.
 
 The S3 provider passes Range to GetObject and maps ContentRange back,
-preserving the existing bucket, prefix and credentials. The local filesystem
-provider resolves the range against the opened file's size and streams only
-those offsets from that held file handle. It does not buffer the file.
+preserving the existing bucket, prefix and credentials. A store that
+ignores Range answers 200 with the whole object and no ContentRange, and
+that body is indistinguishable from a slice once it is handed on, so the
+S3 provider rejects such a response instead of returning it as the
+requested range. The local filesystem provider resolves the range against
+the opened file's size and streams only those offsets from that held file
+handle. It does not buffer the file.
 
 This extends LLP 0014's BlobStore capability without changing archive
 formats, configuration, indexes, writes, or the behavior of existing
@@ -41,6 +45,8 @@ whole-object callers. No runtime dependency or global cache is added.
 ## Checks {#checks}
 
 Provider tests cover inclusive ends, suffixes, open ends, EOF clamping,
-invalid ranges, empty and missing files, unlink-after-open behavior, and S3
-header mapping through a scoped key. Server reader tests verify byte counts,
-projection over real Parquet, legacy fallback and invalid range responses.
+invalid ranges, empty and missing files, unlink-after-open behavior, S3
+header mapping through a scoped key, and the rejection of an S3 response
+that carries no ContentRange for a requested range. Server reader tests
+verify byte counts, projection over real Parquet, legacy fallback and
+invalid range responses.
