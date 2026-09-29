@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -814,6 +815,46 @@ test('an unreadable tree and a missing probe both answer uncertain, never health
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+test('a corner of the tree the walk could not read answers uncertain, never healthy', { skip: process.getuid?.() === 0 ? 'runs as root, where a mode-000 directory is still readable' : false }, async () => {
+  const home = await makeProbeHome()
+  const hidden = path.join(home, '.claude', 'projects', '-Users-t-hidden')
+  try {
+    // The turn is real and post-baseline; the walk just cannot see the
+    // directory holding it. Skipping that corner silently would certify a
+    // capture path this never looked at.
+    await writeTranscript(home, [assistantRecord('2026-09-29T18:30:00.000Z')], '2026-09-29T18:31:00.000Z')
+    await fs.mkdir(hidden, { recursive: true })
+    await fs.writeFile(path.join(hidden, 'b-session.jsonl'), JSON.stringify(assistantRecord('2026-09-29T18:40:00.000Z')) + '\n')
+    await fs.chmod(hidden, 0o000)
+    const confirmed = await confirmIn(home, '2026-09-29T18:00:00.000Z')
+    assert.equal(confirmed.certain, false)
+  } finally {
+    await fs.chmod(hidden, 0o700).catch(() => {})
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a tail read that comes back short is uncertain, not a clean bill of health', async () => {
+  const home = await makeProbeHome()
+  const realOpen = fsp.open
+  try {
+    await writeTranscript(home, [assistantRecord('2026-09-29T18:30:00.000Z')], '2026-09-29T18:31:00.000Z')
+    // A read that stops early drops the *newest* records, which is exactly the
+    // half that decides this: the tail is refilled, and a file that will not
+    // give its own size back is uncertain rather than healthy.
+    fsp.open = async (/** @type {any[]} */ ...args) => {
+      const handle = await realOpen(...(/** @type {[any]} */ (args)))
+      handle.read = async () => ({ bytesRead: 0, buffer: Buffer.alloc(0) })
+      return handle
+    }
+    assert.deepEqual(await confirmIn(home, '2026-09-29T18:00:00.000Z'), { certain: false })
+  } finally {
+    fsp.open = realOpen
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 
 /* ---------- collect + render: the false warning, end to end ---------- */
 

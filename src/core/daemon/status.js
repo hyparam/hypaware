@@ -3516,33 +3516,60 @@ export async function probeClientActivityFromDescriptor({ descriptor, homeDir, e
  * entry: a probe that cannot read a corner of the tree still answers from
  * the rest of it.
  *
+ * Returns whether the whole tree was actually walked. A corner that could
+ * not be listed or stat'd is skipped either way, but the confirmation read
+ * may not call a tree it could not see healthy, so the skip has to be
+ * reported rather than swallowed. A missing entry is not a gap in the walk:
+ * it holds no records at all.
+ *
  * @param {string} dir
  * @param {string | undefined} suffix
  * @param {number} depth
  * @param {(full: string, mtimeMs: number) => void} visit
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>}
  */
 async function eachActivityFile(dir, suffix, depth, visit) {
   /** @type {Dirent[]} */
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })
-  } catch {
-    return
+  } catch (err) {
+    return isMissingEntryError(err)
   }
+  let complete = true
   for (const entry of entries) {
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
-      if (depth <= 1) continue
-      await eachActivityFile(full, suffix, depth - 1, visit)
+      if (depth <= 1) {
+        complete = false
+        continue
+      }
+      if (!(await eachActivityFile(full, suffix, depth - 1, visit))) complete = false
     } else if (entry.isFile()) {
       if (suffix !== undefined && !entry.name.endsWith(suffix)) continue
       try {
         const stat = await fsp.stat(full)
         visit(full, stat.mtimeMs)
-      } catch { /* raced deletion or unreadable file: skip */ }
+      } catch (err) {
+        // Raced deletion or unreadable file: skip, but say so.
+        if (!isMissingEntryError(err)) complete = false
+      }
     }
   }
+  return complete
+}
+
+/**
+ * Did this fs error mean the entry simply is not there? A missing file or
+ * directory holds no records, which is an answer; anything else (a directory
+ * that cannot be listed, a file that cannot be stat'd) is the walk failing to
+ * look, which is not.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isMissingEntryError(err) {
+  return isPlainObject(err) && err.code === 'ENOENT'
 }
 
 /**
@@ -3605,7 +3632,7 @@ export async function confirmClientActivityFromDescriptor({ descriptor, homeDir,
   /** @type {{ full: string, mtimeMs: number }[]} */
   const candidates = []
   let dropped = false
-  await eachActivityFile(dirPath, probe.file_suffix, MAX_ACTIVITY_PROBE_DEPTH, (full, mtimeMs) => {
+  const walked = await eachActivityFile(dirPath, probe.file_suffix, MAX_ACTIVITY_PROBE_DEPTH, (full, mtimeMs) => {
     if (mtimeMs <= sinceMs) return
     if (candidates.length < MAX_CONFIRM_FILES) {
       candidates.push({ full, mtimeMs })
@@ -3624,7 +3651,10 @@ export async function confirmClientActivityFromDescriptor({ descriptor, homeDir,
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
   /** @type {number | undefined} */
   let activityMs
-  let certain = !dropped
+  // A corner of the tree that could not be listed or stat'd may hold the
+  // very turn this is looking for, so a walk that skipped one cannot end in a
+  // clean bill of health any more than an unreadable file can.
+  let certain = !dropped && walked
   for (const candidate of candidates) {
     if (activityMs !== undefined && candidate.mtimeMs <= activityMs) break
     const found = await confirmActivityInFile(candidate.full, sinceMs)
@@ -3644,9 +3674,10 @@ export async function confirmClientActivityFromDescriptor({ descriptor, homeDir,
  * Scanned backwards, so the first conversation record found is the newest and
  * the read stops there. `certain` is false only when the tail could still be
  * hiding one: the read was truncated and never reached back past `sinceMs`,
- * or the file could not be opened at all. A truncated tail whose oldest
- * timestamp already predates the baseline has seen everything that could
- * matter, and a tail read from byte zero has seen the whole file.
+ * the file could not be opened at all, or it gave back fewer bytes than its
+ * own size promised. A truncated tail whose oldest timestamp already predates
+ * the baseline has seen everything that could matter, and a fully-read tail
+ * from byte zero has seen the whole file.
  *
  * @param {string} file
  * @param {number} sinceMs
@@ -3662,8 +3693,16 @@ async function confirmActivityInFile(file, sinceMs) {
     const length = size - start
     if (length <= 0) return { certain: true }
     const buf = Buffer.allocUnsafe(length)
-    const { bytesRead } = await handle.read(buf, 0, length, start)
-    const lines = buf.subarray(0, bytesRead).toString('utf8').split('\n')
+    // Filled to the end, not to whatever one read returned: a short read
+    // drops the *newest* records, which is the half that decides this.
+    let filled = 0
+    while (filled < length) {
+      const { bytesRead } = await handle.read(buf, filled, length - filled, start + filled)
+      if (bytesRead <= 0) break
+      filled += bytesRead
+    }
+    if (filled < length) return { certain: false }
+    const lines = buf.toString('utf8').split('\n')
     // The first line of a truncated read starts mid-record (mid-codepoint,
     // even), so it is never parsed rather than parsed and misread.
     if (start > 0) lines.shift()
