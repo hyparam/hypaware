@@ -9,10 +9,10 @@ import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * Build the kernel-side `BackfillRegistry`. Plugins call
- * `register(contribution)` during activation; `hyp backfill list` and `hyp backfill <provider...>` enumerate
- * providers through `list()` / `get()`. The registry is intentionally
- * narrow. The runner owns lifecycle and telemetry; the contribution's
- * `run()` owns native discovery.
+ * `register(contribution)` during activation; `hyp backfill list` and
+ * `hyp backfill <provider...>` enumerate providers through `list()` /
+ * `get()`. The registry is intentionally narrow. The runner owns lifecycle
+ * and telemetry; the contribution's `run()` owns native discovery.
  *
  * @returns {BackfillRegistry}
  */

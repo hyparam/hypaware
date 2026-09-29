@@ -75,8 +75,8 @@ hyp cache status
 ```
 
 Choose the provider and dates you actually want. `backfill --dry-run` scans
-without writing. Inspect each provider's output
-because one provider can fail while others succeed.
+without writing. Inspect each provider's output because one provider can fail
+while others succeed.
 
 Import writes the local cache. If exports are configured, eligible imported
 rows can subsequently leave through those sinks. Apply your
