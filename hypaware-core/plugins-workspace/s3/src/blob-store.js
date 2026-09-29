@@ -225,15 +225,14 @@ export function createS3BlobStore({ bucket, prefix, client }) {
           }
         }
         if (detail !== undefined) {
-          const body = /** @type {{ destroy?: () => void }} */ (result.Body)
-          if (typeof body.destroy === 'function') body.destroy()
+          releaseBody(result.Body)
           throw tagS3Error(undefined, 'blob_range_not_honored',
             `s3 blob-store: byte range '${input.range}' was not honored for '${input.key}' (${detail})`,
             input.key)
         }
       }
       return {
-        body: toReadable(result.Body),
+        body: toReadable(result.Body, input.key),
         contentLength: result.ContentLength,
         // Only a ranged read can carry a contentRange, and only one the
         // guard above validated. LLP 0452#range-contract makes an absent
@@ -464,16 +463,61 @@ async function materializeBody(body) {
 }
 
 /**
- * @param {NodeJS.ReadableStream | Uint8Array | string} body
+ * Present a response body as a Node readable, or refuse it.
+ *
+ * A WHATWG `ReadableStream` is outside the union `S3CommandsHandle`
+ * declares, but the handle is an injectable public seam and
+ * `@aws-sdk/client-s3` carries a fetch-based request handler whose Body is
+ * one, so it is adapted rather than refused: `Readable.fromWeb` is core,
+ * adds no dependency, and streams instead of buffering.
+ *
+ * Anything else throws. An empty stream is the worst available reading of
+ * "this shape is unknown", because it is byte-for-byte what a genuinely
+ * empty object looks like: a caller reading a Parquet footer cannot tell a
+ * body that never arrived from one that is not there, and the symptom is a
+ * wrong query answer with no exception to trace it to.
+ *
+ * @param {NodeJS.ReadableStream | ReadableStream | Uint8Array | string} body
+ * @param {string} key
  * @returns {NodeJS.ReadableStream}
  */
-function toReadable(body) {
+function toReadable(body, key) {
   if (body && typeof (/** @type {any} */ (body)).pipe === 'function') {
     return /** @type {NodeJS.ReadableStream} */ (body)
   }
   if (body instanceof Uint8Array) return Readable.from([body])
   if (typeof body === 'string') return Readable.from([Buffer.from(body)])
-  return Readable.from([])
+  if (body && typeof (/** @type {any} */ (body)).getReader === 'function') {
+    return Readable.fromWeb(/** @type {any} */ (body))
+  }
+  releaseBody(body)
+  const shape = typeof body === 'object'
+    ? (/** @type {any} */ (body).constructor?.name || 'object')
+    : typeof body
+  throw tagS3Error(undefined, 'blob_body_unusable',
+    `s3 blob-store: getObject for '${key}' returned a body of an unusable shape (${shape})`,
+    key)
+}
+
+/**
+ * Release a body this code will not read, so the connection behind it is not
+ * held open. A Node stream releases through `destroy()`; a WHATWG
+ * `ReadableStream` has no `destroy` and releases through `cancel()`, so a
+ * destroy-only release quietly left one of those open. The caller is on its
+ * way to throwing the error that matters, so the `cancel()` promise is
+ * neither awaited nor allowed to surface, and nothing here throws.
+ *
+ * @param {unknown} body
+ */
+function releaseBody(body) {
+  if (!body || typeof body !== 'object') return
+  const handle = /** @type {{ destroy?: () => void, cancel?: () => unknown }} */ (body)
+  try {
+    if (typeof handle.destroy === 'function') handle.destroy()
+    else if (typeof handle.cancel === 'function') Promise.resolve(handle.cancel()).catch(() => {})
+  } catch {
+    // A body that will not release is not worth losing the original error over.
+  }
 }
 
 /**
