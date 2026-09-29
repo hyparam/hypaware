@@ -232,23 +232,26 @@ export async function runDaemonStatus(argv, ctx) {
 }
 
 /**
- * Drop the daemon pid file when the pid it names is no longer running, and
- * leave it exactly as it is otherwise: the reconciliation `requestDaemonStop`
- * performs on a confirmed exit, for the stop that goes through the service
- * manager instead of the control channel.
+ * Drop every stale pid file the daemon leaves under `stateRoot` - its own and
+ * the supervised processing child's, which is killed with it and gets no
+ * shutdown of its own either (#2288) - and leave a file whose pid is still
+ * running exactly as it is: the reconciliation `requestDaemonStop` performs on
+ * a confirmed exit, for the stop that goes through the service manager instead
+ * of the control channel.
  *
  * Best-effort through the module load too, because the stop it follows already
  * happened: a pid file this cannot read or unlink is `hyp daemon status`'s to
  * report, and nothing in here is a reason to call a completed stop a failure.
+ * Each file is reconciled on its own, so neither holds up the other.
  *
  * @param {string} stateRoot
  */
-async function clearStaleDaemonPidFile(stateRoot) {
+async function clearStaleDaemonPidFiles(stateRoot) {
   try {
-    const { readPidFile, clearPidFile, processIsAlive } = await import('../daemon/pid.js')
-    const entry = readPidFile(stateRoot)
-    if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
-  } catch { /* an unreadable pid file, or an unloadable pid module, outlives this stop */ }
+    const { clearStalePidFile, processingStateRoot } = await import('../daemon/pid.js')
+    clearStalePidFile(stateRoot)
+    clearStalePidFile(processingStateRoot(stateRoot))
+  } catch { /* an unloadable pid module outlives this stop */ }
 }
 
 /**
@@ -306,7 +309,9 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
     // A manager that had to hard-kill a wedged daemon (systemd's
     // `TimeoutStopSec`, launchd's grace) left it no shutdown to run, so the pid
     // file it clears for itself on an orderly stop still names a process that
-    // is gone while this reports `stopped` (#2266).
+    // is gone while this reports `stopped` (#2266). The kill takes the
+    // supervised processing child with it, so its own pid file below
+    // `processing/` is stranded the same way (#2288).
     //
     // Not the gate above asked twice: that one is whether the manager is
     // supervising the service, this one is whether the pid the file names is
@@ -316,7 +321,7 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
     // unloads), so the live pid this guard keeps a file for is somebody else's:
     // a foreground `hyp daemon run` that claimed it while the unit sat in its
     // restart gap, or one the OS has reissued (`EPERM` reads as alive).
-    await clearStaleDaemonPidFile(stateDir)
+    await clearStaleDaemonPidFiles(stateDir)
     ctx.stdout.write('daemon: stopped\n')
     return 0
   }

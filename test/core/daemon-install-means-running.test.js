@@ -11,7 +11,7 @@ import { installLaunchAgent } from '../../src/core/daemon/macos.js'
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
 import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 import { runDaemonStop } from '../../src/core/commands/daemon.js'
-import { pidFilePath, processIsAlive, writePidFile } from '../../src/core/daemon/pid.js'
+import { pidFilePath, processIsAlive, processingStateRoot, writePidFile } from '../../src/core/daemon/pid.js'
 
 /** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 
@@ -647,10 +647,7 @@ test('a service stop clears the pid file a hard-killed daemon left behind', asyn
   const home = tmpHome('stale-pid')
   try {
     const staged = await stageServiceDaemon(home)
-    staged.systemctl.show = async (unit) => {
-      staged.systemctl.calls.push(['show', unit])
-      return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=activating\nMainPID=0\n', stderr: '' }
-    }
+    hardKilled(staged.systemctl)
     const deadPid = 999999
     assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
     stageAbandonedPidFile(staged.stateRoot, deadPid)
@@ -693,6 +690,78 @@ test('a service stop leaves the pid file of a daemon that is still alive', async
 
     assert.equal(code, 0, staged.err())
     assert.equal(fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8'), before, 'a live daemon keeps its pid file')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Put the unit in the state a hard kill leaves it in: still loaded, no MainPID.
+ *
+ * @param {ReturnType<typeof fakeSystemd>} systemctl
+ */
+function hardKilled(systemctl) {
+  systemctl.show = async (unit) => {
+    systemctl.calls.push(['show', unit])
+    return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=activating\nMainPID=0\n', stderr: '' }
+  }
+}
+
+// Issue #2288, the other half of #2266. The supervised processing child keeps
+// its own pid file below `processing/`, and a kill of the daemon's control
+// group strands that one too: the child never ran a shutdown either. Nothing
+// reads it today and the next processing boot overwrites it, so the stale file
+// misleads only a human reading the state dir - which is reason to reconcile
+// it on the same stop, not to leave a second dead pid on disk.
+test('a service stop clears the processing pid file a hard-killed daemon left behind', async () => {
+  const home = tmpHome('stale-processing-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    hardKilled(staged.systemctl)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(processingRoot, deadPid)
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(count(staged.systemctl.calls, 'stop'), 1, 'the stop still went through the service manager')
+    assert.match(staged.out(), /daemon: stopped/)
+    const pidFile = pidFilePath(processingRoot)
+    assert.ok(
+      !fs.existsSync(pidFile) || staged.out().includes(pidFile),
+      `the stale processing pid file was neither removed nor named: ${JSON.stringify(staged.out())}`,
+    )
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The same guard the gateway file gets, against a real spawned child rather
+// than a stubbed liveness function: what is under test is what the live OS
+// says about a running pid. Never `process.pid`, or a regression that deleted
+// the file would still pass while a stop that signalled it took the suite out.
+test('a service stop leaves a live processing pid file byte-identical', async (t) => {
+  const home = tmpHome('live-processing-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    hardKilled(staged.systemctl)
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+    t.after(() => live.kill('SIGKILL'))
+    assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(processingRoot, live.pid)
+    const before = fs.readFileSync(pidFilePath(processingRoot), 'utf8')
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(
+      fs.readFileSync(pidFilePath(processingRoot), 'utf8'),
+      before,
+      'a live processing daemon keeps its pid file',
+    )
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

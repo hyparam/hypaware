@@ -121,3 +121,22 @@ export function processIsAlive(pid) {
     return false
   }
 }
+
+/**
+ * Drop the PID file under `stateRoot` when the pid it names is no longer
+ * running, and leave it exactly as it is otherwise: a file whose pid is still
+ * held belongs to whoever holds it, which is why `processIsAlive` reads
+ * `EPERM` as alive.
+ *
+ * Best-effort, because the callers are stops that already happened: a pid file
+ * this cannot parse or unlink is `hyp daemon status`'s to report rather than a
+ * reason to call a completed stop a failure.
+ *
+ * @param {string} stateRoot
+ */
+export function clearStalePidFile(stateRoot) {
+  try {
+    const entry = readPidFile(stateRoot)
+    if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
+  } catch { /* an unreadable or unremovable pid file outlives this stop */ }
+}
