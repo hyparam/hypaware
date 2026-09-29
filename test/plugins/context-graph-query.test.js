@@ -7,6 +7,8 @@ import path from 'node:path'
 import test from 'node:test'
 import { asyncRow } from 'squirreling'
 
+import { TracerProvider } from '../../src/core/observability/runtime.js'
+
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
@@ -199,7 +201,10 @@ test('the shared deadline allows traversal within thirty seconds', async t => {
   assert.equal(ok(await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })).reachable, 5)
 })
 
-test('the shared deadline rejects a read at thirty seconds before starting another hop', async t => {
+// A budget refusal names its remedy, as the 100k-row and 128 MiB ones do.
+const GUIDED_TIME_BUDGET = /thirty-second time budget; reduce depth or narrow --edge-type/
+
+test('the shared deadline refuses a read at thirty seconds before starting another hop', async t => {
   const fixture = memoryGraph()
   let now = Date.now()
   t.mock.method(Date, 'now', () => now)
@@ -208,8 +213,47 @@ test('the shared deadline rejects a read at thirty seconds before starting anoth
     if (name === 'edge') now += 30_000
     return get(name)
   })
-  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1', depth: 3 }), /thirty-second time budget/)
+  assert.match(refused(await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })), GUIDED_TIME_BUDGET)
   assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 1)
+})
+
+/**
+ * Collect the traversal spans `run` emits, so a claim about telemetry is
+ * asserted rather than described.
+ * @param {() => Promise<unknown>} run
+ */
+async function graphSpans(run) {
+  /** @type {any[]} */
+  const captured = []
+  const provider = new TracerProvider({ resource: { attributes: {} },
+    exporters: [{ exportBatch(spans) { captured.push(...spans) } }] })
+  provider.register()
+  try {
+    await run()
+  } finally {
+    await provider.shutdown()
+  }
+  return captured.filter(span => span.name === 'graph.neighbors')
+}
+
+test('a budget refusal names its error_kind, and a clean traversal names none', async t => {
+  // A refusal returns, and returning takes withSpan's success arm, which
+  // records no exception and no kind. Without naming it on the refusal
+  // branches, a thirty-second trip reads in telemetry exactly like an
+  // unresolved seed, which also returns.
+  const [clean] = await graphSpans(() => queryNeighbors({ ...memoryGraph(), seed: 's1', depth: 3 }))
+  assert.equal(clean.attributes.error_kind, undefined)
+
+  const fixture = memoryGraph()
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    if (name === 'edge') now += 30_000
+    return get(name)
+  })
+  const [trip] = await graphSpans(() => queryNeighbors({ ...fixture, seed: 's1', depth: 3 }))
+  assert.equal(trip.attributes.error_kind, 'budget_refused')
 })
 
 /**
@@ -241,7 +285,14 @@ test('the budget signal firing inside a blocked read refuses with the same guida
       }
     } }
   } }))
-  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1', depth: 3 }), /thirty-second time budget/)
+  const result = await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })
+  assert.match(refused(result), GUIDED_TIME_BUDGET)
+  // The verb renders it through the branch the row and payload budgets take,
+  // off the visibility report the local-only notice is built from.
+  assert.ok(result.localOnly)
+  const rendered = graphNeighborsVerb.render(result, /** @type {any} */ ({}))
+  assert.equal(rendered.exitCode, 1)
+  assert.match(rendered.stderr ?? '', GUIDED_TIME_BUDGET)
 })
 
 test('a source throwing its own abort on a blocked read refuses with the same guidance', async t => {
@@ -256,7 +307,7 @@ test('a source throwing its own abort on a blocked read refuses with the same gu
     own.abort()
     throw new DOMException('Aborted', 'AbortError')
   } }))
-  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), /thirty-second time budget/)
+  assert.match(refused(await queryNeighbors({ ...fixture, seed: 's1' })), GUIDED_TIME_BUDGET)
 })
 
 test('an unrelated abort is not relabelled as the traversal time budget', async t => {
@@ -290,6 +341,16 @@ test('large labels are subject to the cumulative payload budget', async () => {
   assert.match(!result.ok && result.error || '', /payload budget/)
   assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 0)
 })
+
+/**
+ * Assert a traversal refused and return the message it refused with.
+ * @param {Awaited<ReturnType<typeof queryNeighbors>>} r
+ * @returns {string}
+ */
+function refused(r) {
+  assert.equal(r.ok, false)
+  return r.ok ? '' : r.error
+}
 
 /**
  * Assert a traversal succeeded and return it as a plain object for field access.
