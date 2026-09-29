@@ -1,6 +1,7 @@
 // @ts-check
 
 import test from 'node:test'
+import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -9,6 +10,10 @@ import path from 'node:path'
 import { installLaunchAgent } from '../../src/core/daemon/macos.js'
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
 import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus } from '../../src/core/daemon/install.js'
+import { runDaemonStop } from '../../src/core/commands/daemon.js'
+import { pidFilePath, processIsAlive, writePidFile } from '../../src/core/daemon/pid.js'
+
+/** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 
 // Regression for #1036: `hyp daemon install` over a running daemon booted the
 // old instance out, bootstrapped the label back in, and then trusted
@@ -589,4 +594,106 @@ test('a launchd reason that ends in a period does not double up the sentence bre
       return true
     },
   )
+})
+
+/**
+ * A systemd-installed daemon, the systemctl standing in for the service
+ * manager, and the context `hyp daemon stop` runs against them with.
+ *
+ * @param {string} home
+ */
+async function stageServiceDaemon(home) {
+  let out = ''
+  let err = ''
+  const systemctl = fakeSystemd()
+  const options = { ...linuxOpts(home, systemctl), platform: /** @type {const} */ ('linux') }
+  await installSystemdUnit(options)
+  const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+    stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+    stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+  }))
+  return {
+    systemctl,
+    options,
+    ctx,
+    stateRoot: path.join(home, '.hyp', 'hypaware'),
+    out: () => out,
+    err: () => err,
+  }
+}
+
+/**
+ * A pid file the daemon never got to clear, as a hard kill leaves it.
+ *
+ * @param {string} stateRoot
+ * @param {number} pid
+ */
+function stageAbandonedPidFile(stateRoot, pid) {
+  writePidFile(stateRoot, { pid, startedAt: new Date().toISOString(), runId: 'hard-kill', mode: 'foreground' })
+}
+
+// Issue #2266. A manager that had to hard-kill a wedged daemon gave it no
+// shutdown to run, so the pid file the daemon clears for itself on an orderly
+// stop is still on disk naming a process that is gone while `hyp daemon stop`
+// reports `daemon: stopped`. The control-file transport clears exactly that
+// file on a confirmed exit.
+//
+// The unit here is in the state such a kill leaves - no MainPID, still
+// `Restart=always` - which is also the throttle gap the gate must keep reading
+// as supervised rather than as "not running" (#2261), so the stop going
+// through systemctl is asserted alongside the file.
+test('a service stop clears the pid file a hard-killed daemon left behind', async () => {
+  const home = tmpHome('stale-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    staged.systemctl.show = async (unit) => {
+      staged.systemctl.calls.push(['show', unit])
+      return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=activating\nMainPID=0\n', stderr: '' }
+    }
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(count(staged.systemctl.calls, 'stop'), 1, 'the stop still went through the service manager')
+    assert.match(staged.out(), /daemon: stopped/)
+    const pidFile = pidFilePath(staged.stateRoot)
+    assert.ok(
+      !fs.existsSync(pidFile) || staged.out().includes(pidFile),
+      `the stale pid file was neither removed nor named: ${JSON.stringify(staged.out())}`,
+    )
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The property that makes the clear safe: the file goes only when the pid it
+// names is gone. Both managers return from the stop with the process already
+// gone, so the live pid this keeps a file for is somebody else's: a foreground
+// `hyp daemon run` that claimed it while the unit sat in its restart gap, or
+// one the OS has reissued. A stop that deleted it would blind every liveness
+// check to a process that is running.
+test('a service stop leaves the pid file of a daemon that is still alive', async (t) => {
+  const home = tmpHome('live-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    // A live pid that is not the runner's own: a regression that signalled or
+    // killed what the pid file names would otherwise take the suite with it,
+    // and read as a crash rather than as this assertion.
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+    t.after(() => live.kill('SIGKILL'))
+    assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+    stageAbandonedPidFile(staged.stateRoot, live.pid)
+    const before = fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8')
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8'), before, 'a live daemon keeps its pid file')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
 })
