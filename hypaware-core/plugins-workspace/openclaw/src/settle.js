@@ -416,9 +416,10 @@ async function readOpenclawSessionIndex(candidate, budget, unreadable) {
     // a healthy candidate leaves that candidate a `maxBytes` its own
     // transcript exceeds, and it is reported unreadable too: by
     // `transcript_limit` inside its own read, or by the short-circuit above
-    // on the exact residue of 0. Exceeding the bound is a visible storage
-    // failure by design (LLP 0444#failure-policy), recovered by the
-    // scheduled backfill.
+    // on the exact residue of 0. Exceeding a bound is a visible storage
+    // failure by design, and the sentinel it produces recovers through the
+    // scheduled backfill only once the store reads again
+    // (LLP 0444#failure-policy).
     budget.remaining -= error.bytes
     unreadable.push(error)
     return buildOpenclawSessionIndex(candidate, undefined, [])
