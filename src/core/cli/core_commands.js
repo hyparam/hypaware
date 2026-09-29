@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportPublish } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -771,13 +771,10 @@ function buildCoreCommands(registry) {
       name: 'report',
       category: 'explore-share',
       audience: 'everyday',
-      summary: 'Generate, render, and manage reports',
+      summary: 'Generate and manage reports',
       help:
         "'generate' starts an attached AI client with the report skill in the\n" +
         "current directory. Optional instructions set its period and focus.\n\n" +
-        "'render' is a LOCAL build step: it turns a reports tree's Markdown into\n" +
-        'a static HTML site and takes no --remote and no credential.\n' +
-        '\n' +
         'The rest talk to the remote. Reports are hosted there (there is no\n' +
         'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
         '<target> and default to the default remote target, the same resolution\n' +
@@ -800,24 +797,6 @@ function buildCoreCommands(registry) {
         'recording and sync policy. No remote login is required.',
       ].join('\n'),
       run: runReportGenerate,
-    },
-    {
-      // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
-      name: 'report render',
-      summary: 'Build the static HTML site for a local reports tree (no remote involved)',
-      usage: coreUsage('report render'),
-      help: [
-        'Renders every top-level <slug>.md (plus its optional <slug>/ section',
-        'directory) into html/<slug>/, and refreshes the shared assets. <dir>',
-        'defaults to ~/hypaware-reports.',
-        '',
-        'html/ is wiped and rebuilt every run, so a deleted or renamed report',
-        'never leaves stale HTML behind. Report .md sources are never modified,',
-        'and assets/theme.css is yours: it is copied into each page but never',
-        'overwritten. Pass --no-refresh-assets to leave the other assets alone',
-        'too.',
-      ].join('\n'),
-      run: runReportRender,
     },
     {
       name: 'report publish',

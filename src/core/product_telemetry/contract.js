@@ -123,7 +123,6 @@ export const COMMANDS = Object.freeze([
   'report list',
   'report generate',
   'report publish',
-  'report render',
   'session',
   'session ignore',
   'session status',

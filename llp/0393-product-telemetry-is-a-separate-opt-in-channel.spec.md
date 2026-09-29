@@ -1,5 +1,6 @@
 # LLP 0393: Product telemetry is a separate opt-in channel
 
+**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 **Type:** Spec
 **Status:** Accepted
 **Systems:** Observability, CLI, Daemon, Privacy

@@ -330,21 +330,6 @@ destination. The command's exit status indicates whether the client launched,
 not whether report generation completed. `hyp report list` continues to list
 published reports only; use `hyp report publish <folder> ...` to share one.
 
-### `hyp report render`
-
-```text
-hyp report render [<dir>] [--no-refresh-assets]
-```
-
-Builds a static HTML site from a local reports tree. The directory defaults to
-`~/hypaware-reports`. It replaces the derived `html/` directory, preserves
-source Markdown and `assets/theme.css`, and refuses an empty source tree.
-`--no-refresh-assets` also preserves the other copied assets.
-
-```sh
-hyp report render ~/hypaware-reports
-```
-
 ### `hyp report publish`
 
 ```text

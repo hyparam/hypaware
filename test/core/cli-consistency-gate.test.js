@@ -670,6 +670,16 @@ function destinationFamilies(help) {
  * where a report goes, so deleting the destination word rather than fixing it
  * fails here.
  */
+test('report render is retired while the shared server renderer remains exported', async () => {
+  const registry = coreRegistry()
+  assert.equal(registry.list().some((entry) => entry.name === 'report render'), false)
+  const { run } = await harness(registry)
+  const { code } = await run(['report', 'render'])
+  assert.notEqual(code, 0)
+  const { renderReports } = await import('hypaware/core/reports')
+  assert.equal(typeof renderReports, 'function')
+})
+
 test('the report help surfaces name the destination in one vocabulary', { timeout: SWEEP_TIMEOUT_MS }, async () => {
   const registry = coreRegistry()
   const { run } = await harness(registry)

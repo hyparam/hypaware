@@ -1,5 +1,6 @@
 # LLP 0196: Skills state constraints, not procedures
 
+**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 **Type:** RFC
 **Status:** Accepted
 **Systems:** Plugins, Reports, CLI

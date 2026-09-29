@@ -203,17 +203,6 @@ export const CORE_COMMAND_ARGS = {
       positional: ['instructions'],
     },
   },
-  'report render': {
-    usage: 'hyp report render [<dir>] [--no-refresh-assets]',
-    schema: {
-      type: 'object',
-      properties: {
-        dir: { type: 'string' },
-        'no-refresh-assets': { type: 'boolean', default: false },
-      },
-      positional: ['dir'],
-    },
-  },
   'report publish': {
     usage: 'hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]',
     schema: {

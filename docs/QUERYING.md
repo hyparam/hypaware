@@ -175,17 +175,8 @@ suffix if needed. It follows the current directory's recording and sync policy.
 Publishing remains a separate action, using `hyp report publish <folder> ...`.
 
 
-The report renderer builds HTML from a local Markdown report tree. For a small
-report, create `./usage-reports/weekly-usage.md` with your findings, query scope,
-and tables, then run:
-
-```sh
-hyp report render ./usage-reports
-```
-
-Open `./usage-reports/index.html`. The renderer rebuilds `html/`, so edit
-the source Markdown instead of generated HTML. It renders findings you write;
-it does not run SQL or invent a report from an empty directory.
+You can also write a Markdown report yourself with your findings, query scope,
+and tables. The remote renders uploaded Markdown; no local render step is needed.
 
 To share a reviewed Markdown report with your organization:
 
