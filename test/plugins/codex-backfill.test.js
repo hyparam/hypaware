@@ -735,6 +735,9 @@ for (const sweep of [false, true]) {
         assert.equal(usageRows[0].content_text, 'Here are the files.')
         assert.equal(/** @type {any} */ (usageRows[0].attributes).usage.total_tokens, 110)
         assert.equal(entries.find(entry => entry.message === 'codex.backfill.session_projected')?.fields?.message_count, 4)
+        // The drop must be visible to an operator, like every other drop on
+        // this path. Two delivery records were filtered out of one session.
+        assert.equal(entries.find(entry => entry.message === 'codex.backfill.scan_complete')?.fields?.delivery_evidence_skipped, 2)
 
         // Existing live rows already carry usage. Import must not add another
         // usage carrier under a nested send's distinct message/part id.
@@ -753,11 +756,62 @@ for (const sweep of [false, true]) {
   }
 }
 
+test('the send_message tool result survives the delivery filter that shares its metadata key', async () => {
+  const env = await stageEnv()
+  try {
+    // Upstream shape, from openai/codex `rollout_reconstruction_tests.rs`
+    // (`recorded_questions_share_queued_input_order_across_resume`): the
+    // GENUINE `function_call_output` for a Code Mode send carries the delivered
+    // text verbatim under the same `delivered_assistant_message` envelope key
+    // the synthetic assistant record marks itself with. Keying the skip on that
+    // field alone drops a real tool result.
+    await writeModernRollout(env, 'rollout-delivery-output.jsonl', {
+      meta: { id: 'sess-delivery-output', cli_version: '0.159.0' },
+      items: [
+        { payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'ready?' }] } },
+        { payload: { type: 'function_call', call_id: 'first', name: 'user_messaging_send_message', arguments: '{"text":"Continue?"}' } },
+        {
+          metadata: { delivered_assistant_message: 'Continue?' },
+          payload: { type: 'function_call_output', call_id: 'first', output: 'Sent.' },
+        },
+        {
+          metadata: { delivered_assistant_message: 'codex:code-mode-delivery:v1:complete', user_input_order: 1 },
+          payload: {
+            type: 'message', role: 'assistant', id: 'nested-send-0',
+            content: [{ type: 'output_text', text: 'Continue?' }],
+            internal_chat_message_metadata_passthrough: { turn_id: 't-1' },
+          },
+        },
+        { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: {
+          input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110,
+        } } } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    const { items } = await collect(provider.run(ctx))
+    const rows = await materialize(items[0])
+    assert.deepEqual(rows.map(row => row.role), ['user', 'assistant', 'tool'])
+    assert.equal(rowsByRole(rows, 'tool')[0].content_text, 'Sent.')
+    // The send's own call is still an eligible carrier, so skipping the
+    // evidence record costs the turn its row but never its usage.
+    const carriers = rows.filter(row => /** @type {any} */ (row.attributes)?.usage)
+    assert.equal(carriers.length, 1)
+    assert.equal(carriers[0].role, 'assistant')
+    assert.equal(/** @type {any} */ (carriers[0].attributes).usage.total_tokens, 110)
+    assert.equal(entries.find(entry => entry.message === 'codex.backfill.scan_complete')?.fields?.delivery_evidence_skipped, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('ordinary assistant messages keep their text when delivery metadata is absent or null', async () => {
   const env = await stageEnv()
   try {
     const text = 'The content of a confirmed assistant message is unavailable. Do not infer what was asked or authorized.'
-    const metadata = [undefined, null, {}, { user_input_order: 1 }, { delivered_assistant_message: null }]
+    const metadata = [undefined, null, {}, { user_input_order: 1 }, { delivered_assistant_message: null },
+      // Not a `codex:code-mode-delivery:v1:` marker, so not delivery evidence.
+      { delivered_assistant_message: text }]
     await writeModernRollout(env, 'rollout-unmarked.jsonl', {
       meta: { id: 'sess-unmarked' },
       items: metadata.map((metadata, index) => ({
