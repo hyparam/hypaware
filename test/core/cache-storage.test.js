@@ -554,3 +554,31 @@ test('snapshot reconciliation drains legacy spool, isolates sessions, rolls back
   assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 0)
   assert.deepEqual((await read()).map(row => row.content_text), ['keep'])
 })
+
+// @ref LLP 0449#reconciliation [tests]: a reconciled snapshot carries the dataset's current columns.
+test('snapshot reconciliation evolves the table schema for a column the dataset gained', async t => {
+  const cacheRoot = await makeTmpDir('reconcile-evolve')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  /** @type {CachePartitioningDeclaration} */
+  const declaration = {
+    source: { columns: ['client_name'], fallback: 'unknown' },
+    iceberg: { fields: [{ column: 'session_id', transform: 'identity', required: true, sortOnly: true }] },
+  }
+  const storage = createQueryStorageService({ cacheRoot, getDeclaration: () => declaration })
+  /** @param {string[]} names @returns {ColumnSpec[]} */
+  const cols = names => names.map(name => ({ name, type: 'STRING', nullable: true }))
+  const base = ['client_name', 'session_id', 'part_id', 'content_text']
+  const scope = { where: { client_name: 'hermes', session_id: 'hermes-s' }, key: 'part_id' }
+  const row = { client_name: 'hermes', session_id: 'hermes-s', part_id: 'p1', content_text: 'old' }
+  assert.ok(storage.reconcileRows)
+  await storage.reconcileRows('messages', cols(base), [row], scope)
+  // The dataset gains a nullable column; the snapshot writer must widen the
+  // table in place rather than silently drop the value it cannot store.
+  await storage.reconcileRows('messages', cols([...base, 'extra']), [{ ...row, content_text: 'new', extra: 'kept' }], scope)
+  const rows = []
+  for (const part of await storage.discoverCachePartitions()) {
+    for await (const read of storage.readRows(part.path)) rows.push(read)
+  }
+  assert.deepEqual(rows.map(r => r.content_text), ['new'])
+  assert.deepEqual(rows.map(r => r.extra), ['kept'])
+})

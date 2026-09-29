@@ -955,8 +955,14 @@ export async function reconcileRowsInTable(tablePath, columns, rows, scope, next
   const records = rowsToIcebergRecords(columns, rows)
   const pending = new Map(records.map(row => [String(row[scope.key]), row]))
   if (pending.size !== rows.length) throw new Error('Duplicate snapshot row identity')
-  if (!tableExists(tablePath)) {
-    if (!rows.length) return { rowsWritten: 0, rowsDeleted: 0, rowCount: 0 }
+  const tablePresent = tableExists(tablePath)
+  if (!tablePresent && !rows.length) return { rowsWritten: 0, rowsDeleted: 0, rowCount: 0 }
+  // Create the table, or evolve an existing one in place. The transaction
+  // below stages its append against the table's CURRENT schema, so a column
+  // the dataset gained since this table was created would be dropped from
+  // every reconciled row with no error. An empty append is the same switch
+  // point a spool flush goes through (LLP 0029#in-place-evolution).
+  if (!tablePresent || (rows.length && options?.declaration)) {
     await appendRowsToTable(tablePath, [...columns, INGEST_SEQ_COLUMN], [], options)
   }
   const { resolver, lister } = await getLocalIO()

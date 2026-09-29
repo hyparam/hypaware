@@ -35,8 +35,11 @@ export async function reconcileCacheRows(args) {
   const parts = await discoverCachePartitions(cacheRoot, { datasets: [dataset] })
   const knownPaths = new Set(parts.map(part => part.path))
   const paths = [target, ...[...knownPaths].filter(part => part !== target)]
+  // A reconciliation rewrites recorded history, so its record names the exact
+  // scope it rewrote: "rows_deleted: 4" is only actionable with the session it
+  // removed them from.
   return withSpan('cache.reconcile', { [Attr.COMPONENT]: 'cache', [Attr.DATASET]: dataset,
-    [Attr.OPERATION]: 'cache.reconcile', status: 'ok' }, async span => {
+    [Attr.OPERATION]: 'cache.reconcile', ...scope.where, status: 'ok' }, async span => {
     return withPartitionMutationLocks(paths, async () => {
       for (const part of paths) {
         const refusal = appendRefusalReason(part)
@@ -63,7 +66,7 @@ export async function reconcileCacheRows(args) {
       span.setAttribute('rows_written', rowsWritten)
       span.setAttribute('rows_deleted', rowsDeleted)
       getLogger('cache').info('cache.snapshot_reconciled', { component: 'cache', dataset,
-        rows_written: rowsWritten, rows_deleted: rowsDeleted, status: 'ok' })
+        ...scope.where, rows_written: rowsWritten, rows_deleted: rowsDeleted, status: 'ok' })
       return rowsWritten
     })
   }, { component: 'cache' })

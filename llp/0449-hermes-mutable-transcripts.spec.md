@@ -39,7 +39,11 @@ dry runs perform no mutation.
 Validate the complete snapshot before changing data. Hold the existing cache
 partition mutation guards, preserve equal rows and their ingest sequences, and
 publish changed rows and position deletions in one Iceberg transaction per
-table. New or changed rows receive ingest sequences from the same allocator as
+table. A snapshot write is a cache write like any other, so it passes through
+the same in-place schema evolution (LLP 0029) an append does: a transaction
+stages against the table's current schema, and a dataset column added since the
+table was created would otherwise be dropped from every reconciled row in
+silence. New or changed rows receive ingest sequences from the same allocator as
 spool flushes. No stale-prefix append, unversioned parallel copy, or content
 hash in the public part identity is required. Rewinding all messages removes
 all of the session's parts, without waiting for a new message ID.
