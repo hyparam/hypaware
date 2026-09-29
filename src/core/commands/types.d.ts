@@ -65,4 +65,6 @@ export interface BackfillProviderResult {
   sessions_seen: number
   status: 'ok' | 'failed'
   error?: string
+  /** Which step produced `error`, for the run's `provider_finish` span. */
+  error_kind?: string
 }
