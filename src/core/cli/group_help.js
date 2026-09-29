@@ -164,10 +164,9 @@ export function makeGroupCommand({ registry, name, summary, help, aliases, categ
         return 0
       }
       // A registered top-level group can contain metadata-only nested groups
-      // (`client claude-desktop`, `privacy client`). An
-      // exact leaf is selected by longest-prefix dispatch before this runner;
-      // reaching here means the remaining tokens may name one of those nested
-      // groups or an unknown child of one.
+      // (`client claude-desktop`). An exact leaf is selected by longest-prefix
+      // dispatch before this runner; reaching here means the remaining tokens
+      // may name one of those nested groups or an unknown child of one.
       // @ref LLP 0248#tree [implements]: nested task groups remain navigable without executable placeholder commands
       const nonHelp = argv.filter((token) => !isHelpFlag(token))
       for (let depth = nonHelp.length; depth >= 1; depth -= 1) {

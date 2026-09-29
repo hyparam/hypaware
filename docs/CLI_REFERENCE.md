@@ -846,7 +846,8 @@ hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>
 Scans selected providers, materializes records into live datasets, appends
 rows, and flushes the cache. Provider failures don't stop sibling providers.
 `--dry-run` runs the same full scan and projection and writes no row, so it
-reports what an import would take but costs what the import costs.
+reports what an import would take at nearly the cost of one: only
+materialization, the row write, and the cache flush are skipped.
 
 ```sh
 hyp backfill claude codex --since 2026-08-01T00:00:00Z --dry-run

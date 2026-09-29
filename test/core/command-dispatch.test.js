@@ -624,9 +624,9 @@ test('backfill is canonical and removed history commands do not resolve', async 
 // The removed plan spelling has to land on an error, not on an import: with
 // `plan` gone from the registry, `hyp backfill plan` falls through to the
 // import's greedy provider list, where the word can only be read as a
-// provider name. Selection refuses the whole run on any unknown name, so
-// `backfill plan claude` imports nothing either - the named provider does
-// not quietly run while the word that used to be a subcommand is dropped.
+// provider name, and an unknown name refuses the whole run before any
+// provider is driven. This registry activates no plugins, so `claude` is
+// unknown here too; both spellings only have to reach that refusal.
 // @ref LLP 0446#surface [tests]: no compatibility handler turns a former plan into an import
 test('the removed plan spellings fail rather than importing', async () => {
   const { kernel, registry } = coreKernelAndRegistry()
@@ -641,7 +641,7 @@ test('the removed plan spellings fail rather than importing', async () => {
   assert.equal(await dispatch(['client', 'history', 'plan'], {
     stdout: makeBuf(), stderr: planErr, registry, kernel,
   }), 2)
-  assert.match(planErr.text(), /unknown subcommand/)
+  assert.match(planErr.text(), /^hyp client: unknown subcommand 'history'/)
 })
 
 test('leaf command --help renders summary, usage, and long help', async () => {

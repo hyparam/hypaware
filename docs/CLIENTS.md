@@ -74,9 +74,10 @@ hyp backfill codex --since 2026-09-01T00:00:00Z
 hyp cache status
 ```
 
-Choose the provider and dates you actually want. `backfill --dry-run` scans
-without writing. Inspect each provider's output because one provider can fail
-while others succeed.
+Choose the provider and dates you actually want. `backfill --dry-run` scans and
+projects without writing, so it previews the result but is not a cheap probe.
+Inspect each provider's output because one provider can fail while others
+succeed.
 
 Import writes the local cache. If exports are configured, eligible imported
 rows can subsequently leave through those sinks. Apply your
