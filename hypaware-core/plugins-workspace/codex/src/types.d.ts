@@ -53,6 +53,8 @@ export interface CodexRolloutSession {
   items: CodexRolloutItem[]
   /** Stable prefix through the last usage/completion event when native lifecycle events exist. */
   settledItemCount?: number
+  /** Guardian Code Mode delivery-evidence records dropped before projection. Absent when none were. */
+  deliveryEvidenceSkipped?: number
 }
 
 /** One recovered rollout response item plus its envelope timestamp. */

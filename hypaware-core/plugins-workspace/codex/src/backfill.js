@@ -274,6 +274,10 @@ async function* runCodexBackfill(args) {
   let filesRead = 0
   let filesUnchanged = 0
   let sessionsDeferred = 0
+  // Every other drop on this path is counted (ignored sessions, deferred
+  // suffixes). Count this one too, so an operator can tell a session that
+  // recorded nothing from one whose delivery evidence was filtered out.
+  let deliveryEvidenceSkipped = 0
   const files = await listRolloutFiles(sessionsDir)
   const present = new Set(files)
   for (const filePath of args.fingerprints.keys()) {
@@ -318,6 +322,7 @@ async function* runCodexBackfill(args) {
 
     let fileDeferred = 0
     for (const session of sessions) {
+      deliveryEvidenceSkipped += session.deliveryEvidenceSkipped ?? 0
       // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
       if (args.ignoredSessions?.has(session.sessionId)) {
         sessionsIgnored += 1
@@ -413,6 +418,7 @@ async function* runCodexBackfill(args) {
     sessions_deferred: sessionsDeferred,
     sessions_projected: sessionsProjected,
     sessions_ignored: sessionsIgnored,
+    delivery_evidence_skipped: deliveryEvidenceSkipped,
     messages_projected: messagesProjected,
     status: 'ok',
   })
@@ -576,6 +582,38 @@ function parseLegacyDoc(text, filePath) {
   return buildSession({ metaPayload: sessionMeta, turnPayloads: [], items, fallbackId: sessionIdFromPath(filePath) })
 }
 
+// Guardian's Code Mode delivery markers, verbatim from the Codex serializer
+// (`codex-rs/history/src/rollout_payload.rs`). Only the synthetic record carries
+// one; the genuine `send_message` tool result carries the delivered text itself
+// under the same envelope key.
+const CODE_MODE_DELIVERY_COMPLETE = 'codex:code-mode-delivery:v1:complete'
+const CODE_MODE_DELIVERY_INCOMPLETE = 'codex:code-mode-delivery:v1:incomplete:'
+
+/**
+ * Is this response item Guardian delivery evidence rather than model output?
+ *
+ * Codex persists a confirmed Code Mode send twice. The evidence record is a
+ * SYNTHESIZED assistant message whose envelope metadata carries a
+ * `codex:code-mode-delivery:v1:` marker (and, when the send was truncated,
+ * whose text is a fixed unavailable-content placeholder). The send's own
+ * `function_call_output` is a GENUINE record, and it carries the delivered text
+ * verbatim under the same `delivered_assistant_message` key. Keying on the
+ * field's presence alone therefore drops a real tool result, so this mirrors
+ * the conjunction Codex's own reader uses to recognize its synthetic record:
+ * an assistant message payload plus a marker-shaped value.
+ *
+ * @param {unknown} metadata  the response item's envelope metadata
+ * @param {Record<string, unknown>} payload
+ * @returns {boolean}
+ */
+function isDeliveredAssistantEvidence(metadata, payload) {
+  if (!isPlainObject(metadata)) return false
+  const marker = stringValue(metadata.delivered_assistant_message)
+  if (!marker) return false
+  if (marker !== CODE_MODE_DELIVERY_COMPLETE && !marker.startsWith(CODE_MODE_DELIVERY_INCOMPLETE)) return false
+  return payload.type === 'message' && payload.role === 'assistant'
+}
+
 /**
  * Modern rollout: line-delimited `{ timestamp, type, payload }` records:
  * one `session_meta`, zero+ `turn_context`, and the conversation's
@@ -598,6 +636,7 @@ function parseJsonlRollout(text, filePath) {
   let sawRecord = false
   let tracksLifecycle = false
   let settledItemCount = 0
+  let deliveryEvidenceSkipped = 0
 
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
@@ -618,6 +657,14 @@ function parseJsonlRollout(text, filePath) {
     } else if (type === 'turn_context' && payload) {
       turnPayloads.push(payload)
     } else if (type === 'response_item' && payload) {
+      // Codex v0.159.0 encodes Guardian delivery evidence as assistant messages,
+      // including placeholder text for truncated sends. These are retained
+      // context, not model output, and must not become rows or usage carriers.
+      // @ref LLP 0035#one-carrier [constrained-by]: usage stays on the model's last assistant item
+      if (isDeliveredAssistantEvidence(row.metadata, payload)) {
+        deliveryEvidenceSkipped += 1
+        continue
+      }
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
     } else if (type === 'event_msg' && payload) {
       if (payload.type === 'task_started') tracksLifecycle = true
@@ -637,6 +684,7 @@ function parseJsonlRollout(text, filePath) {
   if (!sawRecord) return undefined
   const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
   if (tracksLifecycle) session.settledItemCount = settledItemCount
+  if (deliveryEvidenceSkipped) session.deliveryEvidenceSkipped = deliveryEvidenceSkipped
   return session
 }
 
