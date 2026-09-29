@@ -188,7 +188,7 @@ already local-only or ignored starts syncing. The setting is machine-local
 and reversible, `hyp setup` asks for it in its own step, and `hyp status`
 names it on an enrolled machine.
 
-Two caveats apply to both surfaces:
+Three caveats apply to both surfaces:
 
 - **Prospective only.** A marking gates future recording and forwarding.
   Rows captured before it existed stay in the cache; deleting them is the
@@ -196,6 +196,16 @@ Two caveats apply to both surfaces:
 - **Class resolution needs a working directory.** Only the Claude and
   Codex pathways supply one, so directory markings are a no-op for the
   `raw-anthropic` / `raw-openai` proxy and OTEL sources.
+- **A session is classed by its own directory, not by what it reads.**
+  `hyp query` is a local read and is deliberately not filtered at the export
+  seam, so rows from a `local-only` folder can be quoted into whatever session
+  asked for them, and that session is recorded under its own working
+  directory's class. Generating a usage report in a `sync` folder therefore
+  forwards the generating conversation, the excerpts it quotes included, even
+  when the work it reports on lives under `local-only`. `hyp report generate`
+  starts the report skill in the directory you type it in and changes no
+  class, so choose that directory deliberately, or run `hyp session ignore`
+  inside the session it starts.
 
 ## Pausing a single session
 

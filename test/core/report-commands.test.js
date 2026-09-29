@@ -687,27 +687,44 @@ async function generateFixture(t) {
     await fs.mkdir(dir, { recursive: true })
     await fs.writeFile(path.join(dir, 'SKILL.md'), '# Report skill\n')
   }
+  // The caller's directory is deliberately outside HOME: the whole point of
+  // this command is that the client starts where it was typed, so a fixture
+  // where cwd and HOME are the same path cannot tell a preserved cwd from a
+  // relocation into a HypAware-owned folder.
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-generate-cwd-'))
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }))
   const io = ctxWith({ HOME: home, HYP_HOME: undefined })
   io.ctx.config = { version: 2 }
-  io.ctx.cwd = home
-  return { ...io, home }
+  io.ctx.cwd = cwd
+  return { ...io, home, cwd }
 }
 
 test('generate launches locally with the skill and preserves optional instructions verbatim', async (t) => {
-  const { ctx, home } = await generateFixture(t)
+  const { ctx, home, cwd: where } = await generateFixture(t)
   const { calls } = stubServer(t, () => { throw new Error('generation must not contact a server') })
   const { deps, launches } = fixDeps()
+  // A sentinel the command never reads: it can only reach the spawn by being
+  // passed through, so its presence is the environment's inheritance, which
+  // comparing ctx.env to itself could never show.
+  ctx.env.HYP_TEST_INHERITED = 'sentinel'
   const instructions = 'Cover August 2026\nFocus on `debugging`, $HOME, and "retries".'
   assert.equal(await runReportGenerate([instructions], ctx, deps), 0)
   assert.equal(calls.length, 0)
   assert.equal(launches.length, 1)
   const { cwd, prompt, env } = launches[0]
-  assert.equal(cwd, ctx.cwd)
+  assert.equal(cwd, where)
+  assert.notEqual(cwd, home)
   assert.ok((await fs.stat(cwd)).isDirectory())
   assert.ok(prompt.includes(JSON.stringify(path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md'))))
+  // The destination the skill is told to write into is the caller's
+  // directory, not HOME and not a directory the CLI chose.
+  assert.ok(prompt.includes(JSON.stringify(where)))
   assert.ok(prompt.endsWith(instructions))
-  assert.deepEqual(env, ctx.env)
+  assert.equal(env.HYP_TEST_INHERITED, 'sentinel')
+  // The CLI creates no workspace: neither a state directory under HOME nor
+  // anything at all in the directory it was typed in.
   await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readdir(where), [])
 })
 
 test('generate preserves cwd and environment even with a custom or relative HYP_HOME', async (t) => {

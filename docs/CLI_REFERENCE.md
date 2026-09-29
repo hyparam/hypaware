@@ -321,8 +321,12 @@ Launches an attached AI client with its installed `hypaware-report` skill in
 the caller's current working directory. Optional quoted instructions set the
 period or focus; otherwise the skill uses the previous calendar month.
 Multiple eligible clients produce a picker on a terminal; noninteractive mode
-uses the first. The client keeps its normal permissions and recording policy.
-No remote login is required, and nothing is published unless requested.
+uses the first. The client keeps its normal permissions, and the session is
+recorded under the current directory's own usage class: this is not session
+isolation, so excerpts it reads out of `local-only` history are quoted into a
+transcript that syncs if the directory you typed the command in does
+([PRIVACY.md](PRIVACY.md#marking-directories)). No remote login is required,
+and nothing is published unless requested.
 
 The skill writes `./hypaware-report-<from>-to-<to>/report.md` and linked pages,
 using `-2`, `-3`, etc. if the folder already exists, unless you request another

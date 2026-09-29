@@ -1,14 +1,13 @@
 # LLP 0436: Publish Markdown report sources
 
-**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 **Type:** Decision
 **Status:** Accepted
 **Systems:** CLI, Reports, Plugins
 **Author:** Phil / Codex
 **Date:** 2026-09-24
 **Related:** LLP 0155, LLP 0107, LLP 0196, LLP 0216 (the removal this reverses)
-
 **Extended-by:** LLP 0450 (launch the local report skill in the caller's directory)
+**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 
 ## Decision
 

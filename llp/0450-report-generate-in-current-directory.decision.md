@@ -1,6 +1,5 @@
 # LLP 0450: Launch report generation in the current directory
 
-**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 **Type:** Decision
 **Status:** Accepted
 **Systems:** CLI, Reports, Plugins
@@ -8,6 +7,7 @@
 **Date:** 2026-09-29
 **Extends:** LLP 0436, LLP 0393
 **Related:** LLP 0414, LLP 0448 (unmerged proposal replaced by this narrower scope)
+**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 
 ## Launch the skill {#launch}
 
@@ -28,6 +28,8 @@ silently relocating a session from the user's chosen directory into an
 unmarked `$HYP_HOME/reports` directory. It does not introduce session isolation:
 the generating conversation remains subject to the current directory's normal
 recording and sync policy, including any excerpts it reads from local history.
+Because that consequence is surprising, the command's own help and
+`docs/PRIVACY.md` state it where a person reads them, not only here.
 
 Listing, publishing, rendering, and recording policies remain unchanged.
 Publication is still an explicitly requested action. The command reports launch

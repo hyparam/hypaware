@@ -171,9 +171,10 @@ hyp report generate "Cover last week and focus on repeated debugging work"
 ```
 
 The report skill writes `./hypaware-report-<from>-to-<to>/`, adding a numbered
-suffix if needed. It follows the current directory's recording and sync policy.
-Publishing remains a separate action, using `hyp report publish <folder> ...`.
-
+suffix if needed. The session follows the current directory's recording and
+sync policy, excerpts it quotes from `local-only` history included
+([PRIVACY.md](PRIVACY.md#marking-directories)). Publishing remains a separate
+action, using `hyp report publish <folder> ...`.
 
 You can also write a Markdown report yourself with your findings, query scope,
 and tables. The remote renders uploaded Markdown; no local render step is needed.
