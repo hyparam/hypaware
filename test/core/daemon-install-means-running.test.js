@@ -11,7 +11,7 @@ import { installLaunchAgent } from '../../src/core/daemon/macos.js'
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
 import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 import { runDaemonStop } from '../../src/core/commands/daemon.js'
-import { pidFilePath, processIsAlive, processingStateRoot, writePidFile } from '../../src/core/daemon/pid.js'
+import { clearStalePidFile, pidFilePath, processIsAlive, processingStateRoot, writePidFile } from '../../src/core/daemon/pid.js'
 
 /** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 
@@ -765,4 +765,102 @@ test('a service stop leaves a live processing pid file byte-identical', async (t
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
+})
+
+/**
+ * Run `fn` with `process.kill` raising `code` for `pid`, so the branch under
+ * test is reached whatever this host's process table happens to look like.
+ * Restored in a `finally` rather than in a `t.after`, because the stubbed
+ * region is synchronous: the real `process.kill` is back before any other
+ * test or hook can observe it.
+ *
+ * @param {number} pid
+ * @param {string} code
+ * @param {() => void} fn
+ */
+function withSignalError(pid, code, fn) {
+  const real = process.kill
+  process.kill = (target, signal) => {
+    if (target !== pid) return real.call(process, target, signal)
+    throw Object.assign(new Error(`kill ${code}`), { code, syscall: 'kill' })
+  }
+  try {
+    fn()
+  } finally {
+    process.kill = real
+  }
+}
+
+// Issue #2301. The safety of the stale clear turns on one branch of
+// `processIsAlive`: a pid the runner may not signal is a pid somebody still
+// holds, so reading `EPERM` as dead would unlink the pid file of a live,
+// reissued pid and blind every later liveness check to it. The reading has
+// been argued the other way in this codebase before (#2289).
+//
+// The signal is stubbed rather than probed, because the ambient case is not
+// available everywhere: in a container whose pid 1 is owned by the test uid
+// nothing the runner can name raises `EPERM`, and a test that only read the
+// real process table would pass there without reaching the branch.
+test('a pid file naming a pid the runner may not signal survives the stale clear', (t) => {
+  const home = tmpHome('eperm-pid')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const stateRoot = path.join(home, '.hyp', 'hypaware')
+  const unsignalable = 424242
+  stageAbandonedPidFile(stateRoot, unsignalable)
+  const before = fs.readFileSync(pidFilePath(stateRoot), 'utf8')
+
+  withSignalError(unsignalable, 'EPERM', () => {
+    assert.equal(processIsAlive(unsignalable), true, 'a pid we may not signal is one somebody holds')
+    clearStalePidFile(stateRoot)
+  })
+
+  assert.equal(fs.readFileSync(pidFilePath(stateRoot), 'utf8'), before, 'the clear left a live pid file alone')
+})
+
+// The other half of the same decision: `ESRCH` is the only reading that lets
+// a pid file go, so a catch that answered alive for every error would strand
+// every stale one.
+test('a pid file naming a pid nothing holds is what the stale clear removes', (t) => {
+  const home = tmpHome('esrch-pid')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const stateRoot = path.join(home, '.hyp', 'hypaware')
+  const gone = 424243
+  stageAbandonedPidFile(stateRoot, gone)
+
+  withSignalError(gone, 'ESRCH', () => {
+    assert.equal(processIsAlive(gone), false, 'a pid no process holds is dead')
+    clearStalePidFile(stateRoot)
+  })
+
+  assert.equal(fs.existsSync(pidFilePath(stateRoot)), false, 'the clear removed the stale pid file')
+})
+
+// The same property against the real signal table: pid 1 belongs to root and
+// the runner does not, so signal 0 to it is the unsignalable-but-live case
+// the OS itself produces. Signal 0 only, never a pid this suite could kill.
+// Skipped where the host does not offer the case, so the assertion can never
+// pass for the wrong reason.
+test('the OS agrees: a live pid this uid may not signal keeps its pid file', (t) => {
+  /** @type {unknown} */
+  let thrown
+  try {
+    process.kill(1, 0)
+  } catch (err) {
+    thrown = err
+  }
+  const code = thrown && /** @type {NodeJS.ErrnoException} */ (thrown).code
+  if (code !== 'EPERM') {
+    return t.skip(`kill(1, 0) ${thrown ? `raised ${String(code)}` : 'succeeded'} here, so pid 1 is not unsignalable`)
+  }
+
+  const home = tmpHome('eperm-pid1')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const stateRoot = path.join(home, '.hyp', 'hypaware')
+  assert.equal(processIsAlive(1), true, 'pid 1 is running, whether or not this uid may signal it')
+  stageAbandonedPidFile(stateRoot, 1)
+  const before = fs.readFileSync(pidFilePath(stateRoot), 'utf8')
+
+  clearStalePidFile(stateRoot)
+
+  assert.equal(fs.readFileSync(pidFilePath(stateRoot), 'utf8'), before, 'the clear left pid 1\'s file alone')
 })
