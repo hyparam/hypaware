@@ -83,8 +83,9 @@ set; matching costs at most 100 times the number of returned orgs.
 ## Local report actions {#local-actions}
 
 On a terminal, list offers a picker for its separately listed local reports.
-Selecting a report opens an action screen showing the remote, organization
-selector if any, kind, and period. Publish invokes the existing publish handler
+Selecting a report opens an action screen showing the destination server named
+as every other destination surface names it (LLP 0437 #server-name), the remote
+alias, organization selector if any, kind, and period. Publish invokes the existing publish handler
 only after the user chooses that action. Edit details uses the existing TUI text
 and select prompts. Back returns to the report list; cancellation uploads nothing.
 The reporting period defaults from the generated directory's encoded date range,

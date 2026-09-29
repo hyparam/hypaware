@@ -457,6 +457,8 @@ test('interactive list selects a local report and publishes only after the actio
       const choice = choices.shift()
       assert.ok(choice)
       if (choice === 'publish') {
+        // The alias is a local nickname; the consent line names the server (LLP 0437 #server-name).
+        assert.ok(spec.items?.some((/** @type {string} */ item) => item.includes('uploads this report to hyp.internal')))
         assert.ok(spec.items?.includes('Remote: prod'))
         assert.ok(spec.items?.includes('Organization: acme'))
         assert.ok(spec.items?.includes('Kind: usage-review'))
@@ -489,7 +491,13 @@ test('local picker edits unknown periods and destinations before showing Publish
       const choice = choices.shift()
       assert.ok(choice)
       if (choice === 'edit') assert.ok(!spec.options.some((option) => option.value === 'publish'))
+      if (choice === 'other') {
+        // The remote sub-picker names each alias's server too, so the choice is not made blind.
+        assert.ok(spec.options.some((option) => option.label === 'other (other.internal)'))
+        assert.ok(spec.options.some((option) => option.label === 'prod (hyp.internal)'))
+      }
       if (choice === 'publish') {
+        assert.ok(spec.items?.some((/** @type {string} */ item) => item.includes('uploads this report to other.internal')))
         assert.ok(spec.items?.includes('Remote: other'))
         assert.ok(spec.items?.includes('Period: 2026-08'))
         assert.ok(spec.items?.includes('Kind: retrospective'))

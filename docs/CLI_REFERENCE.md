@@ -361,8 +361,8 @@ time. `--local` skips remote listing and cannot combine with remote selection or
 filters. The other filters apply only to published reports.
 
 On a terminal, select a local report to see **Publish**, **Edit details**, and
-**Back to reports**. The action screen shows the remote, kind, and reporting
-period before upload. Generated folder names supply the default date range;
+**Back to reports**. The action screen names the server the upload goes to,
+alongside the remote, kind, and reporting period. Generated folder names supply the default date range;
 other folders require a period through Edit details. Editing also lets you choose
 another remote. Selecting Publish calls the normal publish flow, including when
 the list was opened with `--local`. Piped output, `--json`, and `HYP_NO_TUI=1`

@@ -12,7 +12,7 @@ import { askYesNo } from './confirm.js'
 import { parseCoreCommandArgv } from './command_args.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { Attr, markSpanStatus, withSpan } from '../observability/index.js'
-import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
+import { effectiveDefaultRemote, effectiveRemotes, serverDisplayName } from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -205,6 +205,26 @@ function printLocalReports(ctx, reports, total) {
 }
 
 /**
+ * The server a `--remote` alias sends to, named the way every other
+ * destination surface names it. A remote is a local nickname, so the alias
+ * alone tells a self-hosted user nothing about where a publish lands; this is
+ * the same mapping `hyp sync` and the folder-classification prompt use.
+ *
+ * An alias with no entry (a stale `query.default_remote`) falls back to the
+ * alias itself: publish refuses it a moment later with the unknown-target
+ * error, and inventing a server name for it would be the worse copy.
+ *
+ * @ref LLP 0437#server-name [implements]: consent copy names the hosted default as HypAware Cloud and any other server by its host, never a local alias
+ * @param {Record<string, { url: string }>} remotes
+ * @param {string} name
+ * @returns {string}
+ */
+function publishDestination(remotes, name) {
+  const url = Object.hasOwn(remotes, name) ? remotes[name].url : undefined
+  return url === undefined ? name : serverDisplayName(url)
+}
+
+/**
  * @ref LLP 0448#local-actions [implements]: listing is read-only until the user chooses Publish with the destination and scope visible
  * @param {CommandRunContext} ctx
  * @param {LocalReport[]} reports
@@ -216,6 +236,9 @@ async function localReportPicker(ctx, reports, params, deps = {}) {
   if (!reports.length || params.json === true || !isTty(ctx.stdin) || !isTty(ctx.stdout) || ctx.env.HYP_NO_TUI === '1') return 0
   const ask = deps.select ?? select
   const input = deps.text ?? text
+  // Config is fixed for the life of the picker, so the remote table is read once
+  // and reused by both the destination line and the remote sub-picker.
+  const remotes = effectiveRemotes(ctx.config)
   const io = {
     ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
     stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
@@ -245,6 +268,10 @@ async function localReportPicker(ctx, reports, params, deps = {}) {
         const action = await ask({
           title: esc(path.basename(report.path)),
           items: [
+            // The alias alone does not say where the upload lands: a self-hosted
+            // team's target is named by whatever they typed into `hyp remote add`.
+            // Name the server the same way every other destination surface does.
+            `Publish uploads this report to ${esc(publishDestination(remotes, remote))} - review it for private content first`,
             `Remote: ${esc(remote)}`,
             ...(org !== undefined ? [`Organization: ${esc(org || '(default)')}`] : []),
             `Kind: ${esc(kind)}`,
@@ -267,10 +294,9 @@ async function localReportPicker(ctx, reports, params, deps = {}) {
         if (action !== 'edit') throw new Error('report action picker returned an unavailable action')
         kind = await input({ title: 'Report kind', default: kind, validate: (value) => KIND_RE.test(value) ? null : 'Use a lowercase name with letters, numbers, and hyphens (max 64).', allowBack: true, ...io })
         period = await input({ title: 'Reporting period', default: period, validate: (value) => PERIOD_RE.test(value) ? null : 'Enter a period such as 2026-08 or 2026-08-01-to-2026-08-31 (max 64).', allowBack: true, ...io })
-        const remotes = effectiveRemotes(ctx.config)
         const target = await ask({
           title: 'Publish to which remote?',
-          options: Object.keys(remotes).map((name) => ({ value: name, label: esc(name) })),
+          options: Object.keys(remotes).map((name) => ({ value: name, label: `${esc(name)} (${esc(publishDestination(remotes, name))})` })),
           default: remote,
           allowBack: true,
           ...io,

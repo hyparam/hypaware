@@ -175,8 +175,8 @@ The report skill writes the brief and linked pages under `~/.hyp/reports`
 including your findings, query scope, and tables.
 
 To share a generated report, run `hyp report list` in a terminal, select the
-local report, and choose **Publish**. The action screen shows the destination
-and reporting period; **Edit details** lets you change them before publishing.
+local report, and choose **Publish**. The action screen names the server the
+report uploads to and its reporting period; **Edit details** lets you change them before publishing.
 Use `hyp report list --local` to skip the remote listing.
 
 You can also publish a reviewed Markdown file directly:
