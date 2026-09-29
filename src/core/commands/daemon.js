@@ -238,6 +238,52 @@ export async function runDaemonStatus(argv, ctx) {
 export async function runDaemonStop(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
   if (!parsed.ok) return parsed.code
+  // A daemon the service manager is supervising is stopped through that
+  // manager, never by signalling the pid: launchd's KeepAlive respawns a job
+  // that is merely killed, so the old SIGTERM reported a stop the machine
+  // undid seconds later. Both managers deliver SIGTERM themselves, so the
+  // daemon still shuts down through its own handler; what changes is who is
+  // told, and therefore whether the respawn policy is told with it. The plist
+  // / unit is preserved either way, so `hyp daemon start` reverses this.
+  //
+  // The gate is whether the service manager is currently supervising the
+  // daemon, which is neither "a unit is on disk" nor "a pid exists right now".
+  //
+  // Not the unit on disk: an installed service the manager is not running is
+  // not what a stop is aimed at, because the process to stop is then a
+  // foreground `hyp daemon run`, which has no respawn policy behind it, is
+  // reached only by the transport below, and is a shape the status collector
+  // supports outright. Gating on `installed` reported `daemon: stopped` and
+  // left that daemon running.
+  //
+  // Not a pid either: both managers are configured to respawn (`KeepAlive` in
+  // the plist, `Restart=always` with `RestartSec` in the unit), so a crashing
+  // daemon has no pid for the whole throttle gap while the manager is still
+  // going to bring it back. That gap is when an operator most wants a stop,
+  // and gating on the pid sent it to the control file, which found nothing
+  // alive and said `daemon: not running` seconds before the respawn.
+  //
+  // Supervision is a per-manager fact, so each platform answers it with its
+  // own: launchd holds a job or it does not, which is exactly what `loaded`
+  // reports there (`launchctl print` exits 113 once `hyp daemon stop` has
+  // booted it out); systemd leaves a stopped unit `loaded` and distinguishes
+  // the two by `ActiveState` instead.
+  // @ref LLP 0300#posix-keeps-signals [constrained-by]: the control file stays the transport for every daemon the service manager is not supervising, foreground sessions included
+  const { serviceDaemonStatus, stopServiceDaemon } = await import('../daemon/install.js')
+  const options = { homeDir: ctx.env.HOME }
+  const status = await serviceDaemonStatus(options)
+  const supervised = status.platform === 'darwin' ? status.loaded : status.active === true
+  if (supervised) {
+    try {
+      await stopServiceDaemon(options)
+      ctx.stdout.write('daemon: stopped\n')
+      return 0
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp daemon stop: ${message}\n`)
+      return 1
+    }
+  }
   const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   // The requester-side control-dir warnings (a chmod it could not apply)

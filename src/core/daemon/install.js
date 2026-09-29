@@ -258,6 +258,24 @@ export async function startServiceDaemon(options) {
 }
 
 /**
+ * Stop the installed service while preserving its installation.
+ * @param {DaemonServiceOptions} options
+ * @returns {Promise<void>}
+ */
+export async function stopServiceDaemon(options) {
+  const platform = options.platform ?? process.platform
+  if (!platformIsSupported(platform)) {
+    throw new DaemonInstallError(`unsupported platform: ${platform}`)
+  }
+  await withDaemonOp(
+    'stop',
+    platform,
+    options.label ?? defaultLabelFor(platform),
+    () => platform === 'darwin' ? macos.stopLaunchAgent(options) : linux.stopSystemdUnit(options),
+  )
+}
+
+/**
  * Restart the installed service.
  *
  * @param {DaemonServiceOptions} options
@@ -291,7 +309,7 @@ export async function restartServiceDaemon(options) {
  * @param {NodeJS.Platform} platform
  * @param {DaemonServiceOptions} options
  * @param {string} label
- * @returns {Promise<{ loaded: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number }>}
  */
 async function serviceRuntimeStatus(platform, options, label) {
   try {
@@ -319,7 +337,7 @@ async function serviceRuntimeStatus(platform, options, label) {
  * `daemon.run` span; this one tracks the installer-facing query).
  *
  * @param {DaemonServiceOptions} options
- * @returns {Promise<{ installed: boolean, loaded: boolean, pid?: number, platform: NodeJS.Platform }>}
+ * @returns {Promise<{ installed: boolean, loaded: boolean, active?: boolean, pid?: number, platform: NodeJS.Platform }>}
  */
 export async function serviceDaemonStatus(options) {
   const platform = options.platform ?? process.platform
@@ -348,7 +366,7 @@ export async function serviceDaemonStatus(options) {
       // throw escapes callers that only ever branch on `installed`.
       const runtime = installed
         ? await serviceRuntimeStatus(platform, options, label)
-        : { loaded: false, pid: undefined }
+        : { loaded: false, active: undefined, pid: undefined }
       log.info('daemon.status', {
         hyp_platform: platform,
         service_label: label,
@@ -356,7 +374,7 @@ export async function serviceDaemonStatus(options) {
         loaded: runtime.loaded,
         exit_status: 'ok',
       })
-      return { installed, loaded: runtime.loaded, pid: runtime.pid, platform }
+      return { installed, loaded: runtime.loaded, active: runtime.active, pid: runtime.pid, platform }
     },
     { component: 'daemon' },
   )
