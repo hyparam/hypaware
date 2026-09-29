@@ -103,6 +103,281 @@ test('s3 BlobStore puts and gets a round-trip object honouring prefix', async ()
   assert.equal(collected.toString('utf8'), 'payload-bytes')
 })
 
+test('s3 BlobStore preserves range headers and scoped keys', async () => {
+  const calls = []
+  const client = {
+    ...makeFakeS3Client(),
+    async getObject(input) {
+      calls.push(input)
+      return {
+        Body: Readable.from([Buffer.from('789')]),
+        ContentLength: 3,
+        ContentRange: 'bytes 7-9/10',
+      }
+    },
+  }
+  const store = createS3BlobStore({ bucket: 'bucket', prefix: 'org/private', client })
+  for (const range of ['bytes=-3', 'bytes=7-9']) {
+    const got = await store.getObject({ key: 'data.parquet', range })
+    assert.ok(got)
+    assert.equal(got.contentLength, 3)
+    assert.equal(got.contentRange, 'bytes 7-9/10')
+    const chunks = []
+    for await (const chunk of got.body) chunks.push(chunk)
+    assert.equal(Buffer.concat(chunks).toString(), '789')
+    assert.deepEqual(calls.at(-1), { Bucket: 'bucket', Key: 'org/private/data.parquet', Range: range })
+  }
+})
+
+test('s3 BlobStore rejects a response that ignored the requested range', async () => {
+  // A store may legally answer a ranged GET with 200 and the whole object.
+  // Handing that body back as the requested slice would feed a reader the
+  // wrong bytes at the right offsets, so the provider must fail instead.
+  // A seam handle may report an absent header as undefined, null or '';
+  // every one of them means the body is not the slice that was asked for.
+  // null is off-contract on purpose: the guard has to hold for a handle
+  // that does not respect the declared shape, which is why it is cast.
+  for (const ContentRange of /** @type {Array<string | undefined>} */ (
+    /** @type {unknown} */ ([undefined, null, ''])
+  )) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from('0123456789')])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength: 10, ContentRange, ETag: '"whole"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
+      (err) => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        assert.match(/** @type {Error} */ (err).message, /Content-Range/)
+        return true
+      },
+    )
+    assert.equal(destroyed, true, 'the unusable body is released, not leaked')
+  }
+})
+
+test('s3 BlobStore rejects a Content-Range it cannot check the offsets of', async () => {
+  // Presence is not enough. A store that answers 200 with the whole object
+  // and a junk Content-Range corrupts exactly as silently as one that sends
+  // no Content-Range at all, and a consumer cannot run the offset check the
+  // contract gives it against a header that does not parse. '0' and '   '
+  // are truthy non-empty strings, so the falsy-value guard alone lets them
+  // through; 'bytes */16' is the 416 form and states no offsets.
+  for (const ContentRange of /** @type {Array<string | undefined>} */ (/** @type {unknown} */ ([
+    '0', '   ', '\t', 'garbage', 'bytes */16', 'bytes 2-4', 'bytes=2-4/16', 'bytes 4-2/16 ',
+    // Non-strings: a truthiness-only guard would let these reach a consumer
+    // that the contract promises a string, and String/Buffer even stringify
+    // into a well-formed header, so only the typeof test rejects them.
+    42, new String('bytes 2-4/16'), Buffer.from('bytes 2-4/16'), { toString: () => 'bytes 2-4/16' },
+  ]))) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from('0123456789ABCDEF')])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength: 16, ContentRange, ETag: '"whole"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
+      (err) => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        // A non-string normalizes to the same sentinel as an absent header,
+        // so it is reported as absent rather than as unusable. Both are the
+        // same refusal: the response stated no slice this code can check.
+        assert.match(/** @type {Error} */ (err).message, /(no|unusable) Content-Range/)
+        return true
+      },
+      `Content-Range ${JSON.stringify(ContentRange)} must not pass as the requested slice`,
+    )
+    assert.equal(destroyed, true, 'the unusable body is released, not leaked')
+  }
+})
+
+test('s3 BlobStore rejects a Content-Range its own ContentLength contradicts', async () => {
+  // The header says three bytes and the response carries sixteen. Whichever
+  // half is lying, the body is not the slice the header describes, and
+  // forwarding it is the same wrong-bytes-at-the-right-offsets corruption
+  // as forwarding one with no header at all. Both values are already in
+  // hand, so this costs a subtraction and never reads the body.
+  // The seam is injectable and public, so ContentLength arrives in whatever
+  // shape the handle produced: a handle forwarding a raw content-length
+  // header hands over the string '16', not the number. A typeof test would
+  // skip this whole check for every such value and return the whole object
+  // as the slice, which is the corruption the check exists to stop.
+  for (const [ContentRange, ContentLength, expected] of /** @type {Array<[string, number, RegExp]>} */ (/** @type {unknown} */ ([
+    ['bytes 2-4/16', 16, /ContentLength 16 against Content-Range/],
+    ['bytes 2-4/16', 0, /ContentLength 0 against Content-Range/],
+    ['bytes 4-2/16', 16, /reversed Content-Range/],
+    // off-contract shapes the seam can still produce
+    ['bytes 2-4/16', '16', /ContentLength 16 against Content-Range/],
+    ['bytes 2-4/16', null, /ContentLength null against Content-Range/],
+    ['bytes 2-4/16', false, /ContentLength false against Content-Range/],
+    ['bytes 2-4/16', '', /ContentLength  against Content-Range/],
+    ['bytes 2-4/16', 'sixteen', /ContentLength sixteen against Content-Range/],
+    ['bytes 2-4/16', 16.5, /ContentLength 16.5 against Content-Range/],
+  ]))) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from('0123456789ABCDEF')])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength, ContentRange, ETag: '"whole"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
+      (err) => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        assert.match(/** @type {Error} */ (err).message, expected)
+        return true
+      },
+      `Content-Range '${ContentRange}' with ContentLength ${ContentLength} must not pass`,
+    )
+    assert.equal(destroyed, true, 'the unusable body is released, not leaked')
+  }
+})
+
+test('s3 BlobStore rejects a self-consistent response for a different range', async () => {
+  // A store can agree with itself and still answer the wrong question. The
+  // suffix case is the one that matters: mishandle `bytes=-3` as "the first
+  // three bytes" and a Parquet footer read comes back as the file header,
+  // under a Content-Range that is well formed and matches its own
+  // ContentLength. Self-consistency cannot catch that, and this provider is
+  // the only place holding both the request and the response.
+  for (const [range, ContentRange, payload] of /** @type {Array<[string, string, string]>} */ ([
+    // suffix read answered with the head of the object
+    ['bytes=-3', 'bytes 0-2/16', '012'],
+    ['bytes=-8', 'bytes 0-7/16', '01234567'],
+    // suffix read that does not reach the end of the object
+    ['bytes=-3', 'bytes 5-7/16', '567'],
+    // suffix read handed more bytes than it asked for
+    ['bytes=-3', 'bytes 12-15/16', '3456'],
+    // explicit range answered one byte to the left
+    ['bytes=2-4', 'bytes 1-3/16', '123'],
+    // explicit range answered with the whole object
+    ['bytes=2-4', 'bytes 0-15/16', '0123456789ABCDEF'],
+    // open range answered from the wrong offset
+    ['bytes=8-', 'bytes 7-15/16', '789ABCDEF'],
+    // response reaches past the last byte asked for
+    ['bytes=2-4', 'bytes 2-6/16', '23456'],
+  ])) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from(payload)])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength: payload.length, ContentRange, ETag: '"part"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range }),
+      err => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        assert.match(/** @type {Error} */ (err).message, /Content-Range/)
+        return true
+      },
+      `'${ContentRange}' must not pass as the answer to '${range}'`,
+    )
+    assert.ok(destroyed, `unusable body for '${range}' must be destroyed`)
+  }
+})
+
+test('s3 BlobStore passes through a well-formed Content-Range', async () => {
+  // The rejections above must not have made honored ranges unreachable. Each
+  // case states a slice, delivers exactly that slice, and answers the range
+  // that was asked for. The unknown-total and clamped-at-EOF forms are legal
+  // answers a conforming store gives, so they must still pass.
+  for (const [range, ContentRange, payload] of /** @type {Array<[string, string, string]>} */ ([
+    ['bytes=2-4', 'bytes 2-4/16', '234'],
+    ['bytes=2-4', 'bytes 2-4/*', '234'],
+    // end clamped to the last byte of the object
+    ['bytes=8-99', 'bytes 8-15/16', '89ABCDEF'],
+    ['bytes=8-', 'bytes 8-15/16', '89ABCDEF'],
+    // suffix reads, including one longer than the object
+    ['bytes=-3', 'bytes 13-15/16', 'DEF'],
+    ['bytes=-99', 'bytes 0-15/16', '0123456789ABCDEF'],
+    // a suffix whose total the store declined to state
+    ['bytes=-3', 'bytes 13-15/*', 'DEF'],
+    // a range the provider does not model is not second-guessed
+    ['bytes=0-1, 4-5', 'bytes 0-1/16', '01'],
+  ])) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return {
+          Body: Readable.from([Buffer.from(payload)]),
+          ContentLength: payload.length,
+          ContentRange,
+          ETag: '"part"',
+        }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    const got = await store.getObject({ key: 'data.parquet', range })
+    assert.ok(got, `'${ContentRange}' must still answer '${range}'`)
+    assert.equal(got.contentRange, ContentRange)
+    assert.equal(got.contentLength, payload.length)
+  }
+})
+
+test('s3 BlobStore accepts a ranged response that omits ContentLength', async () => {
+  // ContentLength is optional on the seam, so the cross-check must skip
+  // rather than reject when the store does not declare one.
+  const client = {
+    ...makeFakeS3Client(),
+    async getObject() {
+      return { Body: Readable.from([Buffer.from('234')]), ContentRange: 'bytes 2-4/16', ETag: '"part"' }
+    },
+  }
+  const store = createS3BlobStore({ bucket: 'bucket', client })
+  const got = await store.getObject({ key: 'data.parquet', range: 'bytes=2-4' })
+  assert.ok(got)
+  assert.equal(got.contentRange, 'bytes 2-4/16')
+  assert.equal(got.contentLength, undefined)
+})
+
+test('s3 BlobStore leaves whole-object reads without a contentRange key', async () => {
+  const client = makeFakeS3Client()
+  const store = createS3BlobStore({ bucket: 'bucket', client })
+  await store.putObject({ key: 'whole.bin', body: Buffer.from('payload') })
+  const got = await store.getObject({ key: 'whole.bin' })
+  assert.ok(got)
+  assert.equal('contentRange' in got, false)
+  assert.deepEqual(client.calls.at(-1)?.input, { Bucket: 'bucket', Key: 'whole.bin' })
+})
+
+test('s3 BlobStore drops a contentRange volunteered on a whole-object read', async () => {
+  // The guard only runs for a ranged read, so a header a store volunteers on
+  // a read that asked for no range would reach the consumer unchecked. LLP
+  // 0452#range-contract makes an absent contentRange mean "whole object", so
+  // forwarding one here states the opposite of the truth.
+  for (const ContentRange of ['bytes 0-2/3', 'garbage', 'bytes 0-15/16']) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: Readable.from([Buffer.from('0123456789ABCDEF')]), ContentLength: 16, ContentRange, ETag: '"whole"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    const got = await store.getObject({ key: 'whole.bin' })
+    assert.ok(got)
+    assert.equal('contentRange' in got, false, `volunteered '${ContentRange}' must not reach a whole-object result`)
+  }
+})
+
 test('s3 BlobStore getObject returns null when AWS reports NotFound', async () => {
   const client = makeFakeS3Client()
   const store = createS3BlobStore({ bucket: 'my-bucket', client })
