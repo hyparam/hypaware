@@ -11,6 +11,7 @@ import {
   createHermesPollRunner,
   runHermesPollTick,
   startHermesSource,
+  WATERMARK_FLUSH_SESSIONS,
 } from '../../hypaware-core/plugins-workspace/hermes/src/source.js'
 import { readHermesWatermark } from '../../hypaware-core/plugins-workspace/hermes/src/watermark.js'
 import { mintHermesSessionEndId } from '../../hypaware-core/plugins-workspace/hermes/src/projector.js'
@@ -135,14 +136,15 @@ function endSession(db, opts) {
 // materializer's dedupe scan sees them on a later tick.
 // ---------------------------------------------------------------------------
 
-/** @returns {{ storage: any, appended: Array<{ rows: Record<string, unknown>[] }> } } */
-function createFakeStorage() {
+/** @param {((sessionId: unknown) => void) | undefined} [beforeReconcile] @returns {{ storage: any, appended: Array<{ rows: Record<string, unknown>[] }> } } */
+function createFakeStorage(beforeReconcile) {
   /** @type {Record<string, unknown>[]} */
   const committedRows = []
   /** @type {Array<{ rows: Record<string, unknown>[] }>} */
   const appended = []
   const storage = {
     async reconcileRows(_dataset, _columns, rows, scope) {
+      beforeReconcile?.(scope.where.session_id)
       const fresh = rows.filter(row => !committedRows.some(old => JSON.stringify(old) === JSON.stringify(row)))
       for (let i = committedRows.length - 1; i >= 0; i--) {
         if (Object.entries(scope.where).every(([key, value]) => committedRows[i][key] === value)) committedRows.splice(i, 1)
@@ -167,7 +169,7 @@ function createFakeStorage() {
 }
 
 /**
- * @param {{ stateDbPath: string, stateDir: string, pollInterval?: string }} opts
+ * @param {{ stateDbPath: string, stateDir: string, pollInterval?: string, beforeReconcile?: (sessionId: unknown) => void }} opts
  */
 function makeCtx(opts) {
   /** @type {Array<{ level: string, message: string, fields?: Record<string, unknown> }>} */
@@ -178,7 +180,7 @@ function makeCtx(opts) {
     warn(message, fields) { logs.push({ level: 'warn', message, fields }) },
     error(message, fields) { logs.push({ level: 'error', message, fields }) },
   }
-  const { storage, appended } = createFakeStorage()
+  const { storage, appended } = createFakeStorage(opts.beforeReconcile)
   const materializer = aiGatewayBackfillMaterializer()
   const materializers = new Map([[PROJECTED_EXCHANGE_KIND, materializer]])
 
@@ -370,3 +372,129 @@ test('stop() clears the timer, closes the db, and is safe to call twice', async 
   assert.equal(afterStop.state, 'stopped')
 })
 
+// ---------------------------------------------------------------------------
+// A mid-loop failure keeps the progress it already made (issue #2283)
+// ---------------------------------------------------------------------------
+
+test('a session that fails mid-tick persists the sessions reconciled before it, so a restart does not re-examine them', async () => {
+  const dir = await tmpDir()
+  const stateDbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(stateDbPath)
+  for (const id of [1, 2, 3]) {
+    insertSession(db, { id, cwd: `/home/dev/p${id}` })
+    insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
+  }
+  db.close()
+
+  // Session 2 blows up in the middle of the loop over 1, 2, 3.
+  const boom = new Error('reconcile exploded')
+  const { ctx, logs } = makeCtx({
+    stateDbPath,
+    stateDir: dir,
+    beforeReconcile(sessionId) {
+      if (sessionId === 'hermes-2') throw boom
+    },
+  })
+
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+  assert.equal(runner.lastError, boom.message, 'the tick degrades rather than throwing out')
+
+  const persisted = readHermesWatermark(dir)
+  assert.deepEqual(Object.keys(persisted), ['1'], 'session 1 completed before the failure, so its fingerprint is on disk')
+  assert.match(persisted['1'].fingerprint ?? '', /^[a-f0-9]{64}$/)
+
+  // The failure names the session that broke and how much progress survived.
+  const partial = logs.find((entry) => entry.message === 'hermes.session_reconcile_failed')
+  assert.ok(partial, 'a mid-loop failure logs which session broke')
+  assert.equal(partial.fields?.session_id, '2')
+  assert.equal(partial.fields?.sessions_persisted, 1)
+  assert.equal(partial.fields?.sessions_examined, 3)
+
+  // Restart: a fresh runner loads the watermark from disk, with no memory of
+  // the tick above and nothing failing any more.
+  const { ctx: nextCtx, logs: nextLogs } = makeCtx({ stateDbPath, stateDir: dir })
+  const restarted = createHermesPollRunner(nextCtx)
+  await runHermesPollTick(restarted, nextCtx)
+
+  const tick = nextLogs.find((entry) => entry.message === 'hermes.poll_tick')
+  assert.ok(tick, 'the restarted runner completes a tick')
+  assert.equal(tick.fields?.sessions_examined, 2, 'only the failed session and the one after it are re-examined, not session 1')
+  assert.deepEqual(Object.keys(readHermesWatermark(dir)).sort(), ['1', '2', '3'])
+})
+
+test('the watermark is flushed inside the loop, not only when the loop ends', async () => {
+  const dir = await tmpDir()
+  const stateDbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(stateDbPath)
+  const total = WATERMARK_FLUSH_SESSIONS + 2
+  for (let id = 1; id <= total; id++) {
+    insertSession(db, { id, cwd: `/home/dev/p${id}` })
+    insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
+  }
+  db.close()
+
+  /** @type {number | null} */
+  let onDiskAtLastSession = null
+  const { ctx } = makeCtx({
+    stateDbPath,
+    stateDir: dir,
+    beforeReconcile(sessionId) {
+      // While the loop is still running its final session, a full batch is
+      // already durable: a hard crash here would not repeat those sessions.
+      if (sessionId === `hermes-${total}`) onDiskAtLastSession = Object.keys(readHermesWatermark(dir)).length
+    },
+  })
+
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+
+  assert.equal(runner.lastError, undefined)
+  assert.equal(onDiskAtLastSession, WATERMARK_FLUSH_SESSIONS, 'one flush per completed batch, mid-loop')
+  assert.equal(Object.keys(readHermesWatermark(dir)).length, total, 'the trailing partial batch is flushed once the loop ends')
+})
+
+test('a sidecar write that fails while degrading does not replace the error that caused the degrade', async () => {
+  const dir = await tmpDir()
+  const stateDbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(stateDbPath)
+  for (const id of [1, 2]) {
+    insertSession(db, { id, cwd: `/home/dev/p${id}` })
+    insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
+  }
+  db.close()
+
+  const boom = new Error('reconcile exploded')
+  // A state dir under a regular file makes every watermark write throw ENOTDIR,
+  // so the flush in the degrade path fails on the same tick the reconcile does.
+  const { ctx, logs } = makeCtx({
+    stateDbPath,
+    stateDir: path.join(stateDbPath, 'unwritable'),
+    beforeReconcile(sessionId) {
+      if (sessionId === 'hermes-2') throw boom
+    },
+  })
+
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+
+  assert.equal(runner.lastError, boom.message, 'the reconcile failure is reported, not the failed sidecar write')
+  const partial = logs.find((entry) => entry.message === 'hermes.session_reconcile_failed')
+  assert.ok(partial, 'the partial-progress record survives a failed flush')
+  assert.equal(partial.fields?.component, 'hermes')
+  assert.equal(partial.fields?.operation, 'hermes.poll')
+  assert.equal(partial.fields?.status, 'partial')
+  assert.equal(partial.fields?.error_kind, 'unknown')
+  assert.equal(partial.fields?.session_id, '2')
+  assert.equal(partial.fields?.sessions_persisted, 0, 'nothing reached disk, and the count says so')
+  assert.equal(partial.fields?.sessions_examined, 2)
+
+  // Best-effort must not mean silent: a coinciding session error is the one
+  // case where nothing else reports that the sidecar is unwritable.
+  const flushFailed = logs.find((entry) => entry.message === 'hermes.watermark_flush_failed')
+  assert.ok(flushFailed, 'the failed sidecar write is reported in its own right')
+  assert.equal(flushFailed.fields?.component, 'hermes')
+  assert.equal(flushFailed.fields?.operation, 'hermes.poll')
+  assert.equal(flushFailed.fields?.error_kind, 'unknown')
+  assert.match(String(flushFailed.fields?.error), /ENOTDIR/, 'the write failure names itself')
+})
