@@ -683,7 +683,8 @@ test('a service stop leaves the pid file of a daemon that is still alive', async
     // and read as a crash rather than as this assertion.
     const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
     t.after(() => live.kill('SIGKILL'))
-    stageAbandonedPidFile(staged.stateRoot, live.pid ?? process.pid)
+    assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+    stageAbandonedPidFile(staged.stateRoot, live.pid)
     const before = fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8')
 
     const code = await runDaemonStop([], staged.ctx, { service: staged.options })

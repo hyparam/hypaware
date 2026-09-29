@@ -244,8 +244,8 @@ export async function runDaemonStatus(argv, ctx) {
  * @param {string} stateRoot
  */
 async function clearStaleDaemonPidFile(stateRoot) {
-  const { readPidFile, clearPidFile, processIsAlive } = await import('../daemon/pid.js')
   try {
+    const { readPidFile, clearPidFile, processIsAlive } = await import('../daemon/pid.js')
     const entry = readPidFile(stateRoot)
     if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
   } catch { /* an unreadable or undeletable pid file outlives this stop */ }
@@ -310,8 +310,12 @@ export async function runDaemonStop(argv, ctx, deps = {}) {
     //
     // Not the gate above asked twice: that one is whether the manager is
     // supervising the service, this one is whether the pid the file names is
-    // running. Only a pid nothing holds takes its file with it, so a daemon
-    // still winding down inside the manager's grace keeps its own.
+    // running. Only a pid nothing holds takes its file with it. Both managers
+    // return from the stop with the process already gone (`systemctl stop`
+    // blocks through `TimeoutStopSec`, the launchd path polls until the job
+    // unloads), so the live pid this guard keeps a file for is somebody else's:
+    // a foreground `hyp daemon run` that claimed it while the unit sat in its
+    // restart gap, or one the OS has reissued (`EPERM` reads as alive).
     await clearStaleDaemonPidFile(stateDir)
     ctx.stdout.write('daemon: stopped\n')
     return 0
