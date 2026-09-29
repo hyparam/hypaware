@@ -156,14 +156,59 @@ for (const platform of ['darwin', 'linux']) {
   })
 }
 
+// A refused bootout is told from an accepted one by what it left behind, not
+// by its exit code: the service is still loaded after the wait. Its stderr is
+// still what the operator needs, so it rides the failure.
 test('service stop surfaces manager failures', async () => {
   const failed = { exitCode: 5, stdout: '', stderr: 'permission denied' }
   const launchctl = fakeLaunchd({ loadedAtStart: true })
   launchctl.bootout = async () => failed
-  await assert.rejects(stopServiceDaemon({ platform: 'darwin', launchctl }), /permission denied/)
+  await assert.rejects(
+    stopServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') }),
+    /permission denied/,
+  )
   const systemctl = fakeSystemd()
   systemctl.stop = async () => failed
   await assert.rejects(stopServiceDaemon({ platform: 'linux', systemctl }), /permission denied/)
+})
+
+// launchd answers a teardown it has not finished with `36: Operation now in
+// progress`, and one the job completed a moment before bootout ran with `3:
+// No such process`. Both are stops that worked, and the second is a race the
+// print above cannot close. Reading either as a failure would have made
+// `hyp daemon stop` exit 1 over its own happy path on a real Mac, which no
+// fake that returns 0 from bootout can show.
+// #1036 again, reached the other way. `hyp daemon start` after a stop has to
+// bootstrap the label back in, and a label bootstrapped seconds after an
+// instance of it was booted out is exactly where launchd leaves the initial
+// spawn pended: bootstrap and kickstart both exit 0 with nothing running.
+// `hyp status` recommends this command after a stop, so `daemon: started`
+// over a dead machine is the same lie the installer stopped telling.
+test('macOS start proves a pid for the label it had to bootstrap', async () => {
+  const launchctl = fakeLaunchd({ spawnOnKickstart: false })
+  await assert.rejects(
+    startServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') }),
+    /never started it/,
+  )
+  assert.equal(count(launchctl.calls, 'bootstrap'), 1)
+  // The other arm is unchanged: a job launchd is already holding is
+  // kickstarted and reported, as it was before stop existed.
+  const loaded = fakeLaunchd({ loadedAtStart: true, spawnOnKickstart: false })
+  await startServiceDaemon({ ...darwinOpts('/unused', loaded), platform: /** @type {const} */ ('darwin') })
+  assert.equal(count(loaded.calls, 'bootstrap'), 0)
+})
+
+test('macOS stop reads the unload, not bootout\'s exit code', async () => {
+  for (const booted of [
+    { exitCode: 36, stdout: '', stderr: 'Boot-out failed: 36: Operation now in progress' },
+    { exitCode: 3, stdout: '', stderr: 'Boot-out failed: 3: No such process' },
+  ]) {
+    const launchctl = fakeLaunchd({ loadedAtStart: true })
+    const real = launchctl.bootout
+    launchctl.bootout = async (args) => { await real(args); return booted }
+    await stopServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') })
+    assert.equal((await launchctl.print(['gui/501/com.hyperparam.hypaware'])).exitCode, 113)
+  }
 })
 
 test('macOS stop waits for asynchronous unload and rejects a stuck service', async () => {

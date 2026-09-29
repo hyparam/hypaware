@@ -41,6 +41,7 @@ import {
   readPidFile,
   writePidFile,
 } from './pid.js'
+import { DAEMON_STOP_TIMEOUT_MS } from './service_ops.js'
 import { openDaemonLog } from './logs.js'
 import { readSourceIdentity, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import {
@@ -1887,24 +1888,11 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
   return out
 }
 
-/**
- * How long `requestDaemonStop` waits for the signalled daemon to exit before
- * it gives up and reports `timed_out`. The wait is on the process, not on the
- * pid file: the daemon clears that file partway through its own shutdown, and
- * the telemetry close whose ceiling is checked against this number runs after
- * it, on the way out of `bin/hypaware.js`. Waiting on liveness is what keeps
- * that close inside the window.
- *
- * Named rather than inline because the telemetry close inside that window has
- * a derived ceiling of its own (`SHUTDOWN_BUDGET_MS`), and the two used to be
- * only coincidentally compatible: three serial channel closes hung at once
- * spent about 3.75s of this 5s (hyparam/hypaware#1153 item 1). The closes are
- * concurrent now, so the telemetry ceiling is one budget, and a test pins the
- * relationship so it stays a checked fact rather than a coincidence.
- *
- * @ref LLP 0343#stop-window [implements]: the stop window is a named constant the telemetry ceiling is checked against
- */
-export const DAEMON_STOP_TIMEOUT_MS = 5_000
+// The stop window lives in `service_ops.js` so the launchd unload poll can
+// spend the same one without importing the kernel. Re-exported because every
+// caller, and the test that pins it against the telemetry ceiling, reads it
+// from here.
+export { DAEMON_STOP_TIMEOUT_MS }
 
 /**
  * `hyp daemon stop` helper. Reads the PID file, requests an orderly stop,

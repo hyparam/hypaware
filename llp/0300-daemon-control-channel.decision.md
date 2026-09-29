@@ -116,6 +116,19 @@ before; only win32 routes through the file channel. The signal path is
 proven by the existing smokes, and service managers (`launchctl bootout`,
 `systemctl stop`) speak signals regardless, so the daemon's handlers stay.
 
+> **Amended (this doc is a Draft):** the sentence above holds for a daemon
+> with no service installed, which is the case this decision was written
+> against. Where the service *is* installed, a bare SIGTERM is not a stop at
+> all: launchd's `KeepAlive` respawns the job within seconds, so
+> `hyp daemon stop` reported a stop that did not happen. An installed
+> `hyp daemon stop` therefore goes through the service manager
+> (`launchctl bootout`, `systemctl --user stop`), which is what can defeat
+> the respawn policy, and preserves the plist / unit so `hyp daemon start`
+> and `hyp daemon restart` bring it back. This changes the transport, not
+> the decision underneath it: both service managers deliver SIGTERM, so the
+> daemon's handlers are still the thing that runs, and `requestDaemonStop`
+> is unchanged and still the path for every uninstalled daemon.
+
 <a id="home-resolution"></a>**Home resolution: `env.HOME` wins when set,
 `os.homedir()` is the fallback, `''` is never a home.** For `HYP_HOME`
 derivations, the shape is `env.HYP_HOME || path.join(env.HOME ||

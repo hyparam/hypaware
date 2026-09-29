@@ -7,9 +7,10 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
-import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
 import { renderStatusText } from '../../src/core/commands/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
+import { plistFileName } from '../../src/core/daemon/platform.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 /** @import { CollectStatusOptions, HypAwareStatusReport, SystemctlAdapter, SystemctlResult } from '../../src/core/daemon/types.js' */
@@ -167,4 +168,45 @@ test('an unloaded unit whose probe could not answer stays a warning', async () =
   const diag = report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid')
   assert.equal(diag?.severity, 'warning')
   assert.doesNotMatch(diag?.message ?? '', /nothing is being captured/)
+})
+
+// The third over-fixing guard, and the one PR #2261 created. `hyp daemon
+// stop` boots the LaunchAgent out (launchd's KeepAlive respawns anything
+// merely killed) and leaves the plist on disk, so a deliberate stop lands on
+// installed + not loaded + not running on macOS - the exact triple this file
+// escalates. LLP 0383 settled that an operator's stop raises nothing, and its
+// signal is the daemon's own last snapshot, which is what separates the two
+// here as well. `systemctl --user stop` leaves its unit loaded, so Linux
+// never reaches this block after a stop and is covered by LLP 0383 already.
+test('macOS: a deliberate stop that booted the LaunchAgent out is not an outage', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // The plist probe is the real one: `hyp daemon stop` preserves the file,
+  // which is what makes this shape indistinguishable from a failed load by
+  // the live facts alone.
+  const plistDir = path.join(hypHome, 'Library', 'LaunchAgents')
+  await fs.mkdir(plistDir, { recursive: true })
+  await fs.writeFile(path.join(plistDir, plistFileName()), '<plist/>\n')
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'stopped',
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    stoppedAt: new Date().toISOString(),
+    sources: [],
+    sinks: [],
+  }))
+
+  const report = await collectHypAwareStatus({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    platform: 'darwin',
+    homeDir: hypHome,
+    launchAgentStatus: async () => ({ loaded: false }),
+  })
+  assert.equal(report.daemon.installed, true, 'the plist stop preserved reads as installed')
+  assert.equal(report.daemon.loaded, false, 'and bootout left launchd holding nothing')
+  assert.equal(report.daemon.running, false)
+  assert.equal(report.overall, 'healthy', 'a stop the operator asked for is not an outage')
+
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid')
+  assert.equal(diag?.severity, 'warning')
+  assert.doesNotMatch(diag?.message ?? '', /nothing is being captured/)
+  assert.deepEqual(diag?.repair, ['hyp daemon start'], 'the reverse of what stopped it, not a re-install')
 })

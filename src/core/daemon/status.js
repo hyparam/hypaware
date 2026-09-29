@@ -1467,7 +1467,23 @@ export async function collectHypAwareStatus(opts = {}) {
     // means "not loaded, or could not be asked". Only a probe that answered can
     // support the claim below, and a live process alongside an unloaded unit is
     // capturing anyway: both of those keep the note this has always been.
-    const capturingNothing = daemon.error === undefined && !daemon.running
+    //
+    // A stop the operator asked for lands on these same facts on macOS, and
+    // only there: `hyp daemon stop` boots the LaunchAgent out, because
+    // launchd's KeepAlive respawns a job that is merely killed, and the plist
+    // stays on disk. `systemctl --user stop` leaves its unit loaded, so Linux
+    // reaches the still-loaded block below instead. What tells a deliberate
+    // stop from a load that failed is the signal that block already uses: the
+    // daemon's own last snapshot. `shutdown()` persists `state: 'stopped'` as
+    // its final write whatever asked for the stop, and a process that died
+    // cannot. Read as a record of how the run ended, not as a claim about now.
+    // @ref LLP 0383#the-signal-is-the-daemons-last-state [implements]: a completed stop is not an outage, whether or not the service manager still holds the unit
+    // Platform-gated, because the shape is only ambiguous on one of them.
+    // On Linux a stop never lands here at all, so a snapshot that ends in a
+    // stop is no evidence about *this* pair of facts and reading it as such
+    // would mask the failed load (#1387) the block exists for.
+    const stoppedOnPurpose = platform === 'darwin' && daemon.state === 'stopped'
+    const capturingNothing = daemon.error === undefined && !daemon.running && !stoppedOnPurpose
     diagnostics.push({
       severity: capturingNothing ? 'error' : 'warning',
       kind: 'daemon_loaded_no_pid',
@@ -1484,16 +1500,22 @@ export async function collectHypAwareStatus(opts = {}) {
       // `systemctl --user restart` / `launchctl kickstart`, and exits 1. Only a
       // re-install runs the load step that is missing, which is why
       // `daemon_binary_missing` already points there.
-      repair: [capturingNothing ? 'hyp daemon install' : 'hyp daemon restart'],
+      // A service the operator stopped needs neither: `hyp daemon start`
+      // bootstraps the preserved plist back in and kickstarts it, which is
+      // the one step missing and the exact reverse of what stopped it.
+      repair: [capturingNothing ? 'hyp daemon install' : stoppedOnPurpose ? 'hyp daemon start' : 'hyp daemon restart'],
     })
   }
 
   // The complement of the block above, and the state the live facts alone
   // cannot read: the service manager still holds the unit and nothing runs
   // under it. `loaded` is a bootstrap fact on both platforms, independent of
-  // active/inactive, and `hyp daemon stop` rides the control file without ever
-  // calling the service manager, so a stop the operator asked for lands on
-  // exactly these three facts too (issue #1391).
+  // active/inactive, and a stop the operator asked for lands on exactly these
+  // three facts too (issue #1391) - by `systemctl --user stop`, which leaves
+  // its unit loaded, or by the control file for a daemon with no service
+  // behind it. (macOS is the exception in both directions: `hyp daemon stop`
+  // boots the LaunchAgent out, so a macOS stop lands in the block above, and
+  // this one is left describing a fault.)
   //
   // What tells them apart is the daemon's own last snapshot: `shutdown()`
   // persists `state: 'stopped'` as its final write whatever asked for the

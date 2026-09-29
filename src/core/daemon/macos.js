@@ -10,7 +10,7 @@ import {
   defaultPlistDir,
   plistFileName,
 } from './platform.js'
-import { ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
+import { DAEMON_STOP_TIMEOUT_MS, ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
@@ -242,6 +242,11 @@ export function planLaunchAgentInstall(options) {
 
 const UNLOAD_POLL_ATTEMPTS = 30 // ~3s ceiling at 100ms each
 const UNLOAD_POLL_INTERVAL_MS = 100
+// A reinstall polls for a job that is already on its way out, so 3s is its
+// budget. A stop is waiting for a *serving* daemon to finish shutting down,
+// which is the whole stop window and not a fraction of it, so it spends the
+// one number that window is named by rather than a second copy of it.
+const STOP_UNLOAD_POLL_ATTEMPTS = Math.ceil(DAEMON_STOP_TIMEOUT_MS / UNLOAD_POLL_INTERVAL_MS)
 const BOOTSTRAP_MAX_RETRIES = 3
 const BOOTSTRAP_RETRY_PAUSE_MS = 150
 const SPAWN_POLL_ATTEMPTS = 20 // ~2s ceiling at 100ms each
@@ -256,10 +261,11 @@ const SPAWN_POLL_INTERVAL_MS = 100
  * @param {LaunchctlAdapter} launchctl
  * @param {string} target
  * @param {(ms: number) => Promise<void>} sleep
+ * @param {number} [attempts]
  * @returns {Promise<LaunchctlResult | undefined>}
  */
-async function waitUntilUnloaded(launchctl, target, sleep) {
-  for (let i = 0; i < UNLOAD_POLL_ATTEMPTS; i += 1) {
+async function waitUntilUnloaded(launchctl, target, sleep, attempts = UNLOAD_POLL_ATTEMPTS) {
+  for (let i = 0; i < attempts; i += 1) {
     const res = await launchctl.print([target])
     if (res.exitCode !== 0) return res // launchd has released it, or the probe failed
     await sleep(UNLOAD_POLL_INTERVAL_MS)
@@ -410,19 +416,44 @@ export async function uninstallLaunchAgent(options) {
 /**
  * Load an unloaded installation, then kickstart it so it begins running.
  *
- * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, plistDir?: string }} options
+ * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, plistDir?: string, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<void>}
  */
 export async function startLaunchAgent(options) {
   const { launchctl, label, target, userDomain } = resolveTarget(options)
   const status = await launchctl.print([target])
-  if (status.exitCode === 113) {
+  const bootstrapped = status.exitCode === 113
+  if (bootstrapped) {
     const plistPath = plistPathFor(options.plistDir ?? defaultPlistDir(options.homeDir), label)
     ensure(await launchctl.bootstrap([userDomain, plistPath]), `bootstrap ${label}`)
   } else {
     ensure(status, `print ${label}`)
   }
-  ensure(await launchctl.kickstart([target]), `kickstart ${label}`)
+  const kickRes = await launchctl.kickstart([target])
+  ensure(kickRes, `kickstart ${label}`)
+  // Only the path that just bootstrapped has to prove a pid, and it is the
+  // exact shape #1036 was: a label bootstrapped seconds after an instance of
+  // it was booted out, whose initial spawn launchd can leave pended forever
+  // (`state = not running`, `runs = 0`, `pended nondemand spawn =
+  // speculative`) while both bootstrap and kickstart exit 0. Stop-then-start
+  // is now a documented pair, and `hyp daemon start` is what `hyp status`
+  // recommends after a stop, so the reassurance has to be worth something.
+  // The other arm kickstarts a job launchd is already holding and is left as
+  // it was.
+  // @ref LLP 0317#install-means-running [implements]: a bootstrap+kickstart reports success only once launchd shows a pid
+  if (!bootstrapped) return
+  const pid = await waitForRunningPid(launchctl, target, options.sleep ?? defaultSleep)
+  if (pid !== undefined) return
+  const why = (kickRes.stderr || '').trim().replace(/\.+$/, '')
+  throw new LaunchAgentError(
+    `bootstrapped LaunchAgent ${label} but launchd never started it`
+      + `${why ? `: ${why}` : ''}`
+      + `; ask launchd itself: launchctl print ${target}`,
+    // No exit code when the kickstart itself exited 0: a thrown error tagged
+    // `exitCode: 0` reads as success to any caller that forwards the field as
+    // a process exit status.
+    { exitCode: kickRes.exitCode === 0 ? undefined : kickRes.exitCode, stderr: kickRes.stderr },
+  )
 }
 
 /**
@@ -435,20 +466,40 @@ export async function stopLaunchAgent(options) {
   const status = await launchctl.print([target])
   if (status.exitCode === 113) return
   ensure(status, `print ${label}`)
-  ensure(await launchctl.bootout([target]), `bootout ${label}`)
-  const unloaded = await waitUntilUnloaded(launchctl, target, options.sleep ?? defaultSleep)
-  if (!unloaded) {
-    throw new LaunchAgentError(`bootout ${label}: service did not unload`)
+  // bootout's exit code is not the gate, for the same reason neither the
+  // install nor the uninstall path above reads it: launchd answers a teardown
+  // it has not finished with `36: Operation now in progress`, and one the job
+  // completed between the print above and here with `3: No such process`.
+  // Both are stops that worked, and a daemon with any shutdown work to do is
+  // the common case here rather than the edge - this is the one bootout call
+  // aimed at a live serving process. The poll is the fact. bootout's own
+  // stderr is folded into the failure instead, so a refusal that leaves the
+  // job loaded (a denied bootout) still says why.
+  const booted = await launchctl.bootout([target])
+  const sleep = options.sleep ?? defaultSleep
+  const unloaded = await waitUntilUnloaded(launchctl, target, sleep, STOP_UNLOAD_POLL_ATTEMPTS)
+  if (unloaded === undefined) {
+    const why = (booted.stderr || '').trim() || (booted.exitCode === 0 ? '' : `exit ${booted.exitCode}`)
+    throw new LaunchAgentError(
+      `failed to bootout ${label}: the service did not unload${why ? `: ${why}` : ''}`,
+      // No exit code when the bootout itself exited 0: a thrown error tagged
+      // `exitCode: 0` reads as success to any caller that forwards the field
+      // as a process exit status.
+      { exitCode: booted.exitCode === 0 ? undefined : booted.exitCode, stderr: booted.stderr },
+    )
   }
   if (unloaded.exitCode !== 113) ensure(unloaded, `print ${label}`)
 }
 
 /**
- * Restart the installed LaunchAgent. Uses `launchctl kickstart -k` so
- * the running process is terminated and then re-started without
- * touching the loaded plist.
+ * Restart the installed LaunchAgent. A loaded one takes
+ * `launchctl kickstart -k`, so the running process is terminated and then
+ * re-started without touching the loaded plist. One launchd is not holding
+ * (`hyp daemon stop` boots it out and leaves the plist) is loaded back in
+ * through {@link startLaunchAgent} instead, which is what makes restart a
+ * usable recovery from a stop rather than an error.
  *
- * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, plistDir?: string }} options
+ * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, plistDir?: string, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<void>}
  */
 export async function restartLaunchAgent(options) {

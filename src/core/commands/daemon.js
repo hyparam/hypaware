@@ -238,10 +238,25 @@ export async function runDaemonStatus(argv, ctx) {
 export async function runDaemonStop(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
   if (!parsed.ok) return parsed.code
+  // A daemon the service manager is supervising is stopped through that
+  // manager, never by signalling the pid: launchd's KeepAlive respawns a job
+  // that is merely killed, so the old SIGTERM reported a stop the machine
+  // undid seconds later. Both managers deliver SIGTERM themselves, so the
+  // daemon still shuts down through its own handler; what changes is who is
+  // told, and therefore whether the respawn policy is told with it. The plist
+  // / unit is preserved either way, so `hyp daemon start` reverses this.
+  //
+  // The gate is the supervised pid, not the unit on disk. An installed
+  // service that is not currently running one is not what a stop is aimed at:
+  // the process to stop is then a foreground `hyp daemon run`, which has no
+  // respawn policy behind it, is reached only by the transport below, and is
+  // a shape the status collector supports outright. Gating on `installed`
+  // would have reported `daemon: stopped` and left that daemon running.
+  // @ref LLP 0300#posix-keeps-signals [constrained-by]: the control file stays the transport for every daemon the service manager is not running, foreground sessions included
   const { serviceDaemonStatus, stopServiceDaemon } = await import('../daemon/install.js')
   const options = { homeDir: ctx.env.HOME }
   const status = await serviceDaemonStatus(options)
-  if (status.installed) {
+  if (status.pid !== undefined) {
     try {
       await stopServiceDaemon(options)
       ctx.stdout.write('daemon: stopped\n')
