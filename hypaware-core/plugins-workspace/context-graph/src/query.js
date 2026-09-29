@@ -232,12 +232,12 @@ export async function queryNeighbors({ query, storage, config, seed, depth = 1, 
       // A read blocked in the engine when the budget expires aborts mid-stream,
       // so checkTime never sees it. Nothing but this traversal's own timer can
       // abort this signal, so an abort surfacing once it has fired is that
-      // budget expiring, whether the layer relayed the signal's reason
-      // (squirreling) or threw an abort of its own (icebird, the parquet
-      // source). Anything not abort-shaped keeps its own identity: a
-      // heap-budget trip arrives as QueryExecutionBudgetError, not as this.
-      const abortShaped = err instanceof Error && (err === visibility.signal.reason
-        || err.name === 'AbortError' || err.name === 'TimeoutError')
+      // budget expiring, whether the layer relayed this signal's own
+      // TimeoutError (squirreling) or threw an AbortError of its own (icebird,
+      // the parquet source). Anything not abort-shaped keeps its own identity:
+      // a heap-budget trip arrives as QueryExecutionBudgetError, not as this.
+      const abortShaped = err instanceof Error
+        && (err.name === 'AbortError' || err.name === 'TimeoutError')
       if (visibility.signal.aborted && abortShaped) throw outOfTime()
       throw err
     } finally {
