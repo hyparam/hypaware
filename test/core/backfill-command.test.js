@@ -127,6 +127,7 @@ test('resolveRetentionDays prefers the flag, then config, then the default', () 
  *
  * @param {{
  *   item?: { dataset: string, kind: string, value: Record<string, unknown> },
+ *   extraItem?: { dataset: string, kind: string, value: Record<string, unknown> },
  *   registerMaterializer?: boolean,
  *   materializerDataset?: string,
  *   materializeRows?: Record<string, unknown>[],
@@ -140,6 +141,7 @@ test('resolveRetentionDays prefers the flag, then config, then the default', () 
  */
 function makeCtx(options = {}) {
   const item = options.item ?? { dataset: 'ds', kind: 'test.kind', value: { x: 1 } }
+  const extraItem = options.extraItem
   const registerMaterializer = options.registerMaterializer ?? true
   const materializerDataset = options.materializerDataset ?? item.dataset
   const materializeRows = options.materializeRows ?? [{ a: 1 }]
@@ -153,7 +155,7 @@ function makeCtx(options = {}) {
   backfills.register({
     name: 'tester',
     plugin: '@test/plugin',
-    datasets: [item.dataset],
+    datasets: extraItem ? [item.dataset, extraItem.dataset] : [item.dataset],
     async plan(planCtx) {
       planContexts.push(planCtx)
       return undefined
@@ -161,6 +163,7 @@ function makeCtx(options = {}) {
     async *run(runCtx) {
       runContexts.push(runCtx)
       yield item
+      if (extraItem) yield extraItem
       if (options.runError) throw options.runError
     },
   })
@@ -172,6 +175,14 @@ function makeCtx(options = {}) {
       plugin: '@test/plugin',
       materialize() { return materializeRows },
     })
+    if (extraItem) {
+      backfillMaterializers.register({
+        kind: extraItem.kind,
+        dataset: extraItem.dataset,
+        plugin: '@test/plugin',
+        materialize() { return materializeRows },
+      })
+    }
   }
 
   /** @type {Array<{ tablePath: string, rows: Record<string, unknown>[] }>} */
@@ -332,6 +343,28 @@ test('runBackfill still fails when only the flush throws', async () => {
   const { ctx, out } = makeCtx({ flushError: new Error('flush failed') })
   const code = await runBackfill(['tester', '--json'], ctx)
   assert.equal(code, 1)
+  const payload = JSON.parse(out.join(''))
+  assert.equal(payload.providers[0].status, 'failed')
+  assert.match(payload.providers[0].error, /flush failed/)
+})
+
+// One failing dataset must not strand the datasets behind it in the same
+// delayed-visibility state the force-flush exists to prevent.
+// @ref LLP 0333#every-table-before-failure [tests]: every touched dataset gets
+//   its attempt before the run's failure is declared
+test('a dataset whose flush throws does not strand the flush of the next dataset', async () => {
+  const { ctx, flushed, out } = makeCtx({
+    extraItem: { dataset: 'ds2', kind: 'test.kind.2', value: { y: 2 } },
+    registeredDatasets: ['ds', 'ds2'],
+    flushError: new Error('flush failed'),
+  })
+  const code = await runBackfill(['tester', '--json'], ctx)
+  assert.equal(code, 1)
+  assert.deepEqual(
+    flushed.map((f) => f.tablePath),
+    ['/tmp/fake-cache/datasets/ds/backfill', '/tmp/fake-cache/datasets/ds2/backfill'],
+    'both touched datasets were attempted, not just the one before the failure'
+  )
   const payload = JSON.parse(out.join(''))
   assert.equal(payload.providers[0].status, 'failed')
   assert.match(payload.providers[0].error, /flush failed/)
