@@ -15,6 +15,14 @@ import { classifyAwsError } from './errors.js'
 export const BLOB_STORE_KIND = 's3'
 
 /**
+ * A usable ranged response states the offsets it actually delivered, as
+ * `bytes start-end/total` (RFC 7233 also allows `*` for an unknown total).
+ * The 416 unsatisfiable form states no offsets, so it does not qualify.
+ * Anything else cannot be checked against what was asked for.
+ */
+const RANGED_RESPONSE = /^bytes \d+-\d+\/(?:\d+|\*)$/
+
+/**
  * Construct an S3-backed `BlobStore`. The factory is injectable so the
  * smoke and unit tests can supply a fake S3 client without spinning up
  * the AWS SDK. Production builds wire `defaultS3BlobStoreClientFactory`.
@@ -132,14 +140,21 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       // Passing a whole object back as though it were the requested slice
       // would hand a Parquet reader the wrong bytes at the right offsets,
       // which reads as a decode error at best and as wrong query results at
-      // worst. A 206 must carry Content-Range, so its absence means the
-      // range was not honored and the only safe answer is to fail.
+      // worst. A 206 must carry a well-formed Content-Range, so anything
+      // else means the range was not honored and the only safe answer is to
+      // fail. Presence alone is not enough: a header the consumer cannot
+      // parse leaves it unable to run the offset check the contract assigns
+      // it, and a whole object forwarded under a junk header corrupts just
+      // as silently as one forwarded under no header at all.
       // @ref LLP 0452#range-contract [implements]: a ranged read never degrades to a whole object
-      if (input.range !== undefined && contentRange === undefined) {
+      if (input.range !== undefined && !RANGED_RESPONSE.test(contentRange ?? '')) {
         const body = /** @type {{ destroy?: () => void }} */ (result.Body)
         if (typeof body.destroy === 'function') body.destroy()
+        const detail = contentRange === undefined
+          ? 'response carried no Content-Range'
+          : `response carried an unusable Content-Range '${contentRange}'`
         throw tagS3Error(undefined, 'blob_range_not_honored',
-          `s3 blob-store: byte range '${input.range}' was not honored for '${input.key}' (response carried no Content-Range)`,
+          `s3 blob-store: byte range '${input.range}' was not honored for '${input.key}' (${detail})`,
           input.key)
       }
       return {

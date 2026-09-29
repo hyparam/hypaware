@@ -162,6 +162,54 @@ test('s3 BlobStore rejects a response that ignored the requested range', async (
   }
 })
 
+test('s3 BlobStore rejects a Content-Range it cannot check the offsets of', async () => {
+  // Presence is not enough. A store that answers 200 with the whole object
+  // and a junk Content-Range corrupts exactly as silently as one that sends
+  // no Content-Range at all, and a consumer cannot run the offset check the
+  // contract gives it against a header that does not parse. '0' and '   '
+  // are truthy non-empty strings, so the falsy-value guard alone lets them
+  // through; 'bytes */16' is the 416 form and states no offsets.
+  for (const ContentRange of ['0', '   ', '\t', 'garbage', 'bytes */16', 'bytes 2-4', 'bytes=2-4/16', 'bytes 4-2/16 ']) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from('0123456789ABCDEF')])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength: 16, ContentRange, ETag: '"whole"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
+      (err) => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        assert.match(/** @type {Error} */ (err).message, /unusable Content-Range/)
+        return true
+      },
+      `Content-Range ${JSON.stringify(ContentRange)} must not pass as the requested slice`,
+    )
+    assert.equal(destroyed, true, 'the unusable body is released, not leaked')
+  }
+})
+
+test('s3 BlobStore passes through a well-formed Content-Range', async () => {
+  // The rejection above must not have made honored ranges unreachable.
+  for (const ContentRange of ['bytes 2-4/16', 'bytes 2-4/*', 'bytes 0-15/16']) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: Readable.from([Buffer.from('234')]), ContentLength: 3, ContentRange, ETag: '"part"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    const got = await store.getObject({ key: 'data.parquet', range: 'bytes=2-4' })
+    assert.ok(got)
+    assert.equal(got.contentRange, ContentRange)
+    assert.equal(got.contentLength, 3)
+  }
+})
+
 test('s3 BlobStore leaves whole-object reads without a contentRange key', async () => {
   const client = makeFakeS3Client()
   const store = createS3BlobStore({ bucket: 'bucket', client })
