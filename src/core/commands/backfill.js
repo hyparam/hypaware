@@ -210,7 +210,7 @@ export async function runBackfillList(argv, ctx) {
  *   devRunId?: string,
  *   sweep?: boolean,
  * }} args
- * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>}
+ * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string }>}
  */
 export async function runBackfillProvider(args) {
   const { ctx, provider: providerName, dryRun } = args
@@ -234,6 +234,7 @@ export async function runBackfillProvider(args) {
     scanned: result.items_seen,
     rowsWritten: result.rows_written,
     skipped: result.rows_skipped,
+    ...(result.error_kind ? { errorKind: result.error_kind } : {}),
   }
 }
 
@@ -248,12 +249,18 @@ function deriveBackfillExitCode(results) {
 }
 
 /**
+ * Record the first failure of a run and the step it came from. The kind is
+ * taken here rather than derived at the `backfill.provider_finish` span,
+ * which can see only that something failed (issue #2255).
+ *
  * @param {BackfillProviderResult} result
  * @param {string} error
+ * @param {string} errorKind
  */
-function markProviderFailed(result, error) {
+function markProviderFailed(result, error, errorKind) {
   result.status = 'failed'
   result.error ??= error
+  result.error_kind ??= errorKind
 }
 
 /**
@@ -269,9 +276,10 @@ function markProviderFailed(result, error) {
  * @param {BackfillRunContext} runCtx
  * @param {BackfillProviderResult} result
  * @param {string} error
+ * @param {string} errorKind
  */
-function markItemFailed(runCtx, result, error) {
-  markProviderFailed(result, error)
+function markItemFailed(runCtx, result, error, errorKind) {
+  markProviderFailed(result, error, errorKind)
   runCtx.itemsFailed = (runCtx.itemsFailed ?? 0) + 1
 }
 
@@ -377,7 +385,7 @@ async function runProvider(args) {
               kind: yielded.kind,
               [Attr.DATASET]: yielded.dataset,
             })
-            markItemFailed(runCtx, result, `missing materializer for kind ${yielded.kind}`)
+            markItemFailed(runCtx, result, `missing materializer for kind ${yielded.kind}`, 'materializer_missing')
             result.rows_skipped += 1
             continue
           }
@@ -392,7 +400,8 @@ async function runProvider(args) {
             markItemFailed(
               runCtx,
               result,
-              `materializer for kind ${yielded.kind} targets dataset ${materializer.dataset}, not ${yielded.dataset}`
+              `materializer for kind ${yielded.kind} targets dataset ${materializer.dataset}, not ${yielded.dataset}`,
+              'dataset_mismatch'
             )
             result.rows_skipped += 1
             continue
@@ -430,12 +439,12 @@ async function runProvider(args) {
           })
           result.rows_written += written.rowsWritten
           if (written.status === 'failed') {
-            markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`)
+            markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`, 'dataset_not_registered')
           }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        markProviderFailed(result, message)
+        markProviderFailed(result, message, 'provider_run_failed')
         log.error('backfill.provider_error', {
           [Attr.COMPONENT]: 'backfill',
           provider: provider.name,
@@ -469,7 +478,7 @@ async function runProvider(args) {
             })
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
-            markProviderFailed(result, message)
+            markProviderFailed(result, message, 'flush_failed')
             log.error('backfill.flush_error', {
               [Attr.COMPONENT]: 'backfill',
               provider: provider.name,
@@ -495,7 +504,7 @@ async function runProvider(args) {
           rows_skipped: result.rows_skipped,
           sessions_seen: result.sessions_seen,
           status: finalStatus,
-          ...(result.error ? { error_kind: 'provider_run_failed' } : {}),
+          ...(result.error_kind ? { error_kind: result.error_kind } : {}),
         },
         async () => {},
         { component: 'backfill' }

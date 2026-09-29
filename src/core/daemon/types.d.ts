@@ -1023,7 +1023,14 @@ export interface BackfillSweepRunner {
     devRunId?: string
     retentionDays?: number
     sweep?: boolean
-  }): Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>
+  }): Promise<{
+    ok: boolean
+    scanned: number
+    rowsWritten: number
+    skipped: number
+    /** Which step failed, for the settlement log; absent on a clean run. */
+    errorKind?: string
+  }>
 }
 
 /**
