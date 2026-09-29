@@ -2,6 +2,7 @@
 
 **Type:** Spec
 **Status:** Accepted
+**Extended-by:** LLP 0447 (remove the client history import alias)
 **Extended-by:** LLP 0446 (remove backfill planning; use import dry runs)
 **Systems:** CLI
 **Author:** Brendan / Codex

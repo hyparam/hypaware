@@ -300,7 +300,7 @@ remain compatibility aliases and use the same runners:
 | --- | --- |
 | `hyp init` | `hyp setup` |
 | `hyp unattach` | `hyp detach` |
-| `hyp client history import`, `hyp client history providers` | `hyp backfill`, `hyp backfill list` |
+| `hyp client history providers` | `hyp backfill list` |
 | `hyp skills install` | `hyp client skills install` |
 | `hyp policy ...`, `hyp ignore`, `hyp unignore`, `hyp purge` | `hyp privacy ...` |
 | `hyp query status`, `hyp query refresh`, `hyp query maintain` | `hyp cache status`, `hyp cache refresh`, `hyp cache maintain` |

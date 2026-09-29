@@ -2,6 +2,7 @@
 
 **Type:** Spec
 **Status:** Accepted
+**Extended-by:** LLP 0447 (remove the client history import alias)
 **Systems:** CLI, Plugins, Backfill
 **Author:** Brendan / Codex
 **Date:** 2026-09-28

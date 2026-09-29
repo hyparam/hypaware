@@ -584,15 +584,15 @@ test('group --help lists subcommands with their registry summaries', async () =>
   assert.doesNotMatch(out, /^ {2}(maintain|refresh|status)\s/m)
 })
 
-test('backfill is canonical and history aliases share its runners and help', async () => {
+test('backfill is canonical and removed history commands do not resolve', async () => {
   const { kernel, registry } = coreKernelAndRegistry()
-  for (const [canonical, alias] of [
-    ['backfill', 'client history import'],
-    ['backfill list', 'client history providers'],
+  for (const { canonical, alias } of [
+    { canonical: 'backfill' },
+    { canonical: 'backfill list', alias: 'client history providers' },
   ]) {
-    assert.equal(registry.get(alias), registry.get(canonical))
+    if (alias) assert.equal(registry.get(alias), registry.get(canonical))
     assert.equal(registry.get(canonical)?.name, canonical)
-    for (const spelling of [canonical, alias]) {
+    for (const spelling of alias ? [canonical, alias] : [canonical]) {
       const stdout = makeBuf()
       const stderr = makeBuf()
       const code = await dispatch([...spelling.split(' '), '--help'], { stdout, stderr, registry, kernel })
@@ -607,6 +607,13 @@ test('backfill is canonical and history aliases share its runners and help', asy
       }
     }
   }
+  assert.equal(registry.get('client history import'), undefined)
+  const removedOut = makeBuf()
+  const removedErr = makeBuf()
+  assert.equal(await dispatch(['client', 'history', 'import', 'codex'], {
+    stdout: removedOut, stderr: removedErr, registry, kernel,
+  }), 2)
+  assert.match(removedErr.text(), /unknown subcommand/)
   assert.equal(registry.get('backfill plan'), undefined)
   assert.equal(registry.get('client history plan'), undefined)
   const stdout = makeBuf()

@@ -233,12 +233,11 @@ function buildCoreCommands(registry) {
       usage: 'hyp cache maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
       run: runQueryMaintain,
     },
-    // @ref LLP 0445#canonical [implements]: short backfill names own help and dispatch; journey spellings remain aliases
+    // @ref LLP 0447#surface [implements]: backfill is the sole import spelling
     {
       name: 'backfill',
       category: 'capture-movement',
       audience: 'everyday',
-      aliases: ['client history import'],
       summary: 'Import client history from backfill providers',
       usage: 'hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
       run: runBackfill,

@@ -621,8 +621,7 @@ hyp backfill list [--json]
 hyp backfill --help
 ```
 
-The longer `hyp client history import` and `hyp client history providers` forms
-remain compatibility aliases of `hyp backfill` and `hyp backfill list`.
+`hyp client history providers` remains a compatibility alias of `hyp backfill list`.
 Preview a scan with `hyp backfill <provider> --dry-run`.
 
 #### `hyp backfill`
