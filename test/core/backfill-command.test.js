@@ -137,6 +137,7 @@ test('resolveRetentionDays prefers the flag, then config, then the default', () 
  *   plugins?: { name: string }[],
  *   runError?: Error,
  *   flushError?: Error,
+ *   flushErrorDataset?: string,
  * }} [options]
  */
 function makeCtx(options = {}) {
@@ -198,7 +199,13 @@ function makeCtx(options = {}) {
     /** @param {string} tablePath */
     async flushTable(tablePath) {
       flushed.push({ tablePath })
-      if (options.flushError) throw options.flushError
+      // Without `flushErrorDataset` every dataset throws. Naming one lets a
+      // test pin that the datasets behind a failing flush complete theirs,
+      // not merely that the loop reached them.
+      const only = options.flushErrorDataset
+      if (options.flushError && (!only || tablePath.startsWith(`/tmp/fake-cache/datasets/${only}/`))) {
+        throw options.flushError
+      }
     },
   }
   const query = {
@@ -357,13 +364,14 @@ test('a dataset whose flush throws does not strand the flush of the next dataset
     extraItem: { dataset: 'ds2', kind: 'test.kind.2', value: { y: 2 } },
     registeredDatasets: ['ds', 'ds2'],
     flushError: new Error('flush failed'),
+    flushErrorDataset: 'ds',
   })
   const code = await runBackfill(['tester', '--json'], ctx)
   assert.equal(code, 1)
   assert.deepEqual(
     flushed.map((f) => f.tablePath),
     ['/tmp/fake-cache/datasets/ds/backfill', '/tmp/fake-cache/datasets/ds2/backfill'],
-    'both touched datasets were attempted, not just the one before the failure'
+    'ds2 completed its flush behind the failing ds, it was not stranded'
   )
   const payload = JSON.parse(out.join(''))
   assert.equal(payload.providers[0].status, 'failed')
