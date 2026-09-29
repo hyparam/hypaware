@@ -236,16 +236,71 @@ test('s3 BlobStore rejects a Content-Range its own ContentLength contradicts', a
   }
 })
 
+test('s3 BlobStore rejects a self-consistent response for a different range', async () => {
+  // A store can agree with itself and still answer the wrong question. The
+  // suffix case is the one that matters: mishandle `bytes=-3` as "the first
+  // three bytes" and a Parquet footer read comes back as the file header,
+  // under a Content-Range that is well formed and matches its own
+  // ContentLength. Self-consistency cannot catch that, and this provider is
+  // the only place holding both the request and the response.
+  for (const [range, ContentRange, payload] of /** @type {Array<[string, string, string]>} */ ([
+    // suffix read answered with the head of the object
+    ['bytes=-3', 'bytes 0-2/16', '012'],
+    ['bytes=-8', 'bytes 0-7/16', '01234567'],
+    // suffix read that does not reach the end of the object
+    ['bytes=-3', 'bytes 5-7/16', '567'],
+    // suffix read handed more bytes than it asked for
+    ['bytes=-3', 'bytes 12-15/16', '3456'],
+    // explicit range answered one byte to the left
+    ['bytes=2-4', 'bytes 1-3/16', '123'],
+    // explicit range answered with the whole object
+    ['bytes=2-4', 'bytes 0-15/16', '0123456789ABCDEF'],
+    // open range answered from the wrong offset
+    ['bytes=8-', 'bytes 7-15/16', '789ABCDEF'],
+    // response reaches past the last byte asked for
+    ['bytes=2-4', 'bytes 2-6/16', '23456'],
+  ])) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from(payload)])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength: payload.length, ContentRange, ETag: '"part"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range }),
+      err => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        assert.match(/** @type {Error} */ (err).message, /Content-Range/)
+        return true
+      },
+      `'${ContentRange}' must not pass as the answer to '${range}'`,
+    )
+    assert.ok(destroyed, `unusable body for '${range}' must be destroyed`)
+  }
+})
+
 test('s3 BlobStore passes through a well-formed Content-Range', async () => {
   // The rejections above must not have made honored ranges unreachable. Each
-  // case states a slice and delivers exactly that slice. The last one is a
-  // store answering a different range than was asked for: self-consistent,
-  // so the provider forwards it, and verifying the offsets against the
-  // request is the consumer's half of LLP 0452#range-contract.
-  for (const [ContentRange, payload] of /** @type {Array<[string, string]>} */ ([
-    ['bytes 2-4/16', '234'],
-    ['bytes 2-4/*', '234'],
-    ['bytes 0-15/16', '0123456789ABCDEF'],
+  // case states a slice, delivers exactly that slice, and answers the range
+  // that was asked for. The unknown-total and clamped-at-EOF forms are legal
+  // answers a conforming store gives, so they must still pass.
+  for (const [range, ContentRange, payload] of /** @type {Array<[string, string, string]>} */ ([
+    ['bytes=2-4', 'bytes 2-4/16', '234'],
+    ['bytes=2-4', 'bytes 2-4/*', '234'],
+    // end clamped to the last byte of the object
+    ['bytes=8-99', 'bytes 8-15/16', '89ABCDEF'],
+    ['bytes=8-', 'bytes 8-15/16', '89ABCDEF'],
+    // suffix reads, including one longer than the object
+    ['bytes=-3', 'bytes 13-15/16', 'DEF'],
+    ['bytes=-99', 'bytes 0-15/16', '0123456789ABCDEF'],
+    // a suffix whose total the store declined to state
+    ['bytes=-3', 'bytes 13-15/*', 'DEF'],
+    // a range the provider does not model is not second-guessed
+    ['bytes=0-1, 4-5', 'bytes 0-1/16', '01'],
   ])) {
     const client = {
       ...makeFakeS3Client(),
@@ -259,8 +314,8 @@ test('s3 BlobStore passes through a well-formed Content-Range', async () => {
       },
     }
     const store = createS3BlobStore({ bucket: 'bucket', client })
-    const got = await store.getObject({ key: 'data.parquet', range: 'bytes=2-4' })
-    assert.ok(got)
+    const got = await store.getObject({ key: 'data.parquet', range })
+    assert.ok(got, `'${ContentRange}' must still answer '${range}'`)
     assert.equal(got.contentRange, ContentRange)
     assert.equal(got.contentLength, payload.length)
   }

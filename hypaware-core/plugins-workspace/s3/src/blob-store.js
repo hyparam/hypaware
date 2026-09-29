@@ -20,7 +20,49 @@ export const BLOB_STORE_KIND = 's3'
  * The 416 unsatisfiable form states no offsets, so it does not qualify.
  * Anything else cannot be checked against what was asked for.
  */
-const RANGED_RESPONSE = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/
+const RANGED_RESPONSE = /^bytes (\d+)-(\d+)\/(\d+|\*)$/
+
+/** The three request forms LLP 0452#range-contract admits. */
+const REQUESTED_RANGE = /^bytes=(\d*)-(\d*)$/
+
+/**
+ * Report how a ranged response contradicts the range that was asked for, or
+ * undefined when it does not.
+ *
+ * Self-consistency is not enough on its own. A store that mishandles a suffix
+ * range answers `bytes=-3` with the FIRST three bytes under `bytes 0-2/16`:
+ * well formed, agreeing with its own ContentLength, and wrong. Suffix ranges
+ * are how a Parquet footer is read (LLP 0452#why), so that is the likely
+ * defect, not an exotic one, and this provider is the only place holding both
+ * the request and the response.
+ *
+ * Only a definite contradiction is reported. A request form this does not
+ * model, or a total the response left unknown, yields undefined rather than a
+ * rejection, so no response that is accepted today and actually correct starts
+ * failing. Short reads stay with the consumer, as does a range narrower than
+ * the one asked for.
+ *
+ * @param {string} range the `input.range` that was sent
+ * @param {number} start first byte the response states it delivered
+ * @param {number} end last byte the response states it delivered
+ * @param {number | undefined} total complete length, when the response stated one
+ * @returns {string | undefined}
+ */
+function contradictsRequest(range, start, end, total) {
+  const asked = REQUESTED_RANGE.exec(range)
+  if (asked === null) return undefined
+  const first = asked[1] === '' ? undefined : Number(asked[1])
+  const last = asked[2] === '' ? undefined : Number(asked[2])
+  if (first === undefined) {
+    if (last === undefined) return undefined
+    if (end - start + 1 > last) return `delivers more than the ${last} bytes the suffix asked for`
+    if (total !== undefined && end !== total - 1) return 'is a suffix that does not end at the object end'
+    return undefined
+  }
+  if (start !== first) return `starts at ${start}, not the requested ${first}`
+  if (last !== undefined && end > last) return `ends at ${end}, past the requested ${last}`
+  return undefined
+}
 
 /**
  * Construct an S3-backed `BlobStore`. The factory is injectable so the
@@ -145,11 +187,14 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       // with ContentLength. Presence alone is not enough, on either half. A
       // header the consumer cannot parse leaves it unable to run the offset
       // check the contract assigns it, and a header contradicted by the
-      // declared body length is not describing this body at all. Checking
-      // that those offsets are the ones asked for stays with the consumer,
-      // which is why this rejects a response that describes no slice rather
-      // than one that describes the wrong slice.
-      // @ref LLP 0452#range-contract [implements]: a response that does not state the slice it delivered is rejected, never passed off as one
+      // declared body length is not describing this body at all. Finally the
+      // stated offsets are checked against the ones asked for, because a
+      // store can be self-consistent and still wrong: mishandle a suffix
+      // range and `bytes=-3` comes back as `bytes 0-2/16`, the first three
+      // bytes of a Parquet footer read under a header with nothing visibly
+      // amiss. Counting the delivered body stays with the consumer; this
+      // never reads the body.
+      // @ref LLP 0452#range-contract [implements]: honor the range or fail, checked against both the response's own account of itself and the request
       if (input.range !== undefined) {
         const stated = contentRange === undefined ? null : RANGED_RESPONSE.exec(contentRange)
         const span = stated === null ? undefined : Number(stated[2]) - Number(stated[1]) + 1
@@ -163,6 +208,12 @@ export function createS3BlobStore({ bucket, prefix, client }) {
           detail = `response carried a reversed Content-Range '${contentRange}'`
         } else if (typeof result.ContentLength === 'number' && result.ContentLength !== span) {
           detail = `response declared ContentLength ${result.ContentLength} against Content-Range '${contentRange}'`
+        } else {
+          const total = stated[3] === '*' ? undefined : Number(stated[3])
+          const contradiction = contradictsRequest(input.range, Number(stated[1]), Number(stated[2]), total)
+          if (contradiction !== undefined) {
+            detail = `response Content-Range '${contentRange}' ${contradiction}`
+          }
         }
         if (detail !== undefined) {
           const body = /** @type {{ destroy?: () => void }} */ (result.Body)
