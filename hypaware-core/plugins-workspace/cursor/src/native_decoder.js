@@ -74,7 +74,9 @@ export function createCursorDecoder({ log } = {}) {
      * a whole pass.
      */
     function updateRef() {
-      if (owned.size > 0) started.ref()
+      // terminate() refs the worker until exit. A queued final reply must
+      // not undo that ref while close() is still awaiting termination.
+      if (closed || owned.size > 0) started.ref()
       else started.unref()
     }
 

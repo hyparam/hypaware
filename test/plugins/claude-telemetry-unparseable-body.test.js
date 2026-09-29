@@ -193,33 +193,48 @@ test('loadSpooledBodies reports the bytes an unparseable body took with it', asy
   }
 })
 
-// Two reads of the same `body_ref` overlapping in the handler: both are issued
-// before either resolves, so both find the file and both call it unparseable,
-// but only one of them can be the call that removed it. `fs.rm(..., { force:
-// true })` resolves for a path that is already gone, so it reported the bytes
-// twice and brought `spool_bytes` down by 2x one deletion.
-test('two overlapping reads of one unparseable body report its bytes once', async () => {
+// Hold deletion open while a later caller reads the same body. Both callers
+// classify it, but only the caller owning removal may report its bytes.
+test('two overlapping reads of one unparseable body report its bytes once', async (t) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-race-'))
+  const removing = Promise.withResolvers()
+  const release = Promise.withResolvers()
   try {
     const content = 'not json at all'
     const file = path.join(dir, 'broken.request.json')
     await fsp.writeFile(file, content, 'utf8')
+    const raw = await fsp.readFile(file)
+    const readFile = fsp.readFile
+    const unlink = fsp.unlink
+    t.mock.method(fsp, 'readFile', (target) => target === file ? Promise.resolve(raw) : readFile(target))
+    const deletion = release.promise.then(() => unlink(file))
+    const remove = t.mock.method(fsp, 'unlink', (target) => {
+      if (target !== file) return unlink(target)
+      removing.resolve(undefined)
+      // Concurrent unlink calls can both succeed on macOS. Sharing this
+      // completion reproduces that behavior on every platform.
+      return deletion
+    })
     const events = [{
       name: 'api_request_body',
       timestamp: '2026-08-17T19:31:00.000Z',
       attributes: { body_ref: file, request_id: REQUEST_ID },
     }]
-    const both = await Promise.all([
-      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
-      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
-    ])
+    const first = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    await removing.promise
+    const second = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    release.resolve(undefined)
+    const both = await Promise.all([first, second])
     assert.equal(both[0].unparseable + both[1].unparseable, 2, 'both reads saw it')
     assert.equal(
       both[0].unparseableBytes + both[1].unparseableBytes,
       content.length,
       'one file left the disk, so its bytes are reported once'
     )
+    assert.equal(remove.mock.callCount(), 1, 'only one caller removes the body')
+    await assert.rejects(fsp.stat(file), { code: 'ENOENT' })
   } finally {
+    release.resolve(undefined)
     await fsp.rm(dir, { recursive: true, force: true })
   }
 })

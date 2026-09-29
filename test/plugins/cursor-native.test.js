@@ -5,6 +5,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
 import { cursorNativeFixture, growToMaximalGraph, wire } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
 import { cursorFields, cursorStorePaths, findCursorSession, listCursorSessions, readCursorSession } from '../../hypaware-core/plugins-workspace/cursor/src/native.js'
 import { createCursorBackfillProvider, cursorAdmission } from '../../hypaware-core/plugins-workspace/cursor/src/recovery.js'
@@ -231,6 +232,28 @@ test('the decoder returns the reader own result off the event loop, and a dead w
     await assert.rejects(inflight, /native_read_failed/)
     await assert.rejects(decoder.read(f.session), /native_read_failed/)
   } finally { await decoder.close(); await f.cleanup() }
+})
+
+test('a queued decoder reply during close keeps the worker referenced until exit', async (t) => {
+  const terminate = Worker.prototype.terminate
+  const unref = t.mock.method(Worker.prototype, 'unref')
+  t.mock.method(Worker.prototype, 'terminate', function () {
+    const exit = terminate.call(this)
+    // Deliver the last reply after terminate() refs the worker, before its
+    // exit event. This ordering otherwise depends on thread scheduling.
+    this.emit('message', { id: 1, error: 'native_read_failed' })
+    return exit
+  })
+  const decoder = createCursorDecoder()
+  const read = assert.rejects(decoder.read({ id: 's', dbPath: '/absent', frontend: 'cli', cwd: '/absent', updatedAt: 0 }), /native_read_failed/)
+  const idleUnrefs = unref.mock.callCount()
+  // Keep the failing version alive long enough to report the assertion.
+  const keepAlive = setInterval(() => {}, 1000)
+  try {
+    await decoder.close()
+    await read
+    assert.equal(unref.mock.callCount(), idleUnrefs, 'the final reply must not undo terminate()\'s ref')
+  } finally { clearInterval(keepAlive) }
 })
 
 // Until hyparam/hypaware#1735 a read whose payload the structured clone

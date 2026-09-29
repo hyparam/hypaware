@@ -149,6 +149,7 @@ test('source runs shortly after boot and reports structured completion-relative 
 test('status reports the repositories the last tick reached, and the inventory it drew them from', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-status-budget-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const completed = Promise.withResolvers()
 
   // A three-repo inventory with room for exactly one request: the tick reaches
   // the first repository and the budget stops it there.
@@ -170,18 +171,27 @@ test('status reports the repositories the last tick reached, and the inventory i
       cacheTablePath() { return '/cache/github_events' },
       async appendRows() {},
     },
-    log: { info() {}, error() {} },
+    log: {
+      info(name) { if (name === 'github.poll_tick_completed') completed.resolve(undefined) },
+      error(name) { completed.reject(new Error(name)) },
+    },
   }))
 
   const source = await startGithubSource()
-  await new Promise((resolve) => setTimeout(resolve, 35))
-  assert.ok(source.status)
-  const status = await source.status()
-  await source.stop()
-
-  assert.equal(status.details?.last_repo_count, 1, 'a budget-stopped tick reached one repository')
-  assert.equal(status.details?.last_inventory_repos, 3, 'the inventory it was drawn from stays visible beside it')
-  assert.equal(status.details?.backlog_pending, true)
+  // The completion log follows the status update. Wait for that signal rather
+  // than assuming filesystem work finishes inside a fixed number of ms.
+  const deadline = setTimeout(() => completed.reject(new Error('GitHub tick did not complete')), 1000)
+  try {
+    await completed.promise
+    assert.ok(source.status)
+    const status = await source.status()
+    assert.equal(status.details?.last_repo_count, 1, 'a budget-stopped tick reached one repository')
+    assert.equal(status.details?.last_inventory_repos, 3, 'the inventory it was drawn from stays visible beside it')
+    assert.equal(status.details?.backlog_pending, true)
+  } finally {
+    clearTimeout(deadline)
+    await source.stop()
+  }
 })
 
 test('source never overlaps slow ticks', async (t) => {
