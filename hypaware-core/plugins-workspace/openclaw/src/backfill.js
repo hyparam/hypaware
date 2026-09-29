@@ -18,7 +18,7 @@ import {
 import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillPlan, BackfillPlanContext, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { OpenclawSessionHeader, OpenclawSessionMessage } from '../../../../hypaware-core/plugins-workspace/openclaw/src/types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
@@ -175,22 +175,6 @@ export function createOpenclawBackfillProvider(opts) {
     // metadata, tunable via `backfill.sweep_cron` (R7), defaulting to
     // every 5 minutes when the config key is absent.
     sweep: { cron: resolveSweepCron(config) },
-    /**
-     * @param {BackfillPlanContext} _ctx
-     * @returns {Promise<BackfillPlan | undefined>}
-     */
-    async plan(_ctx) {
-      const files = []
-      let count = 0
-      for await (const source of listOpenclawSessions(agentsDir)) {
-        count++
-        if (files.length < 128) files.push(source.path)
-      }
-      return {
-        estimated_items: count,
-        sources: files,
-      }
-    },
     async *run(ctx) {
       try { yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config }) }
       catch (error) {

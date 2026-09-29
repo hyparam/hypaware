@@ -1940,7 +1940,7 @@ async function runFinaleBackfill(args) {
         try {
           stderr.write(
             `hyp setup: output closed - the local history import for ${asked.join(', ')} was skipped; ` +
-            `run 'hyp client history import ${asked.join(' ')}' to import it\n`
+            `run 'hyp backfill ${asked.join(' ')}' to import it\n`
           )
         } catch {
           // best-effort: whatever took stdout may have taken stderr too

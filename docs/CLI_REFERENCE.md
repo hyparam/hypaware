@@ -608,22 +608,27 @@ reattach through a proxy.
 hyp client detach codex --dry-run
 ```
 
-### Client history commands
+### Backfill commands
 
-Use the history group to inspect providers before you import:
+Use backfill to import local history, list providers, or preview a scan:
 
 ```text
-hyp client history <subcommand> [args...]
+hyp backfill [provider...] [flags]
+hyp backfill list [--json]
 ```
 
 ```sh
-hyp client history --help
+hyp backfill --help
 ```
 
-#### `hyp client history import`
+The longer `hyp client history import` and `hyp client history providers` forms
+remain compatibility aliases of `hyp backfill` and `hyp backfill list`.
+Preview a scan with `hyp backfill <provider> --dry-run`.
+
+#### `hyp backfill`
 
 ```text
-hyp client history import [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]
+hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]
 ```
 
 Scans selected providers, materializes records into live datasets, appends
@@ -631,41 +636,27 @@ rows, and flushes the cache. Provider failures don't stop sibling providers.
 `--dry-run` scans without writing.
 
 ```sh
-hyp client history import claude codex --since 2026-08-01T00:00:00Z --dry-run
+hyp backfill claude codex --since 2026-08-01T00:00:00Z --dry-run
 ```
 
-#### `hyp client history plan`
+#### `hyp backfill list`
 
 ```text
-hyp client history plan [provider...] [--retention-days <n>] [--json]
-```
-
-Calls provider planning hooks without importing rows. The command is
-read-only. A provider planning failure can appear in output even when the
-overall command returns `0`, so inspect every provider row.
-
-```sh
-hyp client history plan claude --json
-```
-
-#### `hyp client history providers`
-
-```text
-hyp client history providers [--json]
+hyp backfill list [--json]
 ```
 
 Lists every registered backfill provider, not only providers selected as
 configuration defaults.
 
 ```sh
-hyp client history providers --json
+hyp backfill list --json
 ```
 
 #### Scheduled recovery sweeps and `backfill.window_days`
 
 Some adapters rerun their history provider on a schedule, so history the live
 capture lane never saw is recovered without you running
-`hyp client history import` by hand. `@hypaware/claude` (which also serves
+`hyp backfill` by hand. `@hypaware/claude` (which also serves
 Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
 sweep every five minutes by default.
 

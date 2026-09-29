@@ -742,9 +742,9 @@ test('a dead consent surface says on stderr which backfill was skipped', async (
   assert.match(stderr.text(), /output closed/, 'the surviving stream names why the import did not run')
   // The precise command, not the wizard: re-running `hyp setup` to redo
   // one import drags the install, the attach and the overwrite confirm
-  // along with it, and `hyp client history import` is the thing that was
-  // skipped (`core_commands.js`, alias `hyp backfill`).
-  assert.match(stderr.text(), /run 'hyp client history import claude' to import it/, 'and says how to finish it')
+  // along with it, and `hyp backfill` is the thing that was
+  // skipped (`core_commands.js`).
+  assert.match(stderr.text(), /run 'hyp backfill claude' to import it/, 'and says how to finish it')
   // Only the provider the dead question would have covered.
   assert.match(stderr.text(), /import for claude was skipped/)
   assert.doesNotMatch(stderr.text(), /openclaw/, 'the sweep-backed import below is not something to re-run for')

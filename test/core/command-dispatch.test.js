@@ -547,7 +547,7 @@ test('top-level help renders journey sections and a compact operations list', as
   assert.ok(gettingStarted < explore && explore < control && control < additional)
   assert.match(out, /Getting started:\n  setup\s+.*\n  status\s+/)
   assert.match(out, /Explore and share:\n  ask\s+.*\n  query\s+.*\n  report\s+/)
-  assert.match(out, /Control capture and movement:\n  client\s+.*\n  privacy\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
+  assert.match(out, /Control capture and movement:\n  client\s+.*\n  backfill\s+.*\n  privacy\s+.*\n  session\s+.*\n  join\s+.*\n  leave\s+.*\n  sync\s+/)
   // `graph` is plugin-contributed (`@hypaware/context-graph`) and only
   // appears once the plugin is config-active; this dispatch has no config,
   // so only core commands show up here.
@@ -584,18 +584,34 @@ test('group --help lists subcommands with their registry summaries', async () =>
   assert.doesNotMatch(out, /^ {2}(maintain|refresh|status)\s/m)
 })
 
-test('a legacy action alias renders canonical leaf help', async () => {
+test('backfill is canonical and history aliases share its runners and help', async () => {
   const { kernel, registry } = coreKernelAndRegistry()
+  for (const [canonical, alias] of [
+    ['backfill', 'client history import'],
+    ['backfill list', 'client history providers'],
+  ]) {
+    assert.equal(registry.get(alias), registry.get(canonical))
+    assert.equal(registry.get(canonical)?.name, canonical)
+    for (const spelling of [canonical, alias]) {
+      const stdout = makeBuf()
+      const stderr = makeBuf()
+      const code = await dispatch([...spelling.split(' '), '--help'], { stdout, stderr, registry, kernel })
+      assert.equal(code, 0)
+      assert.equal(stderr.text(), '')
+      assert.ok(stdout.text().startsWith(`hyp ${canonical} - `))
+      assert.ok(stdout.text().includes(`usage: hyp ${canonical} `))
+      assert.equal(stdout.text().includes('hyp client history'), false)
+      if (canonical === 'backfill') {
+        assert.match(stdout.text(), /^ {2}list\s+/m)
+        assert.doesNotMatch(stdout.text(), /^ {2}plan\s+/m)
+      }
+    }
+  }
+  assert.equal(registry.get('backfill plan'), undefined)
+  assert.equal(registry.get('client history plan'), undefined)
   const stdout = makeBuf()
-  const stderr = makeBuf()
-
-  const code = await dispatch(['backfill', '--help'], { stdout, stderr, registry, kernel })
-
-  assert.equal(code, 0)
-  const out = stdout.text()
-  assert.match(out, /^hyp client history import - Import client history/)
-  assert.match(out, /usage: hyp client history import \[provider\.\.\.\]/)
-  assert.doesNotMatch(out, /^Subcommands:/m)
+  await dispatch(['client', '--help'], { stdout, stderr: makeBuf(), registry, kernel })
+  assert.doesNotMatch(stdout.text(), /^ {2}history\s+/m)
 })
 
 test('leaf command --help renders summary, usage, and long help', async () => {

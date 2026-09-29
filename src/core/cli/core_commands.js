@@ -1,6 +1,6 @@
 // @ts-check
 
-import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
+import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
 import { runReportDelete, runReportFix, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
 import { coreUsage } from './command_args.js'
@@ -91,7 +91,7 @@ export function registerCoreCommands(registry) {
 /**
  * Descriptions for the core groups that exist only as a shared prefix. A
  * group whose bare command `makeGroupCommand` built speaks for itself; these
- * three have no bare command, so without a registered description their
+ * groups have no bare command, so without a registered description their
  * `--help` opens on a naked `usage:` line and a table, and the reader is
  * never told what the group is for.
  *
@@ -110,15 +110,6 @@ const CORE_COMMAND_GROUPS = [
       '',
       'The same three routines also answer to their former query spellings',
       '(query status/refresh/maintain).',
-    ].join('\n'),
-  },
-  {
-    name: 'client history',
-    summary: 'Import past sessions from AI clients on this machine',
-    help: [
-      'Backfill reads history a client wrote before HypAware was capturing,',
-      'from the transcript files the client keeps on disk. Start with plan,',
-      'which reports what each provider would scan without writing a row.',
     ].join('\n'),
   },
   {
@@ -166,7 +157,7 @@ function buildCoreCommands(registry) {
       name: 'client',
       category: 'capture-movement',
       audience: 'everyday',
-      summary: 'Manage AI clients and history',
+      summary: 'Manage AI clients',
     }),
     makeGroupCommand({
       registry,
@@ -242,26 +233,22 @@ function buildCoreCommands(registry) {
       usage: 'hyp cache maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
       run: runQueryMaintain,
     },
+    // @ref LLP 0445#canonical [implements]: short backfill names own help and dispatch; journey spellings remain aliases
     {
-      name: 'client history import',
-      aliases: ['backfill'],
+      name: 'backfill',
+      category: 'capture-movement',
+      audience: 'everyday',
+      aliases: ['client history import'],
       summary: 'Import client history from backfill providers',
-      usage: 'hyp client history import [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
+      usage: 'hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
       run: runBackfill,
     },
     {
-      name: 'client history providers',
-      aliases: ['backfill list'],
+      name: 'backfill list',
+      aliases: ['client history providers'],
       summary: 'List registered backfill providers',
-      usage: coreUsage('client history providers'),
+      usage: coreUsage('backfill list'),
       run: runBackfillList,
-    },
-    {
-      name: 'client history plan',
-      aliases: ['backfill plan'],
-      summary: 'Show what each backfill provider would scan without writing rows',
-      usage: 'hyp client history plan [provider...] [--retention-days <n>] [--json]',
-      run: runBackfillPlan,
     },
     makeGroupCommand({
       registry,
@@ -430,7 +417,7 @@ function buildCoreCommands(registry) {
         '',
         'hyp client attach codex covers Codex Desktop as well as the Codex CLI - both',
         'read the ~/.codex/config.toml this writes and both write the',
-        '~/.codex/sessions history hyp client history import codex imports. HypAware never',
+        '~/.codex/sessions history hyp backfill codex imports. HypAware never',
         'parses the opaque ~/Library/Application Support/Codex app container,',
         'and loses no Desktop history by not doing so. Claude Desktop also needs',
         'no attach: selecting it in hyp init enables a scheduled import of its',

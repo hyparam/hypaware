@@ -23,7 +23,7 @@ import { loadClientDescriptors } from '../daemon/status.js'
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
- * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BackfillProviderResult, BackfillRunnerContext } from '../../../src/core/commands/types.js'
  * @import { EntrypointOwners } from '../../../src/core/backfill/types.js'
  */
@@ -150,7 +150,7 @@ export async function runBackfill(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runBackfillList(argv, ctx) {
-  const parsed = parseCoreCommandArgv('client history providers', argv, ctx)
+  const parsed = parseCoreCommandArgv('backfill list', argv, ctx)
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
   const providers = ctx.backfills.list()
@@ -187,107 +187,6 @@ export async function runBackfillList(argv, ctx) {
     }
   }
   return 0
-}
-
-/**
- * `hyp backfill plan [provider...] [--retention-days <n>] [--json]`
- *
- * Calls each selected provider's `plan()` hook (if present) and prints
- * the consolidated plan. Providers without a `plan()` implementation
- * are listed but contribute no plan body.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runBackfillPlan(argv, ctx) {
-  const parsed = parsePlanArgv(argv)
-  if (parsed.error !== undefined) {
-    ctx.stderr.write(`hyp backfill plan: ${parsed.error}\n`)
-    return 2
-  }
-
-  const devRunId = ctx.env.DEV_RUN_ID ?? `bf-${randomUUID()}`
-  const retentionDays = resolveRetentionDays({
-    flag: parsed.retentionDays,
-    config: ctx.config,
-  })
-
-  const selected = selectProviders({
-    requested: parsed.providers,
-    available: ctx.backfills.list(),
-    activePlugins: ctx.config.plugins ?? [],
-  })
-
-  if (selected.unknown.length > 0) {
-    ctx.stderr.write(
-      `hyp backfill plan: unknown provider(s): ${selected.unknown.join(', ')}\n`
-    )
-    return 1
-  }
-
-  return withSpan(
-    'backfill.plan',
-    {
-      [Attr.COMPONENT]: 'backfill',
-      [Attr.OPERATION]: 'backfill.plan',
-      [Attr.DEV_RUN_ID]: devRunId,
-      provider_count: selected.providers.length,
-      retention_days: retentionDays ?? 0,
-      status: 'ok',
-    },
-    async () => {
-      /** @type {Array<{ provider: string, plugin: string, datasets: string[], plan: BackfillPlan | undefined }>} */
-      const results = []
-      // The same ownership map and configured-plugin predicate the run gets.
-      // Both are declared on `BackfillPlanContext`, so a provider that
-      // consults them while planning must see what the run will see, or
-      // `hyp backfill plan` estimates over sessions the run then gates out.
-      // Resolved once, and only when some selected provider actually plans.
-      /** @type {Awaited<ReturnType<typeof resolveOwnersForRun>> | undefined} */
-      let owners
-      for (const provider of selected.providers) {
-        if (typeof provider.plan !== 'function') {
-          results.push({ provider: provider.name, plugin: provider.plugin, datasets: provider.datasets, plan: undefined })
-          continue
-        }
-        if (owners === undefined) {
-          owners = await resolveOwnersForRun(ctx, getLogger('backfill'))
-        }
-        const planCtx = buildPlanContext({
-          env: ctx.env,
-          storage: ctx.storage,
-          retentionDays,
-          entrypointOwners: owners.entrypointOwners,
-          isPluginConfigured: owners.isPluginConfigured,
-        })
-        try {
-          const plan = await provider.plan(planCtx)
-          results.push({
-            provider: provider.name,
-            plugin: provider.plugin,
-            datasets: provider.datasets,
-            plan,
-          })
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          ctx.stderr.write(`hyp backfill plan: ${provider.name}: ${message}\n`)
-          results.push({
-            provider: provider.name,
-            plugin: provider.plugin,
-            datasets: provider.datasets,
-            plan: undefined,
-          })
-        }
-      }
-      if (parsed.json) {
-        ctx.stdout.write(JSON.stringify({ run_id: devRunId, providers: results }, null, 2) + '\n')
-      } else {
-        renderPlanText({ results, retentionDays, stdout: ctx.stdout })
-      }
-      return 0
-    },
-    { component: 'backfill' }
-  )
 }
 
 /**
@@ -794,7 +693,7 @@ function buildRunContext(args) {
 }
 
 /**
- * Resolve the entrypoint-ownership map for one provider run or plan, plus
+ * Resolve the entrypoint-ownership map for one provider run, plus
  * the configured-plugin predicate it was built with. The predicate travels
  * separately because container-root admission keys on it alone: an owners
  * map only has entries for plugins that declare `transcript_entrypoints`
@@ -908,28 +807,6 @@ function addEnabledPluginNames(names, config) {
 }
 
 /**
- * @param {{
- *   env: NodeJS.ProcessEnv,
- *   storage: CommandRunContext['storage'],
- *   retentionDays?: number,
- *   entrypointOwners?: EntrypointOwners,
- *   isPluginConfigured?: (plugin: PluginName) => boolean,
- * }} args
- * @returns {BackfillPlanContext}
- */
-function buildPlanContext(args) {
-  /** @type {BackfillPlanContext} */
-  return {
-    env: args.env,
-    cacheRoot: args.storage.cacheRoot,
-    ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
-    ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
-    ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
-    log: noopProviderLogger(),
-  }
-}
-
-/**
  * @param {string} provider
  * @param {string} devRunId
  * @returns {PluginLogger}
@@ -951,11 +828,6 @@ function createProviderLogger(provider, devRunId) {
     warn(message, fields)  { base.warn(message,  stamp(fields)) },
     error(message, fields) { base.error(message, stamp(fields)) },
   }
-}
-
-/** @returns {PluginLogger} */
-function noopProviderLogger() {
-  return { debug() {}, info() {}, warn() {}, error() {} }
 }
 
 /**
@@ -1085,77 +957,6 @@ export function parseRunArgv(argv) {
   if (p.until !== undefined) result.until = p.until
   if (p['retention-days'] !== undefined) result.retentionDays = p['retention-days']
   return result
-}
-
-/**
- * Parse `hyp backfill plan ...` argv. Same as the run argv except
- * `--since`, `--until`, and `--dry-run` are not accepted (plan does
- * not write rows; it just calls `plan()`).
- *
- * @param {string[]} argv
- * @returns {{
- *   providers: string[],
- *   retentionDays?: number,
- *   json: boolean,
- *   error?: undefined,
- * } | { error: string }}
- */
-export function parsePlanArgv(argv) {
-  const parsed = parseCommandArgv(argv, {
-    type: 'object',
-    properties: {
-      providers: { type: 'array', greedy: true },
-      'retention-days': { type: 'number', minimum: 0 },
-      json: { type: 'boolean', default: false },
-    },
-    positional: ['providers'],
-  }, STRICT_SHORT_FLAGS)
-  if ('help' in parsed) {
-    return { error: 'usage: hyp backfill plan [provider...] [--retention-days <n>] [--json]' }
-  }
-  if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ providers?: string[], 'retention-days'?: number, json: boolean }} */ (parsed.params)
-  /** @type {{ providers: string[], retentionDays?: number, json: boolean }} */
-  const result = { providers: p.providers ?? [], json: p.json }
-  if (p['retention-days'] !== undefined) result.retentionDays = p['retention-days']
-  return result
-}
-
-/**
- * @param {{
- *   results: Array<{ provider: string, plugin: string, datasets: string[], plan: BackfillPlan | undefined }>,
- *   retentionDays?: number,
- *   stdout: { write(chunk: string): unknown },
- * }} args
- */
-function renderPlanText(args) {
-  const { results, retentionDays, stdout } = args
-  stdout.write(`backfill plan${retentionDays !== undefined ? ` (retention=${retentionDays}d)` : ''}\n`)
-  if (results.length === 0) {
-    stdout.write('  (no providers selected)\n')
-    return
-  }
-  for (const entry of results) {
-    stdout.write(`  ${entry.provider}  (${entry.plugin})  -> ${entry.datasets.join(', ')}\n`)
-    const plan = entry.plan
-    if (!plan) {
-      stdout.write('    (provider did not return a plan)\n')
-      continue
-    }
-    if (typeof plan.estimated_items === 'number') {
-      stdout.write(`    estimated_items: ${plan.estimated_items}\n`)
-    }
-    if (Array.isArray(plan.sources)) {
-      for (const src of plan.sources) {
-        stdout.write(`    source: ${src}\n`)
-      }
-    }
-    if (Array.isArray(plan.notes)) {
-      for (const note of plan.notes) {
-        stdout.write(`    note: ${note}\n`)
-      }
-    }
-  }
 }
 
 /**

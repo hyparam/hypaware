@@ -64,8 +64,8 @@ export const CORE_COMMAND_ARGS = {
       positional: ['question'],
     },
   },
-  'client history providers': {
-    usage: 'hyp client history providers [--json]',
+  'backfill list': {
+    usage: 'hyp backfill list [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
   },
   'daemon status': {
