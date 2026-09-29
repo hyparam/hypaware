@@ -147,8 +147,10 @@ for (const scenario of [
 /**
  * Two failures in one run. `markProviderFailed` sets `error` and
  * `error_kind` with `??=` on adjacent lines, so the first failure has to
- * win both and neither can be set without the other. Swap either `??=`
- * for `=` and these two are what notices.
+ * win both and neither can be set without the other. Swap the
+ * `error_kind ??=` for `=` and these two are what notices. The `error`
+ * half is pinned elsewhere, by backfill-command.test.js's "a flush that
+ * throws while handling a provider error does not mask that error".
  */
 for (const scenario of [
   {
