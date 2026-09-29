@@ -342,8 +342,25 @@ export async function runHermesPollTick(runner, ctx) {
             // reporting. `sessions_persisted` then counts only what landed.
             try {
               flushMarks()
-            } catch {
-              // The marks stay in memory; the next tick flushes them.
+            } catch (flushErr) {
+              // The marks stay in memory, so this tick's work is not
+              // repeated in-process, but nothing re-triggers a flush for
+              // them: `pendingMarks` is a per-tick local and
+              // `listChangedSessions` reads the in-memory map, so these
+              // sessions are not "changed" again. They reach disk only if
+              // some other session changes later, since a flush rewrites the
+              // whole map; a restart before then re-scans them, which is the
+              // benign pre-fix behaviour. Record the failure, because this is
+              // the one path where nothing else reports an unwritable
+              // sidecar: the tick's own error is the reconcile's, and
+              // `sessions_persisted` short of `sessions_examined` reads
+              // exactly like a healthy trailing batch.
+              ctx.log.warn('hermes.watermark_flush_failed', {
+                component: 'hermes',
+                operation: 'hermes.poll',
+                error_kind: errorKind(flushErr),
+                error: flushErr instanceof Error ? flushErr.message : String(flushErr),
+              })
             }
             ctx.log.warn('hermes.session_reconcile_failed', {
               component: 'hermes',

@@ -488,4 +488,13 @@ test('a sidecar write that fails while degrading does not replace the error that
   assert.equal(partial.fields?.session_id, '2')
   assert.equal(partial.fields?.sessions_persisted, 0, 'nothing reached disk, and the count says so')
   assert.equal(partial.fields?.sessions_examined, 2)
+
+  // Best-effort must not mean silent: a coinciding session error is the one
+  // case where nothing else reports that the sidecar is unwritable.
+  const flushFailed = logs.find((entry) => entry.message === 'hermes.watermark_flush_failed')
+  assert.ok(flushFailed, 'the failed sidecar write is reported in its own right')
+  assert.equal(flushFailed.fields?.component, 'hermes')
+  assert.equal(flushFailed.fields?.operation, 'hermes.poll')
+  assert.equal(flushFailed.fields?.error_kind, 'unknown')
+  assert.match(String(flushFailed.fields?.error), /ENOTDIR/, 'the write failure names itself')
 })
