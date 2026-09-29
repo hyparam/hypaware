@@ -103,6 +103,32 @@ test('s3 BlobStore puts and gets a round-trip object honouring prefix', async ()
   assert.equal(collected.toString('utf8'), 'payload-bytes')
 })
 
+test('s3 BlobStore preserves range headers and scoped keys', async () => {
+  const calls = []
+  const client = {
+    ...makeFakeS3Client(),
+    async getObject(input) {
+      calls.push(input)
+      return {
+        Body: Readable.from([Buffer.from('789')]),
+        ContentLength: 3,
+        ContentRange: 'bytes 7-9/10',
+      }
+    },
+  }
+  const store = createS3BlobStore({ bucket: 'bucket', prefix: 'org/private', client })
+  for (const range of ['bytes=-3', 'bytes=7-9']) {
+    const got = await store.getObject({ key: 'data.parquet', range })
+    assert.ok(got)
+    assert.equal(got.contentLength, 3)
+    assert.equal(got.contentRange, 'bytes 7-9/10')
+    const chunks = []
+    for await (const chunk of got.body) chunks.push(chunk)
+    assert.equal(Buffer.concat(chunks).toString(), '789')
+    assert.deepEqual(calls.at(-1), { Bucket: 'bucket', Key: 'org/private/data.parquet', Range: range })
+  }
+})
+
 test('s3 BlobStore getObject returns null when AWS reports NotFound', async () => {
   const client = makeFakeS3Client()
   const store = createS3BlobStore({ bucket: 'my-bucket', client })

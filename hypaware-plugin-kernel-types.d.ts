@@ -1385,11 +1385,16 @@ export interface PutObjectResult {
 
 export interface GetObjectInput {
   key: string
+  /** Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive. */
+  range?: string
 }
 
 export interface GetObjectResult {
   body: NodeJS.ReadableStream
+  /** Length of the returned body, which may be only a range. */
   contentLength?: number
+  /** HTTP Content-Range when range was honored. Absent means a whole object. */
+  contentRange?: string
   etag?: string
 }
 

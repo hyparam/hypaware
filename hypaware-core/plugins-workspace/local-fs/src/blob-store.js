@@ -157,16 +157,19 @@ export function createLocalFsBlobStore({ baseDir }) {
           await handle.close()
           return null
         }
+        // @ref LLP 0452#range-contract [implements]: local reads honor the same single-range contract as S3 without buffering the file
+        const range = input.range === undefined ? undefined : byteRange(input.range, stat.size)
         // Stream off the held FileHandle so the read uses an already-open
         // fd. The lazy `createReadStream(src)` form races a concurrent
         // unlink: the stream's async open can fire after the file is
         // gone, raising an unhandled ENOENT on consumers that discard the
         // body. With a handle the open is settled at await time and the
         // unlink-after-open is benign on POSIX.
-        const stream = handle.createReadStream({ autoClose: true })
+        const stream = handle.createReadStream({ autoClose: true, ...range })
         return {
           body: stream,
-          contentLength: stat.size,
+          contentLength: range ? range.end - range.start + 1 : stat.size,
+          ...(range ? { contentRange: `bytes ${range.start}-${range.end}/${stat.size}` } : {}),
         }
       } catch (err) {
         await handle.close().catch(() => {})
@@ -243,6 +246,27 @@ export function createLocalFsBlobStore({ baseDir }) {
       }
     },
   }
+}
+
+/** Resolve one HTTP byte range to the inclusive offsets Node streams use.
+ * @param {string} value
+ * @param {number} size
+ */
+function byteRange(value, size) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value)
+  const first = match?.[1] ? Number(match[1]) : undefined
+  const last = match?.[2] ? Number(match[2]) : undefined
+  if (!match || (first === undefined && last === undefined)
+    || (first !== undefined && !Number.isSafeInteger(first))
+    || (last !== undefined && !Number.isSafeInteger(last))) {
+    throw new Error('local-fs blob-store: invalid byte range')
+  }
+  const start = first ?? Math.max(0, size - /** @type {number} */ (last))
+  const end = first === undefined ? size - 1 : Math.min(last ?? size - 1, size - 1)
+  if (start >= size || end < start || size === 0) {
+    throw Object.assign(new Error('local-fs blob-store: unsatisfiable byte range'), { code: 'InvalidRange' })
+  }
+  return { start, end }
 }
 
 /**

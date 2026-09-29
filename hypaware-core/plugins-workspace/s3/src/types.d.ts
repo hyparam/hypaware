@@ -124,9 +124,10 @@ export interface S3CommandsHandle {
     Metadata?: Record<string, string>
     IfNoneMatch?: string
   }): Promise<{ ETag?: string; VersionId?: string }>
-  getObject(input: { Bucket: string; Key: string }): Promise<{
+  getObject(input: { Bucket: string; Key: string; Range?: string }): Promise<{
     Body: NodeJS.ReadableStream | Uint8Array | string | null | undefined
     ContentLength?: number
+    ContentRange?: string
     ETag?: string
   }>
   listObjects(input: {

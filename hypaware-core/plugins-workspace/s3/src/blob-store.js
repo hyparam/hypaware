@@ -113,11 +113,13 @@ export function createS3BlobStore({ bucket, prefix, client }) {
     async getObject(input) {
       const Key = composeKey(input.key)
       try {
-        const result = await client.getObject({ Bucket: bucket, Key })
+        // @ref LLP 0452#range-contract [implements]: preserve the byte range through the same credential and prefix path as whole reads
+        const result = await client.getObject({ Bucket: bucket, Key, ...(input.range !== undefined ? { Range: input.range } : {}) })
         if (!result || result.Body === null || result.Body === undefined) return null
         return {
           body: toReadable(result.Body),
           contentLength: result.ContentLength,
+          contentRange: result.ContentRange,
           etag: result.ETag,
         }
       } catch (err) {
@@ -266,6 +268,7 @@ export async function defaultS3BlobStoreClientFactory(opts) {
           /** @type {unknown} */ (result.Body)
         ),
         ContentLength: result.ContentLength,
+        ContentRange: result.ContentRange,
         ETag: result.ETag,
       }
     },

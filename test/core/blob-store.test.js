@@ -66,6 +66,39 @@ test('local-fs BlobStore puts and gets bytes by key', async () => {
   }
 })
 
+test('local-fs BlobStore serves byte ranges from the opened file', async () => {
+  const base = await makeTempBase()
+  try {
+    const store = createLocalFsBlobStore({ baseDir: base })
+    await store.putObject({ key: 'data', body: Buffer.from('0123456789') })
+    for (const [range, expected, contentRange] of [
+      ['bytes=2-4', '234', 'bytes 2-4/10'],
+      ['bytes=-3', '789', 'bytes 7-9/10'],
+      ['bytes=8-', '89', 'bytes 8-9/10'],
+      ['bytes=8-99', '89', 'bytes 8-9/10'],
+      ['bytes=-99', '0123456789', 'bytes 0-9/10'],
+    ]) {
+      const got = await store.getObject({ key: 'data', range })
+      assert.ok(got)
+      assert.equal(got.contentRange, contentRange)
+      assert.equal(got.contentLength, expected.length)
+      assert.equal(Buffer.from(await collectStream(got.body)).toString(), expected)
+    }
+    for (const range of ['bytes=-', 'bytes=1-2,4-5', 'bytes=10-', 'bytes=5-2', 'bytes=-0']) {
+      await assert.rejects(store.getObject({ key: 'data', range }), /range/i)
+    }
+    assert.equal(await store.getObject({ key: 'missing', range: 'bytes=-8' }), null)
+    await store.putObject({ key: 'empty', body: new Uint8Array() })
+    await assert.rejects(store.getObject({ key: 'empty', range: 'bytes=-8' }), { code: 'InvalidRange' })
+    const held = await store.getObject({ key: 'data', range: 'bytes=2-4' })
+    assert.ok(held)
+    await fs.unlink(path.join(base, 'data'))
+    assert.equal(Buffer.from(await collectStream(held.body)).toString(), '234')
+  } finally {
+    await fs.rm(base, { recursive: true, force: true })
+  }
+})
+
 test('local-fs BlobStore getObject returns null for missing keys', async () => {
   const base = await makeTempBase()
   try {
