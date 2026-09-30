@@ -250,7 +250,11 @@ export function renderClientStatusText(rows, stdout) {
     if (row.capture_health) {
       const events = row.capture_health.last_event_at ?? 'none'
       const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
-      const gap = row.capture_health.state === 'gap' ? ' [capture gap]' : ''
+      // `unknown` is the bounded confirmation read declining to answer, and
+      // the line says so rather than picking a side (LLP 0257 #status-and-health).
+      const gap = row.capture_health.state === 'gap'
+        ? ' [capture gap]'
+        : row.capture_health.state === 'unknown' ? ' [capture unconfirmed]' : ''
       stdout.write(`    capture: ${row.capture_health.state}; last event ${events}; last transcript activity ${transcripts}${gap}\n`)
     }
     if (row.error) stdout.write(`    error: ${row.error}\n`)
@@ -1022,7 +1026,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const transcripts = c.lastTranscriptActivityAt !== null
         ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
         : 'no transcript activity'
-      const tag = c.state === 'gap' ? '  [telemetry may be interrupted]' : ''
+      const tag = c.state === 'gap'
+        ? '  [telemetry may be interrupted]'
+        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
     const namedFailures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)
