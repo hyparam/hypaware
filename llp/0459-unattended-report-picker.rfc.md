@@ -5,7 +5,7 @@
 **Systems:** CLI, Reports
 **Author:** Neutral / Claude
 **Date:** 2026-09-30
-**Extends:** LLP 0414 (#listing-is-the-picker: "a piped run with no id is a usage error, not a guess" settles the run that cannot prompt; this RFC asks what the run that can prompt but is unattended does)
+**Extends:** LLP 0414 (#listing-is-the-picker: "a piped run with no id is a usage error naming the listing, not a guess" settles the run that cannot prompt; this RFC asks what the run that can prompt but is unattended does)
 **Related:** LLP 0456 (the sibling question on the same commands: which client is first when no picker runs), LLP 0198 (#real-launch: the launched client takes the terminal and edits a repository), issue #2400, issue #2373, PR #2399, PR #2387
 
 > `hyp report fix` with no recommendation id opens two listing pickers,
@@ -88,12 +88,12 @@ and, on expiry, take the path escape already takes on both pickers:
 `Nothing started.`, exit 0. Cheapest to explain (silence declines, as a
 person's escape does) and harmless to rerun. Cost: it reads an absence
 as a decline, which PR #2399's own rationale rejected for the client
-picker ("an expired deadline is not a cancel, nobody declined"), and
-exit 0 tells a script that expected a fix to start that nothing is
-wrong. It also needs a scope rule the single-picker deadline never
-did: whether the 10s covers each ask or the report-and-recommendation
-pair together, and whether a keypress on the first picker lifts the
-deadline for the second.
+picker ("an expired deadline is answered apart from a cancel because
+it is not one"), and exit 0 tells a script that expected a fix to
+start that nothing is wrong. It also needs a scope rule the
+single-picker deadline never did: whether the 10s covers each ask or
+the report-and-recommendation pair together, and whether a keypress on
+the first picker lifts the deadline for the second.
 
 <a id="leave-unbounded"></a>**3. Leave them unbounded and say so.**
 Document that `hyp report fix` without an id requires an answering
