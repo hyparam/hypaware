@@ -346,7 +346,7 @@ test('an otel-attached client in lockstep renders the line, healthy, in text and
     const text = stdout.text()
     assert.match(text, /capture health:/)
     assert.match(text, /- claude {2}last event 2m ago, last transcript activity 1m ago\n/)
-    assert.doesNotMatch(text, /\[capture gap\]/)
+    assert.doesNotMatch(text, /\[telemetry may be interrupted\]/)
 
     const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
     assert.equal(json.capture_health.length, 1)
@@ -385,7 +385,7 @@ test('transcripts running hours past the last event degrade overall through an e
 
     const stdout = buffer()
     renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
-    assert.match(stdout.text(), /- claude {2}last event 5h ago, last transcript activity 1m ago {2}\[capture gap\]\n/)
+    assert.match(stdout.text(), /- claude {2}last event 5h ago, last transcript activity 1m ago {2}\[telemetry may be interrupted\]\n/)
   } finally {
     await cleanup(hypHome, home)
   }
@@ -457,7 +457,7 @@ test('a daemon that never ran still yields the line, measured from the attach', 
 
     const stdout = buffer()
     renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
-    assert.match(stdout.text(), /- claude {2}no events yet, last transcript activity 1m ago {2}\[capture gap\]\n/)
+    assert.match(stdout.text(), /- claude {2}no events yet, last transcript activity 1m ago {2}\[telemetry may be interrupted\]\n/)
   } finally {
     await cleanup(hypHome, home)
   }

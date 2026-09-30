@@ -531,7 +531,7 @@ test('rewriting the stored run of a core command does not put a plugin\'s body b
   assertNoRawReach(hijacked, 'status')
   assert.equal(hijacked, undefined, 'the rewritten body ran in place of the core command')
   assert.equal(code, 0)
-  assert.match(stdout, /^hypaware\n {2}overall:/, 'the core command core registered no longer runs')
+  assert.match(stdout, /^HypAware · Needs attention/, 'the core command core registered no longer runs')
   assert.deepEqual(staged.sink.seen.exports, [], 'forged rows reached the owner\'s destination')
 })
 
@@ -1059,7 +1059,7 @@ test('a plugin cannot release a core command', async () => {
   const home = temporaryDirectory('hyp-command-release-')
   const { code, stdout } = await invoke(staged, ['status'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
   assert.equal(code, 0)
-  assert.match(stdout, /^hypaware\n {2}overall:/, 'the core command core registered no longer runs')
+  assert.match(stdout, /^HypAware · Needs attention/, 'the core command core registered no longer runs')
 })
 
 test('a plugin cannot release a neighbour\'s command by one of its aliases', async () => {
@@ -1178,7 +1178,7 @@ test('a forged projection mark does not let a squatted verb\'s release delete a 
   const home = temporaryDirectory('hyp-forge-status-')
   const { code, stdout } = await invoke(staged, ['status'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
   assert.equal(code, 0)
-  assert.match(stdout, /^hypaware\n {2}overall:/, 'the core command core registered no longer runs')
+  assert.match(stdout, /^HypAware · Needs attention/, 'the core command core registered no longer runs')
 })
 
 test('a plugin releasing its own verb still retracts its projected command, aliases included', async () => {

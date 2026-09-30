@@ -1880,7 +1880,12 @@ export async function collectHypAwareStatus(opts = {}) {
   // hourly walk, and `hyp status` reads no cache, so answering this any other
   // way would mean firing a second maintenance walk from a status command.
   const maintenance = maintenanceSkipsFromStatus(daemonStatusFile)
-  if (maintenance && maintenance.skippedTotal > 0) {
+  // `skippedTotal` and each `reasons` entry are clamped independently from a
+  // file this build may not have written, so a recorded failed attempt is
+  // tested directly rather than inferred from the difference between them.
+  // @ref LLP 0454#warning-policy [implements]: ineffective rewrites alone are verbose detail, not actionable failures
+  if (maintenance && (maintenance.reasons.compaction_attempt_failed > 0 ||
+    maintenance.skippedTotal > maintenance.reasons.compaction_ineffective)) {
     const one = maintenance.skippedTotal === 1
     const breakdown = describeMaintenanceSkipReasons(maintenance.reasons)
     // Warning, never an error: the daemon is running, capture works, and
@@ -1893,7 +1898,6 @@ export async function collectHypAwareStatus(opts = {}) {
       message: `cache maintenance is leaving ${maintenance.skippedTotal} partition${one ? '' : 's'} fragmented (${breakdown}), as of its tick at ${maintenance.tickAt}`,
       repair: [
         'hyp query maintain --dry-run',
-        'hyp query maintain --force',
       ],
     })
   }
@@ -2663,17 +2667,16 @@ export async function collectHypAwareStatus(opts = {}) {
   // structurally zero on an ordinary machine (issue #1182), which is the one
   // answer a monitoring field must never give when it has not looked.
   // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
-  const recentErrors = await countRecentErrors(stateRoot)
+  const recentErrors = await countRecentErrors(stateRoot, sinks, daemonStatusFile?.sinks)
   const recentErrorCount = recentErrors.total
-  if (recentErrorCount > 0) {
+  diagnostics.push(...recentErrors.sinkDiagnostics)
+  if (recentErrors.warningCount > 0) {
     diagnostics.push({
       severity: 'warning',
       kind: 'recent_errors',
-      // The breakdown is the pointer: "in the daemon log" and "failed sink
-      // export batches" are different places to look and different repairs,
-      // and a bare total sends the operator to the wrong one. It is prose
-      // only - no new report field is minted for it (LLP 0349#one-number).
-      message: `${recentErrorCount} error${recentErrorCount === 1 ? '' : 's'} recorded in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
+      // Export attempts have their own recovery-aware diagnostic. The history
+      // count still includes them, but cannot make them actionable again.
+      message: `${recentErrors.warningCount} error${recentErrors.warningCount === 1 ? '' : 's'} needing attention in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
       repair: ['hyp daemon restart'],
     })
   }
@@ -4093,28 +4096,51 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * set one failed export is counted once here and once there. That directory
  * exists only when that variable is set, which is why this counter used to
  * read zero on every real machine and why the overlap cannot reach one. The
- * diagnostic names both halves of the breakdown, so a developer who does set
- * it can see where the doubled total came from.
+ * history count retains that overlap. Export ERROR records do not also feed
+ * the generic warning: the outbox and last-success stamp decide that warning.
  *
  * @param {string} stateRoot
+ * @param {SinkSnapshot[]} sinks
+ * @param {unknown} snapshotSinks
  * @param {number} [nowMs]
- * @returns {Promise<{ total: number, breakdown: string[] }>}
+ * @returns {Promise<{ total: number, warningCount: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[] }>}
  */
-async function countRecentErrors(stateRoot, nowMs = Date.now()) {
+async function countRecentErrors(stateRoot, sinks, snapshotSinks, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
+  // Config-derived sink rows omit runtime stamps, so the last success comes
+  // from the already-loaded daemon snapshot, read after the daemon has exited
+  // as happily as while it runs: a success is a historical fact, not a
+  // liveness claim, and the daemon carries the stamp across its own restarts
+  // (`recoverSinkSnapshots` in `runtime.js`). A stamp that does not parse, or
+  // that sits in the future, is no evidence of recovery and leaves the
+  // destination at "never succeeded" rather than quietly clearing a failure.
+  const lastSuccess = new Map(sinks.map((s) => [s.instance, -Infinity]))
+  if (Array.isArray(snapshotSinks)) {
+    for (const sink of snapshotSinks) {
+      if (!sink || typeof sink !== 'object' || !lastSuccess.has(sink.instance)) continue
+      const at = typeof sink.lastSuccessAt === 'string' ? Date.parse(sink.lastSuccessAt) : NaN
+      if (Number.isFinite(at) && at <= nowMs) {
+        lastSuccess.set(sink.instance, Math.max(lastSuccess.get(sink.instance) ?? -Infinity, at))
+      }
+    }
+  }
   const [gatewayLog, processingLog, sinkOutbox, devTelemetry] = await Promise.all([
     countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
     countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs),
-    countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs),
+    countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs, nowMs, lastSuccess),
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
   const daemonLog = gatewayLog + processingLog
   /** @type {string[]} */
   const breakdown = []
   if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)
-  if (sinkOutbox > 0) breakdown.push(`${sinkOutbox} failed sink export batch${sinkOutbox === 1 ? '' : 'es'}`)
-  if (devTelemetry > 0) breakdown.push(`${devTelemetry} in dev telemetry`)
-  return { total: daemonLog + sinkOutbox + devTelemetry, breakdown }
+  if (devTelemetry.warningCount > 0) breakdown.push(`${devTelemetry.warningCount} in dev telemetry`)
+  return {
+    total: daemonLog + sinkOutbox.total + devTelemetry.total,
+    warningCount: daemonLog + devTelemetry.warningCount,
+    breakdown,
+    sinkDiagnostics: sinkOutbox.diagnostics,
+  }
 }
 
 /**
@@ -4215,25 +4241,50 @@ async function countDaemonLogErrors(logPath, sinceMs) {
  * telemetry: the driver's own `sink.export_batch.failed` goes to the OTel
  * logger, which has no exporter configured on an ordinary machine.
  *
- * Nothing drains these files, so the directory is a growing ledger and the
- * window is what makes a count off it mean "now". Costs one directory listing
- * per configured sink and opens no file: the batch id carries its own
- * timestamp. The collector already walks the whole cache tree with a `stat`
- * per file (`measureCacheStats`), so this sits well inside its budget.
+ * One listing answers two questions on two horizons. The history count keeps
+ * the shared 24-hour window, because `recent_error_count` reports what this
+ * install has recorded lately. The warning is a recovery question rather than
+ * a recency one, and waiting is not a recovery, so it takes no window at all:
+ * a failure that has aged out of the count still warns while nothing has
+ * succeeded since. Bounding it by the window instead meant a destination
+ * exporting more slowly than the bar could never reach it, so an install
+ * whose only destination had never once succeeded printed "Healthy"
+ * (issue #2337).
+ *
+ * "Later" is strict, so a success sharing a failure's millisecond leaves the
+ * warning standing: at equal stamps nothing says which came first, and the
+ * conservative reading is the one that keeps looking. A stamp in the future
+ * is evidence about nothing and is skipped on both sides, so a clock that ran
+ * ahead cannot invent a warning and one that was set back cannot clear one.
+ *
+ * Nothing drains these files, so the directory is a growing ledger. Costs one
+ * directory listing per configured sink and opens no file: the batch id
+ * carries its own timestamp, and both answers accumulate in the same pass
+ * with no sort and nothing retained per failure. The collector already walks
+ * the whole cache tree with a `stat` per file (`measureCacheStats`), so this
+ * sits well inside its budget.
+ *
+ * An outbox with no entry in `lastSuccess` belongs to a destination the
+ * report does not list, since `sinks[]` is derived from the loaded config.
+ * Its files still count as history, but nothing asks an operator to repair a
+ * destination this install no longer has.
  *
  * @param {string} sinksDir
  * @param {number} sinceMs
- * @returns {Promise<number>}
+ * @param {number} nowMs
+ * @param {Map<string, number>} lastSuccess
+ * @returns {Promise<{ total: number, diagnostics: StatusDiagnostic[] }>}
  */
-async function countSinkOutboxBatches(sinksDir, sinceMs) {
+// @ref LLP 0453#warning-rule [implements]: a destination warns while it holds an export failure with no later success, however old
+async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
+  const result = { total: 0, diagnostics: /** @type {StatusDiagnostic[]} */ ([]) }
   /** @type {Dirent[]} */
   let instances
   try {
     instances = await fsp.readdir(sinksDir, { withFileTypes: true })
   } catch {
-    return 0
+    return result
   }
-  let count = 0
   for (const instance of instances) {
     if (!instance.isDirectory()) continue
     /** @type {string[]} */
@@ -4243,20 +4294,36 @@ async function countSinkOutboxBatches(sinksDir, sinceMs) {
     } catch {
       continue
     }
+    // `-Infinity` when the destination has never succeeded, so `at < success`
+    // is the one recovery test, and `undefined` when it is not configured.
+    const success = lastSuccess.get(instance.name)
+    let unresolved = 0
+    let last = -Infinity
     for (const file of files) {
       const match = OUTBOX_BATCH_TIMESTAMP.exec(file)
       if (!match) continue
       const at = Date.parse(match[1])
-      if (!Number.isFinite(at) || at < sinceMs) continue
-      count += 1
+      if (!Number.isFinite(at)) continue
+      if (at >= sinceMs) result.total += 1
+      if (success === undefined || at > nowMs || at < success) continue
+      unresolved += 1
+      last = Math.max(last, at)
+    }
+    if (unresolved > 0) {
+      result.diagnostics.push({
+        severity: 'warning',
+        kind: 'sink_export_failing',
+        message: `${sanitizeLabel(instance.name) ?? 'unknown'}: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
+        repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(path.join(sinksDir, instance.name, 'outbox'), 512)}`],
+      })
     }
   }
-  return count
+  return result
 }
 
 /**
  * Walk the dev telemetry directory and count log entries whose `severityText`
- * is `ERROR`. Returns 0 when the directory does not exist, which on an
+ * is `ERROR`. Returns zero counts when the directory does not exist, which on an
  * ordinary install is always: this is the developer's store, kept as one
  * input among three rather than removed, because under `HYP_DEV_TELEMETRY=1`
  * it holds every `getLogger` error, and all but one of them reach no other
@@ -4267,18 +4334,17 @@ async function countSinkOutboxBatches(sinksDir, sinceMs) {
  *
  * @param {string} telemetryDir
  * @param {number} sinceMs
- * @returns {Promise<number>}
+ * @returns {Promise<{ total: number, warningCount: number }>}
  */
 async function countDevTelemetryErrors(telemetryDir, sinceMs) {
+  const result = { total: 0, warningCount: 0 }
   /** @type {string[]} */
   let entries
   try {
     entries = await fsp.readdir(telemetryDir)
-  } catch (err) {
-    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 0
-    return 0
+  } catch {
+    return result
   }
-  let count = 0
   for (const entry of entries) {
     if (!entry.startsWith('logs-') || !entry.endsWith('.jsonl')) continue
     const raw = await readFileTail(path.join(telemetryDir, entry), DEV_TELEMETRY_TAIL_BYTES)
@@ -4289,13 +4355,14 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
         if (!parsed || typeof parsed !== 'object') continue
         if (/** @type {any} */ (parsed).severityText !== 'ERROR') continue
         if (!recordedWithinWindow(/** @type {any} */ (parsed).timestamp, sinceMs)) continue
-        count += 1
+        result.total += 1
+        if (parsed.body !== 'sink.export_batch.failed') result.warningCount += 1
       } catch {
         // skip malformed lines silently
       }
     }
   }
-  return count
+  return result
 }
 
 /**

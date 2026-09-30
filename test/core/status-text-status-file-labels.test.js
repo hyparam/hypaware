@@ -128,7 +128,8 @@ test('a hostile daemon state and mode cannot drive the terminal from hyp status'
   assert.ok(at >= 0)
   assert.match(lines[at], /state=running/, 'the printable part still shows the state')
   assert.match(lines[at], /mode=fore/, 'and the mode')
-  assert.equal(lines[at + 1], '  active plugins:', 'and the forged line never appears')
+  assert.equal(lines[at + 1], '', 'a blank line separates the next section')
+  assert.equal(lines[at + 2], 'Attention', 'and the forged line never appears')
 })
 
 test('an unbounded daemon state is clamped on the daemon line', async () => {
