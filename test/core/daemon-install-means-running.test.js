@@ -1002,8 +1002,10 @@ test('the stale clear runs after the service teardown, never before it', async (
   try {
     const staged = await stageServiceDaemon(home)
     const processingRoot = processingStateRoot(staged.stateRoot)
-    stageAbandonedPidFile(staged.stateRoot, 999999)
-    stageAbandonedPidFile(processingRoot, 999999)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingRoot, deadPid)
     // Both roots, because the order is a property of each file rather than
     // of the call: a clear split so one root goes early and the other late
     // leaves that root exposed for the whole teardown while a single-file
@@ -1015,6 +1017,13 @@ test('the stale clear runs after the service teardown, never before it', async (
 
     const code = await runDaemonUninstall([], staged.ctx, {
       uninstallDaemon: async function() {
+        // Sampled a turn of the loop in, so this is the teardown's
+        // completion and not its first synchronous instant. A caller that
+        // started the teardown without awaiting it would let the clear run
+        // inside this tick, which is the returned-before-the-service-is-gone
+        // shape #2329 records on darwin, and a snapshot taken on entry reads
+        // it as ordered.
+        await new Promise(function(resolve) { setImmediate(resolve) })
         gatewayWhenTornDown = fs.existsSync(pidFilePath(staged.stateRoot))
         processingWhenTornDown = fs.existsSync(pidFilePath(processingRoot))
       },
@@ -1038,15 +1047,21 @@ test('a teardown that failed clears nothing, because the respawn policy is still
   const home = tmpHome('uninstall-failed-teardown')
   try {
     const staged = await stageServiceDaemon(home)
-    stageAbandonedPidFile(staged.stateRoot, 999999)
-    stageAbandonedPidFile(processingStateRoot(staged.stateRoot), 999999)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingStateRoot(staged.stateRoot), deadPid)
 
     const code = await runDaemonUninstall([], staged.ctx, {
-      uninstallDaemon: async function() { throw new Error('bootout refused') },
+      // The failure the real teardown can actually reach: both managers
+      // swallow their stop and disable, so the throw that arrives here is
+      // `unlinkServiceFile` failing on something other than ENOENT, which
+      // is precisely the case that leaves the plist / unit on disk.
+      uninstallDaemon: async function() { throw new Error('could not remove the unit file') },
     })
 
     assert.equal(code, 1)
-    assert.match(staged.err(), /bootout refused/)
+    assert.match(staged.err(), /could not remove the unit file/)
     assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), true, 'a failed teardown cleared the gateway pid file anyway')
     assert.equal(fs.existsSync(pidFilePath(processingStateRoot(staged.stateRoot))), true, 'a failed teardown cleared the processing pid file anyway')
   } finally {
