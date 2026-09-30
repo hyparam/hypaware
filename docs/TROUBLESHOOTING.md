@@ -10,7 +10,7 @@ hyp status
 hyp version
 ```
 
-Follow the `Next:` line under Attention for the failing component, then repeat
+Follow any `Next:` line under Attention for the failing component, then repeat
 the relevant status check. Add `--verbose` for the full inventory and the
 `repair:` lines under each diagnostic. For scripts, use `hyp status --json`.
 
