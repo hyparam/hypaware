@@ -39,8 +39,8 @@ export const CORE_COMMAND_ARGS = {
     schema: { type: 'object', properties: {} },
   },
   'status': {
-    usage: 'hyp status [--json]',
-    schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
+    usage: 'hyp status [--verbose] [--json]',
+    schema: { type: 'object', properties: { json: { type: 'boolean', default: false }, verbose: { type: 'boolean', default: false } } },
   },
   'client status': {
     usage: 'hyp client status [client] [--json]',

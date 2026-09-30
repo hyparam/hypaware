@@ -120,7 +120,7 @@ export async function runInit(argv, ctx) {
         finale: {},
         runStatus: async () => {
           ctx.stdout.write('\n')
-          return runStatus([], ctx)
+          return runStatus(['--verbose'], ctx)
         },
       })
       return result.exitCode

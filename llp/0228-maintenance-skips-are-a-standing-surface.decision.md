@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0454 (ineffective-only skips are informational)
 **Systems:** Cache, Daemon, CLI
 **Author:** Kenny / Claude
 **Date:** 2026-08-13

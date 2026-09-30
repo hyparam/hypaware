@@ -473,3 +473,68 @@ test('errors the processing daemon recorded are counted too', async () => {
   assert.ok(diag, 'a recent_errors diagnostic is raised')
   assert.ok(diag.message.includes('3 in the daemon log'), diag.message)
 })
+
+// @ref LLP 0453#warning-rule [tests]: recovery and retry bursts do not become standing warnings
+for (const scenario of [
+  { name: 'two failures', failures: [20, 1], warns: false },
+  { name: 'short burst that has aged', failures: [35, 34, 33], warns: false },
+  { name: 'sustained failures', failures: [20, 10, 1], warns: true },
+  { name: 'later success', failures: [20, 10, 2], success: 1, warns: false },
+  { name: 'success resets the streak', failures: [40, 30, 20, 10, 1], success: 15, warns: false },
+  { name: 'invalid success', failures: [20, 10, 1], success: 'invalid', warns: true },
+  { name: 'future success', failures: [20, 10, 1], success: -60, warns: true },
+  { name: 'future failure cannot meet threshold', failures: [20, 1, -60], warns: false },
+  { name: 'expired failure cannot meet threshold', failures: [1500, 10, 1], warns: false },
+]) {
+  test(`export warning: ${scenario.name}`, async (t) => {
+    const { hypHome, stateRoot } = await makeHome()
+    t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+      version: 2, plugins: [], sinks: { central: { plugin: '@hypaware/central', config: {} } },
+    }))
+    await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+    await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+      sinks: [{ instance: 'central', lastSuccessAt: typeof scenario.success === 'number'
+        ? new Date(Date.now() - scenario.success * 60_000).toISOString() : scenario.success }],
+    }))
+    await writeOutbox(stateRoot, 'central', scenario.failures.map((minutes) => ({ agoMs: minutes * 60_000, error: 'fetch failed' })))
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.recentErrorCount, scenario.failures.filter((minutes) => minutes < 1440).length)
+    assert.equal(report.diagnostics.some((d) => d.kind === 'recent_errors'), false)
+    const warning = report.diagnostics.find((d) => d.kind === 'sink_export_failing')
+    assert.equal(Boolean(warning), scenario.warns)
+    if (warning) {
+      assert.match(warning.message, /central: 3 failed export attempts/)
+      assert.match(warning.message, /last failure .* ago, with no later success recorded/)
+      assert.equal(warning.repair.some((r) => r.includes('daemon restart')), false)
+    }
+  })
+}
+
+test('export recovery is per destination and dev telemetry cannot revive recovered warnings', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: {
+      recovered: { plugin: '@hypaware/central', config: {} },
+      failing: { plugin: '@hypaware/central', config: {} },
+    },
+  }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'recovered', lastSuccessAt: new Date().toISOString() }],
+  }))
+  for (const instance of ['recovered', 'failing', 'removed']) {
+    await writeOutbox(stateRoot, instance, [20, 10, 1].map((minutes) => ({ agoMs: minutes * 60_000, error: 'HTTP 504' })))
+  }
+  await fs.mkdir(path.join(stateRoot, 'dev-telemetry'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'dev-telemetry', 'logs-4242.jsonl'), JSON.stringify({
+    severityText: 'ERROR', timestamp: new Date().toISOString(), body: 'sink.export_batch.failed',
+  }) + '\n')
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.recentErrorCount, 10, 'all historical errors remain counted')
+  assert.equal(report.diagnostics.some((d) => d.kind === 'recent_errors'), false)
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0].message, /^failing:/)
+})

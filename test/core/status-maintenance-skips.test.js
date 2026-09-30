@@ -399,7 +399,7 @@ test('hyp status names the frozen partitions, and says so without calling the in
     assert.ok(diagnostic, 'a frozen partition raises a diagnostic an operator scanning status will see')
     assert.equal(diagnostic.severity, 'warning')
     assert.match(diagnostic.message, /3 partitions fragmented|leaving 3 partitions fragmented/)
-    assert.ok(diagnostic.repair.includes('hyp query maintain --force'))
+    assert.deepEqual(diagnostic.repair, ['hyp query maintain --dry-run'])
     // The daemon is running and capture works: this is a thing to know
     // about, not an outage.
     assert.equal(report.overall, 'healthy')
@@ -648,6 +648,31 @@ test('the daemon maintenance tick persists what it left fragmented into status.j
       await handle.stop()
       await handle.done
     }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0454#warning-policy [tests]: ineffective compaction remains discoverable without an attention warning
+ test('ineffective-only maintenance is verbose detail, not a warning', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    writeDaemonStatus(stateRoot, {
+      tickAt: new Date().toISOString(),
+      partitionsVisited: 2,
+      skippedTotal: 1,
+      reasons: { compaction_ineffective: 1, compaction_attempt_failed: 0 },
+      partitions: [{ dataset: 'logs', partition: 'all', reason: 'compaction_ineffective', dataFiles: 20 }],
+    })
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.diagnostics.some((d) => d.kind === 'maintenance_partitions_skipped'), false)
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    assert.match(stdout.text(), /maintenance:/)
+    assert.match(stdout.text(), /compaction_ineffective/)
+    assert.doesNotMatch(stdout.text(), /hyp query maintain --force/)
+    const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
+    assert.equal(json.maintenance?.skipped_total, 1)
+  } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })

@@ -25,7 +25,7 @@ import { writeStatusFile } from '../../../src/core/daemon/status.js'
  * 2. With transcripts running hours past the last event, `--json` carries
  *    `capture_health[0].state === 'gap'`, a `capture_gap` diagnostic with an
  *    `error` severity and a repair hint appears, and `overall` degrades; the
- *    text surface shows the `[capture gap]` tag.
+ *    text surface explains that telemetry may be interrupted.
  * 3. With no otel attach marker the line is absent and the `capture_health`
  *    array is empty - no noise on a machine the question does not apply to.
  *
@@ -159,9 +159,9 @@ export async function run({ harness, expect }) {
     expect.that('healthy: hyp status exited 0', okExit, (v) => v === 0)
     const okText = okStdout.text()
     expect.that(
-      'healthy: capture-health line renders',
+      'healthy: configured client and sharing policy render',
       okText,
-      (v) => v.includes('capture health:') && /- claude {2}last event .*, last transcript activity /.test(v)
+      (v) => /claude\s+Attached \(otel\)\s+Local only/.test(v)
     )
     expect.that(
       'healthy: no capture-gap tag',
@@ -169,9 +169,9 @@ export async function run({ harness, expect }) {
       (v) => !v.includes('[capture gap]')
     )
     expect.that(
-      'healthy: overall stays healthy',
+      'healthy: no telemetry interruption warning',
       okText,
-      (v) => v.includes('overall:  healthy')
+      (v) => !v.includes('Telemetry may be interrupted')
     )
 
     /* ---------- Case 2: transcripts hours past the last event -> degraded ---------- */
@@ -240,14 +240,14 @@ export async function run({ harness, expect }) {
     expect.that('gap text: hyp status exited 0', gapTextExit, (v) => v === 0)
     const gapText = gapTextStdout.text()
     expect.that(
-      'gap text: the line carries the capture-gap tag',
+      'gap text: client warns telemetry may be interrupted',
       gapText,
-      (v) => /- claude {2}last event .*, last transcript activity .* {2}\[capture gap\]/.test(v)
+      (v) => /claude\s+Telemetry may be interrupted/.test(v)
     )
     expect.that(
-      'gap text: diagnostics name capture_gap',
+      'gap text: attention includes both activity ages',
       gapText,
-      (v) => v.includes('capture_gap')
+      (v) => /claude: transcripts active .*; last telemetry /.test(v)
     )
 
     /* ---------- Case 3: no otel attach -> no line, no noise ---------- */
