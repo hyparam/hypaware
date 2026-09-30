@@ -423,6 +423,10 @@ test('s3 BlobStore refuses a body shape it cannot read rather than calling it em
     ['number', 42],
     ['boolean', true],
     ['array of chunks', [Buffer.from('0123456789ABCDEF')]],
+    // `getReader` is the web-stream probe, so a body that only looks like one
+    // must not escape as the untagged TypeError `Readable.fromWeb` raises.
+    ['callable getReader that is not a ReadableStream', { getReader() { return { read: async () => ({ done: true }) } } }],
+    ['web ReadableStream already locked', lockedWebStream()],
   ])) {
     const client = {
       ...makeFakeS3Client(),
@@ -439,7 +443,24 @@ test('s3 BlobStore refuses a body shape it cannot read rather than calling it em
       `${what} must not pass as an empty object`,
     )
   }
+  // A body `Readable.fromWeb` will not take is still released, not held: the
+  // refusal path must not reintroduce the leak `releaseBody` exists to close.
+  let released = 0
+  const notAStream = /** @type {any} */ ({ getReader() { return { read: async () => ({ done: true }) } }, cancel() { released += 1 } })
+  const store = createS3BlobStore({
+    bucket: 'bucket',
+    client: { ...makeFakeS3Client(), async getObject() { return { Body: notAStream, ContentLength: 16, ETag: '"odd"' } } },
+  })
+  await assert.rejects(store.getObject({ key: 'data.parquet' }), { errorKind: 'blob_body_unusable' })
+  assert.equal(released, 1, 'a body the adapter refused is released exactly once')
 })
+
+/** A web stream whose reader is already held, which `Readable.fromWeb` rejects. */
+function lockedWebStream() {
+  const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('0123456789ABCDEF')); c.close() } })
+  stream.getReader()
+  return stream
+}
 
 test('s3 BlobStore still reads a genuinely empty object as empty', async () => {
   // The refusal above must not have made emptiness unreportable. Every

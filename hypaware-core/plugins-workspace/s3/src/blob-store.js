@@ -488,7 +488,15 @@ function toReadable(body, key) {
   if (body instanceof Uint8Array) return Readable.from([body])
   if (typeof body === 'string') return Readable.from([Buffer.from(body)])
   if (body && typeof (/** @type {any} */ (body)).getReader === 'function') {
-    return Readable.fromWeb(/** @type {any} */ (body))
+    try {
+      return Readable.fromWeb(/** @type {any} */ (body))
+    } catch {
+      // A callable `getReader` that is not a real `ReadableStream`, or one
+      // already locked: fall through to the refusal below, so the caller gets
+      // the same typed error as any other unusable shape and the body still
+      // goes through `releaseBody`, instead of an untagged TypeError escaping
+      // with the connection behind it held open.
+    }
   }
   releaseBody(body)
   const shape = typeof body === 'object'
