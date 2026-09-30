@@ -95,7 +95,7 @@ export async function runAsk(argv, ctx, deps = {}) {
     // to the one question the user did not ask.
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
-      ctx.stderr.write('hyp ask: no attached client can be started here.\n')
+      ctx.stderr.write('hyp ask: no recorded client can be started here.\n')
       ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
       return 1
     }
