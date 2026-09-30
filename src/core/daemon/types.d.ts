@@ -431,7 +431,16 @@ export interface CaptureHealthReport {
   source: string | null
   /** Last telemetry event the listener saw, or null when none is recorded. */
   lastEventAt: string | null
-  /** Newest activity-probe file mtime, or null when the trail is empty or unprobed. */
+  /**
+   * The newest transcript activity the probe could establish, or null when
+   * the trail is empty or unprobed.
+   *
+   * The newest matching file mtime, which is the cheap first pass. When that
+   * pass alone would report a gap it is replaced by the timestamp of the
+   * newest *conversation* record the bounded confirmation read found, because
+   * a metadata write, a local slash command, or a bare touch moves an mtime
+   * without producing a turn that owed any telemetry.
+   */
   lastTranscriptActivityAt: string | null
   /** The attach timestamp the marker records, or null when unreadable. */
   attachedAt: string | null
@@ -443,9 +452,22 @@ export interface CaptureHealthReport {
    * can be weeks old.
    */
   listenerStartedAt: string | null
-  /** Milliseconds of activity past the capture baseline (0 when none). */
+  /**
+   * Milliseconds of activity past the capture baseline (0 when none).
+   *
+   * Under `state: 'unknown'` this is still the filesystem's unconfirmed
+   * suspicion, which is all it ever was: it is `state`, not this number,
+   * that says whether anything stands behind it.
+   */
   gapMs: number
-  state: 'ok' | 'gap'
+  /**
+   * `gap` is confirmed against transcript content, never against an mtime
+   * alone. `unknown` is the third answer the bounded confirmation read owes
+   * when its budget ran out before the question was settled: it asserts
+   * neither an interruption nor a healthy capture path, and raises no
+   * diagnostic.
+   */
+  state: 'ok' | 'gap' | 'unknown'
 }
 
 /**

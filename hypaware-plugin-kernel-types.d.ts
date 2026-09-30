@@ -215,6 +215,13 @@ export interface PluginClientManifest {
    * captured. Declared here rather than in a core table for the same
    * reason as `attach_probe`: the path is the client's business, and
    * core must be able to read it without importing plugin code.
+   *
+   * An mtime alone only nominates: when it would report a gap, core reads
+   * the tail of the newest files to confirm a real turn is behind the
+   * write, and that read understands Claude Code's JSONL records
+   * (`type`, `isMeta`). A client whose trail is shaped differently gets
+   * the mtime pass and a confirmation read that will not recognise its
+   * turns, so declare one here only alongside that record shape.
    */
   activity_probe?: PluginActivityProbeManifest
   /**
@@ -239,8 +246,10 @@ export interface PluginClientManifest {
 }
 
 /**
- * A client-written directory core may stat (never parse) to answer
- * "when was this client last active?". Same home-relative contract as
+ * A client-written directory core reads to answer "when was this client
+ * last active?": every matching file's mtime, and, only when those mtimes
+ * would report a capture gap, the tail of the newest few (see
+ * `activity_probe` above). Same home-relative contract as
  * `attach_probe.settings_file`: relative to `$HOME`, first segment
  * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
  */
