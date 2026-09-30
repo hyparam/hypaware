@@ -120,7 +120,10 @@ history itself, writes the evidence into `<HYP_HOME>/ask` (one folder,
 rewritten each time), and starts a recorded AI client in that folder to answer
 with one skill. Recorded means attached, or configured with no attach marker
 to write (Codex in its transcript mode); its CLI must also be on `PATH`. If
-more than one such client could be started, it asks which.
+more than one such client could be started, it asks which. A run that cannot
+prompt (input or output is not a terminal, or `HYP_NO_TUI=1`) prints the
+question and launches nothing, gathering no evidence; unlike the with-question
+path below, it takes no fallback client.
 
 With a question, skips the gather and starts a client on that question in the
 current directory, asking which client should answer when more than one could.
