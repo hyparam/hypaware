@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-09-14
 **Extends:** LLP 0155 (#core-group: the `report` group gains a fifth server-facing member, `fix`, riding the same target and credential resolution), LLP 0398 (#run-directory: the launch mechanics of `hyp ask` are reused; the working directory rule gets its other half), LLP 0419 in the server corpus (#record: the evidence and basis lists on the record become the tail of the printed brief)
+**Extended-by:** LLP 0456 (#same-seams: an RFC asking what makes a client first on the piped path, where this decision says the first is taken)
 **Related:** LLP 0198 (#real-launch, #path-probe, #no-preauth: the launch is real, the client must be attached, the session is not pre-authorised), LLP 0402 in the server corpus (the id this verb takes, and the resolve route it calls)
 
 > A published report ranks its recommendations and gives each a page. The
