@@ -248,6 +248,44 @@ test('s3 BlobStore rejects a Content-Range its own ContentLength contradicts', a
   }
 })
 
+test('s3 BlobStore rejects a Content-Range whose total does not exceed its last byte', async () => {
+  // RFC 7233 requires last-byte-pos < complete-length, so `bytes 2-4/3`
+  // describes an object that cannot exist, and that nonsense total is what a
+  // consumer would size the object from. Every other check waves it through:
+  // the span is positive, ContentLength agrees with it, and the offsets are
+  // the ones that were asked for.
+  for (const [range, ContentRange, payload] of /** @type {Array<[string, string, string]>} */ ([
+    // last byte sits past the end of the object the response describes
+    ['bytes=2-4', 'bytes 2-4/3', '234'],
+    ['bytes=16-18', 'bytes 16-18/16', 'GHI'],
+    ['bytes=0-9', 'bytes 0-9/9', '0123456789'],
+    // last byte exactly at the total, one past the last addressable byte
+    ['bytes=5-5', 'bytes 5-5/5', '5'],
+    ['bytes=0-0', 'bytes 0-0/0', '0'],
+  ])) {
+    let destroyed = false
+    const body = Readable.from([Buffer.from(payload)])
+    body.destroy = () => { destroyed = true; return body }
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return { Body: body, ContentLength: payload.length, ContentRange, ETag: '"part"' }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range }),
+      err => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        assert.match(/** @type {Error} */ (err).message, /impossible Content-Range/)
+        return true
+      },
+      `'${ContentRange}' states a total its own last byte is not below`,
+    )
+    assert.ok(destroyed, `unusable body for '${ContentRange}' must be destroyed`)
+  }
+})
+
 test('s3 BlobStore rejects a self-consistent response for a different range', async () => {
   // A store can agree with itself and still answer the wrong question. The
   // suffix case is the one that matters: mishandle `bytes=-3` as "the first
@@ -303,6 +341,8 @@ test('s3 BlobStore passes through a well-formed Content-Range', async () => {
   for (const [range, ContentRange, payload] of /** @type {Array<[string, string, string]>} */ ([
     ['bytes=2-4', 'bytes 2-4/16', '234'],
     ['bytes=2-4', 'bytes 2-4/*', '234'],
+    // whole object as one range: last byte one below the total
+    ['bytes=0-9', 'bytes 0-9/10', '0123456789'],
     // end clamped to the last byte of the object
     ['bytes=8-99', 'bytes 8-15/16', '89ABCDEF'],
     ['bytes=8-', 'bytes 8-15/16', '89ABCDEF'],

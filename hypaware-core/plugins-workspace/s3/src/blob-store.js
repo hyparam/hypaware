@@ -186,18 +186,26 @@ export function createS3BlobStore({ bucket, prefix, client }) {
       // slice it delivered: a well-formed Content-Range whose span agrees
       // with ContentLength. Presence alone is not enough, on either half. A
       // header the consumer cannot parse leaves it unable to run the offset
-      // check the contract assigns it, and a header contradicted by the
-      // declared body length is not describing this body at all. Finally the
-      // stated offsets are checked against the ones asked for, because a
-      // store can be self-consistent and still wrong: mishandle a suffix
-      // range and `bytes=-3` comes back as `bytes 0-2/16`, the first three
-      // bytes of a Parquet footer read under a header with nothing visibly
-      // amiss. Counting the delivered body stays with the consumer; this
-      // never reads the body.
+      // check the contract assigns it, a header whose stated total does not
+      // exceed the last byte it delivered describes an object that cannot
+      // exist (RFC 7233 requires last-byte-pos below complete-length), and a
+      // header contradicted by the declared body length is not describing
+      // this body at all. Finally the stated offsets are checked against the
+      // ones asked for, because a store can be self-consistent and still
+      // wrong: mishandle a suffix range and `bytes=-3` comes back as
+      // `bytes 0-2/16`, the first three bytes of a Parquet footer read under
+      // a header with nothing visibly amiss. Counting the delivered body
+      // stays with the consumer; this never reads the body.
       // @ref LLP 0452#range-contract [implements]: honor the range or fail, checked against both the response's own account of itself and the request
       if (input.range !== undefined) {
         const stated = contentRange === undefined ? null : RANGED_RESPONSE.exec(contentRange)
-        const span = stated === null ? undefined : Number(stated[2]) - Number(stated[1]) + 1
+        const start = Number(stated?.[1])
+        const end = Number(stated?.[2])
+        const span = stated === null ? undefined : end - start + 1
+        // '*' is a total the store declined to state. Unknown is not wrong,
+        // so it leaves both the check below and the suffix end-at-EOF check
+        // with nothing to compare against.
+        const total = stated === null || stated[3] === '*' ? undefined : Number(stated[3])
         // ContentLength comes off the same injectable seam, where a handle
         // forwarding a raw content-length header yields the string '16'
         // rather than a number. A typeof test would skip the cross-check for
@@ -215,11 +223,12 @@ export function createS3BlobStore({ bucket, prefix, client }) {
           detail = `response carried an unusable Content-Range '${contentRange}'`
         } else if (!(/** @type {number} */ (span) >= 1)) {
           detail = `response carried a reversed Content-Range '${contentRange}'`
+        } else if (total !== undefined && end >= total) {
+          detail = `response carried an impossible Content-Range '${contentRange}'`
         } else if (declared !== undefined && declared !== span) {
           detail = `response declared ContentLength ${result.ContentLength} against Content-Range '${contentRange}'`
         } else {
-          const total = stated[3] === '*' ? undefined : Number(stated[3])
-          const contradiction = contradictsRequest(input.range, Number(stated[1]), Number(stated[2]), total)
+          const contradiction = contradictsRequest(input.range, start, end, total)
           if (contradiction !== undefined) {
             detail = `response Content-Range '${contentRange}' ${contradiction}`
           }
