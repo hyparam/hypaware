@@ -295,7 +295,10 @@ export async function runHermesPollTick(runner, ctx) {
           // never make a restart skip work that did not finish.
           let pendingMarks = 0
           let sessionsPersisted = 0
-          let failingSessionId = changed[0].session_id
+          // Non-null only while one session's reconcile is in flight, so the
+          // catch below can tell a reconcile that broke from a flush that did.
+          /** @type {string | number | null} */
+          let reconcilingSessionId = null
           const flushMarks = () => {
             if (pendingMarks === 0) return
             writeHermesWatermark(runner.stateDir, runner.watermark)
@@ -304,9 +307,9 @@ export async function runHermesPollTick(runner, ctx) {
           }
           try {
             for (const change of changed) {
-              failingSessionId = change.session_id
               const session = sessionsById.get(change.session_id)
               if (!session) continue
+              reconcilingSessionId = change.session_id
               const messages = await db.listMessagesForSession(change.session_id)
               // @ref LLP 0449#reconciliation [implements]: replace shifted parts
               // and removed suffixes from a complete visible transcript.
@@ -332,6 +335,7 @@ export async function runHermesPollTick(runner, ctx) {
                 ended_at: change.ended_at,
                 fingerprint: change.fingerprint,
               }
+              reconcilingSessionId = null
               if (++pendingMarks >= WATERMARK_FLUSH_SESSIONS) flushMarks()
             }
           } catch (err) {
@@ -350,27 +354,37 @@ export async function runHermesPollTick(runner, ctx) {
               // sessions are not "changed" again. They reach disk only if
               // some other session changes later, since a flush rewrites the
               // whole map; a restart before then re-scans them, which is the
-              // benign pre-fix behaviour. Record the failure, because this is
-              // the one path where nothing else reports an unwritable
-              // sidecar: the tick's own error is the reconcile's, and
-              // `sessions_persisted` short of `sessions_examined` reads
-              // exactly like a healthy trailing batch.
+              // benign pre-fix behaviour. Record the failure with the tick's
+              // progress: when a reconcile is the tick's error nothing else
+              // reports an unwritable sidecar, and `sessions_persisted` short
+              // of `sessions_examined` otherwise reads exactly like a healthy
+              // trailing batch. When the in-loop flush is the tick's error,
+              // this record is the one that names the write as the step that
+              // broke.
               ctx.log.warn('hermes.watermark_flush_failed', {
                 component: 'hermes',
                 operation: 'hermes.poll',
                 error_kind: errorKind(flushErr),
                 error: flushErr instanceof Error ? flushErr.message : String(flushErr),
+                sessions_persisted: sessionsPersisted,
+                sessions_examined: changed.length,
               })
             }
-            ctx.log.warn('hermes.session_reconcile_failed', {
-              component: 'hermes',
-              operation: 'hermes.poll',
-              status: 'partial',
-              error_kind: errorKind(err),
-              session_id: String(failingSessionId),
-              sessions_persisted: sessionsPersisted,
-              sessions_examined: changed.length,
-            })
+            // The in-loop flush throws from inside this `try` as well, with
+            // every reconcile committed. Naming a session then points an
+            // operator at work that succeeded, so this fires only when a
+            // reconcile is what broke.
+            if (reconcilingSessionId !== null) {
+              ctx.log.warn('hermes.session_reconcile_failed', {
+                component: 'hermes',
+                operation: 'hermes.poll',
+                status: 'partial',
+                error_kind: errorKind(err),
+                session_id: String(reconcilingSessionId),
+                sessions_persisted: sessionsPersisted,
+                sessions_examined: changed.length,
+              })
+            }
             throw err
           }
           flushMarks()
