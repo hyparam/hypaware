@@ -451,6 +451,10 @@ async function chooseQuestion(opts, launchers) {
  * Pick which launcher answers. One launcher needs no screen; more than one
  * gets a framed select. Cancelling returns `undefined` ("not now").
  *
+ * `signal` is a caller-owned deadline, forwarded to the prompt: aborting
+ * it reads here as a cancel, so a caller that cannot assume anyone is at
+ * the terminal gets `undefined` rather than a wait with no end.
+ *
  * @param {{
  *   launchers: FirstAskLauncher[],
  *   title: string,
@@ -458,10 +462,11 @@ async function chooseQuestion(opts, launchers) {
  *   select?: RunWizardFirstAskOptions['select'],
  *   stdin?: RunWizardFirstAskOptions['stdin'],
  *   stdout?: RunWizardFirstAskOptions['stdoutStream'],
+ *   signal?: AbortSignal,
  * }} args
  * @returns {Promise<FirstAskLauncher | undefined>}
  */
-export async function chooseLauncher({ launchers, title, env, select: ask = select, stdin, stdout }) {
+export async function chooseLauncher({ launchers, title, env, select: ask = select, stdin, stdout, signal }) {
   if (launchers.length === 1) return launchers[0]
   /** @type {string | number} */
   let client
@@ -472,6 +477,7 @@ export async function chooseLauncher({ launchers, title, env, select: ask = sele
       options: launchers.map((l) => ({ value: l.client, label: l.label })),
       ...(stdin ? { stdin } : {}),
       ...(stdout ? { stdout } : {}),
+      ...(signal ? { signal } : {}),
       env,
     })
   } catch (err) {

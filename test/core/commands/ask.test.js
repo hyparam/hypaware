@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -219,4 +220,126 @@ test('runAsk: --list on a host with nothing launchable names the condition for a
   const text = stdout.text()
   assert.match(text, /Once an attached client can be started here \(see `hyp status`\), run `hyp ask` again/)
   assert.doesNotMatch(text, /Run `hyp ask` to start your client on it/)
+})
+
+/* ------------------------- the client picker's deadline --------------------- */
+
+// A TTY says a terminal is attached, never that a person is reading it. Under
+// a pty with nothing typed into it - `docker run -t`, a tty-allocating CI
+// runner, expect - `isTTY` reads exactly as a human's terminal does, so
+// `hyp ask "<question>"` drew the picker and waited for a keypress that never
+// came: the named question was never asked and the run only ended when
+// something killed it (#2373). These drive the whole multi-client branch of
+// `runAsk`, which nothing reached before: the TTY gate, the picker, and the
+// fallback a run nobody answers takes.
+
+/**
+ * Two launchable, recorded clients on a throwaway `HOME`: codex in its
+ * default transcript mode (configured, attach n/a) and an attached opencode.
+ * Each stub records that it ran, so which one was started is a file check
+ * rather than a stream the test runner also owns.
+ */
+async function twoLauncherFixture() {
+  const hypHome = await freshHome()
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  const bin = path.join(home, 'bin')
+  await fs.mkdir(bin, { recursive: true })
+  const ran = path.join(home, 'ran.txt')
+  for (const name of ['codex', 'opencode']) {
+    await fs.writeFile(path.join(bin, name), `#!/bin/sh\nprintf '%s' '${name}' > '${ran}'\n`, { mode: 0o755 })
+  }
+  // opencode's attach marker, so the status probe reports it recorded.
+  const plugins = path.join(home, '.config', 'opencode', 'plugins')
+  await fs.mkdir(plugins, { recursive: true })
+  await fs.writeFile(path.join(plugins, 'hypaware.js'), '// HYPWARE_OPENCODE_PLUGIN v1\n')
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }, { name: '@hypaware/opencode' }] })
+  )
+  return {
+    env: { HOME: home, HYP_HOME: hypHome, PATH: bin },
+    async started() { return fs.readFile(ran, 'utf8').catch(() => '') },
+  }
+}
+
+/** A stdout that claims a terminal, as a pty's does. */
+function makeTtyOut() {
+  const buf = makeBuf()
+  return Object.assign(buf, { isTTY: true, columns: 80, rows: 24 })
+}
+
+/** A stdin that claims a terminal and delivers nothing, as an unattended pty's does. */
+function makeSilentTtyIn() {
+  const stdin = new EventEmitter()
+  return Object.assign(stdin, {
+    isTTY: true,
+    isRaw: false,
+    /** @param {boolean} v */
+    setRawMode(v) { this.isRaw = v; return this },
+    resume() { return this },
+    pause() { return this },
+    isPaused() { return false },
+  })
+}
+
+test('runAsk "<question>": an allocated tty nobody answers starts a client instead of waiting for a keypress', async () => {
+  const fixture = await twoLauncherFixture()
+  const stdout = makeTtyOut()
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: fixture.env, stdout, stderr: makeBuf(), stdin: makeSilentTtyIn(),
+  }))
+  // The real prompt, drawn on the real runtime: what is stubbed is the
+  // deadline's length, not the branch under test.
+  const code = await runAsk(['which sessions touched the auth module'], ctx, { pickDeadlineMs: 50 })
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.match(stdout.text(), /Starting Codex\.\.\./)
+  assert.equal(await fixture.started(), 'codex')
+})
+
+test('runAsk "<question>": a terminal someone answers still starts the client they picked', async () => {
+  const fixture = await twoLauncherFixture()
+  const stdout = makeTtyOut()
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: fixture.env, stdout, stderr: makeBuf(), stdin: makeSilentTtyIn(),
+  }))
+  /** @type {Array<string | number>} */
+  let offered = []
+  const code = await runAsk(['which sessions touched the auth module'], ctx, {
+    /** @param {any} spec */
+    select: async (spec) => {
+      offered = spec.options.map((/** @type {any} */ o) => o.value)
+      return 'opencode'
+    },
+  })
+  assert.equal(code, 0)
+  assert.deepEqual(offered, ['codex', 'opencode'])
+  assert.equal(await fixture.started(), 'opencode')
+  assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
+})
+
+test('runAsk "<question>": escaping the picker is "not now", not the deadline fallback', async () => {
+  const fixture = await twoLauncherFixture()
+  const stdout = makeTtyOut()
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: fixture.env, stdout, stderr: makeBuf(), stdin: makeSilentTtyIn(),
+  }))
+  const code = await runAsk(['which sessions touched the auth module'], ctx, {
+    select: async () => { const e = new Error('cancelled'); e.name = 'PromptCancelledError'; throw e },
+  })
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /Nothing started\./)
+  assert.equal(await fixture.started(), '', 'an escape must start nothing')
+})
+
+test('runAsk "<question>": a piped run never reaches the picker at all', async () => {
+  const fixture = await twoLauncherFixture()
+  const { ctx } = makeCtx({ env: fixture.env })
+  let asked = false
+  const code = await runAsk(['which sessions touched the auth module'], ctx, {
+    select: async () => { asked = true; return 'opencode' },
+  })
+  assert.equal(code, 0)
+  assert.equal(asked, false, 'a run off a terminal must not prompt')
+  assert.equal(await fixture.started(), 'codex')
 })

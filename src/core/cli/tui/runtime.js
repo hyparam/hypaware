@@ -44,6 +44,8 @@ export async function run(initialState, io) {
   const region = createLiveRegion(stdout)
   /** @type {((s: string | undefined, k: ReadlineKey) => void) | null} */
   let onKeypress = null
+  /** @type {(() => void) | null} */
+  let onAbort = null
   let cleanedUp = false
 
   // Snapshot raw mode so we can restore it on exit.
@@ -59,6 +61,10 @@ export async function run(initialState, io) {
     if (onKeypress) {
       stdin.removeListener('keypress', onKeypress)
       onKeypress = null
+    }
+    if (onAbort) {
+      try { io.signal?.removeEventListener('abort', onAbort) } catch {}
+      onAbort = null
     }
     try {
       if (typeof stdin.setRawMode === 'function') {
@@ -118,6 +124,18 @@ export async function run(initialState, io) {
       }
       stdin.on('keypress', onKeypress)
       if (typeof stdin.resume === 'function') stdin.resume()
+      // An abort settles the prompt exactly as escape does, chrome unwound
+      // before the caller sees the rejection, so a caller may still spawn
+      // into the terminal it inherits.
+      // @ref LLP 0198#real-launch [constrained-by]: the chrome is fully unwound before the spawn
+      if (io.signal) {
+        onAbort = () => {
+          cleanup()
+          reject(new PromptCancelledError())
+        }
+        if (io.signal.aborted) onAbort()
+        else io.signal.addEventListener('abort', onAbort, { once: true })
+      }
     }).finally(() => cleanup())
   } finally {
     activeRun = false
