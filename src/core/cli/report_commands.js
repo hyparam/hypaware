@@ -776,6 +776,13 @@ export async function runReportFix(argv, ctx, deps = {}) {
   // remote this run did; the credential reaches it through the inherited
   // environment, as every `hyp` call the client makes already relies on.
   const readCommand = ['hyp report get', recommendation.id, ...targetFlags(gate.params)].join(' ')
+  // `readCommand` names the target only when the operator typed one; a bare
+  // run resolved its target from config instead. A `<target>` placeholder
+  // in the hint below would leave the client nothing to substitute, so it
+  // would fall back to the local cache the sentence warns against - name
+  // the resolved target instead.
+  const orgFlag = gate.params.org !== undefined ? ` --org ${shellWord(String(gate.params.org))}` : ''
+  const queryFlags = `--remote ${shellWord(resolved.target)}${orgFlag}`
   const prompt =
     `Run \`${readCommand}\` and read its output. It is one recommendation from a HypAware usage report (${where}): "${title}", ` +
     'followed by the evidence it cites and the queries the report ran to reach it. ' +
@@ -785,7 +792,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
     'Implement the justified change in this repository, verify it the way this repository verifies changes, ' +
     'and summarise what you changed. If it does not apply to this repository, say why instead of forcing it.' +
     (recommendation.basis.length > 0
-      ? ' Re-run the queries with `hyp query sql` and `--remote <target>` to check the server finding; local queries check only this machine\'s recordings.'
+      ? ` Re-run the queries with \`hyp query sql ${queryFlags}\` to check the server finding; local queries check only this machine's recordings.`
       : '')
   ctx.stdout.write(`\nStarting ${launcher.label} on "${esc(title)}"...\n\n`)
   const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd: ctx.cwd, env: ctx.env })
