@@ -10,7 +10,7 @@ import path from 'node:path'
 import { installLaunchAgent } from '../../src/core/daemon/macos.js'
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
 import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus } from '../../src/core/daemon/install.js'
-import { runDaemonStop } from '../../src/core/commands/daemon.js'
+import { runDaemonStop, runDaemonUninstall } from '../../src/core/commands/daemon.js'
 import { clearStalePidFile, pidFilePath, processIsAlive, processingStateRoot, writePidFile } from '../../src/core/daemon/pid.js'
 
 /** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
@@ -863,4 +863,208 @@ test('the OS agrees: a live pid this uid may not signal keeps its pid file', (t)
   clearStalePidFile(stateRoot)
 
   assert.equal(fs.readFileSync(pidFilePath(stateRoot), 'utf8'), before, 'the clear left pid 1\'s file alone')
+})
+
+// Issue #2299. `hyp daemon uninstall` stranded the same two pid files a stop
+// does, and for a stronger reason: the teardown unlinks the plist / unit, so
+// nothing will ever rewrite them.
+
+/**
+ * `hyp daemon uninstall` against a staged install, with the service teardown
+ * stubbed through its deps seam so no real launchd or systemd domain is
+ * reached.
+ *
+ * @param {Awaited<ReturnType<typeof stageServiceDaemon>>} staged
+ */
+async function uninstallThroughSeam(staged) {
+  return await runDaemonUninstall([], staged.ctx, { uninstallDaemon: async function() {} })
+}
+
+test('an uninstall clears both stale pid files the torn-down daemon left behind', async () => {
+  const home = tmpHome('uninstall-stale-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingRoot, deadPid)
+
+    const code = await uninstallThroughSeam(staged)
+
+    assert.equal(code, 0, staged.err())
+    assert.match(staged.out(), /Daemon removed/)
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the stale gateway pid file outlived the uninstall')
+    assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the stale processing pid file outlived the uninstall')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The guard that makes the clear safe, against a real spawned child rather
+// than a stubbed liveness function. Never `process.pid`, which a regression
+// that signalled the file's pid would take out with the suite.
+test('an uninstall leaves the pid files of a live process byte-identical', async (t) => {
+  const home = tmpHome('uninstall-live-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+    t.after(() => live.kill('SIGKILL'))
+    assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(staged.stateRoot, live.pid)
+    stageAbandonedPidFile(processingRoot, live.pid)
+    const gatewayBefore = fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8')
+    const processingBefore = fs.readFileSync(pidFilePath(processingRoot), 'utf8')
+
+    const code = await uninstallThroughSeam(staged)
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8'), gatewayBefore, 'a live gateway pid keeps its file')
+    assert.equal(fs.readFileSync(pidFilePath(processingRoot), 'utf8'), processingBefore, 'a live processing pid keeps its file')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The same property against the real signal table: pid 1 belongs to root and
+// the runner does not, so signal 0 to it is the unsignalable-but-live case the
+// OS itself produces. Skipped where the host does not offer it, so the
+// assertion can never pass for the wrong reason.
+test('the OS agrees: an uninstall keeps the file of a live pid this uid may not signal', async (t) => {
+  /** @type {unknown} */
+  let thrown
+  try {
+    process.kill(1, 0)
+  } catch (err) {
+    thrown = err
+  }
+  const code = thrown && /** @type {NodeJS.ErrnoException} */ (thrown).code
+  if (code !== 'EPERM') {
+    return t.skip(`kill(1, 0) ${thrown ? `raised ${String(code)}` : 'succeeded'} here, so pid 1 is not unsignalable`)
+  }
+
+  const home = tmpHome('uninstall-eperm-pid1')
+  try {
+    const staged = await stageServiceDaemon(home)
+    assert.equal(processIsAlive(1), true, 'pid 1 is running, whether or not this uid may signal it')
+    stageAbandonedPidFile(staged.stateRoot, 1)
+    const before = fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8')
+
+    assert.equal(await uninstallThroughSeam(staged), 0, staged.err())
+
+    assert.equal(fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8'), before, 'the uninstall left pid 1\'s file alone')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// Best-effort, and each file on its own. The teardown the user asked for has
+// already happened, so a pid file that cannot be removed is no reason to call
+// a completed uninstall a failure, and no reason to skip the other root: the
+// shape #2300 records on the stop path.
+test('a gateway pid file that cannot be removed fails neither the uninstall nor the other root', async (t) => {
+  const home = tmpHome('uninstall-unremovable-pid')
+  const staged = await stageServiceDaemon(home)
+  const runDir = path.dirname(pidFilePath(staged.stateRoot))
+  t.after(() => {
+    fs.chmodSync(runDir, 0o755)
+    fs.rmSync(home, { recursive: true, force: true })
+  })
+  if (process.getuid?.() === 0) {
+    return t.skip('root ignores the directory mode, so the unlink cannot be made to fail')
+  }
+  const deadPid = 999999
+  const processingRoot = processingStateRoot(staged.stateRoot)
+  stageAbandonedPidFile(staged.stateRoot, deadPid)
+  stageAbandonedPidFile(processingRoot, deadPid)
+  // Readable but unlinkable: the unlink raises EACCES, the error
+  // `clearPidFile` rethrows rather than swallows.
+  fs.chmodSync(runDir, 0o555)
+
+  const code = await uninstallThroughSeam(staged)
+
+  assert.equal(code, 0, staged.err())
+  assert.match(staged.out(), /Daemon removed/)
+  assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), true, 'the fixture needs an unremovable file')
+  assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the second root was skipped by the first one failing')
+})
+
+// The order the clear sits in, which nothing else observes. Before the
+// teardown the plist / unit is still on disk, so the manager still holds
+// `KeepAlive` / `Restart=always` and a daemon inside its restart gap is about
+// to be brought back (#2261): the pid it then writes is the one an early
+// clear would have deleted out from under it. The deps seam is the only
+// vantage point that can see which ran first, so it is where the order is
+// pinned.
+test('the stale clear runs after the service teardown, never before it', async () => {
+  const home = tmpHome('uninstall-clear-after-teardown')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingRoot, deadPid)
+    // Both roots, because the order is a property of each file rather than
+    // of the call: a clear split so one root goes early and the other late
+    // leaves that root exposed for the whole teardown while a single-file
+    // snapshot still reads as ordered.
+    /** @type {boolean | undefined} */
+    let gatewayWhenTornDown
+    /** @type {boolean | undefined} */
+    let processingWhenTornDown
+
+    const code = await runDaemonUninstall([], staged.ctx, {
+      uninstallDaemon: async function() {
+        // Sampled a turn of the loop in, so this is the teardown's
+        // completion and not its first synchronous instant. A caller that
+        // started the teardown without awaiting it would let the clear run
+        // inside this tick, which is the returned-before-the-service-is-gone
+        // shape #2329 records on darwin, and a snapshot taken on entry reads
+        // it as ordered.
+        await new Promise(function(resolve) { setImmediate(resolve) })
+        gatewayWhenTornDown = fs.existsSync(pidFilePath(staged.stateRoot))
+        processingWhenTornDown = fs.existsSync(pidFilePath(processingRoot))
+      },
+    })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(gatewayWhenTornDown, true, 'the gateway clear ran while the respawn policy was still installed')
+    assert.equal(processingWhenTornDown, true, 'the processing clear ran while the respawn policy was still installed')
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the gateway clear did not run after the teardown either')
+    assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the processing clear did not run after the teardown either')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The other side of that order. A teardown that threw left the plist / unit
+// on disk with its respawn policy intact, so the daemon the clear would read
+// as dead is one the manager is still about to bring back: the file stays,
+// and the command still reports the failure the operator has to act on.
+test('a teardown that failed clears nothing, because the respawn policy is still installed', async () => {
+  const home = tmpHome('uninstall-failed-teardown')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingStateRoot(staged.stateRoot), deadPid)
+
+    const code = await runDaemonUninstall([], staged.ctx, {
+      // The failure the real teardown can actually reach: both managers
+      // swallow their stop and disable, so the throw that arrives here is
+      // `unlinkServiceFile` failing on something other than ENOENT, which
+      // is precisely the case that leaves the plist / unit on disk.
+      uninstallDaemon: async function() { throw new Error('could not remove the unit file') },
+    })
+
+    assert.equal(code, 1)
+    assert.match(staged.err(), /could not remove the unit file/)
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), true, 'a failed teardown cleared the gateway pid file anyway')
+    assert.equal(fs.existsSync(pidFilePath(processingStateRoot(staged.stateRoot))), true, 'a failed teardown cleared the processing pid file anyway')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
 })
