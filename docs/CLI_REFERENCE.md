@@ -332,7 +332,7 @@ hyp report generate "Cover last week and focus on repeated debugging work"
 ```
 
 Launches a recorded AI client with its installed `hypaware-report` skill in
-the caller's current working directory. Recorded means what it means for
+the caller's current working directory. Recorded means what it does for
 `hyp ask`: attached, or configured with no attach marker to write (Codex in
 its transcript mode). Its CLI must also be on `PATH`, and the
 `hypaware-report` skill must already be installed for it. Optional quoted
