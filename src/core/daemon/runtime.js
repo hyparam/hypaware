@@ -1121,6 +1121,12 @@ export async function runDaemon(opts = {}) {
           const err = error instanceof Error ? error : new Error(String(error))
           span.recordException(err)
           span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
+          // The bag stamped `status: 'ok'` at open and the exporters flatten
+          // attributes, not status codes, so a tick that threw exported an
+          // attribute calling itself a success beside its own ERROR code
+          // (hyparam/hypaware#2363). `withSpan` writes this line for the
+          // spans it owns; this tick owns its own, so it writes it here.
+          span.setAttribute('status', 'failed')
           span.setAttribute('error_kind', attrs.error_kind ?? 'unhandled_exception')
           throw err
         } finally {
