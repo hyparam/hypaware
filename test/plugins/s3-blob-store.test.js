@@ -418,6 +418,181 @@ test('s3 BlobStore drops a contentRange volunteered on a whole-object read', asy
   }
 })
 
+test('s3 BlobStore reads a web ReadableStream body instead of reporting it empty', async () => {
+  // The handle is an injectable public seam and @aws-sdk/client-s3 ships a
+  // fetch-based request handler whose Body is a WHATWG ReadableStream, which
+  // has no `pipe`. Falling through to an empty stream would answer a footer
+  // read with zero bytes beside a contentLength that says otherwise, and no
+  // caller can tell that from an object that really is empty.
+  for (const range of /** @type {Array<string | undefined>} */ ([undefined, 'bytes=0-15'])) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        return {
+          Body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('0123456789'))
+              controller.enqueue(new TextEncoder().encode('ABCDEF'))
+              controller.close()
+            },
+          }),
+          ContentLength: 16,
+          ...(range !== undefined ? { ContentRange: 'bytes 0-15/16' } : {}),
+          ETag: '"web"',
+        }
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    const got = await store.getObject({ key: 'data.parquet', ...(range !== undefined ? { range } : {}) })
+    assert.ok(got)
+    const chunks = []
+    for await (const chunk of got.body) chunks.push(Buffer.from(chunk))
+    assert.equal(Buffer.concat(chunks).toString('utf8'), '0123456789ABCDEF')
+    assert.equal(got.contentLength, 16)
+  }
+})
+
+test('s3 BlobStore refuses a body shape it cannot read rather than calling it empty', async () => {
+  // Zero bytes is the worst reading of "this shape is unknown": it is exactly
+  // what a genuinely empty object looks like, so the caller cannot tell a
+  // lost body from real data. Every shape outside the declared union throws.
+  for (const [what, Body] of /** @type {Array<[string, any]>} */ ([
+    ['async iterable without pipe', { async *[Symbol.asyncIterator]() { yield Buffer.from('0123456789ABCDEF') } }],
+    ['plain object', { bytes: '0123456789ABCDEF' }],
+    ['Blob', new Blob(['0123456789ABCDEF'])],
+    ['number', 42],
+    ['boolean', true],
+    ['array of chunks', [Buffer.from('0123456789ABCDEF')]],
+    // `getReader` is the web-stream probe, so a body that only looks like one
+    // must not escape as the untagged TypeError `Readable.fromWeb` raises.
+    ['callable getReader that is not a ReadableStream', { getReader() { return { read: async () => ({ done: true }) } } }],
+    ['web ReadableStream already locked', lockedWebStream()],
+  ])) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() { return { Body, ContentLength: 16, ETag: '"odd"' } },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet' }),
+      (err) => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_body_unusable')
+        assert.match(/** @type {Error} */ (err).message, /unusable shape/)
+        return true
+      },
+      `${what} must not pass as an empty object`,
+    )
+  }
+  // A body `Readable.fromWeb` will not take is still released, not held: the
+  // refusal path must not reintroduce the leak `releaseBody` exists to close.
+  let released = 0
+  const notAStream = /** @type {any} */ ({ getReader() { return { read: async () => ({ done: true }) } }, cancel() { released += 1 } })
+  const store = createS3BlobStore({
+    bucket: 'bucket',
+    client: { ...makeFakeS3Client(), async getObject() { return { Body: notAStream, ContentLength: 16, ETag: '"odd"' } } },
+  })
+  await assert.rejects(store.getObject({ key: 'data.parquet' }), { errorKind: 'blob_body_unusable' })
+  assert.equal(released, 1, 'a body the adapter refused is released exactly once')
+  // The adapter's own error is what says whether the body was not a stream or
+  // was a stream someone else already holds. A refusal reported as shape
+  // `ReadableStream` is unreadable without it, since that shape is the one
+  // the union says is adapted. It has to reach the message and not only the
+  // cause, because a consumer forwards the message alone: format-iceberg's
+  // `describeError` returns `err.message`.
+  for (const [what, body, reason] of /** @type {Array<[string, any, RegExp]>} */ ([
+    ['a callable getReader that is not a stream', notAStream, /must be an instance of ReadableStream/],
+    ['a locked ReadableStream', lockedWebStream(), /locked/],
+  ])) {
+    const refused = createS3BlobStore({
+      bucket: 'bucket',
+      client: { ...makeFakeS3Client(), async getObject() { return { Body: body, ContentLength: 16, ETag: '"odd"' } } },
+    })
+    const err = await refusalError(refused)
+    assert.ok(err.cause instanceof Error, `${what} keeps the adapter's error as cause`)
+    assert.match(err.message, reason, `${what} names the reason in the message a consumer forwards`)
+  }
+})
+
+/**
+ * Read back the error `getObject` throws for a body it will not read.
+ *
+ * @param {BlobStore} store
+ * @returns {Promise<Error & { cause?: unknown }>}
+ */
+async function refusalError(store) {
+  try {
+    await store.getObject({ key: 'data.parquet' })
+  } catch (err) {
+    return /** @type {Error & { cause?: unknown }} */ (err)
+  }
+  throw new Error('getObject resolved where it had to throw')
+}
+
+/** A web stream whose reader is already held, which `Readable.fromWeb` rejects. */
+function lockedWebStream() {
+  const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('0123456789ABCDEF')); c.close() } })
+  stream.getReader()
+  return stream
+}
+
+test('s3 BlobStore still reads a genuinely empty object as empty', async () => {
+  // The refusal above must not have made emptiness unreportable. Every
+  // in-contract shape of a zero-byte body still succeeds with zero bytes.
+  for (const [what, Body] of /** @type {Array<[string, any]>} */ ([
+    ['node stream', Readable.from([])],
+    ['node stream of one empty chunk', Readable.from([Buffer.alloc(0)])],
+    ['Uint8Array', new Uint8Array(0)],
+    ['string', ''],
+    ['web ReadableStream', new ReadableStream({ start(c) { c.close() } })],
+  ])) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() { return { Body, ContentLength: 0, ETag: '"empty"' } },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    const got = await store.getObject({ key: 'empty.bin' })
+    assert.ok(got, `an empty ${what} body is an empty object, not a missing one`)
+    const chunks = []
+    for await (const chunk of got.body) chunks.push(Buffer.from(chunk))
+    assert.equal(Buffer.concat(chunks).byteLength, 0)
+    assert.equal(got.contentLength, 0)
+  }
+})
+
+test('s3 BlobStore releases a web ReadableStream body on the rejection path', async () => {
+  // The range guard releases the body it refuses so the connection is not
+  // held. A web stream has no destroy(), so a destroy-only release left it
+  // open, and the cancel() that does release it returns a promise whose
+  // rejection must not surface as an unhandled rejection or replace the
+  // typed error the caller is waiting for.
+  for (const cancel of /** @type {Array<() => void | Promise<void>>} */ ([
+    () => {},
+    () => Promise.reject(new Error('cancel failed')),
+  ])) {
+    let cancelled = false
+    const body = new ReadableStream({
+      start(c) { c.enqueue(new TextEncoder().encode('0123456789ABCDEF')); c.close() },
+      cancel() { cancelled = true; return cancel() },
+    })
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() { return { Body: body, ContentLength: 16, ETag: '"web"' } },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range: 'bytes=2-4' }),
+      (err) => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_not_honored')
+        return true
+      },
+    )
+    assert.equal(cancelled, true, 'a cancel-only body is released, not leaked')
+  }
+  // A settled microtask turn: a swallowed cancel() rejection would surface
+  // as an unhandled rejection by now if it were not absorbed.
+  await new Promise((resolve) => setImmediate(resolve))
+})
+
 test('s3 BlobStore getObject returns null when AWS reports NotFound', async () => {
   const client = makeFakeS3Client()
   const store = createS3BlobStore({ bucket: 'my-bucket', client })

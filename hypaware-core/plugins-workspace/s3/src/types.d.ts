@@ -125,7 +125,15 @@ export interface S3CommandsHandle {
     IfNoneMatch?: string
   }): Promise<{ ETag?: string; VersionId?: string }>
   getObject(input: { Bucket: string; Key: string; Range?: string }): Promise<{
-    Body: NodeJS.ReadableStream | Uint8Array | string | null | undefined
+    /**
+     * A Node stream is what the bundled factory produces. A WHATWG
+     * `ReadableStream` is admitted alongside it because this handle is an
+     * injectable public seam and `@aws-sdk/client-s3` carries a fetch-based
+     * request handler whose Body is one; the provider adapts it with
+     * `Readable.fromWeb`. A shape outside this union is refused, never read
+     * as an object of zero bytes.
+     */
+    Body: NodeJS.ReadableStream | ReadableStream | Uint8Array | string | null | undefined
     ContentLength?: number
     ContentRange?: string
     ETag?: string
