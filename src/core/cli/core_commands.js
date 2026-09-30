@@ -131,7 +131,7 @@ function buildCoreCommands(registry) {
       bootProfile: 'none',
       summary: 'Inspect and control optional product telemetry',
       usage: coreUsage('telemetry'),
-      help: 'Off by default. Local mode retains a bounded preview queue. Organization mode uses the existing enrolled gateway. Vendor sharing and standalone registration are unavailable. Preview prints the exact next queued payload. Off removes pending copies, not records already accepted remotely.',
+      help: 'Off by default on a standalone install; automatic for an enrolled organization unless a preference is saved. Local mode retains a bounded preview queue. Organization mode uses the existing enrolled gateway. Vendor sharing and standalone registration are unavailable. Preview prints the exact next queued payload. Off removes pending copies, not records already accepted remotely.',
       run: runTelemetry,
     },
     {

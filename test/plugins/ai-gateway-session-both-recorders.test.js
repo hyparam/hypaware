@@ -162,7 +162,7 @@ test('status reports recorded when any advertised recorder does not hold the id'
       const human = fakeCtx({ env: { HYP_HOME: home, CLAUDE_CODE_SESSION_ID: SESSION } })
       assert.equal(await runSessionStatus([], human.ctx), 1)
       const text = human.stdout()
-      assert.match(text, /recorder gateway at .*: ignored \(1 ignored\)/)
+      assert.match(text, /recorder gateway at .*: ignored \(1 session on its ignore list\)/)
       assert.equal((text.match(/^recorder /gm) ?? []).length, 1, 'only the non-headline recorder gets a line')
       assert.doesNotMatch(text, /recorder claude-telemetry at/)
       // Both endpoints still carry the per-responder trust disclosure.

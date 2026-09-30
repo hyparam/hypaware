@@ -155,8 +155,9 @@ items in order:
 Session controls contact every live recorder that advertises the session
 control route, including the gateway and the Claude telemetry listener. A
 successful `hyp session status` therefore reflects all available recorders.
-The ignored-session set is in memory: restarting the daemon clears it, and a
-forked client session has a new session ID.
+An ignored session is saved on this machine and stays ignored across daemon
+restarts until you run `hyp session unignore`. A forked client session has a
+new session ID and needs its own ignore.
 
 ## Reconfigure an installation
 
@@ -268,8 +269,10 @@ Read the plan or warning before you approve any of these operations:
   destination and exclusion plan, then asks for confirmation. Use
   `hyp sync --dry-run` to send nothing.
 - `hyp privacy purge` permanently deletes matching rows from this machine's
-  local cache and sweeps the Claude raw-body spool. It doesn't delete copies
-  that were already exported or sent to HypAware Cloud.
+  local cache and sweeps the Claude raw-body spool. A `--session` purge also
+  deletes that session from your configured and enrolled servers unless you
+  add `--local-only`. The other forms don't delete copies that were already
+  exported or sent to HypAware Cloud.
 - `hyp report delete` permanently deletes a report and its artifacts for the
   entire organization on the selected remote.
 - `hyp plugin install` and an updating `hyp plugin update PLUGIN` can fetch and

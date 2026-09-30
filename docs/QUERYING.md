@@ -117,7 +117,7 @@ hyp query sql "select date, count(distinct session_id) as sessions
 Replace `team` with a configured target. A bare `--remote` uses the default.
 [Team sign-in](TEAM_SETUP.md) normally configures remote access;
 `hyp remote login --no-forward` signs in for queries without enrolling this
-machine for forwarding.
+machine for sync.
 
 `hyp cache status`, `hyp query schema`, and `hyp query overview` describe local
 state. They are not a remote inventory. A remote can have different

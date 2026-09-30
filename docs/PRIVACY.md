@@ -12,13 +12,19 @@ you enroll.
 Each capture source you enable during `hyp setup` records into the local
 query cache under `~/.hyp` (`HYP_HOME`):
 
-| Source          | What lands in the cache                                                       |
-|-----------------|-------------------------------------------------------------------------------|
-| `claude`        | Claude Code conversations: prompts, responses, tool calls, working directory  |
-| `codex`         | Codex conversations, same shape, from both the Codex CLI and Codex Desktop    |
-| `raw-anthropic` | Raw Anthropic API request / response traffic routed through the local gateway |
-| `raw-openai`    | Raw OpenAI API traffic, same shape                                            |
-| `otel`          | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener       |
+| Source           | What lands in the cache                                                                              |
+|------------------|------------------------------------------------------------------------------------------------------|
+| `claude`         | Claude Code conversations: prompts, responses, tool calls, working directory                         |
+| `claude-desktop` | Claude Desktop conversations, same shape, imported from its local transcripts                        |
+| `codex`          | Codex conversations, same shape, from both the Codex CLI and Codex Desktop                           |
+| `cursor`         | Cursor editor and CLI conversations, including the file contents and command output its tools see    |
+| `opencode`       | OpenCode conversations, same shape, from both the OpenCode CLI and Desktop                           |
+| `pi`             | Pi conversations, same shape                                                                         |
+| `openclaw`       | OpenClaw conversations, same shape                                                                   |
+| `hermes`         | Hermes Agent conversations, same shape, read from Hermes's local state                               |
+| `raw-anthropic`  | Raw Anthropic API request / response traffic routed through the local gateway                        |
+| `raw-openai`     | Raw OpenAI API traffic, same shape                                                                   |
+| `otel`           | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener                              |
 
 Recording is content-level: conversation rows include the actual message
 text, not just metadata. Rows age out of the local cache after the
@@ -42,7 +48,7 @@ Three things keep it from becoming a second record:
 - The directory has a size cap (512 MB by default, `spool_max_bytes` in the
   `@hypaware/claude` config). Past it the oldest files go first, so a stopped
   daemon costs detail, never disk.
-- `hyp purge` empties it, whatever else you asked that purge to delete, and
+- `hyp privacy purge` empties it, whatever else you asked that purge to delete, and
   `hyp detach claude` empties it on the way out.
 
 ### If you turned on proxy mode
@@ -113,11 +119,11 @@ records a proxy attach.
 - **Local only**: nowhere. Everything stays in the local cache (plus
   local Parquet exports if you enabled them). There is no phone-home.
 - **HypAware Cloud** (after choosing Sync to the cloud in setup,
-  `hyp remote login`, or `hyp join`): recorded rows are forwarded to
+  `hyp remote login`, or `hyp join`): recorded rows are synced to
   HypAware Cloud, including conversation content. The controls below
   decide which rows that covers.
 
-HypAware Cloud operators can read forwarded data across every org, and each
+HypAware Cloud operators can read synced data across every org, and each
 such read is recorded in that org's audit trail.
 
 An enrolled machine also reports [product telemetry](PRODUCT_TELEMETRY.md) to
@@ -134,7 +140,7 @@ an exchange's working directory, walking up the ancestor chain
 (gitignore-style), and when multiple markings apply the most restrictive
 wins.
 
-| Class        | Recorded locally | Forwarded to HypAware Cloud |
+| Class        | Recorded locally | Synced to HypAware Cloud    |
 |--------------|------------------|------------------------------|
 | `sync`       | yes              | yes (the default)            |
 | `local-only` | yes              | never                        |
@@ -165,7 +171,7 @@ There are two authoring surfaces for the same classes:
 
   ```sh
   hyp privacy set <path> ignore        # never recorded, no dotfile
-  hyp privacy set <path> local-only    # recorded, never forwarded
+  hyp privacy set <path> local-only    # recorded, never synced
   hyp privacy set <path> sync          # explicitly synced (not asked again)
   hyp privacy show [path]              # which class governs, and why
   hyp privacy list                     # every machine-local entry
@@ -190,18 +196,20 @@ names it on an enrolled machine.
 
 Three caveats apply to both surfaces:
 
-- **Prospective only.** A marking gates future recording and forwarding.
+- **Prospective only.** A marking gates future recording and syncing.
   Rows captured before it existed stay in the cache; deleting them is the
   separate, explicit `hyp privacy purge` step below.
-- **Class resolution needs a working directory.** Only the Claude and
-  Codex pathways supply one, so directory markings are a no-op for the
-  `raw-anthropic` / `raw-openai` proxy and OTEL sources.
+- **Class resolution needs a working directory.** The client sources
+  (Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, OpenClaw) supply
+  one. Hermes supplies one only when Hermes itself recorded it for the
+  session. The `raw-anthropic` / `raw-openai` proxy and OTEL sources never do,
+  so directory markings are a no-op for them.
 - **A session is classed by its own directory, not by what it reads.**
   `hyp query` is a local read and is deliberately not filtered at the export
   seam, so rows from a `local-only` folder can be quoted into whatever session
   asked for them, and that session is recorded under its own working
   directory's class. Generating a usage report in a `sync` folder therefore
-  forwards the generating conversation, the excerpts it quotes included, even
+  syncs the generating conversation, the excerpts it quotes included, even
   when the work it reports on lives under `local-only`. `hyp report generate`
   starts the report skill in the directory you type it in and changes no
   class, so choose that directory deliberately, or run `hyp session ignore`
@@ -241,24 +249,41 @@ recent transcript is not enough to identify a Claude conversation.
 
 Ignoring does not delete earlier records, client transcripts, or exported
 copies. Explicitly unignoring makes the whole transcript eligible for import
-again, including turns written while ignored. Delete previously captured local
+again, including turns written while ignored. Delete previously captured
 rows with `hyp privacy purge --session <id>` below. OpenClaw and Hermes session
 opt-out support remains outside this change.
 
 ## Deleting what was already recorded
 
-`hyp privacy purge` permanently deletes rows from this machine's local cache. It
-never contacts a sink or the remote, and never deletes copies that were
-already exported or forwarded:
+`hyp privacy purge` permanently deletes rows from this machine's local cache:
 
 ```sh
 hyp privacy purge <path>          # rows whose cwd is at or under the path
-hyp privacy purge --session <id>  # one session's rows
+hyp privacy purge --session <id>  # one session's rows, here and on your servers
 hyp privacy purge --ignored       # every row whose directory now resolves to ignore
 hyp privacy purge --all           # everything, wholesale
 ```
 
 It prompts on a TTY; pass `--yes` for non-interactive use.
+
+A session purge is the only form that reaches beyond this machine. It also
+deletes that session's rows from every configured or signed-in remote and
+every enrolled server, and keeps the session from being recorded again. The
+confirmation prompt names the servers it will contact:
+
+```sh
+hyp privacy purge --session <id> --remote <target>  # this machine and one server
+hyp privacy purge --session <id> --local-only       # this machine only
+```
+
+Deleting on a server uses your login, and needs you to be the session's owner
+or an organization admin. If a server cannot be reached or refuses, the
+command exits nonzero; run it again to finish. Copies quoted into a published
+report are not removed, and the underlying files are reclaimed by later
+maintenance, not at the moment of the purge.
+
+The path, `--ignored`, and `--all` forms are local only: they never contact a
+sink or a server, and never delete copies already exported or synced.
 
 Every form of it also empties the raw-body spool described above, including
 the targeted ones: a spooled body has not been read yet, so nothing about it
@@ -288,12 +313,12 @@ it never echoes a secret.
 The first sync is the moment this matters most, but it is not a precondition:
 run `hypaware-privacy` whenever you want to know what has been captured here,
 enrolled or not. It reviews this machine's local cache; it cannot inspect rows
-already forwarded to HypAware Cloud.
+already synced to HypAware Cloud.
 
 ## Leaving
 
-`hyp leave` disconnects the machine from HypAware Cloud: forwarding and
-config pull stop, org-driven client attaches are undone, and the forward
+`hyp leave` disconnects the machine from HypAware Cloud: sync and
+config pull stop, org-driven client attaches are undone, and the sync
 credential is removed. Local recordings, config, and the daemon stay; use
 `hyp privacy purge` and the uninstall steps in the [README](../README.md#uninstall)
 to remove those too.

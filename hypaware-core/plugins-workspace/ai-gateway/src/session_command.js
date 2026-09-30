@@ -23,7 +23,18 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 const CONTROL_PATH = '/_hypaware/ignore/session'
 
 /** The other, independent governor. LLP 0066 R7: either match suppresses. */
-const FOLDER_GOVERNOR_NOTE = 'folder:  see `hyp privacy show` (this verb reports the session set only)'
+const FOLDER_GOVERNOR_NOTE = 'folder:  folder rules are checked separately - see `hyp privacy show`'
+
+/**
+ * The recorder's `total`, worded so it cannot be read as a second verdict on
+ * this session: "not ignored (1 ignored)" looked like a contradiction.
+ *
+ * @param {number | null | undefined} total
+ * @returns {string}
+ */
+function ignoreListCount(total) {
+  return `${total} session${total === 1 ? '' : 's'} on its ignore list`
+}
 
 /**
  * The same lifetime note appears beside every confirmed read and write.
@@ -163,6 +174,13 @@ const MAX_ROLLOUT_AGE_MS = 30 * 60 * 1000
  * @ref LLP 0067#cli-session-id
  */
 const CODEX_THREAD_ENV = 'CODEX_THREAD_ID'
+
+/**
+ * Said on the two refusals a plain terminal reaches: no client stated an id,
+ * so the likeliest cause is that the command was not run inside a session.
+ */
+const NOT_IN_SESSION_HINT =
+  'This shell does not look like an AI session: run the command inside the Claude Code or Codex session you mean.'
 
 const IGNORE_USAGE = 'usage: hyp session ignore [session-id] [--json]'
 const UNIGNORE_USAGE = 'usage: hyp session unignore [session-id] [--json]'
@@ -448,8 +466,8 @@ async function runMutation(argv, ctx, method, usage) {
   // and the folder governor below is a separate reason a session stays unrecorded.
   ctx.stdout.write(
     primary.ignored
-      ? `session ${resolvedId.sessionId}: ignored - this id is in the ${primary.recorder} drop set (${primary.total} ignored)\n`
-      : `session ${resolvedId.sessionId}: not ignored - this id is out of the ${primary.recorder} drop set, so this opt-out suppresses nothing now (${primary.total} ignored)\n`
+      ? `session ${resolvedId.sessionId}: ignored - this id is in the ${primary.recorder} drop set (${ignoreListCount(primary.total)})\n`
+      : `session ${resolvedId.sessionId}: not ignored - this id is out of the ${primary.recorder} drop set, so this opt-out suppresses nothing now (${ignoreListCount(primary.total)})\n`
   )
   // Every further confirmed recorder gets its own line: "ignored" on one
   // recorder is not ignored while a second one records, so each write is
@@ -457,8 +475,8 @@ async function runMutation(argv, ctx, method, usage) {
   for (const outcome of confirmed.slice(1)) {
     ctx.stdout.write(
       outcome.ignored
-        ? `also ${outcome.recorder} at ${outcome.endpoint}: ignored - this id is in its drop set (${outcome.total} ignored)\n`
-        : `also ${outcome.recorder} at ${outcome.endpoint}: not ignored - this id is out of its drop set (${outcome.total} ignored)\n`
+        ? `also ${outcome.recorder} at ${outcome.endpoint}: ignored - this id is in its drop set (${ignoreListCount(outcome.total)})\n`
+        : `also ${outcome.recorder} at ${outcome.endpoint}: not ignored - this id is out of its drop set (${ignoreListCount(outcome.total)})\n`
     )
   }
   if (primary.ignored) {
@@ -563,7 +581,12 @@ function writeStatus(ctx, json, report) {
     const who = report.session_id ?? '(unresolved)'
     ctx.stdout.write(`session ${who}: UNKNOWN - cannot confirm the opt-out is in effect\n`)
     ctx.stdout.write(`reason:  ${report.reason ?? 'unknown'}\n`)
-    ctx.stdout.write('assume this session IS being recorded until a check succeeds.\n')
+    // With no id there is no session this warning is about: a plain terminal
+    // reaches here, and "this session IS being recorded" names one that may
+    // not exist. The fail-closed advice stays for anyone who is inside one.
+    ctx.stdout.write(report.session_id === null
+      ? 'no session was identified, so nothing was checked. If you are inside an AI session, assume it IS being recorded.\n'
+      : 'assume this session IS being recorded until a check succeeds.\n')
     writeRecorderStatusLines(ctx, report.recorders)
     writeRecorderTrustNotes(ctx, report.recorders)
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
@@ -638,7 +661,7 @@ function writeRecorderStatusLines(ctx, outcomes) {
       ctx.stdout.write(`recorder ${outcome.recorder} at ${outcome.endpoint}: UNKNOWN - ${outcome.reason ?? 'no answer'}\n`)
     } else {
       ctx.stdout.write(
-        `recorder ${outcome.recorder} at ${outcome.endpoint}: ${outcome.status === 'ignored' ? 'ignored' : 'not ignored'} (${outcome.total} ignored)\n`
+        `recorder ${outcome.recorder} at ${outcome.endpoint}: ${outcome.status === 'ignored' ? 'ignored' : 'not ignored'} (${ignoreListCount(outcome.total)})\n`
       )
     }
   }
@@ -975,7 +998,7 @@ export function resolveSessionIdForCli(args) {
   if (candidates.length === 0) {
     return {
       ok: false,
-      error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
+      error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. ${NOT_IN_SESSION_HINT} Or pass the session id explicitly: hyp session status <session-id>.`,
     }
   }
   // A candidate with no thread id still has to appear: it is one of the reasons
@@ -986,7 +1009,7 @@ export function resolveSessionIdForCli(args) {
     .join(', ')
   return {
     ok: false,
-    error: `could not resolve a session id: ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
+    error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. ${NOT_IN_SESSION_HINT} Or pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
   }
 }
 

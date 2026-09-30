@@ -87,7 +87,7 @@ from that cache, not a prerequisite for querying it.
 
 New guided setups default to local Parquet exports; interactive reconfiguration
 preserves the existing export choice. An enrolled machine may also have a
-centrally managed forwarding sink regardless of its local export choice.
+centrally managed sync sink regardless of its local export choice.
 
 To inspect destinations and send eligible data now:
 

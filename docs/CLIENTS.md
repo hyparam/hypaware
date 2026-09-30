@@ -3,8 +3,8 @@
 [Documentation](README.md) / Clients and history
 
 Use `hyp setup` to select capture integrations. An **attach** then changes the
-selected client's settings so HypAware can observe new activity. **History
-import** reads supported existing transcripts into the local cache.
+selected client's settings so HypAware can observe new activity. **Backfill**
+reads supported existing transcripts into the local cache.
 
 ## Choose and check a client
 
@@ -25,7 +25,7 @@ choices are locked; local additions remain yours to configure.
 | Claude Desktop (`claude-desktop`) | Scheduled transcript import by default. Also enables the shared Claude integration. |
 | OpenClaw (`openclaw`) | Gateway routing plus a scheduled transcript recovery lane. |
 | Cursor (`cursor`) | Native session recovery for the Cursor editor and CLI, including the file contents and command output its tools see. Token usage is not available. |
-| Hermes Agent (`hermes`) | Reads Hermes's local state database read-only: a history import plus ongoing polling. Makes no changes to Hermes. |
+| Hermes Agent (`hermes`) | Reads Hermes's local state database read-only: a backfill plus ongoing polling. Makes no changes to Hermes. |
 | Pi (`pi`) | A managed Pi extension plus bounded recovery of native sessions, including recent history. |
 
 Available integrations depend on active plugins and the installed version.
@@ -84,7 +84,7 @@ rows can subsequently leave through those sinks. Apply your
 [privacy markings](PRIVACY.md) before importing sensitive history.
 
 Some integrations run scheduled recovery automatically. A positive
-`backfill.window_days` limits both join-time import and scheduled recovery;
+`backfill.window_days` limits both join-time backfill and scheduled recovery;
 widening it can make older history eligible on the next sweep. The adapters
 differ in how `backfill.on_join` affects schedules, so consult the
 [recovery reference](CLI_REFERENCE.md#scheduled-recovery-sweeps-and-backfillwindow_days)
@@ -108,7 +108,7 @@ To retain capture but withhold a locally owned client's data from team sync:
 hyp privacy client codex local-only
 ```
 
-Returning that client to `sync` does not automatically upload previously
+Returning that client to `sync` does not automatically sync previously
 withheld history; `hyp sync --history codex` is a separate, confirmed replay.
 For a single folder, live session, or permanent local deletion, see
 [privacy controls](PRIVACY.md). For missing recordings, see
