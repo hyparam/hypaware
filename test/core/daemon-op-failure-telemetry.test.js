@@ -20,6 +20,7 @@ import path from 'node:path'
 import { installDaemon, uninstallDaemon } from '../../src/core/daemon/install.js'
 import { LaunchAgentError, plistPathFor } from '../../src/core/daemon/macos.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
+import { runRoot } from '../../src/core/observability/span_helpers.js'
 
 const LABEL = 'com.hypaware.test.agent'
 const OK = { exitCode: 0, stdout: '', stderr: '' }
@@ -169,6 +170,28 @@ test('a daemon operation that fails after its partial work still reports failed'
   assert.ok(thrown instanceof LaunchAgentError, 'the install failed after writing the service file')
   assert.equal(fs.existsSync(plistPathFor(plistDir, LABEL)), true, 'the partial work landed')
   const span = spanNamed(spans, 'daemon.install')
+  assert.equal(span.status.code, SpanStatusCode.ERROR)
+  assert.equal(span.attributes.status, 'failed')
+  assert.equal(span.attributes.error_kind, 'unhandled_exception')
+})
+
+/**
+ * A daemon operation runs underneath a boot or a top-level command, and those
+ * open their span through `runRoot` rather than `withSpan`. The two helpers
+ * carry separate copies of the same catch, so the guarantee above is only
+ * half-pinned until the root helper is exercised too.
+ */
+test('a root span whose body throws reports failed, like the nested helper', async () => {
+  const boom = new Error('boot step refused')
+
+  const { spans, thrown } = await captureSpans(() => runRoot(
+    'command.run',
+    { hyp_command: 'daemon', status: 'ok' },
+    async () => { throw boom }
+  ))
+
+  assert.equal(thrown, boom, 'the throw reaches the caller unchanged')
+  const span = spanNamed(spans, 'command.run')
   assert.equal(span.status.code, SpanStatusCode.ERROR)
   assert.equal(span.attributes.status, 'failed')
   assert.equal(span.attributes.error_kind, 'unhandled_exception')

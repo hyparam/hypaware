@@ -33,6 +33,10 @@ const declaredStatuses = new WeakMap()
  * whose status codes were never argued about, and reclassifying them as a
  * side effect of one caller's need is not this helper's decision to make.
  *
+ * A declaration holds only where the body returns. One that throws is a
+ * failure whatever it had declared, so both helpers overwrite `status` with
+ * `failed` in their catch and the declared value never reaches the span.
+ *
  * @ref LLP 0322#degrade-reaches-the-signals [implements]: an opt-in terminal status, so only the call site that asks is reclassified
  * @param {Span | null | undefined} span
  * @param {string} status
@@ -133,9 +137,9 @@ export async function runRoot(name, attrs, fn, opts = {}) {
           span.recordException(err)
         } catch { /* as in `withSpan`: unreadable, and the status still says what */ }
         span.setStatus({ code: SpanStatusCode.ERROR, message })
-        // As in `withSpan`, and for the same reason the success branch above
-        // reads the declared status: a caller cannot tell which helper opened
-        // the span it holds.
+        // As in `withSpan`, and for parity with it: a caller cannot tell which
+        // helper opened the span it holds, so a failure the two recorded
+        // differently would read as a different kind of failure.
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
         throw err
