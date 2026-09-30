@@ -25,10 +25,10 @@ import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_clien
 import { positionals } from './remote_commands.js'
 import { isTty } from './stdio.js'
 import { PromptCancelledError, select } from './tui/index.js'
-import { isPromptBackError } from './tui/runtime.js'
+import { isPromptBackError, isPromptCancelledError } from './tui/runtime.js'
 import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
-import { askableClients, attachHint } from '../commands/ask.js'
+import { PICK_DEADLINE_MS, PICK_DEADLINE_NOTICE, askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
 
 /**
@@ -52,6 +52,42 @@ const execFileAsync = promisify(execFile)
  * @returns {string}
  */
 const esc = (value) => escapeForDisplay(String(value))
+
+/**
+ * The client picker, asked under the deadline `hyp ask` puts on the same
+ * screen: the gate that opens it reads two `isTTY` flags, and a TTY says a
+ * terminal is attached, never that a person is reading it, so under
+ * `docker run -t`, a tty-allocating CI runner, tmux or expect the keypress
+ * never comes and the run ends only when something kills it. An expired
+ * deadline is answered apart from a cancel because it is not one: nobody
+ * declined, so the caller falls through to the client it would have started
+ * with no prompt at all rather than to a choice nobody made.
+ *
+ * @param {typeof select} ask
+ * @param {CommandRunContext} ctx
+ * @param {Parameters<typeof select>[0]} spec
+ * @param {number} [deadlineMs]
+ * @returns {Promise<{ client: string | number } | { cancelled: true } | { timedOut: true }>}
+ */
+async function pickClient(ask, ctx, spec, deadlineMs) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), deadlineMs ?? PICK_DEADLINE_MS)
+  const stdin = /** @type {{ once?: (e: string, l: () => void) => unknown, off?: (e: string, l: () => void) => unknown }} */ (/** @type {unknown} */ (ctx.stdin))
+  const lift = () => clearTimeout(timer)
+  stdin?.once?.('keypress', lift)
+  try {
+    return { client: await ask({ ...spec, signal: controller.signal }) }
+  } catch (err) {
+    // The abort settles the prompt as an escape does, so which one happened
+    // is the controller's to answer, not the error's.
+    if (controller.signal.aborted) return { timedOut: true }
+    if (isPromptCancelledError(err) || isPromptBackError(err)) return { cancelled: true }
+    throw err
+  } finally {
+    clearTimeout(timer)
+    stdin?.off?.('keypress', lift)
+  }
+}
 
 /**
  * Core `report` commands: the member-facing client of the server's org-scoped
@@ -114,21 +150,18 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
     }
     let chosen = launchers[0]
     if (launchers.length > 1 && isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1') {
-      let picked
-      let cancelled = false
-      try {
-        const client = await (deps.select ?? select)({
-          box: true,
-          title: 'Which client should generate the report?',
-          options: launchers.map(({ launcher }) => ({ value: launcher.client, label: launcher.label })),
-          ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
-          stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
-          env: ctx.env,
-        })
-        picked = launchers.find(({ launcher }) => launcher.client === client)
-      } catch (err) {
-        if (!(err instanceof PromptCancelledError) && !isPromptBackError(err) && !(err instanceof Error && err.name === 'PromptCancelledError')) throw err
-        cancelled = true
+      const outcome = await pickClient(deps.select ?? select, ctx, {
+        box: true,
+        title: 'Which client should generate the report?',
+        options: launchers.map(({ launcher }) => ({ value: launcher.client, label: launcher.label })),
+        ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+        stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
+        env: ctx.env,
+      }, deps.pickDeadlineMs)
+      let picked = 'client' in outcome ? launchers.find(({ launcher }) => launcher.client === outcome.client) : undefined
+      if ('timedOut' in outcome) {
+        ctx.stdout.write(PICK_DEADLINE_NOTICE)
+        picked = launchers[0]
       }
       // An escape, a back request, and an answer that is not on the list all
       // mean the same thing to the user: no client was chosen, so nothing
@@ -140,7 +173,7 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
       // picker, whose ids come off a server page instead of a fixed local
       // list, goes further and exits 1.
       if (!picked) {
-        if (!cancelled) span.setAttribute('error_kind', 'picker-off-list')
+        if (!('cancelled' in outcome)) span.setAttribute('error_kind', 'picker-off-list')
         markSpanStatus(span, 'cancelled')
         ctx.stdout.write('Nothing started.\n')
         return 0
@@ -545,6 +578,7 @@ const NAMES_EXTENSION_RE = /\.[0-9]*[a-z][a-z0-9]*$/i
  *   resolveLaunchers?: typeof resolveLaunchers,
  *   launchClient?: typeof launchClient,
  *   select?: typeof select,
+ *   pickDeadlineMs?: number,
  * }} [deps]
  * @returns {Promise<number>}
  */
@@ -708,24 +742,22 @@ export async function runReportFix(argv, ctx, deps = {}) {
   /** @type {FirstAskLauncher | undefined} */
   let launcher = launchers[0]
   if (launchers.length > 1 && interactive) {
-    try {
-      const client = await ask({
-        box: true,
-        title: 'Which client should make the change?',
-        options: launchers.map((l) => ({ value: l.client, label: l.label })),
-        ...io,
-      })
-      launcher = launchers.find((l) => l.client === client)
-    } catch (err) {
-      if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
-        launcher = undefined
-      } else {
-        throw err
+    const outcome = await pickClient(ask, ctx, {
+      box: true,
+      title: 'Which client should make the change?',
+      options: launchers.map((l) => ({ value: l.client, label: l.label })),
+      ...io,
+    }, deps.pickDeadlineMs)
+    // An expired deadline leaves `launcher` as it was: the first one, which
+    // is what a run that could not prompt at all starts.
+    if ('timedOut' in outcome) {
+      ctx.stdout.write(PICK_DEADLINE_NOTICE)
+    } else {
+      launcher = 'client' in outcome ? launchers.find((l) => l.client === outcome.client) : undefined
+      if (!launcher) {
+        ctx.stdout.write('Nothing started.\n')
+        return 0
       }
-    }
-    if (!launcher) {
-      ctx.stdout.write('Nothing started.\n')
-      return 0
     }
   }
 

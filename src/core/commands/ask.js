@@ -36,8 +36,20 @@ import {
  * gated on that alone waits for a keypress that never arrives and the
  * question the user did name is never asked. The first keypress lifts the
  * deadline, so it only ever ends a run nobody is answering.
+ *
+ * `hyp report generate` and `hyp report fix` put the same picker on the
+ * same gate, so they take this deadline and its notice rather than a second
+ * pair of their own.
  */
-const PICK_DEADLINE_MS = 10_000
+export const PICK_DEADLINE_MS = 10_000
+
+/**
+ * What an expired deadline says before it launches. An expired deadline is
+ * not a cancel (nobody declined anything), so the run continues into the
+ * client a run that cannot prompt would have started anyway, and discloses
+ * that the client was not chosen.
+ */
+export const PICK_DEADLINE_NOTICE = '\nNo answer at the client prompt - starting the first one.\n'
 
 /**
  * `hyp ask [question]`
@@ -170,7 +182,7 @@ async function pickLauncher(launchers, ctx, deps) {
   }
   if (picked) return picked
   if (!controller.signal.aborted) return undefined
-  ctx.stdout.write('\nNo answer at the client prompt - starting the first one.\n')
+  ctx.stdout.write(PICK_DEADLINE_NOTICE)
   return launchers[0]
 }
 
