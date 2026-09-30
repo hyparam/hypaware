@@ -922,6 +922,8 @@ export interface DaemonUninstallOptions {
   launchctl?: LaunchctlAdapter
   systemctl?: SystemctlAdapter
   userDomain?: string
+  /** Override the poll delay the uninstall waits out the unload with (tests only). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface DaemonServiceOptions {

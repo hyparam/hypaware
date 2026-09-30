@@ -1232,6 +1232,35 @@ test('a bootout the adapter could not even run is tolerated: the probe is the ve
   assert.deepEqual(sleeps, [], 'launchd was holding nothing, so there was nothing to wait out')
 })
 
+test('a probe the adapter could not run still removes the plist, and still fails', async (t) => {
+  // The other half of the bootout above: `runServiceCommand` rejects when the
+  // binary cannot be spawned, and the suite's own refusal to touch a real
+  // launchd rejects the same way. That is not an unload, so the uninstall
+  // still fails - but abandoning the removal would leave a plist launchd
+  // loads again at the next login, which is the one outcome this function
+  // documents it will never produce.
+  const home = tmpHome('uninstall-probe-rejects')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true })
+  const unspawnable = { ...lc, print() { return Promise.reject(new Error("failed to run 'launchctl print': spawn launchctl ENOENT")) } }
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await assert.rejects(
+    () => uninstallLaunchAgent(uninstallOpts(home, /** @type {any} */ (unspawnable), sleeps)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /did not unload/)
+      assert.match(err.message, /spawn launchctl ENOENT/, 'the reason the unload went unconfirmed reaches the operator')
+      return true
+    },
+  )
+
+  assert.equal(fs.existsSync(plistPath), false, 'a probe that could not run cost the operator the removal')
+  assert.deepEqual(sleeps, [], 'the very first probe rejected, so nothing was ever waited out')
+})
+
 test('an uninstall with no plist on disk touches launchd not at all', async (t) => {
   const home = tmpHome('uninstall-no-plist')
   t.after(() => fs.rmSync(home, { recursive: true, force: true }))

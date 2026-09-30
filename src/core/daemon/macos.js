@@ -421,11 +421,20 @@ export async function uninstallLaunchAgent(options) {
 
   if (!fs.existsSync(plistPath)) return
   const booted = await launchctl.bootout([target]).catch(function() { return undefined })
+  // A probe that could not be run at all is no more an unload than a bootout
+  // that could not be run, and no more a reason to abandon the removal: a
+  // `launchctl` the host cannot spawn rejects here (the #1386 shape), and so
+  // does the suite's own refusal to touch a real launchd. Unlink on that path
+  // too, exactly as the bootout's `.catch()` above already does, and let the
+  // failure below carry the reason the unload went unconfirmed.
+  /** @type {Error | undefined} */
+  let probeErr
   const unloaded = await waitUntilUnloaded(launchctl, target, options.sleep ?? defaultSleep, STOP_UNLOAD_POLL_ATTEMPTS)
+    .catch(function(err) { probeErr = err instanceof Error ? err : new Error(String(err)); return undefined })
   unlinkServiceFile(plistPath)
   if (unloaded !== undefined) return
   const failed = booted !== undefined && booted.exitCode !== 0
-  const why = (booted?.stderr || '').trim() || (failed ? `exit ${booted.exitCode}` : '')
+  const why = probeErr?.message || (booted?.stderr || '').trim() || (failed ? `exit ${booted.exitCode}` : '')
   throw new LaunchAgentError(
     `booted out ${label} and removed ${plistPath}, but the service did not unload`
       + `${why ? `: ${why}` : ''}`
