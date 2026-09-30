@@ -282,7 +282,7 @@ function makeSilentTtyIn() {
   })
 }
 
-test('runAsk "<question>": an allocated tty nobody answers starts a client instead of waiting for a keypress', async () => {
+test('runAsk "<question>": an allocated tty nobody answers starts a client instead of waiting for a keypress', { timeout: 5000 }, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
@@ -297,7 +297,7 @@ test('runAsk "<question>": an allocated tty nobody answers starts a client inste
   assert.equal(await fixture.started(), 'codex')
 })
 
-test('runAsk "<question>": a terminal someone answers still starts the client they picked', async () => {
+test('runAsk "<question>": a terminal someone answers still starts the client they picked', { timeout: 5000 }, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
@@ -318,7 +318,7 @@ test('runAsk "<question>": a terminal someone answers still starts the client th
   assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
 })
 
-test('runAsk "<question>": escaping the picker is "not now", not the deadline fallback', async () => {
+test('runAsk "<question>": escaping the picker is "not now", not the deadline fallback', { timeout: 5000 }, async () => {
   const fixture = await twoLauncherFixture()
   const stdout = makeTtyOut()
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
