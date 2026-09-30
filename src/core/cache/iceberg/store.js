@@ -454,8 +454,20 @@ export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister,
  */
 export async function physicalProjection(file, columns) {
   const metadata = await parquetMetadataAsync(file)
+  return { metadata, columns: physicalColumns(metadata, columns) }
+}
+
+/**
+ * The narrowing of {@link physicalProjection}, over a footer already parsed,
+ * for a caller that stages more than one projection against one file.
+ *
+ * @param {FileMetaData} metadata
+ * @param {string[]} columns
+ * @returns {string[]}
+ */
+function physicalColumns(metadata, columns) {
   const physical = new Set(parquetSchema(metadata).children.map((child) => child.element.name))
-  return { metadata, columns: columns.filter((column) => physical.has(column)) }
+  return columns.filter((column) => physical.has(column))
 }
 
 /**
@@ -940,6 +952,81 @@ function addedFilesSize(metadata) {
 }
 
 /**
+ * Locate one reconciliation scope's live rows in one data file, reading the
+ * wide columns only where the snapshot comparison can still need them.
+ *
+ * Only the FIRST live in-scope row per snapshot key can survive a
+ * reconcile, and which row that is follows from the scope columns and the
+ * identity key alone: every other in-scope row is retired whatever its
+ * payload holds, and an out-of-scope row is never touched. So the reads
+ * stage:
+ *
+ *  - the SCOPE pass projects the `where` columns plus the key, a handful of
+ *    dictionary-encoded strings, over every row group, and settles scope and
+ *    candidacy for every row;
+ *  - the VALUE pass projects the columns the scope pass did not read, over
+ *    the row range holding that group's candidates, and merges them on so
+ *    the caller's deep-equal still sees a full row.
+ *
+ * The two projections are disjoint and together cover the caller's column
+ * list once, so a group holding a candidate costs what one full-width read
+ * cost and a group holding none costs only the scope columns: for
+ * `ai_gateway_messages`, three dictionary-encoded strings rather than sixty
+ * columns with `raw_frame` and `content_text` among them. hyparquet decodes
+ * a whole column chunk for any slice inside its row group, so narrowing the
+ * value pass to the candidate range buys materialized rows rather than
+ * bytes; the bytes come from the groups it never opens. Each group is
+ * settled before the next is read, so only row positions cross a group
+ * boundary.
+ *
+ * @param {string} filePath
+ * @param {Resolver} resolver
+ * @param {{ scopeEntries: [string, string][], key: string, scopeColumns: string[], valueColumns: string[], claim: (key: string) => boolean, keep: (key: string, row: Record<string, unknown>) => boolean }} plan
+ * @param {Set<bigint>} [deletedPositions]
+ * @returns {Promise<number[]>} the positions of the scope's rows to retire, in file order
+ */
+async function scanFileForScopedRows(filePath, resolver, plan, deletedPositions) {
+  const file = await Promise.resolve(resolver.reader(filePath))
+  const metadata = await parquetMetadataAsync(file)
+  const scopeColumns = physicalColumns(metadata, plan.scopeColumns)
+  const valueColumns = physicalColumns(metadata, plan.valueColumns)
+  /** @type {number[]} */
+  const retire = []
+  let start = 0
+  for (const group of metadata.row_groups) {
+    const end = start + Number(group.num_rows)
+    const scoped = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+      file, metadata, columns: scopeColumns, rowStart: start, rowEnd: end,
+    }))
+    /** @type {{ pos: number, key: string, row: Record<string, unknown> | undefined }[]} */
+    const hits = []
+    let first = -1
+    let last = -1
+    for (let i = 0; i < scoped.length; i++) {
+      const pos = start + i
+      if (deletedPositions?.has(BigInt(pos))) continue
+      const row = scoped[i]
+      if (!plan.scopeEntries.every(([name, value]) => row[name] === value)) continue
+      const key = String(row[plan.key])
+      const candidate = plan.claim(key)
+      hits.push({ pos, key, row: candidate ? row : undefined })
+      if (!candidate) continue
+      if (first < 0) first = pos
+      last = pos
+    }
+    const values = first < 0 ? [] : /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+      file, metadata, columns: valueColumns, rowStart: first, rowEnd: last + 1,
+    }))
+    for (const hit of hits) {
+      if (hit.row && plan.keep(hit.key, { ...hit.row, ...values[hit.pos - first] })) continue
+      retire.push(hit.pos)
+    }
+    start = end
+  }
+  return retire
+}
+
+/**
  * Reconcile one exact scope in one table. The partition guard belongs to the
  * caller. A transaction publishes deletions and replacements together; a failed
  * commit leaves the prior snapshot readable and the source retries its snapshot.
@@ -975,25 +1062,39 @@ export async function reconcileRowsInTable(tablePath, columns, rows, scope, next
   const deletes = []
   const matched = new Set()
   const names = columns.map(column => column.name)
-  const scopeEntries = Object.entries(scope.where)
+  const scopeEntries = /** @type {[string, string][]} */ (Object.entries(scope.where))
+  // Both halves of the staged projection stay inside the dataset's own
+  // column list: a scope column the dataset does not declare was never
+  // projected, so it must stay invisible to the scope pass too.
+  const declared = new Set(names)
+  const scopeColumns = [...new Set([...Object.keys(scope.where), scope.key])].filter(name => declared.has(name))
+  const inScopePass = new Set(scopeColumns)
+  const plan = {
+    scopeEntries,
+    key: scope.key,
+    scopeColumns,
+    valueColumns: names.filter(name => !inScopePass.has(name)),
+    // Only the first live in-scope row for a key the snapshot still carries
+    // can survive, so claiming the key is what makes every later duplicate a
+    // retirement the scan settles without reading a payload.
+    claim: (/** @type {string} */ key) => {
+      if (!pending.has(key) || matched.has(key)) return false
+      matched.add(key)
+      return true
+    },
+    // The unchanged-row test: a claimed row equal to the snapshot's keeps its
+    // place and its ingest sequence, and the snapshot stops owing a write.
+    keep: (/** @type {string} */ key, /** @type {Record<string, unknown>} */ row) => {
+      if (!isDeepStrictEqual(rowsToIcebergRecords(columns, [row])[0], pending.get(key))) return false
+      pending.delete(key)
+      return true
+    },
+  }
   let rowCount = 0
   for (const [filePath, { entry }] of files) rowCount += Number(entry.data_file.record_count) - (deleted.get(filePath)?.size ?? 0)
   for (const [filePath, { entry }] of files) {
     if (schema && !fileMightMatch(/** @type {ParquetQueryFilter} */ (scope.where), entry, schema)) continue
-    const predicate = (/** @type {Record<string, unknown>} */ row) => {
-      if (!scopeEntries.every(([key, value]) => row[key] === value)) return false
-      const key = String(row[scope.key])
-      const desired = pending.get(key)
-      if (desired && !matched.has(key)) {
-        matched.add(key)
-        if (isDeepStrictEqual(rowsToIcebergRecords(columns, [row])[0], desired)) {
-          pending.delete(key)
-          return false
-        }
-      }
-      return true
-    }
-    for await (const pos of scanFileForMatchingRows(filePath, resolver, predicate, names, deleted.get(filePath))) {
+    for (const pos of await scanFileForScopedRows(filePath, resolver, plan, deleted.get(filePath))) {
       deletes.push({ file_path: filePath, pos })
     }
   }
