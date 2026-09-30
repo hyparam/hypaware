@@ -781,7 +781,7 @@ test('generate requires an available client with an installed report skill', asy
   const { deps, launches } = fixDeps()
   assert.equal(await runReportGenerate([], ctx, deps), 1)
   assert.equal(launches.length, 0)
-  assert.match(err.join(''), /no attached client with the hypaware-report skill/)
+  assert.match(err.join(''), /no recorded client with the hypaware-report skill/)
   await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
 })
 
@@ -1180,7 +1180,7 @@ test('fix with nothing launchable exits 1 with a runnable attach hint, before fe
   const { ctx, err } = ctxWith()
   const { deps, launches } = fixDeps({ launchers: [] })
   assert.equal(await runReportFix([REC], ctx, deps), 1)
-  assert.match(err.join(''), /no attached client can be started here/)
+  assert.match(err.join(''), /no recorded client can be started here/)
   assert.match(err.join(''), /hyp client attach claude/)
   assert.equal(launches.length, 0)
   assert.deepEqual(calls.map((c) => c.url.pathname), [`/v1/reports/_recommendations/${REC}`])
