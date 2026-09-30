@@ -498,3 +498,98 @@ test('a sidecar write that fails while degrading does not replace the error that
   assert.equal(flushFailed.fields?.error_kind, 'unknown')
   assert.match(String(flushFailed.fields?.error), /ENOTDIR/, 'the write failure names itself')
 })
+
+// ---------------------------------------------------------------------------
+// The batch-boundary flush is a write step, not a reconcile (issue #2304)
+// ---------------------------------------------------------------------------
+
+test('an in-loop flush failure names the write, never a session whose reconcile completed', async () => {
+  const dir = await tmpDir()
+  const stateDbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(stateDbPath)
+  const total = WATERMARK_FLUSH_SESSIONS + 6
+  for (let id = 1; id <= total; id++) {
+    insertSession(db, { id, cwd: `/home/dev/p${id}` })
+    insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
+  }
+  db.close()
+
+  // A state dir under a regular file makes every watermark write throw
+  // ENOTDIR. No reconcile is rigged to fail, so the only thing that can throw
+  // inside the loop is the batch-boundary flush after session
+  // WATERMARK_FLUSH_SESSIONS, whose own reconcile has already committed.
+  const unwritable = path.join(stateDbPath, 'unwritable')
+  const { ctx, logs, appended } = makeCtx({ stateDbPath, stateDir: unwritable })
+
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+
+  assert.equal(appended.length, WATERMARK_FLUSH_SESSIONS, 'every session the loop reached reconciled, the boundary one included')
+  assert.match(String(runner.lastError), /ENOTDIR/, 'the write error is what degrades the runner')
+
+  assert.equal(
+    logs.find((entry) => entry.message === 'hermes.session_reconcile_failed'),
+    undefined,
+    'zero reconciles failed, so no record claims one did'
+  )
+
+  const flushFailed = logs.find((entry) => entry.message === 'hermes.watermark_flush_failed')
+  assert.ok(flushFailed, 'the step that actually broke is named')
+  assert.match(String(flushFailed.fields?.error), /ENOTDIR/)
+  assert.equal(flushFailed.fields?.sessions_persisted, 0, 'nothing reached disk, and the count says so')
+  assert.equal(flushFailed.fields?.sessions_examined, total)
+
+  const pollFailed = logs.find((entry) => entry.message === 'hermes.poll_failed')
+  assert.ok(pollFailed, 'the tick degrades')
+  assert.match(String(pollFailed.fields?.error), /ENOTDIR/, 'the original error survives to the tick record')
+
+  // Suppression is scoped to the flush, not to the record: the sessions the
+  // aborted loop never reached are still changed, and a real failure among
+  // them on the next tick still names its session.
+  const boom = new Error('reconcile exploded')
+  const failingId = WATERMARK_FLUSH_SESSIONS + 2
+  const { ctx: nextCtx, logs: nextLogs } = makeCtx({
+    stateDbPath,
+    stateDir: unwritable,
+    beforeReconcile(sessionId) {
+      if (sessionId === `hermes-${failingId}`) throw boom
+    },
+  })
+  await runHermesPollTick(runner, nextCtx)
+
+  assert.equal(runner.lastError, boom.message, 'the reconcile failure is reported, not the failed sidecar write')
+  const partial = nextLogs.find((entry) => entry.message === 'hermes.session_reconcile_failed')
+  assert.ok(partial, 'a genuine reconcile failure still reports on a later tick')
+  assert.equal(partial.fields?.session_id, String(failingId))
+  assert.equal(partial.fields?.status, 'partial')
+  assert.equal(partial.fields?.sessions_examined, total - WATERMARK_FLUSH_SESSIONS)
+})
+
+test('a trailing flush failure after a healthy loop reports the write, not a reconcile', async () => {
+  const dir = await tmpDir()
+  const stateDbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(stateDbPath)
+  for (const id of [1, 2, 3]) {
+    insertSession(db, { id, cwd: `/home/dev/p${id}` })
+    insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
+  }
+  db.close()
+
+  // Under WATERMARK_FLUSH_SESSIONS changed sessions, so the loop completes and
+  // only the flush after it throws.
+  const { ctx, logs, appended } = makeCtx({ stateDbPath, stateDir: path.join(stateDbPath, 'unwritable') })
+
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+
+  assert.equal(appended.length, 3, 'all three sessions reconciled')
+  assert.match(String(runner.lastError), /ENOTDIR/)
+  assert.equal(
+    logs.find((entry) => entry.message === 'hermes.session_reconcile_failed'),
+    undefined,
+    'the loop finished, so no session is named as failing'
+  )
+  const pollFailed = logs.find((entry) => entry.message === 'hermes.poll_failed')
+  assert.ok(pollFailed, 'the write failure reaches the tick record')
+  assert.match(String(pollFailed.fields?.error), /ENOTDIR/)
+})
