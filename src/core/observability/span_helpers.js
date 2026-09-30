@@ -33,6 +33,11 @@ const declaredStatuses = new WeakMap()
  * whose status codes were never argued about, and reclassifying them as a
  * side effect of one caller's need is not this helper's decision to make.
  *
+ * A declaration holds only where the body returns. One that throws is a
+ * failure whatever it had declared. This writes the attribute eagerly, so a
+ * declared value is live on the span mid-run, but both helpers overwrite it
+ * with `failed` in their catch and the exported span never carries it.
+ *
  * @ref LLP 0322#degrade-reaches-the-signals [implements]: an opt-in terminal status, so only the call site that asks is reclassified
  * @param {Span | null | undefined} span
  * @param {string} status
@@ -81,6 +86,12 @@ export async function withSpan(name, attrs, fn, opts = {}) {
         span.recordException(err)
       } catch { /* unreadable, and already rendered as far as it can be */ }
       span.setStatus({ code: SpanStatusCode.ERROR, message })
+      // Most callers stamp `status: 'ok'` in the bag at open, and the JSONL
+      // exporters flatten the attributes, not the status code, so a failure
+      // whose code alone was updated is counted as a success by every query
+      // that filters on it (hyparam/hypaware#2342).
+      // @ref LLP 0322#degrade-reaches-the-signals [constrained-by]: that decision declined to re-read `status` on the success branch, where it would move status codes; this reconciles the attribute on a branch already coded ERROR
+      span.setAttribute('status', 'failed')
       span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
       throw err
     } finally {
@@ -127,6 +138,12 @@ export async function runRoot(name, attrs, fn, opts = {}) {
           span.recordException(err)
         } catch { /* as in `withSpan`: unreadable, and the status still says what */ }
         span.setStatus({ code: SpanStatusCode.ERROR, message })
+        // As in `withSpan`, and for the same reason: the bag stamped
+        // `status: 'ok'` at open, so a query filtering on the attribute rather
+        // than the status code counts this failure as a success
+        // (hyparam/hypaware#2342). In both helpers, because a caller cannot
+        // tell which one opened the span it holds.
+        span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
         throw err
       } finally {
