@@ -179,8 +179,10 @@ export async function run({ harness, expect }) {
     // ----- 2. hyp status -----
     const statusStdout = makeBuf()
     const statusStderr = makeBuf()
+    // The plugin inventory and the cache-retention line are the verbose
+    // report since LLP 0455; the walkthrough assertions below read them there.
     const statusCode = await dispatch(
-      ['status'],
+      ['status', '--verbose'],
       {
         stdout: statusStdout,
         stderr: statusStderr,

@@ -653,7 +653,7 @@ test('the daemon maintenance tick persists what it left fragmented into status.j
 })
 
 // @ref LLP 0454#warning-policy [tests]: ineffective compaction remains discoverable without an attention warning
- test('ineffective-only maintenance is verbose detail, not a warning', async () => {
+test('ineffective-only maintenance is verbose detail, not a warning', async () => {
   const { hypHome, stateRoot } = await makeHome()
   try {
     writeDaemonStatus(stateRoot, {

@@ -1880,8 +1880,12 @@ export async function collectHypAwareStatus(opts = {}) {
   // hourly walk, and `hyp status` reads no cache, so answering this any other
   // way would mean firing a second maintenance walk from a status command.
   const maintenance = maintenanceSkipsFromStatus(daemonStatusFile)
+  // `skippedTotal` and each `reasons` entry are clamped independently from a
+  // file this build may not have written, so a recorded failed attempt is
+  // tested directly rather than inferred from the difference between them.
   // @ref LLP 0454#warning-policy [implements]: ineffective rewrites alone are verbose detail, not actionable failures
-  if (maintenance && maintenance.skippedTotal > maintenance.reasons.compaction_ineffective) {
+  if (maintenance && (maintenance.reasons.compaction_attempt_failed > 0 ||
+    maintenance.skippedTotal > maintenance.reasons.compaction_ineffective)) {
     const one = maintenance.skippedTotal === 1
     const breakdown = describeMaintenanceSkipReasons(maintenance.reasons)
     // Warning, never an error: the daemon is running, capture works, and
@@ -2672,7 +2676,7 @@ export async function collectHypAwareStatus(opts = {}) {
       kind: 'recent_errors',
       // Export attempts have their own recovery-aware diagnostic. The history
       // count still includes them, but cannot make them actionable again.
-      message: `${recentErrors.warningCount} error${recentErrors.warningCount === 1 ? '' : 's'} recorded in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
+      message: `${recentErrors.warningCount} error${recentErrors.warningCount === 1 ? '' : 's'} needing attention in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
       repair: ['hyp daemon restart'],
     })
   }
