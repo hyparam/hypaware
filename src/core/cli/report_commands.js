@@ -776,13 +776,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   // remote this run did; the credential reaches it through the inherited
   // environment, as every `hyp` call the client makes already relies on.
   const readCommand = ['hyp report get', recommendation.id, ...targetFlags(gate.params)].join(' ')
-  // `readCommand` names the target only when the operator typed one; a bare
-  // run resolved its target from config instead. A `<target>` placeholder
-  // in the hint below would leave the client nothing to substitute, so it
-  // would fall back to the local cache the sentence warns against - name
-  // the resolved target instead.
-  const orgFlag = gate.params.org !== undefined ? ` --org ${shellWord(String(gate.params.org))}` : ''
-  const queryFlags = `--remote ${shellWord(resolved.target)}${orgFlag}`
+  const queryFlags = queryTargetFlags(resolved, gate.params)
   const prompt =
     `Run \`${readCommand}\` and read its output. It is one recommendation from a HypAware usage report (${where}): "${title}", ` +
     'followed by the evidence it cites and the queries the report ran to reach it. ' +
@@ -898,7 +892,7 @@ async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommend
       return 1
     }
     const bytes = Buffer.from(await outcome.response.arrayBuffer())
-    const appendix = citationsAppendix(recommendation, ext)
+    const appendix = citationsAppendix(recommendation, ext, queryTargetFlags(resolved, gate.params))
     return { bytes: appendix ? Buffer.concat([bytes, Buffer.from(appendix, 'utf8')]) : bytes, ext }
   }
   // The repair has to run and do what the sentence says (LLP 0139
@@ -936,6 +930,27 @@ function shellWord(s) {
  */
 function targetFlags(params) {
   return ['org', 'remote'].flatMap((f) => params[f] !== undefined ? [`--${f} ${shellWord(String(params[f]))}`] : [])
+}
+
+/**
+ * The flags a `hyp query sql` re-run needs to reach the population this report
+ * was measured over, as pasteable words. Unlike `targetFlags()` this names the
+ * *resolved* target, not the typed one, because a bare run resolved its target
+ * from config and echoing what was typed would name no remote at all.
+ *
+ * Every re-run sentence `report fix` puts in front of the launched client comes
+ * from here, the prompt and the citations tail of the `hyp report get` it sends
+ * the client to read alike: a `<target>` placeholder in either leaves the client
+ * nothing to substitute, so its cheapest path is to drop the flag and query the
+ * local cache, which is what those sentences exist to prevent.
+ *
+ * @param {{ target: string }} resolved
+ * @param {Record<string, unknown>} params the gate's parsed params
+ * @returns {string}
+ */
+function queryTargetFlags(resolved, params) {
+  const orgFlag = params.org !== undefined ? ` --org ${shellWord(String(params.org))}` : ''
+  return `--remote ${shellWord(resolved.target)}${orgFlag}`
 }
 
 /**
@@ -987,14 +1002,15 @@ function fixRecommendation(id, c) {
  *
  * @param {FixRecommendation} recommendation
  * @param {string} ext `md` or `html`
+ * @param {string} queryFlags the run's resolved target flags, for the re-run sentences
  * @returns {string}
  */
-function citationsAppendix(recommendation, ext) {
+function citationsAppendix(recommendation, ext, queryFlags) {
   const { evidence, basis } = recommendation
   if (evidence.length === 0 && basis.length === 0) return ''
   const lines = ['', '---', '', '## Citations from the report record', '']
   if (evidence.length > 0) {
-    lines.push('### Evidence', '', 'The turns this page cites as `evidence:N`, by N. Each is a recorded message; look it up with `hyp query sql` against `ai_gateway_messages` by `session_id` and `message_id`, using `--remote <target>` with the same remote target and organization scope as this report for server evidence.', '')
+    lines.push('### Evidence', '', `The turns this page cites as \`evidence:N\`, by N. Each is a recorded message; look it up with \`hyp query sql ${queryFlags}\` against \`ai_gateway_messages\` by \`session_id\` and \`message_id\` for server evidence.`, '')
     evidence.forEach((e, i) => {
       const where = [`session ${e.sessionId}`, e.chainId ? `chain ${e.chainId}` : '', `message ${e.messageId}`, e.toolCallId ? `tool call ${e.toolCallId}` : '', e.day].filter(Boolean).join(', ')
       lines.push(`${i + 1}. ${e.note} (${where})`)
@@ -1002,7 +1018,7 @@ function citationsAppendix(recommendation, ext) {
     lines.push('')
   }
   if (basis.length > 0) {
-    lines.push('### Basis', '', 'The queries the report ran to reach this recommendation, verbatim. Re-run them with `hyp query sql` and `--remote <target>`, keeping the report\'s remote target, organization scope, and date filters. Local queries see only this machine\'s recordings and do not reproduce the server population.', '')
+    lines.push('### Basis', '', `The queries the report ran to reach this recommendation, verbatim. Re-run them with \`hyp query sql ${queryFlags}\`, keeping the report's date filters. Local queries see only this machine's recordings and do not reproduce the server population.`, '')
     for (const q of basis) {
       if (q.agent) lines.push(`Run by ${q.agent}:`, '')
       // A fence longer than any backtick run in the query, so a query that
