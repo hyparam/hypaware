@@ -153,8 +153,10 @@ hyp ask "Which sessions mentioned connection refused this week on this machine?"
 hyp client skills install --client codex
 ```
 
-`hyp ask` launches an attached, executable AI client. Skill installation adds
-the registered HypAware skills to the chosen supported client.
+`hyp ask` launches an AI client HypAware is recording (attached, or
+configured with no attach marker to write) whose CLI is on your `PATH`. Skill
+installation adds the registered HypAware skills to the chosen supported
+client.
 
 For an MCP client, configure a **stdio** server with executable `hyp` and
 arguments `mcp`, `serve`. For a remote proxy, add `--remote`, `team` to those
@@ -164,7 +166,7 @@ intended `HYP_HOME`. MCP configuration file syntax belongs to your MCP client;
 
 ## Turn findings into a report
 
-Generate a report with an attached AI client in your current directory:
+Generate a report with a recorded AI client in your current directory:
 
 ```sh
 hyp report generate "Cover last week and focus on repeated debugging work"
