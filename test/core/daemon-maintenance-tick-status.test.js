@@ -121,6 +121,15 @@ test('a degraded maintenance tick sets the span status code, not just the attrib
       'the span status CODE (not just the attribute) must reflect the degraded tick - ' +
       'a bare setAttribute inside withSpan would leave this "ok"'
     )
+    // @ref LLP 0220#tick-reports-degraded [tests]: the count is the half of
+    // the verdict only the report knows. `withSpan` derives the message as
+    // `String(status)`, so adopting it would produce both values asserted
+    // above and drop the count.
+    assert.equal(
+      span.statusMessage, '1 partition(s) failed',
+      'the span status MESSAGE must name how many partitions were lost - ' +
+      'withSpan would reduce it to the bare status word "degraded"'
+    )
   } finally {
     if (handle) {
       await handle.stop()
