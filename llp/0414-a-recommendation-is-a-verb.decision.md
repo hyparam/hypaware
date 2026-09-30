@@ -84,10 +84,15 @@ the population the claim was measured over, reproducible against the same
 store". Without them a client reads the report author's conclusion and has
 no way to check the finding or to say whether the pattern is still
 happening, which the prompt asks it to judge. The tail directs server evidence
-lookups and basis queries through `hyp query sql --remote <target>`, keeping
-the report's remote target, organization scope, and date filters. A local
-query sees only this machine's cache and cannot reproduce the server
-population. A record from an older server, or an uploaded report,
+lookups and basis queries through `hyp query sql`, naming the target this run
+resolved and the organization scope it was given, and keeping the report's date
+filters. It names them concretely rather than as a `<target>` placeholder,
+because the tail is read by the client `fix` launches as well as by a person:
+the prompt's first instruction is to run `hyp report get` and read its output,
+and a client has nothing to substitute into a placeholder, so its cheapest path
+is to drop the flag and query the local cache. A local query sees only this
+machine's cache and cannot reproduce the server population. A record from an
+older server, or an uploaded report,
 carries neither list and yields the page alone.
 
 `fix` tells the client to run that command rather than handing it a file.

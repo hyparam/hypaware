@@ -634,22 +634,24 @@ const CITED = {
  * publishes the page as HTML only; `opening` lists the page's title and
  * thesis on the record, as a server that reads them at publish does;
  * `cited` attaches `CITED` to the entry on both the listing and the resolve
- * route, as a server that verified them does.
+ * route, as a server that verified them does; an object attaches exactly the
+ * lists it names, for a recommendation the server cited one way only.
  *
  * @param {TestContext} t
- * @param {{ md?: boolean, opening?: boolean, cited?: boolean }} [opts]
+ * @param {{ md?: boolean, opening?: boolean, cited?: boolean | Partial<typeof CITED> }} [opts]
  */
 function stubFixServer(t, { md = true, opening = false, cited = false } = {}) {
+  const citations = cited === true ? CITED : cited || {}
   const listed = {
     ...(opening
       ? { id: REC, page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' }
       : { id: REC, page: 'recommendation-batch-the-retries' }),
-    ...(cited ? CITED : {}),
+    ...citations,
   }
   return stubServer(t, (method, url) => {
     const p = url.pathname
     if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [listed] }] } }
-    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', ...(cited ? CITED : {}) }, report: REPORT } }
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', ...citations }, report: REPORT } }
     if (p.startsWith('/v1/reports/_recommendations/')) return { status: 404, json: { error: 'unknown_recommendation' } }
     if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') {
       return md ? { status: 200, body: new TextEncoder().encode(PAGE) } : { status: 404, json: { error: 'not_found' } }
@@ -883,6 +885,36 @@ test('fix with no --remote names the resolved default target in the re-run hint,
   assert.equal(await runReportFix([REC], ctx, deps), 0)
   assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql --remote prod`/)
   assert.doesNotMatch(launches[0].prompt, /<target>/)
+})
+
+// The client reads the prompt and the output of the `hyp report get` the prompt
+// tells it to run, and with evidence and no basis the prompt carries no re-run
+// hint, so that output is its only remote guidance.
+// @ref LLP 0414#page-is-the-brief [tests]: the citations tail names this run's resolved target, so the read the prompt sends the client to make is runnable
+test('fix on a recommendation with evidence and no basis shows the client no <target>, by either route', async (t) => {
+  stubFixServer(t, { cited: { evidence: CITED.evidence } })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctxWith().ctx, deps), 0)
+  assert.doesNotMatch(launches[0].prompt, /hyp query sql/, 'no basis, so no re-run hint in the prompt')
+  assert.doesNotMatch(launches[0].prompt, /<target>/)
+  // The read the prompt names, made the way the client makes it.
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.doesNotMatch(printed, /<target>/)
+  assert.match(printed, /look it up with `hyp query sql --remote prod` against `ai_gateway_messages`/)
+})
+
+// The appendix carries the org scope the same way the prompt does, so the
+// command it hands over reaches the population the report was measured over.
+test('the citations tail names the resolved remote and the org scope, shell-quoted', async (t) => {
+  stubFixServer(t, { cited: true })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC, '--org', 'acme corp', '--remote', 'prod'], ctx), 0)
+  const printed = out.join('')
+  assert.doesNotMatch(printed, /<target>/)
+  assert.match(printed, /look it up with `hyp query sql --remote prod --org 'acme corp'` against/)
+  assert.match(printed, /Re-run them with `hyp query sql --remote prod --org 'acme corp'`, keeping the report's date filters\./)
 })
 
 test('fix falls back to the HTML page when the report has no Markdown one', async (t) => {
