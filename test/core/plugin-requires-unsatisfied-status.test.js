@@ -194,7 +194,7 @@ function runDaemonOutsideTestRunner({ hypHome, configPath, runId }) {
     // The two operator surfaces the issue says must agree, read off the same
     // running install by the real CLI rather than by calling a renderer.
     `  const cliEnv = { ...process.env, HYP_HOME: ${JSON.stringify(hypHome)}, HYP_CONFIG: ${JSON.stringify(configPath)} }`,
-    `  const statusRun = spawnSync(process.execPath, [${JSON.stringify(binPath)}, 'status'], { env: cliEnv, encoding: 'utf8' })`,
+    `  const statusRun = spawnSync(process.execPath, [${JSON.stringify(binPath)}, 'status', '--verbose'], { env: cliEnv, encoding: 'utf8' })`,
     '  result.statusText = String(statusRun.stdout ?? "")',
     `  const listRun = spawnSync(process.execPath, [${JSON.stringify(binPath)}, 'plugin', 'list'], { env: cliEnv, encoding: 'utf8' })`,
     '  result.pluginListText = String(listRun.stdout ?? "")',

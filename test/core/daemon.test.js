@@ -9,7 +9,7 @@ import path from 'node:path'
 
 import { renderDaemonInstall, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 import { ServiceOpError, ensureFsOp } from '../../src/core/daemon/service_ops.js'
-import { runDaemon } from '../../src/core/daemon/runtime.js'
+import { collectSinkSnapshots, recoverSinkSnapshots, runDaemon } from '../../src/core/daemon/runtime.js'
 import {
   probeClientAttachFromDescriptor,
   readStatusFile,
@@ -825,3 +825,88 @@ for (const flags of [[], ['--foreground'], ['-f']]) {
     }
   })
 }
+
+// Issue #2337 / LLP 0453. `hyp status` warns while a destination holds an
+// export failure no later success has answered, which makes the last-success
+// stamp the fixed point the whole warning is defined against. The daemon
+// rebuilt its sink snapshots from an empty map on every boot, so a restart
+// reset every destination to "never succeeded" and a destination that had
+// recovered came back warning - a warning nothing could clear, because the
+// success that would have cleared it had already happened. No new file and no
+// new config key: the stamp already rides `status.json`'s own sink rows, and
+// the boot reads them back out of the snapshot it is about to overwrite.
+// @ref LLP 0453#warning-rule [tests]: historical success survives daemon exit, so a restart cannot resurrect a cleared warning
+test('a boot recovers lastSuccessAt from the status file, and only that', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-sink-success-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  try {
+    /** @type {any} */
+    const prior = {
+      state: 'stopped',
+      pid: 4242,
+      startedAt: '2026-09-29T00:00:00.000Z',
+      uptimeMs: 1000,
+      runId: 'prior',
+      mode: 'detached',
+      sources: [],
+      sinks: [
+        { instance: 'central', plugin: '@hypaware/central', kind: 'request', lastTickAt: '2026-09-29T01:00:00.000Z', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+        // Never succeeded: nothing to carry, and seeding a blank row would
+        // make an absent stamp indistinguishable from a recorded one.
+        { instance: 'never', plugin: '@hypaware/central', kind: 'request', lastTickAt: '2026-09-29T01:00:00.000Z' },
+        // Unparseable: a garbled file may lose recovery evidence, never
+        // invent it, so this destination stays at "never succeeded".
+        { instance: 'garbled', lastSuccessAt: 'not a date' },
+        { instance: '', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+        null,
+      ],
+    }
+    writeStatusFile(stateRoot, prior)
+
+    const sinkSnapshots = recoverSinkSnapshots(stateRoot)
+    assert.deepEqual([...sinkSnapshots.values()], [
+      { instance: 'central', plugin: '', kind: '', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+    ], 'only a row with a usable stamp and a usable name is carried forward')
+
+    // The seam the boot runs: the live handles rebuild the rows over the
+    // recovered map. The stamp survives, the live plugin and kind replace the
+    // blanks, and `lastTickAt` is absent - it is what says this daemon has
+    // ticked, and a recovered one would say so before the first tick ran.
+    const runtime = /** @type {any} */ ({
+      sinks: {
+        listHandles: () => [
+          { instanceName: 'central', plugin: '@hypaware/central', kind: 'request' },
+          { instanceName: 'never', plugin: '@hypaware/central', kind: 'request' },
+        ],
+      },
+    })
+    assert.deepEqual(collectSinkSnapshots({ runtime, sinkSnapshots }), [
+      { instance: 'central', plugin: '@hypaware/central', kind: 'request', lastSuccessAt: '2026-09-29T00:59:00.000Z' },
+      { instance: 'never', plugin: '@hypaware/central', kind: 'request' },
+    ])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Best effort, because a boot is not the place to fail on a state file. An
+// unreadable snapshot costs the stamps, which reads as "never succeeded" and
+// warns; it must never cost the daemon.
+// @ref LLP 0453#warning-rule [tests]: a snapshot that cannot be read yields no stamps rather than a failed boot
+test('an absent or unreadable status file yields no recovered stamps', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-sink-success-bad-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  try {
+    assert.deepEqual(recoverSinkSnapshots(stateRoot), new Map(), 'no daemon has ever run here')
+
+    const statusPath = statusFilePath(stateRoot)
+    await fs.mkdir(path.dirname(statusPath), { recursive: true })
+    await fs.writeFile(statusPath, '{ truncated')
+    assert.deepEqual(recoverSinkSnapshots(stateRoot), new Map(), 'a half-written snapshot is not a parse error at boot')
+
+    await fs.writeFile(statusPath, JSON.stringify({ sinks: 'central' }))
+    assert.deepEqual(recoverSinkSnapshots(stateRoot), new Map(), 'a sinks field that is not a list spreads into nothing')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})

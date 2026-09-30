@@ -3,6 +3,7 @@
 **Type:** Decision
 **Status:** Accepted
 **Systems:** Daemon, CLI
+**Extended-by:** LLP 0453 (export warning policy; historical counts retained)
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-09-01

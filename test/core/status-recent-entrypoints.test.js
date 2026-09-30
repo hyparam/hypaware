@@ -363,7 +363,9 @@ test('a rendered recent-clients block cannot be forged by a hostile entrypoint',
   // than a line of its own.
   const block = text.slice(text.indexOf('  recent clients:')).split(LF)
   assert.match(block[1], /^ {4}- \S.* {2}\(claude\) {2}last seen just now, 1 row$/)
-  assert.match(block[2], /^ {2}cache:/, 'the next line is the real one, not a forged one')
+  assert.equal(block[2], '', 'a blank line separates the next section')
+  assert.equal(block[3], '  storage:', 'the next section is the real one, not a forged one')
+  assert.match(block[4], /^ {4}cache:/)
 })
 
 // `sanitizeLabel` bounds a label's bytes; nothing bounded how many of them
