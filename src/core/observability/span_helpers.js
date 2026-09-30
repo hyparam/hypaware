@@ -34,8 +34,9 @@ const declaredStatuses = new WeakMap()
  * side effect of one caller's need is not this helper's decision to make.
  *
  * A declaration holds only where the body returns. One that throws is a
- * failure whatever it had declared, so both helpers overwrite `status` with
- * `failed` in their catch and the declared value never reaches the span.
+ * failure whatever it had declared. This writes the attribute eagerly, so a
+ * declared value is live on the span mid-run, but both helpers overwrite it
+ * with `failed` in their catch and the exported span never carries it.
  *
  * @ref LLP 0322#degrade-reaches-the-signals [implements]: an opt-in terminal status, so only the call site that asks is reclassified
  * @param {Span | null | undefined} span
@@ -137,9 +138,11 @@ export async function runRoot(name, attrs, fn, opts = {}) {
           span.recordException(err)
         } catch { /* as in `withSpan`: unreadable, and the status still says what */ }
         span.setStatus({ code: SpanStatusCode.ERROR, message })
-        // As in `withSpan`, and for parity with it: a caller cannot tell which
-        // helper opened the span it holds, so a failure the two recorded
-        // differently would read as a different kind of failure.
+        // As in `withSpan`, and for the same reason: the bag stamped
+        // `status: 'ok'` at open, so a query filtering on the attribute rather
+        // than the status code counts this failure as a success
+        // (hyparam/hypaware#2342). In both helpers, because a caller cannot
+        // tell which one opened the span it holds.
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
         throw err
