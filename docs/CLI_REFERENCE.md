@@ -117,13 +117,23 @@ hyp ask ["question"] [--list]
 With no argument, asks the one question worth asking first: which skill would
 be the most useful to add. HypAware measures the last 30 days of recorded
 history itself, writes the evidence into `<HYP_HOME>/ask` (one folder,
-rewritten each time), and starts an attached AI client in that
-folder to answer with one skill. If more than one attached client could be
-started, it asks which. With a question, skips the gather and starts the
-client on that question in the current directory. The client takes over the
-terminal. `--list` prints the question and launches nothing. An empty cache, a
-declined selection, or list-only use succeeds. No launchable client, no
-gatherable evidence, or a process-start failure returns `1`.
+rewritten each time), and starts a recorded AI client in that folder to answer
+with one skill. Recorded means attached, or configured with no attach marker
+to write (Codex in its transcript mode); its CLI must also be on `PATH`. If
+more than one such client could be started, it asks which.
+
+With a question, skips the gather and starts a client on that question in the
+current directory, asking which client should answer when more than one could.
+A run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
+takes the first client of the offered set rather than failing. The client does
+not receive the bare question: it is framed with an instruction to look the
+answer up in the recorded sessions with `hyp query` first, and the typed
+question follows verbatim.
+
+The client takes over the terminal. `--list` prints the question and launches
+nothing. An empty cache, a declined selection, or list-only use succeeds. No
+launchable client, no gatherable evidence, or a process-start failure returns
+`1`.
 
 ```sh
 hyp ask "which sessions changed the authentication module"
