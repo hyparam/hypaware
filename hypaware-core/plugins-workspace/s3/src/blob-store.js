@@ -487,23 +487,35 @@ function toReadable(body, key) {
   }
   if (body instanceof Uint8Array) return Readable.from([body])
   if (typeof body === 'string') return Readable.from([Buffer.from(body)])
+  /** @type {unknown} */
+  let refusal
   if (body && typeof (/** @type {any} */ (body)).getReader === 'function') {
     try {
       return Readable.fromWeb(/** @type {any} */ (body))
-    } catch {
+    } catch (err) {
       // A callable `getReader` that is not a real `ReadableStream`, or one
       // already locked: fall through to the refusal below, so the caller gets
-      // the same typed error as any other unusable shape and the body still
-      // goes through `releaseBody`, instead of an untagged TypeError escaping
-      // with the connection behind it held open.
+      // the same typed error as any other unusable shape rather than an
+      // untagged TypeError. `releaseBody` runs and closes the first case. It
+      // cannot close a locked stream: `cancel()` rejects on one, and only
+      // whoever holds the reader can release it, so that body stays open
+      // until the handle drops it. Which of the two happened is knowable
+      // only from the adapter's own error, and a refusal reporting shape
+      // `ReadableStream` otherwise reads as a bug here, that shape being the
+      // one the union says is adapted. So the reason is carried into both
+      // the cause and the message: the cause for a debugger, the message
+      // because that is all a consumer forwards (format-iceberg's
+      // `describeError` returns `err.message` and nothing else).
+      refusal = err
     }
   }
   releaseBody(body)
   const shape = typeof body === 'object'
     ? (/** @type {any} */ (body).constructor?.name || 'object')
     : typeof body
-  throw tagS3Error(undefined, 'blob_body_unusable',
-    `s3 blob-store: getObject for '${key}' returned a body of an unusable shape (${shape})`,
+  const why = refusal instanceof Error ? `: ${refusal.message}` : ''
+  throw tagS3Error(refusal, 'blob_body_unusable',
+    `s3 blob-store: getObject for '${key}' returned a body of an unusable shape (${shape})${why}`,
     key)
 }
 

@@ -453,7 +453,40 @@ test('s3 BlobStore refuses a body shape it cannot read rather than calling it em
   })
   await assert.rejects(store.getObject({ key: 'data.parquet' }), { errorKind: 'blob_body_unusable' })
   assert.equal(released, 1, 'a body the adapter refused is released exactly once')
+  // The adapter's own error is what says whether the body was not a stream or
+  // was a stream someone else already holds. A refusal reported as shape
+  // `ReadableStream` is unreadable without it, since that shape is the one
+  // the union says is adapted. It has to reach the message and not only the
+  // cause, because a consumer forwards the message alone: format-iceberg's
+  // `describeError` returns `err.message`.
+  for (const [what, body, reason] of /** @type {Array<[string, any, RegExp]>} */ ([
+    ['a callable getReader that is not a stream', notAStream, /must be an instance of ReadableStream/],
+    ['a locked ReadableStream', lockedWebStream(), /locked/],
+  ])) {
+    const refused = createS3BlobStore({
+      bucket: 'bucket',
+      client: { ...makeFakeS3Client(), async getObject() { return { Body: body, ContentLength: 16, ETag: '"odd"' } } },
+    })
+    const err = await refusalError(refused)
+    assert.ok(err.cause instanceof Error, `${what} keeps the adapter's error as cause`)
+    assert.match(err.message, reason, `${what} names the reason in the message a consumer forwards`)
+  }
 })
+
+/**
+ * Read back the error `getObject` throws for a body it will not read.
+ *
+ * @param {BlobStore} store
+ * @returns {Promise<Error & { cause?: unknown }>}
+ */
+async function refusalError(store) {
+  try {
+    await store.getObject({ key: 'data.parquet' })
+  } catch (err) {
+    return /** @type {Error & { cause?: unknown }} */ (err)
+  }
+  throw new Error('getObject resolved where it had to throw')
+}
 
 /** A web stream whose reader is already held, which `Readable.fromWeb` rejects. */
 function lockedWebStream() {
