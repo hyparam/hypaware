@@ -111,6 +111,18 @@ export async function reconcileCacheRows(args) {
  * resolve anywhere, which is why the set is then empty rather than a subset.
  * Everything unproven is simply absent, and the caller fails closed on it.
  *
+ * One precondition this cannot check, and does not hold by construction: the
+ * chain that decides a label is the one in force when the partition was
+ * written, and nothing on disk records it. The guard reads the chain in force
+ * now. So a dataset whose chain once led with another column keeps partitions
+ * labelled by that column, and a scope resolving through `client_name` today
+ * reads those labels as foreign and skips rows that are in fact its own. The
+ * trap is that correcting a chain to lead with `client_name` is what opens
+ * the gap on the rows already written under the old one. The cursor cannot
+ * carry the missing fact either, being the file this path has already found
+ * unreadable. Every declaration here has only ever led with `client_name`,
+ * so nothing on disk can carry a disagreeing label (issue #2332).
+ *
  * @ref LLP 0449#reconciliation [implements]: reconciliation never changes another client's rows, so a partition holding only another client's has no work here to refuse.
  * @param {{ path: string, partition: Record<string, string> }[]} parts
  * @param {string[]} segments  the scope's own resolved partition segments
