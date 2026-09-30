@@ -133,9 +133,10 @@ required. Version 2.1.214 or later provides the complete tool-decision detail.
 If the installed version is too old, attach refuses to change the existing
 client settings and tells you to update Claude Code.
 
-Status reports the configured telemetry endpoint, live listener endpoint,
-endpoint drift, recent telemetry activity, transcript activity, and capture
-health. If the endpoints differ, reattach Claude and restart the daemon:
+`hyp client status claude` reports the configured telemetry endpoint, live
+listener endpoint, endpoint drift, recent telemetry activity, transcript
+activity, and capture health. If the endpoints differ, reattach Claude and
+restart the daemon:
 
 ```sh
 hyp attach claude
@@ -150,7 +151,7 @@ items in order:
 2. Confirm that `hyp client status claude` reports the client as attached.
 3. Restart the daemon with `hyp daemon restart`.
 4. Start a new Claude Code process so it reads the managed `env` block.
-5. Run `hyp status` again and follow any `repair:` lines.
+5. Run `hyp status` again and follow any `Next:` lines under Attention.
 
 Session controls contact every live recorder that advertises the session
 control route, including the gateway and the Claude telemetry listener. A

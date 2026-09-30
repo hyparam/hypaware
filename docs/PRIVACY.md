@@ -104,9 +104,9 @@ writes either one today. On a machine that ran one of those releases it is
 still a login item, and still a session-wide variable that other Node
 programs will also read.
 
-**Its lifetime.** `hyp status` shows the fingerprint, every host the CA is
-permitted to vouch for, whether the keychain still trusts it, and whether
-the launchd variable is live. `hyp detach claude --purge` and `hyp daemon
+**Its lifetime.** `hyp status --verbose` shows the fingerprint, every host the
+CA is permitted to vouch for, whether the keychain still trusts it, and
+whether the launchd variable is live. `hyp detach claude --purge` and `hyp daemon
 uninstall` remove the CA, its keychain trust, the launchd variable, and the
 login agent. A plain `hyp detach claude` leaves the CA and any trust an
 earlier release was granted in place, because a detach is not a statement

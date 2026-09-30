@@ -91,14 +91,18 @@ installation or configuration failures return `1`.
 ### `hyp status`
 
 ```text
-hyp status [--json]
+hyp status [--verbose] [--json]
 ```
 
-Collects one read-only health snapshot without activating plugins. It reports
-configuration, daemon, active plugins, sources, sinks, clients, cache, recent
-errors, first-sync state, and repair commands. For Claude, it also reports OTEL
-attach mode, configured and live listener endpoints, endpoint drift, recorder
-activity, and capture health. Use `--json` for the stable machine form.
+Collects one read-only health snapshot without activating plugins. By default it
+prints a summary: daemon state, storage, each client's attach state and sharing
+policy, first-sync state, and an Attention section whose `Next:` lines are the
+commands to run. `--verbose` adds the inventory behind that summary:
+configuration, active plugins, sources, sinks, cache, recent errors, proxy
+trust, maintenance, recent clients, capture health, and the `repair:` lines
+under each diagnostic. Configured and live listener endpoints and endpoint
+drift are reported by `hyp client status`. Use `--json` for the stable machine
+form; `--verbose` does not change it.
 
 ```sh
 hyp status --json

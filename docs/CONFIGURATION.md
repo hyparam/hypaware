@@ -8,7 +8,7 @@ preserves centrally managed settings, and reports the actions it will take.
 ## Locate and validate configuration
 
 The local file is `<HYP_HOME>/hypaware-config.json`; `HYP_HOME` defaults to
-`~/.hyp`. Run `hyp status` to see the paths and effective setup.
+`~/.hyp`. Run `hyp status --verbose` to see the paths and effective setup.
 
 ```sh
 hyp config validate
@@ -21,8 +21,9 @@ and `query.cache` settings. Each plugin owns its own `config` block. Use
 
 On an enrolled machine, a separate central layer under `config-control/` is
 authoritative. Local settings are additive and cannot override central locks.
-`hyp status` identifies each layer and any rejected local entries. Joining
-does not replace your local configuration; leaving removes central management.
+`hyp status --verbose` identifies each layer and any rejected local entries.
+Joining does not replace your local configuration; leaving removes central
+management.
 
 ## Make a repeatable setup
 

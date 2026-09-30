@@ -120,7 +120,7 @@ See [what HypAware records and how to control it](./docs/PRIVACY.md).
 hyp status
 ```
 
-This shows the daemon, attached clients, and what was captured recently. See
+This shows the daemon, your clients, and anything that needs attention. See
 [troubleshooting](./docs/TROUBLESHOOTING.md).
 
 ## Uninstall

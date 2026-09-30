@@ -2,16 +2,17 @@
 
 [Documentation](README.md) / Troubleshooting
 
-Start with the health snapshot. It reports configuration, capture, clients,
-storage, and repair commands without starting sources:
+Start with the health snapshot. It reports the daemon, clients, storage, and
+anything needing attention without starting sources:
 
 ```sh
 hyp status
 hyp version
 ```
 
-For scripts, use `hyp status --json`. Follow the specific `repair:` line for
-the failing component, then repeat the relevant status check.
+Follow the `Next:` line under Attention for the failing component, then repeat
+the relevant status check. Add `--verbose` for the full inventory and the
+`repair:` lines under each diagnostic. For scripts, use `hyp status --json`.
 
 ## No new recordings
 
