@@ -773,7 +773,7 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       summary: 'Generate and manage reports',
       help:
-        "'generate' starts an attached AI client with the report skill in the\n" +
+        "'generate' starts a recorded AI client with the report skill in the\n" +
         "current directory. Optional instructions set its period and focus.\n\n" +
         'The rest talk to the remote. Reports are hosted there (there is no\n' +
         'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
@@ -784,15 +784,16 @@ function buildCoreCommands(registry) {
     }),
     {
       name: 'report generate',
-      summary: 'Start an attached AI client to generate a local report',
+      summary: 'Start a recorded AI client to generate a local report',
       usage: coreUsage('report generate'),
       help: [
-        'Starts an attached client with the hypaware-report skill in the current',
-        'working directory. Optional quoted instructions can specify',
-        'the reporting period and focus; the skill defaults to the previous',
-        'calendar month. Publishing requires an explicit request.',
-        'If multiple attached clients have the skill, asks which on a terminal;',
-        'otherwise uses the first available client. The client takes over the',
+        'Starts a recorded client with the hypaware-report skill in the current',
+        'working directory. Recorded means attached, or configured with no attach',
+        'marker to write, as codex is in its transcript mode. Optional quoted',
+        'instructions can specify the reporting period and focus; the skill',
+        'defaults to the previous calendar month. Publishing requires an explicit',
+        'request. If more than one recorded client has the skill, asks which on a',
+        'terminal; otherwise starts one without asking. The client takes over the',
         'terminal with its normal permissions and is recorded under the current',
         'directory\'s own usage class. This is not session isolation: excerpts it',
         'reads out of local-only history are quoted into a transcript that syncs',
@@ -841,18 +842,20 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'report fix',
-      summary: "Start an attached AI client on one of a report's recommendations, here",
+      summary: "Start a recorded AI client on one of a report's recommendations, here",
       usage: coreUsage('report fix'),
       help: [
         "The id is a recommendation's, as 'hyp report list' prints under each",
         'report (hyprec-0123456789abcdef). HypAware checks the recommendation still',
-        'exists and starts an attached client in the current directory with',
+        'exists and starts a recorded client in the current directory with',
         "instructions to read it through 'hyp report get <id>' and make the",
-        'change here; nothing is written to disk. With no id on a terminal, pick',
-        'a report (newest first), then one of its recommendations (--kind,',
-        '--period and --limit narrow which reports). If more than one attached',
-        'client could be started, it asks which. The client takes over the',
-        'terminal; nothing is pre-authorised.',
+        'change here; nothing is written to disk. Recorded means attached, or',
+        'configured with no attach marker to write, as codex is in its transcript',
+        'mode. With no id on a terminal, pick a report (newest first), then one',
+        'of its recommendations (--kind, --period and --limit narrow which',
+        'reports). If more than one recorded client could be started, it asks',
+        'which on a terminal; an id given off a terminal starts one without',
+        'asking. The client takes over the terminal; nothing is pre-authorised.',
       ].join('\n'),
       run: runReportFix,
     },

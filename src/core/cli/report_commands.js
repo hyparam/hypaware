@@ -144,7 +144,7 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
     span.setAttribute('launcher_count', launchers.length)
     if (launchers.length === 0) {
       span.setAttribute('error_kind', 'no-launcher')
-      ctx.stderr.write('hyp report generate: no attached client with the hypaware-report skill can be started.\n')
+      ctx.stderr.write('hyp report generate: no recorded client with the hypaware-report skill can be started.\n')
       ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
       return 1
     }
@@ -735,7 +735,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   const descriptors = await buildWalkthroughClientDescriptorMap()
   const launchers = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
   if (launchers.length === 0) {
-    ctx.stderr.write('hyp report fix: no attached client can be started here.\n')
+    ctx.stderr.write('hyp report fix: no recorded client can be started here.\n')
     ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
     return 1
   }
