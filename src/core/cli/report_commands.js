@@ -776,13 +776,23 @@ export async function runReportFix(argv, ctx, deps = {}) {
   // remote this run did; the credential reaches it through the inherited
   // environment, as every `hyp` call the client makes already relies on.
   const readCommand = ['hyp report get', recommendation.id, ...targetFlags(gate.params)].join(' ')
+  // `readCommand` names the target only when the operator typed one; a bare
+  // run resolved its target from config instead. A `<target>` placeholder
+  // in the hint below would leave the client nothing to substitute, so it
+  // would fall back to the local cache the sentence warns against - name
+  // the resolved target instead.
+  const orgFlag = gate.params.org !== undefined ? ` --org ${shellWord(String(gate.params.org))}` : ''
+  const queryFlags = `--remote ${shellWord(resolved.target)}${orgFlag}`
   const prompt =
     `Run \`${readCommand}\` and read its output. It is one recommendation from a HypAware usage report (${where}): "${title}", ` +
     'followed by the evidence it cites and the queries the report ran to reach it. ' +
-    'Implement it in this repository: make the change it describes, verify it the way this repository verifies changes, ' +
+    'Before implementing, validate the recommendation against current code and its cited evidence. ' +
+    'Use remote queries when the evidence comes from the server, keeping the same remote target and organization scope. ' +
+    'Treat proposed causes and remedies as hypotheses where indicated; revise or reject them if the investigation points elsewhere. ' +
+    'Implement the justified change in this repository, verify it the way this repository verifies changes, ' +
     'and summarise what you changed. If it does not apply to this repository, say why instead of forcing it.' +
     (recommendation.basis.length > 0
-      ? ' Re-run the queries with `hyp query sql` if you need to check the finding against the recordings on this machine.'
+      ? ` Re-run the queries with \`hyp query sql ${queryFlags}\` to check the server finding; local queries check only this machine's recordings.`
       : '')
   ctx.stdout.write(`\nStarting ${launcher.label} on "${esc(title)}"...\n\n`)
   const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd: ctx.cwd, env: ctx.env })
@@ -984,7 +994,7 @@ function citationsAppendix(recommendation, ext) {
   if (evidence.length === 0 && basis.length === 0) return ''
   const lines = ['', '---', '', '## Citations from the report record', '']
   if (evidence.length > 0) {
-    lines.push('### Evidence', '', 'The turns this page cites as `evidence:N`, by N. Each is a recorded message; look it up on this machine with `hyp query sql` against `ai_gateway_messages` by `session_id` and `message_id`.', '')
+    lines.push('### Evidence', '', 'The turns this page cites as `evidence:N`, by N. Each is a recorded message; look it up with `hyp query sql` against `ai_gateway_messages` by `session_id` and `message_id`, using `--remote <target>` with the same remote target and organization scope as this report for server evidence.', '')
     evidence.forEach((e, i) => {
       const where = [`session ${e.sessionId}`, e.chainId ? `chain ${e.chainId}` : '', `message ${e.messageId}`, e.toolCallId ? `tool call ${e.toolCallId}` : '', e.day].filter(Boolean).join(', ')
       lines.push(`${i + 1}. ${e.note} (${where})`)
@@ -992,7 +1002,7 @@ function citationsAppendix(recommendation, ext) {
     lines.push('')
   }
   if (basis.length > 0) {
-    lines.push('### Basis', '', 'The queries the report ran to reach this recommendation, verbatim. They ran on the server over the whole org; `hyp query sql` on this machine sees only its own recordings, so counts will differ but the shape of the check is the same.', '')
+    lines.push('### Basis', '', 'The queries the report ran to reach this recommendation, verbatim. Re-run them with `hyp query sql` and `--remote <target>`, keeping the report\'s remote target, organization scope, and date filters. Local queries see only this machine\'s recordings and do not reproduce the server population.', '')
     for (const q of basis) {
       if (q.agent) lines.push(`Run by ${q.agent}:`, '')
       // A fence longer than any backtick run in the query, so a query that

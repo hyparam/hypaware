@@ -870,7 +870,19 @@ test('fix writes nothing to disk and carries the target flags into the read comm
   assert.equal(await runReportFix([REC, '--org', 'acme', '--remote', 'prod'], ctx, deps), 0)
   assert.deepEqual(await fs.readdir(hypHome), [])
   assert.match(launches[0].prompt, new RegExp('^Run `hyp report get ' + REC + ' --org acme --remote prod` and read its output\\.'))
-  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql`/)
+  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql --remote prod --org acme`/)
+})
+
+// A bare run carries no `--remote` into readCommand (targetFlags only echoes
+// what was typed), so the re-run hint must still name a concrete target -
+// otherwise the client has nothing to substitute and queries the local cache.
+test('fix with no --remote names the resolved default target in the re-run hint, not a placeholder', async (t) => {
+  stubFixServer(t, { cited: true })
+  const { ctx } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql --remote prod`/)
+  assert.doesNotMatch(launches[0].prompt, /<target>/)
 })
 
 test('fix falls back to the HTML page when the report has no Markdown one', async (t) => {
