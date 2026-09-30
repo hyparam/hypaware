@@ -230,7 +230,10 @@ test('runWizardFirstAsk: no launchable client prints the list and launches nothi
   // does not have, so it is never offered as something to paste.
   for (const p of SUGGESTED_PROMPTS) assert.ok(!text.includes(p.prompt), `prompt ${p.id} offered for pasting`)
   // Nothing to start here, so the footer names the condition and the verb to run once it holds.
-  assert.match(text, /Once an attached client can be started here \(see `hyp status`\), run `hyp ask` again/)
+  // That condition is `askableClients`' predicate: attached, or configured with
+  // no attach marker to write, which is recorded but not attached.
+  assert.match(text, /Once a recorded client can be started here \(see `hyp status`\), run `hyp ask` again/)
+  assert.doesNotMatch(text, /attached client/)
 })
 
 test('an empty cache frames the question as something to come back to', () => {
