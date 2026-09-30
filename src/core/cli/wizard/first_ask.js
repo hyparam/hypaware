@@ -221,7 +221,10 @@ function promptListFooter(footer, hasRows) {
       // `hyp ask`" would point at the screen they are looking at. The
       // sentence names the condition instead, and the verb only as what
       // to run once it holds.
-      return 'Nothing was started. Once an attached client can be started here (see `hyp status`), run `hyp ask` again: it gathers the evidence first.'
+      //
+      // The condition is `askableClients`' predicate: attached, or configured
+      // with no attach marker to write, which is recorded but not attached.
+      return 'Nothing was started. Once a recorded client can be started here (see `hyp status`), run `hyp ask` again: it gathers the evidence first.'
     default:
       return hasRows === false
         ? 'Run `hyp ask` then, to start your client on it.'

@@ -222,7 +222,8 @@ test('runAsk: --list on a host with nothing launchable names the condition for a
   const { ctx, stdout } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
   await runAsk(['--list'], ctx)
   const text = stdout.text()
-  assert.match(text, /Once an attached client can be started here \(see `hyp status`\), run `hyp ask` again/)
+  assert.match(text, /Once a recorded client can be started here \(see `hyp status`\), run `hyp ask` again/)
+  assert.doesNotMatch(text, /attached client/)
   assert.doesNotMatch(text, /Run `hyp ask` to start your client on it/)
 })
 
