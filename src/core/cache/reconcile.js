@@ -35,7 +35,6 @@ export async function reconcileCacheRows(args) {
   const parts = await discoverCachePartitions(cacheRoot, { datasets: [dataset] })
   const knownPaths = new Set(parts.map(part => part.path))
   const paths = [target, ...[...knownPaths].filter(part => part !== target)]
-  const unreachable = partitionsOutsideScope(parts, segments, scope.where, declaration)
   // A reconciliation rewrites recorded history, so its record names the exact
   // scope it rewrote: "rows_deleted: 4" is only actionable with the session it
   // removed them from.
@@ -44,6 +43,10 @@ export async function reconcileCacheRows(args) {
     return withPartitionMutationLocks(paths, async () => {
       /** @type {Set<string>} */
       const skipped = new Set()
+      // Only a refusal ever asks which partitions are out of scope, and a
+      // healthy cache never refuses, so the scan stays off the common path.
+      /** @type {Set<string> | null} */
+      let unreachable = null
       for (const part of paths) {
         const refusal = appendRefusalReason(part)
         if (!refusal) continue
@@ -51,6 +54,7 @@ export async function reconcileCacheRows(args) {
         // still fails closed: its stale copies would survive the canonical
         // write and answer queries beside it. One that provably holds none of
         // them has no retirement to refuse, so this scope walks past it.
+        unreachable ??= partitionsOutsideScope(parts, segments, scope.where, declaration)
         if (!unreachable.has(part)) throw new Error(refusal)
         skipped.add(part)
         getLogger('cache').warn('cache.retirement_skipped', { component: 'cache', dataset,
