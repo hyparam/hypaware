@@ -45,7 +45,7 @@ import {
 } from './pid.js'
 import { DAEMON_STOP_TIMEOUT_MS } from './service_ops.js'
 import { openDaemonLog } from './logs.js'
-import { readSourceIdentity, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { readSourceIdentity, readStatusFile, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import {
   detectSupervisor,
   readSelfPackageIdentity,
@@ -279,8 +279,12 @@ export async function runDaemon(opts = {}) {
     sources: [],
     sinks: [],
   }
-  /** @type {Map<string, SinkSnapshot>} */
-  const sinkSnapshots = new Map()
+  // Not a fresh map: `hyp status` warns while a destination holds an export
+  // failure no later success has answered (LLP 0453), so a boot that started
+  // every destination at "never succeeded" would re-raise a warning on one
+  // that had already recovered, and nothing could clear it afterwards.
+  // @ref LLP 0453#warning-rule [implements]: historical success survives daemon exit, so the warning is defined against a stable point
+  const sinkSnapshots = recoverSinkSnapshots(runtimeStateRoot)
   /** @type {NodeJS.Timeout | null} */
   let tickHandle = null
   /** @type {((reason: 'signal'|'manual'|'restart'|'control') => Promise<number>) | null} */
@@ -1859,6 +1863,40 @@ async function safeStatus(runtime, name, fileLog) {
 }
 
 /**
+ * The boot's starting sink snapshots: the `lastSuccessAt` stamps the previous
+ * daemon left in `status.json`, and nothing else. `lastTickAt` is deliberately
+ * dropped, since it is what says *this* daemon has ticked. Best effort, because
+ * a boot is not the place to fail on a state file: an absent, truncated or
+ * hostile snapshot yields no stamps, and a row without a parseable one is
+ * skipped, so a garbled file can lose recovery evidence but never invent it.
+ * `readStatusFile` validates only that it read an object, hence the row guards.
+ * Rows for instances this boot no longer registers are harmless:
+ * `collectSinkSnapshots` emits from the live handles.
+ *
+ * @param {string} stateRoot
+ * @returns {Map<string, SinkSnapshot>}
+ */
+function recoverSinkSnapshots(stateRoot) {
+  /** @type {Map<string, SinkSnapshot>} */
+  const out = new Map()
+  /** @type {DaemonStatus | null} */
+  let prior = null
+  try {
+    prior = readStatusFile(stateRoot)
+  } catch {
+    return out
+  }
+  if (!prior || !Array.isArray(prior.sinks)) return out
+  for (const row of prior.sinks) {
+    if (!row || typeof row !== 'object') continue
+    if (typeof row.instance !== 'string' || row.instance === '') continue
+    if (typeof row.lastSuccessAt !== 'string' || !Number.isFinite(Date.parse(row.lastSuccessAt))) continue
+    out.set(row.instance, { instance: row.instance, plugin: '', kind: '', lastSuccessAt: row.lastSuccessAt })
+  }
+  return out
+}
+
+/**
  * Build a snapshot row per registered sink instance. The kernel sink
  * driver doesn't surface failure / next-tick fields, so those stay
  * `undefined`.
@@ -1968,6 +2006,7 @@ function sleep(ms) {
 export {
   collectSinkSnapshots,
   pidFilePath,
+  recoverSinkSnapshots,
   statusFilePath,
   resolveClientActionSeam,
   startConfiguredSources,

@@ -474,43 +474,136 @@ test('errors the processing daemon recorded are counted too', async () => {
   assert.ok(diag.message.includes('3 in the daemon log'), diag.message)
 })
 
-// @ref LLP 0453#warning-rule [tests]: recovery and retry bursts do not become standing warnings
+/**
+ * A `HYP_HOME` with one configured destination, a daemon snapshot recording
+ * its last success, and one outbox file per failed export.
+ *
+ * @param {{ failures: number[], success?: number | string, outbox?: boolean }} scenario
+ */
+async function seedDestination(scenario) {
+  const { hypHome, stateRoot } = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  // A destination that has never succeeded has no stamp at all, which is a
+  // different fixture from one whose stamp is unusable: both must warn, and
+  // only writing the row for the second tells them apart.
+  const lastSuccessAt = typeof scenario.success === 'number'
+    ? new Date(Date.now() - scenario.success * 60_000).toISOString()
+    : scenario.success
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', ...(lastSuccessAt === undefined ? {} : { lastSuccessAt }) }],
+  }))
+  if (scenario.outbox !== false) {
+    await writeOutbox(stateRoot, 'central', scenario.failures.map((minutes) => ({ agoMs: minutes * 60_000, error: 'fetch failed' })))
+  }
+  return { hypHome, stateRoot }
+}
+
+// A destination needs attention while it holds a failed export that no later
+// success has answered. One unresolved failure is enough, and no amount of
+// ageing turns one into a recovery. The four rows whose answer the threshold
+// rule got wrong are marked: it could not fire on a destination exporting
+// more slowly than the bar, so `never succeeded, two failures` printed
+// `HypAware · Healthy` while its only destination had never delivered
+// anything (issue #2337).
+// @ref LLP 0453#warning-rule [tests]: an unresolved failure warns; only a strictly later success clears it
 for (const scenario of [
-  { name: 'two failures', failures: [20, 1], warns: false },
-  { name: 'short burst that has aged', failures: [35, 34, 33], warns: false },
-  { name: 'sustained failures', failures: [20, 10, 1], warns: true },
-  { name: 'later success', failures: [20, 10, 2], success: 1, warns: false },
-  { name: 'success resets the streak', failures: [40, 30, 20, 10, 1], success: 15, warns: false },
-  { name: 'invalid success', failures: [20, 10, 1], success: 'invalid', warns: true },
-  { name: 'future success', failures: [20, 10, 1], success: -60, warns: true },
-  { name: 'future failure cannot meet threshold', failures: [20, 1, -60], warns: false },
-  { name: 'expired failure cannot meet threshold', failures: [1500, 10, 1], warns: false },
+  // Was `false` under the threshold rule (one failure, no span).
+  { name: 'never succeeded, one failure', failures: [1], warns: true },
+  // Was `false`: two failures never reached the count of three. This is the
+  // blocker case - the only destination has never delivered anything.
+  { name: 'never succeeded, two failures', failures: [20, 1], warns: true },
+  // Was `false`: the whole burst had aged out of the 24-hour window. Ageing
+  // is not recovery, so the window no longer decides this.
+  { name: 'unresolved failure older than the window', failures: [1500], warns: true },
+  { name: 'never succeeded, sustained failures', failures: [20, 10, 1], warns: true },
+  { name: 'a later success clears every earlier failure', failures: [20, 10, 2], success: 1, warns: false },
+  // Was `false`: the streak restarted at the success and never rebuilt. Two
+  // failures stand after it, so two failures are unanswered.
+  { name: 'failures after a success still stand', failures: [40, 30, 20, 10, 1], success: 15, warns: true },
+  { name: 'a success stamp that does not parse is no recovery evidence', failures: [20, 10, 1], success: 'invalid', warns: true },
+  { name: 'a success stamp in the future is no recovery evidence', failures: [20, 10, 1], success: -60, warns: true },
+  // Symmetric with the row above: a stamp ahead of the clock is evidence
+  // about nothing, whichever side of the comparison it sits on.
+  { name: 'a failure stamp in the future does not warn', failures: [-60], warns: false },
+  { name: 'a configured destination with an empty outbox does not warn', failures: [], warns: false },
+  { name: 'a configured destination with no outbox at all does not warn', failures: [], outbox: false, warns: false },
+  { name: 'a past success and no failures does not warn', failures: [], success: 30, warns: false },
 ]) {
   test(`export warning: ${scenario.name}`, async (t) => {
-    const { hypHome, stateRoot } = await makeHome()
+    const { hypHome } = await seedDestination(scenario)
     t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
-    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
-      version: 2, plugins: [], sinks: { central: { plugin: '@hypaware/central', config: {} } },
-    }))
-    await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
-    await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
-      sinks: [{ instance: 'central', lastSuccessAt: typeof scenario.success === 'number'
-        ? new Date(Date.now() - scenario.success * 60_000).toISOString() : scenario.success }],
-    }))
-    await writeOutbox(stateRoot, 'central', scenario.failures.map((minutes) => ({ agoMs: minutes * 60_000, error: 'fetch failed' })))
     const report = await collectHypAwareStatus(collectOpts(hypHome))
-    assert.equal(report.recentErrorCount, scenario.failures.filter((minutes) => minutes < 1440).length)
+    // The 24-hour window survives everywhere it was already doing a job: the
+    // history count still drops the failure from 25 hours ago, in the same
+    // run where that failure raises the warning.
+    assert.equal(
+      report.recentErrorCount,
+      scenario.outbox === false ? 0 : scenario.failures.filter((minutes) => minutes < 1440).length,
+      'recent_error_count keeps its 24-hour horizon',
+    )
     assert.equal(report.diagnostics.some((d) => d.kind === 'recent_errors'), false)
     const warning = report.diagnostics.find((d) => d.kind === 'sink_export_failing')
     assert.equal(Boolean(warning), scenario.warns)
     if (warning) {
-      assert.match(warning.message, /central: 3 failed export attempts/)
-      assert.match(warning.message, /last failure .* ago, with no later success recorded/)
+      // A success only answers failures older than itself, and only when it
+      // is usable at all: an unparseable or future stamp answers nothing.
+      const clearsOlderThan = typeof scenario.success === 'number' && scenario.success >= 0 ? scenario.success : Infinity
+      const unresolved = scenario.failures.filter((minutes) => minutes > 0 && minutes <= clearsOlderThan).length
+      assert.equal(warning.severity, 'warning')
+      assert.match(warning.message, new RegExp(`^central: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure .+ ago$`))
+      // A remote destination is not repaired by bouncing the local daemon.
       assert.equal(warning.repair.some((r) => r.includes('daemon restart')), false)
     }
   })
 }
 
+// The boundary the one-line rule does not settle, pinned at the millisecond
+// rather than approached from a relative offset: the fixture reads the stamp
+// back out of the filename the sink driver wrote, so the two values are the
+// same instant by construction and not by arithmetic that could drift.
+//
+// A tie warns. At equal stamps nothing in the record says which came first,
+// and the conservative reading of "no later success" is the one that keeps
+// looking. One millisecond later, the success is strictly later and clears.
+// @ref LLP 0453#warning-rule [tests]: only a strictly later success clears a failure, so equal stamps warn
+test('export warning: a success sharing the failure millisecond warns, one millisecond later clears', async (t) => {
+  const { hypHome, stateRoot } = await seedDestination({ failures: [5] })
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const outbox = path.join(stateRoot, 'sinks', 'central', 'outbox')
+  const [batchFile] = await fs.readdir(outbox)
+  const stamp = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/.exec(batchFile)
+  assert.ok(stamp, `the fixture filename carries the batch stamp: ${batchFile}`)
+  const failedAtMs = Date.parse(stamp[1])
+
+  /** @param {number} ms */
+  const reportWithSuccessAt = async (ms) => {
+    await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+      sinks: [{ instance: 'central', lastSuccessAt: new Date(ms).toISOString() }],
+    }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    return report.diagnostics.some((d) => d.kind === 'sink_export_failing')
+  }
+
+  assert.equal(await reportWithSuccessAt(failedAtMs), true, 'an identical stamp is not a later success')
+  assert.equal(await reportWithSuccessAt(failedAtMs - 1), true, 'an earlier success is not a later success')
+  assert.equal(await reportWithSuccessAt(failedAtMs + 1), false, 'one millisecond later is a later success')
+})
+
+// Three properties that argue with each other, in one fixture:
+//
+//  - Recovery is per destination: `recovered` succeeding must not mask
+//    `failing`, which still holds three unanswered failures.
+//  - `removed` has a failing outbox and is not in `sinks[]`, so it is a
+//    destination this install no longer has, and nothing asks an operator to
+//    repair one they already deleted. Leaving `sinks[]` is also the only door
+//    out of a warning nothing else can clear, since no success is ever
+//    recorded for a destination that is never exercised again.
+//  - Its files are still history: all ten errors stay in
+//    `recent_error_count`, the three from `removed` included.
+// @ref LLP 0453#warning-rule [tests]: one destination's success clears only its own warning; an unconfigured destination raises none
 test('export recovery is per destination and dev telemetry cannot revive recovered warnings', async (t) => {
   const { hypHome, stateRoot } = await makeHome()
   t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
@@ -535,6 +628,6 @@ test('export recovery is per destination and dev telemetry cannot revive recover
   assert.equal(report.recentErrorCount, 10, 'all historical errors remain counted')
   assert.equal(report.diagnostics.some((d) => d.kind === 'recent_errors'), false)
   const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
-  assert.equal(warnings.length, 1)
-  assert.match(warnings[0].message, /^failing:/)
+  assert.equal(warnings.length, 1, warnings.map((w) => w.message).join(' | '))
+  assert.match(warnings[0].message, /^failing: 3 failed export attempts with no later success recorded/)
 })

@@ -4068,9 +4068,6 @@ const DEV_TELEMETRY_TAIL_BYTES = 1024 * 1024
  */
 const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/
 
-const EXPORT_FAILURE_WARNING_COUNT = 3
-const EXPORT_FAILURE_WARNING_SPAN_MS = 10 * 60_000
-
 /**
  * Count the failures this install has actually recorded in the last
  * {@link RECENT_ERROR_WINDOW_HOURS} hours, across every store that exists on
@@ -4110,9 +4107,13 @@ const EXPORT_FAILURE_WARNING_SPAN_MS = 10 * 60_000
  */
 async function countRecentErrors(stateRoot, sinks, snapshotSinks, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
-  // Config-derived sink rows omit runtime stamps. Read the already-loaded
-  // daemon snapshot directly, including after exit: success is a historical
-  // fact, not a liveness claim. Do not let malformed/future stamps hide errors.
+  // Config-derived sink rows omit runtime stamps, so the last success comes
+  // from the already-loaded daemon snapshot, read after the daemon has exited
+  // as happily as while it runs: a success is a historical fact, not a
+  // liveness claim, and the daemon carries the stamp across its own restarts
+  // (`readPriorSinkSuccess` in `runtime.js`). A stamp that does not parse, or
+  // that sits in the future, is no evidence of recovery and leaves the
+  // destination at "never succeeded" rather than quietly clearing a failure.
   const lastSuccess = new Map(sinks.map((s) => [s.instance, -Infinity]))
   if (Array.isArray(snapshotSinks)) {
     for (const sink of snapshotSinks) {
@@ -4240,12 +4241,33 @@ async function countDaemonLogErrors(logPath, sinceMs) {
  * telemetry: the driver's own `sink.export_batch.failed` goes to the OTel
  * logger, which has no exporter configured on an ordinary machine.
  *
- * Nothing drains these files, so the directory is a growing ledger. The
- * history count keeps its window; warnings consider only attempts after the
- * destination's last recorded success. Costs one directory listing
- * per configured sink and opens no file: the batch id carries its own
- * timestamp. The collector already walks the whole cache tree with a `stat`
- * per file (`measureCacheStats`), so this sits well inside its budget.
+ * One listing answers two questions on two horizons. The history count keeps
+ * the shared 24-hour window, because `recent_error_count` reports what this
+ * install has recorded lately. The warning is a recovery question rather than
+ * a recency one, and waiting is not a recovery, so it takes no window at all:
+ * a failure that has aged out of the count still warns while nothing has
+ * succeeded since. Bounding it by the window instead meant a destination
+ * exporting more slowly than the bar could never reach it, so an install
+ * whose only destination had never once succeeded printed "Healthy"
+ * (issue #2337).
+ *
+ * "Later" is strict, so a success sharing a failure's millisecond leaves the
+ * warning standing: at equal stamps nothing says which came first, and the
+ * conservative reading is the one that keeps looking. A stamp in the future
+ * is evidence about nothing and is skipped on both sides, so a clock that ran
+ * ahead cannot invent a warning and one that was set back cannot clear one.
+ *
+ * Nothing drains these files, so the directory is a growing ledger. Costs one
+ * directory listing per configured sink and opens no file: the batch id
+ * carries its own timestamp, and both answers accumulate in the same pass
+ * with no sort and nothing retained per failure. The collector already walks
+ * the whole cache tree with a `stat` per file (`measureCacheStats`), so this
+ * sits well inside its budget.
+ *
+ * An outbox with no entry in `lastSuccess` belongs to a destination the
+ * report does not list, since `sinks[]` is derived from the loaded config.
+ * Its files still count as history, but nothing asks an operator to repair a
+ * destination this install no longer has.
  *
  * @param {string} sinksDir
  * @param {number} sinceMs
@@ -4253,7 +4275,7 @@ async function countDaemonLogErrors(logPath, sinceMs) {
  * @param {Map<string, number>} lastSuccess
  * @returns {Promise<{ total: number, diagnostics: StatusDiagnostic[] }>}
  */
-// @ref LLP 0453#warning-rule [implements]: warn on sustained failures after the destination's last success, not recovered history
+// @ref LLP 0453#warning-rule [implements]: a destination warns while it holds an export failure with no later success, however old
 async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
   const result = { total: 0, diagnostics: /** @type {StatusDiagnostic[]} */ ([]) }
   /** @type {Dirent[]} */
@@ -4272,26 +4294,26 @@ async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
     } catch {
       continue
     }
-    let count = 0
-    let first = Infinity
-    let last = -Infinity
+    // `-Infinity` when the destination has never succeeded, so `at < success`
+    // is the one recovery test, and `undefined` when it is not configured.
     const success = lastSuccess.get(instance.name)
+    let unresolved = 0
+    let last = -Infinity
     for (const file of files) {
       const match = OUTBOX_BATCH_TIMESTAMP.exec(file)
       if (!match) continue
       const at = Date.parse(match[1])
-      if (!Number.isFinite(at) || at < sinceMs) continue
-      result.total += 1
-      if (success === undefined || at <= success || at > nowMs) continue
-      count += 1
-      first = Math.min(first, at)
+      if (!Number.isFinite(at)) continue
+      if (at >= sinceMs) result.total += 1
+      if (success === undefined || at > nowMs || at < success) continue
+      unresolved += 1
       last = Math.max(last, at)
     }
-    if (count >= EXPORT_FAILURE_WARNING_COUNT && last - first >= EXPORT_FAILURE_WARNING_SPAN_MS) {
+    if (unresolved > 0) {
       result.diagnostics.push({
         severity: 'warning',
         kind: 'sink_export_failing',
-        message: `${sanitizeLabel(instance.name)}: ${count} failed export attempts over ${formatGapDuration(last - first)}; last failure ${formatGapDuration(nowMs - last)} ago, with no later success recorded`,
+        message: `${sanitizeLabel(instance.name)}: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
         repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(path.join(sinksDir, instance.name, 'outbox'), 512)}`],
       })
     }
