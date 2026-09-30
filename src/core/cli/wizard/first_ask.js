@@ -116,7 +116,7 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
  * capture-enabled but carries no `launch` block because it has no prompt
  * argument to carry one for.
  *
- * @ref LLP 0198#path-probe [implements]: offer only what is attached and resolves
+ * @ref LLP 0198#path-probe [implements]: offer only what is recorded and resolves
  * @param {{
  *   clients: string[],
  *   descriptors: Map<string, ClientDescriptor>,

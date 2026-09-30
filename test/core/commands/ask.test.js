@@ -85,6 +85,13 @@ test('askableClients includes a configured client whose attach is n/a (codex in 
       { name: 'claude', plugin: '@hypaware/claude', configured: false, attachable: true, attached: false },
       { name: 'codex', plugin: '@hypaware/codex', configured: true, attachable: false, attached: false },
       { name: 'claude-desktop', plugin: '@hypaware/claude-desktop', configured: true, attachable: false, attached: false },
+      // `attachable` is a required boolean every real row carries
+      // (`status.js` derives it from the descriptor), so a row without one
+      // is not a state to honour: it is a report shape nothing here
+      // produces. The predicate therefore tests `=== false` rather than
+      // falsiness, which would read a missing field as "attach n/a" and
+      // offer every configured client on the machine.
+      { name: 'ghost', plugin: '@hypaware/ghost', configured: true, attached: false },
     ],
   })
   const clients = await askableClients(ctx, { collectStatus: async () => report })
@@ -165,6 +172,38 @@ test('runAsk "<question>": the no-launcher hint names real clients, not a placeh
   const text = stderr.text()
   assert.match(text, /Attach one with `hyp client attach claude` \(or codex, opencode, pi\)/)
   assert.doesNotMatch(text, /<client>/)
+})
+
+// The three helpers above are each pinned on their own, but nothing reached
+// the call site in `runAsk` that wires them together, so which client answers
+// and what it is started on were both unpinned: a predicate that stopped
+// offering transcript-mode Codex, or a frame that stopped carrying the typed
+// question, would have regressed with every test still green. This drives the
+// real command against a temp `HYP_HOME`, a temp `HOME`, and a stub `codex`
+// alone on `PATH`, so the offer, the non-interactive pick, and the prompt
+// handed to the client are one assertion each.
+// @ref LLP 0429#status [tests]: a codex whose capture mode writes no marker is still a client `hyp ask` may start
+test('runAsk "<question>": starts the transcript-mode codex it offers, on the framed question', async () => {
+  const hypHome = await freshHome()
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  const bin = path.join(home, 'bin')
+  await fs.mkdir(bin, { recursive: true })
+  const promptFile = path.join(home, 'prompt.txt')
+  // `launchClient` spawns with `stdio: 'inherit'`, so the stub records its
+  // argument to a file rather than to a stream the test runner also owns.
+  await fs.writeFile(path.join(bin, 'codex'), `#!/bin/sh\nprintf '%s' "$1" > '${promptFile}'\n`, { mode: 0o755 })
+  // Codex enabled and in its default transcript mode: configured, attach n/a,
+  // no marker anywhere under this `HOME`.
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] })
+  )
+  const question = 'which sessions touched the auth module'
+  const { ctx, stdout } = makeCtx({ env: { HOME: home, HYP_HOME: hypHome, PATH: bin } })
+  const code = await runAsk([question], ctx)
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /Starting Codex\.\.\./)
+  assert.equal(await fs.readFile(promptFile, 'utf8'), framedQuestion(question))
 })
 
 /* --------------------------------- N7 -------------------------------------- */
