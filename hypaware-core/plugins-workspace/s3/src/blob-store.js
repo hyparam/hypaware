@@ -388,7 +388,7 @@ export async function defaultS3BlobStoreClientFactory(opts) {
     async getObject(input) {
       const result = await client.send(new GetObjectCommand(input))
       return {
-        Body: /** @type {NodeJS.ReadableStream | Uint8Array | string | null | undefined} */ (
+        Body: /** @type {NodeJS.ReadableStream | Uint8Array | null | undefined} */ (
           /** @type {unknown} */ (result.Body)
         ),
         ContentLength: result.ContentLength,
@@ -480,13 +480,21 @@ async function materializeBody(body) {
  * one, so it is adapted rather than refused: `Readable.fromWeb` is core,
  * adds no dependency, and streams instead of buffering.
  *
- * Anything else throws. An empty stream is the worst available reading of
- * "this shape is unknown", because it is byte-for-byte what a genuinely
+ * A `string` is refused rather than decoded, and is the one shape
+ * withdrawn from the union. Reading it means guessing an encoding the
+ * handle has no field to state, and both guesses corrupt a real payload
+ * without raising: UTF-8 re-encodes every byte above 0x7F, latin1
+ * truncates every code point above U+00FF. A handle holding a string knows
+ * the encoding this code cannot, so it decodes and hands over a
+ * `Uint8Array`.
+ *
+ * Anything else throws too. An empty stream is the worst available reading
+ * of "this shape is unknown", because it is byte-for-byte what a genuinely
  * empty object looks like: a caller reading a Parquet footer cannot tell a
  * body that never arrived from one that is not there, and the symptom is a
  * wrong query answer with no exception to trace it to.
  *
- * @param {NodeJS.ReadableStream | ReadableStream | Uint8Array | string} body
+ * @param {NodeJS.ReadableStream | ReadableStream | Uint8Array} body
  * @param {string} key
  * @returns {NodeJS.ReadableStream}
  */
@@ -495,7 +503,6 @@ function toReadable(body, key) {
     return /** @type {NodeJS.ReadableStream} */ (body)
   }
   if (body instanceof Uint8Array) return Readable.from([body])
-  if (typeof body === 'string') return Readable.from([Buffer.from(body)])
   /** @type {unknown} */
   let refusal
   if (body && typeof (/** @type {any} */ (body)).getReader === 'function') {
