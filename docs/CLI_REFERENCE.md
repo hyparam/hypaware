@@ -501,8 +501,10 @@ hyp session --help
 If you omit the session ID, HypAware derives it from a supported Claude Code or
 Codex context. It refuses rather than guessing. An ignored session is saved
 under `<HYP_HOME>/hypaware/session-ignores/` and stays ignored across recorder
-and daemon restarts until you unignore it. A fork has a new session ID and
-needs its own ignore.
+and daemon restarts until you unignore it. The Cursor recorder is the
+exception: it advertises the control route but still holds its set in memory,
+so a restart clears the Cursor half (issue #2155). A fork has a new session ID
+and needs its own ignore.
 
 ### `hyp session status`
 

@@ -379,6 +379,10 @@ test('a cwd match with NO thread id still makes the answer ambiguous: it is not 
     'the survivor must not be resolved just because its rival lacked a thread id'
   )
   assert.match(out.ok ? '' : out.error, /2 Codex rollouts record cwd/)
+  // The refusal must not tell this caller the shell is not an AI session: the
+  // same sentence just said two rollouts record this cwd, so the shell may
+  // well be inside one of them. The remedy here is to name the id, not to move.
+  assert.doesNotMatch(out.ok ? '' : out.error, /does not look like an AI session/)
   assert.match(
     out.ok ? '' : out.error,
     /rollout-2026-01-01-aaa\.jsonl/,
@@ -471,6 +475,9 @@ test('refuses when no Codex rollout matches the cwd', () => {
   ])
   const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
   assert.equal(out.ok, false)
+  // Nothing on disk records this cwd and no client stated an id, so the
+  // likeliest cause really is a plain terminal: say so before the fallback.
+  assert.match(out.ok ? '' : out.error, /does not look like an AI session/)
 })
 
 test('CLAUDE_CODE_SESSION_ID wins over any Codex rollout scan', () => {

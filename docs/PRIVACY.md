@@ -201,9 +201,13 @@ Three caveats apply to both surfaces:
   separate, explicit `hyp privacy purge` step below.
 - **Class resolution needs a working directory.** The client sources
   (Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, OpenClaw) supply
-  one. Hermes supplies one only when Hermes itself recorded it for the
-  session. The `raw-anthropic` / `raw-openai` proxy and OTEL sources never do,
-  so directory markings are a no-op for them.
+  one. Hermes supplies the real one for an interactive session it recorded a
+  cwd for, and scopes a messaging-channel session (Telegram, Discord, Slack,
+  WhatsApp, Signal, email) under a derived `~/.hermes/channels/<source>` path
+  instead; an interactive Hermes session with no recorded cwd has no scope to
+  match and is recorded unconditionally. The `raw-anthropic` / `raw-openai`
+  proxy and OTEL sources never supply one, so directory markings are a no-op
+  for them.
 - **A session is classed by its own directory, not by what it reads.**
   `hyp query` is a local read and is deliberately not filtered at the export
   seam, so rows from a `local-only` folder can be quoted into whatever session

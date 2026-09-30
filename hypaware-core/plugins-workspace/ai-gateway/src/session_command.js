@@ -176,8 +176,11 @@ const MAX_ROLLOUT_AGE_MS = 30 * 60 * 1000
 const CODEX_THREAD_ENV = 'CODEX_THREAD_ID'
 
 /**
- * Said on the two refusals a plain terminal reaches: no client stated an id,
- * so the likeliest cause is that the command was not run inside a session.
+ * Said on the one refusal a plain terminal reaches: no client stated an id AND
+ * nothing on disk records this cwd, so the likeliest cause is that the command
+ * was not run inside a session. Deliberately NOT said on the ambiguous refusal
+ * below, where rollouts DO record this cwd: there the shell may well be inside
+ * one of them, and the remedy is to name the id, not to move.
  */
 const NOT_IN_SESSION_HINT =
   'This shell does not look like an AI session: run the command inside the Claude Code or Codex session you mean.'
@@ -1009,7 +1012,7 @@ export function resolveSessionIdForCli(args) {
     .join(', ')
   return {
     ok: false,
-    error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. ${NOT_IN_SESSION_HINT} Or pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
+    error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
   }
 }
 

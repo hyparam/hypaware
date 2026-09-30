@@ -156,8 +156,9 @@ Session controls contact every live recorder that advertises the session
 control route, including the gateway and the Claude telemetry listener. A
 successful `hyp session status` therefore reflects all available recorders.
 An ignored session is saved on this machine and stays ignored across daemon
-restarts until you run `hyp session unignore`. A forked client session has a
-new session ID and needs its own ignore.
+restarts until you run `hyp session unignore`. The Cursor recorder still holds
+its set in memory, so a restart clears the Cursor half (issue #2155). A forked
+client session has a new session ID and needs its own ignore.
 
 ## Reconfigure an installation
 
