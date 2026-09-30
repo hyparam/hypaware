@@ -535,14 +535,96 @@ function lockedWebStream() {
   return stream
 }
 
+/** Byte sequences a blob store has to deliver exactly or not at all. */
+const BINARY_FIXTURES = /** @type {Array<[string, Buffer]>} */ ([
+  // The Parquet-shaped payload from #2324: reading it as UTF-8 turns its
+  // three bytes above 0x7F into six and delivers 17 bytes under a
+  // ContentLength of 14.
+  ['a Parquet header with bytes above 0x7F', Buffer.from('50415231007f80ffc32850415231', 'hex')],
+  ['every one of the 256 byte values', Buffer.from(Array.from({ length: 256 }, (_, i) => i))],
+  ['a lone 0x80, which is not valid UTF-8 alone', Buffer.from([0x80])],
+  // Bytes that are valid UTF-8 must survive too: a fix that swapped UTF-8
+  // for another single guess would corrupt these instead.
+  ['a valid multi-byte UTF-8 sequence', Buffer.from('PAR1 € 中 é', 'utf8')],
+  ['no bytes at all', Buffer.alloc(0)],
+])
+
+test('s3 BlobStore delivers a binary body byte for byte', async () => {
+  // contentLength is the store's account of the body, and nothing
+  // downstream compares the two, so a body that disagrees with it is not
+  // caught later. Every shape the union declares has to hand back the exact
+  // bytes it was given.
+  for (const [what, payload] of BINARY_FIXTURES) {
+    for (const [shape, make] of /** @type {Array<[string, () => any]>} */ ([
+      ['node stream', () => Readable.from([payload])],
+      ['Uint8Array', () => new Uint8Array(payload)],
+      ['Buffer', () => Buffer.from(payload)],
+      ['web ReadableStream', () => new ReadableStream({ start(c) { c.enqueue(new Uint8Array(payload)); c.close() } })],
+    ])) {
+      const client = {
+        ...makeFakeS3Client(),
+        async getObject() { return { Body: make(), ContentLength: payload.byteLength, ETag: '"bin"' } },
+      }
+      const store = createS3BlobStore({ bucket: 'bucket', client })
+      const got = await store.getObject({ key: 'data.parquet' })
+      assert.ok(got)
+      const chunks = []
+      for await (const chunk of got.body) chunks.push(Buffer.from(chunk))
+      const delivered = Buffer.concat(chunks)
+      assert.equal(delivered.toString('hex'), payload.toString('hex'),
+        `${shape} must deliver ${what} unchanged`)
+      assert.equal(got.contentLength, delivered.byteLength,
+        `${shape} must deliver as many bytes as contentLength declares for ${what}`)
+    }
+  }
+})
+
+test('s3 BlobStore refuses a string body rather than guessing its encoding', async () => {
+  // A string is the one shape withdrawn from the declared union. It carries
+  // no encoding, so reading it means guessing one, and both guesses corrupt
+  // real payloads without raising: UTF-8 re-encodes every byte above 0x7F,
+  // and latin1 truncates every code point above U+00FF. Refusing is the
+  // only answer that never hands back bytes the store did not send.
+  for (const [what, payload] of BINARY_FIXTURES) {
+    // `any`, because the union no longer admits a string: the compiler now
+    // rejects one at this seam, which is half of what this change is for,
+    // and the test still has to hand the provider what a handle might.
+    for (const [encoding, asString] of /** @type {Array<[BufferEncoding, any]>} */ ([
+      ['latin1', payload.toString('latin1')],
+      ['utf8', payload.toString('utf8')],
+    ])) {
+      const client = {
+        ...makeFakeS3Client(),
+        async getObject() { return { Body: asString, ContentLength: payload.byteLength, ETag: '"str"' } },
+      }
+      const store = createS3BlobStore({ bucket: 'bucket', client })
+      await assert.rejects(
+        store.getObject({ key: 'data.parquet' }),
+        (err) => {
+          assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_body_unusable')
+          assert.match(/** @type {Error} */ (err).message, /unusable shape \(string\)/)
+          // A string holds nothing to close and nothing to adapt, so the
+          // release the refusal runs has to pass over it rather than throw
+          // on a missing destroy and replace the typed error with a
+          // TypeError, and no adapter failure stands behind it.
+          assert.equal(/** @type {{ cause?: unknown }} */ (err).cause, undefined)
+          return true
+        },
+        `${what} stringified as ${encoding} must not resolve`,
+      )
+    }
+  }
+})
+
 test('s3 BlobStore still reads a genuinely empty object as empty', async () => {
   // The refusal above must not have made emptiness unreportable. Every
   // in-contract shape of a zero-byte body still succeeds with zero bytes.
+  // A zero-length string is not one: admitting the single string whose
+  // encoding cannot matter would make the contract depend on body length.
   for (const [what, Body] of /** @type {Array<[string, any]>} */ ([
     ['node stream', Readable.from([])],
     ['node stream of one empty chunk', Readable.from([Buffer.alloc(0)])],
     ['Uint8Array', new Uint8Array(0)],
-    ['string', ''],
     ['web ReadableStream', new ReadableStream({ start(c) { c.close() } })],
   ])) {
     const client = {
