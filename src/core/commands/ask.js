@@ -23,7 +23,21 @@ import {
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { FirstAskEvidence } from '../../../src/core/query/types.js'
+ * @import { FirstAskLauncher, RunWizardFirstAskOptions } from '../../../src/core/cli/wizard/types.js'
  */
+
+/**
+ * How long the client picker waits for a first keypress before deciding
+ * nobody is at the terminal.
+ *
+ * A TTY says a terminal is attached, never that a person is reading it: a
+ * pty with nothing typed into it (`docker run -t`, a tty-allocating CI
+ * runner, expect) answers `isTTY` exactly as a human's does, so a picker
+ * gated on that alone waits for a keypress that never arrives and the
+ * question the user did name is never asked. The first keypress lifts the
+ * deadline, so it only ever ends a run nobody is answering.
+ */
+const PICK_DEADLINE_MS = 10_000
 
 /**
  * `hyp ask [question]`
@@ -40,13 +54,17 @@ import {
  * current directory, which is the shape a user reaches for once they know
  * what they want: `hyp ask "which sessions touched the auth module"`.
  *
+ * `deps` are the prompt seams `hyp report fix` already carries, so a test
+ * can reach the multi-client branch with no terminal to drive.
+ *
  * @ref LLP 0198#re-runnable [implements]: the question needs a verb, or it is a sentence to retype
  * @ref LLP 0398#run-directory [implements]: the recommendation starts in the evidence folder, a free-form question where it was typed
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ select?: RunWizardFirstAskOptions['select'], pickDeadlineMs?: number }} [deps]
  * @returns {Promise<number>}
  */
-export async function runAsk(argv, ctx) {
+export async function runAsk(argv, ctx, deps = {}) {
   const parsed = parseCoreCommandArgv('ask', argv, ctx)
   if (!parsed.ok) return parsed.code
   const clients = await askableClients(ctx)
@@ -73,14 +91,7 @@ export async function runAsk(argv, ctx) {
     // answer. A run that cannot prompt (piped, or `HYP_NO_TUI`) takes the
     // first rather than failing: the user named a question, not a client.
     const canPrompt = isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1'
-    const launcher = canPrompt
-      ? await chooseLauncher({
-        launchers,
-        title: 'Which client should answer?',
-        env: ctx.env,
-        ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
-      })
-      : launchers[0]
+    const launcher = canPrompt ? await pickLauncher(launchers, ctx, deps) : launchers[0]
     // Cancelling is "not now", not a failure, but it still has to be said:
     // a run that exits 0 printing nothing reads as a client that started and
     // vanished. Same sentence `hyp report fix` uses on the same cancel.
@@ -115,6 +126,52 @@ export async function runAsk(argv, ctx) {
   // cache are all 0 - in the last case nothing is broken, there is just
   // no history yet.
   return outcome.launched === false && (outcome.reason === 'no-launcher' || outcome.reason === 'no-evidence') ? 1 : 0
+}
+
+/**
+ * Which client answers a named question, asked on a terminal.
+ *
+ * The screen is the same one `hyp report fix` puts up, under a deadline
+ * the picker itself has no reason to carry: a run nobody is at must still
+ * end. An expired deadline is not a cancel - the person did not decline
+ * anything - so it falls through to the pick a run that cannot prompt
+ * already makes, and says so, rather than reporting a choice nobody made.
+ * An escape still means "not now" and returns `undefined`.
+ *
+ * @param {FirstAskLauncher[]} launchers
+ * @param {CommandRunContext} ctx
+ * @param {{ select?: RunWizardFirstAskOptions['select'], pickDeadlineMs?: number }} deps
+ * @returns {Promise<FirstAskLauncher | undefined>}
+ */
+async function pickLauncher(launchers, ctx, deps) {
+  if (launchers.length < 2) return launchers[0]
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), deps.pickDeadlineMs ?? PICK_DEADLINE_MS)
+  const stdin = /** @type {{ once?: (e: string, l: () => void) => unknown, off?: (e: string, l: () => void) => unknown }} */ (/** @type {unknown} */ (ctx.stdin))
+  const lift = () => clearTimeout(timer)
+  stdin?.once?.('keypress', lift)
+  /** @type {FirstAskLauncher | undefined} */
+  let picked
+  try {
+    picked = await chooseLauncher({
+      launchers,
+      title: 'Which client should answer?',
+      env: ctx.env,
+      signal: controller.signal,
+      ...(deps.select ? { select: deps.select } : {}),
+      ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+      // The prompt draws where the gate looked: `isTty(ctx.stdout)` decided
+      // there was a terminal, so that is the stream the frame belongs on.
+      stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
+    })
+  } finally {
+    clearTimeout(timer)
+    stdin?.off?.('keypress', lift)
+  }
+  if (picked) return picked
+  if (!controller.signal.aborted) return undefined
+  ctx.stdout.write('\nNo answer at the client prompt - starting the first one.\n')
+  return launchers[0]
 }
 
 /**

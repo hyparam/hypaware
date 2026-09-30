@@ -148,6 +148,13 @@ export interface SelectSpec extends PromptChrome {
   stdout?: NodeJS.WritableStream
   env?: NodeJS.ProcessEnv
   clearOnResolve?: boolean
+  /**
+   * Settles the prompt as a cancel when aborted, for a caller that cannot
+   * assume anyone is at the terminal. The caller owns the controller, so it
+   * can tell its own abort apart from an escape the person pressed. Omitted
+   * means the prompt waits, which is every attended caller.
+   */
+  signal?: AbortSignal
 }
 
 export interface TextSpec extends PromptChrome {
@@ -182,6 +189,8 @@ export interface RunOpts {
   stdin: NodeJS.ReadableStream
   stdout: NodeJS.WritableStream
   env?: NodeJS.ProcessEnv
+  /** See `SelectSpec.signal`: aborting settles the prompt as a cancel. */
+  signal?: AbortSignal
   /**
    * Erase the prompt's frame from the terminal when it settles (resolve or
    * cancel) so the next prompt redraws in its place instead of stacking
