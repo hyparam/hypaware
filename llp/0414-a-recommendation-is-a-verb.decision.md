@@ -83,16 +83,18 @@ and `basis`, the queries the job ran to reach it, verbatim, "for the agent:
 the population the claim was measured over, reproducible against the same
 store". Without them a client reads the report author's conclusion and has
 no way to check the finding or to say whether the pattern is still
-happening, which the prompt asks it to judge. The tail says the counts will
-differ: the job measured the org's store, a local `hyp query sql` sees this
-machine's cache. A record from an older server, or an uploaded report,
+happening, which the prompt asks it to judge. The tail directs server evidence
+lookups and basis queries through `hyp query sql --remote <target>`, keeping
+the report's remote target, organization scope, and date filters. A local
+query sees only this machine's cache and cannot reproduce the server
+population. A record from an older server, or an uploaded report,
 carries neither list and yields the page alone.
 
 `fix` tells the client to run that command rather than handing it a file.
 An earlier revision fetched the page and wrote it to
 `<HYP_HOME>/recommendations/<id>.md`, copying the mechanics of `hyp ask`;
 but the reasons LLP 0398 had for a folder (a six-kilobyte prompt, evidence
-files, a hook test that writes beside them) do not hold for a two-sentence
+files, a hook test that writes beside them) do not hold for a short
 prompt, and the copy served only the session `fix` started. A session that
 is already open and is asked to fix an id has to reach the recommendation
 on its own, through the CLI, and it should make the same read the launched
@@ -107,6 +109,13 @@ into the command the prompt names so the client resolves the same target;
 the credential reaches it through the inherited environment, as every
 `hyp` call a client makes already relies on. Nothing is written to disk.
 
+The launch prompt requires validation against current code and cited evidence
+before implementation. Proposed causes and remedies remain hypotheses where
+the report indicates uncertainty; the client revises or rejects them when its
+investigation points elsewhere, implements the justified change, and verifies
+it using the repository's checks. An inapplicable recommendation is explained,
+not forced into the repository.
+
 <a id="run-where-typed"></a>**The client starts where the command was
 typed.** LLP 0398 moved the recommendation ask into a folder HypAware
 owns because that session is about HypAware's own data and belongs to no
@@ -114,7 +123,7 @@ project. A fix is the opposite case: it is a change to a repository, and
 the repository is wherever the person ran the command, the same rule
 LLP 0198 chose at the launch boundary and LLP 0398 kept for a free-form
 question. The brief is reached by a command the prompt names, so the
-prompt stays two sentences wherever the client starts.
+prompt stays short wherever the client starts.
 
 <a id="same-seams"></a>**Same client rules as `hyp ask`.** Only an
 attached client is started, because a session nothing records would be a
