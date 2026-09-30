@@ -90,9 +90,17 @@ export async function withSpan(name, attrs, fn, opts = {}) {
       // exporters flatten the attributes, not the status code, so a failure
       // whose code alone was updated is counted as a success by every query
       // that filters on it (hyparam/hypaware#2342).
-      // @ref LLP 0322#degrade-reaches-the-signals [constrained-by]: that decision declined to re-read `status` on the success branch, where it would move status codes; this reconciles the attribute on a branch already coded ERROR
+      // @ref LLP 0322#degrade-reaches-the-signals [constrained-by]: that decision declined to re-read `status` on the success branch, where it would move status codes; the two writes below reconcile `status` and `error_kind` on a branch already coded ERROR, where no code moves
       span.setAttribute('status', 'failed')
-      span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
+      // `error_kind` from the bag is a default, not a verdict: a body that
+      // classified its own failure wrote a typed kind before throwing
+      // (`query.execute_sql` writes `budget_exceeded`) and the bag overwrote
+      // it (hyparam/hypaware#2364). The bag's own value is already on the
+      // span, so read the span and name a kind only when nothing else did.
+      // Unguarded: the span is this helper's own, not the thrower's value.
+      if (span.attributes.error_kind === undefined) {
+        span.setAttribute('error_kind', 'unhandled_exception')
+      }
       throw err
     } finally {
       span.end()
@@ -144,7 +152,12 @@ export async function runRoot(name, attrs, fn, opts = {}) {
         // (hyparam/hypaware#2342). In both helpers, because a caller cannot
         // tell which one opened the span it holds.
         span.setAttribute('status', 'failed')
-        span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
+        // And the same `error_kind` rule: the bag's value is the default for
+        // a failure nothing named, not an overrule of the kind a body wrote
+        // before throwing (hyparam/hypaware#2364).
+        if (span.attributes.error_kind === undefined) {
+          span.setAttribute('error_kind', 'unhandled_exception')
+        }
         throw err
       } finally {
         span.end()
