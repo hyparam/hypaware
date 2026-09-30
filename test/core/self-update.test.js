@@ -470,7 +470,7 @@ test('runSelfUpdatePass applies a newer release from a global install', async ()
     // The install is followed by the preflight of what it put on disk,
     // run with the same node the service unit relaunches with.
     assert.deepEqual(calls.at(-2), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), '--version'])
-    assert.deepEqual(calls.at(-1), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install'])
+    assert.deepEqual(calls.at(-1), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'])
     const state = readSelfUpdateState(dir)
     assert.equal(state.last_apply?.ok, true)
     assert.equal(state.available, false)
@@ -496,7 +496,7 @@ test('manual and automatic upgrades run the new installer with the selected conf
             installs += 1
             assert.equal(acquireApplyLock(dir), null, 'the package cannot be replaced while skills copy')
             assert.equal(cmd, process.execPath)
-            assert.deepEqual(args, [path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install'])
+            assert.deepEqual(args, [path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'])
             assert.equal(options.env?.HOME, dir)
             assert.equal(options.env?.HYP_HOME, env.HYP_HOME)
             assert.equal(options.env?.HYP_CONFIG, configPath)

@@ -6,6 +6,7 @@
 **Author:** Brendan / Codex
 **Date:** 2026-09-30
 **Extends:** LLP 0138, LLP 0309
+**Extended-by:** LLP 0458 (update-time installation is restricted to currently attached clients)
 **Supersedes:** LLP 0397, LLP 0400; LLP 0402 #migration-is-the-boot-heal only
 
 ## Request {#request}

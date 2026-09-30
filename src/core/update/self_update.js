@@ -667,9 +667,9 @@ export async function applySelfUpdate(opts) {
 
   const preflight = await runPreflight({ globalRoot, version: opts.version, env, run })
   if (preflight.ok) {
-    // @ref LLP 0457#update-installs [implements]: run the new package's installer, not registries or modules retained by the old updater
+    // @ref LLP 0458#attached-only [implements]: the new package probes current attachments before using the shared installer
     try {
-      const skills = await run(process.execPath, [path.join(globalRoot, 'bin', 'hypaware.js'), 'skills', 'install'], {
+      const skills = await run(process.execPath, [path.join(globalRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'], {
         env: { ...env, ...(opts.configPath ? { HYP_CONFIG: opts.configPath } : {}) },
         timeoutMs: NPM_TIMEOUT_MS,
       })

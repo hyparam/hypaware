@@ -30,7 +30,7 @@ import { enableClientAdapter } from '../config/client_enable.js'
 import { enableGatewayProxyMode } from '../config/gateway_proxy_enable.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
-import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
+import { probeAttachedClients, probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { askYesNo } from '../cli/confirm.js'
 import { isTty } from '../cli/stdio.js'
 import { defaultBackfillConsentPromptFactory, describeBackfillResult, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
@@ -2289,8 +2289,19 @@ export async function runSkillsInstall(argv, ctx) {
   }
 
   const descriptors = await buildClientDescriptorMap(ctx)
+  /** @type {string[] | 'all'} */
+  let clients = parsed.client === 'all' ? 'all' : [parsed.client]
+  // @ref LLP 0458#attached-only [implements]: updates use current settings markers, never enabled plugins or stale install records
+  if (parsed.attached) {
+    const attached = await probeAttachedClients({ descriptors, homeDir, env: ctx.env })
+    clients = attached.filter((name) => parsed.client === 'all' || name === parsed.client)
+    if (clients.length === 0) {
+      ctx.stdout.write('(no attached clients to install)\n')
+      return 0
+    }
+  }
   const { installed } = await materializeClientAssets({
-    clients: parsed.client === 'all' ? 'all' : [parsed.client],
+    clients,
     descriptors,
     homeDir,
     stateRoot: clientAssetStateRoot(ctx.env, homeDir),
@@ -2376,12 +2387,15 @@ export async function buildClientDescriptorMap(ctx) {
 function parseSkillsArgs(argv) {
   const parsed = parseCommandArgv(argv, {
     type: 'object',
-    properties: { client: { type: 'string', default: 'all' } },
+    properties: {
+      client: { type: 'string', default: 'all' },
+      attached: { type: 'boolean', default: false },
+    },
   })
-  if ('help' in parsed) return { client: 'all', error: 'usage: hyp skills install [--client <name>|all]' }
-  if (!parsed.ok) return { client: 'all', error: parsed.error }
-  const p = /** @type {{ client: string }} */ (parsed.params)
-  return { client: p.client }
+  if ('help' in parsed) return { client: 'all', attached: false, error: 'usage: hyp skills install [--client <name>|all] [--attached]' }
+  if (!parsed.ok) return { client: 'all', attached: false, error: parsed.error }
+  const p = /** @type {{ client: string, attached: boolean }} */ (parsed.params)
+  return { client: p.client, attached: p.attached }
 }
 
 // The body written by `hyp ignore`: a self-documenting `.hypignore` whose

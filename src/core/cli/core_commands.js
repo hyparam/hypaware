@@ -604,7 +604,8 @@ function buildCoreCommands(registry) {
       name: 'client skills install',
       aliases: ['skills install'],
       summary: 'Install registered skills and subagents into AI client directories',
-      usage: 'hyp client skills install [--client <name>]',
+      usage: 'hyp client skills install [--client <name>] [--attached]',
+      help: 'Use --attached to install only for clients with a current HypAware attach marker.',
       run: runSkillsInstall,
     },
     makeGroupCommand({
