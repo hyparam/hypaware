@@ -331,22 +331,29 @@ hyp report generate
 hyp report generate "Cover last week and focus on repeated debugging work"
 ```
 
-Launches an attached AI client with its installed `hypaware-report` skill in
-the caller's current working directory. Optional quoted instructions set the
-period or focus; otherwise the skill uses the previous calendar month.
-Multiple eligible clients produce a picker on a terminal; noninteractive mode
-uses the first. The client keeps its normal permissions, and the session is
-recorded under the current directory's own usage class: this is not session
-isolation, so excerpts it reads out of `local-only` history are quoted into a
-transcript that syncs if the directory you typed the command in does
+Launches a recorded AI client with its installed `hypaware-report` skill in
+the caller's current working directory. Recorded means what it means for
+`hyp ask`: attached, or configured with no attach marker to write (Codex in
+its transcript mode). Its CLI must also be on `PATH`, and the
+`hypaware-report` skill must already be installed for it. Optional quoted
+instructions set the period or focus; otherwise the skill uses the previous
+calendar month. If more than one such client could be started, it asks which;
+a run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
+takes the first client of the offered set rather than failing. The client
+keeps its normal permissions, and the session is recorded under the current
+directory's own usage class: this is not session isolation, so excerpts it
+reads out of `local-only` history are quoted into a transcript that syncs if
+the directory you typed the command in does
 ([PRIVACY.md](PRIVACY.md#marking-directories)). No remote login is required,
 and nothing is published unless requested.
 
 The skill writes `./hypaware-report-<from>-to-<to>/report.md` and linked pages,
 using `-2`, `-3`, etc. if the folder already exists, unless you request another
-destination. The command's exit status indicates whether the client launched,
-not whether report generation completed. `hyp report list` continues to list
-published reports only; use `hyp report publish <folder> ...` to share one.
+destination. A declined pick starts nothing and succeeds; no recorded client
+carrying the skill, or a process-start failure, returns `1`. The exit status
+covers the launch only, never whether report generation completed.
+`hyp report list` continues to list published reports only; use
+`hyp report publish <folder> ...` to share one.
 
 ### `hyp report publish`
 
@@ -429,7 +436,7 @@ hyp report get hyprec-0123456789abcdef
 hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]
 ```
 
-Starts an attached AI client on one recommendation, in the current directory.
+Starts a recorded AI client on one recommendation, in the current directory.
 The id is the one `hyp report list` prints under each report. HypAware
 resolves it to its report, checks the recommendation page still exists, and
 starts the client with instructions to read it through
@@ -444,9 +451,15 @@ recommendations, labelled by the page's title and described by its thesis
 when the remote lists them, else by the page name. Escape on the second
 list
 returns to the first. `--kind`, `--period` and `--limit` narrow which reports
-are offered. Without a terminal the id is required. If more than one attached
-client could be started, it asks which. A declined pick succeeds. An unknown
-id, no launchable client, or a process-start failure returns `1`.
+are offered. Without a terminal, or with `HYP_NO_TUI=1`, the id is required
+and omitting it there returns `2`. The client offer set is the recorded one
+`hyp report generate` draws on, without the skill requirement: attached, or
+configured with no attach marker to write, and with its CLI on `PATH`. If
+more than one such client could be started, it asks which; a run given an id
+that cannot prompt takes the first of that set. A declined pick succeeds, as
+does a listing that carries no recommendations. A malformed id returns `2`.
+An unknown id, a recommendation page the report no longer carries, no
+launchable client, or a process-start failure returns `1`.
 
 ```sh
 hyp report fix hyprec-0123456789abcdef

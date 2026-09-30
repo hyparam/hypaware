@@ -40,7 +40,8 @@ hyp query overview
 ```
 
 Have your client answer a question about your history. `hyp ask` opens one of
-your attached clients, such as Claude Code or Codex, on the question:
+the clients HypAware is recording, such as Claude Code or Codex, on the
+question:
 
 ```sh
 hyp ask "which sessions touched the auth module"
