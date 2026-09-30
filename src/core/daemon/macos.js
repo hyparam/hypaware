@@ -399,18 +399,41 @@ export async function installLaunchAgent(options) {
  * state and a missing plist file. Removes only the service artifact.
  * Config, recordings, and logs are left untouched.
  *
- * @param {{ label?: string, plistDir?: string, homeDir?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
+ * Waits for launchd to release the job before unlinking, on the same
+ * `STOP_UNLOAD_POLL_ATTEMPTS` budget {@link stopLaunchAgent} spends: `bootout`
+ * is asynchronous, and this one is aimed at a live serving daemon, so the
+ * teardown is the whole stop window rather than a fraction of it.
+ *
+ * The unlink happens even when the job never unloads, and the failure is
+ * raised after it. Removal is what the command is for, and a plist left on
+ * disk is a service launchd loads again at the next login. Reporting success
+ * over a daemon that is still serving is the half of that trade the caller
+ * cannot recover from, so the timeout is a failure.
+ *
+ * @param {{ label?: string, plistDir?: string, homeDir?: string, launchctl?: LaunchctlAdapter, userDomain?: string, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<void>}
+ * @ref LLP 0206#d1 [constrained-by]: the detach sweep runs only on a teardown that succeeded, so a job launchd never released has to report failure rather than let clients be detached from a port that may still answer
  */
 export async function uninstallLaunchAgent(options) {
   const { launchctl, label, target } = resolveTarget(options)
   const plistDir = options.plistDir ?? defaultPlistDir(options.homeDir)
   const plistPath = plistPathFor(plistDir, label)
 
-  if (fs.existsSync(plistPath)) {
-    await launchctl.bootout([target]).catch(function() { /* best-effort */ })
-    unlinkServiceFile(plistPath)
-  }
+  if (!fs.existsSync(plistPath)) return
+  const booted = await launchctl.bootout([target]).catch(function() { return undefined })
+  const unloaded = await waitUntilUnloaded(launchctl, target, options.sleep ?? defaultSleep, STOP_UNLOAD_POLL_ATTEMPTS)
+  unlinkServiceFile(plistPath)
+  if (unloaded !== undefined) return
+  const failed = booted !== undefined && booted.exitCode !== 0
+  const why = (booted?.stderr || '').trim() || (failed ? `exit ${booted.exitCode}` : '')
+  throw new LaunchAgentError(
+    `booted out ${label} and removed ${plistPath}, but the service did not unload`
+      + `${why ? `: ${why}` : ''}`
+      + `. The daemon may still be running; ask launchd itself: launchctl print ${target}`,
+    // `exitCode: 0` on a thrown error reads as success to any caller that
+    // forwards the field as a process exit status.
+    { exitCode: failed ? booted.exitCode : undefined, stderr: booted?.stderr },
+  )
 }
 
 /**
@@ -481,7 +504,7 @@ export async function stopLaunchAgent(options) {
   if (status.exitCode === 113) return
   ensure(status, `print ${label}`)
   // bootout's exit code is not the gate, for the same reason neither the
-  // install nor the uninstall path above reads it: launchd answers a teardown
+  // install nor the uninstall path above gates on it: launchd answers a teardown
   // it has not finished with `36: Operation now in progress`, and one the job
   // completed between the print above and here with `3: No such process`.
   // Both are stops that worked, and a daemon with any shutdown work to do is
