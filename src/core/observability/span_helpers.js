@@ -81,6 +81,12 @@ export async function withSpan(name, attrs, fn, opts = {}) {
         span.recordException(err)
       } catch { /* unreadable, and already rendered as far as it can be */ }
       span.setStatus({ code: SpanStatusCode.ERROR, message })
+      // Most callers stamp `status: 'ok'` in the bag at open, and the JSONL
+      // exporters flatten the attributes, not the status code, so a failure
+      // whose code alone was updated is counted as a success by every query
+      // that filters on it (hyparam/hypaware#2342).
+      // @ref LLP 0322#degrade-reaches-the-signals [constrained-by]: that decision declined to re-read `status` on the success branch, where it would move status codes; this reconciles the attribute on a branch already coded ERROR
+      span.setAttribute('status', 'failed')
       span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
       throw err
     } finally {
@@ -127,6 +133,10 @@ export async function runRoot(name, attrs, fn, opts = {}) {
           span.recordException(err)
         } catch { /* as in `withSpan`: unreadable, and the status still says what */ }
         span.setStatus({ code: SpanStatusCode.ERROR, message })
+        // As in `withSpan`, and for the same reason the success branch above
+        // reads the declared status: a caller cannot tell which helper opened
+        // the span it holds.
+        span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
         throw err
       } finally {
