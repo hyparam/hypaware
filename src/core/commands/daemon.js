@@ -253,7 +253,7 @@ async function clearStaleDaemonPidFiles(stateRoot) {
     const { clearStalePidFile, processingStateRoot } = await import('../daemon/pid.js')
     clearStalePidFile(stateRoot)
     clearStalePidFile(processingStateRoot(stateRoot))
-  } catch { /* an unloadable pid module outlives this stop */ }
+  } catch { /* an unloadable pid module outlives this teardown */ }
 }
 
 /**

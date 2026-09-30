@@ -989,3 +989,56 @@ test('a gateway pid file that cannot be removed fails neither the uninstall nor 
   assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), true, 'the fixture needs an unremovable file')
   assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the second root was skipped by the first one failing')
 })
+
+// The order the clear sits in, which nothing else observes. Before the
+// teardown the plist / unit is still on disk, so the manager still holds
+// `KeepAlive` / `Restart=always` and a daemon inside its restart gap is about
+// to be brought back (#2261): the pid it then writes is the one an early
+// clear would have deleted out from under it. The deps seam is the only
+// vantage point that can see which ran first, so it is where the order is
+// pinned.
+test('the stale clear runs after the service teardown, never before it', async () => {
+  const home = tmpHome('uninstall-clear-after-teardown')
+  try {
+    const staged = await stageServiceDaemon(home)
+    stageAbandonedPidFile(staged.stateRoot, 999999)
+    /** @type {boolean | undefined} */
+    let pidFileWhenTornDown
+
+    const code = await runDaemonUninstall([], staged.ctx, {
+      uninstallDaemon: async function() {
+        pidFileWhenTornDown = fs.existsSync(pidFilePath(staged.stateRoot))
+      },
+    })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(pidFileWhenTornDown, true, 'the clear ran while the respawn policy was still installed')
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the clear did not run after the teardown either')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The other side of that order. A teardown that threw left the plist / unit
+// on disk with its respawn policy intact, so the daemon the clear would read
+// as dead is one the manager is still about to bring back: the file stays,
+// and the command still reports the failure the operator has to act on.
+test('a teardown that failed clears nothing, because the respawn policy is still installed', async () => {
+  const home = tmpHome('uninstall-failed-teardown')
+  try {
+    const staged = await stageServiceDaemon(home)
+    stageAbandonedPidFile(staged.stateRoot, 999999)
+    stageAbandonedPidFile(processingStateRoot(staged.stateRoot), 999999)
+
+    const code = await runDaemonUninstall([], staged.ctx, {
+      uninstallDaemon: async function() { throw new Error('bootout refused') },
+    })
+
+    assert.equal(code, 1)
+    assert.match(staged.err(), /bootout refused/)
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), true, 'a failed teardown cleared the gateway pid file anyway')
+    assert.equal(fs.existsSync(pidFilePath(processingStateRoot(staged.stateRoot))), true, 'a failed teardown cleared the processing pid file anyway')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
