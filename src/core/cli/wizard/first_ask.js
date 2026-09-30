@@ -433,24 +433,46 @@ export async function runWizardFirstAsk(opts) {
  * @returns {Promise<{ prompt: (typeof SUGGESTED_PROMPTS)[number], launcher: FirstAskLauncher } | undefined>}
  */
 async function chooseQuestion(opts, launchers) {
-  const ask = opts.select ?? select
-  const io = {
+  const prompt = SUGGESTED_PROMPTS[0]
+  const launcher = await chooseLauncher({
+    launchers,
+    // The only screen: there is no question menu ahead of it, so the
+    // title names the job rather than pointing back at one.
+    title: 'Which client should recommend a skill?',
+    env: opts.env,
+    ...(opts.select ? { select: opts.select } : {}),
     ...(opts.stdin ? { stdin: opts.stdin } : {}),
     ...(opts.stdoutStream ? { stdout: opts.stdoutStream } : {}),
-    env: opts.env,
-  }
-  const prompt = SUGGESTED_PROMPTS[0]
-  if (launchers.length === 1) return { prompt, launcher: launchers[0] }
+  })
+  return launcher ? { prompt, launcher } : undefined
+}
+
+/**
+ * Pick which launcher answers. One launcher needs no screen; more than one
+ * gets a framed select. Cancelling returns `undefined` ("not now").
+ *
+ * @param {{
+ *   launchers: FirstAskLauncher[],
+ *   title: string,
+ *   env: NodeJS.ProcessEnv,
+ *   select?: RunWizardFirstAskOptions['select'],
+ *   stdin?: RunWizardFirstAskOptions['stdin'],
+ *   stdout?: RunWizardFirstAskOptions['stdoutStream'],
+ * }} args
+ * @returns {Promise<FirstAskLauncher | undefined>}
+ */
+export async function chooseLauncher({ launchers, title, env, select: ask = select, stdin, stdout }) {
+  if (launchers.length === 1) return launchers[0]
   /** @type {string | number} */
   let client
   try {
     client = await ask({
-      // The only screen: there is no question menu ahead of it, so the
-      // title names the job rather than pointing back at one.
       box: true,
-      title: 'Which client should recommend a skill?',
+      title,
       options: launchers.map((l) => ({ value: l.client, label: l.label })),
-      ...io,
+      ...(stdin ? { stdin } : {}),
+      ...(stdout ? { stdout } : {}),
+      env,
     })
   } catch (err) {
     if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
@@ -458,6 +480,5 @@ async function chooseQuestion(opts, launchers) {
     }
     throw err
   }
-  const launcher = launchers.find((l) => l.client === client)
-  return launcher ? { prompt, launcher } : undefined
+  return launchers.find((l) => l.client === client)
 }

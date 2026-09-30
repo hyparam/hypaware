@@ -6,7 +6,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { askableClients, runAsk } from '../../../src/core/commands/ask.js'
+import { askableClients, framedQuestion, runAsk } from '../../../src/core/commands/ask.js'
+import { chooseLauncher } from '../../../src/core/cli/wizard/first_ask.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -55,8 +56,8 @@ test('askableClients returns only attached clients when the probe succeeds', asy
   const { ctx } = makeCtx()
   const report = /** @type {any} */ ({
     clients: [
-      { name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true },
-      { name: 'codex', plugin: '@hypaware/codex', configured: true, attached: false },
+      { name: 'claude', plugin: '@hypaware/claude', configured: true, attachable: true, attached: true },
+      { name: 'codex', plugin: '@hypaware/codex', configured: true, attachable: true, attached: false },
     ],
   })
   const clients = await askableClients(ctx, { collectStatus: async () => report })
@@ -67,12 +68,49 @@ test('askableClients returns an empty list when the probe succeeds with nothing 
   const { ctx } = makeCtx()
   const report = /** @type {any} */ ({
     clients: [
-      { name: 'claude', plugin: '@hypaware/claude', configured: false, attached: false },
-      { name: 'codex', plugin: '@hypaware/codex', configured: false, attached: false },
+      { name: 'claude', plugin: '@hypaware/claude', configured: false, attachable: true, attached: false },
+      { name: 'codex', plugin: '@hypaware/codex', configured: false, attachable: false, attached: false },
     ],
   })
   const clients = await askableClients(ctx, { collectStatus: async () => report })
   assert.deepEqual(clients, [], 'a successful zero-attached probe must not fall through to the unfiltered list')
+})
+
+test('askableClients includes a configured client whose attach is n/a (codex in transcript mode)', async () => {
+  const { ctx } = makeCtx()
+  // Codex in transcript mode writes no marker, so status reports it
+  // `configured, attach n/a`: it is recorded, just not through a settings file.
+  const report = /** @type {any} */ ({
+    clients: [
+      { name: 'claude', plugin: '@hypaware/claude', configured: false, attachable: true, attached: false },
+      { name: 'codex', plugin: '@hypaware/codex', configured: true, attachable: false, attached: false },
+      { name: 'claude-desktop', plugin: '@hypaware/claude-desktop', configured: true, attachable: false, attached: false },
+    ],
+  })
+  const clients = await askableClients(ctx, { collectStatus: async () => report })
+  assert.deepEqual(clients, ['codex', 'claude-desktop'])
+})
+
+test('framedQuestion tells the client to answer from HypAware history and keeps the question verbatim', () => {
+  const prompt = framedQuestion('which sessions touched the auth module')
+  assert.match(prompt, /HypAware history/)
+  assert.match(prompt, /hyp query/)
+  assert.ok(prompt.endsWith('Question: which sessions touched the auth module'))
+})
+
+test('chooseLauncher asks which client when more than one can answer, and skips the screen for one', async () => {
+  const claude = { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] }
+  const codex = { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] }
+  /** @type {string[][]} */
+  const shown = []
+  /** @param {any} spec */
+  const select = async (spec) => { shown.push(spec.options.map((/** @type {any} */ o) => o.value)); return 'codex' }
+  assert.equal(await chooseLauncher({ launchers: [claude, codex], title: 't', env: {}, select }), codex)
+  assert.deepEqual(shown, [['claude', 'codex']])
+  assert.equal(await chooseLauncher({ launchers: [claude], title: 't', env: {}, select }), claude)
+  assert.equal(shown.length, 1, 'a single launcher must not prompt')
+  const cancel = async () => { const e = new Error('cancelled'); e.name = 'PromptCancelledError'; throw e }
+  assert.equal(await chooseLauncher({ launchers: [claude, codex], title: 't', env: {}, select: cancel }), undefined)
 })
 
 test('askableClients falls back to launchable clients only when the probe throws', async () => {

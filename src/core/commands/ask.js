@@ -12,6 +12,7 @@ import { prepareFirstAskEvidence } from '../query/first_ask_evidence.js'
 import { firstLookNoticeSink } from '../cli/wizard/first_look.js'
 import {
   SUGGESTED_PROMPTS,
+  chooseLauncher,
   launchClient,
   resolveLaunchers,
   runWizardFirstAsk,
@@ -68,10 +69,23 @@ export async function runAsk(argv, ctx) {
       ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
       return 1
     }
-    ctx.stdout.write(`\nStarting ${launchers[0].label}...\n\n`)
-    const result = await launchClient({ launcher: launchers[0], prompt: question, env: ctx.env })
+    // Same client pick as the recommendation ask when more than one could
+    // answer. A run that cannot prompt (piped, or `HYP_NO_TUI`) takes the
+    // first rather than failing: the user named a question, not a client.
+    const canPrompt = isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1'
+    const launcher = canPrompt
+      ? await chooseLauncher({
+        launchers,
+        title: 'Which client should answer?',
+        env: ctx.env,
+        ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+      })
+      : launchers[0]
+    if (!launcher) return 0
+    ctx.stdout.write(`\nStarting ${launcher.label}...\n\n`)
+    const result = await launchClient({ launcher, prompt: framedQuestion(question), env: ctx.env })
     if (!result.ok) {
-      ctx.stderr.write(`hyp ask: could not start ${launchers[0].bin}: ${result.error ?? 'spawn failed'}\n`)
+      ctx.stderr.write(`hyp ask: could not start ${launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
       return 1
     }
     return 0
@@ -143,6 +157,24 @@ async function prepareEvidenceFromCtx(ctx, descriptors, client) {
 }
 
 /**
+ * The free-form question as the client is started on it.
+ *
+ * The client opens with no context, and a question like "which sessions
+ * touched the auth module" reads to it as one about the current repo, so
+ * it greps the tree or answers from nothing. Naming HypAware and the
+ * query command points it at the recorded history the verb exists to
+ * reach; the person's words follow verbatim.
+ *
+ * @param {string} question
+ * @returns {string}
+ */
+export function framedQuestion(question) {
+  return 'Answer this from my HypAware history: look it up in the recorded sessions with `hyp query` '
+    + '(the hypaware-query skill explains how) before answering, rather than from this directory or memory.\n\n'
+    + `Question: ${question}`
+}
+
+/**
  * Whether the local cache holds any gateway rows.
  *
  * The wizard gets this for free from the first look it just ran; `hyp
@@ -200,7 +232,14 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
     // evidence of detachment, not grounds to fall through: only a
     // thrown probe (one that could not read a settings file) is unknown
     // rather than a "no".
-    return report.clients.filter((c) => c.attached).map((c) => c.name)
+    //
+    // A configured client whose attach is n/a (`attachable: false`) is
+    // recorded without any settings marker - Codex in its default
+    // transcript mode, for one - so a missing marker there is not
+    // detachment. Clients with no `launch` block (Claude Desktop) are
+    // still dropped later by `resolveLaunchers`.
+    // @ref LLP 0429#status [constrained-by]: a probe whose marker this capture mode never writes is n/a, not missing
+    return report.clients.filter((c) => c.attached || (c.configured && !c.attachable)).map((c) => c.name)
   } catch {
     // fall through to the unfiltered list
   }
