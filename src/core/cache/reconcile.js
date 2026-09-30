@@ -91,19 +91,21 @@ export async function reconcileCacheRows(args) {
  * The partitions among `parts` that provably hold none of the scope's rows.
  *
  * A partition's `<key>=<value>` segments are read back as a fact, not as a
- * naming convention: every row reaches a partition through
- * `resolveSourceSegments`, and `isLegacyPartition` in
- * `src/core/cache/migrate.js` leaves a partition carrying a `source=` segment
- * where it is, which is the cache saying it holds exactly the rows resolving
- * to that value.
+ * naming convention: the two writers that ever label one both label it per
+ * row from the row's own values, the spool flush through
+ * `resolveSourceSegments` and `migrateLegacyPartitions` through
+ * `resolveClientName`, and `isLegacyPartition` then leaves a partition
+ * carrying a `source=` segment alone, so nothing ever relabels one.
  *
- * That is a proof only while the scope decides the resolution. The resolver
- * takes the first non-empty column of the declaration's fallback chain, and
- * `reconcileCacheRows` rejects an empty scope value, so a scope pinning that
- * first column pins the answer for every row it covers. A scope that leaves it
- * free does not: such a row may carry any value there and resolve anywhere,
- * which is why the set is then empty rather than a subset. Everything unproven
- * is simply absent, and the caller fails closed on it.
+ * That is a proof only while the scope decides the resolution, and only while
+ * those two writers agree. The resolver takes the first non-empty column of
+ * the declaration's fallback chain while migration always takes
+ * `client_name` first, so they answer alike exactly when the chain leads with
+ * `client_name`; `reconcileCacheRows` rejects an empty scope value, so pinning
+ * that column then pins the answer for every row the scope covers. Any other
+ * chain, or a scope leaving the column free, proves nothing: such a row may
+ * resolve anywhere, which is why the set is then empty rather than a subset.
+ * Everything unproven is simply absent, and the caller fails closed on it.
  *
  * @ref LLP 0449#reconciliation [implements]: reconciliation never changes another client's rows, so a partition holding only another client's has no work here to refuse.
  * @param {{ path: string, partition: Record<string, string> }[]} parts
@@ -113,11 +115,10 @@ export async function reconcileCacheRows(args) {
  * @returns {Set<string>}
  */
 function partitionsOutsideScope(parts, segments, where, declaration) {
-  const first = declaration?.source.columns[0]
-  // With no declaration the write path resolves through `client_name` first
-  // (`resolveClientName`), and the scope requires it; an empty chain resolves
-  // every row to the same fallback. Both are pinned.
-  if (first !== undefined && where[first] === undefined) return new Set()
+  // With no declaration the write path resolves through `resolveClientName`,
+  // which is `client_name` first, and the scope requires that column non-empty.
+  const first = declaration ? declaration.source.columns[0] : 'client_name'
+  if (first !== 'client_name' || where[first] === undefined) return new Set()
   /** @type {Set<string>} */
   const outside = new Set()
   for (const part of parts) {

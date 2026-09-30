@@ -664,3 +664,36 @@ test('snapshot reconciliation still refuses a corrupt cursor on a partition that
   assert.equal(fsSync.existsSync(path.join(cacheRoot, 'datasets/messages/source=hermes')), false,
     'nothing is published while a partition that could hold the scope cannot be verified')
 })
+
+// @ref LLP 0449#reconciliation [tests]: the skip reads a `source=` segment as
+// the value the row resolved to, and `migrateLegacyPartitions` writes that
+// segment from `resolveClientName` whatever the dataset declares. A chain
+// leading with anything else makes the two disagree, so it proves nothing.
+test('snapshot reconciliation refuses a corrupt cursor when the declared chain does not lead with client_name', async t => {
+  const cacheRoot = await makeTmpDir('reconcile-unaligned-chain')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  /** @type {CachePartitioningDeclaration} */
+  const unaligned = {
+    source: { columns: ['provider', 'client_name'], fallback: 'unknown' },
+    iceberg: { fields: [{ column: 'session_id', transform: 'identity', required: true, sortOnly: true }] },
+  }
+  const storage = createQueryStorageService({ cacheRoot, getDeclaration: () => unaligned })
+  const reconcile = storage.reconcileRows
+  assert.ok(reconcile)
+  /** @type {ColumnSpec[]} */
+  const columns = [...SNAPSHOT_COLUMNS, { name: 'provider', type: 'STRING', nullable: false }]
+  // The scope pins the chain's first column, so pinning alone lets this through.
+  const scope = { where: { ...SNAPSHOT_SCOPE.where, provider: 'openai' }, key: 'part_id' }
+  const stale = { ...scope.where, part_id: 'p1', content_text: 'stale' }
+  // A migrated partition, labelled the way `migrateLegacyPartitions` labels
+  // one: by `resolveClientName`, which reads `client_name`, not `provider`.
+  // The scope resolves to `source=openai`, so the labels differ while the rows
+  // match, and only a chain leading with `client_name` could rule that out.
+  await storage.appendRowsToPartition('messages', ['source=hermes'], columns, [stale])
+  await fs.writeFile(path.join(cacheRoot, 'datasets/messages/source=hermes/cursor.json'), '{ this is not a cursor')
+
+  await assert.rejects(() => reconcile('messages', columns,
+    [{ ...stale, content_text: 'new' }], scope), /cursor\.json/)
+  assert.equal(fsSync.existsSync(path.join(cacheRoot, 'datasets/messages/source=openai')), false,
+    'nothing is published while a partition the scope could reach cannot be verified')
+})
