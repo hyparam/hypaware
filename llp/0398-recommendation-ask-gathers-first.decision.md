@@ -317,8 +317,12 @@ goes straight from the gather to the launch. The one screen left is the
 client pick when two clients could answer, still framed, and cancelling
 it is "not now". `hyp ask --list` names the one question in plain words,
 never the launch prompt, which tells the client to read a folder only the
-gather creates. `hyp ask "<question>"` still
-skips everything and starts straight on what was typed.
+gather creates. `hyp ask "<question>"` still skips the gather and starts
+in the caller's directory, but it shares that one screen: the same client
+pick, cancelled the same way. What it starts the client on is the typed
+question framed as one to answer from the recorded history, since a client
+opening cold in a repository reads a question about sessions as a question
+about that repository.
 
 <a id="setup-offer"></a>**Setup offers to run it.** LLP 0198
 #onboarding-list ended setup on a printed list because the launch would

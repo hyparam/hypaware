@@ -81,7 +81,13 @@ export async function runAsk(argv, ctx) {
         ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
       })
       : launchers[0]
-    if (!launcher) return 0
+    // Cancelling is "not now", not a failure, but it still has to be said:
+    // a run that exits 0 printing nothing reads as a client that started and
+    // vanished. Same sentence `hyp report fix` uses on the same cancel.
+    if (!launcher) {
+      ctx.stdout.write('Nothing started.\n')
+      return 0
+    }
     ctx.stdout.write(`\nStarting ${launcher.label}...\n\n`)
     const result = await launchClient({ launcher, prompt: framedQuestion(question), env: ctx.env })
     if (!result.ok) {
@@ -200,14 +206,17 @@ async function cacheHasRows(ctx) {
 }
 
 /**
- * The clients `hyp ask` may start: those HypAware is actually recording.
+ * The clients `hyp ask` may start: those HypAware is recording, as far as a
+ * status probe can tell.
  *
- * Attachment is this command's analogue of the wizard's "picked" list
- * (`@ref LLP 0198#path-probe`): starting an unattached client would open
- * a session nothing captures, so the question it was started on would be
- * answered against data that excludes the asking. A status failure
- * degrades to every launchable client rather than to none, because a
- * probe that cannot read a settings file is not evidence of detachment.
+ * This is the command's analogue of the wizard's "picked" list
+ * (`@ref LLP 0198#path-probe`): starting a client nothing captures would
+ * open a session the question is then answered without, so the predicate
+ * is evidence of capture rather than mere presence. Two things count as
+ * that evidence: an attach marker, and a capture mode that writes no
+ * marker to find. A status failure degrades to every launchable client
+ * rather than to none, because a probe that cannot read a settings file is
+ * not evidence of detachment.
  *
  * `collectStatus` defaults to the real status collector; tests inject a
  * stub to exercise the throw path without faking a filesystem failure.
@@ -233,13 +242,16 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
     // thrown probe (one that could not read a settings file) is unknown
     // rather than a "no".
     //
-    // A configured client whose attach is n/a (`attachable: false`) is
-    // recorded without any settings marker - Codex in its default
-    // transcript mode, for one - so a missing marker there is not
-    // detachment. Clients with no `launch` block (Claude Desktop) are
+    // A configured client whose attach is n/a (`attachable: false`) has no
+    // settings marker to miss - Codex in its default transcript mode, for
+    // one - so a missing marker there is not detachment. `configured` is the
+    // strongest thing the status report carries for such a client: it says
+    // the plugin is enabled, not that its lane is running, so a codex whose
+    // sweep is switched off (`backfill.on_join: false`, #2076) still reaches
+    // the offer. Clients with no `launch` block (Claude Desktop) are
     // still dropped later by `resolveLaunchers`.
     // @ref LLP 0429#status [constrained-by]: a probe whose marker this capture mode never writes is n/a, not missing
-    return report.clients.filter((c) => c.attached || (c.configured && !c.attachable)).map((c) => c.name)
+    return report.clients.filter((c) => c.attached || (c.configured && c.attachable === false)).map((c) => c.name)
   } catch {
     // fall through to the unfiltered list
   }
