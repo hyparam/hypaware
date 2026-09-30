@@ -22,6 +22,7 @@ import {
   runReportList,
   runReportPublish,
 } from '../../src/core/cli/report_commands.js'
+import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
 
@@ -915,6 +916,78 @@ test('the citations tail names the resolved remote and the org scope, shell-quot
   assert.doesNotMatch(printed, /<target>/)
   assert.match(printed, /look it up with `hyp query sql --remote prod --org 'acme corp'` against/)
   assert.match(printed, /Re-run them with `hyp query sql --remote prod --org 'acme corp'`, keeping the report's date filters\./)
+})
+
+/**
+ * Split a `shellWord`-quoted flag string the way a shell splits it, so a hint
+ * is checked as the argv the launched client's `hyp` process receives rather
+ * than as the text of the sentence carrying it.
+ *
+ * @param {string} s
+ * @returns {string[]}
+ */
+function shellSplit(s) {
+  /** @type {string[]} */ const words = []
+  let word = ''
+  let quoted = false
+  let started = false
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i]
+    if (c === "'") { quoted = !quoted; started = true; continue }
+    if (!quoted && c === '\\') { i += 1; word += s[i] ?? ''; started = true; continue }
+    if (!quoted && /\s/.test(c)) {
+      if (started) words.push(word)
+      word = ''
+      started = false
+      continue
+    }
+    word += c
+    started = true
+  }
+  if (started) words.push(word)
+  return words
+}
+
+/**
+ * Every `hyp query sql` hint in a piece of emitted text, as its flag words.
+ *
+ * @param {string} text
+ * @returns {string[][]}
+ */
+function queryHints(text) {
+  return [...text.matchAll(/`hyp query sql ([^`]*)`/g)].map((m) => shellSplit(m[1]))
+}
+
+// `--org=` is the admin single-org form the reports plane takes and the query
+// plane has no form for, so a hint naming it is a command `hyp query sql`
+// rejects. Both routes to the hint are checked, and as argv rather than text:
+// a naive split reads the emitted `''` as a two-character org and passes.
+test('the admin single-org form yields a query hint hyp query sql accepts, by either route', async (t) => {
+  const { calls } = stubFixServer(t, { cited: true })
+  const { ctx } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC, '--org', '', '--remote', 'prod'], ctx, deps), 0)
+  // The run's own scope is untouched: the reports plane still gets `org=`.
+  assert.equal(calls.at(-1)?.url.searchParams.get('org'), '')
+  // The citations tail is the other route to the same builder, and the client
+  // reads it too: the prompt's first instruction is to run `hyp report get`.
+  const { ctx: getCtx, out } = ctxWith()
+  assert.equal(await runReportGet([REC, '--org', '', '--remote', 'prod'], getCtx), 0)
+  const hints = [...queryHints(launches[0].prompt), ...queryHints(out.join(''))]
+  assert.equal(hints.length, 3)
+  for (const argv of hints) {
+    assert.equal(parseControlFlags(argv).ok, true, `hyp query sql refuses '${argv.join(' ')}'`)
+    assert.deepEqual(argv, ['--remote', 'prod'])
+  }
+})
+
+// The gate is on emptiness, not on truthiness of some other kind: `*` (read
+// every org the account may read) is a scope the hint must keep naming.
+test('fix keeps an --org * scope in the re-run hint', async (t) => {
+  stubFixServer(t, { cited: true })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC, '--org', '*', '--remote', 'prod'], ctxWith().ctx, deps), 0)
+  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql --remote prod --org '\*'`/)
 })
 
 test('fix falls back to the HTML page when the report has no Markdown one', async (t) => {

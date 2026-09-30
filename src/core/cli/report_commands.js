@@ -944,13 +944,20 @@ function targetFlags(params) {
  * nothing to substitute, so its cheapest path is to drop the flag and query the
  * local cache, which is what those sentences exist to prevent.
  *
+ * The org gate is emptiness, not presence, unlike `applyOrgParam()`'s: `--org=`
+ * is the admin single-org form on the reports plane, but the query plane has no
+ * such form (`parseControlFlags` refuses an empty org), so a hint naming it is
+ * a command `hyp query sql` rejects. Dropping it scopes nothing away: an
+ * omitted `--org` says there what the empty form says on the reports plane, no
+ * org named, so the server serves the bearer its own scope.
+ *
  * @param {{ target: string }} resolved
  * @param {Record<string, unknown>} params the gate's parsed params
  * @returns {string}
  */
 function queryTargetFlags(resolved, params) {
-  const orgFlag = params.org !== undefined ? ` --org ${shellWord(String(params.org))}` : ''
-  return `--remote ${shellWord(resolved.target)}${orgFlag}`
+  const org = params.org === undefined ? '' : String(params.org)
+  return `--remote ${shellWord(resolved.target)}${org ? ` --org ${shellWord(org)}` : ''}`
 }
 
 /**
