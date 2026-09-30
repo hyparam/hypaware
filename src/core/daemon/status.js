@@ -4111,7 +4111,7 @@ async function countRecentErrors(stateRoot, sinks, snapshotSinks, nowMs = Date.n
   // from the already-loaded daemon snapshot, read after the daemon has exited
   // as happily as while it runs: a success is a historical fact, not a
   // liveness claim, and the daemon carries the stamp across its own restarts
-  // (`readPriorSinkSuccess` in `runtime.js`). A stamp that does not parse, or
+  // (`recoverSinkSnapshots` in `runtime.js`). A stamp that does not parse, or
   // that sits in the future, is no evidence of recovery and leaves the
   // destination at "never succeeded" rather than quietly clearing a failure.
   const lastSuccess = new Map(sinks.map((s) => [s.instance, -Infinity]))
@@ -4313,7 +4313,7 @@ async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
       result.diagnostics.push({
         severity: 'warning',
         kind: 'sink_export_failing',
-        message: `${sanitizeLabel(instance.name)}: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
+        message: `${sanitizeLabel(instance.name) ?? 'unknown'}: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
         repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(path.join(sinksDir, instance.name, 'outbox'), 512)}`],
       })
     }
