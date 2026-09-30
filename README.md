@@ -1,15 +1,15 @@
 # HypAware
 
-HypAware records every session from your AI coding agents (Claude Code,
+HypAware records every session from your AI clients (Claude Code,
 Codex, Cursor, OpenCode, and more) into one queryable history on your
 machine. Then it helps you find what went wrong, what keeps repeating, and
 what to fix.
 
 - **Collect.** A lightweight background daemon captures sessions from the
-  agents you already use. No changes to how you work.
+  clients you already use. No changes to how you work.
 - **Store.** Sessions land in a local cache of open table files, linked as a
   graph of sessions, repos, files, tools, and skills. No data warehouse.
-- **Analyze.** Query everything with SQL or search, or have your agent
+- **Analyze.** Query everything with SQL or search, or have your client
   answer a question in plain English.
 - **Act.** HypAware turns patterns in your history into concrete fixes, like a
   skill worth adding, with the sessions that prove it.
@@ -26,7 +26,7 @@ hyp setup
 Setup first asks how to collect. **Sync to the cloud** is the default: press
 Enter and a browser sign-in enrolls this machine, so your history follows you
 across machines. Choose **Local only** to keep everything on this machine.
-Then it asks which agents to capture, installs the background daemon, and
+Then it asks which clients to capture, installs the background daemon, and
 starts recording. It ends with a first look at your history: tokens per
 model, activity per day, which repos you worked in, and which tools got
 called. Both `hyp` and `hypaware` run the same CLI.
@@ -39,22 +39,22 @@ See the summary any time:
 hyp query overview
 ```
 
-Have your agent answer a question about your history. `hyp ask` opens one of
-your attached agents, such as Claude Code or Codex, on the question:
+Have your client answer a question about your history. `hyp ask` opens one of
+your attached clients, such as Claude Code or Codex, on the question:
 
 ```sh
 hyp ask "which sessions touched the auth module"
 hyp ask            # suggest a skill based on your recent sessions
 ```
 
-Or ask from inside any session. Install the HypAware skills and your agent
+Or ask from inside any session. Install the HypAware skills and your client
 looks up past sessions itself whenever a question calls for it:
 
 ```sh
 hyp client skills install
 ```
 
-Search and query directly, without an agent:
+Search and query directly, without an AI client:
 
 ```sh
 hyp query grep "connection refused"
@@ -63,7 +63,7 @@ hyp query sql "select count(*) from ai_gateway_messages"
 
 See [querying and reports](./docs/QUERYING.md) for more.
 
-## Supported agents
+## Supported clients
 
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
 OpenClaw, Hermes Agent, Pi, and any tool that exports OpenTelemetry logs,
@@ -90,9 +90,9 @@ spend, and failure patterns across the whole team:
 hyp query sql "select count(*) from ai_gateway_messages" --remote
 ```
 
-Nothing leaves your machine right away. The first sync waits until the end of
-the day you sign in, so you can review what will be sent and mark anything
-private first.
+Nothing leaves your machine right away. The first sync waits until 11:59pm on
+the day you sign in, or 11:59pm the next day if you sign in within four hours
+of that, so you can review what will be sent and mark anything private first.
 
 One person can sign in and sync on their own. To put more than one person in
 an organization, [contact us](https://hypaware.ai/contact/?utm_medium=readme)
@@ -120,19 +120,19 @@ See [what HypAware records and how to control it](./docs/PRIVACY.md).
 hyp status
 ```
 
-This shows the daemon, attached agents, and what was captured recently. See
+This shows the daemon, your clients, and anything that needs attention. See
 [troubleshooting](./docs/TROUBLESHOOTING.md).
 
 ## Uninstall
 
 ```sh
 hyp leave                  # only if you signed in to HypAware Cloud
-hyp daemon uninstall       # stop the daemon and detach every agent
+hyp daemon uninstall       # stop the daemon and detach every client
 npm uninstall -g hypaware
 rm -rf ~/.hyp              # delete all local recordings
 ```
 
-Your agents' settings are restored on the way out. Copies already sent to
+Your clients' settings are restored on the way out. Copies already sent to
 HypAware Cloud or exported to files are not affected.
 
 ## Documentation

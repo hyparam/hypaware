@@ -6,11 +6,11 @@ This guide takes you from nothing to a working, validated plugin. The
 fast path is two commands:
 
 ```sh
-hyp plugin new @yourorg/my-thing --kind source   # scaffold
-hyp plugin doctor ./my-thing                      # validate
+hyp dev plugin new @yourorg/my-thing --kind source   # scaffold
+hyp dev plugin doctor ./my-thing                      # validate
 ```
 
-`hyp plugin doctor` runs static checks **and** a dry-run of your
+`hyp dev plugin doctor` runs static checks **and** a dry-run of your
 `activate()` function, then prints every problem at once with a fix for
 each. Run it after every change. It also accepts `--json` for use by
 agents and scripts.
@@ -36,12 +36,12 @@ declare in the manifest must actually be registered in `activate()`.
 
 ```sh
 # 1. Scaffold (kinds: source | sink | dataset)
-hyp plugin new @yourorg/widget --kind source --dir hypaware-core/plugins-workspace
+hyp dev plugin new @yourorg/widget --kind source --dir hypaware-core/plugins-workspace
 
 # 2. Edit src/index.js - fill in the TODOs in activate()
 
 # 3. Validate
-hyp plugin doctor hypaware-core/plugins-workspace/widget
+hyp dev plugin doctor hypaware-core/plugins-workspace/widget
 ```
 
 The scaffold is intentionally minimal and passes the doctor out of the
@@ -366,12 +366,12 @@ or private data, hash or redact when identity matters.
 
 ## Troubleshooting (doctor diagnostics)
 
-Every `hyp plugin doctor` finding has a stable `kind`. What each means
+Every `hyp dev plugin doctor` finding has a stable `kind`. What each means
 and how to fix it:
 
 | `kind` | Meaning | Fix |
 |--------|---------|-----|
-| `manifest_invalid` | `hypaware.plugin.json` is missing, not JSON, or fails validation | Compare against [Manifest](#manifest); `hyp plugin new` emits a valid one |
+| `manifest_invalid` | `hypaware.plugin.json` is missing, not JSON, or fails validation | Compare against [Manifest](#manifest); `hyp dev plugin new` emits a valid one |
 | `entrypoint_missing` | `entrypoint` doesn't resolve to a file | Create the file or fix the path (usually `./src/index.js`) |
 | `semver_invalid` | `version` isn't `X.Y.Z`, or `hypaware_api` isn't a valid range | Use `"1.0.0"` / `"^1.0.0"` |
 | `name_convention` (warn) | `name` isn't `@scope/slug` | Rename to a scoped form |

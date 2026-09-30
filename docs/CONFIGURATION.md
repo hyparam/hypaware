@@ -8,7 +8,7 @@ preserves centrally managed settings, and reports the actions it will take.
 ## Locate and validate configuration
 
 The local file is `<HYP_HOME>/hypaware-config.json`; `HYP_HOME` defaults to
-`~/.hyp`. Run `hyp status` to see the paths and effective setup.
+`~/.hyp`. Run `hyp status --verbose` to see the paths and effective setup.
 
 ```sh
 hyp config validate
@@ -21,8 +21,9 @@ and `query.cache` settings. Each plugin owns its own `config` block. Use
 
 On an enrolled machine, a separate central layer under `config-control/` is
 authoritative. Local settings are additive and cannot override central locks.
-`hyp status` identifies each layer and any rejected local entries. Joining
-does not replace your local configuration; leaving removes central management.
+`hyp status --verbose` identifies each layer and any rejected local entries.
+Joining does not replace your local configuration; leaving removes central
+management.
 
 ## Make a repeatable setup
 
@@ -87,7 +88,7 @@ from that cache, not a prerequisite for querying it.
 
 New guided setups default to local Parquet exports; interactive reconfiguration
 preserves the existing export choice. An enrolled machine may also have a
-centrally managed forwarding sink regardless of its local export choice.
+centrally managed sync sink regardless of its local export choice.
 
 To inspect destinations and send eligible data now:
 

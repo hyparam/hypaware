@@ -131,9 +131,12 @@ export async function loginWithBrowser({
     // line; compact is the lane that drops standing lines, so it says it with a
     // spinner instead - live while the poll runs, cleared once the sign-in
     // settles, and off a TTY the same one plain line.
+    // An empty status drops the elapsed seconds: this wait is on the person in
+    // the browser, and a count-up beside it reads as timing them. The spinner
+    // frame still moves, so the line does not read as a hang.
     const poll = () => poller.waitForCode()
     const { code } = compact
-      ? await withSpinner({ stdout, env, label: WAITING_LABEL, above: fallback }, poll)
+      ? await withSpinner({ stdout, env, label: WAITING_LABEL, above: fallback, status: () => '' }, poll)
       : await poll()
 
     // Redeeming the code is still the login and still blocking: `exchangeCode`

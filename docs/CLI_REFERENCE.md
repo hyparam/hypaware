@@ -91,14 +91,18 @@ installation or configuration failures return `1`.
 ### `hyp status`
 
 ```text
-hyp status [--json]
+hyp status [--verbose] [--json]
 ```
 
-Collects one read-only health snapshot without activating plugins. It reports
-configuration, daemon, active plugins, sources, sinks, clients, cache, recent
-errors, first-sync state, and repair commands. For Claude, it also reports OTEL
-attach mode, configured and live listener endpoints, endpoint drift, recorder
-activity, and capture health. Use `--json` for the stable machine form.
+Collects one read-only health snapshot without activating plugins. By default it
+prints a summary: daemon state, storage, each client's attach state and sharing
+policy, first-sync state, and an Attention section whose `Next:` lines are the
+commands to run. `--verbose` adds the inventory behind that summary:
+configuration, active plugins, sources, sinks, cache, recent errors, proxy
+trust, maintenance, recent clients, capture health, and the `repair:` lines
+under each diagnostic. Configured and live listener endpoints and endpoint
+drift are reported by `hyp client status`. Use `--json` for the stable machine
+form; `--verbose` does not change it.
 
 ```sh
 hyp status --json
@@ -112,8 +116,8 @@ hyp ask ["question"] [--list]
 
 With no argument, asks the one question worth asking first: which skill would
 be the most useful to add. HypAware measures the last 30 days of recorded
-history itself, writes the evidence into one folder under the system temp
-directory (rewritten each time), and starts an attached AI client in that
+history itself, writes the evidence into `<HYP_HOME>/ask` (one folder,
+rewritten each time), and starts an attached AI client in that
 folder to answer with one skill. If more than one attached client could be
 started, it asks which. With a question, skips the gather and starts the
 client on that question in the current directory. The client takes over the
@@ -499,8 +503,12 @@ hyp session --help
 ```
 
 If you omit the session ID, HypAware derives it from a supported Claude Code or
-Codex context. It refuses rather than guessing. The in-memory state disappears
-when the daemon restarts, and a fork has a new session ID.
+Codex context. It refuses rather than guessing. An ignored session is saved
+under `<HYP_HOME>/hypaware/session-ignores/` and stays ignored across recorder
+and daemon restarts until you unignore it. The Cursor recorder is the
+exception: it advertises the control route but still holds its set in memory,
+so a restart clears the Cursor half (issue #2155). A fork has a new session ID
+and needs its own ignore.
 
 ### `hyp session status`
 
@@ -525,8 +533,8 @@ Folder policy remains independent. Use `hyp privacy show` to inspect it.
 hyp session ignore [session-id] [--json]
 ```
 
-Adds the exact session ID to every available recorder's in-memory drop set.
-This stops future capture only. It doesn't delete existing rows. The Claude
+Saves the exact session ID as ignored and adds it to every available
+recorder's drop set. This stops future capture only. It doesn't delete existing rows. The Claude
 telemetry listener deletes ignored-session bodies from its transient spool.
 
 ```sh
@@ -539,8 +547,8 @@ hyp session ignore
 hyp session unignore [session-id] [--json]
 ```
 
-Removes the exact session ID from the live recorder sets. Folder policy can
-still prevent recording.
+Removes the saved ignore and the exact session ID from the live recorder sets.
+Folder policy can still prevent recording.
 
 ```sh
 hyp session unignore
@@ -733,7 +741,7 @@ Tune the timer in the Claude plugin config if needed:
 
 The same block's `window_days`, if set, bounds this scheduled rerun as well
 as the join-time import: see "Scheduled recovery sweeps and
-`backfill.window_days`" above.
+`backfill.window_days`" below.
 
 To turn the schedule off, set the same block's `on_join` to false. That is the
 existing opt-out from automatic history import, and it now withholds the
@@ -1013,7 +1021,7 @@ hyp privacy client [<name>] [sync|local-only] [--json]
 
 Lists or changes per-client export policy. `local-only` withholds future rows
 from remote sync. Returning to `sync` affects future rows only: the policy
-flip itself uploads nothing that was withheld. To upload that retained history,
+flip itself syncs nothing that was withheld. To sync that retained history,
 run the separate, separately confirmed `hyp sync --history <client>`. A client
 required by central configuration can't opt out.
 
@@ -1037,35 +1045,48 @@ hyp privacy folders ask
 ### `hyp privacy purge`
 
 ```text
-hyp privacy purge <path> | --session <id> | --ignored | --all [--yes] [--json]
+hyp privacy purge <path> | --session <id> [--remote <target> | --local-only] | --ignored | --all [--yes] [--json]
 ```
 
 **Warning:** This operation permanently deletes matching rows from this
-machine's local cache. Select exactly one target. It never contacts a sink or
-HypAware Cloud and can't retract exported copies. Every form also sweeps the
+machine's local cache. Select exactly one target. Every form also sweeps the
 Claude raw-body spool so pending bodies can't recreate deleted rows. A terminal
 prompts for confirmation; a non-interactive call requires `--yes`.
 
+A `--session` purge also deletes that session's rows from every configured or
+signed-in remote and every enrolled server, and excludes the session from
+future recording. `--remote <target>` limits the remote scope to one server;
+`--local-only` skips servers. The two flags are mutually exclusive and apply
+only with `--session`. Remote deletion uses your login credential and requires
+the session owner or an organization admin. Physical files remain until
+compaction, and copies in published reports aren't covered.
+
+The `<path>`, `--ignored`, and `--all` targets purge locally only. They never
+contact a sink or HypAware Cloud and can't retract exported copies.
+
 ```sh
 hyp privacy purge --session SESSION_ID
+hyp privacy purge --session SESSION_ID --local-only
 ```
 
 Replace `SESSION_ID` with the reviewed session ID. Avoid `--yes` during manual
-work.
+work. A remote failure returns a nonzero exit status; repeat the command to
+finish an incomplete purge.
 
 ## Connect to or leave HypAware Cloud
 
 ### `hyp join`
 
 ```text
-hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]
+hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]
 ```
 
 Validates the URL and enrollment token, writes a permission-restricted
 central seed layer, and installs or restarts the daemon. The full organization
 configuration arrives later. Local configuration and history remain.
 `--no-daemon` writes only the seed and leaves service installation as an
-explicit next step.
+explicit next step. `--force` allows the existing CLI path if global
+installation fails.
 
 ```sh
 hyp join https://hyp.example.com --token-file ./enrollment-token
@@ -1080,7 +1101,7 @@ history and process listings.
 hyp leave
 ```
 
-Removes the central layer, identity, and forwarding credential, restarts the
+Removes the central layer, identity, and sync credential, restarts the
 daemon, and reverses organization-driven client attaches. It keeps the local
 configuration, daemon service, query history, and recordings. Partial failure
 returns `1` and prints repair commands.
@@ -1106,13 +1127,15 @@ Daemon commands don't activate plugins.
 ### `hyp daemon install`
 
 ```text
-hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]
+hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json]]
 ```
 
 Installs the persistent launchd or systemd user service. When invoked from an
 ephemeral `npx` path, it installs a durable global package before it writes the
-service. `--dry-run` renders the exact service definition without changing the
-machine; add `--json` for structured plan output.
+service. `--force` allows the existing CLI path if that global installation
+fails; removing that directory later can break capture. `--dry-run` renders
+the exact service definition without changing the machine; add `--json` for
+structured plan output.
 
 ```sh
 hyp daemon install --dry-run --json
@@ -1312,7 +1335,7 @@ Expires table-format export snapshots for one sink instance or all eligible
 instances. Only `--compact` rewrites data files. `--dry-run` writes nothing.
 
 ```sh
-hyp sink maintain local-parquet --dry-run
+hyp sink maintain --dry-run
 ```
 
 ## Manage plugins
@@ -1438,25 +1461,35 @@ hyp remote add <name> <url>
 ```
 
 Registers a named Model Context Protocol (MCP) query target in local
-configuration. It doesn't authenticate.
+configuration. It doesn't authenticate. Give the server's base URL; HypAware
+appends `/v1/mcp` itself, and a URL that already ends in `/v1/mcp` is used as
+given.
 
 ```sh
-hyp remote add team https://hyp.example.com/mcp
+hyp remote add team https://hyp.example.com
 ```
 
 ### `hyp remote login`
 
 ```text
-hyp remote login <name> [--token-file <path>] [--no-forward] [--no-daemon]
+hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--browser] [--no-browser] [--no-forward] [--no-daemon] [--force]
 ```
 
 Signs in through a browser by default, or reads a static token from
 `--token-file` or standard input. It stores the credential with mode `0600`.
-The parser also accepts `--org`, `--no-browser`, and `--host`. Unless you set
-`--no-forward`, login can enroll this machine, provision forwarding, and
-install the daemon. `--no-daemon` provisions without installing the service.
+Omit `name` to sign in to the default target. Unless you set `--no-forward`,
+login can enroll this machine, set up sync, and install the daemon.
+
+- `--org <org>` selects an organization.
+- `--no-browser` prints the sign-in URL instead of opening a browser.
+- `--host <label>` overrides the host label this machine syncs under, which defaults to the
+  hostname.
+- `--no-forward` signs in for queries only, with no organization enrollment.
+- `--no-daemon` sets up sync without installing the service.
+- `--force` allows the existing CLI path if global installation fails.
 
 ```sh
+hyp remote login
 hyp remote login team --no-forward
 ```
 
@@ -1552,12 +1585,14 @@ hyp graph --help
 ### `hyp graph project`
 
 ```text
-hyp graph project [--source <dataset>] [--dry-run]
+hyp graph project [--source <dataset>] [--refresh] [--dry-run]
 ```
 
 Reads registered projection contracts and writes the derived `node` and `edge`
-datasets. It is idempotent. `--source` limits projection to one source dataset,
-and `--dry-run` writes nothing. An empty successful result means that no
+datasets. It is idempotent, and existing nodes and edges keep their properties
+unless you pass `--refresh`, which replaces matching rows with what the
+recordings show now. `--source` limits projection to one source dataset, and
+`--dry-run` writes nothing. An empty successful result means that no
 eligible recordings exist.
 
 ```sh

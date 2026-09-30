@@ -47,7 +47,7 @@ import { isTty, readAllStdin } from '../cli/stdio.js'
 export async function runJoin(argv, ctx) {
   const parsed = parseJoinArgs(argv)
   if (parsed.help) {
-    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]\n')
+    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]\n')
     ctx.stdout.write('  token sources (pick one): positional argument, --token-file, or stdin\n')
     return 0
   }

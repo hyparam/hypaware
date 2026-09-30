@@ -25,7 +25,7 @@ hyp setup
 ```
 
 This opens a guided setup. The first question is how you want to collect
-agent logs. Select **Sync to the cloud** (it is already selected, so a
+AI client sessions. Select **Sync to the cloud** (it is already selected, so a
 bare enter takes it).
 
 <img src="images/wizard-fork.png" width="480" alt="The setup's opening choice, with Sync to the cloud selected: Sync to the cloud, or Local only.">
@@ -40,13 +40,13 @@ doing at each one:
    email address, so there are no codes or keys to enter.
 2. **Set up recording.** One question with two answers. **Record and sync
    everything** takes the default answer to every remaining question: the
-   setup names the tools it is about to configure, then states what it will
+   setup names the clients it is about to configure, then states what it will
    record, what will sync to your team, and how new folders are handled,
    and continues without stopping again. **Customize** asks you those two
    questions instead, one screen at a time (see below).
-3. **Complete any additional setup.** A tool whose adapter needs one more
+3. **Complete any additional setup.** A client whose adapter needs one more
    step asks for it here, and you may defer any of them; the remaining setup
-   continues. No tool shipped today asks for one, so on a stock install this
+   continues. No client shipped today asks for one, so on a stock install this
    step passes silently. Claude Desktop is now a regular collection choice:
    selecting it schedules transcript imports and performs no additional app
    setup.
@@ -58,11 +58,11 @@ Two screens, in order, each with the same answer already selected that
 is on the screen, so inspecting everything and changing nothing is one
 keypress per screen.
 
-1. **Choose what to collect and sync.** A checklist of AI tools. Tools your
-   team manages are already selected and locked; tools detected on your
-   machine are pre-selected as well. A checked tool is recorded here *and*
+1. **Choose what to collect and sync.** A checklist of AI clients. Clients your
+   team manages are already selected and locked; clients detected on your
+   machine are pre-selected as well. A checked client is recorded here *and*
    shared with HypAware Cloud. Completing setup clears any
-   standing `hyp privacy client <name> local-only` for the tools on it;
+   standing `hyp privacy client <name> local-only` for the clients on it;
    cancelling before setup commits preserves those settings.
    `hyp privacy client` changes them afterwards.
 2. **Choose how new folders are handled.** Whether recording in a project
@@ -70,7 +70,7 @@ keypress per screen.
    first time. This is a standing preference; `hyp privacy folders`
    changes it later.
 
-<img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as set by your team and a detected tool pre-checked.">
+<img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed clients locked on as set by your team and a detected client pre-checked.">
 
 
 ### After the questions
@@ -78,10 +78,11 @@ keypress per screen.
 Both answers arrive here, so this applies whichever one you gave.
 
 The setup then installs the components, imports your recent AI history, and
-reports when the first upload will occur.
+reports when the first sync will occur.
 
-> **Nothing is uploaded immediately.** The first upload is held until
-> tonight, leaving a window to review what will be shared. Before then, run
+> **Nothing is synced immediately.** The first sync is held until
+> 11:59pm tonight, or 11:59pm tomorrow if you sign in within four hours of
+> that, leaving a window to review what will be shared. Before then, run
 > the `hypaware-privacy` skill to see what would be shared and keep any
 > private material off the record. See
 > [what HypAware records and how to control it](./PRIVACY.md).
@@ -93,7 +94,7 @@ hyp status
 ```
 
 This reports whether recording is active, what is shared with your team
-versus kept on your machine, and any pending upload deadline. To disconnect
+versus kept on your machine, and any pending first-sync deadline. To disconnect
 and undo the setup, run `hyp leave`.
 
 ## Explore what was recorded

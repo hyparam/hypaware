@@ -142,6 +142,35 @@ test('hyp session status fails closed when no gateway endpoint can be resolved a
   assert.equal(out.ignored, null)
 })
 
+// The UNKNOWN report has two readers and they need different advice. With an
+// id, "assume this session IS being recorded" names a real session. With no
+// id nothing was checked and no session was named, so the unconditional
+// wording would warn about a session that may not exist.
+test('an UNKNOWN with no resolved id says nothing was checked, not that "this session" is recorded', async () => {
+  const codexHome = temporaryDirectory('hyp-session-nocodex-')
+  fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true })
+  const ctx = fakeCtx({ endpoint: undefined, env: { CODEX_HOME: codexHome }, cwd: '/repo/here' })
+  const code = await runSessionStatus([], ctx.ctx)
+  assert.equal(code, SESSION_EXIT_UNKNOWN)
+  const text = ctx.stdout()
+  assert.match(text, /session \(unresolved\): UNKNOWN/)
+  assert.match(text, /no session was identified, so nothing was checked/)
+  assert.doesNotMatch(text, /assume this session IS being recorded until a check succeeds/)
+})
+
+test('an UNKNOWN that DID resolve an id keeps the unconditional fail-closed warning', async () => {
+  const deadPort = await closedPort()
+  const ctx = fakeCtx({
+    endpoint: `http://127.0.0.1:${deadPort}`,
+    env: { CLAUDE_CODE_SESSION_ID: 'sess-unreachable-human' },
+  })
+  const code = await runSessionStatus([], ctx.ctx)
+  assert.equal(code, SESSION_EXIT_UNKNOWN)
+  const text = ctx.stdout()
+  assert.match(text, /assume this session IS being recorded until a check succeeds/)
+  assert.doesNotMatch(text, /no session was identified/)
+})
+
 test('hyp session status names the folder governor rather than omitting it (R7)', async () => {
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
@@ -379,6 +408,10 @@ test('a cwd match with NO thread id still makes the answer ambiguous: it is not 
     'the survivor must not be resolved just because its rival lacked a thread id'
   )
   assert.match(out.ok ? '' : out.error, /2 Codex rollouts record cwd/)
+  // The refusal must not tell this caller the shell is not an AI session: the
+  // same sentence just said two rollouts record this cwd, so the shell may
+  // well be inside one of them. The remedy here is to name the id, not to move.
+  assert.doesNotMatch(out.ok ? '' : out.error, /does not look like an AI session/)
   assert.match(
     out.ok ? '' : out.error,
     /rollout-2026-01-01-aaa\.jsonl/,
@@ -471,6 +504,9 @@ test('refuses when no Codex rollout matches the cwd', () => {
   ])
   const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
   assert.equal(out.ok, false)
+  // Nothing on disk records this cwd and no client stated an id, so the
+  // likeliest cause really is a plain terminal: say so before the fallback.
+  assert.match(out.ok ? '' : out.error, /does not look like an AI session/)
 })
 
 test('CLAUDE_CODE_SESSION_ID wins over any Codex rollout scan', () => {

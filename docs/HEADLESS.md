@@ -2,7 +2,7 @@
 
 [Documentation](README.md)
 
-Capture agent sessions on a machine with no browser and no interactive user:
+Capture AI client sessions on a machine with no browser and no interactive user:
 a CI runner, a container, or a long-lived server. Enrollment happens with a
 token minted ahead of time on your own machine, so the headless machine never
 signs in.
@@ -18,7 +18,7 @@ Two things make headless different from a laptop install:
 
 Every run that joins with one token lands under **one shared gateway** in
 HypAware Cloud, so a pipeline's runs stay grouped together. A token-based join
-forwards immediately: there is no first-sync review hold, because whoever
+syncs immediately: there is no first-sync review hold, because whoever
 minted the token chose enrollment deliberately. See
 [what HypAware records and how to control it](./PRIVACY.md).
 

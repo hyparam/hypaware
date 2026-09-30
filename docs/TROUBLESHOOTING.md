@@ -2,16 +2,17 @@
 
 [Documentation](README.md) / Troubleshooting
 
-Start with the health snapshot. It reports configuration, capture, clients,
-storage, and repair commands without starting sources:
+Start with the health snapshot. It reports the daemon, clients, storage, and
+anything needing attention without starting sources:
 
 ```sh
 hyp status
 hyp version
 ```
 
-For scripts, use `hyp status --json`. Follow the specific `repair:` line for
-the failing component, then repeat the relevant status check.
+Follow any `Next:` line under Attention for the failing component, then repeat
+the relevant status check. Add `--verbose` for the full inventory and the
+`repair:` lines under each diagnostic. For scripts, use `hyp status --json`.
 
 ## No new recordings
 
@@ -45,8 +46,8 @@ by dates, hit count, searchable columns, privacy, or local retention.
 
 - Confirm the correct `HYP_HOME` and local versus remote target.
 - Read stderr for withheld-row, freshness, and truncation notices.
-- Use `hyp backfill list` and a provider-specific import dry run to
-  check whether older transcripts are available. Cache refresh is not a history import.
+- Use `hyp backfill list` and a provider-specific backfill dry run to
+  check whether older transcripts are available. Cache refresh is not a backfill.
 - Refresh the affected local dataset with
   `hyp cache refresh ai_gateway_messages` when freshness warnings call for it.
 - Use `--output ./results.json` with `--format json` for complete query output;
@@ -54,7 +55,7 @@ by dates, hit count, searchable columns, privacy, or local retention.
 
 See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
 
-## An export or team upload is missing
+## An export or team sync is missing
 
 ```sh
 hyp status
@@ -70,7 +71,7 @@ delivery and inspect each sink's result. It can partially succeed and still
 return failure.
 
 Remote sign-in with `--no-forward` grants query access without setting up
-forwarding. `hyp leave` disconnects forwarding but keeps local recordings.
+sync. `hyp leave` stops sync but keeps local recordings.
 See [team setup](TEAM_SETUP.md) and [privacy controls](PRIVACY.md).
 
 ## A command is missing or rejects an option
