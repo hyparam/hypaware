@@ -117,6 +117,10 @@ test('a degraded maintenance tick sets the span status code, not just the attrib
     assert.ok(span, 'the maintenance.tick span must be exported within the poll window')
     assert.equal(span.attributes.status, 'degraded', 'sanity: the attribute this tick set')
     assert.equal(
+      span.attributes.partitions_failed, 1,
+      'the degraded tick must carry how much it lost, not only that it was degraded'
+    )
+    assert.equal(
       span.status, 'failed',
       'the span status CODE (not just the attribute) must reflect the degraded tick - ' +
       'a bare setAttribute inside withSpan would leave this "ok"'
