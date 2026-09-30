@@ -9,8 +9,8 @@ what to fix.
   agents you already use. No changes to how you work.
 - **Store.** Sessions land in a local cache of open table files, linked as a
   graph of sessions, repos, files, tools, and skills. No data warehouse.
-- **Analyze.** Query everything with SQL or search, or just ask a question
-  in plain English.
+- **Analyze.** Query everything with SQL or search, or have your agent
+  answer a question in plain English.
 - **Act.** HypAware turns patterns in your history into concrete fixes, like a
   skill worth adding, with the sessions that prove it.
 
@@ -39,22 +39,27 @@ See the summary any time:
 hyp query overview
 ```
 
-Ask a question about your own history:
+Have your agent answer a question about your history. `hyp ask` opens one of
+your attached agents, such as Claude Code or Codex, on the question:
 
 ```sh
 hyp ask "which sessions touched the auth module"
 hyp ask            # suggest a skill based on your recent sessions
 ```
 
-Search and query directly:
+Or ask from inside any session. Install the HypAware skills and your agent
+looks up past sessions itself whenever a question calls for it:
+
+```sh
+hyp client skills install
+```
+
+Search and query directly, without an agent:
 
 ```sh
 hyp query grep "connection refused"
 hyp query sql "select count(*) from ai_gateway_messages"
 ```
-
-Your agents can do this too. `hyp client skills install` gives Claude or
-Codex skills to look up what happened in past sessions on their own.
 
 See [querying and reports](./docs/QUERYING.md) for more.
 
