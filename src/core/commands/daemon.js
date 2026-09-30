@@ -236,13 +236,15 @@ export async function runDaemonStatus(argv, ctx) {
  * the supervised processing child's, which is killed with it and gets no
  * shutdown of its own either (#2288) - and leave a file whose pid is still
  * running exactly as it is: the reconciliation `requestDaemonStop` performs on
- * a confirmed exit, for the stop that goes through the service manager instead
- * of the control channel.
+ * a confirmed exit, for the teardowns that go through the service manager
+ * instead of the control channel, which are the supervised stop and the
+ * uninstall (#2299).
  *
- * Best-effort through the module load too, because the stop it follows already
- * happened: a pid file this cannot read or unlink is `hyp daemon status`'s to
- * report, and nothing in here is a reason to call a completed stop a failure.
- * Each file is reconciled on its own, so neither holds up the other.
+ * Best-effort through the module load too, because the teardown it follows
+ * already happened: a pid file this cannot read or unlink is
+ * `hyp daemon status`'s to report, and nothing in here is a reason to call a
+ * completed stop or uninstall a failure. Each file is reconciled on its own,
+ * so neither holds up the other.
  *
  * @param {string} stateRoot
  */
@@ -521,6 +523,16 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
     ctx.stderr.write(`hyp daemon uninstall: ${message}\n`)
     return 1
   }
+  // After the teardown, never before it: until the plist / unit is unlinked
+  // the manager still has a respawn policy, and a daemon sitting in its
+  // restart gap is about to be brought back (#2261). Afterwards nothing will
+  // ever rewrite either file, so the stop's reconciliation applies here with
+  // more force than it does there.
+  //
+  // Before the detach sweep, which fails on its own account: a client whose
+  // settings could not be reversed is no reason to leave two dead pids on
+  // disk.
+  await clearStaleDaemonPidFiles(readObservabilityEnv(ctx.env).stateDir)
   // Only reached once the service is actually gone: a failed uninstall leaves a
   // daemon still serving that port, and detaching from it would break capture
   // for no reason.
