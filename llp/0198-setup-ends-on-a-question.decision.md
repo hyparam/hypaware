@@ -119,10 +119,16 @@ and Claude Desktop is detectable, pickable, attachable, and cannot be
 started on a question at all - it is a GUI app with no prompt argument.
 
 The explicit `hyp ask` command therefore probes `$PATH` directly for the launch binary of
-each *attached* client, and offers only what both is attached and resolves.
-The two conditions are both required: an unattached client is one HypAware
-is not recording, so opening it would produce a session the user did not
-consent to capture, and an attached client with no binary cannot be started.
+each *recorded* client, and offers only what both is recorded and resolves.
+The two conditions are both required: opening a client HypAware is not
+recording would produce a session the user did not consent to capture,
+and a recorded client with no binary cannot be started. An attach marker
+is the ordinary evidence of recording, but not the only one: a capture
+mode that writes no marker leaves none to find, so a configured client
+whose attach reads *not applicable* is recorded too
+([LLP 0429 #status](./0429-codex-capture-leaves-inference.spec.md#status)).
+Reading a missing marker there as detachment would withhold the offer
+from a client that is recording perfectly well.
 
 <a id="split"></a>**Core owns the questions; the manifest owns the
 launch.** The prompts are questions about HypAware's own datasets -
