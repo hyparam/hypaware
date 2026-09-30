@@ -7,9 +7,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { installLaunchAgent } from '../../src/core/daemon/macos.js'
+import { installLaunchAgent, plistPathFor, uninstallLaunchAgent } from '../../src/core/daemon/macos.js'
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
-import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus } from '../../src/core/daemon/install.js'
+import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus, uninstallDaemon } from '../../src/core/daemon/install.js'
+import { defaultPlistDir } from '../../src/core/daemon/platform.js'
+import { DAEMON_STOP_TIMEOUT_MS } from '../../src/core/daemon/service_ops.js'
 import { runDaemonStop, runDaemonUninstall } from '../../src/core/commands/daemon.js'
 import { clearStalePidFile, pidFilePath, processIsAlive, processingStateRoot, writePidFile } from '../../src/core/daemon/pid.js'
 
@@ -34,19 +36,39 @@ const RUNNING_PID = 4242
  * apart: launchd holding the label with nothing running under it, which is
  * what a throttled respawn and a pended spawn both look like.
  *
- * @param {{ loadedAtStart?: boolean, pidAtStart?: number, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean, kickstartStderr?: string }} [opts]
+ * `unloadAfterPrints` is the fact the teardown paths need and the install
+ * ones do not: `bootout` is asynchronous, so launchd can still be holding the
+ * job for several probes after the command has returned (#2329). `0`, the
+ * default, is the teardown that finished inside the call, which is what every
+ * install test here already assumed. A number is how many further `print`
+ * probes still see the job; `Infinity` is the job launchd never releases.
+ * `onUnloaded` fires the instant the fake lets go, which is where a test
+ * models what the completed teardown does to the daemon's pid files.
+ *
+ * @param {{ loadedAtStart?: boolean, pidAtStart?: number, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean, kickstartStderr?: string, unloadAfterPrints?: number, onUnloaded?: () => void, bootoutRejects?: string }} [opts]
  */
 function fakeLaunchd(opts) {
   const { loadedAtStart = false, spawnOnBootstrap = false, spawnOnKickstart = true, kickstartStderr } = opts ?? {}
+  const { unloadAfterPrints = 0, onUnloaded, bootoutRejects } = opts ?? {}
   /** @type {string[][]} */
   const calls = []
   let loaded = loadedAtStart
   let pid = opts?.pidAtStart ?? (loadedAtStart ? RUNNING_PID : 0)
+  let printsUntilReleased = 0
+  function release() {
+    loaded = false
+    pid = 0
+    onUnloaded?.()
+  }
   return {
     calls,
     /** @param {string[]} args */
     print(args) {
       calls.push(['print', ...args])
+      if (printsUntilReleased > 0) {
+        printsUntilReleased -= 1
+        if (printsUntilReleased === 0) release()
+      }
       if (!loaded) {
         return Promise.resolve({ exitCode: 113, stdout: '', stderr: 'Could not find service' })
       }
@@ -58,8 +80,12 @@ function fakeLaunchd(opts) {
     /** @param {string[]} args */
     bootout(args) {
       calls.push(['bootout', ...args])
-      loaded = false
-      pid = 0
+      if (bootoutRejects !== undefined) return Promise.reject(new Error(bootoutRejects))
+      // The teardown launchd has accepted but not finished: the job is still
+      // there for the next `unloadAfterPrints` probes, and the +1 is the probe
+      // that finally sees it gone.
+      if (unloadAfterPrints > 0) printsUntilReleased = unloadAfterPrints + 1
+      else release()
       return Promise.resolve(OK)
     },
     /** @param {string[]} args */
@@ -597,30 +623,33 @@ test('a launchd reason that ends in a period does not double up the sentence bre
 })
 
 /**
+ * The context a `hyp daemon ...` command runs against a staged HOME with,
+ * capturing both streams.
+ *
+ * @param {string} home
+ */
+function stageCtx(home) {
+  let out = ''
+  let err = ''
+  const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+    stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+    stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+  }))
+  return { ctx, stateRoot: path.join(home, '.hyp', 'hypaware'), out: () => out, err: () => err }
+}
+
+/**
  * A systemd-installed daemon, the systemctl standing in for the service
  * manager, and the context `hyp daemon stop` runs against them with.
  *
  * @param {string} home
  */
 async function stageServiceDaemon(home) {
-  let out = ''
-  let err = ''
   const systemctl = fakeSystemd()
   const options = { ...linuxOpts(home, systemctl), platform: /** @type {const} */ ('linux') }
   await installSystemdUnit(options)
-  const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
-    stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
-    stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
-    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
-  }))
-  return {
-    systemctl,
-    options,
-    ctx,
-    stateRoot: path.join(home, '.hyp', 'hypaware'),
-    out: () => out,
-    err: () => err,
-  }
+  return { systemctl, options, ...stageCtx(home) }
 }
 
 /**
@@ -1067,4 +1096,234 @@ test('a teardown that failed clears nothing, because the respawn policy is still
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
+})
+
+// Issue #2329. `launchctl bootout` is asynchronous, and the uninstall was the
+// one launchd path that fired it and returned anyway, so it could report a
+// removed daemon while launchd was still tearing the job down.
+//
+// Every one of these drives the injected `LaunchctlAdapter` and never a
+// launchd domain (LLP 0181), which is what lets darwin-only teardown code be
+// exercised at all from a Linux host.
+
+/**
+ * A plist on disk with no launchd state behind it: the only thing
+ * `uninstallLaunchAgent` checks before it acts.
+ *
+ * @param {string} home
+ */
+function stagePlist(home) {
+  const plistDir = defaultPlistDir(home)
+  fs.mkdirSync(plistDir, { recursive: true })
+  const plistPath = plistPathFor(plistDir)
+  fs.writeFileSync(plistPath, '<plist/>\n')
+  return plistPath
+}
+
+/**
+ * Uninstall options whose waits are recorded rather than spent. The recorded
+ * milliseconds are how the bound and the cadence of the poll are asserted
+ * without the test either taking that long or measuring the host's scheduler.
+ *
+ * @param {string} home
+ * @param {ReturnType<typeof fakeLaunchd>} launchctl
+ * @param {number[]} sleeps
+ */
+function uninstallOpts(home, launchctl, sleeps) {
+  return {
+    homeDir: home,
+    launchctl,
+    userDomain: 'gui/501',
+    sleep: async function(/** @type {number} */ ms) { sleeps.push(ms) },
+  }
+}
+
+test('an uninstall whose teardown finished inside the call unlinks straight away', async (t) => {
+  const home = tmpHome('uninstall-unloads-now')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.equal(count(lc.calls, 'bootout'), 1)
+  assert.equal(count(lc.calls, 'print'), 1, 'one probe was enough to see the job gone')
+  assert.deepEqual(sleeps, [], 'a teardown already finished costs the uninstall no wait at all')
+  assert.equal(fs.existsSync(plistPath), false, 'the plist outlived the uninstall')
+})
+
+test('an uninstall waits out a teardown launchd has not finished, and unlinks only after it', async (t) => {
+  const home = tmpHome('uninstall-unloads-late')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const plistPath = stagePlist(home)
+  /** @type {boolean | undefined} */
+  let plistWhenReleased
+  const lc = fakeLaunchd({
+    loadedAtStart: true,
+    unloadAfterPrints: 3,
+    onUnloaded() { plistWhenReleased = fs.existsSync(plistPath) },
+  })
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.equal(count(lc.calls, 'print'), 4, 'polled until the probe reported the job gone')
+  assert.equal(sleeps.length, 3, 'one interval between probes, and none after the last')
+  // The order the install path already keeps on the other side of the same
+  // race: it writes the new plist only once the old job is released. While
+  // the wait runs the service genuinely is still installed, and
+  // `hyp daemon status` reads that off this very file.
+  assert.equal(plistWhenReleased, true, 'the plist was unlinked before launchd had let the job go')
+  assert.equal(fs.existsSync(plistPath), false, 'the plist outlived the uninstall')
+})
+
+test('a job launchd never releases still loses its plist, and the uninstall says so', async (t) => {
+  const home = tmpHome('uninstall-never-unloads')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true, unloadAfterPrints: Infinity })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await assert.rejects(
+    () => uninstallLaunchAgent(uninstallOpts(home, lc, sleeps)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /did not unload/)
+      // What the operator has to act on: which service is still held, and
+      // that the removal half already happened.
+      assert.match(err.message, /gui\/501\/com\.hyperparam\.hypaware/)
+      assert.match(err.message, /removed/)
+      return true
+    },
+  )
+
+  // Unlink, and fail: refusing to unlink would leave the operator a service
+  // no command of theirs removes, and returning 0 is the bug.
+  assert.equal(fs.existsSync(plistPath), false, 'the plist survived a timed-out uninstall')
+  assert.ok(sleeps.length > 1 && sleeps.every((ms) => ms === sleeps[0]), 'a fixed poll cadence')
+  assert.equal(
+    sleeps.reduce((a, b) => a + b, 0),
+    DAEMON_STOP_TIMEOUT_MS,
+    'the wait is the stop window and no longer, so uninstall cannot hang',
+  )
+  assert.equal(count(lc.calls, 'print'), sleeps.length, 'one probe per interval, never a busy loop')
+})
+
+test('a bootout the adapter could not even run is tolerated: the probe is the verdict', async (t) => {
+  // The `.catch()` on the bootout predates this and stays. launchd answers a
+  // teardown it has already completed with `3: No such process`, and the
+  // adapter itself can fail to spawn; neither is a reason to abandon an
+  // uninstall. What decides it is whether the job is still there afterwards.
+  const home = tmpHome('uninstall-bootout-rejects')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ bootoutRejects: 'launchctl: could not spawn' })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.equal(count(lc.calls, 'bootout'), 1)
+  assert.equal(fs.existsSync(plistPath), false, 'the plist stayed because a bootout could not be run')
+  assert.deepEqual(sleeps, [], 'launchd was holding nothing, so there was nothing to wait out')
+})
+
+test('a probe the adapter could not run still removes the plist, and still fails', async (t) => {
+  // The other half of the bootout above: `runServiceCommand` rejects when the
+  // binary cannot be spawned, and the suite's own refusal to touch a real
+  // launchd rejects the same way. That is not an unload, so the uninstall
+  // still fails - but abandoning the removal would leave a plist launchd
+  // loads again at the next login, which is the one outcome this function
+  // documents it will never produce.
+  const home = tmpHome('uninstall-probe-rejects')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true })
+  const unspawnable = { ...lc, print() { return Promise.reject(new Error("failed to run 'launchctl print': spawn launchctl ENOENT")) } }
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await assert.rejects(
+    () => uninstallLaunchAgent(uninstallOpts(home, /** @type {any} */ (unspawnable), sleeps)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /did not unload/)
+      assert.match(err.message, /spawn launchctl ENOENT/, 'the reason the unload went unconfirmed reaches the operator')
+      return true
+    },
+  )
+
+  assert.equal(fs.existsSync(plistPath), false, 'a probe that could not run cost the operator the removal')
+  assert.deepEqual(sleeps, [], 'the very first probe rejected, so nothing was ever waited out')
+})
+
+test('an uninstall with no plist on disk touches launchd not at all', async (t) => {
+  const home = tmpHome('uninstall-no-plist')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true })
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.deepEqual(lc.calls, [], 'nothing is installed here, so there is nothing to boot out or probe')
+})
+
+// #2329 reaching #2299, which is the consequence rather than the mechanism.
+// `clearStaleDaemonPidFiles` runs after the teardown and keeps the file of any
+// pid that is still alive, so a teardown that returned while launchd was still
+// killing the daemon left both files behind - and the plist is gone by then,
+// so nothing is ever coming back to reconcile them.
+test('an uninstall that waited out a late unload clears the pid files launchd stranded', async (t) => {
+  const home = tmpHome('uninstall-late-unload-pids')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const staged = stageCtx(home)
+  const processingRoot = processingStateRoot(staged.stateRoot)
+  // The daemon as it is while launchd is still tearing it down: a live pid,
+  // and never the runner's own, which a regression that signalled what the
+  // pid file names would otherwise take out along with the suite.
+  const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+  t.after(() => live.kill('SIGKILL'))
+  assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+  const deadPid = 999999
+  assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+  stageAbandonedPidFile(staged.stateRoot, live.pid)
+  stageAbandonedPidFile(processingRoot, live.pid)
+
+  const lc = fakeLaunchd({
+    loadedAtStart: true,
+    unloadAfterPrints: 3,
+    // launchd finishing what bootout started, with the SIGKILL its grace
+    // period ends in: the daemon and the processing child it supervises are
+    // both gone, and neither ran a shutdown, so the pid files they left name
+    // processes that no longer exist. Restaged rather than caused, because
+    // killing the child above would leave an unreaped pid that signal 0 still
+    // reports as alive.
+    onUnloaded() {
+      stageAbandonedPidFile(staged.stateRoot, deadPid)
+      stageAbandonedPidFile(processingRoot, deadPid)
+    },
+  })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  const code = await runDaemonUninstall([], staged.ctx, {
+    uninstallDaemon: (o) => uninstallDaemon({
+      ...o,
+      ...uninstallOpts(home, lc, sleeps),
+      platform: /** @type {const} */ ('darwin'),
+    }),
+  })
+
+  assert.equal(code, 0, staged.err())
+  assert.match(staged.out(), /Daemon removed/)
+  assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the gateway pid file was stranded by a teardown that returned early')
+  assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the processing pid file was stranded by a teardown that returned early')
+  assert.equal(fs.existsSync(plistPath), false, 'the plist outlived the uninstall')
+  assert.ok(sleeps.length > 0, 'the teardown returned without ever waiting on launchd')
 })
