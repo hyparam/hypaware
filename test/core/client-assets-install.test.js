@@ -173,6 +173,16 @@ test('hyp skills install materializes skills and subagents in one command', asyn
   assert.match(stdout.text(), /installed skill 'test-skill'/)
   assert.match(stdout.text(), /installed agent 'test-analyst'/)
   assert.match(stdout.text(), /installed 1 skill copy\(ies\), 1 agent copy\(ies\)/)
+
+  // Update uses this same command: managed copies replace edits and restore
+  // deletions, with no separate digest-based refresh policy.
+  await fs.writeFile(skillDest, 'user edit\n')
+  await fs.rm(agentDest)
+  assert.equal(await dispatch(['skills', 'install'], {
+    stdout, stderr, env: { ...process.env, HOME: home }, registry, kernel,
+  }), 0)
+  assert.equal(await fs.readFile(skillDest, 'utf8'), 'skill body\n')
+  assert.equal(await fs.readFile(agentDest, 'utf8'), '---\nname: test-analyst\n---\nbody\n')
 })
 
 test('hyp agents install is gone: agents is not a command', async () => {

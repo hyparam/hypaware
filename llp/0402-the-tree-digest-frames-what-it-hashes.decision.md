@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0457 (retires the boot-heal migration; the hasher remains unchanged)
 **Systems:** Onboarding, Plugins, Daemon
 **Author:** Claude
 **Date:** 2026-09-11

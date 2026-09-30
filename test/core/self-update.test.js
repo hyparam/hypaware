@@ -410,6 +410,9 @@ async function fakeGlobalInstall(dir, opts = {}) {
       }
       return { exitCode: 0, stdout: `hypaware ${version}\n`, stderr: '' }
     }
+    if (cmd === process.execPath && args[1] === 'skills') {
+      return { exitCode: 0, stdout: 'installed skills\n', stderr: '' }
+    }
     // One version npm cannot install at all (`installFailsVersion`), so a
     // rollback can be made to fail while the update that provoked it
     // installed cleanly.
@@ -463,10 +466,11 @@ test('runSelfUpdatePass applies a newer release from a global install', async ()
     })
     assert.equal(result.action, 'updated')
     assert.equal(result.latest, '1.1.0')
-    assert.deepEqual(calls.at(-2), ['npm', 'install', '-g', 'hypaware@1.1.0'])
+    assert.deepEqual(calls.at(-3), ['npm', 'install', '-g', 'hypaware@1.1.0'])
     // The install is followed by the preflight of what it put on disk,
     // run with the same node the service unit relaunches with.
-    assert.deepEqual(calls.at(-1), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), '--version'])
+    assert.deepEqual(calls.at(-2), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), '--version'])
+    assert.deepEqual(calls.at(-1), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install'])
     const state = readSelfUpdateState(dir)
     assert.equal(state.last_apply?.ok, true)
     assert.equal(state.available, false)
@@ -475,10 +479,93 @@ test('runSelfUpdatePass applies a newer release from a global install', async ()
   }
 })
 
+test('manual and automatic upgrades run the new installer with the selected config under the apply lock', async () => {
+  for (const force of [false, true]) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-skills-'))
+    try {
+      const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+      const configPath = path.join(dir, 'custom-config.json')
+      const env = { HOME: dir, HYP_HOME: path.join(dir, '.hyp'), HYP_CONFIG: '/wrong-config.json' }
+      const events = []
+      let installs = 0
+      const result = await runSelfUpdatePass({
+        stateRoot: dir, env, packageRoot, configPath, force, supervised: !force,
+        fetchImpl: fetchStub('1.1.0').impl,
+        runner: async (cmd, args, options) => {
+          if (args[1] === 'skills') {
+            installs += 1
+            assert.equal(acquireApplyLock(dir), null, 'the package cannot be replaced while skills copy')
+            assert.equal(cmd, process.execPath)
+            assert.deepEqual(args, [path.join(packageRoot, 'bin', 'hypaware.js'), 'skills', 'install'])
+            assert.equal(options.env?.HOME, dir)
+            assert.equal(options.env?.HYP_HOME, env.HYP_HOME)
+            assert.equal(options.env?.HYP_CONFIG, configPath)
+            assert.equal(options.timeoutMs, NPM_TIMEOUT_MS)
+            assert.equal(calls.at(-1)?.at(-1), '--version', 'preflight precedes skills')
+          }
+          return runner(cmd, args, options)
+        },
+        log: (event) => { events.push(event) },
+      })
+      assert.equal(result.action, 'updated')
+      assert.equal(installs, 1)
+      assert.ok(events.includes('self_update.skills_installed'))
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('skill install failures and partial warnings are reported without blocking package handover', async () => {
+  for (const outcome of ['error', 'warning', 'throw', 'timeout']) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-skill-error-'))
+    try {
+      const { packageRoot, runner } = await fakeGlobalInstall(dir)
+      const events = []
+      const result = await runSelfUpdatePass({
+        stateRoot: dir, env: {}, packageRoot, force: true,
+        fetchImpl: fetchStub('1.1.0').impl,
+        runner: async (cmd, args, options) => {
+          if (args[1] !== 'skills') return runner(cmd, args, options)
+          if (outcome === 'throw') throw new Error('could not spawn installer')
+          return { exitCode: outcome === 'warning' ? 0 : outcome === 'timeout' ? -1 : 1,
+            stdout: '', stderr: 'warning: skill copy failed' }
+        },
+        log: (event, fields) => { events.push({ event, fields }) },
+      })
+      assert.equal(result.action, 'updated', 'the daemon must still restart onto the healthy package')
+      assert.equal(readSelfUpdateState(dir).last_apply?.ok, true)
+      const event = events.find((e) => e.event === (outcome === 'warning'
+        ? 'self_update.skills_install_warning' : 'self_update.skills_install_failed'))
+      assert.ok(event)
+      assert.match(String(event.fields?.detail), /skill copy failed|could not spawn installer/)
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('failed package installs and preflight rollbacks never run the skill installer', async () => {
+  for (const options of [{ installExit: 1 }, { preflightFails: '1.1.0' }]) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-no-skills-'))
+    try {
+      const { packageRoot, runner, calls } = await fakeGlobalInstall(dir, options)
+      const result = await runSelfUpdatePass({
+        stateRoot: dir, env: {}, packageRoot, runner, force: true,
+        fetchImpl: fetchStub('1.1.0').impl,
+      })
+      assert.notEqual(result.action, 'updated')
+      assert.equal(calls.some((call) => call[2] === 'skills'), false)
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('runSelfUpdatePass records an up-to-date probe and respects the TTL after it', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-ttl-'))
   try {
-    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
     const probe = fetchStub('1.0.0')
     const first = await runSelfUpdatePass({
       supervised: true,
@@ -492,6 +579,7 @@ test('runSelfUpdatePass records an up-to-date probe and respects the TTL after i
     })
     assert.equal(second.action, 'none')
     assert.equal(probe.calledCount(), 1)
+    assert.deepEqual(calls, [], 'no package or skill install on an unchanged check')
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
@@ -707,8 +795,8 @@ test('npm runs with the node bin directory on PATH, not the service manager defa
       name: 'hypaware', version: '1.1.0', packageRoot, runner, env: { PATH: '/usr/bin:/bin' },
     })
     assert.equal(applied.applied, true)
-    // prefix, install, preflight: all three run with the node bin in front.
-    assert.equal(envs.length, 3)
+    // Prefix, install, preflight, skills: every child gets the node bin.
+    assert.equal(envs.length, 4)
     for (const env of envs) assert.equal(env.PATH?.split(path.delimiter)[0], nodeBin)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })

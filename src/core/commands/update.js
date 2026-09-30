@@ -66,7 +66,8 @@ export async function runUpdate(argv, ctx) {
     // reports. Pass the diagnostic events through; the routine ones are
     // already this command's own output.
     log: (event, fields) => {
-      if (event !== 'self_update.error' && event !== 'self_update.registry_override_ignored') return
+      if (event !== 'self_update.error' && event !== 'self_update.registry_override_ignored' &&
+          event !== 'self_update.skills_install_failed' && event !== 'self_update.skills_install_warning') return
       try { ctx.stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`) } catch { /* stderr gone */ }
     },
   })
@@ -216,4 +217,3 @@ async function restartDaemonIfRunning(ctx, version, daemonInstall) {
   }
   return 0
 }
-

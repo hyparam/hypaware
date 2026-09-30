@@ -320,33 +320,6 @@ export interface ClientAssetMaterialization {
   withheld: ClientAssetRemoval[]
 }
 
-/**
- * What one boot-time refresh did: the installed copies it rewrote because
- * their source changed, the ones it left alone and why, and how many it read
- * and found current.
- */
-export interface ClientAssetRefresh {
-  refreshed: Omit<ClientAssetRemoval, 'dryRun'>[]
-  skipped: (Omit<ClientAssetRemoval, 'dryRun'> & {
-    /**
-     * `edited`: bytes no longer match any recorded digest. `unreadable`: the
-     * copy could not be read. `missing`: the copy is gone. `copy_failed`: the
-     * rewrite itself failed.
-     */
-    reason: 'edited' | 'unreadable' | 'missing' | 'copy_failed'
-  })[]
-  unchanged: number
-  /**
-   * How many of the `unchanged` copies had a stale record healed to the bytes
-   * found on disk (LLP 0400 #source-equality-is-ownership). A sub-count of
-   * `unchanged`, not a fourth outcome: the file was not touched. It is
-   * reported separately because a heal is the only outcome that writes the
-   * ledger without rewriting a copy, so a caller that logs only `refreshed`
-   * and `skipped` would record the change to disk nowhere.
-   */
-  healed: number
-}
-
 export interface MaterializeClientAssetsOptions {
   /**
    * Client names to install for; contributions targeting others are skipped.

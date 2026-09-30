@@ -1,7 +1,8 @@
 # LLP 0400: bytes equal to the current source are evidence the copy is ours
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** LLP 0457
 **Systems:** Onboarding, Plugins, Daemon
 **Author:** Claude
 **Date:** 2026-09-11
