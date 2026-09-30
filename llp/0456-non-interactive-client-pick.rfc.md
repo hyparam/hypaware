@@ -38,7 +38,8 @@ made, and it is now load-bearing: PR #2339 widened the askable list so
 that Codex in its default transcript mode (marker-less but recorded,
 LLP 0429 #status) joins any attached client, making a two-element list
 the ordinary case. On such an install, `codex` sorts before `opencode`
-and every piped run silently switched agents when the list widened.
+and every piped run switched agents when the list widened, with no
+stated rule behind the switch.
 Issue #671 item 5 flagged the arbitrary `launchers[0]` pick before the
 widening; PR #2339 fixed the interactive half with a picker and left
 the piped half to the emergent order.
