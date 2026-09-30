@@ -6,7 +6,7 @@
 **Author:** Neutral / Claude
 **Date:** 2026-09-30
 **Extends:** LLP 0414 (#same-seams: "piped, the first is taken" names a position, not a rule; this RFC asks what makes a client first), LLP 0198 (#path-probe: the recorded-and-resolvable predicate builds the list this pick indexes into)
-**Related:** LLP 0398 (#run-directory: the launch mechanics around the pick), LLP 0429 (#status: the marker-less transcript mode that widened the list), issue #2368, issue #671 (item 5), PR #2339
+**Related:** LLP 0398 (#run-directory: the launch mechanics around the pick), LLP 0429 (#status: the marker-less transcript mode that widened the list), LLP 0458 (the sibling question on the same commands: what the report and recommendation pickers do when the tty is unattended), issue #2368, issue #671 (item 5), PR #2339
 
 > `hyp ask "<question>"`, `hyp report generate`, and `hyp report fix` each
 > start one attached client. Interactive runs prompt since PR #2339. A run
