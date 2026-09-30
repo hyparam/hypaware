@@ -171,6 +171,10 @@ test('runAsk "<question>": the no-launcher hint names real clients, not a placeh
   const code = await runAsk(['which sessions touched the auth module'], ctx)
   assert.equal(code, 1)
   const text = stderr.text()
+  // The set it refuses on is `askableClients`, which keeps a client that is
+  // attached *or* configured with no attach marker to write, so the line can
+  // only say "recorded" without contradicting the offer.
+  assert.match(text, /hyp ask: no recorded client can be started here\./)
   assert.match(text, /Attach one with `hyp client attach claude` \(or codex, opencode, pi\)/)
   assert.doesNotMatch(text, /<client>/)
 })
