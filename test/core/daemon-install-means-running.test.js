@@ -1001,19 +1001,30 @@ test('the stale clear runs after the service teardown, never before it', async (
   const home = tmpHome('uninstall-clear-after-teardown')
   try {
     const staged = await stageServiceDaemon(home)
+    const processingRoot = processingStateRoot(staged.stateRoot)
     stageAbandonedPidFile(staged.stateRoot, 999999)
+    stageAbandonedPidFile(processingRoot, 999999)
+    // Both roots, because the order is a property of each file rather than
+    // of the call: a clear split so one root goes early and the other late
+    // leaves that root exposed for the whole teardown while a single-file
+    // snapshot still reads as ordered.
     /** @type {boolean | undefined} */
-    let pidFileWhenTornDown
+    let gatewayWhenTornDown
+    /** @type {boolean | undefined} */
+    let processingWhenTornDown
 
     const code = await runDaemonUninstall([], staged.ctx, {
       uninstallDaemon: async function() {
-        pidFileWhenTornDown = fs.existsSync(pidFilePath(staged.stateRoot))
+        gatewayWhenTornDown = fs.existsSync(pidFilePath(staged.stateRoot))
+        processingWhenTornDown = fs.existsSync(pidFilePath(processingRoot))
       },
     })
 
     assert.equal(code, 0, staged.err())
-    assert.equal(pidFileWhenTornDown, true, 'the clear ran while the respawn policy was still installed')
-    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the clear did not run after the teardown either')
+    assert.equal(gatewayWhenTornDown, true, 'the gateway clear ran while the respawn policy was still installed')
+    assert.equal(processingWhenTornDown, true, 'the processing clear ran while the respawn policy was still installed')
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the gateway clear did not run after the teardown either')
+    assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the processing clear did not run after the teardown either')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
