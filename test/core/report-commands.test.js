@@ -7,6 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -1173,6 +1174,77 @@ test('fix asks which client only when more than one could start, and only on a t
     assert.match(prompts[0].title, /Which client/)
     assert.equal(launches[0].launcher.client, 'codex')
   }
+})
+
+/* ---------- the client picker's deadline ---------- */
+
+// The picker's gate reads two `isTTY` flags, and a TTY says a terminal is
+// attached, never that a person is reading it: under `docker run -t`, a
+// tty-allocating CI runner, tmux or expect the prompt drew and waited for a
+// keypress that never came, so the run only ended when something killed it
+// (#2393, the same defect `hyp ask` carried as #2373). These drive the real
+// prompt runtime rather than a stubbed `select`: what is stubbed is the
+// deadline's length, not the branch under test.
+
+/** A stdout that claims a terminal, as a pty's does. */
+function ttyOut() {
+  /** @type {string[]} */ const chunks = []
+  return {
+    isTTY: true,
+    columns: 80,
+    rows: 24,
+    /** @param {any} chunk */
+    write(chunk) { chunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8')); return true },
+    text: () => chunks.join(''),
+  }
+}
+
+/** A stdin that claims a terminal and delivers nothing, as an unattended pty's does. */
+function silentTtyIn() {
+  return Object.assign(new EventEmitter(), {
+    isTTY: true,
+    isRaw: false,
+    /** @param {boolean} v */
+    setRawMode(v) { this.isRaw = v; return this },
+    resume() { return this },
+    pause() { return this },
+    isPaused() { return false },
+  })
+}
+
+/** Two launchable clients, so both commands reach their client picker. */
+const TWO_CLIENTS = [
+  { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
+  { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
+]
+
+test('generate: an allocated tty nobody answers starts the first client instead of waiting for a keypress', { timeout: 5000 }, async (t) => {
+  const { ctx } = await generateFixture(t)
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
+})
+
+test('fix: an allocated tty nobody answers starts the first client instead of waiting for a keypress', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
 })
 
 test('fix with nothing launchable exits 1 with a runnable attach hint, before fetching the page', async (t) => {
