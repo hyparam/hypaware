@@ -625,6 +625,7 @@ export function withNodeBinOnPath(env) {
  *   packageRoot?: string,
  *   env?: NodeJS.ProcessEnv,
  *   configPath?: string,
+ *   skipSkillsInstall?: boolean,
  *   runner?: CommandRunner,
  *   platform?: NodeJS.Platform,
  *   log?: (event: string, fields?: Record<string, unknown>) => void,
@@ -667,6 +668,16 @@ export async function applySelfUpdate(opts) {
 
   const preflight = await runPreflight({ globalRoot, version: opts.version, env, run })
   if (preflight.ok) {
+    // `--attached` is the new release's flag: a rollback installs whatever
+    // the update replaced, and a release predating LLP 0458 refuses the flag
+    // outright, so this lane (which runs only when the boot is already
+    // failing) would report its own argv as a failed step. The skip leaves
+    // the assets on disk for `hyp skills install` or the next upgrade.
+    // @ref LLP 0458#attached-only [constrained-by]: the flag is the new package's, so a rollback onto an older one does not use it
+    if (opts.skipSkillsInstall) {
+      log('self_update.skills_install_skipped', { reason: 'rollback', version: opts.version })
+      return { applied: true }
+    }
     // @ref LLP 0458#attached-only [implements]: the new package probes current attachments before using the shared installer
     try {
       const skills = await run(process.execPath, [path.join(globalRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'], {
@@ -1242,7 +1253,7 @@ async function maybeRollBack({ stateRoot, stuck, packageRoot, env, runner, nowMs
   /** @type {Awaited<ReturnType<typeof applySelfUpdate>>} */
   let back
   try {
-    back = await applySelfUpdate({ name: identity.name, version: last.from, packageRoot, env, runner, log })
+    back = await applySelfUpdate({ name: identity.name, version: last.from, packageRoot, env, runner, log, skipSkillsInstall: true })
   } finally {
     releaseLock()
   }
