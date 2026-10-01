@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
 
@@ -647,7 +648,13 @@ test('export warning: a sink only a prior daemon status file names shows its sha
   await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
     sinks: [{ instance: 'ghost', plugin: '@hypaware/central', kind: 'request' }],
   }))
-  await writeOutbox(stateRoot, 'ghost', [{ agoMs: 90 * 24 * 60 * 60_000, error: 'fetch failed' }])
+  // One failure outside the 24-hour history window and one inside it, so a
+  // pass on `recentErrorCount` can only mean the in-window failure was
+  // actually counted, not that the window excluded everything on offer.
+  await writeOutbox(stateRoot, 'ghost', [
+    { agoMs: 90 * 24 * 60 * 60_000, error: 'fetch failed' },
+    { agoMs: 60_000, error: 'fetch failed' },
+  ])
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.deepEqual(
@@ -660,6 +667,75 @@ test('export warning: a sink only a prior daemon status file names shows its sha
     [],
     'a destination the operator deleted raises no export warning',
   )
-  // The files are still history, and 90 days is outside the 24-hour horizon.
-  assert.equal(report.recentErrorCount, 0)
+  // The files are still history: the in-window failure is counted even
+  // though the destination that produced it is not configured.
+  assert.equal(report.recentErrorCount, 1)
+})
+
+// A local config that fails to parse is not the operator naming a smaller
+// `sinks` set; it is a file `hyp status` could not read. Reading it the same
+// way as a deleted `sinks` key would silence a live export failure the
+// operator never asked to stop hearing about, the exact silent-suppression
+// issue #2337 built this warning against.
+// @ref LLP 0453#warning-rule [tests]: an unreadable local config is not a configured-set removal, so a destination it would have named still warns
+test('export warning: an unreadable local config still warns about a failing sink', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // Central names no sinks either, so `config.sinks` is empty for a reason
+  // that has nothing to do with the unreadable local file.
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), JSON.stringify({ version: 2, plugins: [] }))
+  await fs.writeFile(defaultConfigPath(hypHome), '{{{ not json')
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'central', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['central'],
+    'the recovered row still renders the shape of the install',
+  )
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1, 'an unreadable config must not suppress a live export failure')
+  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+})
+
+// A local `sinks` entry the central layer's merge drops as `invalid_merge`
+// (an unknown plugin, say) is a rejected local addition, not the operator
+// clearing the destination. It leaves `config.sinks` empty by the same path
+// as a deleted `sinks` key, so it must not be read as the same intent.
+// @ref LLP 0453#warning-rule [tests]: a sinks entry the layer merge dropped is not a configured-set removal, so the destination still warns
+test('export warning: a sinks entry the central layer merge dropped still warns', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), JSON.stringify({ version: 2, plugins: [] }))
+  // Names a plugin this install has no manifest for, so `resolveLayeredConfig`
+  // drops it rather than merging it in.
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: { central: { plugin: '@hypaware/does-not-exist', config: {} } },
+  }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'central', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['central'],
+    'the recovered row still renders the shape of the install',
+  )
+  assert.deepEqual(
+    report.layered?.drops,
+    [{ section: 'sinks', key: 'central', reason: 'invalid_merge', detail: 'sink_plugin_unknown' }],
+    'ground truth: the merge actually dropped the local entry',
+  )
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1, 'a merge-dropped entry must not suppress a live export failure')
+  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
 })

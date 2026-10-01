@@ -1911,7 +1911,15 @@ export async function collectHypAwareStatus(opts = {}) {
   /** @type {Map<string, { plugin: string, kind: string }>} */
   const handleByInstance = new Map()
   // Cleared by the status-file fallback below, the one branch whose rows no
-  // config entry and no live handle backs.
+  // config entry and no live handle backs - but only when an empty
+  // configured sink set is the operator's own removal. An unreadable local
+  // config (`localConfigUnreadable`) and a `sinks` entry the central layer
+  // merge dropped (`merged.drops`, reason `invalid_merge`) also leave
+  // `config.sinks` empty without the operator having removed anything, so
+  // neither is read as intent here; reading either as intent would silently
+  // drop a live export-failure warning instead of fixing the over-warning
+  // issue #2361 set out to fix.
+  const sinksDroppedByMerge = merged.drops.some((d) => d.section === 'sinks')
   let sinksAreConfigured = true
   if (opts.runtime?.sinks) {
     // The registry's key, not the handle's own `instanceName`: nothing on
@@ -1955,8 +1963,10 @@ export async function collectHypAwareStatus(opts = {}) {
     // Shape is not configuration either: deleting the whole `sinks` key is the
     // one removal that lands here instead of the config branch, so reading
     // these rows as configured asks an operator to repair a destination they
-    // deleted (issue #2361).
-    sinksAreConfigured = false
+    // deleted (issue #2361). But an unreadable local config or a merge-dropped
+    // `sinks` entry land here too without being a removal, so only clear the
+    // gate when neither of those explains the empty `config.sinks`.
+    sinksAreConfigured = localConfigUnreadable || sinksDroppedByMerge
     sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
       .filter((s) => !!s && typeof s === 'object'))
   }
