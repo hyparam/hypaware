@@ -92,6 +92,42 @@ test('init --from-file --force backs up then overwrites', async () => {
   assert.match(stdout.text(), /backed up existing config/i)
 })
 
+test('init --from-file --dry-run into a fresh home writes nothing', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const fromFile = await writeFromFile(hypHome)
+  const code = await dispatch(['init', '--from-file', fromFile, '--dry-run'], opts)
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /\(dry-run\) Would write /)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
+test('init --from-file --dry-run --force leaves the existing config and makes no backup', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+  const fromFile = await writeFromFile(hypHome)
+
+  const code = await dispatch(['init', '--from-file', fromFile, '--dry-run', '--force'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /\(dry-run\) would back up existing config/)
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.deepEqual(after.plugins, EXISTING.plugins)
+  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  assert.equal(backups.length, 0)
+})
+
+test('init --yes --dry-run writes no config', async () => {
+  const { hypHome, stdout, stderr, opts } = await makeHome()
+  // This run reaches the finale, so HOME goes to the tmp dir with HYP_HOME.
+  const code = await dispatch(
+    ['init', '--yes', '--no-daemon', '--source', 'otel', '--dry-run'],
+    { ...opts, env: { ...opts.env, HOME: hypHome } }
+  )
+  assert.equal(code, 0, stderr.text())
+  assert.match(stdout.text(), /\(dry-run\) Would save settings/)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
 test('init --yes refuses to clobber an existing local config without --force', async () => {
   const { hypHome, stderr, opts } = await makeHome()
   const configPath = path.join(hypHome, 'hypaware-config.json')

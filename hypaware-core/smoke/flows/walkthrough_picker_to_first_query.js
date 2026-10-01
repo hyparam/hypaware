@@ -36,10 +36,12 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *
  * Assertions (per bead hy-5oz4):
  *
+ * - The dry run names the config it would write and writes none.
  * - Non-interactive picker selections generate a config matching the
  *   expected v2 shape (both AI upstreams, OTEL, Parquet sink), plus the
  *   riders those picks pull in (LLP 0213 #d1): the written config is wider
- *   than the seven plugins this smoke activates by injection.
+ *   than the seven plugins this smoke activates by injection. Checked on
+ *   the same picks run for real with `--no-daemon`.
  * - Dry-run daemon install chooses the stable binary path passed via
  *   `--bin <stable-bin>` and outputs a sensible target path.
  * - Claude + Codex + OpenCode attach dry-runs produce expected file edits
@@ -263,14 +265,20 @@ export async function run({ harness, expect }) {
         v.includes('Dry run: nothing was written.')
     )
 
-    // ----- 2. Config written matches Phase 5 shape -----
+    // ----- 2. Dry-run reported the config and did not write it -----
     const configPath = defaultConfigPath(harness.hypHome)
-    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
-    const expected = await goldenPickerConfig(harness.hypHome)
     expect.that(
-      'config: Phase 5 picker config matches expected shape',
-      written,
-      (v) => deepEqual(v, expected)
+      'stdout: dry-run named the config it would write',
+      initText,
+      (v) =>
+        typeof v === 'string' &&
+        v.includes('(dry-run) Would save settings') &&
+        v.includes(`(dry-run) Would write ${configPath}`)
+    )
+    expect.that(
+      'dry-run did not write the config',
+      await fs.stat(configPath).then(() => true, () => false),
+      (v) => v === false
     )
 
     // ----- 3. Dry-run did not touch real per-client files -----
@@ -421,18 +429,23 @@ export async function run({ harness, expect }) {
     // Runs after the capture + SQL phase: init re-boots the kernel from
     // the picker-written config (post-attach one-shot re-boot), which
     // replaces this smoke's injected echo upstream, so the echo
-    // round-trip must complete first. The dry-run above already wrote
-    // the config, and init refuses to overwrite an existing config
-    // without --force (LLP 0129).
+    // round-trip must complete first. The same picks as the dry-run
+    // above, which wrote nothing, so this is the run that writes the
+    // config the golden shape is checked against.
     const realInitStdout = makeBuf()
     const realInitStderr = makeBuf()
     const realInitCode = await dispatch(
       [
         'setup',
         '--yes',
-        '--force',
+        '--client', 'claude',
+        '--client', 'codex',
+        '--client', 'opencode',
         '--source', 'claude',
-        '--export', 'keep-local',
+        '--source', 'codex',
+        '--source', 'opencode',
+        '--source', 'otel',
+        '--export', 'local-parquet',
         '--retention-days', '30',
         '--no-daemon',
         '--bin', stableBinPath,
@@ -450,6 +463,13 @@ export async function run({ harness, expect }) {
       'stderr: real hyp setup attach had no errors',
       realInitStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
+    )
+    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    const expected = await goldenPickerConfig(harness.hypHome)
+    expect.that(
+      'config: Phase 5 picker config matches expected shape',
+      written,
+      (v) => deepEqual(v, expected)
     )
     // The picker writes no `listen`, so the port the client is wired to is the
     // fixed default the daemon's gateway will bind, not a wizard-pinned one.

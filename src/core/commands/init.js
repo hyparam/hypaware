@@ -410,14 +410,18 @@ async function runInitFromFile(flags, ctx) {
   // `init` writes the user-owned local layer, so guard against silently
   // clobbering a working config (the non-destructive half of #111).
   // `--from-file` is non-interactive: refuse unless `--force`, and back
-  // up before replacing.
-  const guard = await prepareLocalConfigWrite({ targetPath, force: flags.force })
+  // up before replacing. `--dry-run` gets the same answer and refusal
+  // with no backup and no write.
+  const dryRun = flags.dryRun
+  const guard = await prepareLocalConfigWrite({ targetPath, force: flags.force, dryRun })
   if (!guard.proceed) {
     ctx.stderr.write(`hyp setup: ${guard.message}\n`)
     return 1
   }
   if (guard.backupPath) {
-    ctx.stdout.write(`  backed up existing config to ${guard.backupPath}\n`)
+    ctx.stdout.write(dryRun
+      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
+      : `  backed up existing config to ${guard.backupPath}\n`)
   }
 
   await withSpan(
@@ -427,10 +431,12 @@ async function runInitFromFile(flags, ctx) {
       [Attr.OPERATION]: 'wizard.pick.write_config',
       config_path: targetPath,
       from_file: true,
-      ...(guard.backupPath ? { config_backed_up: true } : {}),
+      ...(dryRun ? { dry_run: true } : {}),
+      ...(guard.backupPath && !dryRun ? { config_backed_up: true } : {}),
       status: 'ok',
     },
     async () => {
+      if (dryRun) return
       await fs.mkdir(path.dirname(targetPath), { recursive: true })
       await fs.writeFile(targetPath, JSON.stringify(parsed, null, 2) + '\n', 'utf8')
     },
@@ -450,7 +456,7 @@ async function runInitFromFile(flags, ctx) {
     { component: 'wizard' }
   )
 
-  ctx.stdout.write(`✓ Wrote ${targetPath}\n`)
+  ctx.stdout.write(dryRun ? `(dry-run) Would write ${targetPath}\n` : `✓ Wrote ${targetPath}\n`)
   return 0
 }
 
