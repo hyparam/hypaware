@@ -48,6 +48,11 @@ hyp ask "which sessions touched the auth module"
 hyp ask            # suggest a skill based on your recent sessions
 ```
 
+With a question, if multiple clients are available, `hyp ask` asks which to
+launch. After 10 seconds without input, it starts the first offered client and
+says so; the first keypress removes the deadline. See the
+[`hyp ask` reference](./docs/CLI_REFERENCE.md#hyp-ask) for details.
+
 Or ask from inside any session. Install the HypAware skills and your client
 looks up past sessions itself whenever a question calls for it:
 

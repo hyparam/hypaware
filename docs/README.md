@@ -1,8 +1,8 @@
 # HypAware documentation
 
-HypAware collects AI sessions and telemetry into a local, queryable history.
-You can keep it on your machine, export files, or sync recordings to
-HypAware Cloud. Both `hyp` and `hypaware` run the same CLI.
+HypAware records sessions from your AI clients locally so you can search and
+query them on your machine. You can sync your recordings to HypAware Cloud so
+your team can search and query them.
 
 ## Quickstart
 
@@ -13,17 +13,15 @@ npm i -g hypaware
 hyp setup
 ```
 
-Setup's first question is how to collect. **Sync to the cloud** is the
-default and opens a browser sign-in; choose **Local only** to keep everything
-on this machine. Then check capture and look at what you already have:
+Select **Sync to the cloud** to store your recordings on HypAware Cloud or
+choose **Local only** to keep everything on your machine. Then have your agent
+inspect your logs:
 
 ```sh
-hyp status
-hyp query overview
 hyp ask "From my HypAware history, where did my agents go off the rails recently?"
 ```
 
-To switch a local-only machine to sync later, run `hyp remote login`.
+To **Sync to the cloud** later, run `hyp remote login`.
 
 ## Start here
 
@@ -50,14 +48,12 @@ To switch a local-only machine to sync later, run `hyp remote login`.
 
 ## How the pieces fit
 
-Clients and telemetry sources write to the **local query cache**. Queries read
-that cache. **Sinks** export eligible data from it on a schedule: for example,
-Parquet files on disk or recordings sent to HypAware Cloud. Enabling
-capture and enabling export are separate choices.
+HypAware stores captured sessions in a **local query cache**. Local searches
+and queries read that cache. If you enable Cloud sync, eligible recordings are
+also sent to HypAware Cloud so your team can search and query them.
 
-**Plugins** provide client integrations, sources, destinations, and optional
-query tools. Command availability follows the active configuration. Run
-`hyp --help` and `hyp plugin list` to see what your installation supports.
+**Plugins** provide client integrations and optional query tools. Run
+`hyp plugin list` to see plugins and their status.
 
 ## Contributors and advanced reference
 
@@ -65,6 +61,5 @@ query tools. Command availability follows the active configuration. Run
 - [Product telemetry](PRODUCT_TELEMETRY.md): the enrollment default, its
   controls, what is collected, and delivery limits.
 
-These guides describe the code in this repository. For an older installed
-release, use `hyp version` and `hyp COMMAND --help` to check its supported
-syntax. Uppercase values such as `SESSION_ID` in examples are placeholders.
+Use `hyp --help` to list commands, or `hyp <command> --help` for help with a
+specific command.
