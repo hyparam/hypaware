@@ -811,12 +811,14 @@ async function runGuardedInitWizard(opts, guard) {
   if (folderAskPending && folderAsk) {
     await commitWizardFolderAsk({ env: opts.env, stderr: opts.stderr, mode: folderAsk })
   }
+  const dryRun = opts.finale?.dryRun === true
   if (picked.configPending) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
       stderr: opts.stderr,
       interactive,
       ...(opts.force !== undefined ? { force: opts.force } : {}),
+      dryRun,
       configPath: picked.configPath,
       config: picked.config,
     })
@@ -825,7 +827,7 @@ async function runGuardedInitWizard(opts, guard) {
       return { exitCode: 1, ...(pathway ? { pathway } : {}) }
     }
     // Past this line a cancel is a cancel over a machine that changed.
-    landedConfigPath = picked.configPath
+    if (!dryRun) landedConfigPath = picked.configPath
   }
 
   // @ref LLP 0396#combined-selection [implements]: no opt-out is cleared until the selection questions and the config write succeed
@@ -889,7 +891,7 @@ async function runGuardedInitWizard(opts, guard) {
   }
   // An attended run already said each of these as it happened; the summary
   // is for a scripted run's log.
-  if (!interactive) writeWalkthroughRunSummary({ stdout: opts.stdout, configPath: picked.configPath, finaleSummary })
+  if (!interactive) writeWalkthroughRunSummary({ stdout: opts.stdout, configPath: picked.configPath, finaleSummary, dryRun })
 
   // End an attended setup on the user's own rows, not on a command they
   // still have to type. Attended and non-dry-run only: a scripted `--yes`

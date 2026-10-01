@@ -25,6 +25,7 @@ import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config
 import { discoverInstalledPlugins, unloadableInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
+import { centralLayerUnreadable } from '../remote/gateway_seed.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
@@ -1207,6 +1208,17 @@ export async function collectHypAwareStatus(opts = {}) {
   // `config_unreadable` / `config_local_unreadable` own the run.
   const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
 
+  // Same fact, central layer: a central file the host could not parse is not
+  // the operator removing anything either, so it must not be read as intent
+  // any more than a local parse failure is.
+  const centralLayerParseFailed = !!centralLoaded && !centralLoaded.ok && centralLoaded.errorKind !== 'config_missing'
+
+  // Whether the central layer can be read at all, widest definition: every
+  // load failure counts, `config_missing` included, and a null `centralLoaded`
+  // is re-checked against the control directory instead of read as an
+  // absence. See `centralLayerUnreadable`'s own doc for why.
+  const centralUnreadable = centralLayerUnreadable({ stateDir: stateRoot, centralLoaded })
+
   // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
   // concern); a local entry that lost the merge shows in `layered.drops`,
@@ -1241,7 +1253,9 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'config_missing',
-        message: `no config found - neither a central layer nor ${configPath}`,
+        message: centralUnreadable === null
+          ? `no config found - neither a central layer nor ${configPath}`
+          : `no config found - ${configPath}`,
         repair: ['hyp setup', 'hyp setup --from-file <config.json>', 'hyp join <url> <token>'],
       })
     } else {
@@ -1276,6 +1290,44 @@ export async function collectHypAwareStatus(opts = {}) {
         pointer: err.pointer,
       })
     }
+  }
+
+  // The same fact for the other layer, and why it needs a line of its own:
+  // `centralConfig` is null both for a layer that is absent and for one that
+  // is there and will not parse, so without this the report asserts
+  // `layered: null` - no central layer at all - and nothing names the file
+  // (issue #2423). An unreadable layer is not an absent one - the same
+  // distinction LLP 0226 #unreadable-is-not-absent draws for a client asset -
+  // and `hyp remote login` is what writes this very layer, so a host that
+  // cannot read it has a layer all the same. `centralLayerUnreadable` covers
+  // every way that can happen, not only a file that fails to parse: an
+  // active-slot pointer naming a slot file that is gone, an active pointer
+  // replaced by something other than a symlink, or a control directory this
+  // process cannot even list.
+  //
+  // A warning on the local layer's precedent: the host runs on whichever layer
+  // did load, so this is loud without being an outage signal, and staying out
+  // of `degradingKinds` leaves `overall` as it was. Whether an unreadable org
+  // layer *should* degrade the verdict is a separate question.
+  //
+  // `hyp remote login` is deliberately not a repair: its D4 gate reads the
+  // same `centralLayerUnreadable` predicate and refuses while the layer is
+  // unreadable, so it would be advice that cannot run on the one host that
+  // sees this line. `hyp leave` can run here on purpose (#623), which is why
+  // it leads the re-enrollment route, and the permission line covers the
+  // control directory this process could not list, where `hyp join`'s own
+  // seed write would fail too.
+  if (centralUnreadable) {
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'config_central_unreadable',
+      message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
+      repair: [
+        'hyp join <url> <token>',
+        'hyp leave, then hyp remote login',
+        'check the ownership and permissions of the config-control directory',
+      ],
+    })
   }
 
   // An installed plugin in a bundled name is code that never runs: boot
@@ -1910,6 +1962,21 @@ export async function collectHypAwareStatus(opts = {}) {
   // detail on a running install.
   /** @type {Map<string, { plugin: string, kind: string }>} */
   const handleByInstance = new Map()
+  // Cleared by the status-file fallback below, the one branch whose rows no
+  // config entry and no live handle backs - but only when an empty
+  // configured sink set is the operator's own removal. An unreadable local
+  // or central config (`localConfigUnreadable`, `centralLayerParseFailed`) and
+  // a `sinks` entry the central layer merge dropped (`merged.drops`, reason
+  // `invalid_merge`) also leave `config.sinks` empty without the operator
+  // having removed anything, so none of these is read as intent here; reading
+  // any of them as intent would silently drop a live export-failure warning
+  // instead of fixing the over-warning issue #2361 set out to fix. A
+  // merge-dropped entry only speaks for the destination it names, so it is
+  // matched by key against the recovered rows below rather than treated as
+  // a global flag; an unreadable layer speaks for all of them, since nothing
+  // is known about which instances it named.
+  const sinkKeysDroppedByMerge = new Set(merged.drops.filter((d) => d.section === 'sinks').map((d) => d.key))
+  let sinksAreConfigured = true
   if (opts.runtime?.sinks) {
     // The registry's key, not the handle's own `instanceName`: nothing on
     // this path catches, so an owner's accessor on the name took `hyp status`
@@ -1948,8 +2015,23 @@ export async function collectHypAwareStatus(opts = {}) {
     // only that it read an object, so a `sinks` of `5` throws out of the
     // collector at the spread and a `sinks` of `"ab"` spreads into one blank
     // row per character. Same guard as the sources list above.
-    sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
-      .filter((s) => !!s && typeof s === 'object'))
+    //
+    // Shape is not configuration either: deleting the whole `sinks` key is the
+    // one removal that lands here instead of the config branch, so reading
+    // these rows as configured asks an operator to repair a destination they
+    // deleted (issue #2361). But an unreadable local or central config, or a
+    // merge-dropped `sinks` entry, land here too without being a removal, so
+    // only clear the gate when none of those explains the empty `config.sinks`.
+    // The merge-drop half is scoped to the recovered rows it actually names:
+    // a dropped entry speaks only for the destination it named, not for every
+    // row this fallback recovers, so only a recovered instance whose key was
+    // dropped re-arms the gate. The unreadable-layer checks stay unscoped,
+    // since an unreadable layer leaves no record of which instances it named.
+    const recovered = (Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
+      .filter((s) => !!s && typeof s === 'object')
+    sinksAreConfigured = localConfigUnreadable || centralLayerParseFailed
+      || recovered.some((s) => sinkKeysDroppedByMerge.has(s.instance))
+    sinks.push(...recovered)
   }
 
   // ----- client attach -----
@@ -2667,7 +2749,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // structurally zero on an ordinary machine (issue #1182), which is the one
   // answer a monitoring field must never give when it has not looked.
   // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
-  const recentErrors = await countRecentErrors(stateRoot, sinks, daemonStatusFile?.sinks)
+  // Only configured destinations arm the export warning: rows recovered from a
+  // prior daemon's file are shape, so their outbox files stay history.
+  // @ref LLP 0453#warning-rule [implements]: a destination outside the configured set does not warn, however the removal was spelled
+  const recentErrors = await countRecentErrors(
+    stateRoot,
+    sinksAreConfigured ? sinks : [],
+    daemonStatusFile?.sinks,
+  )
   const recentErrorCount = recentErrors.total
   diagnostics.push(...recentErrors.sinkDiagnostics)
   if (recentErrors.warningCount > 0) {
@@ -4100,12 +4189,12 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * the generic warning: the outbox and last-success stamp decide that warning.
  *
  * @param {string} stateRoot
- * @param {SinkSnapshot[]} sinks
+ * @param {SinkSnapshot[]} configuredSinks
  * @param {unknown} snapshotSinks
  * @param {number} [nowMs]
  * @returns {Promise<{ total: number, warningCount: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[] }>}
  */
-async function countRecentErrors(stateRoot, sinks, snapshotSinks, nowMs = Date.now()) {
+async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
   // Config-derived sink rows omit runtime stamps, so the last success comes
   // from the already-loaded daemon snapshot, read after the daemon has exited
@@ -4114,7 +4203,7 @@ async function countRecentErrors(stateRoot, sinks, snapshotSinks, nowMs = Date.n
   // (`recoverSinkSnapshots` in `runtime.js`). A stamp that does not parse, or
   // that sits in the future, is no evidence of recovery and leaves the
   // destination at "never succeeded" rather than quietly clearing a failure.
-  const lastSuccess = new Map(sinks.map((s) => [s.instance, -Infinity]))
+  const lastSuccess = new Map(configuredSinks.map((s) => [s.instance, -Infinity]))
   if (Array.isArray(snapshotSinks)) {
     for (const sink of snapshotSinks) {
       if (!sink || typeof sink !== 'object' || !lastSuccess.has(sink.instance)) continue
@@ -4264,10 +4353,10 @@ async function countDaemonLogErrors(logPath, sinceMs) {
  * the whole cache tree with a `stat` per file (`measureCacheStats`), so this
  * sits well inside its budget.
  *
- * An outbox with no entry in `lastSuccess` belongs to a destination the
- * report does not list, since `sinks[]` is derived from the loaded config.
+ * An outbox with no entry in `lastSuccess` belongs to a destination this
+ * install no longer has, since the map is keyed by the configured sinks alone.
  * Its files still count as history, but nothing asks an operator to repair a
- * destination this install no longer has.
+ * destination they have removed.
  *
  * @param {string} sinksDir
  * @param {number} sinceMs

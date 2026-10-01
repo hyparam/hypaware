@@ -92,6 +92,42 @@ test('init --from-file --force backs up then overwrites', async () => {
   assert.match(stdout.text(), /backed up existing config/i)
 })
 
+test('init --from-file --dry-run into a fresh home writes nothing', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const fromFile = await writeFromFile(hypHome)
+  const code = await dispatch(['init', '--from-file', fromFile, '--dry-run'], opts)
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /\(dry-run\) Would write /)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
+test('init --from-file --dry-run --force leaves the existing config and makes no backup', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+  const fromFile = await writeFromFile(hypHome)
+
+  const code = await dispatch(['init', '--from-file', fromFile, '--dry-run', '--force'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /\(dry-run\) would back up existing config/)
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.deepEqual(after.plugins, EXISTING.plugins)
+  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  assert.equal(backups.length, 0)
+})
+
+test('init --yes --dry-run writes no config', async () => {
+  const { hypHome, stdout, stderr, opts } = await makeHome()
+  // This run reaches the finale, so HOME goes to the tmp dir with HYP_HOME.
+  const code = await dispatch(
+    ['init', '--yes', '--no-daemon', '--source', 'otel', '--dry-run'],
+    { ...opts, env: { ...opts.env, HOME: hypHome } }
+  )
+  assert.equal(code, 0, stderr.text())
+  assert.match(stdout.text(), /\(dry-run\) Would save settings/)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
 test('init --yes refuses to clobber an existing local config without --force', async () => {
   const { hypHome, stderr, opts } = await makeHome()
   const configPath = path.join(hypHome, 'hypaware-config.json')
@@ -153,4 +189,36 @@ test('init rejects an unrecognized flag as a flag, not a preset', async () => {
   assert.equal(code, 2)
   assert.match(stderr.text(), /unknown flag '--bogus'/)
   assert.doesNotMatch(stderr.text(), /unknown preset/)
+})
+
+// Regression: the preset dispatch (argv[0] not starting with '-') runs
+// before flag parsing, so `hyp setup claude-and-otel-local --dry-run`
+// reached the preset's own argv.includes('--force') check with no
+// awareness of --dry-run at all, and it wrote the config unconditionally.
+test('setup claude-and-otel-local --dry-run writes no config', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /\(dry-run\) Would write /)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
+// The preset reads --dry-run out of its own raw argv (it is dispatched
+// before flag parsing), and the CLI codec accepts the inline-boolean
+// spelling for any boolean flag elsewhere (--flag=true / --flag=false),
+// so the preset needs to honor that spelling too, not just the bare flag.
+test('setup claude-and-otel-local --dry-run=true writes no config', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run=true'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /\(dry-run\) Would write /)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
+test('setup claude-and-otel-local --dry-run=false writes the config', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run=false'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /✓ Wrote /)
+  await assert.doesNotReject(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })

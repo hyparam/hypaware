@@ -488,6 +488,10 @@ export async function runWizardPick(opts) {
  * (message to stderr) and returned as `ok: false` for the caller to turn
  * into its exit-1 result.
  *
+ * With `dryRun` neither the backup nor the write happens: the guard still
+ * answers, so the run refuses exactly where the real one would, and the
+ * line says what would be saved.
+ *
  * @ref LLP 0031#local-layer-writers [implements]: pick-phase overwrite safety on the config write path
  * @ref LLP 0190#commit-point [implements]: the config write is callable after the question lanes, not only inside pick
  *
@@ -496,16 +500,19 @@ export async function runWizardPick(opts) {
  *   stderr: { write(chunk: string): unknown },
  *   interactive: boolean,
  *   force?: boolean,
+ *   dryRun?: boolean,
  *   configPath: string,
  *   config: HypAwareV2Config,
  * }} args
  * @returns {Promise<{ ok: boolean }>}
  */
 export async function commitWizardPickedConfig(args) {
+  const dryRun = args.dryRun === true
   // @ref LLP 0433#scope [implements]: an attended run backs up and saves without asking
   const guard = await prepareLocalConfigWrite({
     targetPath: args.configPath,
     force: args.interactive || args.force,
+    dryRun,
   })
   if (!guard.proceed) {
     args.stderr.write(`hyp setup: ${guard.message}\n`)
@@ -531,15 +538,21 @@ export async function commitWizardPickedConfig(args) {
       [Attr.OPERATION]: 'wizard.pick.write_config',
       config_path: args.configPath,
       plugin_count: args.config.plugins?.length ?? 0,
-      ...(guard.backupPath ? { config_backed_up: true } : {}),
+      ...(dryRun ? { dry_run: true } : {}),
+      ...(guard.backupPath && !dryRun ? { config_backed_up: true } : {}),
       status: 'ok',
     },
     async () => {
+      if (dryRun) return
       await fs.mkdir(path.dirname(args.configPath), { recursive: true })
       await fs.writeFile(args.configPath, JSON.stringify(args.config, null, 2) + '\n', 'utf8')
     },
     { component: 'wizard' }
   )
+  if (dryRun) {
+    args.stdout.write(`(dry-run) Would save settings${guard.backupPath ? ' (previous config would be backed up)' : ''}\n`)
+    return { ok: true }
+  }
   // One line once the save lands, under the recap (LLP 0437 #recap).
   args.stdout.write(`✓ Saved settings${guard.backupPath ? ' (previous config backed up)' : ''}\n`)
   return { ok: true }

@@ -36,10 +36,12 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *
  * Assertions (per bead hy-5oz4):
  *
+ * - The dry run names the config it would write and writes none.
  * - Non-interactive picker selections generate a config matching the
  *   expected v2 shape (both AI upstreams, OTEL, Parquet sink), plus the
  *   riders those picks pull in (LLP 0213 #d1): the written config is wider
- *   than the seven plugins this smoke activates by injection.
+ *   than the seven plugins this smoke activates by injection. Checked on
+ *   the same picks run for real with `--no-daemon`.
  * - Dry-run daemon install chooses the stable binary path passed via
  *   `--bin <stable-bin>` and outputs a sensible target path.
  * - Claude + Codex + OpenCode attach dry-runs produce expected file edits
@@ -117,6 +119,39 @@ export async function run({ harness, expect }) {
   // never depends on whatever `claude` binary the machine running it carries.
   const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
   process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
+  // Neither HOME nor XDG_CONFIG_HOME sandboxes `opencode` itself: both
+  // setup runs in this flow pick `opencode` and shell out to it, the
+  // earlier --dry-run run included, which still emits
+  // backfill.provider_start{dry_run:true, provider:'opencode'} and an
+  // opencode.backfill.selection log row, so it also executes the host
+  // CLI and reads its session list. That is why PATH has to be planted
+  // before the first dispatch below, not just before the widened real
+  // run. `runOpenCode` (hypaware-core/plugins-workspace/opencode/src/backfill.js)
+  // resolves a bare `opencode` from PATH. An inherited PATH would make this
+  // release-gate smoke read and import whatever real session history is
+  // installed on the machine running it. Plant a fake `opencode` ahead of
+  // it on PATH, the way opencode_capture.js already does.
+  const previousPath = process.env.PATH
+  const fakeOpenCodeBinDir = path.join(harness.tmpDir, 'bin')
+  await fs.mkdir(fakeOpenCodeBinDir, { recursive: true })
+  const fakeOpenCodePath = path.join(fakeOpenCodeBinDir, 'opencode')
+  await fs.writeFile(
+    fakeOpenCodePath,
+    [
+      '#!/usr/bin/env node',
+      'const args = process.argv.slice(2)',
+      "if (args[0] === 'session' && args[1] === 'list') {",
+      '  process.stdout.write(JSON.stringify([]))',
+      '  process.exit(0)',
+      '}',
+      "process.stderr.write('unsupported fake opencode args')",
+      'process.exit(2)',
+      '',
+    ].join('\n'),
+    'utf8'
+  )
+  await fs.chmod(fakeOpenCodePath, 0o755)
+  process.env.PATH = `${fakeOpenCodeBinDir}:${previousPath ?? ''}`
 
   // Pre-existing settings files would let us detect that dry-runs do
   // not modify them. Seed harmless baselines and snapshot them.
@@ -263,14 +298,20 @@ export async function run({ harness, expect }) {
         v.includes('Dry run: nothing was written.')
     )
 
-    // ----- 2. Config written matches Phase 5 shape -----
+    // ----- 2. Dry-run reported the config and did not write it -----
     const configPath = defaultConfigPath(harness.hypHome)
-    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
-    const expected = await goldenPickerConfig(harness.hypHome)
     expect.that(
-      'config: Phase 5 picker config matches expected shape',
-      written,
-      (v) => deepEqual(v, expected)
+      'stdout: dry-run named the config it would write',
+      initText,
+      (v) =>
+        typeof v === 'string' &&
+        v.includes('(dry-run) Would save settings') &&
+        v.includes(`(dry-run) Would write ${configPath}`)
+    )
+    expect.that(
+      'dry-run did not write the config',
+      await fs.stat(configPath).then(() => true, () => false),
+      (v) => v === false
     )
 
     // ----- 3. Dry-run did not touch real per-client files -----
@@ -421,18 +462,23 @@ export async function run({ harness, expect }) {
     // Runs after the capture + SQL phase: init re-boots the kernel from
     // the picker-written config (post-attach one-shot re-boot), which
     // replaces this smoke's injected echo upstream, so the echo
-    // round-trip must complete first. The dry-run above already wrote
-    // the config, and init refuses to overwrite an existing config
-    // without --force (LLP 0129).
+    // round-trip must complete first. The same picks as the dry-run
+    // above, which wrote nothing, so this is the run that writes the
+    // config the golden shape is checked against.
     const realInitStdout = makeBuf()
     const realInitStderr = makeBuf()
     const realInitCode = await dispatch(
       [
         'setup',
         '--yes',
-        '--force',
+        '--client', 'claude',
+        '--client', 'codex',
+        '--client', 'opencode',
         '--source', 'claude',
-        '--export', 'keep-local',
+        '--source', 'codex',
+        '--source', 'opencode',
+        '--source', 'otel',
+        '--export', 'local-parquet',
         '--retention-days', '30',
         '--no-daemon',
         '--bin', stableBinPath,
@@ -450,6 +496,13 @@ export async function run({ harness, expect }) {
       'stderr: real hyp setup attach had no errors',
       realInitStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
+    )
+    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    const expected = await goldenPickerConfig(harness.hypHome)
+    expect.that(
+      'config: Phase 5 picker config matches expected shape',
+      written,
+      (v) => deepEqual(v, expected)
     )
     // The picker writes no `listen`, so the port the client is wired to is the
     // fixed default the daemon's gateway will bind, not a wizard-pinned one.
@@ -499,6 +552,11 @@ export async function run({ harness, expect }) {
         v.sources_available === expectedSourcesAvailable
     )
 
+    // Two `wizard.pick.write_config` spans have landed by now, both from
+    // runs above: the dry run and the real `--no-daemon` run, in no
+    // asserted order. `dry_run` is the internal signal that proves the dry
+    // run skipped its write, so each span is identified by that tag rather
+    // than by position in the array.
     const writeSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.write_config'
     )
@@ -510,6 +568,28 @@ export async function run({ harness, expect }) {
         typeof v.plugin_count === 'number' &&
         v.plugin_count >= 4 &&
         typeof v.config_path === 'string'
+    )
+    const dryRunWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run === true
+    )
+    // Not `!Object.hasOwn(..., 'dry_run')`: that couples the smoke to the
+    // omission style one emitter happens to use (wizard/pick.js spreads
+    // `...(dryRun ? { dry_run: true } : {})`), while the sibling
+    // client.attach assertion below asserts an explicit `dry_run === false`.
+    // `!== true` expresses the intent ("not tagged as a dry run") and
+    // survives either emitter style.
+    const realWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run !== true
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span is tagged dry_run (the dry run above)',
+      dryRunWriteSpans.length,
+      (v) => v === 1
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span has no dry_run attribute (the real run above)',
+      realWriteSpans.length,
+      (v) => v === 1
     )
 
     const finishSpans = traces.filter(
@@ -597,6 +677,8 @@ export async function run({ harness, expect }) {
     else process.env.XDG_CONFIG_HOME = previousXdgConfigHome
     if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
     else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
     await echo.close()
   }
 }

@@ -255,6 +255,7 @@ export type StatusDiagnosticKind =
   | 'config_missing'
   | 'config_unreadable'
   | 'config_local_unreadable'
+  | 'config_central_unreadable'
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
   | 'daemon_heartbeat_stale'

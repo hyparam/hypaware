@@ -1308,6 +1308,21 @@ test('runInitWizard: a non-interactive run prints the run summary with the writt
   assert.ok(!stdout.text().includes('next: hyp query sql'))
 })
 
+test('runInitWizard: a dry run saves no config and its summary says so', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, 'config.json')
+  const { opts, stdout } = wizardOpts(home, {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    pick: async () => pickResult({ configPending: true, configPath }),
+    finale: { dryRun: true },
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  assert.match(stdout.text(), /\(dry-run\) Would save settings\n/)
+  assert.ok(stdout.text().includes(`(dry-run) Would write ${configPath}\n`))
+  assert.doesNotMatch(stdout.text(), /✓ (Wrote|Saved)/)
+  await assert.rejects(fs.access(configPath))
+})
+
 test('runInitWizard: an attended run skips the run summary, having said each step as it ran', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome())
   await runInitWizard(opts)
