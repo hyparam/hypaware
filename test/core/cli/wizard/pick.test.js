@@ -622,6 +622,68 @@ test('commitWizardPickedConfig: an unattended run without --force refuses withou
   assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n')
 })
 
+test('commitWizardPickedConfig: a dry run creates no config', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  const stdout = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout, stderr: makeBuf(),
+    interactive: false,
+    dryRun: true,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/otel' }] }),
+  })
+
+  assert.equal(committed.ok, true)
+  assert.equal(stdout.text(), '(dry-run) Would save settings\n')
+  await assert.rejects(fs.access(path.dirname(configPath)), 'not even the config directory is created')
+})
+
+test('commitWizardPickedConfig: a dry run over an existing config writes neither the config nor a backup', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
+  const stdout = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout, stderr: makeBuf(),
+    interactive: false,
+    force: true,
+    dryRun: true,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/otel' }] }),
+  })
+
+  assert.equal(committed.ok, true)
+  assert.equal(stdout.text(), '(dry-run) Would save settings (previous config would be backed up)\n')
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n')
+  assert.deepEqual(await fs.readdir(path.dirname(configPath)), ['config.json'])
+})
+
+test('commitWizardPickedConfig: a dry run without --force refuses where the real run would', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
+  const stderr = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout: makeBuf(), stderr,
+    interactive: false,
+    dryRun: true,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [] }),
+  })
+
+  assert.equal(committed.ok, false)
+  assert.match(stderr.text(), /refusing to overwrite/)
+})
+
 // --- cancel ---
 
 test('runWizardPick: a cancelled prompt returns the deterministic cancel result', async () => {

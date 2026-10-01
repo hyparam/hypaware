@@ -126,16 +126,19 @@ const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'vers
  *   question, and the backup keeps the old file (LLP 0433).
  *
  * The helper only decides + backs up; the caller performs the write.
+ * With `dryRun` it only decides: the answer (and the `backupPath` a real
+ * run would write) is the same, and nothing is copied.
  *
  * @param {{
  *   targetPath: string,
  *   force?: boolean,
  *   now?: () => number,
+ *   dryRun?: boolean,
  * }} args
  * @returns {Promise<LocalConfigWriteGuard>}
  * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup
  */
-export async function prepareLocalConfigWrite({ targetPath, force, now }) {
+export async function prepareLocalConfigWrite({ targetPath, force, now, dryRun }) {
   let exists = true
   try {
     await fs.access(targetPath)
@@ -155,7 +158,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, now }) {
 
   const stamp = new Date((now ?? Date.now)()).toISOString().replace(/[:.]/g, '-')
   const backupPath = `${targetPath}.bak-${stamp}`
-  await fs.copyFile(targetPath, backupPath)
+  if (!dryRun) await fs.copyFile(targetPath, backupPath)
   return { proceed: true, backupPath }
 }
 

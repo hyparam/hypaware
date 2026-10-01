@@ -500,11 +500,12 @@ const PICKER_DISPLAY_ORDER = ['claude', 'claude-desktop', 'codex', 'opencode', '
  *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   configPath: string,
  *   finaleSummary?: FinaleSummary | undefined,
+ *   dryRun?: boolean,
  * }} args
  */
-export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }) {
+export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary, dryRun }) {
   stdout.write('\n')
-  stdout.write(`✓ Wrote ${configPath}\n`)
+  stdout.write(dryRun ? `(dry-run) Would write ${configPath}\n` : `✓ Wrote ${configPath}\n`)
   if (finaleSummary?.daemonInstall && !finaleSummary.daemonInstall.skipped) {
     const tag = finaleSummary.daemonInstall.dryRun ? '(dry-run) ' : ''
     if (finaleSummary.daemonInstall.targetPath) {
