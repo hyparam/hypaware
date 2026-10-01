@@ -1,7 +1,8 @@
 # LLP 0397: installed client assets follow the update
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Superseded
+**Superseded-by:** LLP 0457
 **Systems:** Daemon, Plugins, Onboarding
 **Author:** Brendan / Claude
 **Date:** 2026-09-10

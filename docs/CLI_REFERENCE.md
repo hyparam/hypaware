@@ -678,12 +678,15 @@ hyp client skills --help
 #### `hyp client skills install`
 
 ```text
-hyp client skills install [--client <name>]
+hyp client skills install [--client <name>] [--attached]
 ```
 
 Replaces registered skill and subagent copies for one client, or for all
 eligible clients when you omit `--client`. It requires a home directory and is
-safe to repeat.
+safe to repeat. `--attached` restricts installation to clients whose settings
+currently contain a HypAware attach marker. With no attached clients it installs
+nothing. Package updates use this mode so detached and never-attached clients
+do not get skills installed.
 
 ```sh
 hyp client skills install --client codex

@@ -41,8 +41,8 @@ export const NPM_KILL_GRACE_MS = 5000
 // An apply lock this old belonged to a process that died mid-install;
 // honoring it forever would wedge updates permanently. The floor is the
 // longest a live holder can legitimately hold it: `applySelfUpdate` runs
-// up to three npm commands (prefix, install, and the rollback install)
-// plus the preflight, each bounded by its own timeout, which is about
+// up to three install commands (prefix, install, and either rollback or
+// skills install) plus the preflight, each bounded by its timeout, about
 // 390s of the 500s here. Reclaiming a lock its owner still holds starts
 // the second concurrent `npm install -g` this lock exists to prevent, so
 // erring long costs a slower recovery and erring short costs the machine.
@@ -624,6 +624,7 @@ export function withNodeBinOnPath(env) {
  *   previousVersion?: string,
  *   packageRoot?: string,
  *   env?: NodeJS.ProcessEnv,
+ *   configPath?: string,
  *   runner?: CommandRunner,
  *   platform?: NodeJS.Platform,
  *   log?: (event: string, fields?: Record<string, unknown>) => void,
@@ -665,7 +666,25 @@ export async function applySelfUpdate(opts) {
   }
 
   const preflight = await runPreflight({ globalRoot, version: opts.version, env, run })
-  if (preflight.ok) return { applied: true }
+  if (preflight.ok) {
+    // @ref LLP 0458#attached-only [implements]: the new package probes current attachments before using the shared installer
+    try {
+      const skills = await run(process.execPath, [path.join(globalRoot, 'bin', 'hypaware.js'), 'skills', 'install', '--attached'], {
+        env: { ...env, ...(opts.configPath ? { HYP_CONFIG: opts.configPath } : {}) },
+        timeoutMs: NPM_TIMEOUT_MS,
+      })
+      const event = skills.exitCode !== 0 ? 'self_update.skills_install_failed'
+        : skills.stderr.trim() ? 'self_update.skills_install_warning' : 'self_update.skills_installed'
+      log(event, { exit_code: skills.exitCode, detail: npmDetail(skills) })
+    } catch (err) {
+      log('self_update.skills_install_failed', {
+        detail: redactUrls(err instanceof Error ? err.message : String(err)).slice(-NPM_DETAIL_CHARS),
+      })
+    }
+    // A helper install failure must not strand a healthy new package before
+    // its restart. The warning names the failed step; skills install retries it.
+    return { applied: true }
+  }
   const reason = preflight.inconclusive ? 'preflight_inconclusive' : 'preflight_failed'
   log('self_update.preflight_failed', { error_kind: reason, latest_version: opts.version, detail: preflight.detail })
   if (!opts.previousVersion || opts.previousVersion === opts.version) {
@@ -1110,6 +1129,7 @@ export async function runSelfUpdatePass(opts = {}) {
         version: latest,
         previousVersion: identity.version,
         packageRoot: opts.packageRoot,
+        configPath: resolveLocalConfigPath({ stateRoot, env, configPath: opts.configPath }),
         // Untouched: the only override that reaches here is one the probe
         // believed, so npm resolving the tarball through it is the same
         // answer this pass already used for the version. An untrusted one
@@ -1440,10 +1460,10 @@ function runCommand(cmd, args, opts) {
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    /** @type {Buffer[]} */
-    const stdoutChunks = []
-    /** @type {Buffer[]} */
-    const stderrChunks = []
+    // Keep only a bounded tail: skill installation loads plugins, whose
+    // diagnostics must not grow the updater's memory for the child's lifetime.
+    let stdout = ''
+    let stderr = ''
     let settled = false
     // Two-stage kill: an npm that ignores SIGTERM would otherwise leave
     // this promise pending forever, and the daemon's `selfUpdateInFlight`
@@ -1464,12 +1484,12 @@ function runCommand(cmd, args, opts) {
       clearTimeout(timer)
       resolve({
         exitCode,
-        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        stdout,
+        stderr,
       })
     }
-    child.stdout?.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)))
-    child.stderr?.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)))
+    child.stdout?.setEncoding('utf8').on('data', (chunk) => { stdout = (stdout + chunk).slice(-64 * 1024) })
+    child.stderr?.setEncoding('utf8').on('data', (chunk) => { stderr = (stderr + chunk).slice(-64 * 1024) })
     child.on('error', () => finish(-1))
     child.on('close', (code) => finish(code ?? -1))
   })

@@ -10,6 +10,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 function agentsKernelAndRegistry() {
   const registry = createCommandRegistry()
@@ -173,6 +174,85 @@ test('hyp skills install materializes skills and subagents in one command', asyn
   assert.match(stdout.text(), /installed skill 'test-skill'/)
   assert.match(stdout.text(), /installed agent 'test-analyst'/)
   assert.match(stdout.text(), /installed 1 skill copy\(ies\), 1 agent copy\(ies\)/)
+
+  // Update uses this same command: managed copies replace edits and restore
+  // deletions, with no separate digest-based refresh policy.
+  await fs.writeFile(skillDest, 'user edit\n')
+  await fs.rm(agentDest)
+  assert.equal(await dispatch(['skills', 'install'], {
+    stdout, stderr, env: { ...process.env, HOME: home }, registry, kernel,
+  }), 0)
+  assert.equal(await fs.readFile(skillDest, 'utf8'), 'skill body\n')
+  assert.equal(await fs.readFile(agentDest, 'utf8'), '---\nname: test-analyst\n---\nbody\n')
+})
+
+test('update-mode skills install respects attachment, client filtering, and a subsequent detach', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attached-assets-'))
+  try {
+    const env = isolatedClientEnv(process.env, home)
+    const { kernel, registry } = agentsKernelAndRegistry()
+    const sourceDir = path.join(home, 'source-skill')
+    const sourceFile = path.join(home, 'source-agent.md')
+    await fs.mkdir(sourceDir)
+    await fs.writeFile(path.join(sourceDir, 'SKILL.md'), 'current skill\n')
+    await fs.writeFile(sourceFile, 'current agent\n')
+    kernel.skills.register({ name: 'test-skill', plugin: '@hypaware/claude', clients: ['claude', 'codex'], sourceDir })
+    kernel.agents.register({ name: 'test-agent', plugin: '@hypaware/claude', clients: ['claude'], sourceFile })
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const opts = { env, kernel, registry, stdout, stderr }
+    const stateRoot = path.join(home, '.hyp', 'hypaware')
+    const settingsPath = path.join(home, '.claude', 'settings.json')
+    const skillDir = path.join(home, '.claude', 'skills', 'test-skill')
+    const agentPath = path.join(home, '.claude', 'agents', 'test-agent.md')
+
+    // Registered contributions alone must not create client directories or a ledger.
+    assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
+    await assert.rejects(fs.stat(path.join(home, '.claude')), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(path.join(home, '.codex')), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(path.join(stateRoot, 'client-assets.json')), { code: 'ENOENT' })
+    assert.match(stdout.text(), /no attached clients/)
+
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+    await fs.writeFile(settingsPath, JSON.stringify({ _hypaware: { managed: { env: {}, hooks: [] } } }))
+    assert.equal(await dispatch(['skills', 'install', '--attached', '--client', 'codex'], opts), 0)
+    await assert.rejects(fs.stat(skillDir), { code: 'ENOENT' })
+    assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
+    assert.equal(await fs.readFile(path.join(skillDir, 'SKILL.md'), 'utf8'), 'current skill\n')
+    assert.equal(await fs.readFile(agentPath, 'utf8'), 'current agent\n')
+    await assert.rejects(fs.stat(path.join(home, '.codex')), { code: 'ENOENT' })
+
+    await fs.writeFile(path.join(skillDir, 'SKILL.md'), 'local edit\n')
+    await fs.rm(agentPath)
+    assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
+    assert.equal(await fs.readFile(path.join(skillDir, 'SKILL.md'), 'utf8'), 'current skill\n')
+    assert.equal(await fs.readFile(agentPath, 'utf8'), 'current agent\n')
+
+    // Seed the org attach's undo record so the real detach removes both assets.
+    const actionsPath = path.join(stateRoot, 'config-control', 'client-actions.json')
+    await fs.mkdir(path.dirname(actionsPath), { recursive: true })
+    const actions = JSON.stringify({ attach: { claude: {
+      status: 'done', request_key: 'claude', installed_assets: [skillDir, agentPath],
+    } } })
+    await fs.writeFile(actionsPath, actions)
+    assert.equal(await dispatch(['detach', 'claude'], opts), 0, stderr.text())
+    await assert.rejects(fs.stat(skillDir), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(agentPath), { code: 'ENOENT' })
+    const ledger = await fs.readFile(path.join(stateRoot, 'client-assets.json'), 'utf8')
+    // Even a leftover control-plane marker cannot override the settings probe.
+    await fs.writeFile(actionsPath, actions)
+    assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
+    await assert.rejects(fs.stat(skillDir), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(agentPath), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(stateRoot, 'client-assets.json'), 'utf8'), ledger)
+    await assert.rejects(fs.stat(path.join(home, '.codex')), { code: 'ENOENT' })
+
+    await fs.writeFile(settingsPath, '{malformed')
+    assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
+    await assert.rejects(fs.stat(skillDir), { code: 'ENOENT' })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
 })
 
 test('hyp agents install is gone: agents is not a command', async () => {
