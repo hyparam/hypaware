@@ -631,3 +631,35 @@ test('export recovery is per destination and dev telemetry cannot revive recover
   assert.equal(warnings.length, 1, warnings.map((w) => w.message).join(' | '))
   assert.match(warnings[0].message, /^failing: 3 failed export attempts with no later success recorded/)
 })
+
+// Deleting the `sinks` key is a removal like emptying it or replacing the set,
+// so it must silence the destination too (issue #2361). It is the one spelling
+// that leaves `sinks[]` recovered from the prior daemon's `status.json`, which
+// the report still needs for the install's shape but must not read as a
+// destination there is anything left to repair.
+// @ref LLP 0453#warning-rule [tests]: a destination only the status file still names is not a configured destination, so it raises no warning
+test('export warning: a sink only a prior daemon status file names shows its shape and raises no warning', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // No `sinks` key at all: the operator deleted the destination from the config.
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'ghost', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'ghost', [{ agoMs: 90 * 24 * 60 * 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['ghost'],
+    'the recovered row still renders the shape of the install',
+  )
+  assert.deepEqual(
+    report.diagnostics.filter((d) => d.kind === 'sink_export_failing').map((d) => d.message),
+    [],
+    'a destination the operator deleted raises no export warning',
+  )
+  // The files are still history, and 90 days is outside the 24-hour horizon.
+  assert.equal(report.recentErrorCount, 0)
+})

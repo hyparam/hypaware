@@ -1910,6 +1910,9 @@ export async function collectHypAwareStatus(opts = {}) {
   // detail on a running install.
   /** @type {Map<string, { plugin: string, kind: string }>} */
   const handleByInstance = new Map()
+  // Cleared by the status-file fallback below, the one branch whose rows no
+  // config entry and no live handle backs.
+  let sinksAreConfigured = true
   if (opts.runtime?.sinks) {
     // The registry's key, not the handle's own `instanceName`: nothing on
     // this path catches, so an owner's accessor on the name took `hyp status`
@@ -1948,6 +1951,12 @@ export async function collectHypAwareStatus(opts = {}) {
     // only that it read an object, so a `sinks` of `5` throws out of the
     // collector at the spread and a `sinks` of `"ab"` spreads into one blank
     // row per character. Same guard as the sources list above.
+    //
+    // Shape is not configuration either: deleting the whole `sinks` key is the
+    // one removal that lands here instead of the config branch, so reading
+    // these rows as configured asks an operator to repair a destination they
+    // deleted (issue #2361).
+    sinksAreConfigured = false
     sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
       .filter((s) => !!s && typeof s === 'object'))
   }
@@ -2667,7 +2676,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // structurally zero on an ordinary machine (issue #1182), which is the one
   // answer a monitoring field must never give when it has not looked.
   // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
-  const recentErrors = await countRecentErrors(stateRoot, sinks, daemonStatusFile?.sinks)
+  // Only configured destinations arm the export warning: rows recovered from a
+  // prior daemon's file are shape, so their outbox files stay history.
+  // @ref LLP 0453#warning-rule [implements]: a destination outside the configured set does not warn, however the removal was spelled
+  const recentErrors = await countRecentErrors(
+    stateRoot,
+    sinksAreConfigured ? sinks : [],
+    daemonStatusFile?.sinks,
+  )
   const recentErrorCount = recentErrors.total
   diagnostics.push(...recentErrors.sinkDiagnostics)
   if (recentErrors.warningCount > 0) {
@@ -4100,12 +4116,12 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * the generic warning: the outbox and last-success stamp decide that warning.
  *
  * @param {string} stateRoot
- * @param {SinkSnapshot[]} sinks
+ * @param {SinkSnapshot[]} configuredSinks
  * @param {unknown} snapshotSinks
  * @param {number} [nowMs]
  * @returns {Promise<{ total: number, warningCount: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[] }>}
  */
-async function countRecentErrors(stateRoot, sinks, snapshotSinks, nowMs = Date.now()) {
+async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
   // Config-derived sink rows omit runtime stamps, so the last success comes
   // from the already-loaded daemon snapshot, read after the daemon has exited
@@ -4114,7 +4130,7 @@ async function countRecentErrors(stateRoot, sinks, snapshotSinks, nowMs = Date.n
   // (`recoverSinkSnapshots` in `runtime.js`). A stamp that does not parse, or
   // that sits in the future, is no evidence of recovery and leaves the
   // destination at "never succeeded" rather than quietly clearing a failure.
-  const lastSuccess = new Map(sinks.map((s) => [s.instance, -Infinity]))
+  const lastSuccess = new Map(configuredSinks.map((s) => [s.instance, -Infinity]))
   if (Array.isArray(snapshotSinks)) {
     for (const sink of snapshotSinks) {
       if (!sink || typeof sink !== 'object' || !lastSuccess.has(sink.instance)) continue
@@ -4264,10 +4280,10 @@ async function countDaemonLogErrors(logPath, sinceMs) {
  * the whole cache tree with a `stat` per file (`measureCacheStats`), so this
  * sits well inside its budget.
  *
- * An outbox with no entry in `lastSuccess` belongs to a destination the
- * report does not list, since `sinks[]` is derived from the loaded config.
+ * An outbox with no entry in `lastSuccess` belongs to a destination this
+ * install no longer has, since the map is keyed by the configured sinks alone.
  * Its files still count as history, but nothing asks an operator to repair a
- * destination this install no longer has.
+ * destination they have removed.
  *
  * @param {string} sinksDir
  * @param {number} sinceMs
