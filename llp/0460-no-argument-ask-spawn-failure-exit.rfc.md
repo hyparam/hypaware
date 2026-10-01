@@ -61,12 +61,16 @@ The no-argument ask is the lone outlier, against its siblings, against
 the docs, and against the stated rationale of its own mapping comment.
 
 One scoping fact bounds the blast radius of either arm: `spawn-failed`
-on the no-argument path is reachable only from an attended terminal.
-`runWizardFirstAsk` returns `not-interactive` before any spawn when
-either stream is not a tty or `HYP_NO_TUI=1`, so a piped or CI run never
-reaches the spawn and keeps exit 0 under every candidate below. The
-exit code in question is the one a human's shell (or a tty-allocating
-wrapper) sees after watching the failure sentence print.
+on the no-argument path is reachable only from a run that holds a
+terminal. `runWizardFirstAsk` returns `not-interactive` before any
+spawn when either stream is not a tty or `HYP_NO_TUI=1`, so a piped or
+plain scripted run never reaches the spawn and keeps exit 0 under every
+candidate below. A terminal is not a person, though: a tty-allocating
+wrapper - `docker run -t`, a tty-allocating CI runner, expect - answers
+`isTTY` exactly as a human's terminal does and does reach the spawn, as
+the client picker's own deadline already records
+(`PICK_DEADLINE_MS`, #2373). So what either arm excludes is every run
+whose streams are not ttys, which is not the same as excluding CI.
 
 ## Problem {#problem}
 
@@ -88,8 +92,17 @@ the mapping comment's own boundary ("a failed invocation rather than a
 choice"). Cost: a user-visible exit-code change on a shipped CLI.
 Any caller that runs bare `hyp ask` on a terminal, suffers a spawn
 failure, and branches on `$?` would see 1 where it saw 0; the scoping
-fact above confines that to attended terminals, but confined is not
-none.
+fact above confines that to runs on a tty, but confined is not none.
+One such caller is already in this repository. Setup's closing offer
+spawns bare `hyp ask` as a child (`runAskChild`,
+`cli/wizard/suggest_skill.js`) with all three stdio inherited, and
+branches on the child's exit code, so a spawn failure there is reported
+today as `suggest_skill: launched` with no verb line, and under this
+arm becomes `child-failed` with the "Run `hyp ask` any time" line.
+That is arguably the arm's point rather than its price, since setup
+currently records a launch that did not happen - but it is a change
+inside the product, not only in third-party scripts, and it sits in
+exactly the attended setup the scoping fact does not exclude.
 
 <a id="align-docs"></a>**2. Scope the docs sentence to the with-question
 path.** State that the no-argument form exits 0 on a spawn failure,
@@ -104,8 +117,10 @@ contract change.
 
 Which arm lands. Whichever is chosen, issue #2388's acceptance
 condition applies: a test pins bare `hyp ask`'s exit code on a spawn
-failure, failing before the change and passing after (for arm 2, the
-test pins 0 and the docs edit scopes the claim).
+failure, which nothing does today. Arm 1's test fails before the
+change and passes after. Arm 2's cannot: it pins the code the command
+already returns, so it passes from the moment it is written, and what
+has to move there is the docs sentence the edit scopes.
 
 ## Open questions {#open-questions}
 
