@@ -119,6 +119,34 @@ export async function run({ harness, expect }) {
   // never depends on whatever `claude` binary the machine running it carries.
   const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
   process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
+  // Neither HOME nor XDG_CONFIG_HOME sandboxes `opencode` itself: the
+  // widened real run below picks `opencode` with a non-dry export, and
+  // `runOpenCode` (hypaware-core/plugins-workspace/opencode/src/backfill.js)
+  // resolves a bare `opencode` from PATH. An inherited PATH would make this
+  // release-gate smoke read and import whatever real session history is
+  // installed on the machine running it. Plant a fake `opencode` ahead of
+  // it on PATH, the way opencode_capture.js already does.
+  const previousPath = process.env.PATH
+  const fakeOpenCodeBinDir = path.join(harness.tmpDir, 'bin')
+  await fs.mkdir(fakeOpenCodeBinDir, { recursive: true })
+  const fakeOpenCodePath = path.join(fakeOpenCodeBinDir, 'opencode')
+  await fs.writeFile(
+    fakeOpenCodePath,
+    [
+      '#!/usr/bin/env node',
+      'const args = process.argv.slice(2)',
+      "if (args[0] === 'session' && args[1] === 'list') {",
+      '  process.stdout.write(JSON.stringify([]))',
+      '  process.exit(0)',
+      '}',
+      "process.stderr.write('unsupported fake opencode args')",
+      'process.exit(2)',
+      '',
+    ].join('\n'),
+    'utf8'
+  )
+  await fs.chmod(fakeOpenCodePath, 0o755)
+  process.env.PATH = `${fakeOpenCodeBinDir}:${previousPath ?? ''}`
 
   // Pre-existing settings files would let us detect that dry-runs do
   // not modify them. Seed harmless baselines and snapshot them.
@@ -519,6 +547,11 @@ export async function run({ harness, expect }) {
         v.sources_available === expectedSourcesAvailable
     )
 
+    // Two `wizard.pick.write_config` spans have landed by now, both from
+    // runs above: the dry run and the real `--no-daemon` run, in no
+    // asserted order. `dry_run` is the internal signal that proves the dry
+    // run skipped its write, so each span is identified by that tag rather
+    // than by position in the array.
     const writeSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.write_config'
     )
@@ -530,6 +563,22 @@ export async function run({ harness, expect }) {
         typeof v.plugin_count === 'number' &&
         v.plugin_count >= 4 &&
         typeof v.config_path === 'string'
+    )
+    const dryRunWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run === true
+    )
+    const realWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => !Object.hasOwn(s.attributes ?? {}, 'dry_run')
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span is tagged dry_run (the dry run above)',
+      dryRunWriteSpans.length,
+      (v) => v === 1
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span has no dry_run attribute (the real run below)',
+      realWriteSpans.length,
+      (v) => v === 1
     )
 
     const finishSpans = traces.filter(
@@ -617,6 +666,8 @@ export async function run({ harness, expect }) {
     else process.env.XDG_CONFIG_HOME = previousXdgConfigHome
     if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
     else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
     await echo.close()
   }
 }

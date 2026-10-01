@@ -190,3 +190,15 @@ test('init rejects an unrecognized flag as a flag, not a preset', async () => {
   assert.match(stderr.text(), /unknown flag '--bogus'/)
   assert.doesNotMatch(stderr.text(), /unknown preset/)
 })
+
+// Regression: the preset dispatch (argv[0] not starting with '-') runs
+// before flag parsing, so `hyp setup claude-and-otel-local --dry-run`
+// reached the preset's own argv.includes('--force') check with no
+// awareness of --dry-run at all, and it wrote the config unconditionally.
+test('setup claude-and-otel-local --dry-run writes no config', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /\(dry-run\) Would write /)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})

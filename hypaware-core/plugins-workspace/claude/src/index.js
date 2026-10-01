@@ -622,13 +622,16 @@ function firstNonEmpty(...values) {
  *
  * The preset never overwrites an existing config file silently (pass
  * `--force` to opt into overwrite); otherwise the existing file
- * stays and the command returns 1.
+ * stays and the command returns 1. `--dry-run` reports the path the
+ * preset would write and writes nothing, refusing on an existing
+ * config exactly as a real run would.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
   const force = argv.includes('--force')
+  const dryRun = argv.includes('--dry-run')
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   const configPath = ctx.env.HYP_CONFIG
@@ -705,9 +708,11 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
     },
   }
 
-  await fs.mkdir(path.dirname(configPath), { recursive: true })
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
-  ctx.stdout.write(`✓ Wrote ${configPath}\n`)
+  if (!dryRun) {
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
+  }
+  ctx.stdout.write(dryRun ? `(dry-run) Would write ${configPath}\n` : `✓ Wrote ${configPath}\n`)
   ctx.stdout.write('  plugins: @hypaware/ai-gateway, @hypaware/otel, @hypaware/local-fs, @hypaware/format-parquet, @hypaware/claude\n')
   ctx.stdout.write('  next: hyp client attach claude\n')
   return 0
