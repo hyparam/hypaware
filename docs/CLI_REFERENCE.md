@@ -128,10 +128,13 @@ path below, it takes no fallback client.
 With a question, skips the gather and starts a client on that question in the
 current directory, asking which client should answer when more than one could.
 A run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
-takes the first client of the offered set rather than failing. The client does
-not receive the bare question: it is framed with an instruction to look the
-answer up in the recorded sessions with `hyp query` first, and the typed
-question follows verbatim.
+takes the first client of the offered set rather than failing. The pick is also
+time-bounded on a terminal: unanswered for 10 seconds, it takes that same
+first client and says so on stdout (`No answer at the client prompt - starting
+the first one.`). The first keypress lifts the deadline, so a pick someone is
+answering is never cut short. The client does not receive the bare question:
+it is framed with an instruction to look the answer up in the recorded
+sessions with `hyp query` first, and the typed question follows verbatim.
 
 The client takes over the terminal. `--list` prints the question and launches
 nothing. An empty cache, a declined selection, or list-only use succeeds. No
@@ -342,8 +345,11 @@ its transcript mode). Its CLI must also be on `PATH`, and the
 instructions set the period or focus; otherwise the skill uses the previous
 calendar month. If more than one such client could be started, it asks which;
 a run that cannot prompt (input or output is not a terminal, or `HYP_NO_TUI=1`)
-takes the first client of the offered set rather than failing. The client
-keeps its normal permissions, and the session is recorded under the current
+takes the first client of the offered set rather than failing. That pick is
+also time-bounded on a terminal: unanswered for 10 seconds, it takes that same
+first client and says so on stdout (`No answer at the client prompt - starting
+the first one.`), and the first keypress lifts the deadline. The client keeps
+its normal permissions, and the session is recorded under the current
 directory's own usage class: this is not session isolation, so excerpts it
 reads out of `local-only` history are quoted into a transcript that syncs if
 the directory you typed the command in does
@@ -459,10 +465,15 @@ and omitting it there returns `2`. The client offer set is the recorded one
 `hyp report generate` draws on, without the skill requirement: attached, or
 configured with no attach marker to write, and with its CLI on `PATH`. If
 more than one such client could be started, it asks which; a run given an id
-that cannot prompt takes the first of that set. A declined pick succeeds, as
-does a listing that carries no recommendations. A malformed id returns `2`.
-An unknown id, a recommendation page the report no longer carries, no
-launchable client, or a process-start failure returns `1`.
+that cannot prompt takes the first of that set. That pick is also time-bounded
+on a terminal: unanswered for 10 seconds, it takes the first of that set and
+says so on stdout (`No answer at the client prompt - starting the first
+one.`), and the first keypress lifts the deadline. The deadline covers the
+client pick only, not the report and recommendation listings above, which wait
+for an answer. A declined pick succeeds, as does a listing that carries no
+recommendations. A malformed id returns `2`. An unknown id, a recommendation
+page the report no longer carries, no launchable client, or a process-start
+failure returns `1`.
 
 ```sh
 hyp report fix hyprec-0123456789abcdef
