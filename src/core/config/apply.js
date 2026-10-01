@@ -143,20 +143,23 @@ export function hasAppliedCentralConfig({ stateRoot }) {
 const CENTRAL_LAYER_BASENAMES = [ACTIVE_BASENAME, SEED_BASENAME, 'config.a.json', 'config.b.json']
 
 /**
- * Why {@link resolveCentralLayerPath} returned `null`, for the one caller that
- * cannot treat "resolved nothing" and "could not resolve" alike: the D4
+ * Why {@link resolveCentralLayerPath} returned `null`, for the two callers
+ * that cannot treat "resolved nothing" and "could not resolve" alike: the D4
  * exclusivity gate (LLP 0063), which reads `null` as *not enrolled* and would
  * otherwise let a second org enroll a machine whose layer it merely failed to
- * look up (#623).
+ * look up (#623); and `hyp status`'s unreadable-central-layer diagnostic,
+ * which would otherwise report a host with an unresolvable layer as having
+ * no central layer at all and name no file (#2423).
  *
  * Resolution is lossy on purpose everywhere else. `readActiveSlot` swallows
  * every `readlink` error into `null` (the pointer replaced by a regular file,
  * a dangling or looping link, a target that is not a slot), and `existsSync`
- * swallows `EACCES` on `config-control/` into `false`. Boot and `hyp status`
- * are right to see one `null`: either way there is no layer to merge or show.
- * A permission decision is not, so this reports resolution *failure*
- * separately: the control directory could not be listed, or it still holds
- * central-layer files that the resolution above did not manage to name.
+ * swallows `EACCES` on `config-control/` into `false`. Boot is right to see
+ * one `null`: there is no layer to merge either way. A permission decision
+ * and a report that has to name the layer are not, so this reports
+ * resolution *failure* separately: the control directory could not be
+ * listed, or it still holds central-layer files that the resolution above
+ * did not manage to name.
  *
  * `null` means the absence is real: no control directory, or one with no
  * central-layer file left in it (what `hyp leave` and `resetCentralLayerToSeed`
