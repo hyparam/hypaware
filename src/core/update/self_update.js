@@ -673,6 +673,7 @@ export async function applySelfUpdate(opts) {
     // outright, so this lane (which runs only when the boot is already
     // failing) would report its own argv as a failed step. The skip leaves
     // the assets on disk for `hyp skills install` or the next upgrade.
+    // @ref LLP 0457#update-installs [constrained-by]: this is the one lane where the installer never runs after a successful install, and 0457's own recovery paths (attach, hyp skills install, the next upgrade) cover the resulting asset lag
     // @ref LLP 0458#attached-only [constrained-by]: the flag is the new package's, so a rollback onto an older one does not use it
     if (opts.skipSkillsInstall) {
       log('self_update.skills_install_skipped', { reason: 'rollback', version: opts.version })
