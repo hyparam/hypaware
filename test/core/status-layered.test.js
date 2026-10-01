@@ -217,7 +217,11 @@ test('a joined host whose central seed cannot be parsed names the file', async (
   const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
   assert.ok(unreadable, 'the unreadable central layer has a diagnostic of its own')
   assert.equal(unreadable?.severity, 'warning')
-  assert.ok(unreadable?.message.includes(seedPath), `message names the file: ${unreadable?.message}`)
+  // The message carries the load failure verbatim (like the local-layer
+  // sibling, it does not re-interpolate the path on top of it); a JSON parse
+  // failure's own message does not repeat the path, but it does prove the
+  // seed file itself was read and rejected, not merely absent.
+  assert.match(unreadable?.message ?? '', /is unreadable \(config is not valid JSON/)
   // The local layer still carries the host, so the verdict is unchanged: the
   // diagnostic is loud, not an outage signal.
   assert.equal(report.overall, 'healthy')
@@ -242,7 +246,9 @@ test('an unparseable applied slot is named through the active pointer', async ()
 
   const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
   assert.ok(unreadable, 'the unreadable applied slot has a diagnostic of its own')
-  assert.ok(unreadable?.message.includes(slotPath), `message names the slot: ${unreadable?.message}`)
+  // Same shape as the seed case: the inner JSON-parse message does not repeat
+  // the slot path, but it does prove the slot file was read and rejected.
+  assert.match(unreadable?.message ?? '', /is unreadable \(config is not valid JSON/)
 })
 
 test('a readable central layer reports no unreadable-layer diagnostic', async () => {
@@ -250,4 +256,118 @@ test('a readable central layer reports no unreadable-layer diagnostic', async ()
   await joinedHomeForRender(hypHome)
   const report = await collectHypAwareStatus({ env: env(hypHome) })
   assert.ok(!report.diagnostics.some((d) => d.kind === 'config_central_unreadable'))
+})
+
+// The old gate (`!centralLoaded.ok && errorKind !== 'config_missing'`) missed
+// every state where `centralLoaded` never got as far as a load failure at
+// all: a pointer naming a slot that is gone, a pointer that is not a symlink,
+// and a control directory this process cannot even list. All three are a
+// central layer this host cannot read, not an absent one, and all three used
+// to report `overall: healthy`, `layered: null`, and zero config diagnostics
+// (issue #2423's wider form).
+
+test('an active-slot pointer naming a slot file that is gone reports the central layer unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  const missingSlotPath = path.join(controlDir, 'config.b.json')
+  // The pointer resolves (by name) to a slot the apply engine never wrote
+  // here, or already rotated away - `readActiveSlot` only checks the target
+  // name, not that the file exists.
+  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'a pointer naming a gone slot file has a diagnostic of its own')
+  assert.equal(unreadable?.severity, 'warning')
+  assert.ok(unreadable?.message.includes(missingSlotPath), `message names the missing slot file: ${unreadable?.message}`)
+  assert.equal(report.layered, null)
+  assert.equal(report.overall, 'healthy')
+})
+
+test('an active pointer replaced by a regular file reports the central layer unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  // The slot file still holds a central sink, but the pointer that would
+  // name it is a plain file, not a symlink: `readActiveSlot` cannot follow it.
+  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'a non-symlink active pointer has a diagnostic of its own')
+  assert.ok(unreadable?.message.includes(controlDir), `message names the control directory: ${unreadable?.message}`)
+  // Resolution could not follow the pointer, so there is nothing to merge:
+  // the host still holds another org's sink verbatim in `config.a.json`, but
+  // `layered` reads `null`, same as a never-joined host.
+  assert.equal(report.layered, null)
+  assert.equal(report.overall, 'healthy')
+})
+
+test('a central config directory that cannot be listed reports the central layer unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+  await fs.chmod(controlDir, 0o000)
+
+  try {
+    const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+    const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+    assert.ok(unreadable, 'an unlistable control directory has a diagnostic of its own')
+    assert.match(unreadable?.message ?? '', /failed to read the central config directory/)
+    assert.ok(unreadable?.message.includes(controlDir), `message names the control directory: ${unreadable?.message}`)
+    assert.equal(report.layered, null)
+    assert.equal(report.overall, 'healthy')
+  } finally {
+    await fs.chmod(controlDir, 0o700)
+  }
+})
+
+// The `config_missing` message's "neither a central layer" clause is only
+// true when the central layer really is absent. When it is unreadable
+// instead, the two diagnostics used to contradict each other on the same
+// report (issue #2423).
+
+test('config_missing does not claim "neither a central layer" when the central layer is unreadable', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  // No local config at all, and the central layer resolves to a slot file
+  // that is gone: both `config_missing` and `config_central_unreadable` fire.
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const missing = report.diagnostics.find((d) => d.kind === 'config_missing')
+  assert.ok(missing, 'the no-config diagnostic still fires')
+  assert.doesNotMatch(missing?.message ?? '', /neither a central layer/)
+  assert.ok(missing?.message.includes('no config found'))
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'the central layer is reported unreadable too')
 })

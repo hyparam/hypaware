@@ -25,6 +25,7 @@ import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config
 import { discoverInstalledPlugins, unloadableInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
+import { centralLayerUnreadable } from '../remote/gateway_seed.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
@@ -1210,7 +1211,13 @@ export async function collectHypAwareStatus(opts = {}) {
   // Same fact, central layer: a central file the host could not parse is not
   // the operator removing anything either, so it must not be read as intent
   // any more than a local parse failure is.
-  const centralLayerUnreadable = !!centralLoaded && !centralLoaded.ok && centralLoaded.errorKind !== 'config_missing'
+  const centralLayerParseFailed = !!centralLoaded && !centralLoaded.ok && centralLoaded.errorKind !== 'config_missing'
+
+  // Whether the central layer can be read at all, widest definition: every
+  // load failure counts, `config_missing` included, and a null `centralLoaded`
+  // is re-checked against the control directory instead of read as an
+  // absence. See `centralLayerUnreadable`'s own doc for why.
+  const centralUnreadable = centralLayerUnreadable({ stateDir: stateRoot, centralLoaded })
 
   // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
@@ -1246,7 +1253,9 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'config_missing',
-        message: `no config found - neither a central layer nor ${configPath}`,
+        message: centralUnreadable === null
+          ? `no config found - neither a central layer nor ${configPath}`
+          : `no config found - ${configPath}`,
         repair: ['hyp setup', 'hyp setup --from-file <config.json>', 'hyp join <url> <token>'],
       })
     } else {
@@ -1287,20 +1296,25 @@ export async function collectHypAwareStatus(opts = {}) {
   // `centralConfig` is null both for a layer that is absent and for one that
   // is there and will not parse, so without this the report asserts
   // `layered: null` - no central layer at all - and nothing names the file
-  // (issue #2423). An unreadable layer is not an absent one, the reading
-  // LLP 0226 #unreadable-is-not-absent gives an unreadable asset and
-  // `hyp remote login` already gives this very layer.
+  // (issue #2423). An unreadable layer is not an absent one - the same
+  // distinction LLP 0226 #unreadable-is-not-absent draws for a client asset -
+  // and `hyp remote login` is what writes this very layer, so a host that
+  // cannot read it has a layer all the same. `centralLayerUnreadable` covers
+  // every way that can happen, not only a file that fails to parse: an
+  // active-slot pointer naming a slot file that is gone, an active pointer
+  // replaced by something other than a symlink, or a control directory this
+  // process cannot even list.
   //
   // A warning on the local layer's precedent: the host runs on whichever layer
   // did load, so this is loud without being an outage signal, and staying out
   // of `degradingKinds` leaves `overall` as it was. Whether an unreadable org
   // layer *should* degrade the verdict is a separate question.
-  if (centralLoaded && centralLayerUnreadable) {
+  if (centralUnreadable) {
     diagnostics.push({
       severity: 'warning',
       kind: 'config_central_unreadable',
-      message: `central config layer ${centralLoaded.configPath} is unreadable (${centralLoaded.message}) - the team config it carries is not applied`,
-      repair: ['hyp join <url> <token>'],
+      message: `central config layer is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
+      repair: ['hyp join <url> <token>', 'hyp remote login <url>'],
     })
   }
 
@@ -1939,7 +1953,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // Cleared by the status-file fallback below, the one branch whose rows no
   // config entry and no live handle backs - but only when an empty
   // configured sink set is the operator's own removal. An unreadable local
-  // or central config (`localConfigUnreadable`, `centralLayerUnreadable`) and
+  // or central config (`localConfigUnreadable`, `centralLayerParseFailed`) and
   // a `sinks` entry the central layer merge dropped (`merged.drops`, reason
   // `invalid_merge`) also leave `config.sinks` empty without the operator
   // having removed anything, so none of these is read as intent here; reading
@@ -2003,7 +2017,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // since an unreadable layer leaves no record of which instances it named.
     const recovered = (Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
       .filter((s) => !!s && typeof s === 'object')
-    sinksAreConfigured = localConfigUnreadable || centralLayerUnreadable
+    sinksAreConfigured = localConfigUnreadable || centralLayerParseFailed
       || recovered.some((s) => sinkKeysDroppedByMerge.has(s.instance))
     sinks.push(...recovered)
   }
