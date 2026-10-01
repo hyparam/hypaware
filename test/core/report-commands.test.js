@@ -1364,6 +1364,108 @@ test('fix: an allocated tty nobody answers starts the first client instead of wa
   assert.equal(launches[0].launcher.client, 'claude')
 })
 
+/* ---------- the byte that is not a keypress (#2392) ---------- */
+
+// The deadline is lifted by the first keypress, and a pty whose input has
+// reached EOF (`script ... < /dev/null`) is sent a NUL byte that readline
+// decodes into one: lifting on it kept the picker on screen with nothing left
+// to end the run. These emit the keypress that pty actually delivered rather
+// than opening one - the delivery is simulated, the shape is measured. Under
+// `script -qec 'node ...' /dev/null < /dev/null` on node 22 exactly one event
+// arrives, `str` = `\0` with
+// `key = { sequence: '\0', name: '`', ctrl: true, meta: false, shift: false }`.
+// It has a `name`, which is why the guard reads the sequence. Both pickers arm
+// through one `armPickDeadline`, so these pin the same guard `hyp ask` pins
+// from the other side of the import.
+
+/** The keypress a pty at EOF delivers, as measured. `\0`, never the raw byte. */
+const NON_KEY_BYTE_PRESS = {
+  str: '\0',
+  key: { sequence: '\0', name: '`', ctrl: true, meta: false, shift: false },
+}
+
+/**
+ * A stdin that claims a terminal and delivers `events` once the prompt is
+ * listening. `resume()` is the hook: the TUI runtime calls it directly after
+ * it attaches its `keypress` listener, so a delivery scheduled there cannot
+ * race the listener it is meant for.
+ *
+ * @param {Array<{ after?: number, str?: string, key?: object }>} events
+ */
+function keyedTtyIn(events) {
+  const stdin = new EventEmitter()
+  let delivered = false
+  return Object.assign(stdin, {
+    isTTY: true,
+    isRaw: false,
+    /** @param {boolean} v */
+    setRawMode(v) { this.isRaw = v; return this },
+    resume() {
+      if (delivered) return this
+      delivered = true
+      for (const { after = 0, str, key } of events) {
+        setTimeout(() => stdin.emit('keypress', str, key), after)
+      }
+      return this
+    },
+    pause() { return this },
+    isPaused() { return false },
+  })
+}
+
+test('generate: a NUL byte off a pty at EOF does not lift the deadline', { timeout: 5000 }, async (t) => {
+  const { ctx } = await generateFixture(t)
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = keyedTtyIn([NON_KEY_BYTE_PRESS])
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
+})
+
+test('fix: a NUL byte off a pty at EOF does not lift the deadline', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = keyedTtyIn([NON_KEY_BYTE_PRESS])
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
+})
+
+test('fix: a real keypress still lifts the deadline for good', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx } = ctxWith()
+  const stdout = ttyOut()
+  // The NUL first, then down and - well past a 50ms deadline - enter: a reader
+  // who takes their time must not be cut off mid-decision (#2391), and the
+  // pick that lands has to be theirs rather than the fallback's first client.
+  // The lift listens with `on`, not `once`, so the byte it declines to act on
+  // does not spend the listener the keystroke behind it needs.
+  ctx.stdin = keyedTtyIn([
+    NON_KEY_BYTE_PRESS,
+    { key: { sequence: '\x1b[B', name: 'down' } },
+    { after: 400, str: '\r', key: { sequence: '\r', name: 'return' } },
+  ])
+  ctx.stdout = stdout
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'codex', 'the deadline must not outlive a real keypress')
+})
+
 test('fix with nothing launchable exits 1 with a runnable attach hint, before fetching the page', async (t) => {
   const { calls } = stubFixServer(t)
   const { ctx, err } = ctxWith()

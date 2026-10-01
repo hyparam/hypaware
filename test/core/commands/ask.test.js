@@ -348,3 +348,94 @@ test('runAsk "<question>": a piped run never reaches the picker at all', async (
   assert.equal(asked, false, 'a run off a terminal must not prompt')
   assert.equal(await fixture.started(), 'codex')
 })
+
+/* --------- the deadline, and the byte that is not a keypress (#2392) -------- */
+
+// A pty whose input has reached EOF (`script ... < /dev/null`) is sent a NUL
+// byte, and readline decodes it into a keypress like any other. The deadline
+// lifted on it, so the one unattended pty shape that speaks before falling
+// silent kept the picker on screen forever: measured under a real `script`
+// pty at EOF, a run with a 300ms deadline was still unsettled when it was
+// killed 20s later, and after the fix it settled at 320ms.
+//
+// These cases emit the keypress that pty delivered rather than opening one:
+// the delivery is simulated, the shape is measured. Under
+// `script -qec 'node ...' /dev/null < /dev/null` on node 22 exactly one event
+// arrives, `str` = `\0` with
+// `key = { sequence: '\0', name: '`', ctrl: true, meta: false, shift: false }`.
+// It carries a `name`, which is why the guard reads the sequence.
+
+/** The keypress a pty at EOF delivers, as measured. `\0`, never the raw byte. */
+const NON_KEY_BYTE_PRESS = {
+  str: '\0',
+  key: { sequence: '\0', name: '`', ctrl: true, meta: false, shift: false },
+}
+
+/**
+ * A stdin that claims a terminal and delivers `events` once the prompt is
+ * listening. `resume()` is the hook: the TUI runtime calls it directly after
+ * it attaches its `keypress` listener, so a delivery scheduled there cannot
+ * race the listener it is meant for.
+ *
+ * @param {Array<{ after?: number, str?: string, key?: object }>} events
+ */
+function makeKeyedTtyIn(events) {
+  const stdin = new EventEmitter()
+  let delivered = false
+  return Object.assign(stdin, {
+    isTTY: true,
+    isRaw: false,
+    /** @param {boolean} v */
+    setRawMode(v) { this.isRaw = v; return this },
+    resume() {
+      if (delivered) return this
+      delivered = true
+      for (const { after = 0, str, key } of events) {
+        setTimeout(() => stdin.emit('keypress', str, key), after)
+      }
+      return this
+    },
+    pause() { return this },
+    isPaused() { return false },
+  })
+}
+
+test('runAsk "<question>": a NUL byte off a pty at EOF does not lift the deadline', { timeout: 5000 }, async () => {
+  const fixture = await twoLauncherFixture()
+  const stdout = makeTtyOut()
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: fixture.env,
+    stdout,
+    stderr: makeBuf(),
+    stdin: makeKeyedTtyIn([NON_KEY_BYTE_PRESS]),
+  }))
+  const code = await runAsk(['which sessions touched the auth module'], ctx, { pickDeadlineMs: 50 })
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(await fixture.started(), 'codex')
+})
+
+test('runAsk "<question>": a real keypress still lifts the deadline, stray byte or not', { timeout: 5000 }, async () => {
+  const fixture = await twoLauncherFixture()
+  const stdout = makeTtyOut()
+  // The NUL, then down, then enter well past a 50ms deadline: a reader who
+  // takes their time must not be cut off mid-decision (#2391), and the pick
+  // that lands has to be theirs rather than the fallback's first client. The
+  // byte comes first because the lift listens with `on`, not `once`: a `once`
+  // listener is spent by the byte it declines to act on, and the keystroke
+  // behind it would then find nothing left to lift.
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: fixture.env,
+    stdout,
+    stderr: makeBuf(),
+    stdin: makeKeyedTtyIn([
+      NON_KEY_BYTE_PRESS,
+      { key: { sequence: '\x1b[B', name: 'down' } },
+      { after: 400, str: '\r', key: { sequence: '\r', name: 'return' } },
+    ]),
+  }))
+  const code = await runAsk(['which sessions touched the auth module'], ctx, { pickDeadlineMs: 50 })
+  assert.equal(code, 0)
+  assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
+  assert.equal(await fixture.started(), 'opencode')
+})
