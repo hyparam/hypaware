@@ -1207,6 +1207,11 @@ export async function collectHypAwareStatus(opts = {}) {
   // `config_unreadable` / `config_local_unreadable` own the run.
   const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
 
+  // Same fact, central layer: a central file the host could not parse is not
+  // the operator removing anything either, so it must not be read as intent
+  // any more than a local parse failure is.
+  const centralLayerUnreadable = !!centralLoaded && !centralLoaded.ok && centralLoaded.errorKind !== 'config_missing'
+
   // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
   // concern); a local entry that lost the merge shows in `layered.drops`,
@@ -1913,12 +1918,12 @@ export async function collectHypAwareStatus(opts = {}) {
   // Cleared by the status-file fallback below, the one branch whose rows no
   // config entry and no live handle backs - but only when an empty
   // configured sink set is the operator's own removal. An unreadable local
-  // config (`localConfigUnreadable`) and a `sinks` entry the central layer
-  // merge dropped (`merged.drops`, reason `invalid_merge`) also leave
-  // `config.sinks` empty without the operator having removed anything, so
-  // neither is read as intent here; reading either as intent would silently
-  // drop a live export-failure warning instead of fixing the over-warning
-  // issue #2361 set out to fix.
+  // or central config (`localConfigUnreadable`, `centralLayerUnreadable`) and
+  // a `sinks` entry the central layer merge dropped (`merged.drops`, reason
+  // `invalid_merge`) also leave `config.sinks` empty without the operator
+  // having removed anything, so none of the three is read as intent here;
+  // reading any of them as intent would silently drop a live export-failure
+  // warning instead of fixing the over-warning issue #2361 set out to fix.
   const sinksDroppedByMerge = merged.drops.some((d) => d.section === 'sinks')
   let sinksAreConfigured = true
   if (opts.runtime?.sinks) {
@@ -1963,10 +1968,10 @@ export async function collectHypAwareStatus(opts = {}) {
     // Shape is not configuration either: deleting the whole `sinks` key is the
     // one removal that lands here instead of the config branch, so reading
     // these rows as configured asks an operator to repair a destination they
-    // deleted (issue #2361). But an unreadable local config or a merge-dropped
-    // `sinks` entry land here too without being a removal, so only clear the
-    // gate when neither of those explains the empty `config.sinks`.
-    sinksAreConfigured = localConfigUnreadable || sinksDroppedByMerge
+    // deleted (issue #2361). But an unreadable local or central config, or a
+    // merge-dropped `sinks` entry, land here too without being a removal, so
+    // only clear the gate when none of those explains the empty `config.sinks`.
+    sinksAreConfigured = localConfigUnreadable || centralLayerUnreadable || sinksDroppedByMerge
     sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
       .filter((s) => !!s && typeof s === 'object'))
   }

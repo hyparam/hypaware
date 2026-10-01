@@ -739,3 +739,34 @@ test('export warning: a sinks entry the central layer merge dropped still warns'
   assert.equal(warnings.length, 1, 'a merge-dropped entry must not suppress a live export failure')
   assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
 })
+
+// A central layer that fails to parse is the third non-removal: it leaves
+// `config.sinks` empty the same way an unreadable local config or a
+// merge-dropped entry does, without the operator having removed the
+// destination the central layer itself names. Reading it as a removal would
+// silence a live export failure the same way the other two spellings would.
+// @ref LLP 0453#warning-rule [tests]: an unreadable central layer is not a configured-set removal, so a destination it would have named still warns
+test('export warning: an unreadable central layer still warns about a failing sink', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // Local config names no sinks either, so `config.sinks` is empty for a
+  // reason that has nothing to do with the unreadable central file.
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), '{{{ not json')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'central', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['central'],
+    'the recovered row still renders the shape of the install',
+  )
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1, 'an unreadable central layer must not suppress a live export failure')
+  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+})
