@@ -7,9 +7,11 @@ import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 import { sanitizeLabel } from '../util/json_util.js'
+import { groupThousands } from '../util/format_number.js'
 
 /**
- * @import { CommandRunContext, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, DatasetRegistration, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CacheStatusPartition, CacheStatusReport } from '../../../src/core/cache/types.js'
  * @import { OverviewRows } from '../../../src/core/query/types.js'
  */
 
@@ -86,28 +88,132 @@ export async function runQueryStatus(argv, ctx) {
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
-  ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
-  ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
-  ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
-  for (const dataset of datasets) {
-    ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
+  ctx.stdout.write(renderCacheStatus({ report, datasets }))
+  return 0
+}
+
+/**
+ * Human byte size, in the decimal units `hyp status` reports storage in.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1e3) return `${Math.max(0, Math.round(bytes) || 0)} B`
+  if (bytes < 999_500) return `${Math.round(bytes / 1e3)} KB`
+  if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`
+  return `${(bytes / 1e9).toFixed(1)} GB`
+}
+
+/**
+ * A partition's row label. The dataset is the row above it, so a
+ * source-only key prints as the bare source.
+ *
+ * @param {CacheStatusPartition} p
+ * @returns {string}
+ */
+function partitionLabel(p) {
+  const entries = Object.entries(p.partition)
+  if (entries.length === 0) return '(all)'
+  if (entries.length === 1 && entries[0][0] === 'source') return entries[0][1]
+  return entries.map(([k, v]) => `${k}=${v}`).join('/')
+}
+
+/**
+ * The retention cutoff most partitions share, hoisted into the header so
+ * only a partition that departs from it carries a note.
+ *
+ * @param {CacheStatusPartition[]} partitions
+ * @returns {string | undefined}
+ */
+function commonRetentionCutoff(partitions) {
+  /** @type {Map<string, number>} */
+  const counts = new Map()
+  /** @type {string | undefined} */
+  let best
+  for (const p of partitions) {
+    const date = p.lastRetentionCutoffDate
+    if (!date) continue
+    const n = (counts.get(date) ?? 0) + 1
+    counts.set(date, n)
+    if (best === undefined || n > (counts.get(best) ?? 0)) best = date
   }
-  if (report.partitions.length > 0) {
-    ctx.stdout.write(`partitions: ${report.partitions.length}\n`)
-    for (const p of report.partitions) {
-      const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
-      const label = `${p.dataset}/${partKey || 'all'}`
-      if (p.layout === 'source-table') {
-        const extras = []
-        if (p.deleteFileCount) extras.push(`deletes=${p.deleteFileCount}`)
-        if (p.lastRetentionCutoffDate) extras.push(`retention_cutoff=${p.lastRetentionCutoffDate}`)
-        ctx.stdout.write(`  ${label}  source-table  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B${extras.length ? '  ' + extras.join('  ') : ''}\n`)
-      } else {
-        ctx.stdout.write(`  ${label}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
-      }
+  return best
+}
+
+const CACHE_STATUS_COLUMNS = ['ROWS', 'FILES', 'SNAPSHOTS', 'DELETES', 'METADATA']
+
+/**
+ * Render `hyp cache status` as one table: a row per dataset, with its
+ * partitions indented beneath it unless the only one is a placeholder
+ * (`source=unknown`, or no partition key). Dataset names stay at column 0,
+ * which is where callers reading the dataset list look for them. Only what
+ * varies is printed per row: the source-table layout is the unlabelled
+ * default, and the shared retention cutoff sits in the header.
+ *
+ * @param {{ report: CacheStatusReport, datasets: DatasetRegistration[] }} args
+ * @returns {string}
+ */
+export function renderCacheStatus({ report, datasets }) {
+  const cutoff = commonRetentionCutoff(report.partitions)
+  /** @type {Map<string, CacheStatusPartition[]>} */
+  const byDataset = new Map(datasets.map((d) => [d.name, []]))
+  for (const p of report.partitions) {
+    const parts = byDataset.get(p.dataset)
+    if (parts) parts.push(p)
+    else byDataset.set(p.dataset, [p])
+  }
+  const plugins = new Map(datasets.map((d) => [d.name, d.plugin]))
+
+  /** @param {CacheStatusPartition} p */
+  const cells = (p) => [
+    groupThousands(p.rowCount),
+    groupThousands(p.dataFileCount),
+    groupThousands(p.snapshotCount),
+    p.deleteFileCount ? groupThousands(p.deleteFileCount) : '-',
+    formatBytes(p.metadataBytes),
+  ]
+  /** @param {CacheStatusPartition} p */
+  const note = (p) => {
+    if (p.layout !== 'source-table') return `${p.layout === 'epoch' ? 'legacy ' : ''}epoch ${p.epoch}`
+    if (p.lastRetentionCutoffDate === cutoff) return ''
+    return p.lastRetentionCutoffDate ? `cutoff ${p.lastRetentionCutoffDate}` : 'no cutoff'
+  }
+
+  /** @type {Array<{ label: string, cells?: string[], note: string }>} */
+  const rows = []
+  for (const [name, parts] of byDataset) {
+    const owner = plugins.get(name) ?? '(not registered)'
+    const label = parts.length === 1 ? partitionLabel(parts[0]) : ''
+    if (parts.length === 0) {
+      rows.push({ label: name, cells: CACHE_STATUS_COLUMNS.map(() => '-'), note: owner })
+    } else if (label === '(all)' || label === 'unknown') {
+      rows.push({ label: name, cells: cells(parts[0]), note: [owner, note(parts[0])].filter(Boolean).join('  ') })
+    } else {
+      rows.push({ label: name, note: owner })
+      for (const p of parts) rows.push({ label: `  ${partitionLabel(p)}`, cells: cells(p), note: note(p) })
     }
   }
-  return 0
+
+  let out = `cache      ${report.cacheRoot}\n`
+  out += `pending    ${formatBytes(report.pendingSpoolBytes)}\n`
+  if (cutoff) out += `retention  cutoff ${cutoff}\n`
+  if (rows.length === 0) return out + 'datasets   none registered\n'
+
+  const labelWidth = rows.reduce((w, r) => Math.max(w, r.label.length), 'DATASET'.length)
+  const widths = CACHE_STATUS_COLUMNS.map((h, i) => rows.reduce((w, r) => Math.max(w, r.cells?.[i].length ?? 0), h.length))
+  /**
+   * @param {string} label
+   * @param {string[] | undefined} values
+   * @param {string} trailing
+   */
+  const line = (label, values, trailing) => {
+    const padded = [label.padEnd(labelWidth), ...widths.map((w, i) => (values?.[i] ?? '').padStart(w))].join('  ')
+    return `${padded}   ${trailing}`.trimEnd() + '\n'
+  }
+  out += '\n' + line('DATASET', CACHE_STATUS_COLUMNS, '')
+  for (const r of rows) out += line(r.label, r.cells, r.note)
+  return out
 }
 
 const QUERY_OVERVIEW_USAGE =
