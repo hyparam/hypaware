@@ -1,18 +1,30 @@
+[← All documentation](README.md)
+
+---
+
 # Troubleshoot a HypAware installation
 
-[Documentation](README.md) / Troubleshooting
-
-Start with the health snapshot. It reports the daemon, clients, storage, and
-anything needing attention without starting sources:
+Check the installation's status and version:
 
 ```sh
 hyp status
 hyp version
 ```
 
-Follow any `Next:` line under Attention for the failing component, then repeat
-the relevant status check. Add `--verbose` for the full inventory and the
-`repair:` lines under each diagnostic. For scripts, use `hyp status --json`.
+`hyp status` reports the background service, clients, storage, and problems,
+with guidance to help resolve them. Use `hyp status --verbose` for more detail
+or `hyp status --json` for scripts.
+
+## Contents
+
+- [No new recordings](#no-new-recordings)
+- [History or search results are missing](#history-or-search-results-are-missing)
+- [An export or team sync is missing](#an-export-or-team-sync-is-missing)
+- [A command is missing or rejects an option](#a-command-is-missing-or-rejects-an-option)
+- [The CLI and daemon run different versions](#the-cli-and-daemon-run-different-versions)
+- [Disk usage or maintenance problems](#disk-usage-or-maintenance-problems)
+- [A query or graph projection refuses for memory](#a-query-or-graph-projection-refuses-for-memory)
+- [Find diagnostic logs](#find-diagnostic-logs)
 
 ## No new recordings
 
@@ -27,13 +39,15 @@ hyp cache status
 2. Check that the client is attached. Preview and apply its attach using
    `hyp attach CLIENT --dry-run` and `hyp attach CLIENT`.
 3. Check the daemon is running. Use `hyp daemon start` for an installed service,
-   or follow [headless setup](HEADLESS.md) when there is no service manager.
+   or follow [headless setup](TEAM_SETUP.md#ci-and-headless-deployment) when there is no service manager.
 4. Start a new client process and complete a turn so it uses the managed settings.
 5. Check `hyp privacy show /absolute/path/to/project` for an ignore marking.
 
-For Claude Code, use [the capture-health checklist](CLI.md#check-capture-and-claude-telemetry):
-the installed version, configured listener, live listener, and transcript
-activity help distinguish a missing attach from failed telemetry delivery.
+For Claude Code, `hyp client status claude` reports the configured and live
+listener endpoints, recent telemetry, and transcript activity. If the endpoints
+differ, run `hyp attach claude`, restart the daemon, and start a new Claude Code
+process. Check the [client table](CLIENTS.md#choose-and-check-a-client) for minimum
+version requirements.
 For transcript-only clients, allow time for the scheduled recovery sweep.
 
 Detaching a gateway-routed client restores its own connection settings if a
@@ -86,7 +100,7 @@ hyp query --help
 Plugin-owned commands appear only while the owning plugin is active. Entering
 a known inactive command prints a repair instruction. If a flag in these docs
 is unavailable, check the installed version's command help and the
-[update procedure](CLI.md#upgrade-within-a-compatible-major-version).
+[update procedure](CLI.md#update-hypaware).
 
 ## The CLI and daemon run different versions
 
@@ -171,14 +185,15 @@ the shell that started it, so it needs neither step.
 
 ## Find diagnostic logs
 
-With the default `HYP_HOME`, service output is under
-`~/.hyp/hypaware/logs/daemon.out.log` and `daemon.err.log`; processing work has
+With the default `HYP_HOME`, start with the structured log at
+`~/.hyp/hypaware/logs/daemon.log`. Service stdout and stderr are in
+`daemon.out.log` and `daemon.err.log` in the same directory. Processing work has
 its own `~/.hyp/hypaware/processing/logs/daemon.log`. Use the paths reported for
 your installation if you configured another home.
 
 An OTLP exporter refused with `421 Misdirected Request` is pointed at a name
 other than `localhost` or `127.0.0.1`; point it at one of those instead.
-[Product telemetry](PRODUCT_TELEMETRY.md) has separate controls; it is
+[Product telemetry](PRIVACY.md#product-telemetry) has separate controls; it is
 automatic for enrolled organizations, defaults off on standalone installations,
 and is not the captured conversations or the local diagnostic log.
 

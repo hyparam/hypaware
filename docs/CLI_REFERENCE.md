@@ -1,14 +1,16 @@
-# HypAware CLI command reference
+[← All documentation](README.md)
 
-[Documentation](README.md)
+---
+
+# HypAware CLI command reference
 
 This reference documents the visible commands shipped with HypAware. It uses
 the canonical `hyp` spelling. The `hypaware` binary accepts the same arguments.
 
-For installation, upgrade, recovery, and task-oriented workflows, see
-[Use the HypAware CLI](./CLI.md).
+For task guides, start at the [documentation index](README.md). This reference
+defines command syntax and behavior; the guides explain common workflows.
 
-## On this page
+## Contents
 
 - [Read command syntax](#read-command-syntax)
 - [Plugin-owned commands](#plugin-owned-commands)
@@ -19,6 +21,7 @@ For installation, upgrade, recovery, and task-oriented workflows, see
 - [Control the current session](#control-the-current-session)
 - [Manage AI clients](#manage-ai-clients)
 - [Import past client history](#import-past-client-history)
+- [Collect GitHub activity](#collect-github-activity)
 - [Control privacy](#control-privacy)
 - [Connect to or leave HypAware Cloud](#connect-to-or-leave-hypaware-cloud)
 - [Manage the daemon](#manage-the-daemon)
@@ -32,9 +35,10 @@ For installation, upgrade, recovery, and task-oriented workflows, see
 - [Inspect vector indexes](#inspect-vector-indexes)
 - [Enrich the activity graph](#enrich-the-activity-graph)
 - [Update HypAware](#update-hypaware)
-- [Control optional product telemetry](#control-optional-product-telemetry)
+- [Control product telemetry](#control-product-telemetry)
 - [Print version information](#print-version-information)
 - [Develop plugins](#develop-plugins)
+- [Use canonical command names](#use-canonical-command-names)
 
 ## Read command syntax
 
@@ -49,22 +53,32 @@ your installed version.
 
 ## Plugin-owned commands
 
-Core commands are always registered. Plugin-owned commands are registered only
-when their plugin is active in the effective configuration. They also appear in
-top-level and group help only while active.
+Core commands and core group headings remain visible. Plugin-owned subcommands
+appear in help and can run only when their plugin is active in the effective
+configuration. A visible group heading does not mean every subcommand is enabled.
+If an inactive plugin owns a command you enter, HypAware names the plugin and
+prints a repair instruction.
+
+The examples below assume their owning plugins are enabled in the effective
+configuration. Listing a plugin in this reference doesn't enable it. Add it
+to `plugins[]` in your configuration and configure any dependencies it requires.
+Use `hyp config validate` to check the configuration and `hyp plugin list`
+to inspect plugin status. A successful `--help` check only verifies the help
+page; it doesn't prove the plugin can run.
 
 This reference identifies each plugin-owned family:
 
-- `session ...`: `@hypaware/ai-gateway`.
+- `session ...`: shared commands provided by `@hypaware/ai-gateway`,
+  `@hypaware/opencode`, `@hypaware/pi`, or `@hypaware/cursor`.
+- `query grep`: `@hypaware/grep`.
+- `github ...`: `@hypaware/github`.
 - `client claude-account ...`: `@hypaware/claude-account`.
 - `client claude-desktop ...`: `@hypaware/claude-desktop`.
 - `graph ...` and `query graph neighbors`: `@hypaware/context-graph`.
 - `query vector ...` and `vector status`: `@hypaware/vector-search`.
 - `enrichment ...`: `@hypaware/context-graph-enrich`.
 
-Hidden credential and client-hook machine contracts aren't user commands and
-aren't documented here. Hidden Gas City routes are also excluded because their
-process-memory changes don't persist yet.
+Internal credential and client-hook commands are excluded from this user reference.
 
 ## Set up and inspect HypAware
 
@@ -76,17 +90,20 @@ hyp setup [preset] [flags]
 
 Runs the guided setup, applies a named plugin preset, or performs an unattended
 configuration. It can write or replace the local configuration, install the
-daemon, attach clients, install client assets, and import history. `--dry-run`
-writes nothing. `--force` backs up and replaces an existing configuration.
+daemon, attach clients, install client assets, and import history.
+`--force` backs up and replaces an existing configuration.
 Important options include repeatable `--source` and `--client`, `--export`,
 `--retention-days`, `--from-file`, `--no-daemon`, and `--bin`.
+
+`--dry-run` currently still writes the configuration, including with
+`--from-file`. It is not a read-only preview.
 
 ```sh
 hyp setup --source claude --client claude --export keep-local --yes
 ```
 
-Success returns `0`. Invalid arguments or a refused overwrite return `2`;
-installation or configuration failures return `1`.
+Success returns `0`. Invalid flags return `2`; a refused overwrite, an unknown
+preset, or an installation or configuration failure returns `1`.
 
 ### `hyp status`
 
@@ -114,9 +131,9 @@ hyp status --json
 hyp ask ["question"] [--list]
 ```
 
-With no argument, asks the one question worth asking first: which skill would
-be the most useful to add. HypAware measures the last 30 days of recorded
-history itself, writes the evidence into `<HYP_HOME>/ask` (one folder,
+With no argument, asks which skill would be useful to add based on your history.
+HypAware measures the last 30 days of recorded history, writes the evidence into
+`<HYP_HOME>/ask` (one folder,
 rewritten each time), and starts a recorded AI client in that folder to answer
 with one skill. Recorded means attached, or configured with no attach marker
 to write (Codex in its transcript mode); its CLI must also be on `PATH`. If
@@ -138,8 +155,10 @@ sessions with `hyp query` first, and the typed question follows verbatim.
 
 The client takes over the terminal. `--list` prints the question and launches
 nothing. An empty cache, a declined selection, or list-only use succeeds. No
-launchable client, no gatherable evidence, or a process-start failure returns
-`1`.
+launchable client or no gatherable evidence returns `1`. A process-start failure
+returns `1` when a question was supplied; bare `hyp ask` currently reports that
+failure but still exits `0`. Its exit status therefore does not prove a client
+started.
 
 ```sh
 hyp ask "which sessions changed the authentication module"
@@ -210,11 +229,8 @@ failures return `1`.
 hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
-Provided by the bundled `@hypaware/grep` plugin. New `hyp setup` capture
-configurations include it; existing client configurations gain it automatically
-on startup, preserving explicit `enabled: false` entries. The migration backs up
-the local config before writing. With a read-only config, search remains
-available for the current process and a warning reports that persistence failed.
+Provided by `@hypaware/grep`, which standard capture setups enable. An explicit
+`enabled: false` entry keeps it disabled.
 
 Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
 case-insensitive substring by default, or a regular expression with `--regex`.
@@ -279,7 +295,7 @@ direction. The default depth is `1`, direction is `both`, and limit is `100`.
 The parser also accepts `--json` for the command's structured result.
 
 ```sh
-hyp query graph neighbors src/core/cli/dispatch.js --type File --depth 2 --direction in
+hyp query graph neighbors src/app.js --type File --depth 2 --direction in
 ```
 
 This command is read-only and supports remote execution. An unresolved or
@@ -299,10 +315,13 @@ hyp query vector <subcommand> [args...]
 hyp query vector --help
 ```
 
+Requires active `@hypaware/vector-search` and a configured embedder provider,
+such as `@hypaware/embedder-openai`, plus at least one configured vector index.
+
 Search syntax is:
 
 ```text
-hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>]
+hyp query vector search <query> [--index <name>] [--dataset <name>] [--top-k <n>] [--no-refresh] [--format <fmt>] [--max-cell <n>] [--max-bytes <n>]
 ```
 
 Embeds the query and searches configured local vector shards. Automatic
@@ -373,7 +392,8 @@ hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title
 Uploads Markdown for the remote to render. A single file must be `.md` or
 `.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
 its root and may otherwise contain only `usage.md`, `work.md`, `health.md`,
-and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`); HTML,
+and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`).
+The legacy `change-<slug>.md` spelling is also accepted. HTML,
 images, client assets, subdirectories, and symlinks are rejected before any
 upload. The remote renders the HTML; there is no local render step in the
 publish path. The remote identifies repeat uploads by content hash. `--org`
@@ -451,12 +471,12 @@ resolves it to its report, checks the recommendation page still exists, and
 starts the client with instructions to read it through
 `hyp report get <rec-id>` and make the change in the current repository.
 Nothing is written to disk. The client takes over the terminal and nothing is
-pre-authorised: the client asks before running the read.
+pre-authorized: the client asks before running the read.
 
 With no id on a terminal, it asks in two steps: first which report, newest
 first, each with its publish date and how many recommendations it carries
 (a report with none is not offered); then which of that report's
-recommendations, labelled by the page's title and described by its thesis
+recommendations, labeled by the page's title and described by its thesis
 when the remote lists them, else by the page name. Escape on the second
 list
 returns to the first. `--kind`, `--period` and `--limit` narrow which reports
@@ -528,8 +548,8 @@ early release to report. Avoid `--yes` until you have reviewed the plan.
 
 ## Control the current session
 
-Plugin: `@hypaware/ai-gateway`. Use `hyp session --help` when the plugin is
-active:
+Available through the [recorder plugins](#plugin-owned-commands). Use
+`hyp session --help` to inspect the shared controls:
 
 ```text
 hyp session <subcommand> [args...]
@@ -544,8 +564,10 @@ Codex context. It refuses rather than guessing. An ignored session is saved
 under `<HYP_HOME>/hypaware/session-ignores/` and stays ignored across recorder
 and daemon restarts until you unignore it. The Cursor recorder is the
 exception: it advertises the control route but still holds its set in memory,
-so a restart clears the Cursor half (issue #2155). A fork has a new session ID
-and needs its own ignore.
+so a restart clears Cursor's exclusions. A fork has a new session ID and needs
+its own ignore. Supported routes include the gateway, Claude telemetry,
+OpenCode, Pi, and Cursor. OpenClaw and Hermes do not support session opt-out;
+use [directory controls](PRIVACY.md#marking-directories) for them.
 
 ### `hyp session status`
 
@@ -746,8 +768,8 @@ hyp client claude-account status
 
 Plugin: `@hypaware/claude-desktop`.
 
-Desktop capture is transcript-only by default. Select Claude
-Desktop in `hyp setup`; the daemon reruns the Claude history provider every
+Claude Desktop capture is supported on macOS and uses local transcripts by
+default. Select Claude Desktop in `hyp setup`; the daemon reruns the Claude history provider every
 five minutes. This needs no Claude account credential and makes no changes to
 the Desktop app.
 
@@ -784,8 +806,8 @@ as the join-time import: see "Scheduled recovery sweeps and
 `backfill.window_days`" below.
 
 To turn the schedule off, set the same block's `on_join` to false. That is the
-existing opt-out from automatic history import, and it now withholds the
-scheduled rerun as well as the join-time one; `sweep_cron` chooses a cadence
+opt-out from automatic history import; it withholds both the scheduled rerun
+and the join-time import; `sweep_cron` chooses a cadence
 and has no "never" value.
 
 ```json
@@ -797,7 +819,7 @@ and has no "never" value.
 The subcommands below operate the older managed third-party-inference route.
 They are optional experiments, not prerequisites for transcript capture. They
 require `@hypaware/claude-account`; without that capability they return a
-repair message while the scheduled transcript lane continues normally.
+repair message while the scheduled transcript imports continue normally.
 
 ```text
 hyp client claude-desktop <subcommand> [args...]
@@ -906,6 +928,9 @@ rows, and flushes the cache. Provider failures don't stop sibling providers.
 reports what an import would take at nearly the cost of one: only
 materialization, the row write, and the cache flush are skipped.
 
+Choose providers shown by `hyp backfill list`. The example below requires
+both Claude and Codex capture to be enabled.
+
 ```sh
 hyp backfill claude codex --since 2026-08-01T00:00:00Z --dry-run
 ```
@@ -925,19 +950,19 @@ hyp backfill list --json
 
 ### Scheduled recovery sweeps and `backfill.window_days`
 
-Some adapters rerun their history provider on a schedule, so history the live
-capture lane never saw is recovered without you running
-`hyp backfill` by hand. `@hypaware/claude` (which also serves
-Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
-sweep every five minutes by default.
+Some adapters import history on a schedule to recover sessions missed by live
+capture:
 
-A positive `backfill.window_days` on a plugin entry bounds that scheduled
-sweep as well as the join-time import. This is deliberate:
-a `window_days` set only to keep the first import
-small also caps every later recovery, so a session older than the window is
-never swept up, OpenClaw's Lane B included. Nothing is removed from disk. The
-history is only left unimported, and widening or dropping `window_days` lets
-the next sweep take it.
+| Plugin | Default interval | Does `backfill.on_join: false` stop scheduled recovery? |
+| --- | --- | --- |
+| `@hypaware/codex` (transcript mode) | One minute | Yes |
+| `@hypaware/pi` | Five minutes | Yes |
+| `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
+| `@hypaware/openclaw` | Five minutes | No |
+
+A positive `backfill.window_days` bounds both the join-time import and scheduled
+recovery. Older sessions remain on disk but are not imported. Widening the
+window makes older history eligible on the next run.
 
 ```json
 { "name": "@hypaware/openclaw", "config": {
@@ -945,17 +970,69 @@ the next sweep take it.
 } }
 ```
 
-With no `window_days`, the sweep falls back to the cache retention window:
-`query.cache.retention.default_days` if set, otherwise 90 days. A
-`default_days` of `0` is the open window rather than a zero-day one, so a
-sweep that falls back to it scans all history.
+Without an explicit window, recovery uses `query.cache.retention.default_days`,
+or 90 days if that setting is absent. A retention value of `0` means no age
+limit. See [retention configuration](CONFIGURATION.md#set-local-retention).
 
-Setting the same block's `on_join` to false stops `@hypaware/claude`'s
-scheduled sweep as well as its join-time import: that adapter contributes no
-schedule at all when the flag is off. It does not stop `@hypaware/openclaw`'s.
-That adapter contributes its Lane B schedule unconditionally, so an OpenClaw
-entry with `backfill.on_join: false` still sweeps on its `sweep_cron` cadence;
-today the only way to bound it is `window_days`.
+`sweep_cron` changes the recovery cadence. OpenClaw schedules recovery even when
+`backfill.on_join` is false; bound it with `window_days` or disable the integration
+to stop its automatic capture.
+
+## Collect GitHub activity
+
+Plugin: `@hypaware/github`. Capture writes structural repository activity to
+`github_events` and projects it into the activity graph. See
+[clients and history](CLIENTS.md#collect-github-activity) for the workflow.
+
+### `hyp github login`
+
+```text
+hyp github login [--no-browser]
+```
+
+Signs in with a GitHub device code. `--no-browser` prints the code and URL without
+opening a browser. GitHub's `repo` scope includes private repositories and write
+permissions; HypAware only reads. A configured environment token continues to
+override the saved OAuth credential. Canceling returns `130`; login failure
+returns `1`.
+
+### `hyp github logout`
+
+```text
+hyp github logout
+```
+
+Removes locally saved OAuth tokens. It does not remove an environment override
+or credentials available through `gh`.
+
+### `hyp github status`
+
+```text
+hyp github status
+```
+
+Checks the effective credential with GitHub and reports its source and account.
+Authentication failure returns `1`.
+
+### `hyp github backfill`
+
+```text
+hyp github backfill [owner/repo ...]
+```
+
+Imports history for eligible named repositories or, without names, the configured
+selection. Naming a repository allows a one-time import without recorded session
+evidence, but repository exclusions still apply. Bounded work can continue on
+later capture runs. Capture or graph-projection failures return `1`.
+
+### `hyp github sync`
+
+```text
+hyp github sync
+```
+
+Runs one poll immediately, including graph projection. It does not perform the
+full historical import. Capture or projection failures return `1`.
 
 ## Control privacy
 
@@ -1032,7 +1109,9 @@ hyp privacy list --json
 hyp privacy ignore [path]
 ```
 
-Writes a shareable `.hypignore` file at the explicit path or repository root.
+Writes a shareable `.hypignore` file in an existing directory at the explicit
+path. With no path, uses
+the repository root, or the current directory when outside a repository.
 Use `hyp privacy set <path> sync|local-only|ignore` for machine-local markings
 and `hyp privacy show [path]` to report without writing.
 
@@ -1121,15 +1200,16 @@ finish an incomplete purge.
 hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]
 ```
 
-Validates the URL and enrollment token, writes a permission-restricted
-central seed layer, and installs or restarts the daemon. The full organization
-configuration arrives later. Local configuration and history remain.
-`--no-daemon` writes only the seed and leaves service installation as an
-explicit next step. `--force` allows the existing CLI path if global
+Validates the URL syntax and requires a nonempty token, writes a
+permission-restricted central seed layer, and installs or restarts the daemon.
+It does not authenticate with the server. Authentication and the full organization
+configuration arrive when the daemon connects. Local configuration and history remain.
+`--no-daemon` writes only the seed. Start `hyp daemon run` under your own
+supervisor, or install the service separately where a service manager exists. `--force` allows the existing CLI path if global
 installation fails.
 
 ```sh
-hyp join https://hyp.example.com --token-file ./enrollment-token
+hyp join https://api.hypaware.ai --token-file ./enrollment-token
 ```
 
 Prefer `--token-file` or standard input. A positional token can appear in shell
@@ -1143,7 +1223,9 @@ hyp leave
 
 Removes the central layer, identity, and sync credential, restarts the
 daemon, and reverses organization-driven client attaches. It keeps the local
-configuration, daemon service, query history, and recordings. Partial failure
+configuration, daemon service, recordings, and remote query sign-ins. Use
+`hyp remote remove <name>` to remove a query target and its stored sign-in
+separately. Partial failure
 returns `1` and prints repair commands.
 
 ```sh
@@ -1521,6 +1603,8 @@ Omit `name` to sign in to the default target. Unless you set `--no-forward`,
 login can enroll this machine, set up sync, and install the daemon.
 
 - `--org <org>` selects an organization.
+- `--browser` forces browser sign-in when stdin is piped, unless an explicit
+  `--token-file` is supplied.
 - `--no-browser` prints the sign-in URL instead of opening a browser.
 - `--host <label>` overrides the host label this machine syncs under, which defaults to the
   hostname.
@@ -1554,20 +1638,8 @@ The token is written to standard output on its own; the summary line, the
 warning, and the recipe go to standard error, so `hyp remote mint > ci.token`
 stores exactly the secret.
 
-Use the printed token as the CI recipe's bootstrap credential. The recipe names
-the base URL, which is what `hyp join` expects, even when the target was
-registered with a `/v1/mcp` suffix, and feeds the token on standard input
-rather than as a positional argument, which would expose a long-lived shared
-secret to `ps` and to `set -x` traces on the runner:
-
-```sh
-# setup
-printf '%s' "$HYP_CI_TOKEN" | hyp join https://hyp.example.com --no-daemon
-hyp daemon run &
-# ... the job's steps ...
-# teardown: flush what the schedule has not exported yet
-hyp sync --yes
-```
+For the complete join, capture, and flush workflow, see
+[CI and headless deployment](TEAM_SETUP.md#ci-and-headless-deployment).
 
 ### `hyp remote list`
 
@@ -1671,8 +1743,13 @@ hyp vector status --json
 
 ## Enrich the activity graph
 
-Plugin: `@hypaware/context-graph-enrich`. The visible `hyp enrichment` group
-lists its operations:
+Requires active `@hypaware/context-graph-enrich`, `@hypaware/context-graph`,
+and `@hypaware/vector-search`, plus configured embedder and completion
+providers. Bundled providers include `@hypaware/embedder-openai` and
+`@hypaware/completion-anthropic` or `@hypaware/completion-openai`.
+Adding only the enrichment plugin is not sufficient.
+
+The `hyp enrichment` group lists its operations:
 
 ```text
 hyp enrichment <propose|curate|backfill|status>
@@ -1691,7 +1768,7 @@ resolution, committed-knowledge, and derived graph data.
 hyp enrichment propose
 ```
 
-Runs one T1 proposal tick over settled sessions and writes new prospect rows.
+Analyzes settled sessions once and writes proposed knowledge for review.
 
 ```sh
 hyp enrichment propose
@@ -1703,8 +1780,8 @@ hyp enrichment propose
 hyp enrichment curate
 ```
 
-Runs one synchronous T2 curation tick over pending prospects. It can call the
-configured completion provider and write resolution and committed rows.
+Reviews pending proposals once. It can call the configured completion provider
+and record which proposals were accepted or rejected, along with accepted knowledge.
 
 ```sh
 hyp enrichment curate
@@ -1713,7 +1790,7 @@ hyp enrichment curate
 ### `hyp enrichment backfill`
 
 ```text
-hyp enrichment backfill [--propose-only|--curate-only]
+hyp enrichment backfill [--propose-only|--curate-only] [--since <YYYY-MM-DD>] [--dry-run]
 ```
 
 Processes historical sessions. The parser also accepts `--since YYYY-MM-DD`
@@ -1754,9 +1831,9 @@ still running an older version than the package on disk. Foreground daemons
 need a separate relaunch; source checkouts and npx-cache copies do not
 self-update. Failures return `1` with a reason and repair guidance.
 
-See [updating and recovery](CLI.md#upgrade-within-a-compatible-major-version).
+See [updating and recovery](CLI.md#update-hypaware).
 
-## Control optional product telemetry
+## Control product telemetry
 
 ### `hyp telemetry`
 
@@ -1771,7 +1848,7 @@ retains an allowlisted preview queue without delivery. `enable organization`
 requires an eligible HypAware Cloud enrollment. `off` removes pending copies
 and stops collection, but cannot retract records already accepted remotely.
 
-See [product telemetry](PRODUCT_TELEMETRY.md) for daemon restart requirements,
+See [product telemetry](PRIVACY.md#product-telemetry) for daemon restart requirements,
 what is collected, and delivery limits.
 
 ## Print version information
@@ -1829,3 +1906,27 @@ errors return `1`.
 ```sh
 hyp dev plugin doctor ./plugins/hypaware-plugin-widget --json
 ```
+
+## Use canonical command names
+
+Use the canonical names below in new scripts and documentation. Other spellings
+remain compatibility aliases and use the same runners:
+
+| Compatibility spelling | Canonical spelling |
+| --- | --- |
+| `hyp init` | `hyp setup` |
+| `hyp unattach` | `hyp detach` |
+| `hyp client history providers` | `hyp backfill list` |
+| `hyp skills install` | `hyp client skills install` |
+| `hyp policy ...`, `hyp ignore`, `hyp unignore`, `hyp purge` | `hyp privacy ...` |
+| `hyp query status`, `hyp query refresh`, `hyp query maintain` | `hyp cache status`, `hyp cache refresh`, `hyp cache maintain` |
+| `hyp graph neighbors` | `hyp query graph neighbors` |
+| `hyp vector search` | `hyp query vector search` |
+| `hyp plugin new`, `hyp plugin doctor` | `hyp dev plugin new`, `hyp dev plugin doctor` |
+| `hyp mcp` | `hyp mcp serve` |
+| `hyp enrich ...` | `hyp enrichment ...` |
+
+`hyp attach` and `hyp detach` are the preferred short forms of `hyp client attach`
+and `hyp client detach`; both spellings run the same command.
+
+Plugin-owned aliases are available only when the owning plugin is active.

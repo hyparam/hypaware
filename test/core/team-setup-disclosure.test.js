@@ -33,7 +33,7 @@ const DOC = 'docs/TEAM_SETUP.md'
 // the gate. Matched on a distinctive fragment rather than the whole
 // paragraph so rewording it stays free; moving it does not.
 const UNCONDITIONAL_CLAIMS = [
-  { what: 'the first-sync hold callout', find: 'Nothing is synced immediately.' },
+  { what: 'the first-sync hold callout', find: 'Choose **n** to review your recordings first.' },
   { what: 'the pointer to the privacy skill', find: 'hypaware-privacy' },
   { what: 'the pointer to PRIVACY.md', find: './PRIVACY.md' },
 ]
