@@ -196,3 +196,58 @@ test('a never-joined host renders no provenance tags or layers block', async () 
   renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
   assert.doesNotMatch(stdout.text(), /\[central · locked\]|\[local\]|local config \(not applied\)/)
 })
+
+// A central layer that is on disk but does not parse is not an absent one:
+// the collector collapses both to `centralConfig === null`, so without a
+// diagnostic of its own the report names the file nowhere (issue #2423).
+
+test('a joined host whose central seed cannot be parsed names the file', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, '{ not json at all\n')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'the unreadable central layer has a diagnostic of its own')
+  assert.equal(unreadable?.severity, 'warning')
+  assert.ok(unreadable?.message.includes(seedPath), `message names the file: ${unreadable?.message}`)
+  // The local layer still carries the host, so the verdict is unchanged: the
+  // diagnostic is loud, not an outage signal.
+  assert.equal(report.overall, 'healthy')
+  // The merge itself is unchanged: there is nothing readable to merge.
+  assert.deepEqual(report.activePlugins, ['@hypaware/ai-gateway'])
+})
+
+test('an unparseable applied slot is named through the active pointer', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  const slotPath = path.join(controlDir, 'config.a.json')
+  await fs.writeFile(slotPath, 'truncated-garbage')
+  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
+  assert.ok(unreadable, 'the unreadable applied slot has a diagnostic of its own')
+  assert.ok(unreadable?.message.includes(slotPath), `message names the slot: ${unreadable?.message}`)
+})
+
+test('a readable central layer reports no unreadable-layer diagnostic', async () => {
+  const hypHome = await makeHome()
+  await joinedHomeForRender(hypHome)
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(!report.diagnostics.some((d) => d.kind === 'config_central_unreadable'))
+})

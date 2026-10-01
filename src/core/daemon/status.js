@@ -1283,6 +1283,27 @@ export async function collectHypAwareStatus(opts = {}) {
     }
   }
 
+  // The same fact for the other layer, and why it needs a line of its own:
+  // `centralConfig` is null both for a layer that is absent and for one that
+  // is there and will not parse, so without this the report asserts
+  // `layered: null` - no central layer at all - and nothing names the file
+  // (issue #2423). An unreadable layer is not an absent one, the reading
+  // LLP 0226 #unreadable-is-not-absent gives an unreadable asset and
+  // `hyp remote login` already gives this very layer.
+  //
+  // A warning on the local layer's precedent: the host runs on whichever layer
+  // did load, so this is loud without being an outage signal, and staying out
+  // of `degradingKinds` leaves `overall` as it was. Whether an unreadable org
+  // layer *should* degrade the verdict is a separate question.
+  if (centralLoaded && centralLayerUnreadable) {
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'config_central_unreadable',
+      message: `central config layer ${centralLoaded.configPath} is unreadable (${centralLoaded.message}) - the team config it carries is not applied`,
+      repair: ['hyp join <url> <token>'],
+    })
+  }
+
   // An installed plugin in a bundled name is code that never runs: boot
   // activates the bundled copy and warns once in the daemon log. This is the
   // surface that names it and the one command that clears it, and it is a
