@@ -1309,12 +1309,24 @@ export async function collectHypAwareStatus(opts = {}) {
   // did load, so this is loud without being an outage signal, and staying out
   // of `degradingKinds` leaves `overall` as it was. Whether an unreadable org
   // layer *should* degrade the verdict is a separate question.
+  //
+  // `hyp remote login` is deliberately not a repair: its D4 gate reads the
+  // same `centralLayerUnreadable` predicate and refuses while the layer is
+  // unreadable, so it would be advice that cannot run on the one host that
+  // sees this line. `hyp leave` can run here on purpose (#623), which is why
+  // it leads the re-enrollment route, and the permission line covers the
+  // control directory this process could not list, where `hyp join`'s own
+  // seed write would fail too.
   if (centralUnreadable) {
     diagnostics.push({
       severity: 'warning',
       kind: 'config_central_unreadable',
       message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
-      repair: ['hyp join <url> <token>', 'hyp remote login <url>'],
+      repair: [
+        'hyp join <url> <token>',
+        'hyp leave, then hyp remote login',
+        'check the ownership and permissions of the config-control directory',
+      ],
     })
   }
 
