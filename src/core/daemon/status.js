@@ -1313,7 +1313,7 @@ export async function collectHypAwareStatus(opts = {}) {
     diagnostics.push({
       severity: 'warning',
       kind: 'config_central_unreadable',
-      message: `central config layer is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
+      message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
       repair: ['hyp join <url> <token>', 'hyp remote login <url>'],
     })
   }

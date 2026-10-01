@@ -217,10 +217,10 @@ test('a joined host whose central seed cannot be parsed names the file', async (
   const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
   assert.ok(unreadable, 'the unreadable central layer has a diagnostic of its own')
   assert.equal(unreadable?.severity, 'warning')
-  // The message carries the load failure verbatim (like the local-layer
-  // sibling, it does not re-interpolate the path on top of it); a JSON parse
-  // failure's own message does not repeat the path, but it does prove the
-  // seed file itself was read and rejected, not merely absent.
+  // A JSON parse failure's own inner message does not repeat the path, so the
+  // diagnostic interpolates it explicitly; this is the exact case issue
+  // #2423 reproduced.
+  assert.ok(unreadable?.message.includes(seedPath), `message names the file: ${unreadable?.message}`)
   assert.match(unreadable?.message ?? '', /is unreadable \(config is not valid JSON/)
   // The local layer still carries the host, so the verdict is unchanged: the
   // diagnostic is loud, not an outage signal.
@@ -247,7 +247,8 @@ test('an unparseable applied slot is named through the active pointer', async ()
   const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
   assert.ok(unreadable, 'the unreadable applied slot has a diagnostic of its own')
   // Same shape as the seed case: the inner JSON-parse message does not repeat
-  // the slot path, but it does prove the slot file was read and rejected.
+  // the slot path, so the diagnostic interpolates it explicitly.
+  assert.ok(unreadable?.message.includes(slotPath), `message names the slot: ${unreadable?.message}`)
   assert.match(unreadable?.message ?? '', /is unreadable \(config is not valid JSON/)
 })
 
