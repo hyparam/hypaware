@@ -26,12 +26,12 @@ spelled: deleting the whole `sinks` key, emptying it, or replacing the set
 without that entry. Its files are still history, but this install no longer
 has that destination to repair, even when `sinks[]` still lists it, recovered
 only from the prior daemon's status file for shape. A config layer the host
-could not read, local or central, or a `sinks` entry the central layer's
-merge dropped, is not a removal: the destination stays configured and still
-warns. Since nothing clears a warning but a success, a destination that stays
-configured and is never exercised again would warn until it is removed or
-succeeds; that is the accepted cost of the rule and no escape hatch is added
-for it.
+could not read, local or central, or a `sinks` entry for that destination
+which the central layer's merge dropped, is not a removal: the destination
+stays configured and still warns. Since nothing clears a warning but a
+success, a destination that stays configured and is never exercised again
+would warn until it is removed or succeeds; that is the accepted cost of the
+rule and no escape hatch is added for it.
 
 Use the existing outbox filename timestamps and the already-loaded daemon
 snapshot's `lastSuccessAt`. Config-derived sink rows omit that runtime stamp.

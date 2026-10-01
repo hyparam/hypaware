@@ -770,3 +770,43 @@ test('export warning: an unreadable central layer still warns about a failing si
   assert.equal(warnings.length, 1, 'an unreadable central layer must not suppress a live export failure')
   assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
 })
+
+// A merge-dropped entry speaks only for the destination it names. Dropping
+// `brandnew` must not re-arm the warning for `deleted-ghost`, an unrelated
+// instance recovered only from the prior daemon's status file: it is outside
+// the configured set under every reading (issue #2361).
+// @ref LLP 0453#warning-rule [tests]: a dropped sinks entry speaks only for the destination it names, so an unrelated recovered row still raises no warning
+test('export warning: a merge-dropped entry does not re-arm the warning for an unrelated recovered sink', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), JSON.stringify({ version: 2, plugins: [] }))
+  // Names a plugin this install has no manifest for, so `resolveLayeredConfig`
+  // drops it rather than merging it in. The only configured sink is
+  // `brandnew`, so dropping it leaves `config.sinks` empty.
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: { brandnew: { plugin: '@hypaware/does-not-exist', config: {} } },
+  }))
+  // The prior daemon's status file names a different instance entirely, one
+  // the current config never mentioned, dropped or not.
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'deleted-ghost', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'deleted-ghost', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.layered?.drops,
+    [{ section: 'sinks', key: 'brandnew', reason: 'invalid_merge', detail: 'sink_plugin_unknown' }],
+    'ground truth: the merge actually dropped the local entry',
+  )
+  assert.deepEqual(
+    report.diagnostics.filter((d) => d.kind === 'sink_export_failing').map((d) => d.message),
+    [],
+    'a drop naming a different destination must not warn about this unrelated recovered row',
+  )
+  // The file is still history even though the row it belongs to is not read
+  // as configured.
+  assert.equal(report.recentErrorCount, 1)
+})

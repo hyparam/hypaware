@@ -1921,10 +1921,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // or central config (`localConfigUnreadable`, `centralLayerUnreadable`) and
   // a `sinks` entry the central layer merge dropped (`merged.drops`, reason
   // `invalid_merge`) also leave `config.sinks` empty without the operator
-  // having removed anything, so none of the three is read as intent here;
-  // reading any of them as intent would silently drop a live export-failure
-  // warning instead of fixing the over-warning issue #2361 set out to fix.
-  const sinksDroppedByMerge = merged.drops.some((d) => d.section === 'sinks')
+  // having removed anything, so none of these is read as intent here; reading
+  // any of them as intent would silently drop a live export-failure warning
+  // instead of fixing the over-warning issue #2361 set out to fix. A
+  // merge-dropped entry only speaks for the destination it names, so it is
+  // matched by key against the recovered rows below rather than treated as
+  // a global flag; an unreadable layer speaks for all of them, since nothing
+  // is known about which instances it named.
+  const sinkKeysDroppedByMerge = new Set(merged.drops.filter((d) => d.section === 'sinks').map((d) => d.key))
   let sinksAreConfigured = true
   if (opts.runtime?.sinks) {
     // The registry's key, not the handle's own `instanceName`: nothing on
@@ -1971,9 +1975,16 @@ export async function collectHypAwareStatus(opts = {}) {
     // deleted (issue #2361). But an unreadable local or central config, or a
     // merge-dropped `sinks` entry, land here too without being a removal, so
     // only clear the gate when none of those explains the empty `config.sinks`.
-    sinksAreConfigured = localConfigUnreadable || centralLayerUnreadable || sinksDroppedByMerge
-    sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
-      .filter((s) => !!s && typeof s === 'object'))
+    // The merge-drop half is scoped to the recovered rows it actually names:
+    // a dropped entry speaks only for the destination it named, not for every
+    // row this fallback recovers, so only a recovered instance whose key was
+    // dropped re-arms the gate. The unreadable-layer checks stay unscoped,
+    // since an unreadable layer leaves no record of which instances it named.
+    const recovered = (Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
+      .filter((s) => !!s && typeof s === 'object')
+    sinksAreConfigured = localConfigUnreadable || centralLayerUnreadable
+      || recovered.some((s) => sinkKeysDroppedByMerge.has(s.instance))
+    sinks.push(...recovered)
   }
 
   // ----- client attach -----
