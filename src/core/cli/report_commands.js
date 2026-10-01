@@ -28,7 +28,7 @@ import { PromptCancelledError, select } from './tui/index.js'
 import { isPromptBackError, isPromptCancelledError } from './tui/runtime.js'
 import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
-import { PICK_DEADLINE_MS, PICK_DEADLINE_NOTICE, askableClients, attachHint } from '../commands/ask.js'
+import { PICK_DEADLINE_NOTICE, armPickDeadline, askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
 
 /**
@@ -71,10 +71,7 @@ const esc = (value) => escapeForDisplay(String(value))
  */
 async function pickClient(ask, ctx, spec, deadlineMs) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), deadlineMs ?? PICK_DEADLINE_MS)
-  const stdin = /** @type {{ once?: (e: string, l: () => void) => unknown, off?: (e: string, l: () => void) => unknown }} */ (/** @type {unknown} */ (ctx.stdin))
-  const lift = () => clearTimeout(timer)
-  stdin?.once?.('keypress', lift)
+  const disarm = armPickDeadline(ctx.stdin, controller, deadlineMs)
   try {
     return { client: await ask({ ...spec, signal: controller.signal }) }
   } catch (err) {
@@ -84,8 +81,7 @@ async function pickClient(ask, ctx, spec, deadlineMs) {
     if (isPromptCancelledError(err) || isPromptBackError(err)) return { cancelled: true }
     throw err
   } finally {
-    clearTimeout(timer)
-    stdin?.off?.('keypress', lift)
+    disarm()
   }
 }
 

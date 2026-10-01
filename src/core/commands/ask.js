@@ -52,6 +52,52 @@ export const PICK_DEADLINE_MS = 10_000
 export const PICK_DEADLINE_NOTICE = '\nNo answer at the client prompt - starting the first one.\n'
 
 /**
+ * Arm the picker deadline against `stdin`, and hand back the disarm its caller
+ * runs when the prompt settles. Both client pickers arm through this rather
+ * than keeping a copy, for the same reason they share the deadline above.
+ *
+ * The first keypress lifts the deadline for good, which is what keeps someone
+ * still reading the options from being cut off mid-decision. But a keypress is
+ * not proof of a keyboard: a pty whose input has reached EOF
+ * (`script ... < /dev/null`) is sent a NUL byte, and readline decodes it into
+ * a keypress like any other. Measured under exactly that pty on node 22, it
+ * arrives once carrying the sequence `\0` under a ctrl-chord name nobody
+ * pressed, and lifting on it hands a run nobody is at precisely the unbounded
+ * wait the deadline exists to end, so it is the one keypress that does not
+ * count. The escape `\0` and not the character: a literal NUL would make this
+ * file read as binary to grep.
+ *
+ * The listener is `on`, not `once`: a `once` listener is spent by the byte it
+ * declines to act on, and the genuine keystroke behind it would then find
+ * nothing left to lift.
+ *
+ * @param {unknown} stdin
+ * @param {AbortController} controller
+ * @param {number} [deadlineMs]
+ * @returns {() => void}
+ */
+export function armPickDeadline(stdin, controller, deadlineMs) {
+  const timer = setTimeout(() => controller.abort(), deadlineMs ?? PICK_DEADLINE_MS)
+  const io = /** @type {{ on?: (e: string, l: typeof lift) => unknown, off?: (e: string, l: typeof lift) => unknown }} */ (stdin)
+  /**
+   * @param {string} [str]
+   * @param {{ sequence?: string }} [key]
+   * @returns {void}
+   */
+  function lift(str, key) {
+    if ((key?.sequence ?? str) === '\0') return
+    disarm()
+  }
+  /** @returns {void} */
+  function disarm() {
+    clearTimeout(timer)
+    io?.off?.('keypress', lift)
+  }
+  io?.on?.('keypress', lift)
+  return disarm
+}
+
+/**
  * `hyp ask [question]`
  *
  * The verb that makes setup's closing question runnable. Setup prints it
@@ -158,10 +204,7 @@ export async function runAsk(argv, ctx, deps = {}) {
 async function pickLauncher(launchers, ctx, deps) {
   if (launchers.length < 2) return launchers[0]
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), deps.pickDeadlineMs ?? PICK_DEADLINE_MS)
-  const stdin = /** @type {{ once?: (e: string, l: () => void) => unknown, off?: (e: string, l: () => void) => unknown }} */ (/** @type {unknown} */ (ctx.stdin))
-  const lift = () => clearTimeout(timer)
-  stdin?.once?.('keypress', lift)
+  const disarm = armPickDeadline(ctx.stdin, controller, deps.pickDeadlineMs)
   /** @type {FirstAskLauncher | undefined} */
   let picked
   try {
@@ -177,8 +220,7 @@ async function pickLauncher(launchers, ctx, deps) {
       stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
     })
   } finally {
-    clearTimeout(timer)
-    stdin?.off?.('keypress', lift)
+    disarm()
   }
   if (picked) return picked
   if (!controller.signal.aborted) return undefined
