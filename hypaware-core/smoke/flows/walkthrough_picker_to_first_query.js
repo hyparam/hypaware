@@ -119,9 +119,14 @@ export async function run({ harness, expect }) {
   // never depends on whatever `claude` binary the machine running it carries.
   const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
   process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
-  // Neither HOME nor XDG_CONFIG_HOME sandboxes `opencode` itself: the
-  // widened real run below picks `opencode` with a non-dry export, and
-  // `runOpenCode` (hypaware-core/plugins-workspace/opencode/src/backfill.js)
+  // Neither HOME nor XDG_CONFIG_HOME sandboxes `opencode` itself: both
+  // setup runs in this flow pick `opencode` and shell out to it, the
+  // earlier --dry-run run included, which still emits
+  // backfill.provider_start{dry_run:true, provider:'opencode'} and an
+  // opencode.backfill.selection log row, so it also executes the host
+  // CLI and reads its session list. That is why PATH has to be planted
+  // before the first dispatch below, not just before the widened real
+  // run. `runOpenCode` (hypaware-core/plugins-workspace/opencode/src/backfill.js)
   // resolves a bare `opencode` from PATH. An inherited PATH would make this
   // release-gate smoke read and import whatever real session history is
   // installed on the machine running it. Plant a fake `opencode` ahead of
@@ -567,8 +572,14 @@ export async function run({ harness, expect }) {
     const dryRunWriteSpans = writeSpans.filter(
       (/** @type {any} */ s) => s.attributes?.dry_run === true
     )
+    // Not `!Object.hasOwn(..., 'dry_run')`: that couples the smoke to the
+    // omission style one emitter happens to use (wizard/pick.js spreads
+    // `...(dryRun ? { dry_run: true } : {})`), while the sibling
+    // client.attach assertion below asserts an explicit `dry_run === false`.
+    // `!== true` expresses the intent ("not tagged as a dry run") and
+    // survives either emitter style.
     const realWriteSpans = writeSpans.filter(
-      (/** @type {any} */ s) => !Object.hasOwn(s.attributes ?? {}, 'dry_run')
+      (/** @type {any} */ s) => s.attributes?.dry_run !== true
     )
     expect.that(
       'traces: exactly one wizard.pick.write_config span is tagged dry_run (the dry run above)',
@@ -576,7 +587,7 @@ export async function run({ harness, expect }) {
       (v) => v === 1
     )
     expect.that(
-      'traces: exactly one wizard.pick.write_config span has no dry_run attribute (the real run below)',
+      'traces: exactly one wizard.pick.write_config span has no dry_run attribute (the real run above)',
       realWriteSpans.length,
       (v) => v === 1
     )

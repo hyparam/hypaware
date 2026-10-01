@@ -202,3 +202,23 @@ test('setup claude-and-otel-local --dry-run writes no config', async () => {
   assert.match(stdout.text(), /\(dry-run\) Would write /)
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })
+
+// The preset reads --dry-run out of its own raw argv (it is dispatched
+// before flag parsing), and the CLI codec accepts the inline-boolean
+// spelling for any boolean flag elsewhere (--flag=true / --flag=false),
+// so the preset needs to honor that spelling too, not just the bare flag.
+test('setup claude-and-otel-local --dry-run=true writes no config', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run=true'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /\(dry-run\) Would write /)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
+test('setup claude-and-otel-local --dry-run=false writes the config', async () => {
+  const { hypHome, stdout, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run=false'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /✓ Wrote /)
+  await assert.doesNotReject(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})

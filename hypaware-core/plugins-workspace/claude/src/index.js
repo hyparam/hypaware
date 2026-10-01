@@ -613,6 +613,32 @@ function firstNonEmpty(...values) {
 }
 
 /**
+ * Read a boolean flag out of a preset's raw argv the way the CLI codec
+ * reads one: a bare `--flag` is true, `--flag=true` / `--flag=false`
+ * carry their value. A preset is dispatched before flag parsing
+ * (src/core/commands/init.js), so it reads argv itself, and a plain
+ * `argv.includes('--dry-run')` silently drops `--dry-run=true`: a
+ * spelling the CLI accepts everywhere else. Same class as
+ * src/core/cli/remote_commands.js's `--no-forward=true`.
+ *
+ * @param {string[]} argv
+ * @param {string} name flag name without the leading dashes
+ */
+function booleanFlag(argv, name) {
+  const bare = `--${name}`
+  const prefix = `${bare}=`
+  let value = false
+  for (const token of argv) {
+    if (token === bare) {
+      value = true
+    } else if (token.startsWith(prefix)) {
+      value = token.slice(prefix.length) === 'true'
+    }
+  }
+  return value
+}
+
+/**
  * `hyp setup claude-and-otel-local`
  *
  * Writes a v2 config that picks: `@hypaware/ai-gateway`,
@@ -624,14 +650,22 @@ function firstNonEmpty(...values) {
  * `--force` to opt into overwrite); otherwise the existing file
  * stays and the command returns 1. `--dry-run` reports the path the
  * preset would write and writes nothing, refusing on an existing
- * config exactly as a real run would.
+ * config exactly as a real run would. `--dry-run` is read the way the
+ * CLI codec reads a boolean, so `--dry-run=true` and `--dry-run=false`
+ * work as well as the bare flag. `--force` is not: see the comment on
+ * it below.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
+  // Left as a plain argv.includes: dropping `--force=true` fails safe (the
+  // preset still refuses to overwrite, the conservative outcome), unlike
+  // dropping `--dry-run=true` which fails dangerous (it writes). Only the
+  // dangerous direction is fixed here; routing --force through booleanFlag
+  // too is a behavior change for another change.
   const force = argv.includes('--force')
-  const dryRun = argv.includes('--dry-run')
+  const dryRun = booleanFlag(argv, 'dry-run')
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   const configPath = ctx.env.HYP_CONFIG
