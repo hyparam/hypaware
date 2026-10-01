@@ -30,6 +30,7 @@ import {
 } from '../../src/core/update/self_update.js'
 import { DAEMON_RESTART_EXIT_CODE } from '../../src/core/daemon/runtime.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
+import { parseCommandArgv } from '../../src/core/cli/verb_codec.js'
 import { CONFIG_BASENAME, parseConfigShape } from '../../src/core/config/schema.js'
 import { mergeConfigLayers } from '../../src/core/config/merge.js'
 
@@ -2129,6 +2130,51 @@ test('repeated failed boots on an installed version reinstall the one it replace
     const third = await lane()
     assert.notEqual(third.action, 'updated')
     assert.equal(calls.filter((c) => c[1] === 'install').length, 1)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a rollback onto a release predating --attached does not fail its own helper step', async () => {
+  // The rollback installs the version the update replaced, so the
+  // post-install child is the *downgraded* binary. A release predating
+  // LLP 0458 declares no `attached` property in its skills parse and
+  // refuses the flag outright, and this lane only runs when the boot is
+  // already failing: it must not report its own argv as a failed step.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-preflag-'))
+  try {
+    const { packageRoot, runner } = await failedBootAfterApply(dir)
+    /** @type {string[]} */
+    const events = []
+    let attachedAsked = false
+    const lane = () => runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, fetchImpl: fetchStub('1.1.0').impl,
+      runner: async (cmd, args, options) => {
+        if (args[1] !== 'skills') return runner(cmd, args, options)
+        if (args.includes('--attached')) attachedAsked = true
+        // The pre-flag `parseSkillsArgs`: `client` and nothing else, so an
+        // unknown flag is refused with `error: ...` and exit 2.
+        const parsed = parseCommandArgv(args.slice(3), {
+          type: 'object',
+          properties: { client: { type: 'string', default: 'all' } },
+        })
+        if ('ok' in parsed && !parsed.ok) return { exitCode: 2, stdout: '', stderr: `error: ${parsed.error}\n` }
+        return { exitCode: 0, stdout: 'installed skills\n', stderr: '' }
+      },
+      log: (event) => { events.push(event) },
+    })
+    // One failed boot is counted; the second is the pattern that rolls back.
+    assert.notEqual((await lane()).action, 'updated')
+    assert.deepEqual(await lane(), { action: 'updated', reason: 'rolled_back', latest: '1.0.0' })
+    assert.equal(
+      events.includes('self_update.skills_install_failed'), false,
+      'the rollback must not report a failure for an argv the restored release cannot parse'
+    )
+    assert.ok(
+      events.includes('self_update.skills_install_skipped'),
+      'the skipped helper step is named by its own event, not left silent'
+    )
+    assert.equal(attachedAsked, false)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
