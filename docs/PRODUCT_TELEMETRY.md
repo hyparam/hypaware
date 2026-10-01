@@ -68,6 +68,20 @@ remain absent, not zero. No cache traversal is added. First useful-result
 milestones, complete setup funnels and adapter-specific capture failure coverage
 are not yet instrumented.
 
+Those counters are volume, not content, and a `local-only` marking does not
+filter them: the capture and write stages sit upstream of the export seam that
+withholds a `local-only` directory, so `pipeline.rows`, `pipeline.bytes`,
+`pipeline.failures`, `pipeline.pending`, `pipeline.oldest_age` and
+`pipeline.freshness` all describe work that includes rows recorded under a
+directory marked `local-only`. Only export bytes, which report what a sink
+actually wrote, leave a withheld row out. What travels is the aggregate alone:
+one number per record plus a `stage` label from the closed set `capture`,
+`write`, `export`, `archive`, `mover`. `contract.js` matches that attribute key
+set exactly and rejects a record carrying anything else, so no path, dataset,
+source id, session or captured content accompanies a count, and none of it
+travels at all unless collection is in `organization` mode: `off` sends nothing,
+and `local` keeps the queue on disk with no network delivery.
+
 ## Delivery and durability
 
 `<HYP_HOME>/hypaware/product-telemetry/queue-v1` has 160 exclusive slots of at
