@@ -101,7 +101,7 @@ export async function runQueryStatus(argv, ctx) {
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 1e3) return `${Math.max(0, Math.round(bytes) || 0)} B`
   if (bytes < 999_500) return `${Math.round(bytes / 1e3)} KB`
-  if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`
+  if (bytes < 999_500_000) return `${(bytes / 1e6).toFixed(1)} MB`
   return `${(bytes / 1e9).toFixed(1)} GB`
 }
 
@@ -120,8 +120,10 @@ function partitionLabel(p) {
 }
 
 /**
- * The retention cutoff most partitions share, hoisted into the header so
- * only a partition that departs from it carries a note.
+ * The retention cutoff most source-table partitions share, hoisted into the
+ * header only when it beats "no cutoff" as the most common answer among them.
+ * A cutoff held by a minority stays on its own row instead of reading as
+ * cache-wide.
  *
  * @param {CacheStatusPartition[]} partitions
  * @returns {string | undefined}
@@ -129,16 +131,16 @@ function partitionLabel(p) {
 function commonRetentionCutoff(partitions) {
   /** @type {Map<string, number>} */
   const counts = new Map()
-  /** @type {string | undefined} */
-  let best
+  /** @type {string} */
+  let best = ''
   for (const p of partitions) {
-    const date = p.lastRetentionCutoffDate
-    if (!date) continue
-    const n = (counts.get(date) ?? 0) + 1
-    counts.set(date, n)
-    if (best === undefined || n > (counts.get(best) ?? 0)) best = date
+    if (p.layout !== 'source-table') continue
+    const key = p.lastRetentionCutoffDate ?? ''
+    const n = (counts.get(key) ?? 0) + 1
+    counts.set(key, n)
+    if (n > (counts.get(best) ?? 0)) best = key
   }
-  return best
+  return best || undefined
 }
 
 const CACHE_STATUS_COLUMNS = ['ROWS', 'FILES', 'SNAPSHOTS', 'DELETES', 'METADATA']
@@ -156,14 +158,24 @@ const CACHE_STATUS_COLUMNS = ['ROWS', 'FILES', 'SNAPSHOTS', 'DELETES', 'METADATA
  */
 export function renderCacheStatus({ report, datasets }) {
   const cutoff = commonRetentionCutoff(report.partitions)
+  // `dataset.name` is a live plugin property, not a stored field, and it is
+  // this table's join key: read it once per registration rather than once per
+  // map, or two disagreeing reads can mark a registered dataset `(not registered)`.
   /** @type {Map<string, CacheStatusPartition[]>} */
-  const byDataset = new Map(datasets.map((d) => [d.name, []]))
+  const byDataset = new Map()
+  /** @type {Map<string, string>} */
+  const plugins = new Map()
+  for (const d of datasets) {
+    const name = d.name
+    const plugin = d.plugin
+    byDataset.set(name, [])
+    plugins.set(name, plugin)
+  }
   for (const p of report.partitions) {
     const parts = byDataset.get(p.dataset)
     if (parts) parts.push(p)
     else byDataset.set(p.dataset, [p])
   }
-  const plugins = new Map(datasets.map((d) => [d.name, d.plugin]))
 
   /** @param {CacheStatusPartition} p */
   const cells = (p) => [

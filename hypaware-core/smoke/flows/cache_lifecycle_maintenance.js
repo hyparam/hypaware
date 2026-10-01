@@ -13,6 +13,7 @@ import {
 } from '../../../src/core/observability/index.js'
 import { readCursorSync } from '../../../src/core/cache/partition.js'
 import { maintainCache, cacheStatus } from '../../../src/core/cache/maintenance.js'
+import { groupThousands } from '../../../src/core/util/format_number.js'
 
 /**
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
@@ -168,10 +169,11 @@ export async function run({ harness, expect }) {
         { stdout: statusStdout, stderr: statusStderr, kernel, registry }
       )
       expect.that('query status: exited 0', statusCode, (v) => v === 0)
+      const datasetRow = new RegExp(`^${DATASET}\\s+${groupThousands(totalRows)}\\s`, 'm')
       expect.that(
-        'query status: output contains partition info',
+        'query status: output lists the dataset row with its row count',
         statusStdout.text(),
-        (v) => typeof v === 'string' && v.includes('partitions:')
+        (v) => typeof v === 'string' && datasetRow.test(v)
       )
 
       // --- 7. Verify hyp query maintain CLI ---

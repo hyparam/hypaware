@@ -98,6 +98,33 @@ test('cache status notes only a partition whose retention cutoff departs from th
   assert.match(out, /^ {2}openclaw\s.* {3}no cutoff$/m)
 })
 
+test('cache status does not hoist a cutoff that most partitions do not share', () => {
+  const out = render(
+    [
+      sourceTable({ lastRetentionCutoffDate: undefined }),
+      sourceTable({ partition: { source: 'codex' }, lastRetentionCutoffDate: undefined }),
+      sourceTable({ partition: { source: 'hermes' }, lastRetentionCutoffDate: undefined }),
+      sourceTable({ partition: { source: 'openclaw' }, lastRetentionCutoffDate: undefined }),
+      sourceTable({ partition: { source: 'edge' }, lastRetentionCutoffDate: '2026-01-01' }),
+    ],
+    [{ name: 'ai_gateway_messages', plugin: '@hypaware/ai-gateway' }]
+  )
+
+  assert.doesNotMatch(out, /^retention\b/m)
+  assert.match(out, /^ {2}edge\s.* {3}cutoff 2026-01-01$/m)
+  assert.doesNotMatch(out, /no cutoff/)
+})
+
+test('cache status does not round a metadata size up into a wrong unit', () => {
+  const out = render(
+    [sourceTable({ metadataBytes: 999999999 })],
+    [{ name: 'ai_gateway_messages', plugin: '@hypaware/ai-gateway' }]
+  )
+
+  assert.match(out, /^ {2}claude\s.*\b1\.0 GB$/m)
+  assert.doesNotMatch(out, /1000\.0 MB/)
+})
+
 test('cache status on an empty install says so instead of printing an empty table', () => {
   const out = render([], [])
 

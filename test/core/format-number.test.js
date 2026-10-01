@@ -99,6 +99,7 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
  * `groupThousands`, and a third importer reds until it is named here.
  */
 const COUNT_RENDERERS = [
+  'hypaware-core/smoke/flows/cache_lifecycle_maintenance.js',
   'src/core/cli/walkthrough.js',
   'src/core/commands/query.js',
   'src/core/commands/sync.js',

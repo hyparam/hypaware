@@ -595,10 +595,10 @@ export async function run({ harness, expect }) {
     )
     expect.that('dispatch: query status exited 0', statusCode, (v) => v === 0)
     expect.that(
-      'enumeration: claude_telemetry_events is listed alongside ai_gateway_messages',
+      'enumeration: each dataset is listed at column 0 with its owning plugin',
       statusOut.text(),
-      (v) => v.includes('claude_telemetry_events  (@hypaware/claude)') &&
-        v.includes('ai_gateway_messages  (@hypaware/ai-gateway)'),
+      (v) => /^claude_telemetry_events\b.*@hypaware\/claude$/m.test(v) &&
+        /^ai_gateway_messages\b.*@hypaware\/ai-gateway$/m.test(v),
     )
     expect.that(
       'registration: the dataset declares the claude_telemetry source signal',
