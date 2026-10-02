@@ -466,3 +466,98 @@ test('a hostile diagnostic kind cannot drive the terminal from the verbose diagn
     '--json still carries the kind byte-exact',
   )
 })
+
+// The fifth file: the client-action marker store. `buildClientActionsReport`
+// keys `kind` on a marker store and `requestKey` on a marker name or a
+// configured plugin, and lifts `reason`, `last_attempt` and `at` out of marker
+// JSON behind a `typeof === 'string'` guard, so a marker file this build did not
+// write supplied every string on the row. The Attention line cleaned three of
+// the five and the verbose block none, and `at` and `lastAttempt` reach a
+// terminal here alone. Planted rather than written as markers because the render
+// is what is under test.
+test('a hostile client-action marker cannot drive the terminal from the verbose client-actions block', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  // An erase-line sequence and a newline carrying a complete extra row: on the
+  // raw render each one forged a `[done]` action the operator never had.
+  const FORGED_ROW = '    - attach trusted  [done]'
+  const forge = (/** @type {string} */ value) => `${value}${ERASE_LINE}\n${FORGED_ROW}`
+  report.clientActions = {
+    actions: [
+      { kind: forge('attach'), requestKey: 'pending-key', state: 'pending' },
+      { kind: 'backfill', requestKey: forge('@acme/p'), state: 'pending' },
+      {
+        kind: 'backfill',
+        requestKey: '@acme/q',
+        state: 'failed',
+        reason: forge('import rejected'),
+        lastAttempt: forge('2026-01-01T00:00:00.000Z'),
+        attempts: 3,
+      },
+      { kind: 'attach', requestKey: 'codex', state: 'done', rows: 7, at: forge('2026-01-02T00:00:00.000Z') },
+      { kind: 'attach', requestKey: forge('refused-key'), state: 'refused', reason: forge('settings not writable') },
+    ],
+  }
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.match(text, /client actions:/, 'the block is rendered at all')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  // Counted inside the block rather than over the whole render: other sections
+  // write rows with the same prefix, and an ambient home can populate them.
+  const block = text.split('\n  client actions:\n')[1].split('\n\n')[0]
+  assert.equal(
+    block.split('\n').filter((line) => line.startsWith('    - ')).length,
+    5,
+    'five planted actions stay five rows, whatever their fields carry',
+  )
+  assert.equal(
+    block.split('\n').filter((line) => line.startsWith(FORGED_ROW)).length,
+    0,
+    'and no embedded newline forges a sixth',
+  )
+  // Every one of the five keeps its printable part, so a row still identifies
+  // its action rather than rendering blank.
+  assert.match(block, /^ {4}- attach\[2K.*pending-key {2}\[pending\]$/m, 'a hostile kind collapses into its own row, which still carries the key and the state')
+  assert.match(block, /- backfill @acme\/p/, 'the printable part of a hostile key still names the plugin')
+  assert.match(block, /\[failed\] {2}\(import rejected/, 'the reason still reads')
+  assert.match(block, /last attempt 2026-01-01T00:00:00\.000Z/, 'the last-attempt timestamp still reads')
+  assert.match(block, /at 2026-01-02T00:00:00\.000Z/, 'the done timestamp still reads')
+  assert.match(block, /run 'hyp client attach refused-key/, "and the refused state's repair hint still names the key")
+
+  // `--json` is the identifier contract: all five stay byte-exact, key order
+  // included, which is why the cleaning happens at the text interpolation.
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    JSON.stringify(payload.client_actions),
+    JSON.stringify([
+      { kind: forge('attach'), request_key: 'pending-key', state: 'pending' },
+      { kind: 'backfill', request_key: forge('@acme/p'), state: 'pending' },
+      {
+        kind: 'backfill',
+        request_key: '@acme/q',
+        state: 'failed',
+        reason: forge('import rejected'),
+        last_attempt: forge('2026-01-01T00:00:00.000Z'),
+        attempts: 3,
+      },
+      { kind: 'attach', request_key: 'codex', state: 'done', rows: 7, at: forge('2026-01-02T00:00:00.000Z') },
+      { kind: 'attach', request_key: forge('refused-key'), state: 'refused', reason: forge('settings not writable') },
+    ]),
+    '--json still carries every planted byte raw',
+  )
+})
