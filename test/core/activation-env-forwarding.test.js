@@ -19,6 +19,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../src/core/runtime/loader.js'
 
 /** @param {string} p */
@@ -61,15 +62,23 @@ test('activatePlugins hands the injected env to each activation context', async 
   })
 
   try {
-    const { results } = await activatePlugins({
+    const cacheRoot = path.join(stateRoot, 'cache')
+    const { results, runtime } = await activatePlugins({
       plugins: [{ manifest, rootDir, config: {} }],
       stateRoot,
       runId: 'env-forwarding',
       tmpRoot: stateRoot,
       env: /** @type {any} */ ({ HYP_TEST_MARKER: 'injected' }),
+      // Issue #2454. Without a runtime, `createKernelRuntime` falls back to
+      // `defaultCacheRoot()`, which reads HYP_HOME or the real home, rooting
+      // this fixture in the home the test exists to keep state out of.
+      // `<stateRoot>/cache` is the shape `bootKernel` passes.
+      runtime: createKernelRuntime({ cacheRoot }),
     })
     assert.equal(results[0]?.ok, true, /** @type {any} */ (results[0])?.message)
     assert.equal(await fs.readFile(seen, 'utf8'), 'injected')
+    // Pinned, not incidental: with no runtime this reads `<home>/.hyp/hypaware/cache`.
+    assert.equal(runtime.cacheRoot, cacheRoot, 'the fixture runtime rooted its cache outside the test tmpdir')
   } finally {
     await fs.rm(rootDir, { recursive: true, force: true })
     await fs.rm(stateRoot, { recursive: true, force: true })
