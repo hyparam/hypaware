@@ -27,6 +27,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createPluginPaths, reclaimPluginTempDirs } from '../../src/core/runtime/paths.js'
 
 /**
@@ -358,6 +359,57 @@ test('a completed dispatch leaves no signal listeners of its own behind', async 
     })
     assert.equal(code, 0)
     assert.deepEqual(counts(), before, 'dispatch left its SIGINT/SIGTERM listeners installed after the command completed')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Issue #2482, the nesting case. The handler decides whether some *other* owner
+// holds the signal by counting process listeners, so two owning dispatches in
+// one process still have to add up to one dispatch-owned listener per signal. A
+// second pair makes both handlers read a foreign owner and both defer, and
+// because a listener is registered the default disposition is gone too: the
+// signal is swallowed whole and Ctrl-C stops working. The wizard's sync step is
+// that shape, and the only one in the tree - `runConfiguredSync` re-enters
+// `dispatch` without passing its kernel (src/core/cli/wizard/sync_now.js), and
+// keeps the terminal delivering Ctrl-C as SIGINT on purpose.
+test('a dispatch nested inside another owning dispatch adds no second signal listener', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-signal-nested-'))
+  try {
+    await fs.writeFile(
+      path.join(hypHome, 'hypaware-config.json'),
+      JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n'
+    )
+    const counts = () => /** @type {const} */ (['SIGINT', 'SIGTERM']).map((s) => process.listenerCount(s))
+    const before = counts()
+    /** @type {number[][]} */
+    const inner = []
+    const quiet = { write: () => true }
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', DEV_RUN_ID: `issue-2482-nested-${process.pid}-${Date.now()}` }
+    const tmpRoot = path.join(hypHome, 'plugin-temp-root')
+    const registry = createCommandRegistry()
+    registry.register({
+      name: 'probe nest',
+      summary: 'two owning dispatches in one process',
+      usage: 'probe nest [inner]',
+      run: async (argv) => {
+        if (argv[0] === 'inner') {
+          inner.push(counts())
+          return 0
+        }
+        // No `kernel`, so the inner call owns a second boot and reaches the
+        // install gate on its own, exactly as `runConfiguredSync` does.
+        return await dispatch(['probe', 'nest', 'inner'], { registry, stdout: quiet, stderr: quiet, env, tmpRoot })
+      },
+    })
+    const code = await dispatch(['probe', 'nest'], { registry, stdout: quiet, stderr: quiet, env, tmpRoot })
+    assert.equal(code, 0)
+    assert.deepEqual(
+      inner,
+      [before.map((n) => n + 1)],
+      'two owning dispatches installed two signal listeners, so each handler reads the other as a foreign owner and the signal is swallowed'
+    )
+    assert.deepEqual(counts(), before, 'nested dispatches left their SIGINT/SIGTERM listeners installed after both completed')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

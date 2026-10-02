@@ -770,6 +770,30 @@ export function decideBootProfile(argv, registry) {
 }
 
 /**
+ * Every boot-owned kernel in this process that still wants releasing, in the
+ * order the boots happened. Module-level, and deliberately: the handler decides
+ * whether somebody *else* owns the signal by counting process listeners, so a
+ * second owning dispatch in the same process must not add a second pair. It
+ * would make both handlers read a foreign owner, both defer, and the signal be
+ * swallowed by the two halves of one mechanism - with nothing left to take the
+ * default disposition either, so Ctrl-C would stop working outright. The
+ * wizard's sync step is exactly that shape: `runConfiguredSync` re-enters
+ * `dispatch` without passing its kernel (`src/core/cli/wizard/sync_now.js`),
+ * and goes out of its way to keep the terminal delivering Ctrl-C as a signal.
+ * One pair for the process, one release per boot registered against it.
+ *
+ * @type {Set<() => Promise<void>>}
+ */
+const pendingBootReleases = new Set()
+
+/**
+ * Removes the one installed pair while it is installed, and is `undefined`
+ * whenever it is not: it is also the "is a pair installed?" flag.
+ * @type {(() => void) | undefined}
+ */
+let removeInstalledSignalHandlers
+
+/**
  * Release a boot-owned kernel when this process is interrupted, then let the
  * signal do what it would have done.
  *
@@ -781,34 +805,64 @@ export function decideBootProfile(argv, registry) {
  * present it is the owner and this one does nothing at all: that is what keeps
  * the daemon's shutdown ordering and the github device-flow cancel intact, and
  * it gives up nothing, because a process already carrying a listener for that
- * signal was never going to take the default disposition either.
+ * signal was never going to take the default disposition either - it keeps
+ * running instead, so the post-boot `finally` is still the thing that releases
+ * the boot.
  *
  * When this is the only listener the default disposition *was* the exit, so
  * dropping the listener and re-raising reproduces it: the parent still sees a
  * signal-terminated child rather than a `process.exit` standing in for one, and
- * the conventional 128+N status stays the kernel's to report. Dropping it before
- * the release also makes a second signal the conventional immediate give-up.
+ * the conventional 128+N status stays the kernel's to report. Dropping both
+ * before the release also makes a second signal the conventional immediate
+ * give-up.
  *
  * @param {() => Promise<void>} release
- * @returns {() => void} remove the listeners this installed
+ * @returns {() => void} deregister this boot's release, and uninstall the
+ *   handlers once no boot is left wanting one
  */
 function installSignalTeardown(release) {
-  /** @type {[NodeJS.Signals, () => void][]} */
-  const installed = []
-  for (const signal of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM'])) {
-    const handler = () => {
-      if (process.listenerCount(signal) > 1) return
-      process.removeListener(signal, handler)
-      // Both arms: `release` swallows its own failures today, and a process
-      // stranded mid-signal is not the way to find out that changed.
-      const reraise = () => { process.kill(process.pid, signal) }
-      release().then(reraise, reraise)
+  pendingBootReleases.add(release)
+  if (!removeInstalledSignalHandlers) {
+    /** @type {[NodeJS.Signals, () => void][]} */
+    const installed = []
+    for (const signal of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM'])) {
+      const handler = () => {
+        if (process.listenerCount(signal) > 1) return
+        removeInstalledSignalHandlers?.()
+        // Both arms: the releases swallow their own failures today, and a
+        // process stranded mid-signal is not the way to find out that changed.
+        const reraise = () => { process.kill(process.pid, signal) }
+        releasePendingBoots().then(reraise, reraise)
+      }
+      installed.push([signal, handler])
+      process.on(signal, handler)
     }
-    installed.push([signal, handler])
-    process.on(signal, handler)
+    removeInstalledSignalHandlers = () => {
+      removeInstalledSignalHandlers = undefined
+      for (const [signal, handler] of installed) process.removeListener(signal, handler)
+    }
   }
   return () => {
-    for (const [signal, handler] of installed) process.removeListener(signal, handler)
+    pendingBootReleases.delete(release)
+    if (pendingBootReleases.size === 0) removeInstalledSignalHandlers?.()
+  }
+}
+
+/**
+ * Release every boot still live in this process, innermost first, one at a
+ * time. Each release is already guarded against running twice, so the `finally`
+ * of a boot that outlives the signal finds nothing left to do.
+ *
+ * @returns {Promise<void>}
+ */
+async function releasePendingBoots() {
+  for (const release of [...pendingBootReleases].reverse()) {
+    try {
+      await release()
+    } catch {
+      // Same best-effort contract `teardownBootOwnedKernel` keeps: a boot we
+      // cannot release is a leak, not a reason to strand the signal.
+    }
   }
 }
 
@@ -821,9 +875,12 @@ function installSignalTeardown(release) {
  * listening keeps the Node process alive after it has printed its result.
  * The temp dirs after, because that is where `encodePartition` stages a sink's
  * in-flight blob (`src/core/sinks/encoder.js`, read by `@hypaware/local-fs`
- * and `@hypaware/s3`): every call site runs once the command body has
- * resolved, so an export the body drove has already written its destination
- * file and taken its last byte out of the scratch dir (issue #2465).
+ * and `@hypaware/s3`): the return and throw call sites run once the command
+ * body has resolved, so an export the body drove has already written its
+ * destination file and taken its last byte out of the scratch dir (issue
+ * #2465). The signal call site is the one that does not wait for the body, and
+ * does not have to: the re-raise is already ending the process, so a staged
+ * blob nothing will go on to read is exactly what there is to reclaim.
  *
  * Injected kernels belong to callers and are intentionally not cleaned
  * up here; smokes and daemon internals manage their own source
