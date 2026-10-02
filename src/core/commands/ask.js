@@ -136,7 +136,7 @@ export async function runAsk(argv, ctx, deps = {}) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       const canPaste = await recordedClientReadsQuerySkill(ctx, descriptors, clients)
-      await writeNoLauncher(ctx, descriptors, canPaste ? framedQuestion(question) : undefined)
+      await writeNoLauncher(ctx, descriptors, clients, canPaste ? framedQuestion(question) : undefined)
       return 1
     }
     // Same client pick as the recommendation ask when more than one could
@@ -182,7 +182,7 @@ export async function runAsk(argv, ctx, deps = {}) {
     // answer it from: on an empty cache it would send a desktop app looking
     // through nothing.
     const canPaste = hasRows !== false && await recordedClientReadsQuerySkill(ctx, descriptors, clients)
-    await writeNoLauncher(ctx, descriptors, canPaste ? RECOMMEND_COLD_PROMPT : undefined)
+    await writeNoLauncher(ctx, descriptors, clients, canPaste ? RECOMMEND_COLD_PROMPT : undefined)
   }
   return outcome.launched === false && (outcome.reason === 'no-launcher' || outcome.reason === 'no-evidence') ? 1 : 0
 }
@@ -242,14 +242,25 @@ async function recordedClientReadsQuerySkill(ctx, descriptors, clients) {
  * goes to stderr and the prompt alone to stdout, so `hyp ask | pbcopy`
  * copies exactly what to paste.
  *
+ * In the no-CLI branch, a recorded client can still be sitting right there
+ * on `$PATH` (OpenCode, Pi, a bare Claude Desktop) with no `launch` block
+ * to start it by - that machine's "no client CLI found" is true and
+ * misleading in the same breath, since the recorded client it found is
+ * never what the headline or the install advice is about. A third sentence
+ * names every recorded client in `clients` whose descriptor carries no
+ * `launch`, so that reader is told plainly that installing or re-PATHing
+ * their client cannot fix this.
+ *
  * @ref LLP 0198#path-probe [implements]: nothing recorded and resolvable is one refusal, said the same way by every form of the verb
  * @ref LLP 0139#repair-must-be-runnable [implements]: an attach is named only where an attach is the repair
+ * @ref LLP 0198#split [implements]: the refusal names a recorded client `hyp ask` can never start, not just the unresolved ones
  * @param {CommandRunContext} ctx
  * @param {Map<string, ClientDescriptor>} descriptors
+ * @param {string[]} clients the recorded clients
  * @param {string} [paste] the prompt to offer for a desktop app, when a recorded client has no CLI
  * @returns {Promise<void>}
  */
-async function writeNoLauncher(ctx, descriptors, paste) {
+async function writeNoLauncher(ctx, descriptors, clients, paste) {
   const unrecorded = await resolveLaunchers({ clients: [...descriptors.keys()], descriptors, env: ctx.env })
   if (unrecorded.length > 0) {
     const one = unrecorded.length === 1
@@ -268,11 +279,44 @@ async function writeNoLauncher(ctx, descriptors, paste) {
   // find. "Install one, or add it to your PATH" read as a choice the first
   // reader could make without installing anything.
   ctx.stderr.write('  You can install one, then run `hyp ask` again. If one is already installed, add its folder to your PATH.\n')
+  const launchless = clients.filter((client) => {
+    const descriptor = descriptors.get(client)
+    return descriptor !== undefined && !descriptor.launch
+  })
+  if (launchless.length > 0) {
+    const one = launchless.length === 1
+    const names = launchless.map((client) => friendlyClientLabel(client)).sort()
+    const labels = one ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
+    ctx.stderr.write(`  ${labels} ${one ? 'is' : 'are'} recorded, but \`hyp ask\` cannot start ${one ? 'it' : 'them'} (see \`hyp help ask\`).\n`)
+  }
   if (paste) {
     // The blank line is stderr's, so stdout carries the prompt and nothing else.
     ctx.stderr.write('  Using a desktop app instead? You can paste this in:\n\n')
     ctx.stdout.write(`${paste}\n`)
   }
+}
+
+/**
+ * The name a recorded launch-less client is called by in the no-CLI
+ * refusal. Most client names already read fine capitalized plainly
+ * (`pi` -> `Pi`); `opencode` does not, so it gets its own entry rather
+ * than a refusal that reads "Opencode". Same small-table-with-fallback
+ * shape as `summariseCollecting`'s `FRIENDLY_CLIENT_LABELS` in
+ * `wizard/fork.js`, kept local here since the two call sites format
+ * different sentences.
+ *
+ * @param {string} client
+ * @returns {string}
+ */
+function friendlyClientLabel(client) {
+  return FRIENDLY_LAUNCHLESS_LABELS[client] ?? (client.length > 0 ? client.charAt(0).toUpperCase() + client.slice(1) : client)
+}
+
+/** @type {Record<string, string>} */
+const FRIENDLY_LAUNCHLESS_LABELS = {
+  opencode: 'OpenCode',
+  pi: 'Pi',
+  'claude-desktop': 'Claude Desktop',
 }
 
 /**

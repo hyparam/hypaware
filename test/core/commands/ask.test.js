@@ -195,6 +195,55 @@ test('runAsk: with no client CLI on PATH, the refusal names the binaries and nev
   assert.equal(stdout.text(), '')
 })
 
+// The bug: a recorded OpenCode with its CLI on PATH read the no-CLI refusal
+// as a claim that nothing of its was found, with install advice that could
+// never make it startable - `hyp ask` can never launch OpenCode regardless
+// of PATH, so the refusal must say so by name.
+// @ref LLP 0198#split [tests]: the no-CLI refusal names a recorded client it can never start
+test('runAsk: a recorded OpenCode is named by the no-CLI refusal, not left for install advice to mislead', async () => {
+  const env = await bareEnv()
+  const plugins = path.join(env.HOME, '.config', 'opencode', 'plugins')
+  await fs.mkdir(plugins, { recursive: true })
+  await fs.writeFile(path.join(plugins, 'hypaware.js'), '// HYPWARE_OPENCODE_PLUGIN v1\n')
+  const { ctx, stderr } = makeCtx({ env })
+  assert.equal(await runAsk([], ctx), 1)
+  const text = stderr.text()
+  assert.match(text, /hyp ask: no client CLI found on your PATH/)
+  assert.match(text, /OpenCode is recorded, but `hyp ask` cannot start it \(see `hyp help ask`\)\./)
+})
+
+test('runAsk: with OpenCode and Pi both recorded, the no-CLI refusal names both, pluralized', async () => {
+  const env = await bareEnv()
+  const opencodePlugins = path.join(env.HOME, '.config', 'opencode', 'plugins')
+  await fs.mkdir(opencodePlugins, { recursive: true })
+  await fs.writeFile(path.join(opencodePlugins, 'hypaware.js'), '// HYPWARE_OPENCODE_PLUGIN v1\n')
+  const piExtensions = path.join(env.HOME, '.pi', 'agent', 'extensions')
+  await fs.mkdir(piExtensions, { recursive: true })
+  await fs.writeFile(path.join(piExtensions, 'hypaware.js'), '// HYPWARE_PI_EXTENSION v1\n')
+  const { ctx, stderr } = makeCtx({ env })
+  assert.equal(await runAsk([], ctx), 1)
+  const text = stderr.text()
+  assert.match(text, /hyp ask: no client CLI found on your PATH/)
+  assert.match(text, /OpenCode and Pi are recorded, but `hyp ask` cannot start them \(see `hyp help ask`\)\./)
+})
+
+// A launch-declaring client (Claude Code) must never get the new sentence:
+// it is only for a recorded client `hyp ask` can never start.
+test('runAsk: a recorded Claude Code gets no "cannot start it" sentence, since it has a launch block', async () => {
+  const env = await bareEnv()
+  await fs.mkdir(path.join(env.HOME, '.claude'), { recursive: true })
+  await fs.writeFile(
+    path.join(env.HOME, '.claude', 'settings.json'),
+    JSON.stringify({ _hypaware: { version: '2.0.0', port: 40000 } })
+  )
+  const { ctx, stderr } = makeCtx({ env })
+  assert.equal(await runAsk([], ctx), 1)
+  const text = stderr.text()
+  assert.match(text, /hyp ask: no client CLI found on your PATH/)
+  assert.doesNotMatch(text, /is recorded, but `hyp ask` cannot start it/)
+  assert.doesNotMatch(text, /are recorded, but `hyp ask` cannot start them/)
+})
+
 // The third case: a client is recorded and has no CLI, which is someone on a
 // desktop app. Nothing can start the app, but it can be asked by hand, so the
 // prompt is handed over: the explanation on stderr, the prompt alone on

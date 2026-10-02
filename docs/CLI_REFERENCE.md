@@ -166,8 +166,11 @@ started, `hyp ask` prints the same error with or without a question and returns
 says which half is missing: a client CLI that is on `PATH` but not recorded is
 answered with the `hyp client attach` command to run, and no client CLI on
 `PATH` at all is answered with the binaries it looked for, since an attach
-would not give it anything to start. In that second case, if a recorded client
-has the `hypaware-query` skill installed (a Claude or Codex desktop app with no
+would not give it anything to start. That second refusal also names any
+recorded client it cannot start (OpenCode, Pi), since neither an install nor
+a `PATH` fix would make one of those launchable either. In that second case,
+if a recorded client has the `hypaware-query` skill installed (a Claude or
+Codex desktop app with no
 CLI), `hyp ask` also prints the prompt to paste into the app: the typed question framed for `hyp query`, or for the
 bare form a version of the skill question that looks through the history
 itself, since no evidence is gathered for an app it cannot start. The prompt
