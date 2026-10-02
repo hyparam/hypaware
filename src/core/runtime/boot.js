@@ -338,8 +338,9 @@ export async function bootKernel(opts = {}) {
       // `daemon/gateway.js`, `cli/integration.js`): `stateRoot`/`cacheRoot` are
       // rooted under it, so a plugin re-deriving a home from the raw env would
       // place its state where the kernel is not looking.
-      // @ref LLP 0300#home-resolution [constrained-by]: a plugin's own fallback
-      //   re-runs read-side resolution, which ignores an injected `env.HOME`
+      // @ref LLP 0300#home-resolution [constrained-by]: a plugin re-derives the
+      //   home via `readObservabilityEnv`, the shape 0300 declined because it
+      //   ignores `env.HOME`, so setting `HYP_HOME` is the only way to steer it
       const result = await activatePlugins({
         plugins: activationEntries,
         stateRoot,

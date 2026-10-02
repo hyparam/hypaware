@@ -125,12 +125,15 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
 // Issue #2450, one level up from the two tests above: `bootKernel` rooted its
 // own `stateRoot`/`cacheRoot` under the `hypHome` it resolved but handed
 // activation the raw `env`, so a boot whose `opts.hypHome` did not match
-// `env.HYP_HOME` split kernel state from plugin state. No shipped caller can
-// present a differing value (dispatch and both daemon entrypoints derive
-// `hypHome` from the env they pass, and the gateway forks the processor with
-// `HYP_HOME` forced to its own home) and `bootKernel` is not on the package's
-// `exports` map, so this pins the documented invariant - `opts.hypHome`
-// overrides HYP_HOME - rather than choosing between two live behaviors.
+// `env.HYP_HOME` split kernel state from plugin state. No shipped caller
+// presents a conflicting non-empty `env.HYP_HOME`: dispatch derives `hypHome`
+// from the same env it passes, and the gateway forks the processor with
+// `HYP_HOME` forced to its own home. The divergence that did ship is an absent
+// one: `hyp daemon run` resolves the home through LLP 0300's `env.HOME` arm,
+// which `readObservabilityEnv` and `@hypaware/local-fs` both ignore for
+// `os.homedir()`, so a daemon under an injected `HOME` placed plugin state
+// outside the home it was told to use. Either way `opts.hypHome` wins, as
+// `BootKernelOptions` documents.
 test('bootKernel forces its resolved hypHome into the env activation reads', async () => {
   const booted = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-boot-'))
   const ambient = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-ambient-'))
