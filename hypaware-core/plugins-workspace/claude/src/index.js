@@ -651,21 +651,15 @@ function booleanFlag(argv, name) {
  * stays and the command returns 1. On `--force` the old file is copied
  * to `hypaware-config.json.bak-<ts>` first. `--dry-run` reports the path
  * the preset would write and writes nothing, refusing on an existing
- * config exactly as a real run would. `--dry-run` is read the way the
- * CLI codec reads a boolean, so `--dry-run=true` and `--dry-run=false`
- * work as well as the bare flag. `--force` is not: see the comment on
- * it below.
+ * config exactly as a real run would. Both flags are read the way the CLI
+ * codec reads a boolean, so `--force=true` / `--dry-run=true` and
+ * `--force=false` / `--dry-run=false` work as well as the bare flags.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
-  // Left as a plain argv.includes: dropping `--force=true` fails safe (the
-  // preset still refuses to overwrite, the conservative outcome), unlike
-  // dropping `--dry-run=true` which fails dangerous (it writes). Only the
-  // dangerous direction is fixed here; routing --force through booleanFlag
-  // too is a behavior change for another change.
-  const force = argv.includes('--force')
+  const force = booleanFlag(argv, 'force')
   const dryRun = booleanFlag(argv, 'dry-run')
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
