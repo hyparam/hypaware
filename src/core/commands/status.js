@@ -1213,16 +1213,26 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.clientActions && report.clientActions.actions.length > 0) {
     section('client actions')
     for (const a of report.clientActions.actions) {
+      // Through `printable` like the Attention line above: every string on this
+      // row comes off a marker file, not from this build. `requestKey` is a
+      // marker name or a configured plugin and `kind` a marker store, while
+      // `reason`, `last_attempt` and `at` are read out of marker JSON behind a
+      // `typeof === 'string'` guard alone. Those two identifiers keep the label
+      // default like every other name on this surface; the reason and the two
+      // timestamps are unclamped, because at 120 characters the reason would be
+      // cut shorter than the Attention line already prints it and a timestamp is
+      // only useful exact. `state`, `rows` and `attempts` need nothing: they are
+      // literals of this build and numbers.
       let detail = ''
       if (a.state === 'done') {
         const bits = []
         if (a.rows !== undefined) bits.push(`${a.rows} rows`)
-        if (a.at) bits.push(`at ${a.at}`)
+        if (a.at) bits.push(`at ${printable(a.at, Infinity)}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
       } else if (a.state === 'failed') {
         const bits = []
-        if (a.reason) bits.push(a.reason)
-        if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
+        if (a.reason) bits.push(printable(a.reason, Infinity))
+        if (a.lastAttempt) bits.push(`last attempt ${printable(a.lastAttempt, Infinity)}`)
         if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
       } else if (a.state === 'refused') {
@@ -1233,11 +1243,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         // the attention signal without the action.
         // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
         const bits = []
-        if (a.reason) bits.push(a.reason)
-        const repair = `run 'hyp client attach ${a.requestKey}' after fixing the cause`
+        if (a.reason) bits.push(printable(a.reason, Infinity))
+        const repair = `run 'hyp client attach ${printable(a.requestKey)}' after fixing the cause`
         detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
-      stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
+      stdout.write(`    - ${printable(a.kind)} ${printable(a.requestKey)}  [${a.state}]${detail}\n`)
     }
   }
 
