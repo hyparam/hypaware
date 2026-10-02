@@ -652,8 +652,10 @@ function booleanFlag(argv, name) {
  * to `hypaware-config.json.bak-<ts>` first. `--dry-run` reports the path
  * the preset would write and writes nothing, refusing on an existing
  * config exactly as a real run would. Both flags are read the way the CLI
- * codec reads a boolean, so `--force=true` / `--dry-run=true` and
- * `--force=false` / `--dry-run=false` work as well as the bare flags.
+ * codec reads a boolean for the `true` / `false` spellings, so
+ * `--force=true` / `--dry-run=true` and `--force=false` / `--dry-run=false`
+ * work as well as the bare flags. Any other inline value reads as false
+ * here instead of being refused like the codec does (issue #2440).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
