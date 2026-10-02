@@ -24,6 +24,7 @@ import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBoot
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { activatePlugins } from '../runtime/loader.js'
+import { reclaimPluginTempDirs } from '../runtime/paths.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginScopedConfig } from '../config/plugin_scope.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -338,7 +339,7 @@ async function dispatchInternal(argv, opts) {
       return await runCommandByName('setup', [], { stdout, stderr, env, cwd, registry, kernel })
     } finally {
       if (ownsKernel) {
-        await stopBootStartedSources(kernel)
+        await teardownBootOwnedKernel(kernel)
       }
     }
   }
@@ -369,7 +370,7 @@ async function dispatchInternal(argv, opts) {
         })
       }
       if (ownsKernel) {
-        await stopBootStartedSources(kernel)
+        await teardownBootOwnedKernel(kernel)
       }
       return group.unknownSub !== undefined ? 2 : 0
     }
@@ -397,7 +398,7 @@ async function dispatchInternal(argv, opts) {
       stderr.write(`run 'hyp --help' for the list of available commands\n`)
     }
     if (ownsKernel) {
-      await stopBootStartedSources(kernel)
+      await teardownBootOwnedKernel(kernel)
     }
     return 2
   }
@@ -434,7 +435,7 @@ async function dispatchInternal(argv, opts) {
     const groupDepth = argv.length - matched.rest.length
     if (inactive && (emptyGroup || inactive.token.split(' ').length > groupDepth)) {
       renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
-      if (ownsKernel) await stopBootStartedSources(kernel)
+      if (ownsKernel) await teardownBootOwnedKernel(kernel)
       return 2
     }
   }
@@ -602,7 +603,7 @@ async function dispatchInternal(argv, opts) {
           if (!isHelpFlag(matched.rest[0])) noteCommandTransition(matched.command.name, matched.rest, exitCode)
           if (matched.command.group && matched.rest.length > 0 && !isHelpFlag(matched.rest[0]) && exitCode !== 0) noteInvocation({ kind: 'unknown' })
           if (ownsKernel) {
-            await stopBootStartedSources(kernel)
+            await teardownBootOwnedKernel(kernel)
           }
           const duration = performance.now() - start
           const finalStatus = exitCode === 0 ? 'ok' : 'failed'
@@ -742,18 +743,25 @@ export function decideBootProfile(argv, registry) {
 }
 
 /**
- * Some plugins currently start listeners during activation. For a
- * one-shot CLI command, any source that was started only because this
- * dispatch booted the kernel must be closed before returning or the
- * Node process will stay alive after printing its result.
+ * Release what this dispatch's own kernel boot acquired, in the order it has
+ * to come off: the listeners some plugins start during activation, then the
+ * per-boot scratch directories activation created.
+ *
+ * Sources first, because a one-shot CLI command whose source is still
+ * listening keeps the Node process alive after it has printed its result.
+ * The temp dirs after, because that is where `encodePartition` stages a sink's
+ * in-flight blob (`src/core/sinks/encoder.js`, read by `@hypaware/local-fs`
+ * and `@hypaware/s3`): every call site runs once the command body has
+ * resolved, so an export the body drove has already written its destination
+ * file and taken its last byte out of the scratch dir (issue #2465).
  *
  * Injected kernels belong to callers and are intentionally not cleaned
  * up here; smokes and daemon internals manage their own source
- * lifecycles.
+ * lifecycles and the temp dirs of their own boots.
  *
  * @param {ReturnType<typeof createKernelRuntime>} kernel
  */
-async function stopBootStartedSources(kernel) {
+async function teardownBootOwnedKernel(kernel) {
   try {
     await kernel.sources.stopAll()
   } catch {
@@ -761,6 +769,14 @@ async function stopBootStartedSources(kernel) {
     // already completed, and individual source stop failures are not
     // actionable from the dispatcher layer.
   }
+  // The activation contexts are the only record of where this boot's temp dirs
+  // landed: `createPluginPaths` resolves `tempBase` from `tmpRoot ?? os.tmpdir()`,
+  // so re-deriving the paths here would be guessing at a root the kernel
+  // already holds. A plugin whose `activate()` threw is in the map too, and its
+  // dirs were created before the throw, so it gets reclaimed as well.
+  await reclaimPluginTempDirs(
+    Array.from(kernel.activationContexts.values(), (ctx) => ctx.paths.tempDir)
+  )
 }
 
 /**

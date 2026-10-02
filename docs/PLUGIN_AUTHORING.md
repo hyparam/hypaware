@@ -124,6 +124,8 @@ order, paths, logging, and lifecycle. Common context members include:
 - `ctx.requireCapability(name, range)` / `ctx.provideCapability(name, version, value)`.
 - `ctx.config`: the validated config slice for this plugin.
 - `ctx.paths`: `{ rootDir, stateDir, cacheDir, tempDir }`, created for you.
+  `stateDir` and `cacheDir` are durable; `tempDir` is scratch for this boot
+  only, and the CLI removes it when the kernel it booted tears down.
 - `ctx.log`: structured logger; `ctx.log.info('event', { ... })`.
 - `ctx.permissions`: check declared permissions.
 

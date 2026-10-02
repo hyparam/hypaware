@@ -25,7 +25,9 @@ import path from 'node:path'
  * it is single-purpose and not user-facing.
  *
  * Directories are created eagerly so plugins can write immediately
- * inside `activate(ctx)` without an mkdir dance.
+ * inside `activate(ctx)` without an mkdir dance. `stateDir` and
+ * `cacheDir` outlive the boot; `tempDir` does not, and whoever booted
+ * the kernel hands the set back to `reclaimPluginTempDirs` at teardown.
  */
 
 /**
@@ -58,6 +60,26 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   ])
 
   return { rootDir, stateDir, cacheDir, tempDir }
+}
+
+/**
+ * Remove the per-boot temp directories a kernel boot created. The boot that
+ * made them is the only thing that can know it is finished with them, and
+ * until issue #2465 nothing removed them at all: one directory per activated
+ * plugin stayed in the user's temp root until the OS temp reaper got to it.
+ *
+ * @param {Iterable<string>} tempDirs `PluginPaths.tempDir` values from one boot.
+ * @returns {Promise<void>}
+ */
+export async function reclaimPluginTempDirs(tempDirs) {
+  for (const dir of tempDirs) {
+    try {
+      await fs.rm(dir, { recursive: true, force: true })
+    } catch {
+      // Teardown runs after the command rendered its result, so a scratch dir
+      // we cannot remove is a leak, not a failure the caller can act on.
+    }
+  }
 }
 
 /**
