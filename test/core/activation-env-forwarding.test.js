@@ -21,6 +21,7 @@ import path from 'node:path'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../src/core/runtime/loader.js'
+import { bootKernel } from '../../src/core/runtime/boot.js'
 
 /** @param {string} p */
 async function exists(p) {
@@ -118,5 +119,39 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
     )
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Issue #2450, one level up from the two tests above: `bootKernel` rooted its
+// own `stateRoot`/`cacheRoot` under the `hypHome` it resolved but handed
+// activation the raw `env`, so a boot whose `opts.hypHome` did not match
+// `env.HYP_HOME` split kernel state from plugin state. No shipped caller can
+// present a differing value (dispatch and both daemon entrypoints derive
+// `hypHome` from the env they pass, and the gateway forks the processor with
+// `HYP_HOME` forced to its own home) and `bootKernel` is not on the package's
+// `exports` map, so this pins the documented invariant - `opts.hypHome`
+// overrides HYP_HOME - rather than choosing between two live behaviors.
+test('bootKernel forces its resolved hypHome into the env activation reads', async () => {
+  const booted = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-boot-'))
+  const ambient = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-ambient-'))
+
+  try {
+    const boot = await bootKernel({
+      hypHome: booted,
+      tmpRoot: booted,
+      runId: 'boot-hyphome-forced',
+      bootProfile: { activate: ['@hypaware/local-fs'] },
+      env: { ...process.env, HYP_HOME: ambient, HYP_CONFIG: '' },
+    })
+    const activation = boot.activations.find((r) => r.plugin?.name === '@hypaware/local-fs')
+    assert.equal(activation?.ok, true, `local-fs did not activate: ${JSON.stringify(activation)}`)
+
+    // `@hypaware/local-fs` mkdirs `<ctx.env.HYP_HOME>/exports` in `activate()`,
+    // so which of the two homes grew an `exports` dir is the proof.
+    assert.ok(await exists(path.join(booted, 'exports')), 'plugin state did not land under the boot\'s resolved hypHome')
+    assert.equal(await exists(path.join(ambient, 'exports')), false, 'plugin state landed under env.HYP_HOME instead of the resolved hypHome')
+  } finally {
+    await fs.rm(booted, { recursive: true, force: true })
+    await fs.rm(ambient, { recursive: true, force: true })
   }
 })

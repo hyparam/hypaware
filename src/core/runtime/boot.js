@@ -332,14 +332,21 @@ export async function bootKernel(opts = {}) {
       // The env this boot resolved, not `process.env`: plugins read `ctx.env`
       // at activation time to place state, so a caller booting with an injected
       // env (tests, smokes, the daemon) only gets its HYP_HOME honored if the
-      // env reaches activation from here.
+      // env reaches activation from here. `HYP_HOME` is forced to the home this
+      // boot resolved, not forwarded, the way every other site threading an env
+      // alongside a resolved home already does (`daemon/runtime.js`,
+      // `daemon/gateway.js`, `cli/integration.js`): `stateRoot`/`cacheRoot` are
+      // rooted under it, so a plugin re-deriving a home from the raw env would
+      // place its state where the kernel is not looking.
+      // @ref LLP 0300#home-resolution [constrained-by]: a plugin's own fallback
+      //   re-runs read-side resolution, which ignores an injected `env.HOME`
       const result = await activatePlugins({
         plugins: activationEntries,
         stateRoot,
         runId,
         runtime,
         tmpRoot: opts.tmpRoot,
-        env,
+        env: { ...env, HYP_HOME: hypHome },
       })
 
       const activePlugins = result.results
