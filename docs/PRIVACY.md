@@ -342,9 +342,9 @@ batches. It cannot recall batches the server already accepted. If saving fails,
 the command exits nonzero and reports that telemetry remains enabled.
 
 `local` keeps a preview queue without sending it. `organization` enables sending
-and requires one eligible enrolled central sink with an HTTPS destination.
-Changing the mode clears older pending batches. `preview` prints the exact next
-batch, or `null` if none is queued.
+and requires exactly one eligible enrolled central sink with an HTTPS
+destination. Changing the mode clears older pending batches. `preview` prints
+the exact next batch, or `null` if none is queued.
 
 Restart a running daemon after enabling collection. It notices disabling and
 enrollment changes within 30 seconds. `hyp status` also reports telemetry state.

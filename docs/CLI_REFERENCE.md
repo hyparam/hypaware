@@ -105,9 +105,11 @@ hyp setup --source claude --client claude --export keep-local --yes
 
 Success returns `0`. Invalid flags return `2`. A refused overwrite, an unknown
 preset, or a `--from-file` configuration that cannot be read or does not
-validate returns `1`. A failed daemon install is not fatal: setup returns `0`
-and prints a note to run `hyp daemon install`, so a zero exit does not prove
-the background service was installed.
+validate returns `1`. A failed daemon install is normally not fatal: setup
+returns `0` and prints a note to run `hyp daemon install`, so a zero exit does
+not prove the background service was installed. Refusing to persist a service
+against a non-durable CLI path, which an `npx` run without a global install
+hits, returns `1` instead.
 
 ### `hyp status`
 

@@ -58,7 +58,9 @@ hyp setup --yes \
     --retention-days 90
 ```
 
-`--dry-run` reports what would be written and writes nothing. If a
+`--dry-run` reports what would be written and writes no configuration. It is
+not a whole-run preview: in a guided run the enrollment choice and the folder
+and sync-scope settings are applied before the flag takes effect. If a
 configuration already exists, add `--force` to replace it.
 HypAware backs up the existing configuration before replacement.
 
@@ -128,8 +130,12 @@ hyp daemon install
 hyp status
 ```
 
-Replace `NEXT_MAJOR_VERSION` with the version you reviewed. If validation
-fails, stop and restore the saved copy.
+Replace `NEXT_MAJOR_VERSION` with the version you reviewed. Set top-level
+`"auto_update": false` and restart the daemon first, or the next automatic
+check moves off the version you pinned; centrally managed policy may own that
+choice. Do not assume `--yes` accepts a breaking migration, because no such
+acceptance contract exists. If validation fails, stop and restore the saved
+copy.
 
 ## Reinstall or recover the current version
 
