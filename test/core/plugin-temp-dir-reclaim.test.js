@@ -12,7 +12,7 @@
 // in-process `dispatch` call cannot show: that the shipped entrypoint, run as a
 // user runs it, leaves nothing behind after the process exits.
 //
-// The rest cover the hazards the reclaim itself created by making a stray
+// The last two cover the hazards the reclaim itself created by making a stray
 // `mkdir -p` target into an `fs.rm(recursive)` target: a `runId` that steers
 // the delete out of the temp root, and two boots that adopt one directory.
 // Those live against `createPluginPaths` directly, because neither is
@@ -26,6 +26,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createPluginPaths, reclaimPluginTempDirs } from '../../src/core/runtime/paths.js'
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hypaware.js')
@@ -122,6 +123,93 @@ test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tm
     )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// Issue #2473. The reclaim above only ran on dispatch's success and
+// handled-error paths, and the sink-materialization warning pass writes to
+// `stderr` after the kernel has booted. A `stderr` whose `write` throws (what
+// a pipe write raises once the reader closed, `hyp sync | head`) therefore left
+// the whole boot behind: one temp dir per activated plugin, and every source the
+// activations started still listening.
+test('a throw from the post-boot sink warning path still reclaims the boot temp dirs', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-epipe-'))
+  const tmpRoot = path.join(hypHome, 'plugin-temp-root')
+  const runId = `issue-2473-${process.pid}-${Date.now()}`
+
+  try {
+    // A directory in the temp root that this boot does not own. Teardown now
+    // runs on a throw as well as on a clean exit, and widening *when* the
+    // recursive delete runs must not widen *what* it deletes: reclaim only ever
+    // gets the `tempDir` paths this boot's own activation contexts recorded.
+    await fs.mkdir(path.join(tmpRoot, 'not-ours', 'sub'), { recursive: true })
+    await fs.writeFile(path.join(tmpRoot, 'not-ours', 'sub', 'keepme.txt'), 'CANARY')
+
+    // A sink naming a plugin `plugins[]` does not enable is the shortest route
+    // into the warning pass: it cannot materialize, and the `config` boot
+    // profile `hyp query sql` boots activates plugins, so the pass is not
+    // skipped.
+    await fs.writeFile(
+      path.join(hypHome, 'hypaware-config.json'),
+      JSON.stringify({
+        version: 2,
+        plugins: [{ name: '@hypaware/otel' }],
+        sinks: { bad: { plugin: '@hypaware/local-fs' } },
+      }) + '\n'
+    )
+
+    let writes = 0
+    const epipe = {
+      write() {
+        writes += 1
+        const err = /** @type {NodeJS.ErrnoException} */ (new Error('write EPIPE'))
+        err.code = 'EPIPE'
+        throw err
+      },
+    }
+
+    await assert.rejects(
+      () => dispatch(['query', 'sql', 'select 1'], {
+        stdout: { write: () => true },
+        stderr: epipe,
+        env: {
+          ...process.env,
+          HYP_HOME: hypHome,
+          HYP_CONFIG: '',
+          DEV_RUN_ID: runId,
+        },
+        tmpRoot,
+      }),
+      (err) => {
+        // The teardown runs in a `finally`, so it must not throw out of it and
+        // stand in for the error that got us there.
+        assert.equal(/** @type {NodeJS.ErrnoException} */ (err).code, 'EPIPE', String(err))
+        return true
+      }
+    )
+
+    assert.ok(writes > 0, 'nothing wrote to stderr: this fixture no longer reaches the sink warning pass')
+    assert.deepEqual(
+      await fs.readdir(tmpRoot),
+      ['not-ours'],
+      'a throw from the post-boot sink warning path exited dispatch without tearing the boot down'
+    )
+    assert.equal(
+      await fs.readFile(path.join(tmpRoot, 'not-ours', 'sub', 'keepme.txt'), 'utf8'),
+      'CANARY',
+      'the teardown reclaim deleted a directory in the temp root that this boot did not create'
+    )
+    // The assertion above is on the test-owned root, so on its own it would also
+    // pass if `tmpRoot` forwarding broke and the dirs landed in the shared OS
+    // temp root instead. `runId` is unique to this run, so naming the survivors
+    // by suffix stays safe under parallel `npm test` workers.
+    assert.deepEqual(
+      (await fs.readdir(os.tmpdir())).filter((e) => e.endsWith('-' + runId)),
+      [],
+      'plugin boot temp dirs from this boot survived in the OS temp root'
+    )
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
   }
 })
 
