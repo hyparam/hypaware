@@ -107,6 +107,42 @@ test('local-fs BlobStore serves byte ranges from the opened file', async () => {
   }
 })
 
+test('local-fs BlobStore names an unsatisfiable range the way the s3 provider does', async () => {
+  // Same token the s3 provider raises for a 416, so a ranged consumer can
+  // tell "no such bytes in this object, refetch it whole" from a store that
+  // is failing, without knowing which provider answered. The legal suffix
+  // longer than the object stays legal: it is the whole object.
+  const base = await makeTempBase()
+  try {
+    const store = createLocalFsBlobStore({ baseDir: base })
+    await store.putObject({ key: 'data', body: Buffer.from('0123456789') })
+    await store.putObject({ key: 'empty', body: new Uint8Array() })
+    for (const [key, range] of [
+      // first byte at or past the end of the object
+      ['data', 'bytes=10-'],
+      ['data', 'bytes=10-10'],
+      ['data', 'bytes=99-'],
+      // a suffix of zero bytes addresses nothing
+      ['data', 'bytes=-0'],
+      // an empty object can satisfy no range at all
+      ['empty', 'bytes=0-'],
+      ['empty', 'bytes=0-0'],
+      ['empty', 'bytes=-8'],
+    ]) {
+      await assert.rejects(
+        store.getObject({ key, range }),
+        { code: 'InvalidRange', errorKind: 'blob_range_unsatisfiable' },
+        `'${range}' over '${key}' must be named as an unsatisfiable range`,
+      )
+    }
+    const whole = await store.getObject({ key: 'data', range: 'bytes=-99' })
+    assert.ok(whole, 'a suffix longer than the object is satisfiable')
+    assert.equal(Buffer.from(await collectStream(whole.body)).toString(), '0123456789')
+  } finally {
+    await fs.rm(base, { recursive: true, force: true })
+  }
+})
+
 test('local-fs BlobStore getObject returns null for missing keys', async () => {
   const base = await makeTempBase()
   try {
