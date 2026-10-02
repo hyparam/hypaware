@@ -260,10 +260,35 @@ export async function activate(ctx) {
         },
         async (span) => {
           if (attachCtx.dryRun) {
+            const port = safeEndpointPort(attachCtx.endpoint)
+            // Plan against the install on disk instead of answering from a
+            // constant: `--dry-run` is the surface an operator reads to learn
+            // whether a real attach would change this config. With no
+            // resolvable endpoint there is no attach to plan.
+            let route
+            /** @type {{ changed: boolean, prevValue?: string }} */
+            let planned = { changed: false }
+            try {
+              if (port !== undefined) {
+                route = codexProviderRoute(port)
+                planned = await attach({
+                  port,
+                  version: ctx.plugin.version,
+                  configPath,
+                  baseUrl: route.baseUrl,
+                  providerName: route.providerName,
+                  dryRun: true,
+                })
+              }
+            } catch (err) {
+              // A plan that cannot read the install is a failed attach, and the
+              // span has to say so on the same attribute the write path sets.
+              span.setAttribute('status', 'failed')
+              span.setAttribute('restored', false)
+              throw err
+            }
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            const port = safeEndpointPort(attachCtx.endpoint)
-            const route = port === undefined ? undefined : codexProviderRoute(port)
             writeAttachOutput(attachCtx, {
               status: 'ok',
               client: CLIENT_NAME,
@@ -271,7 +296,10 @@ export async function activate(ctx) {
               configPath,
               port,
               baseUrl: route?.baseUrl,
-              changed: false,
+              changed: planned.changed,
+              prevValue: planned.changed && planned.prevValue !== undefined
+                ? planned.prevValue
+                : undefined,
             })
             return
           }
@@ -636,6 +664,9 @@ function writeAttachOutput(attachCtx, fields) {
       attachCtx.stdout.write(`  Would set base_url = ${fields.baseUrl}\n`)
     } else {
       attachCtx.stdout.write(`  Would set base_url to the local gateway endpoint ${CODEX_ROUTE_PREFIX}\n`)
+    }
+    if (fields.prevValue !== undefined) {
+      attachCtx.stdout.write(`  Would record previous model_provider = ${fields.prevValue}\n`)
     }
     return
   }
