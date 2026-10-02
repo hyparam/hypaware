@@ -9,6 +9,7 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { diagnoseV1Config } from '../../src/core/config/validate.js'
 
 // `status.json` is not the only file whose bytes reach `hyp status`'s text
 // surface. Three more do:
@@ -397,5 +398,71 @@ test('a hostile repair string cannot drive the terminal from the verbose diagnos
     payload.diagnostics.find((d) => d.kind === 'config_invalid')?.repair,
     repair,
     '--json still carries the repair commands byte-exact',
+  )
+})
+
+// The fourth file, found reviewing the fix for the first three: `kind` is only
+// nearly a closed set. `V1DiagnosticKind` spells one of its entries
+// `gateway_missing_${string}_upstream`, and the `${string}` is a plugin
+// manifest's `contributes.client.required_upstreams[0]` - `validateManifest`
+// accepts the `contributes` block opaquely and `plugin_catalog` copies the
+// array in without filtering, so an installed plugin's own manifest reaches
+// this line. Driven through `diagnoseV1Config` first so the planted diagnostic
+// below is the one the collector would really build, not a shape invented here.
+test('a hostile diagnostic kind cannot drive the terminal from the verbose diagnostics block', async () => {
+  const upstream = `openai${ERASE_LINE}\n  overall:  healthy`
+  const built = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway', enabled: true, config: { upstreams: [] } },
+        { name: '@acme/evil', enabled: true },
+      ],
+    },
+    {
+      clientDescriptors: new Map([
+        ['evilclient', { plugin: '@acme/evil', name: 'evilclient', skillDir: 'skills', requiredUpstreams: [upstream] }],
+      ]),
+    },
+  ).find((d) => CONTROL_EXCEPT_NEWLINE.test(d.kind))
+  assert.ok(built, 'a manifest-supplied upstream name reaches the diagnostic kind')
+
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  report.diagnostics.push({
+    severity: 'warning',
+    kind: built.kind,
+    message: built.message,
+    repair: built.repair,
+  })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('  overall:  healthy')).length,
+    1,
+    'the embedded newline cannot forge a second overall line',
+  )
+  assert.match(text, /\[WARN \] gateway_missing_openai/, 'the printable part of the kind still names the condition')
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    payload.diagnostics.at(-1)?.kind,
+    built.kind,
+    '--json still carries the kind byte-exact',
   )
 })

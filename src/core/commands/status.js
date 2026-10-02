@@ -1246,13 +1246,18 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     for (const [index, d] of report.diagnostics.entries()) {
       if (index > 0) stdout.write('\n')
       const tag = d.severity === 'error' ? 'ERROR' : 'WARN '
-      // Through `printable` like the Attention line above: a diagnostic's prose
-      // is not all this build's own - an unreadable config reaches `message` as
-      // `JSON.parse`'s excerpt of the file, and a repair names config-supplied
-      // values. Unclamped because clamping is the Attention line's job, and
-      // `printable`'s 120-character default would cut real diagnostics shorter
-      // here than the summary already prints them.
-      stdout.write(`    [${tag}] ${d.kind}: ${printable(d.message, Infinity)}\n`)
+      // Through `printable` like the Attention line above: a diagnostic's strings
+      // are not all this build's own. An unreadable config reaches `message` as
+      // `JSON.parse`'s excerpt of the file, a repair names config-supplied values,
+      // and `kind` is only nearly a closed set: `V1DiagnosticKind` spells one entry
+      // `gateway_missing_${string}_upstream`, and that `${string}` is a plugin
+      // manifest's `contributes.client.required_upstreams[0]`, which the manifest
+      // validator accepts opaquely and the catalog copies verbatim. The prose is
+      // unclamped because clamping is the Attention line's job, and `printable`'s
+      // 120-character default would cut real diagnostics shorter here than the
+      // summary already prints them; `kind` keeps that default, like every other
+      // identifier on this surface.
+      stdout.write(`    [${tag}] ${printable(d.kind)}: ${printable(d.message, Infinity)}\n`)
       for (const repair of d.repair) {
         stdout.write(`        repair: ${printable(repair, Infinity)}\n`)
       }
