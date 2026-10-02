@@ -94,8 +94,19 @@ test('activatePlugins hands the injected env to each activation context', async 
 
 test('a dispatch boot places plugin state under the injected HYP_HOME, not the real home', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-home-'))
-  const realExports = path.join(os.homedir(), '.hyp', 'exports')
-  const realExistedBefore = await exists(realExports)
+
+  // Issue #2451. A boot that reads `process.env` instead of the env it was
+  // injected with resolves plugin state from the ambient home. Snapshotting
+  // `~/.hyp/exports`'s existence could not see that escape: `mkdir` over a
+  // directory already there is a no-op, so on a machine that has run HypAware
+  // the before and the after are both `true`. An empty directory this test
+  // owns gives the escape somewhere visible to land, and takes the real home
+  // out of reach of every ambient arm (`HYP_HOME`, and `os.homedir()` through
+  // HOME or USERPROFILE). `process.env` is private to this file's worker
+  // (`node --test` runs one process per file, tests within a file in
+  // sequence), so no concurrent test file can write here or see the swap.
+  const ambientHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-env-ambient-home-'))
+  const savedAmbient = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, HYP_HOME: process.env.HYP_HOME }
 
   // Issue #2465. Deliberately a path that does not exist yet:
   // `createPluginPaths` mkdirs `<tmpRoot>/<plugin>-<runId>` recursively, so
@@ -108,6 +119,10 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
   await fs.writeFile(fromFile, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n')
 
   try {
+    process.env.HOME = ambientHome
+    process.env.USERPROFILE = ambientHome
+    process.env.HYP_HOME = ambientHome
+
     const runId = `issue-2462-${process.pid}-${Date.now()}`
     const stderr = makeBuf()
     const code = await dispatch(['init', '--from-file', fromFile], {
@@ -127,10 +142,10 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
     // `@hypaware/local-fs` mkdirs `<HYP_HOME>/exports` in `activate()`, so where
     // that directory landed is the shortest proof of where activation read its env.
     assert.ok(await exists(path.join(hypHome, 'exports')), 'the exports dir did not land under the injected HYP_HOME')
-    assert.equal(
-      await exists(realExports),
-      realExistedBefore,
-      'the boot created .hyp/exports in the invoking user\'s real home'
+    assert.deepEqual(
+      await fs.readdir(ambientHome),
+      [],
+      'the boot placed plugin state under the ambient env\'s home, not the injected HYP_HOME'
     )
 
     // Issue #2465, two assertions on one directory that fail for opposite
@@ -164,7 +179,12 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       'plugin boot temp dirs from this boot survived in the OS temp root'
     )
   } finally {
+    for (const [key, value] of Object.entries(savedAmbient)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(ambientHome, { recursive: true, force: true })
   }
 })
 
