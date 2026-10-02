@@ -82,6 +82,7 @@ export async function materializeClientAssets(options) {
         continue
       }
       stdout?.write(`installed ${asset.kind} '${asset.name}' → ${dest}\n`)
+      await sweepRefreshStaging(dest, client, planned, stdout, stderr)
     }
     installed.push({ kind: asset.kind, name: asset.name, client, dest, dryRun })
   }
@@ -711,6 +712,104 @@ function attachMarkerAssets(stateRoot, client) {
 }
 
 /* ------------------------------- Internals ------------------------------- */
+
+/**
+ * Take off the machine the staging trees a v1.39-era refresh left beside
+ * `dest`: `<dest>.hyp-refresh`, which held the replacement copy while it was
+ * written, and `<dest>.hyp-refresh-old`, which held the copy being replaced for
+ * the two renames a swap takes. A refresh killed inside that window leaves
+ * either or both behind, each a complete copy of the asset in the client's own
+ * skills directory under a name no ledger record covers: the client reads a
+ * second (sometimes older) `SKILL.md` for the same skill, and no prune reaches
+ * it, because a prune only ever considers destinations a record names. Nothing
+ * sweeps them any more, which left a manual `rm` as the only remedy (#2407).
+ *
+ * **Called only once this run has written `dest` itself**, which is what makes
+ * a leftover a leftover: the authoritative copy is then on disk and freshly
+ * equal to the plugin source, so neither staging tree holds anything it does
+ * not. A copy that failed hits the `continue` above and sweeps nothing - there,
+ * a `.hyp-refresh-old` can be the only surviving copy of the asset, because a
+ * kill between the two renames leaves `dest` absent, and deleting it would
+ * destroy what the staging existed to preserve. No code in this version *stages*
+ * under these names, so a tree carrying one cannot belong to a refresh in
+ * flight, and a concurrently running old binary needs no guard here:
+ * {@link copyAsset} already replaced `dest` out from under it before this is
+ * reached.
+ *
+ * What a tree at one of these names can still be is a destination of this very
+ * plan: `<X>.hyp-refresh` is a legal single-segment contribution name, so a
+ * plugin registering both `X` and `X.hyp-refresh` for one client has the second
+ * one land exactly where installing the first would sweep. `planned` is
+ * consulted for that, and only once something is actually at the path, so the
+ * common case (nothing left over) pays for no scan: without it, installing `X`
+ * deletes a copy this same run made and reported installed, on every run
+ * forever, while the ledger goes on naming it and the prune reports nothing.
+ *
+ * A removal here emits `client_assets.refresh_staging_removed` as well as
+ * printing, because two of the four callers withhold `stdout`: the wizard
+ * finale suppresses the per-copy lines, and `hyp attach --json` has no text
+ * stream at all. Reported only down the stream they withhold, a recursive
+ * delete inside the user's own skills directory would be recorded nowhere on
+ * exactly the paths where the user sees nothing - and this sweep is authorized
+ * by a derived name rather than by a recorded digest, so its warrant is weaker
+ * than the prune's while its reporting would have been thinner. A failure
+ * emits too, beside the stderr warning.
+ *
+ * Exactly those two names, never a `.hyp-refresh` prefix match. Both were fixed
+ * rather than pid-scoped so that leftovers would stay recognizable, so a prefix
+ * catches nothing we ever wrote that the two names miss, while a recursive
+ * delete authorized by a prefix would reach a user-authored
+ * `<name>.hyp-refreshed-by-me` in a directory whose other contents are the
+ * user's own. Derived names also cost no directory listing.
+ *
+ * Suffixing a destination cannot escape the containment
+ * {@link planClientAssets} already checked: neither suffix holds a separator,
+ * so the result is a sibling of `dest` and still a direct child of the asset
+ * directory. A leftover that cannot be removed is reported rather than thrown,
+ * so it cannot turn a copy that succeeded into a reported failure.
+ *
+ * @param {string} dest
+ * @param {string} client
+ * @param {PlannedClientAsset[]} planned
+ * @param {{ write(chunk: string): unknown }} [stdout]
+ * @param {{ write(chunk: string): unknown }} [stderr]
+ * @returns {Promise<void>}
+ * @ref LLP 0219#automatic-not-gated [implements]: an automatic, unconfirmed
+ *   removal is not silent at any call site, so it emits as well as printing.
+ * @ref LLP 0457#transition [constrained-by]: that spec removed every per-boot
+ *   asset pass and settled that ordinary startup does not sweep these, so the
+ *   recovery path is an explicit install (`hyp skills install`, attach, the
+ *   wizard finale) and a restart that installs nothing still sweeps nothing.
+ */
+async function sweepRefreshStaging(dest, client, planned, stdout, stderr) {
+  for (const suffix of ['.hyp-refresh', '.hyp-refresh-old']) {
+    const stage = `${dest}${suffix}`
+    if (!await statShape(stage)) continue
+    if (planned.some((entry) => entry.dest === stage)) continue
+    try {
+      await fs.rm(stage, { recursive: true, force: true })
+      stdout?.write(`removed leftover refresh staging ${stage}\n`)
+      getLogger('client-assets').info('client_assets.refresh_staging_removed', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.sweep_refresh_staging',
+        hyp_client: client,
+        [Attr.STATUS]: 'ok',
+        detail: stage,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      stderr?.write(`warning: leftover refresh staging ${stage} could not be removed: ${message}\n`)
+      getLogger('client-assets').warn('client_assets.refresh_staging_remove_failed', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.sweep_refresh_staging',
+        hyp_client: client,
+        [Attr.STATUS]: 'failed',
+        [Attr.ERROR_KIND]: 'staging_unremovable',
+        detail: stage,
+      })
+    }
+  }
+}
 
 /**
  * The evidence about a path no digest was ever recorded for. Shared and never
