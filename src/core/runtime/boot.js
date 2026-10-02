@@ -329,12 +329,17 @@ export async function bootKernel(opts = {}) {
           config: configByName.get(/** @type {PluginName} */ (/** @type {LoadedManifest} */ (entry).manifest.name)) ?? /** @type {JsonObject} */ ({}),
         }))
 
+      // The env this boot resolved, not `process.env`: plugins read `ctx.env`
+      // at activation time to place state, so a caller booting with an injected
+      // env (tests, smokes, the daemon) only gets its HYP_HOME honored if the
+      // env reaches activation from here.
       const result = await activatePlugins({
         plugins: activationEntries,
         stateRoot,
         runId,
         runtime,
         tmpRoot: opts.tmpRoot,
+        env,
       })
 
       const activePlugins = result.results

@@ -42,10 +42,11 @@ import { createActivationContext, createKernelRuntime } from './activation.js'
  * @param {string} args.runId                     Per-boot identifier used for tempDir naming.
  * @param {KernelRuntime} [args.runtime]          Override the kernel runtime (tests).
  * @param {string} [args.tmpRoot]                 Override the OS temp root (tests).
+ * @param {NodeJS.ProcessEnv} [args.env]          Environment each activation context sees; defaults to `process.env`.
  * @returns {Promise<{ runtime: KernelRuntime, results: ActivationResult[] }>}
  * @ref LLP 0008#consequences [implements]: loads each plugin only through its single manifest entrypoint, never a deep import
  */
-export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpRoot }) {
+export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpRoot, env }) {
   if (!Array.isArray(plugins)) throw new Error('activatePlugins: plugins must be an array')
   if (!stateRoot) throw new Error('activatePlugins: stateRoot is required')
   if (!runId) throw new Error('activatePlugins: runId is required')
@@ -80,6 +81,7 @@ export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpR
         plugin: activePlugin,
         paths,
         config,
+        env,
       })
 
       await withSpan(
