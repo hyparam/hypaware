@@ -12,6 +12,7 @@ import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { materializeClientAssets } from '../../src/core/runtime/client_assets.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
+import { withLogRecords } from '../helpers/log_records.js'
 
 function agentsKernelAndRegistry() {
   const registry = createCommandRegistry()
@@ -432,6 +433,52 @@ test('a contribution named for the staging suffix is not swept by its own neighb
     assert.match(second.text(), /removed leftover refresh staging .*demo\.hyp-refresh-old\n/)
     assert.doesNotMatch(second.text(), /removed leftover refresh staging .*demo\.hyp-refresh\n/)
     assert.equal(await fs.readFile(path.join(skillsDir, 'demo.hyp-refresh', 'SKILL.md'), 'utf8'), 'suffixed body\n')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0219#automatic-not-gated [tests]: the removal is recorded at a call
+// site that withholds every stream it could have printed to.
+test('the refresh-staging sweep is recorded where the caller withholds stdout', async () => {
+  // The sweep is a recursive delete inside the user's own skills directory,
+  // authorized by a derived name rather than by a recorded digest. Two of the
+  // four callers withhold `stdout` - the wizard finale suppresses the per-copy
+  // lines, `hyp attach --json` has no text stream - so a report that only ever
+  // went down that stream left the delete recorded nowhere on exactly the paths
+  // where the user sees nothing. LLP 0219 #automatic-not-gated settled that an
+  // automatic, unconfirmed removal here is not silent at any call site.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-refresh-quiet-'))
+  try {
+    const sourceDir = path.join(home, 'src-skill')
+    await fs.mkdir(sourceDir, { recursive: true })
+    await fs.writeFile(path.join(sourceDir, 'SKILL.md'), 'v2 body\n', 'utf8')
+
+    const skillsDir = path.join(home, '.claude', 'skills')
+    const dest = path.join(skillsDir, 'demo-skill')
+    await fs.mkdir(`${dest}.hyp-refresh-old`, { recursive: true })
+    await fs.writeFile(path.join(`${dest}.hyp-refresh-old`, 'SKILL.md'), 'v1 body\n', 'utf8')
+
+    // No `stdout`, no `stderr`: the shape the wizard finale and `--json` pass.
+    const { records } = await withLogRecords(() => materializeClientAssets({
+      clients: ['claude'],
+      descriptors: new Map([['claude', {
+        plugin: /** @type {any} */ ('@hypaware/claude'),
+        name: 'claude',
+        skillDir: '.claude/skills',
+        agentDir: '.claude/agents',
+      }]]),
+      homeDir: home,
+      skills: { list: () => [{ name: 'demo-skill', clients: ['claude'], sourceDir }] },
+      agents: { list: () => [] },
+    }))
+
+    await assert.rejects(fs.stat(`${dest}.hyp-refresh-old`), { code: 'ENOENT' })
+    const swept = records.filter((r) => r.body === 'client_assets.refresh_staging_removed')
+    assert.equal(swept.length, 1, 'the removal is recorded even with no stream to print to')
+    assert.equal(swept[0].attributes.detail, `${dest}.hyp-refresh-old`)
+    assert.equal(swept[0].attributes.hyp_client, 'claude')
+    assert.equal(swept[0].attributes.hyp_component, 'client-assets')
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
