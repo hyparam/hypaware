@@ -286,6 +286,7 @@ async function dispatchInternal(argv, opts) {
       commandRegistry: registry,
       cacheRoot,
       workspaceDir: opts.workspaceDir,
+      tmpRoot: opts.tmpRoot,
       env,
     })
     kernel = boot.runtime

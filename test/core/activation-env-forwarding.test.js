@@ -105,6 +105,11 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       stdout: makeBuf(),
       stderr,
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      // Issue #2462. The boot gives every activating plugin a temp dir under
+      // `tmpRoot ?? os.tmpdir()` (src/core/runtime/paths.js). Those are siblings
+      // of `hypHome`, not children, so the `fs.rm` below cannot reach them: a
+      // passing direct `node --test` run left 17 of them in the OS temp root.
+      tmpRoot: hypHome,
     })
     assert.equal(code, 0, stderr.text())
 
@@ -115,6 +120,15 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       await exists(realExports),
       realExistedBefore,
       'the boot created .hyp/exports in the invoking user\'s real home'
+    )
+
+    // `tempBase` is `tmpRoot ?? os.tmpdir()`, one or the other, so finding them
+    // here is what proves none landed in the OS temp root. Counted here and not
+    // there because other test files share `os.tmpdir()` under `npm test` and
+    // write the same shape into it.
+    assert.ok(
+      (await fs.readdir(hypHome)).some((e) => e.startsWith('@hypaware__')),
+      'no plugin boot temp dir landed under the test-owned tmpRoot'
     )
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })

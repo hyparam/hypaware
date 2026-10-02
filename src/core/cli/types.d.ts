@@ -326,6 +326,8 @@ export interface DispatchOptions {
   cwd?: string
   /** Override the local plugin workspace */
   workspaceDir?: string
+  /** Override OS temp root (tests); reaches `createPluginPaths` through `bootKernel`. */
+  tmpRoot?: string
   registry?: ReturnType<typeof createCommandRegistry>
   kernel?: KernelRuntime
 }
