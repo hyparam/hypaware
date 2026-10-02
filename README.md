@@ -25,7 +25,7 @@ hyp setup
 
 Setup first asks how to collect. **Sync to the cloud** is the default: press
 Enter and a browser sign-in enrolls this machine, so your history follows you
-across machines. Choose **Local only** to keep everything on this machine.
+across machines. Choose **Local only** to keep recordings on this machine.
 Then it asks which clients to capture, installs the background daemon, and
 starts recording. It ends with a first look at your history: tokens per
 model, activity per day, which repos you worked in, and which tools got
@@ -62,7 +62,21 @@ hyp query grep "connection refused"
 hyp query sql "select count(*) from ai_gateway_messages"
 ```
 
-See [querying and reports](./docs/QUERYING.md) for more.
+See [queries](./docs/QUERYING.md) for more.
+
+## Reports
+
+Reports review your AI work over a period: token usage, recurring tasks, tool
+failures, and opportunities to improve. Your agent investigates recorded sessions
+and proposes specific fixes with evidence:
+
+```sh
+hyp report generate "Cover last week and focus on repeated debugging work"
+```
+
+Read the report locally or publish it to make it appear in your team's
+[HypAware Cloud dashboard](https://app.hypaware.ai/).
+See [reports](./docs/REPORTS.md) for generation and publishing.
 
 ## Supported clients
 
@@ -91,9 +105,12 @@ spend, and failure patterns across the whole team:
 hyp query sql "select count(*) from ai_gateway_messages" --remote
 ```
 
-Nothing leaves your machine right away. The first sync waits until 11:59pm on
-the day you sign in, or 11:59pm the next day if you sign in within four hours
-of that, so you can review what will be sent and mark anything private first.
+First-time browser enrollment provides a review period when its hold is saved.
+Setup then asks `Upload now? [Y/n]`: pressing Enter chooses Yes and uploads
+immediately, so answer **n** to keep the review period. Check the deadline with
+`hyp status`. See the
+[first-sync review](./docs/TEAM_SETUP.md#review-before-the-first-upload)
+before sharing recordings.
 
 One person can sign in and sync on their own. To put more than one person in
 an organization, [contact us](https://hypaware.ai/contact/?utm_medium=readme)
@@ -102,9 +119,8 @@ and we'll set it up; there is no self-serve invite yet. See the
 
 ## Privacy
 
-Everything stays local unless you sign in, either by choosing **Sync to the
-cloud** in setup or with `hyp remote login`. You control what is recorded,
-per folder:
+Recordings stay local until you configure Cloud sync or another export
+destination. You control what is recorded, per folder:
 
 ```sh
 hyp privacy ignore              # never record sessions in this repo
@@ -138,12 +154,6 @@ HypAware Cloud or exported to files are not affected.
 
 ## Documentation
 
-- [Setup and lifecycle](./docs/CLI.md)
-- [Clients and history](./docs/CLIENTS.md)
-- [Querying and reports](./docs/QUERYING.md)
-- [Configuration and storage](./docs/CONFIGURATION.md)
-- [Privacy](./docs/PRIVACY.md)
-- [Team setup](./docs/TEAM_SETUP.md) and [headless deploys](./docs/HEADLESS.md)
-- [Troubleshooting](./docs/TROUBLESHOOTING.md)
-- [CLI reference](./docs/CLI_REFERENCE.md)
-- [Writing a plugin](./docs/PLUGIN_AUTHORING.md)
+Start at the [documentation index](./docs/README.md) for setup, clients,
+queries and reports, Cloud and teams, privacy, configuration, and troubleshooting.
+The [CLI reference](./docs/CLI_REFERENCE.md) lists complete command syntax and flags.

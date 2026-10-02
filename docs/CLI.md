@@ -1,26 +1,35 @@
-# Use the HypAware CLI
+[← All documentation](README.md)
 
-[Documentation](README.md)
+---
 
-Use the HypAware command-line interface (CLI) to set up capture, inspect your
-installation, explore recorded data, and control what leaves your machine.
-This guide uses `hyp`, the short binary name. You can use `hypaware` instead;
-both names run the same binary.
+# Install and maintain HypAware
+
+Install HypAware, check its background service, and keep the installation up to date.
 
 For the syntax and behavior of every command, see the
 [HypAware CLI command reference](./CLI_REFERENCE.md).
 
+## Contents
+
+- [Requirements](#requirements)
+- [Install HypAware](#install-hypaware)
+- [Check the installation](#check-the-installation)
+- [Manage the background service](#manage-the-background-service)
+- [Reconfigure an installation](#reconfigure-an-installation)
+- [Update HypAware](#update-hypaware)
+- [Reinstall or recover the current version](#reinstall-or-recover-the-current-version)
+- [Uninstall](#uninstall)
+
 ## Requirements
 
-Before you install HypAware, make sure that your machine meets these
-requirements:
-
 - Node.js 22.12 or later.
-- macOS with launchd, or Linux with a systemd user service, if you want the
-  persistent daemon.
+- macOS with `launchd`, or Linux with a `systemd` user service, for the
+  persistent background service. A container or CI host without one can run
+  `hyp daemon run` in the foreground instead; see
+  [CI and headless deployment](TEAM_SETUP.md#ci-and-headless-deployment).
 - An interactive terminal for the guided setup.
 
-## Install HypAware for the first time
+## Install HypAware
 
 Install the CLI globally, then run the guided setup:
 
@@ -29,137 +38,57 @@ npm i -g hypaware
 hyp setup
 ```
 
-The first question is how to collect. **Sync to the cloud** is the default:
-press Enter and a browser sign-in enrolls this machine so its recordings
-follow you across machines. Choose **Local only** to keep everything on this
-machine; you can switch later with `hyp remote login`. The setup then asks
-what to record. New guided setups also configure local Parquet exports; use
-`--export` to choose another strategy. It writes the configuration, installs
-the daemon, attaches the clients you selected, and imports supported client
-history.
+Select **Sync to the cloud** to store your recordings on HypAware Cloud or
+choose **Local only** to keep recordings on your machine. To change this later,
+see [connect a machine](TEAM_SETUP.md#connect-a-machine).
 
-If a valid configuration already exists, `hyp setup` shows the current setup
-and lets you reconfigure it, open full status, or quit. Quit is the default, so
-pressing Enter doesn't change a working installation.
+Setup then asks which AI clients to record, installs the background service,
+connects the clients you selected, and imports their supported session history.
 
-For an unattended local installation, specify every important choice:
+If a valid configuration already exists, `hyp setup` lets you reconfigure the setup.
+
+For an unattended local installation, specify each choice:
 
 ```sh
 hyp setup --yes \
     --source claude \
     --source otel \
     --client claude \
-    --export local-parquet \
+    --export keep-local \
     --retention-days 90
 ```
 
-OpenCode is available in both guided and unattended setup. To configure its
-CLI and Desktop capture without the gateway, use `--source opencode` (or the
-equivalent `--client opencode`).
-
-Use `--dry-run` first if you want to inspect the configuration and planned
-actions. If a configuration already exists, add `--force` to replace it.
+`--dry-run` reports what would be written and writes no configuration. It is
+not a whole-run preview: in a guided run the enrollment choice and the folder
+and sync-scope settings are applied before the flag takes effect. If a
+configuration already exists, add `--force` to replace it.
 HypAware backs up the existing configuration before replacement.
 
-## Follow the command journey
-
-For worked examples, see [clients and history](CLIENTS.md),
-[querying and reports](QUERYING.md), [configuration and storage](CONFIGURATION.md),
-and [troubleshooting](TROUBLESHOOTING.md).
-
-Start with the command that matches your task:
-
-- Getting started: use `hyp setup` to configure HypAware and `hyp status` to
-  check the result.
-- Explore and share: use `hyp ask`, `hyp query`, and `hyp report` to work with
-  recorded data.
-- Control capture and movement: use `hyp client`, `hyp privacy`, `hyp session`,
-  `hyp join`, `hyp leave`, and `hyp sync`.
-- Operate the installation: use `hyp daemon`, `hyp config`, `hyp cache`,
-  `hyp sink`, `hyp plugin`, `hyp remote`, `hyp mcp`, `hyp graph`,
-  `hyp vector`, `hyp enrichment`, `hyp version`, and `hyp dev`.
-
-Use `hyp --help` to see the commands available for your current configuration.
-Use group help to discover the next level:
-
-```sh
-hyp client --help
-hyp privacy --help
-hyp query --help
-```
-
-### Plugin command availability
-
-Some commands belong to plugins. A plugin-owned command appears in help and
-can run only when that plugin is active in the effective configuration. For
-example, `hyp query graph neighbors` belongs to `@hypaware/context-graph`, and
-`hyp query vector search` belongs to `@hypaware/vector-search`.
-
-If an inactive plugin owns the command you enter, HypAware names the plugin and
-prints a repair instruction. Top-level help reads plugin manifests without
-starting plugin listeners or sources.
-
-## Check capture and Claude telemetry
-
-Use overall status as the first troubleshooting step:
+## Check the installation
 
 ```sh
 hyp status
 ```
 
-Use the stable JSON form in scripts:
+Status reports the background service, clients, storage, and anything that needs
+attention, with guidance to help resolve problems. For capture checks, see
+[clients and history](CLIENTS.md); for failures, see [troubleshooting](TROUBLESHOOTING.md).
+
+## Manage the background service
+
+The daemon keeps capture and scheduled sync running after you close the terminal.
+Setup installs it as a per-user service. On macOS, its LaunchAgent runs while
+you are logged in. On Linux, its systemd user service requires user-session
+support; see [headless deployment](TEAM_SETUP.md#long-lived-headless-machines)
+for hosts that must keep running after logout.
 
 ```sh
-hyp status --json
-```
-
-For a client-focused view, use:
-
-```sh
-hyp client status
-hyp client status claude
-```
-
-Claude Code capture uses Claude's OpenTelemetry (OTEL) export instead of a
-proxy. `hyp attach claude` writes a reversible `env` block in
-`~/.claude/settings.json`. New Claude Code processes send telemetry events to
-the daemon's loopback listener and write transient raw API bodies to
-`~/.hyp/spool/claude-bodies`. The listener projects those bodies and deletes
-them. The spool is owner-only and bounded.
-
-This attach mode doesn't change `ANTHROPIC_BASE_URL`, install a certificate
-authority (CA), or require a terminal restart. Claude Code 2.1.193 or later is
-required. Version 2.1.214 or later provides the complete tool-decision detail.
-If the installed version is too old, attach refuses to change the existing
-client settings and tells you to update Claude Code.
-
-`hyp client status claude` reports the configured telemetry endpoint, live
-listener endpoint, endpoint drift, recent telemetry activity, transcript
-activity, and capture health. If the endpoints differ, reattach Claude and
-restart the daemon:
-
-```sh
-hyp attach claude
+hyp daemon status
 hyp daemon restart
-hyp client status claude
 ```
 
-If telemetry is quiet while Claude transcripts are active, check the following
-items in order:
-
-1. Confirm that Claude Code meets the minimum version.
-2. Confirm that `hyp client status claude` reports the client as attached.
-3. Restart the daemon with `hyp daemon restart`.
-4. Start a new Claude Code process so it reads the managed `env` block.
-5. Run `hyp status` again and follow any `Next:` lines under Attention.
-
-Session controls contact every live recorder that advertises the session
-control route, including the gateway and the Claude telemetry listener. A
-successful `hyp session status` therefore reflects all available recorders.
-An ignored session is saved on this machine and stays ignored across daemon
-restarts until you run `hyp session unignore`. The Cursor recorder still holds
-its set in memory, so a restart clears the Cursor half (issue #2155). A forked
-client session has a new session ID and needs its own ignore.
+Use the [daemon reference](CLI_REFERENCE.md#manage-the-daemon) for start, stop,
+install, and foreground operation.
 
 ## Reconfigure an installation
 
@@ -172,56 +101,26 @@ hyp setup
 Select **Reconfigure** in the menu. HypAware preserves a centrally managed
 configuration layer and changes only the choices this machine owns.
 
-For a repeatable reconfiguration from a reviewed file, validate the file and
-then replace the current local configuration:
+For unattended replacements and configuration files, see
+[repeatable configuration](CONFIGURATION.md#make-a-repeatable-setup).
 
-```sh
-hyp config validate ./hypaware-config.json
-hyp setup --from-file ./hypaware-config.json --force
-hyp status
-```
+## Update HypAware
 
-## Upgrade within a compatible major version
-
-For a normal global installation, check for and apply the latest release:
+HypAware updates automatically by default when installed globally and running
+as a background service. To update now:
 
 ```sh
 hyp update
-hyp status
 ```
 
-`hyp update` installs a newer HypAware package through npm and restarts the
-installed daemon. It also handles a daemon left running an older version after
-the package was updated. A foreground daemon must be relaunched separately.
-Source checkouts and npx-cache installations do not self-update.
+The command installs the latest release and restarts the background service.
 
-Supervised global installations also update automatically by default. Status
-reports update failures or a held release. `hyp update` selects the latest
-release; it is not a major-version pin. If you specifically need to install a
-1.x release, use npm's version selector. To keep automatic updates from later
-selecting another release, set top-level `"auto_update": false` in the effective
-configuration and restart the daemon; centrally managed policy may own that
-choice. Then run:
-
-```sh
-npm install -g hypaware@1
-hyp version
-hyp config validate
-hyp daemon install
-hyp status
-```
-
-`hyp daemon install` refreshes the launchd or systemd user-service definition
-so it points at the durable global binary. The command preserves your
-configuration and recordings.
-
-## Upgrade across a breaking version
-
-HypAware doesn't provide a general operator-controlled migration rollback.
-The updater's boot-failure recovery is not a backup of your data.
-Before you install a new major version, read its release notes and save a copy
-of `~/.hyp` at a new backup path. Then install the exact reviewed version and
-validate before you resume ordinary use:
+`hyp update` and the automatic check both take the registry's latest release
+with no major-version bound, so an update can cross a breaking boundary.
+HypAware has no operator-controlled migration rollback, and the updater's
+boot-failure recovery is not a backup of your data. Before a major version,
+read its release notes and copy `~/.hyp` to a new backup path, then install the
+reviewed version and validate before resuming ordinary use:
 
 ```sh
 npm install -g hypaware@NEXT_MAJOR_VERSION
@@ -231,10 +130,12 @@ hyp daemon install
 hyp status
 ```
 
-Replace `NEXT_MAJOR_VERSION` with the version that you reviewed. Don't assume
-that `--yes` accepts a breaking migration; no such acceptance contract exists
-today. If validation fails, stop and restore the saved state with the recovery
-procedure for that release.
+Replace `NEXT_MAJOR_VERSION` with the version you reviewed. Set top-level
+`"auto_update": false` and restart the daemon first, or the next automatic
+check moves off the version you pinned; centrally managed policy may own that
+choice. Do not assume `--yes` accepts a breaking migration, because no such
+acceptance contract exists. If validation fails, stop and restore the saved
+copy.
 
 ## Reinstall or recover the current version
 
@@ -242,97 +143,25 @@ If the CLI binary or service definition is missing but your state is intact,
 reinstall the package and service:
 
 ```sh
-npm install -g hypaware@1
-hyp config validate
+npm install -g hypaware
 hyp daemon install
-hyp client status
 hyp status
 ```
 
-If you have a known-good configuration file, restore it through the supported
-setup path:
+To restore a known-good configuration, follow
+[repeatable configuration](CONFIGURATION.md#make-a-repeatable-setup).
+
+Use `hyp attach <client>` for any configured client that status reports as
+detached, replacing `<client>` with its name, such as `claude` or `codex`.
+
+## Uninstall
 
 ```sh
-hyp config validate ./known-good-config.json
-hyp setup --from-file ./known-good-config.json --force
-hyp daemon install
-hyp status
+hyp leave                  # if this machine is enrolled in Cloud
+hyp daemon uninstall
+npm uninstall -g hypaware
 ```
 
-Use `hyp attach CLIENT` for any configured client that status reports as
-detached. Replace `CLIENT` with a listed client name, such as `claude` or
-`codex`.
-
-## Review operations that change or delete data
-
-Read the plan or warning before you approve any of these operations:
-
-- `hyp sync` sends captured data to configured destinations. It prints the
-  destination and exclusion plan, then asks for confirmation. Use
-  `hyp sync --dry-run` to send nothing.
-- `hyp privacy purge` permanently deletes matching rows from this machine's
-  local cache and sweeps the Claude raw-body spool. A `--session` purge also
-  deletes that session from your configured and enrolled servers unless you
-  add `--local-only`. The other forms don't delete copies that were already
-  exported or sent to HypAware Cloud.
-- `hyp report delete` permanently deletes a report and its artifacts for the
-  entire organization on the selected remote.
-- `hyp plugin install` and an updating `hyp plugin update PLUGIN` can fetch and
-  execute remote plugin code. HypAware shows the source, resolved revision,
-  manifest, requested permissions, and warnings before it asks you to trust
-  the code. A non-interactive remote install or update refuses to continue
-  without `--yes`. Review the source and pin a revision before you approve it.
-- `hyp daemon uninstall` removes the persistent service and detaches clients
-  so they don't point at a stopped gateway. It keeps the configuration,
-  recordings, and logs.
-- `hyp detach CLIENT` stops future capture and keeps recordings. For a
-  legacy proxy attach, `--purge` also removes the HypAware interception CA and
-  its keychain trust. Claude telemetry detach removes the managed telemetry
-  settings and sweeps its raw-body spool.
-- `hyp remote login` stores a permission-restricted credential. Prefer browser
-  sign-in, `--token-file`, or standard input. Don't place a token directly in
-  shell history.
-
-For the full privacy model, see
-[Control what HypAware records](./PRIVACY.md).
-
-## Use canonical command names
-
-Use the canonical names below in new scripts and documentation. Other spellings
-remain compatibility aliases and use the same runners:
-
-| Compatibility spelling | Canonical spelling |
-| --- | --- |
-| `hyp init` | `hyp setup` |
-| `hyp unattach` | `hyp detach` |
-| `hyp client history providers` | `hyp backfill list` |
-| `hyp skills install` | `hyp client skills install` |
-| `hyp policy ...`, `hyp ignore`, `hyp unignore`, `hyp purge` | `hyp privacy ...` |
-| `hyp query status`, `hyp query refresh`, `hyp query maintain` | `hyp cache status`, `hyp cache refresh`, `hyp cache maintain` |
-| `hyp graph neighbors` | `hyp query graph neighbors` |
-| `hyp vector search` | `hyp query vector search` |
-| `hyp plugin new`, `hyp plugin doctor` | `hyp dev plugin new`, `hyp dev plugin doctor` |
-| `hyp mcp` | `hyp mcp serve` |
-| `hyp enrich ...` | `hyp enrichment ...` |
-
-`hyp attach` and `hyp detach` are the preferred short forms of `hyp client attach`
-and `hyp client detach`; both spellings run the same command.
-
-Plugin-owned aliases are available only when the owning plugin is active.
-
-## Planned commands that aren't available
-
-The following lifecycle commands describe planned behavior only. They are not
-registered and don't work in the current CLI:
-
-```text
-hyp setup update
-hyp setup repair
-hyp setup rollback
-```
-
-Use the current upgrade and recovery procedures in this guide instead.
-
-The `source gascity` routes are also unavailable. HypAware doesn't publish
-those canonical routes until Gas City attachment changes persist across
-process restarts.
+Daemon uninstall restores managed client settings and retains local configuration
+and recordings. To delete recorded data, see [privacy](PRIVACY.md#deleting-what-was-already-recorded).
+Copies already synced to Cloud or exported to files are not removed by uninstall.

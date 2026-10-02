@@ -1,14 +1,10 @@
+[← All documentation](README.md)
+
+---
+
 # Authoring a HypAware plugin
 
-[Documentation](README.md)
-
-This guide takes you from nothing to a working, validated plugin. The
-fast path is two commands:
-
-```sh
-hyp dev plugin new @yourorg/my-thing --kind source   # scaffold
-hyp dev plugin doctor ./my-thing                      # validate
-```
+Create a plugin, register its contributions, and check it before enabling it.
 
 `hyp dev plugin doctor` runs static checks **and** a dry-run of your
 `activate()` function, then prints every problem at once with a fix for
@@ -30,22 +26,40 @@ A plugin is two things:
 The doctor's most important check is that these two agree: anything you
 declare in the manifest must actually be registered in `activate()`.
 
----
+## Contents
+
+- [Quickstart](#quickstart)
+- [Manifest](#manifest)
+- [The activate(ctx) contract](#the-activatectx-contract)
+- [Capabilities](#capabilities)
+- [Config sections](#config-sections)
+- [Permissions](#permissions)
+- [Logging and errors](#logging-and-errors)
+- [Troubleshooting (doctor diagnostics)](#troubleshooting-doctor-diagnostics)
+- [See also](#see-also)
 
 ## Quickstart
 
 ```sh
-# 1. Scaffold (kinds: source | sink | dataset)
-hyp dev plugin new @yourorg/widget --kind source --dir hypaware-core/plugins-workspace
+# Scaffold (kinds: source | sink | dataset)
+hyp dev plugin new @yourorg/widget --kind source --dir ./plugins
 
-# 2. Edit src/index.js - fill in the TODOs in activate()
+# Edit ./plugins/widget/src/index.js, then check it
+hyp dev plugin doctor ./plugins/widget
 
-# 3. Validate
-hyp dev plugin doctor hypaware-core/plugins-workspace/widget
+# Register the local plugin installation
+hyp plugin install ./plugins/widget
 ```
 
-The scaffold is intentionally minimal and passes the doctor out of the
-box, so you always start from green and edit toward your feature.
+Enable it by adding `{ "name": "@yourorg/widget" }` to the existing `plugins`
+array in your [configuration](CONFIGURATION.md#locate-and-validate-configuration),
+then run `hyp config validate` and restart the daemon. Installation alone does
+not enable a plugin.
+
+The scaffold is a starting point. Doctor checks the manifest and activation
+registrations, but does not prove that a source captures data, a sink exports it,
+or a dataset can be queried. Test the contribution you implement in an isolated
+installation. For a dataset, run a query that reads its rows as well as doctor.
 
 ---
 
@@ -59,10 +73,10 @@ fields (validated by `src/core/manifest.js`):
 | `schema_version` | yes | Must be `1`. |
 | `name` | yes | Scoped, `@scope/slug` by convention, e.g. `@yourorg/widget`. |
 | `version` | yes | Semver `X.Y.Z`. |
-| `hypaware_api` | yes | Semver **range** against the kernel API, e.g. `^1.0.0`. |
-| `runtime` | yes | `"node"` (the only V1 runtime). |
+| `hypaware_api` | yes | A declared API semver range, e.g. `^1.0.0`. Doctor checks its syntax; the runtime does not enforce compatibility against a kernel API version. |
+| `runtime` | yes | Must be `"node"`. |
 | `entrypoint` | yes | Path to the module exporting `activate`, e.g. `./src/index.js`. |
-| `node_engine` | no | e.g. `">=20"`. |
+| `node_engine` | no | Informational, not enforced by the plugin loader. HypAware itself requires Node.js 22.12 or later; use `">=22.12"`. |
 | `description` | no | One line; shown in help. |
 | `permissions` | no | String array, e.g. `["network", "read_env"]`. |
 | `requires` | no | `{ plugins?, capabilities? }`: see [Capabilities](#capabilities). |
@@ -82,11 +96,12 @@ The entrypoint exports one function:
 // @ts-check
 
 /**
- * @import { PluginActivationContext } from '<path>/hypaware-plugin-kernel-types.d.ts'
+ * @import { PluginActivationContext } from 'hypaware'
  */
 
 const PLUGIN_NAME = '@yourorg/widget'
 
+/** @param {PluginActivationContext} ctx */
 export async function activate(ctx) {
   // Register everything the manifest declares. Do NOT do real work
   // (open sockets, read large config, hit the network) here - defer
@@ -94,9 +109,15 @@ export async function activate(ctx) {
 }
 ```
 
+The type import above resolves through the installed `hypaware` package, which
+must be resolvable from your development project. A global CLI installation alone
+does not make it resolvable to your editor. The generated scaffold may instead
+contain a relative type path to the CLI installation; update that path if you
+move the plugin.
+
 `activate()` runs once at boot. Its job is to *register* contributions
 on the registries hanging off `ctx`. The kernel handles dependency
-order, paths, logging, and lifecycle. `ctx` gives you:
+order, paths, logging, and lifecycle. Common context members include:
 
 - `ctx.sources`, `ctx.sinks`, `ctx.query`, `ctx.commands`, `ctx.skills`,
   `ctx.agents`, `ctx.initPresets`, `ctx.configRegistry`: the registries.
@@ -106,10 +127,8 @@ order, paths, logging, and lifecycle. `ctx` gives you:
 - `ctx.log`: structured logger; `ctx.log.info('event', { ... })`.
 - `ctx.permissions`: check declared permissions.
 
-> **Style**: JavaScript, no semicolons, JSDoc types.
-> Declare type imports with `@import` at the top of the file; never use
-> inline `import('...')` types or `@typedef`. Define shared types as
-> `interface`s in a `.d.ts` and `@import` them.
+See the [shipped plugin API types](../hypaware-plugin-kernel-types.d.ts) for the
+complete context and registration contracts.
 
 ### Registering sources
 
@@ -167,24 +186,58 @@ the partition/row callbacks:
 ctx.query.registerDataset({
   name: 'widget_events',
   plugin: PLUGIN_NAME,
-  schema: [
-    { name: 'event_time', type: 'TIMESTAMP', nullable: false },
-    { name: 'message', type: 'STRING', nullable: true },
-  ],
+  schema: {
+    columns: [
+      { name: 'event_time', type: 'TIMESTAMP', nullable: false },
+      { name: 'message', type: 'STRING', nullable: true },
+    ],
+  },
   primaryTimestampColumn: 'event_time',
   async discoverPartitions() { return [] },
-  async refreshPartition() { return { rowCount: 0 } },
+  async refreshPartition() { return { status: 'skipped', rows: 0 } },
   createDataSource() {
-    return { async *[Symbol.asyncIterator]() { /* yield rows */ } }
+    return {
+      columns: ['event_time', 'message'],
+      scan() {
+        return {
+          async *rows() {
+            yield {
+              columns: ['event_time', 'message'],
+              cells: {
+                event_time: async () => Date.parse('2026-09-01T00:00:00Z'),
+                message: async () => 'hello',
+              },
+            }
+          },
+          appliedWhere: false,
+          appliedLimitOffset: false,
+        }
+      },
+    }
   },
 })
 ```
+
+This example exposes one fixed row through a `ScannableDataSource`. Each cell
+is an async function. A real dataset must implement partition discovery and
+refresh for its storage, and stream its records from `scan().rows()`. The two
+`applied` flags stay false unless the source applies those query hints itself.
 
 Column `type` is one of `STRING | INT32 | INT64 | DOUBLE | BOOLEAN | TIMESTAMP | JSON`.
 
 ### Registering commands
 
-Declare `contributes.commands: [{ name }]` and register a `run`:
+Keep the manifest's command name and summary identical to the registration:
+
+```json
+{
+  "contributes": {
+    "commands": [{ "name": "widget sync", "summary": "Sync widgets now" }]
+  }
+}
+```
+
+Register its implementation inside `activate(ctx)`:
 
 ```js
 ctx.commands.register({
@@ -192,7 +245,10 @@ ctx.commands.register({
   plugin: PLUGIN_NAME,
   summary: 'Sync widgets now',
   usage: 'hyp widget sync',
-  run: async (argv, runCtx) => { runCtx.stdout.write('ok\n'); return 0 },
+  run: async (argv, runCtx) => {
+    runCtx.stdout.write('ok\n')
+    return 0
+  },
 })
 ```
 
@@ -299,15 +355,17 @@ ctx.provideCapability('hypaware.blob-store', '1.0.0', blobStoreImpl)
 To **require** one, declare the range and resolve it at use time:
 
 ```jsonc
-"requires": { "capabilities": { "hypaware.ai-gateway": "^1.0.0" } }
+"requires": { "capabilities": { "hypaware.ai-gateway": "^2.0.0" } }
 ```
 
 ```js
-const gateway = ctx.requireCapability('hypaware.ai-gateway', '^1.0.0')
+const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 ```
 
-The doctor checks that every required capability is provided by some
-bundled or installed plugin (`hyp plugin list` shows what is available).
+Doctor checks required capability ranges against bundled and installed provider
+manifests. Its unresolved-capability diagnostic names the providers and versions
+it found. `hyp plugin list` lists plugins, not capability versions; inspect a
+provider's manifest with `hyp plugin info <name>`.
 
 ---
 
@@ -333,11 +391,13 @@ documented but unvalidated.
 ## Permissions
 
 Declare what the plugin needs in `manifest.permissions` (e.g. `network`,
-`read_env`, `read_state`, `write_state`). At runtime, check before use:
+`read_env`, `read_state`, `write_state`). These are declarations, not a security
+sandbox or independently granted permissions. Plugins run as your user and can
+access its resources. The context helpers check membership in the declared set:
 
 ```js
 if (ctx.permissions.has('network')) { /* ... */ }
-ctx.permissions.require('network') // throws if not granted
+ctx.permissions.require('network') // throws if not declared
 ```
 
 ---
@@ -350,8 +410,7 @@ Use `ctx.log` with structured fields, not `console.log`:
 ctx.log.info('widget.sync', { component: 'widget', operation: 'sync', status: 'ok', count })
 ```
 
-Tag thrown errors with a stable `hypErrorKind` so telemetry and smokes
-can group them:
+Tag thrown errors with a stable `hypErrorKind` so logs can group them:
 
 ```js
 const err = new Error('widget endpoint unreachable')
@@ -359,8 +418,8 @@ const err = new Error('widget endpoint unreachable')
 throw err
 ```
 
-Keep dev telemetry local and secret-safe: no credentials, raw prompts,
-or private data, hash or redact when identity matters.
+Keep logs free of secrets: no credentials, raw prompts, or private data.
+Hash or redact values when identity matters.
 
 ---
 
@@ -391,6 +450,7 @@ and how to fix it:
 
 ## See also
 
-- [`hypaware-plugin-kernel-types.d.ts`](../hypaware-plugin-kernel-types.d.ts): the full plugin API surface.
-- `hypaware-core/plugins-workspace/gascity/`: a complete worked example (source + dataset + commands + init preset + skill).
-- `hypaware-core/plugins-workspace/s3/`: a blob-store sink that provides a capability.
+- [Plugin API types](../hypaware-plugin-kernel-types.d.ts): the shipped context and registration contracts.
+- [OTEL integration](../hypaware-core/plugins-workspace/otel/src/index.js): source registration.
+- [S3 integration](../hypaware-core/plugins-workspace/s3/src/index.js): a sink and blob-store capability provider.
+- [Dataset registry](../src/core/registry/datasets.js): dataset registration and validation.

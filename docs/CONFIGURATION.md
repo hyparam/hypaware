@@ -1,9 +1,21 @@
-# Configure storage, exports, and plugins
+[← All documentation](README.md)
 
-[Documentation](README.md) / Configuration
+---
+
+# Configure storage, exports, and plugins
 
 Prefer `hyp setup` for routine changes. It composes the required plugins,
 preserves centrally managed settings, and reports the actions it will take.
+
+## Contents
+
+- [Locate and validate configuration](#locate-and-validate-configuration)
+- [Make a repeatable setup](#make-a-repeatable-setup)
+- [Set local retention](#set-local-retention)
+- [Choose an export destination](#choose-an-export-destination)
+- [Maintain the query cache](#maintain-the-query-cache)
+- [Know where data lives](#know-where-data-lives)
+- [Manage optional plugins](#manage-optional-plugins)
 
 ## Locate and validate configuration
 
@@ -16,7 +28,10 @@ hyp plugin list
 ```
 
 Configuration uses `version: 2`, an explicit `plugins` list, optional `sinks`,
-and `query.cache` settings. Each plugin owns its own `config` block. Use
+and `query.cache` settings. The top-level `auto_update` setting defaults to
+`true` for supervised global installations; see [automatic updates](CLI.md#update-hypaware).
+To disable automatic updates, set `"auto_update": false` and restart the daemon.
+Organization policy may control this setting. Each plugin owns its own `config` block. Use
 `hyp plugin info PLUGIN` to inspect an installed plugin's manifest.
 
 On an enrolled machine, a separate central layer under `config-control/` is
@@ -27,14 +42,9 @@ management.
 
 ## Make a repeatable setup
 
-Preview an unattended local setup:
-
-```sh
-hyp setup --yes --source codex --client codex --export keep-local --retention-days 120 --dry-run
-```
-
-Remove `--dry-run` to apply it. On an existing installation, interactive
-`hyp setup` is the usual reconfiguration path. An unattended replacement
+For a fresh installation, use the [unattended setup example](CLI.md#install-hypaware).
+On an existing installation, interactive `hyp setup` is the usual reconfiguration
+path. An unattended replacement
 requires `--force` and backs up the previous local file; supply the complete
 set of choices, since it is a replacement rather than an incremental patch.
 
@@ -52,9 +62,10 @@ changing it in one shell does not move existing recordings or a running service.
 
 ## Set local retention
 
-The guided setup uses 120 days for local collection and 90 days for team
-collection. Existing retention survives interactive reconfiguration.
-`--retention-days` overrides the setup default. In a configuration file, the
+First-time guided setup uses 120 days for local collection and 90 days for team
+collection. Unattended setup defaults to 90 days, including local-only installs.
+Existing retention survives interactive reconfiguration. `--retention-days`
+overrides the setup default. In a configuration file, the
 following is a fragment to merge into the existing `query` block:
 
 ```json
@@ -86,21 +97,13 @@ from that cache, not a prerequisite for querying it.
 | `--export local-parquet` | Also write Parquet files under `<HYP_HOME>/exports` every five minutes. |
 | `--export configure-later` | Defer local export configuration. |
 
-New guided setups default to local Parquet exports; interactive reconfiguration
-preserves the existing export choice. An enrolled machine may also have a
+These `--export` flags select unattended setup; they are not extra choices
+inside the guided walkthrough. New guided setups default to local Parquet
+exports; interactive reconfiguration preserves the existing export choice. An enrolled machine may also have a
 centrally managed sync sink regardless of its local export choice.
 
-To inspect destinations and send eligible data now:
-
-```sh
-hyp sync --dry-run
-hyp sync
-```
-
-`hyp sync` prints its plan and asks for confirmation. It does not bypass
-local-only or ignored-folder exclusions. A confirmed all-destination sync can
-release an attended enrollment's first-sync hold early. See [privacy](PRIVACY.md)
-and [headless setup](HEADLESS.md) for enrollment-specific behavior.
+For previewing destinations and sending recordings now, see
+[Cloud sync](TEAM_SETUP.md#send-recordings-now).
 
 The generated Parquet sink instance is named `local`.
 
@@ -119,6 +122,17 @@ For custom destinations, keep writer and destination plugin settings in their
 documented config blocks and run `hyp config validate` before restarting.
 The [plugin authoring guide](PLUGIN_AUTHORING.md) explains the sink contracts.
 
+## Maintain the query cache
+
+The cache is Iceberg storage backed by Parquet files. Local queries use this
+cache; optional Parquet exports are an additional copy for external use.
+
+Use `hyp cache refresh DATASET` when a query reports stale cached data, and
+`hyp cache maintain DATASET --dry-run` to inspect maintenance before applying
+it. Cache refresh does not import client transcripts; use
+[history imports](CLIENTS.md#bring-in-existing-history) for that. Cache
+maintenance does not delete exported copies.
+
 ## Know where data lives
 
 All paths below are relative to `HYP_HOME`:
@@ -132,7 +146,12 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/sinks/` | Export state and retry outboxes |
 | `exports/` | Default local Parquet destination |
 | `spool/claude-bodies/` | Transient Claude raw bodies |
-| `hypaware/logs/` | Service stdout and stderr logs |
+| `hypaware/logs/daemon.log` | Main structured daemon log |
+| `hypaware/logs/daemon.out.log` | Service stdout log |
+| `hypaware/logs/daemon.err.log` | Service stderr log |
+| `hypaware/session-ignores/` | Persistent session exclusions for supported recorders |
+| `hypaware/product-telemetry/` | Product telemetry policy and pending batches |
+| `hypaware/tls/` | Local proxy certificate authority and certificates |
 | `hypaware/processing/logs/daemon.log` | Processing daemon log |
 | `hypaware/dev-telemetry/` | Local development diagnostics |
 
