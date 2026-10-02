@@ -2753,8 +2753,9 @@ export async function collectHypAwareStatus(opts = {}) {
   // structurally zero on an ordinary machine (issue #1182), which is the one
   // answer a monitoring field must never give when it has not looked.
   // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
-  // Only configured destinations arm the export warning: rows recovered from a
-  // prior daemon's file are shape, so their outbox files stay history.
+  // Not simply the configured set: an unreadable layer, or a recovered row
+  // whose `sinks` key the central merge dropped, leaves the gate armed over
+  // the status-file fallback's recovered rows.
   // @ref LLP 0453#warning-rule [implements]: a destination outside the configured set does not warn, however the removal was spelled
   const recentErrors = await countRecentErrors(
     stateRoot,
