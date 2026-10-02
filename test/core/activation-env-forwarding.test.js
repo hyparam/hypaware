@@ -18,7 +18,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { dispatch } from '../../src/core/cli/dispatch.js'
+import { dispatch, activatePluginDependencyClosure } from '../../src/core/cli/dispatch.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../src/core/runtime/loader.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
@@ -222,5 +222,63 @@ test('bootKernel forces its resolved hypHome into the env activation reads', asy
   } finally {
     await fs.rm(booted, { recursive: true, force: true })
     await fs.rm(ambient, { recursive: true, force: true })
+  }
+})
+
+// Issue #2445, the same gap on a second activation path. `bootKernel` is not
+// the only producer of activation entries: `activatePluginDependencyClosure`
+// activates a config-selected plugin mid-command (the dispatch-miss seam and
+// the manual-attach enable prompt), and it called `activatePlugins` with no
+// `env` at all, so `createActivationContext` fell back to `process.env` there
+// no matter what the command was invoked with. The injected env below carries
+// nothing but the marker, so a `ctx.env` that came from the ambient process
+// cannot accidentally satisfy the assertion.
+test('the dependency-closure activation path hands the injected env to ctx.env', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-closure-plugin-'))
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-closure-state-'))
+  const seen = path.join(stateRoot, 'seen.txt')
+  const runId = `issue-2445-${process.pid}-${Date.now()}`
+  await fs.writeFile(
+    path.join(rootDir, 'index.js'),
+    'import fs from \'node:fs/promises\'\n' +
+    'export async function activate(ctx) {\n' +
+    `  await fs.writeFile(${JSON.stringify(seen)}, String(ctx.env.HYP_CLOSURE_MARKER))\n` +
+    '}\n'
+  )
+  const manifest = /** @type {any} */ ({
+    schema_version: 1,
+    name: '@acme/closure-env-reader',
+    version: '1.0.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+  })
+
+  try {
+    // The `selection` seam the dispatch-miss caller uses, so the closure runs
+    // off this fixture instead of a disk discovery of the real install.
+    const result = await activatePluginDependencyClosure({
+      seedNames: [manifest.name],
+      kernel: createKernelRuntime({ cacheRoot: path.join(stateRoot, 'cache') }),
+      stateRoot,
+      runId,
+      activePlugins: [],
+      selection: /** @type {any} */ ({
+        selectedManifests: [{ manifest, rootDir }],
+        layered: { effective: { plugins: [{ name: manifest.name, config: {} }] } },
+      }),
+      env: /** @type {any} */ ({ HYP_CLOSURE_MARKER: 'injected' }),
+    })
+    assert.deepEqual(result, { activated: [manifest.name], failed: [] })
+    assert.equal(await fs.readFile(seen, 'utf8'), 'injected')
+  } finally {
+    // This path passes no `tmpRoot`, so the fixture's boot temp dir lands in
+    // the shared OS temp root; `runId` is unique to this run, so matching on
+    // it reclaims only what this test made (issue #2477's residue stays).
+    for (const entry of (await fs.readdir(os.tmpdir())).filter((e) => e.endsWith('-' + runId))) {
+      await fs.rm(path.join(os.tmpdir(), entry), { recursive: true, force: true })
+    }
+    await fs.rm(rootDir, { recursive: true, force: true })
+    await fs.rm(stateRoot, { recursive: true, force: true })
   }
 })
