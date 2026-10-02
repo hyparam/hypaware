@@ -314,3 +314,47 @@ test('setup claude-and-otel-local --force=false refuses to clobber an existing c
     []
   )
 })
+
+// Regression (#2437): the preset dispatch runs before any flag parsing and
+// handed raw argv to a preset that reads only the two flags it honors, so
+// `--help`, `-h`, and an unrecognized flag were ignored and the config write
+// proceeded. A help invocation writes nothing, and an unrecognized flag refuses
+// like the no-preset form does.
+for (const helpFlag of ['--help', '-h']) {
+  test(`setup claude-and-otel-local ${helpFlag} prints help and writes no config`, async () => {
+    const { hypHome, stdout, stderr, opts } = await makeHome()
+    const code = await dispatch(['setup', 'claude-and-otel-local', helpFlag], opts)
+    assert.equal(code, 0, stderr.text())
+    // The same registry-backed help `hyp setup --help` renders, not help a
+    // preset composed for itself.
+    assert.match(stdout.text(), /usage: hyp setup \[preset\] \[flags\]/)
+    assert.doesNotMatch(stdout.text(), /Wrote /)
+    await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+  })
+}
+
+test('setup claude-and-otel-local --bogus refuses with exit 2 and writes no config', async () => {
+  const { hypHome, stdout, stderr, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--bogus'], opts)
+  assert.equal(code, 2, stdout.text())
+  assert.match(stderr.text(), /unknown flag '--bogus'/)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
+test('setup claude-and-otel-local -X refuses with exit 2 and writes no config', async () => {
+  const { hypHome, stderr, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '-X'], opts)
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /unknown flag '-X'/)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
+// The gate refuses typos without disturbing the spellings the preset honors:
+// a bare preset run still writes.
+test('setup claude-and-otel-local still writes the config past the flag gate', async () => {
+  const { hypHome, stdout, stderr, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local'], opts)
+  assert.equal(code, 0, stderr.text())
+  assert.match(stdout.text(), /Wrote /)
+  await assert.doesNotReject(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
