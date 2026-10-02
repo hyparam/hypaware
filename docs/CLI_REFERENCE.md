@@ -228,7 +228,9 @@ hyp query sql "select count(*) as rows from ai_gateway_messages"
 
 A malformed flag or a missing statement returns a usage error. The statement
 itself is parsed during the run, so invalid or non-read-only SQL returns `1`,
-as do query, remote, and output failures.
+as do query and output failures. A `--remote` failure splits: an unregistered
+target, or a session that needs `hyp remote login` again, returns `2`; a
+transport error, or an error the remote itself reports, returns `1`.
 
 ### `hyp query grep`
 
@@ -770,8 +772,9 @@ hyp client claude-account status
 Reports the credential mode and whether a usable credential is present. A
 missing, unreadable, or unresolved credential returns `1`. A stored
 subscription credential that is past its expiry still returns `0`: the command
-prints the expiry timestamp without comparing it, and the next resolve renews
-the token from the stored refresh token.
+prints the expiry timestamp without comparing it, and the next resolve attempts
+a renewal from the stored refresh token, which succeeds unless that token has
+also been revoked or expired.
 
 ```sh
 hyp client claude-account status
