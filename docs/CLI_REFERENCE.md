@@ -95,15 +95,19 @@ daemon, attach clients, install client assets, and import history.
 Important options include repeatable `--source` and `--client`, `--export`,
 `--retention-days`, `--from-file`, `--no-daemon`, and `--bin`.
 
-`--dry-run` currently still writes the configuration, including with
-`--from-file`. It is not a read-only preview.
+`--dry-run` reports what would be written and writes no configuration,
+including with `--from-file`. It still refuses an existing configuration
+without `--force`, exactly where a real run would.
 
 ```sh
 hyp setup --source claude --client claude --export keep-local --yes
 ```
 
-Success returns `0`. Invalid flags return `2`; a refused overwrite, an unknown
-preset, or an installation or configuration failure returns `1`.
+Success returns `0`. Invalid flags return `2`. A refused overwrite, an unknown
+preset, or a `--from-file` configuration that cannot be read or does not
+validate returns `1`. A failed daemon install is not fatal: setup returns `0`
+and prints a note to run `hyp daemon install`, so a zero exit does not prove
+the background service was installed.
 
 ### `hyp status`
 

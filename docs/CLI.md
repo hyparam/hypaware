@@ -55,8 +55,8 @@ hyp setup --yes \
     --retention-days 90
 ```
 
-`--dry-run` currently still writes the configuration, so it is not a read-only
-preview. If a configuration already exists, add `--force` to replace it.
+`--dry-run` reports what would be written and writes nothing. If a
+configuration already exists, add `--force` to replace it.
 HypAware backs up the existing configuration before replacement.
 
 ## Check the installation

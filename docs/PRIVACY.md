@@ -316,8 +316,10 @@ separate; see [data paths](CONFIGURATION.md#know-where-data-lives).
 ## Product telemetry
 
 Product telemetry reports how HypAware itself is running. It is enabled for an
-enrolled organization unless you saved an `off` or `local` preference. Standalone
-installations default to off. Check the effective state and destination:
+enrolled organization unless you saved an `off` or `local` preference. An
+already-enrolled machine starts reporting on its next CLI run or daemon start
+after an upgrade, without a new prompt. Standalone installations default to off.
+Check the effective state and destination:
 
 ```sh
 hyp telemetry status
@@ -340,8 +342,9 @@ batches. It cannot recall batches the server already accepted. If saving fails,
 the command exits nonzero and reports that telemetry remains enabled.
 
 `local` keeps a preview queue without sending it. `organization` enables sending
-and requires one eligible enrolled central sink. Changing the mode clears older
-pending batches. `preview` prints the exact next batch, or `null` if none is queued.
+and requires one eligible enrolled central sink with an HTTPS destination.
+Changing the mode clears older pending batches. `preview` prints the exact next
+batch, or `null` if none is queued.
 
 Restart a running daemon after enabling collection. It notices disabling and
 enrollment changes within 30 seconds. `hyp status` also reports telemetry state.
