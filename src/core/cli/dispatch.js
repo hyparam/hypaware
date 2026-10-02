@@ -325,6 +325,24 @@ async function dispatchInternal(argv, opts) {
   // its own failures, so running it on a throw cannot replace the exit code or
   // mask the error that got here, and it still deletes only the temp dirs this
   // boot's own activation contexts recorded.
+  //
+  // A termination signal is the other exit that never reaches that `finally`:
+  // the default disposition kills the process where it stands (issue #2482). One
+  // release, guarded, so the signal path and the `finally` can both reach for it
+  // and only the first of them does the work.
+  let released = false
+  const release = async () => {
+    if (released) return
+    released = true
+    await teardownBootOwnedKernel(kernel)
+  }
+  // Only a boot that activated something has anything to release, and gating on
+  // that is what keeps every `{ activate: [] }` command (`hyp daemon run` among
+  // them, which owns its own boot and its own shutdown) on exactly the signal
+  // disposition it has today.
+  const removeSignalTeardown = ownsKernel && kernel.activationContexts.size > 0
+    ? installSignalTeardown(release)
+    : undefined
   try {
     if (sinkPass) {
       const sinkResult = await materializeSinks(kernel, sinkPass.config, {
@@ -631,7 +649,10 @@ async function dispatchInternal(argv, opts) {
       )
     )
   } finally {
-    if (ownsKernel) await teardownBootOwnedKernel(kernel)
+    // A handler outliving the boot it was there to tear down is the same class
+    // of leak as the temp dirs, so it comes off here and not only on the signal.
+    removeSignalTeardown?.()
+    if (ownsKernel) await release()
   }
 }
 
@@ -746,6 +767,49 @@ export function decideBootProfile(argv, registry) {
   if (profile === 'all-available') return 'all-available'
   if (profile === 'none') return { activate: [] }
   return 'config'
+}
+
+/**
+ * Release a boot-owned kernel when this process is interrupted, then let the
+ * signal do what it would have done.
+ *
+ * Three other sites install SIGINT/SIGTERM handlers on this same process
+ * (`src/core/daemon/runtime.js`, `src/core/daemon/gateway.js`, and
+ * `hypaware-core/plugins-workspace/github/src/commands.js`), and `hyp daemon
+ * run` is itself dispatched, so a handler installed here can sit *underneath*
+ * one that owns the shutdown. Whenever any other listener for that signal is
+ * present it is the owner and this one does nothing at all: that is what keeps
+ * the daemon's shutdown ordering and the github device-flow cancel intact, and
+ * it gives up nothing, because a process already carrying a listener for that
+ * signal was never going to take the default disposition either.
+ *
+ * When this is the only listener the default disposition *was* the exit, so
+ * dropping the listener and re-raising reproduces it: the parent still sees a
+ * signal-terminated child rather than a `process.exit` standing in for one, and
+ * the conventional 128+N status stays the kernel's to report. Dropping it before
+ * the release also makes a second signal the conventional immediate give-up.
+ *
+ * @param {() => Promise<void>} release
+ * @returns {() => void} remove the listeners this installed
+ */
+function installSignalTeardown(release) {
+  /** @type {[NodeJS.Signals, () => void][]} */
+  const installed = []
+  for (const signal of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM'])) {
+    const handler = () => {
+      if (process.listenerCount(signal) > 1) return
+      process.removeListener(signal, handler)
+      // Both arms: `release` swallows its own failures today, and a process
+      // stranded mid-signal is not the way to find out that changed.
+      const reraise = () => { process.kill(process.pid, signal) }
+      release().then(reraise, reraise)
+    }
+    installed.push([signal, handler])
+    process.on(signal, handler)
+  }
+  return () => {
+    for (const [signal, handler] of installed) process.removeListener(signal, handler)
+  }
 }
 
 /**
