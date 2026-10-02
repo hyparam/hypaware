@@ -705,8 +705,10 @@ export function maintenanceSkipsFromStatus(status) {
   const rawReasons = isPlainObject(raw.reasons) ? raw.reasons : {}
   /** @type {Record<MaintenanceSkipReason, number>} */
   const reasons = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  let reasonsTotal = 0
   for (const reason of MAINTENANCE_SKIP_REASONS) {
     reasons[reason] = nonNegativeInt(rawReasons[reason]) ?? 0
+    reasonsTotal += reasons[reason]
   }
 
   /** @type {MaintenanceSkippedPartition[]} */
@@ -734,19 +736,20 @@ export function maintenanceSkipsFromStatus(status) {
     })
   }
 
-  const recordedTotal = nonNegativeInt(raw.skippedTotal)
-    ?? MAINTENANCE_SKIP_REASONS.reduce((sum, reason) => sum + reasons[reason], 0)
+  // Floored at both the capped list and the reasons it reports: a total below
+  // either renders a sentence no tick could produce, "2 partitions" above
+  // three lines of them, or "0 partitions fragmented (2
+  // compaction_attempt_failed)" (issue #2360). A snapshot this build wrote
+  // has the total at exactly the reason sum, so both floors are no-ops there.
+  const skippedTotal = Math.max(nonNegativeInt(raw.skippedTotal) ?? 0, reasonsTotal, partitions.length)
   return {
     tickAt,
-    // Floored at the skipped total (and the named list, which the total
-    // itself is already floored at below): "visited" can never be smaller
-    // than "skipped", or the render says "5 of 0 partitions" for a snapshot
-    // no tick could have produced. A file this build did not write can claim
+    // Floored at the skipped total: "visited" can never be smaller than
+    // "skipped", or the render says "5 of 0 partitions" for a snapshot no
+    // tick could have produced. A file this build did not write can claim
     // whatever it wants here, so the floor is enforced rather than trusted.
-    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, recordedTotal, partitions.length),
-    // The list is capped, so the count leads; but a count smaller than the
-    // list would render "2 partitions" above three lines of them.
-    skippedTotal: Math.max(recordedTotal, partitions.length),
+    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, skippedTotal),
+    skippedTotal,
     reasons,
     partitions,
   }
@@ -1932,9 +1935,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // hourly walk, and `hyp status` reads no cache, so answering this any other
   // way would mean firing a second maintenance walk from a status command.
   const maintenance = maintenanceSkipsFromStatus(daemonStatusFile)
-  // `skippedTotal` and each `reasons` entry are clamped independently from a
-  // file this build may not have written, so a recorded failed attempt is
-  // tested directly rather than inferred from the difference between them.
+  // A recorded failed attempt is tested directly rather than inferred from
+  // the difference between the counts: the snapshot's floor makes the
+  // difference agree, but the gate must not depend on that, or narrowing the
+  // floor would silently suppress a real failure.
   // @ref LLP 0454#warning-policy [implements]: ineffective rewrites alone are verbose detail, not actionable failures
   if (maintenance && (maintenance.reasons.compaction_attempt_failed > 0 ||
     maintenance.skippedTotal > maintenance.reasons.compaction_ineffective)) {
