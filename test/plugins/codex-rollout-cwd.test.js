@@ -56,7 +56,7 @@ const SUBSCRIPTION_THREAD_ID = '019e60b5-9999-4aaa-8bbb-ccccddddeeee'
  * That is the shape these tests need, because the rollout fallback only runs
  * when the request states an id and no in-band cwd.
  * @ref LLP 0151#body-is-authority [tests]: keyed on the surface Codex really
- *   fills, not on a `session-id` header Codex never emits.
+ *   fills, not on a bare `session-id` header no Codex turn sends.
  */
 function subscriptionClientMetadata() {
   return {
