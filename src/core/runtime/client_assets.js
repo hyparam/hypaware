@@ -82,7 +82,7 @@ export async function materializeClientAssets(options) {
         continue
       }
       stdout?.write(`installed ${asset.kind} '${asset.name}' → ${dest}\n`)
-      await sweepRefreshStaging(dest, stdout, stderr)
+      await sweepRefreshStaging(dest, planned, stdout, stderr)
     }
     installed.push({ kind: asset.kind, name: asset.name, client, dest, dryRun })
   }
@@ -730,10 +730,20 @@ function attachMarkerAssets(stateRoot, client) {
  * not. A copy that failed hits the `continue` above and sweeps nothing - there,
  * a `.hyp-refresh-old` can be the only surviving copy of the asset, because a
  * kill between the two renames leaves `dest` absent, and deleting it would
- * destroy what the staging existed to preserve. No code in this version writes
- * these names, so a tree carrying one cannot belong to a refresh in flight, and
- * a concurrently running old binary needs no guard here: {@link copyAsset}
- * already replaced `dest` out from under it before this is reached.
+ * destroy what the staging existed to preserve. No code in this version *stages*
+ * under these names, so a tree carrying one cannot belong to a refresh in
+ * flight, and a concurrently running old binary needs no guard here:
+ * {@link copyAsset} already replaced `dest` out from under it before this is
+ * reached.
+ *
+ * What a tree at one of these names can still be is a destination of this very
+ * plan: `<X>.hyp-refresh` is a legal single-segment contribution name, so a
+ * plugin registering both `X` and `X.hyp-refresh` for one client has the second
+ * one land exactly where installing the first would sweep. `planned` is
+ * consulted for that, and only once something is actually at the path, so the
+ * common case (nothing left over) pays for no scan: without it, installing `X`
+ * deletes a copy this same run made and reported installed, on every run
+ * forever, while the ledger goes on naming it and the prune reports nothing.
  *
  * Exactly those two names, never a `.hyp-refresh` prefix match. Both were fixed
  * rather than pid-scoped so that leftovers would stay recognizable, so a prefix
@@ -749,6 +759,7 @@ function attachMarkerAssets(stateRoot, client) {
  * so it cannot turn a copy that succeeded into a reported failure.
  *
  * @param {string} dest
+ * @param {PlannedClientAsset[]} planned
  * @param {{ write(chunk: string): unknown }} [stdout]
  * @param {{ write(chunk: string): unknown }} [stderr]
  * @returns {Promise<void>}
@@ -757,10 +768,11 @@ function attachMarkerAssets(stateRoot, client) {
  *   recovery path is an explicit install (`hyp skills install`, attach, the
  *   wizard finale) and a restart that installs nothing still sweeps nothing.
  */
-async function sweepRefreshStaging(dest, stdout, stderr) {
+async function sweepRefreshStaging(dest, planned, stdout, stderr) {
   for (const suffix of ['.hyp-refresh', '.hyp-refresh-old']) {
     const stage = `${dest}${suffix}`
     if (!await statShape(stage)) continue
+    if (planned.some((entry) => entry.dest === stage)) continue
     try {
       await fs.rm(stage, { recursive: true, force: true })
       stdout?.write(`removed leftover refresh staging ${stage}\n`)

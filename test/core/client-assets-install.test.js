@@ -392,6 +392,51 @@ test('a copy that did not land, and a dry run, sweep no refresh staging', async 
   }
 })
 
+test('a contribution named for the staging suffix is not swept by its own neighbour', async () => {
+  // `<X>.hyp-refresh` is a legal single-segment contribution name, so the tree
+  // the sweep derives from `X` can be a destination this same plan installs
+  // rather than a leftover. Sweeping it deleted a copy the run had just made
+  // and reported installed, on every run forever: the ledger went on naming it,
+  // the prune reported nothing, and the client never saw the skill.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-refresh-collide-'))
+  try {
+    const plain = path.join(home, 'src-plain')
+    await fs.mkdir(plain, { recursive: true })
+    await fs.writeFile(path.join(plain, 'SKILL.md'), 'plain body\n', 'utf8')
+    const suffixed = path.join(home, 'src-suffixed')
+    await fs.mkdir(suffixed, { recursive: true })
+    await fs.writeFile(path.join(suffixed, 'SKILL.md'), 'suffixed body\n', 'utf8')
+
+    const { kernel, registry } = agentsKernelAndRegistry()
+    // Registered first, so it is copied before the sweep that derives its path.
+    kernel.skills.register({ name: 'demo.hyp-refresh', plugin: '@hypaware/claude', clients: ['claude'], sourceDir: suffixed })
+    kernel.skills.register({ name: 'demo', plugin: '@hypaware/claude', clients: ['claude'], sourceDir: plain })
+
+    const skillsDir = path.join(home, '.claude', 'skills')
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const opts = { stdout, stderr, env: { ...process.env, HOME: home }, registry, kernel }
+    assert.equal(await dispatch(['skills', 'install'], opts), 0, stderr.text())
+
+    // Both land, and the one whose name looks like staging keeps its own body.
+    assert.equal(await fs.readFile(path.join(skillsDir, 'demo', 'SKILL.md'), 'utf8'), 'plain body\n')
+    assert.equal(await fs.readFile(path.join(skillsDir, 'demo.hyp-refresh', 'SKILL.md'), 'utf8'), 'suffixed body\n')
+    assert.doesNotMatch(stdout.text(), /removed leftover/)
+
+    // A genuine leftover beside the same pair is still swept.
+    await fs.mkdir(`${path.join(skillsDir, 'demo')}.hyp-refresh-old`, { recursive: true })
+    await fs.writeFile(path.join(`${path.join(skillsDir, 'demo')}.hyp-refresh-old`, 'SKILL.md'), 'stale\n', 'utf8')
+    const second = makeBuf()
+    assert.equal(await dispatch(['skills', 'install'], { ...opts, stdout: second }), 0, stderr.text())
+    await assert.rejects(fs.stat(`${path.join(skillsDir, 'demo')}.hyp-refresh-old`), { code: 'ENOENT' })
+    assert.match(second.text(), /removed leftover refresh staging .*demo\.hyp-refresh-old\n/)
+    assert.doesNotMatch(second.text(), /removed leftover refresh staging .*demo\.hyp-refresh\n/)
+    assert.equal(await fs.readFile(path.join(skillsDir, 'demo.hyp-refresh', 'SKILL.md'), 'utf8'), 'suffixed body\n')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('hyp agents install is gone: agents is not a command', async () => {
   const { kernel, registry } = agentsKernelAndRegistry()
   const stdout = makeBuf()
