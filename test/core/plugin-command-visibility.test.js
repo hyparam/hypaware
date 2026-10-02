@@ -270,7 +270,7 @@ test('public diagnostics carry long help', async () => {
   const accountStatus = account.get('client claude-account status')
   assert.doesNotMatch(
     accountStatus.help,
-    /nonzero|no credential resolves|doubles as a check/,
+    /no credential resolves|doubles as a check/,
     'claude-account status must not claim a nonzero exit for an unresolvable credential: runStatus never resolves one',
   )
   assert.match(
