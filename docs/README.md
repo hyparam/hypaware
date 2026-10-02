@@ -33,7 +33,7 @@ specific command.
 | [Queries](QUERYING.md) | Explore recordings with your agent, search, SQL, graph and vector tools, and MCP | `ask`, `query`, `graph`, `vector`, `enrichment`, `mcp` |
 | [Reports](REPORTS.md) | Generate, review, and publish reports | `report` |
 | [Cloud and teams](TEAM_SETUP.md) | Enrollment, sync, remote access, CI, and headless deployment | `remote`, `join`, `leave`, `sync` |
-| [Privacy](PRIVACY.md) | What is recorded, sharing controls, session exclusions, deletion, and product telemetry | `privacy`, `session`, `telemetry` |
+| [Privacy controls](PRIVACY.md) | What is recorded, sharing controls, session exclusions, deletion, and product telemetry | `privacy`, `session`, `telemetry` |
 | [Configuration and storage](CONFIGURATION.md) | Configuration files, retention, cache, exports, and plugins | `config`, `cache`, `sink`, `plugin` |
 | [Troubleshooting](TROUBLESHOOTING.md) | Diagnose missing recordings, sync failures, and installation problems | Diagnostic commands |
 | [CLI reference](CLI_REFERENCE.md) | Complete command syntax, flags, exit behavior, and aliases | All commands |

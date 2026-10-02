@@ -117,7 +117,7 @@ an organization, [contact us](https://hypaware.ai/contact/?utm_medium=readme)
 and we'll set it up; there is no self-serve invite yet. See the
 [team setup guide](./docs/TEAM_SETUP.md).
 
-## Privacy
+## Privacy controls
 
 Recordings stay local until you configure Cloud sync or another export
 destination. You control what is recorded, per folder:
