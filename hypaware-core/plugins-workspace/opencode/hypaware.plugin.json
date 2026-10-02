@@ -16,8 +16,7 @@
         "format": "managed_file",
         "settings_file": ".config/opencode/plugins/hypaware.js",
         "marker_text": "// HYPWARE_OPENCODE_PLUGIN v1"
-      },
-      "launch": { "bin": "opencode", "args": ["run", "{prompt}"], "label": "OpenCode" }
+      }
     },
     "picker": [
       {

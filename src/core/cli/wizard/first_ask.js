@@ -172,12 +172,14 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
  *
  * `footer` says who is reading:
  *
- * - `ask`: a launch is possible, and this run is not doing one (declined,
- *   piped, or `--list`). Names the verb that would.
- * - `no-launch`: this run could not start a client (none attached and on
- *   PATH, a spawn failure, an unforeseen error). There is no manual
- *   route, because the answer needs the evidence only the verb gathers,
- *   so it names what has to be true before the verb is worth running again.
+ * - `ask`: a launch is possible, and this run is not doing one (declined
+ *   or piped). Names the verb that would.
+ * - `no-launch`: this run found a client and still could not start it (a
+ *   spawn failure, an unforeseen error). There is no manual route,
+ *   because the answer needs the evidence only the verb gathers, so it
+ *   names what has to be true before the verb is worth running again.
+ *   Having no client to start at all is not this footer: `hyp ask` says
+ *   that itself, the same way with or without a question.
  *
  * Setup no longer prints this: it offers to run the ask instead
  * (`suggest_skill.js`), and carries its own empty-history note.
@@ -282,9 +284,10 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
 }
 
 /**
- * Run the explicit first ask. Never throws: a missing binary, a spawn
- * failure, a cancelled prompt, or an unforeseen error all degrade to the
- * printed list.
+ * Run the explicit first ask. Never throws: a spawn failure, a cancelled
+ * prompt, or an unforeseen error all degrade to the printed list. No
+ * launchable client returns `no-launcher` and prints nothing, leaving the
+ * message to the caller.
  *
  * @ref LLP 0198#first-ask [implements]: the explicit command owns the gather and the launch
  * @param {RunWizardFirstAskOptions} opts
@@ -301,19 +304,6 @@ export async function runWizardFirstAsk(opts) {
     async (span) => {
       const { stdout, env, clients, descriptors } = opts
       try {
-        // Checked before launchability, because it subsumes it: with no
-        // rows the answer is the same whether or not a client could have
-        // been started, and "nothing recorded yet" is the more useful
-        // half of it. `undefined` means the caller could not tell, which
-        // is never a reason to withhold the offer.
-        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the printed question
-        if (opts.hasRows === false) {
-          span.setAttribute('status', 'skipped')
-          span.setAttribute('skip_reason', 'no-rows')
-          writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
-          return { launched: false, reason: /** @type {const} */ ('no-rows') }
-        }
-
         const launchers = await resolveLaunchers({
           clients,
           descriptors,
@@ -323,11 +313,28 @@ export async function runWizardFirstAsk(opts) {
         })
         span.setAttribute('launcher_count', launchers.length)
 
+        // Checked first, ahead of the empty cache: with nothing to start,
+        // "come back once you have history" would send the reader to this
+        // same refusal later. Nothing is printed here. The caller owns the
+        // one message for it, because `hyp ask "<question>"` refuses the
+        // same way and the two must not drift.
+        // @ref LLP 0198#path-probe [implements]: nothing recorded and resolvable is one refusal, said the same way by every form of the verb
         if (launchers.length === 0) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-launcher')
-          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
           return { launched: false, reason: /** @type {const} */ ('no-launcher') }
+        }
+
+        // Checked before anything that could launch: with no rows there is
+        // nothing to answer from, and "nothing recorded yet" is the useful
+        // thing to say. `undefined` means the caller could not tell, which
+        // is never a reason to withhold the offer.
+        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the printed question
+        if (opts.hasRows === false) {
+          span.setAttribute('status', 'skipped')
+          span.setAttribute('skip_reason', 'no-rows')
+          writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
+          return { launched: false, reason: /** @type {const} */ ('no-rows') }
         }
         // `HYP_NO_TUI` is the same veto the prompt runtime honours. Reading
         // it here rather than letting `select()` throw keeps a deliberate

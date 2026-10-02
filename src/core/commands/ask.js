@@ -4,11 +4,12 @@ import { collectHypAwareStatus } from '../daemon/status.js'
 import { buildWalkthroughClientDescriptorMap } from '../cli/walkthrough.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
+import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
 import { OVERVIEW_DATASET, OVERVIEW_PROBE_SQL, overviewRunnerFromCtx } from '../query/overview.js'
-import { prepareFirstAskEvidence } from '../query/first_ask_evidence.js'
+import { RECOMMEND_COLD_PROMPT, prepareFirstAskEvidence } from '../query/first_ask_evidence.js'
 import { firstLookNoticeSink } from '../cli/wizard/first_look.js'
 import {
   SUGGESTED_PROMPTS,
@@ -16,7 +17,6 @@ import {
   launchClient,
   resolveLaunchers,
   runWizardFirstAsk,
-  writeSuggestedPrompts,
 } from '../cli/wizard/first_ask.js'
 
 /**
@@ -127,12 +127,6 @@ export async function runAsk(argv, ctx, deps = {}) {
   if (!parsed.ok) return parsed.code
   const clients = await askableClients(ctx)
   const descriptors = await buildWalkthroughClientDescriptorMap()
-
-  if (parsed.params.list === true) {
-    const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
-    writeSuggestedPrompts({ stdout: ctx.stdout, footer: launchers.length > 0 ? 'ask' : 'no-launch' })
-    return 0
-  }
   const question = String(parsed.params.question ?? '').trim()
 
   if (question.length > 0) {
@@ -141,8 +135,8 @@ export async function runAsk(argv, ctx, deps = {}) {
     // to the one question the user did not ask.
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
-      ctx.stderr.write('hyp ask: no recorded client can be started here.\n')
-      ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
+      const canPaste = await recordedClientReadsQuerySkill(ctx, descriptors, clients)
+      await writeNoLauncher(ctx, descriptors, canPaste ? framedQuestion(question) : undefined)
       return 1
     }
     // Same client pick as the recommendation ask when more than one could
@@ -183,7 +177,102 @@ export async function runAsk(argv, ctx, deps = {}) {
   // nothing could produce it. Declining, a piped run that printed the question, and an empty
   // cache are all 0 - in the last case nothing is broken, there is just
   // no history yet.
+  if (outcome.launched === false && outcome.reason === 'no-launcher') {
+    // The cold form of the question, and only where there is history to
+    // answer it from: on an empty cache it would send a desktop app looking
+    // through nothing.
+    const canPaste = hasRows !== false && await recordedClientReadsQuerySkill(ctx, descriptors, clients)
+    await writeNoLauncher(ctx, descriptors, canPaste ? RECOMMEND_COLD_PROMPT : undefined)
+  }
   return outcome.launched === false && (outcome.reason === 'no-launcher' || outcome.reason === 'no-evidence') ? 1 : 0
+}
+
+/**
+ * Whether any recorded client can read the `hypaware-query` skill, which is
+ * what makes a pasted prompt worth offering: both prompts tell the app to
+ * look the answer up with that skill, so handing one to a client that was
+ * never shipped it (OpenCode, Pi) points the reader at instructions their
+ * app does not have.
+ *
+ * Read off disk, the way `hyp report generate` checks for its own skill,
+ * rather than from a list of client names: a desktop app shares its CLI's
+ * skill tree (Claude Desktop reads `~/.claude/skills`), and a client that
+ * gains the skill later qualifies with no edit here.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {Map<string, ClientDescriptor>} descriptors
+ * @param {string[]} clients the recorded clients
+ * @returns {Promise<boolean>}
+ */
+async function recordedClientReadsQuerySkill(ctx, descriptors, clients) {
+  const homeDir = ctx.env.HOME || os.homedir()
+  for (const client of clients) {
+    const skillDir = descriptors.get(client)?.skillDir
+    if (!skillDir) continue
+    try {
+      await fsp.access(path.join(homeDir, skillDir, 'hypaware-query', 'SKILL.md'))
+      return true
+    } catch {
+      // not installed for this client: keep looking
+    }
+  }
+  return false
+}
+
+/**
+ * The one thing `hyp ask` says when no recorded client can be started,
+ * with or without a question. One writer rather than a sentence per form:
+ * the bare ask used to answer this with the question it could not ask and
+ * no repair, while the question form named the fix.
+ *
+ * Which fix it names depends on which half of launchability is missing,
+ * and the two halves are separate facts. A CLI on PATH that HypAware is
+ * not recording is repaired by an attach, so the attach command is named.
+ * No CLI on PATH is not: attaching Codex on a machine that has only Codex
+ * Desktop succeeds and still leaves nothing to start, so that case names
+ * the binaries looked for and never an attach.
+ *
+ * Called only once the recorded clients resolved to nothing, so whatever
+ * resolves among all launch-declaring clients here is on PATH and not
+ * recorded.
+ *
+ * `paste` is the third case: a client that has the HypAware skills is
+ * recorded and has no CLI, which is someone using a desktop app. Nothing here can start that app, but it can
+ * be asked by hand, so the prompt is handed over to paste. The explanation
+ * goes to stderr and the prompt alone to stdout, so `hyp ask | pbcopy`
+ * copies exactly what to paste.
+ *
+ * @ref LLP 0198#path-probe [implements]: nothing recorded and resolvable is one refusal, said the same way by every form of the verb
+ * @ref LLP 0139#repair-must-be-runnable [implements]: an attach is named only where an attach is the repair
+ * @param {CommandRunContext} ctx
+ * @param {Map<string, ClientDescriptor>} descriptors
+ * @param {string} [paste] the prompt to offer for a desktop app, when a recorded client has no CLI
+ * @returns {Promise<void>}
+ */
+async function writeNoLauncher(ctx, descriptors, paste) {
+  const unrecorded = await resolveLaunchers({ clients: [...descriptors.keys()], descriptors, env: ctx.env })
+  if (unrecorded.length > 0) {
+    const one = unrecorded.length === 1
+    const names = unrecorded.map((l) => l.label).sort()
+    const labels = one ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
+    const [first, ...rest] = unrecorded.map((l) => l.client).sort()
+    const alternatives = rest.length > 0 ? ` (or ${rest.join(', ')})` : ''
+    ctx.stderr.write(`hyp ask: ${labels} ${one ? 'is' : 'are'} installed, but HypAware is not recording ${one ? 'it' : 'them'}.\n`)
+    ctx.stderr.write(`  Run \`hyp client attach ${first}\`${alternatives}, then run \`hyp ask\` again.\n`)
+    return
+  }
+  const bins = [...descriptors.values()].flatMap((d) => (d.launch ? [d.launch.bin] : [])).sort()
+  const looked = bins.length > 0 ? ` (looked for ${bins.join(', ')})` : ''
+  ctx.stderr.write(`hyp ask: no client CLI found on your PATH${looked}.\n`)
+  // Two different readers: one has no CLI, one has a CLI the shell does not
+  // find. "Install one, or add it to your PATH" read as a choice the first
+  // reader could make without installing anything.
+  ctx.stderr.write('  You can install one, then run `hyp ask` again. If one is already installed, add its folder to your PATH.\n')
+  if (paste) {
+    // The blank line is stderr's, so stdout carries the prompt and nothing else.
+    ctx.stderr.write('  Using a desktop app instead? You can paste this in:\n\n')
+    ctx.stdout.write(`${paste}\n`)
+  }
 }
 
 /**
@@ -243,8 +332,8 @@ async function pickLauncher(launchers, ctx, deps) {
  *
  * `client` is the one the wizard is about to start. Its descriptor carries
  * the skill and agent trees that client actually reads, which is what the
- * instructions and the on-disk listing name: Codex and OpenCode do not
- * load `~/.claude/skills`.
+ * instructions and the on-disk listing name: Codex does not load
+ * `~/.claude/skills`.
  *
  * @ref LLP 0398#run-directory [implements]: a fixed folder under HYP_HOME owns the ask, not the caller's cwd and not a shared temp directory
  * @param {CommandRunContext} ctx
@@ -385,8 +474,9 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
  * alternatives, so the sentence stays one line however many adapters
  * declare a `launch` block.
  *
- * Shared with `hyp report fix`, which launches through the same seams and
- * fails the same way.
+ * Used by `hyp report fix` and `hyp report generate`, which launch through
+ * the same seams. `hyp ask` words its own refusal (`writeNoLauncher`),
+ * which names an attach only when a CLI is on PATH to attach.
  *
  * @ref LLP 0139#repair-must-be-runnable [implements]: the repair we print is a command that runs
  * @ref LLP 0198#split [constrained-by]: the launchable set is whatever declares `contributes.client.launch`

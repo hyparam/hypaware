@@ -54,12 +54,11 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'ask': {
-    usage: 'hyp ask ["question"] [--list]',
+    usage: 'hyp ask ["question"]',
     schema: {
       type: 'object',
       properties: {
         question: { type: 'string', greedy: true },
-        list: { type: 'boolean', default: false },
       },
       positional: ['question'],
     },

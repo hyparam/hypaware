@@ -8,6 +8,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { askableClients, framedQuestion, runAsk } from '../../../src/core/commands/ask.js'
+import { RECOMMEND_COLD_PROMPT } from '../../../src/core/query/first_ask_evidence.js'
 import { chooseLauncher } from '../../../src/core/cli/wizard/first_ask.js'
 
 /**
@@ -126,11 +127,13 @@ test('askableClients falls back to launchable clients only when the probe throws
   const clients = await askableClients(ctx, {
     collectStatus: async () => { throw new Error('settings file unreadable') },
   })
-  // The fallback is the real bundled-plugin launchable set (claude, codex,
-  // opencode, and pi carry a `launch` block; claude-desktop and openclaw do not), so
-  // this also pins that the fallback is non-empty and never invents a
-  // client the catalog does not know about.
-  assert.deepEqual([...clients].sort(), ['claude', 'codex', 'opencode', 'pi'])
+  // The fallback is the real bundled-plugin launchable set (claude and codex
+  // carry a `launch` block; claude-desktop, openclaw, opencode, and pi do
+  // not), so this also pins that the fallback is non-empty and never invents
+  // a client the catalog does not know about. OpenCode and Pi are recorded
+  // but not launchable: neither is shipped the HypAware skills the prompts
+  // lean on, so starting one would open a session that cannot follow them.
+  assert.deepEqual([...clients].sort(), ['claude', 'codex'])
 })
 
 /* ---------------------------- exit-code contract ---------------------------- */
@@ -141,42 +144,158 @@ async function freshHome() {
   return hypHome
 }
 
+/**
+ * An env for a machine with nothing on PATH and nothing recorded. `HOME` is
+ * a temp directory because the status probe reads attach markers under it:
+ * without one, a developer's own `~/.claude/settings.json` decides whether
+ * a client counts as recorded, and the test passes or fails by machine.
+ */
+async function bareEnv() {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  return { HOME: home, HYP_HOME: await freshHome(), HYP_CONFIG: '', PATH: '' }
+}
+
 test('runAsk: no-launcher exits 1 on a fresh install with nothing attached', async () => {
-  const hypHome = await freshHome()
-  const { ctx, stdout } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
+  const { ctx, stdout, stderr } = makeCtx({ env: await bareEnv() })
   const code = await runAsk([], ctx)
   assert.equal(code, 1)
-  // The no-launcher variant is the printed list, not a client launch.
-  assert.match(stdout.text(), /Worth asking your AI client/)
+  // Not the question it cannot ask: the refusal and its repair.
+  assert.equal(stdout.text(), '')
+  assert.match(stderr.text(), /hyp ask: no client CLI found on your PATH/)
 })
 
-test('runAsk: --list exits 0 regardless of launchability', async () => {
-  const hypHome = await freshHome()
-  const { ctx, stdout } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
-  const code = await runAsk(['--list'], ctx)
-  assert.equal(code, 0)
-  assert.match(stdout.text(), /Worth asking your AI client/)
+// @ref LLP 0198#path-probe [tests]: with or without a question, nothing launchable is the same refusal
+test('runAsk: with nothing launchable, the bare ask and a named question say the same thing', async () => {
+  const env = await bareEnv()
+  const bare = makeCtx({ env })
+  const named = makeCtx({ env })
+  assert.equal(await runAsk([], bare.ctx), 1)
+  assert.equal(await runAsk(['which sessions touched the auth module'], named.ctx), 1)
+  assert.equal(bare.stderr.text(), named.stderr.text())
+  assert.equal(bare.stdout.text(), named.stdout.text())
+  assert.match(bare.stderr.text(), /hyp ask: no client CLI found on your PATH/)
 })
 
-// A hint that cannot be typed is not a repair. `hyp client attach <client>`
-// reads as an input redirection from a file called `client` in every shell
-// the CLI runs under, and answers `unknown client` when typed literally, so
-// the line names one of the launchable clients outright. The names come from
-// the descriptors, not a literal, so a new adapter that declares a `launch`
-// block appears here without an edit.
-// @ref LLP 0139#repair-must-be-runnable [tests]: the no-launcher hint prints a command that runs
-test('runAsk "<question>": the no-launcher hint names real clients, not a placeholder', async () => {
-  const hypHome = await freshHome()
-  const { ctx, stderr } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
-  const code = await runAsk(['which sessions touched the auth module'], ctx)
-  assert.equal(code, 1)
+// Launchability is two facts, and the repair differs by which one is missing.
+// Attaching Codex on a machine with only Codex Desktop succeeds and still
+// leaves nothing to start, so a missing CLI must never be answered with an
+// attach command.
+// @ref LLP 0139#repair-must-be-runnable [tests]: an attach is named only where an attach is the repair
+test('runAsk: with no client CLI on PATH, the refusal names the binaries and never an attach', async () => {
+  const { ctx, stdout, stderr } = makeCtx({ env: await bareEnv() })
+  assert.equal(await runAsk([], ctx), 1)
   const text = stderr.text()
-  // The set it refuses on is `askableClients`, which keeps a client that is
-  // attached *or* configured with no attach marker to write, so the line can
-  // only say "recorded" without contradicting the offer.
-  assert.match(text, /hyp ask: no recorded client can be started here\./)
-  assert.match(text, /Attach one with `hyp client attach claude` \(or codex, opencode, pi\)/)
+  // The names come from the descriptors, so a new adapter that declares a
+  // `launch` block appears here without an edit.
+  assert.match(text, /hyp ask: no client CLI found on your PATH \(looked for claude, codex\)\./)
+  assert.match(text, /You can install one, then run `hyp ask` again\. If one is already installed, add its folder to your PATH\./)
+  assert.doesNotMatch(text, /hyp client attach/)
+  // Nothing is recorded here, so there is no desktop app worth pasting into.
+  assert.doesNotMatch(text, /desktop app/)
+  assert.equal(stdout.text(), '')
+})
+
+// The third case: a client is recorded and has no CLI, which is someone on a
+// desktop app. Nothing can start the app, but it can be asked by hand, so the
+// prompt is handed over: the explanation on stderr, the prompt alone on
+// stdout, where a pipe to the clipboard takes exactly what to paste.
+// @ref LLP 0198#path-probe [tests]: a recorded client with no CLI gets the prompt to paste, not a dead end
+test('runAsk: a recorded client with no CLI is handed the prompt to paste into its desktop app', async () => {
+  const env = await bareEnv()
+  // Codex enabled in its default transcript mode: recorded, and no `codex`
+  // on PATH. This is a machine with Codex Desktop and no Codex CLI.
+  await fs.writeFile(
+    path.join(env.HYP_HOME, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] })
+  )
+  // The skill both prompts name, where the Codex app reads it.
+  const skill = path.join(env.HOME, '.codex', 'skills', 'hypaware-query')
+  await fs.mkdir(skill, { recursive: true })
+  await fs.writeFile(path.join(skill, 'SKILL.md'), '---\nname: hypaware-query\n---\n')
+  const question = 'which sessions touched the auth module'
+  const bare = makeCtx({ env })
+  const named = makeCtx({ env })
+  assert.equal(await runAsk([], bare.ctx), 1)
+  assert.equal(await runAsk([question], named.ctx), 1)
+  // The same explanation either way; only the prompt differs.
+  assert.equal(bare.stderr.text(), named.stderr.text())
+  assert.match(bare.stderr.text(), /hyp ask: no client CLI found on your PATH/)
+  assert.match(bare.stderr.text(), /Using a desktop app instead\? You can paste this in:/)
+  assert.doesNotMatch(bare.stderr.text(), /hyp client attach/)
+  assert.equal(bare.stdout.text(), `${RECOMMEND_COLD_PROMPT}\n`)
+  assert.equal(named.stdout.text(), `${framedQuestion(question)}\n`)
+})
+
+// Both prompts tell the app to use the hypaware-query skill. OpenCode and Pi
+// are recorded but never shipped it, and a recorded Codex whose skills were
+// not installed cannot read it either, so neither is handed a prompt that
+// points at instructions the app does not have.
+test('runAsk: a recorded client without the hypaware-query skill is not handed a prompt to paste', async () => {
+  const question = 'which sessions touched the auth module'
+  // An attached OpenCode: recorded, with no skill tree of ours.
+  const opencode = await bareEnv()
+  const plugins = path.join(opencode.HOME, '.config', 'opencode', 'plugins')
+  await fs.mkdir(plugins, { recursive: true })
+  await fs.writeFile(path.join(plugins, 'hypaware.js'), '// HYPWARE_OPENCODE_PLUGIN v1\n')
+  // A recorded Codex whose skills were never installed.
+  const codex = await bareEnv()
+  await fs.writeFile(
+    path.join(codex.HYP_HOME, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] })
+  )
+  for (const env of [opencode, codex]) {
+    for (const argv of [[], [question]]) {
+      const { ctx, stdout, stderr } = makeCtx({ env })
+      assert.equal(await runAsk(argv, ctx), 1)
+      assert.match(stderr.text(), /hyp ask: no client CLI found on your PATH/)
+      assert.doesNotMatch(stderr.text(), /desktop app/)
+      assert.equal(stdout.text(), '')
+    }
+  }
+})
+
+// The launch prompt points at a folder only the gather creates. Pasted into
+// an app that was never started there, it fails in exactly the way the gather
+// exists to prevent, so the pasted form must stand on its own.
+// @ref LLP 0398#one-question [tests]: the pasted form names no evidence folder
+test('the cold recommendation prompt stands alone: no evidence folder, and it says how to look', () => {
+  assert.doesNotMatch(RECOMMEND_COLD_PROMPT, /ASK\.md|this folder|already gathered/)
+  assert.match(RECOMMEND_COLD_PROMPT, /^From my HypAware history/)
+  assert.match(RECOMMEND_COLD_PROMPT, /`hyp query`/)
+  assert.doesNotMatch(RECOMMEND_COLD_PROMPT, /\n/)
+})
+
+test('runAsk: a CLI on PATH that is not recorded is answered with the attach that repairs it', async () => {
+  const hypHome = await freshHome()
+  // A temp HOME, so the probe reads no attach marker from the real one.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  const bin = path.join(home, 'bin')
+  await fs.mkdir(bin, { recursive: true })
+  await fs.writeFile(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const env = { HOME: home, HYP_HOME: hypHome, HYP_CONFIG: '', PATH: bin }
+  const bare = makeCtx({ env })
+  const named = makeCtx({ env })
+  assert.equal(await runAsk([], bare.ctx), 1)
+  assert.equal(await runAsk(['which sessions touched the auth module'], named.ctx), 1)
+  assert.equal(bare.stderr.text(), named.stderr.text())
+  const text = bare.stderr.text()
+  assert.match(text, /hyp ask: Claude Code is installed, but HypAware is not recording it\./)
+  // A command that can be typed: a real client name, never a placeholder.
+  assert.match(text, /Run `hyp client attach claude`, then run `hyp ask` again\./)
   assert.doesNotMatch(text, /<client>/)
+  assert.doesNotMatch(text, /codex|opencode|\bpi\b/)
+})
+
+// `--list` printed the question list back when there were several to choose
+// among. With one question there is nothing to list, so the flag is gone and
+// is refused like any other unknown flag rather than silently ignored.
+test('runAsk: --list is no longer a flag', async () => {
+  const hypHome = await freshHome()
+  const { ctx, stdout, stderr } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
+  const code = await runAsk(['--list'], ctx)
+  assert.notEqual(code, 0)
+  assert.doesNotMatch(stdout.text(), /Worth asking your AI client/)
+  assert.match(stderr.text(), /--list/)
 })
 
 // The three helpers above are each pinned on their own, but nothing reached
@@ -211,22 +330,6 @@ test('runAsk "<question>": starts the transcript-mode codex it offers, on the fr
   assert.equal(await fs.readFile(promptFile, 'utf8'), framedQuestion(question))
 })
 
-/* --------------------------------- N7 -------------------------------------- */
-
-// `hyp ask --list` used to pass `launchable: true` unconditionally, so a
-// machine with nothing on `$PATH` printed "Run `hyp ask` to pick one of
-// these and start your client on it" for a command that would exit 1.
-// @ref LLP 0198#path-probe [tests]: --list's launchability claim matches whether anything can actually be started
-test('runAsk: --list on a host with nothing launchable names the condition for a launch, not a launch promise', async () => {
-  const hypHome = await freshHome()
-  const { ctx, stdout } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
-  await runAsk(['--list'], ctx)
-  const text = stdout.text()
-  assert.match(text, /Once a recorded client can be started here \(see `hyp status`\), run `hyp ask` again/)
-  assert.doesNotMatch(text, /attached client/)
-  assert.doesNotMatch(text, /Run `hyp ask` to start your client on it/)
-})
-
 /* ------------------------- the client picker's deadline --------------------- */
 
 // A TTY says a terminal is attached, never that a person is reading it. Under
@@ -239,8 +342,8 @@ test('runAsk: --list on a host with nothing launchable names the condition for a
 // fallback a run nobody answers takes.
 
 /**
- * Two launchable, recorded clients on a throwaway `HOME`: codex in its
- * default transcript mode (configured, attach n/a) and an attached opencode.
+ * Two launchable, recorded clients on a throwaway `HOME`: an attached claude
+ * and codex in its default transcript mode (configured, attach n/a).
  * Each stub records that it ran, so which one was started is a file check
  * rather than a stream the test runner also owns.
  */
@@ -250,16 +353,15 @@ async function twoLauncherFixture() {
   const bin = path.join(home, 'bin')
   await fs.mkdir(bin, { recursive: true })
   const ran = path.join(home, 'ran.txt')
-  for (const name of ['codex', 'opencode']) {
+  for (const name of ['claude', 'codex']) {
     await fs.writeFile(path.join(bin, name), `#!/bin/sh\nprintf '%s' '${name}' > '${ran}'\n`, { mode: 0o755 })
   }
-  // opencode's attach marker, so the status probe reports it recorded.
-  const plugins = path.join(home, '.config', 'opencode', 'plugins')
-  await fs.mkdir(plugins, { recursive: true })
-  await fs.writeFile(path.join(plugins, 'hypaware.js'), '// HYPWARE_OPENCODE_PLUGIN v1\n')
+  // claude's attach marker, so the status probe reports it recorded.
+  await fs.mkdir(path.join(home, '.claude'), { recursive: true })
+  await fs.writeFile(path.join(home, '.claude', 'settings.json'), JSON.stringify({ _hypaware: { version: 1 } }))
   await fs.writeFile(
     path.join(hypHome, 'hypaware-config.json'),
-    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }, { name: '@hypaware/opencode' }] })
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/codex' }] })
   )
   return {
     env: { HOME: home, HYP_HOME: hypHome, PATH: bin },
@@ -298,8 +400,8 @@ test('runAsk "<question>": an allocated tty nobody answers starts a client inste
   const code = await runAsk(['which sessions touched the auth module'], ctx, { pickDeadlineMs: 50 })
   assert.equal(code, 0)
   assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
-  assert.match(stdout.text(), /Starting Codex\.\.\./)
-  assert.equal(await fixture.started(), 'codex')
+  assert.match(stdout.text(), /Starting Claude Code\.\.\./)
+  assert.equal(await fixture.started(), 'claude')
 })
 
 test('runAsk "<question>": a terminal someone answers still starts the client they picked', { timeout: 5000 }, async () => {
@@ -314,12 +416,12 @@ test('runAsk "<question>": a terminal someone answers still starts the client th
     /** @param {any} spec */
     select: async (spec) => {
       offered = spec.options.map((/** @type {any} */ o) => o.value)
-      return 'opencode'
+      return 'codex'
     },
   })
   assert.equal(code, 0)
-  assert.deepEqual(offered, ['codex', 'opencode'])
-  assert.equal(await fixture.started(), 'opencode')
+  assert.deepEqual(offered, ['claude', 'codex'])
+  assert.equal(await fixture.started(), 'codex')
   assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
 })
 
@@ -342,11 +444,11 @@ test('runAsk "<question>": a piped run never reaches the picker at all', async (
   const { ctx } = makeCtx({ env: fixture.env })
   let asked = false
   const code = await runAsk(['which sessions touched the auth module'], ctx, {
-    select: async () => { asked = true; return 'opencode' },
+    select: async () => { asked = true; return 'codex' },
   })
   assert.equal(code, 0)
   assert.equal(asked, false, 'a run off a terminal must not prompt')
-  assert.equal(await fixture.started(), 'codex')
+  assert.equal(await fixture.started(), 'claude')
 })
 
 /* --------- the deadline, and the byte that is not a keypress (#2392) -------- */
@@ -412,7 +514,7 @@ test('runAsk "<question>": a NUL byte off a pty at EOF does not lift the deadlin
   const code = await runAsk(['which sessions touched the auth module'], ctx, { pickDeadlineMs: 50 })
   assert.equal(code, 0)
   assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
-  assert.equal(await fixture.started(), 'codex')
+  assert.equal(await fixture.started(), 'claude')
 })
 
 test('runAsk "<question>": a real keypress still lifts the deadline, stray byte or not', { timeout: 5000 }, async () => {
@@ -437,5 +539,5 @@ test('runAsk "<question>": a real keypress still lifts the deadline, stray byte 
   const code = await runAsk(['which sessions touched the auth module'], ctx, { pickDeadlineMs: 50 })
   assert.equal(code, 0)
   assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
-  assert.equal(await fixture.started(), 'opencode')
+  assert.equal(await fixture.started(), 'codex')
 })

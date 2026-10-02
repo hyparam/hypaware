@@ -138,7 +138,9 @@ person is asked which; piped, the first is taken, as a named `hyp ask`
 does. The launch inherits the terminal and drops the child's exit code
 (LLP 0198 #real-launch), and nothing is pre-authorised (LLP 0198
 #no-preauth): the client reads the brief and asks for what it needs. The
-no-launcher failure prints the same runnable attach hint.
+no-launcher failure prints a runnable attach hint (`hyp ask` has since
+split its own refusal by which condition is missing, LLP 0198 #path-probe;
+this verb still prints the one hint).
 
 <a id="list-shows-ids"></a>**`hyp report list` prints the ids.** Each
 report's line is followed by one indented line per recommendation, id,

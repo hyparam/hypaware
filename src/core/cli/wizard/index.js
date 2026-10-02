@@ -43,7 +43,7 @@ import { useColor } from '../stdio.js'
 import { ensureDurableBin } from '../global_install.js'
 import { platformIsSupported } from '../../daemon/platform.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { runWizardSuggestSkill } from './suggest_skill.js'
+import { anyClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -1033,6 +1033,7 @@ async function runGuardedInitWizard(opts, guard) {
       hasRows: firstLookHadRows(firstLookResult),
       ...(opts.stdin ? { stdin: opts.stdin } : {}),
       ...(opts.suggestSkill ?? {}),
+      launchable: opts.suggestSkill?.launchable ?? await anyClientLaunchable(opts.env),
     })
   }
 

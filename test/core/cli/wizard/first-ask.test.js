@@ -208,28 +208,42 @@ test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is fil
   assert.equal(spawner.calls[0].args[2], FIRST.prompt)
 })
 
-test('runWizardFirstAsk: no launchable client prints the list and launches nothing', async () => {
+// @ref LLP 0198#path-probe [tests]: nothing recorded and resolvable is one refusal, and the caller words it
+test('runWizardFirstAsk: no launchable client launches nothing and prints nothing, whatever the cache holds', async () => {
+  for (const hasRows of [true, false, undefined]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const spawner = recordingSpawn()
+    const result = await runWizardFirstAsk({
+      clients: ['claude-desktop'],
+      descriptors: descriptors(),
+      stdout,
+      stderr,
+      env: {},
+      interactive: true,
+      ...(hasRows === undefined ? {} : { hasRows }),
+      resolve: async () => undefined,
+      spawnFn: spawner.fn,
+      select: selectReturning(FIRST.id).fn,
+    })
+    // An empty cache does not win: "come back once you have history" would
+    // send the reader to this same refusal.
+    assert.deepEqual(result, { launched: false, reason: 'no-launcher' })
+    assert.equal(spawner.calls.length, 0)
+    // The caller owns the message, so the question it cannot ask is not printed.
+    assert.equal(stdout.text(), '')
+    assert.equal(stderr.text(), '')
+  }
+})
+
+test('the no-launch footer names the condition for a launch, never a prompt to paste', () => {
   const stdout = makeBuf()
-  const spawner = recordingSpawn()
-  const result = await runWizardFirstAsk({
-    clients: ['claude-desktop'],
-    descriptors: descriptors(),
-    stdout,
-    env: {},
-    interactive: true,
-    resolve: async () => undefined,
-    spawnFn: spawner.fn,
-    select: selectReturning(FIRST.id).fn,
-  })
-  assert.deepEqual(result, { launched: false, reason: 'no-launcher' })
-  assert.equal(spawner.calls.length, 0)
+  writeSuggestedPrompts({ stdout, footer: 'no-launch' })
   const text = stdout.text()
-  assert.match(text, /Worth asking your AI client/)
   for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
   // The prompt names the evidence folder, which a reader with no launch
   // does not have, so it is never offered as something to paste.
   for (const p of SUGGESTED_PROMPTS) assert.ok(!text.includes(p.prompt), `prompt ${p.id} offered for pasting`)
-  // Nothing to start here, so the footer names the condition and the verb to run once it holds.
   // That condition is `askableClients`' predicate: attached, or configured with
   // no attach marker to write, which is recorded but not attached.
   assert.match(text, /Once a recorded client can be started here \(see `hyp status`\), run `hyp ask` again/)

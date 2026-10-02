@@ -381,8 +381,6 @@ function buildCoreCommands(registry) {
         'With a question, skips all of that and starts straight on it:',
         '  hyp ask "which sessions touched the auth module last week"',
         '',
-        '  --list   print the question and exit, launching nothing',
-        '',
         'Only clients HypAware is recording (hyp status) and whose CLI is on',
         'your PATH can be started: recording means attached, or configured with',
         'no attach marker to write, as codex is in its transcript mode. Claude',

@@ -73,8 +73,9 @@ deadline would make the deadline the afterthought.
 
 <a id="frame"></a>**The `hyp ask` menu is drawn as its own screen.** The
 prompt is framed in a border (`box`, `cli/tui/types.d.ts`). The frame
-distinguishes the explicit command's interactive menu from its plain `--list`
-output. Onboarding itself prints no framed or interactive menu.
+distinguishes the explicit command's interactive menu from its plain printed
+output (the `--list` flag that once printed the list is gone, LLP 0398
+#one-question). Onboarding itself prints no framed or interactive menu.
 
 The border is dim and the content inside keeps the emphasis it already had:
 the frame's job is separation, not competition with the bold title or the
@@ -130,6 +131,28 @@ whose attach reads *not applicable* is recorded too
 Reading a missing marker there as detachment would withhold the offer
 from a client that is recording perfectly well.
 
+When nothing is both recorded and resolvable, `hyp ask` refuses the same
+way with or without a question: one error on stderr and exit `1`. The
+error names the repair for whichever condition is missing, because the two
+are repaired differently. A launch binary that resolves for a client
+HypAware is not recording is repaired by an attach, so the error names a
+runnable `hyp client attach` command. No launch binary on `$PATH` is not:
+attaching Codex on a machine that has only Codex Desktop succeeds and still
+leaves nothing to start, so the error names the binaries it looked for and
+no attach. That machine is the third case, a recorded client with no CLI:
+the desktop app cannot be started on a prompt, but it can be asked by hand,
+so the refusal also hands over the prompt to paste into it (the framed
+question, or the cold form of the skill question, LLP 0398 #one-question).
+It does so only when a recorded client has the `hypaware-query` skill on
+disk, since both prompts tell the app to use it: a recorded OpenCode or Pi,
+or a Codex whose skills were never installed, gets the refusal alone.
+The explanation goes to stderr and the prompt alone to stdout, so a pipe to
+the clipboard takes exactly what to paste, and the exit stays `1` because
+nothing was started. The bare ask checks this ahead of the empty cache, since "come back once you
+have history" would send the reader to the same refusal later, and it does
+not print the question: the question cannot be asked by hand, so printing
+it without a client to start offers nothing to act on.
+
 <a id="split"></a>**Core owns the questions; the manifest owns the
 launch.** The prompts are questions about HypAware's own datasets -
 what was recorded, what it cost, what was sensitive - and they are
@@ -141,6 +164,14 @@ every other client fact already lives: `contributes.client`, as a
 applied to a new field). A future adapter becomes launchable by declaring
 `launch`, with no edit to core - the same rule [LLP 0180](./0180-finale-attaches-openclaw.decision.md)
 established for the finale's client list.
+
+Declaring one is a claim that the client can follow the prompts, not only
+that it takes one. Claude Code and Codex declare a block. OpenCode and Pi
+do not, though both have a prompt argument: neither is shipped the HypAware
+skills the prompts name (`hypaware-query` for a typed question), and the
+modes that take a prompt (`opencode run`, `pi -p`) answer once and exit,
+so the recommendation's offer to write the skill has no turn to be accepted
+in. They are recorded and not launchable until both hold.
 
 The launch block is `{ bin, args }`, where exactly one `args` element
 must contain the `{prompt}` placeholder. The validation is not ceremony:

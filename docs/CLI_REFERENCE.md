@@ -134,7 +134,7 @@ hyp status --json
 ### `hyp ask`
 
 ```text
-hyp ask ["question"] [--list]
+hyp ask ["question"]
 ```
 
 With no argument, asks which skill would be useful to add based on your history.
@@ -159,9 +159,20 @@ answering is never cut short. The client does not receive the bare question:
 it is framed with an instruction to look the answer up in the recorded
 sessions with `hyp query` first, and the typed question follows verbatim.
 
-The client takes over the terminal. `--list` prints the question and launches
-nothing. An empty cache, a declined selection, or list-only use succeeds. No
-launchable client or no gatherable evidence returns `1`. A process-start failure
+The client takes over the terminal. An empty cache or a declined selection
+succeeds. No gatherable evidence returns `1`. When no recorded client can be
+started, `hyp ask` prints the same error with or without a question and returns
+`1`; that check comes first, so it applies on an empty cache too. The error
+says which half is missing: a client CLI that is on `PATH` but not recorded is
+answered with the `hyp client attach` command to run, and no client CLI on
+`PATH` at all is answered with the binaries it looked for, since an attach
+would not give it anything to start. In that second case, if a recorded client
+has the `hypaware-query` skill installed (a Claude or Codex desktop app with no
+CLI), `hyp ask` also prints the prompt to paste into the app: the typed question framed for `hyp query`, or for the
+bare form a version of the skill question that looks through the history
+itself, since no evidence is gathered for an app it cannot start. The prompt
+is the only thing written to stdout, so `hyp ask | pbcopy` copies it; the exit
+status is still `1`, because nothing was started. A process-start failure
 returns `1` when a question was supplied; bare `hyp ask` currently reports that
 failure but still exits `0`. Its exit status therefore does not prove a client
 started.
