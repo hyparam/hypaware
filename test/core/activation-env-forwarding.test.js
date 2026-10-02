@@ -99,22 +99,24 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
   const fromFile = path.join(hypHome, 'incoming.json')
   await fs.writeFile(fromFile, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n')
 
-  const stderr = makeBuf()
-  const code = await dispatch(['init', '--from-file', fromFile], {
-    stdout: makeBuf(),
-    stderr,
-    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
-  })
-  assert.equal(code, 0, stderr.text())
+  try {
+    const stderr = makeBuf()
+    const code = await dispatch(['init', '--from-file', fromFile], {
+      stdout: makeBuf(),
+      stderr,
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    })
+    assert.equal(code, 0, stderr.text())
 
-  // `@hypaware/local-fs` mkdirs `<HYP_HOME>/exports` in `activate()`, so where
-  // that directory landed is the shortest proof of where activation read its env.
-  assert.ok(await exists(path.join(hypHome, 'exports')), 'the exports dir did not land under the injected HYP_HOME')
-  assert.equal(
-    await exists(realExports),
-    realExistedBefore,
-    'the boot created .hyp/exports in the invoking user\'s real home'
-  )
-
-  await fs.rm(hypHome, { recursive: true, force: true })
+    // `@hypaware/local-fs` mkdirs `<HYP_HOME>/exports` in `activate()`, so where
+    // that directory landed is the shortest proof of where activation read its env.
+    assert.ok(await exists(path.join(hypHome, 'exports')), 'the exports dir did not land under the injected HYP_HOME')
+    assert.equal(
+      await exists(realExports),
+      realExistedBefore,
+      'the boot created .hyp/exports in the invoking user\'s real home'
+    )
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
 })
