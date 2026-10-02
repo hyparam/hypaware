@@ -25,7 +25,10 @@ import path from 'node:path'
  * it is single-purpose and not user-facing.
  *
  * Directories are created eagerly so plugins can write immediately
- * inside `activate(ctx)` without an mkdir dance.
+ * inside `activate(ctx)` without an mkdir dance. `stateDir` and
+ * `cacheDir` outlive the boot; `tempDir` does not, and a CLI dispatch
+ * that owns its kernel hands the set back to `reclaimPluginTempDirs`
+ * at teardown (daemon and gateway boots, and injected kernels, do not).
  */
 
 /**
@@ -49,15 +52,65 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   const stateDir = pluginStateDir(stateRoot, pluginName)
   const cacheDir = path.join(stateRoot, 'cache', 'plugins', pluginName)
   const tempBase = tmpRoot ?? os.tmpdir()
-  const tempDir = path.join(tempBase, `${sanitizeTempSegment(pluginName)}-${runId}`)
+  // `runId` reaches here straight from `DEV_RUN_ID` (or similar) and is not
+  // otherwise validated, so without sanitizing it the same way as `pluginName`
+  // it could contribute `/` or `..` segments that `path.join` normalizes right
+  // out of `tempBase`. Teardown recursively deletes this path, so an
+  // unsanitized `runId` would turn an attacker- or accident-controlled env
+  // var into an arbitrary recursive delete.
+  const intendedTempDir = path.join(tempBase, `${sanitizeTempSegment(pluginName)}-${sanitizeTempSegment(runId)}`)
 
   await Promise.all([
     fs.mkdir(stateDir, { recursive: true }),
     fs.mkdir(cacheDir, { recursive: true }),
-    fs.mkdir(tempDir, { recursive: true }),
+    fs.mkdir(tempBase, { recursive: true }),
   ])
 
+  // The temp dir name is derived only from plugin name and runId, so two boots
+  // sharing a runId (two kernel boots in one process, which several smokes and
+  // any embedder that boots twice can do) resolve to the same directory.
+  // Reclaim deletes whatever this boot thinks it owns at teardown, so adopting
+  // a directory another live boot created would delete that boot's in-flight
+  // scratch out from under it. Whoever creates the directory owns it; everyone
+  // else takes a unique sibling.
+  //
+  // The probe has to be a *non-recursive* mkdir. `{ recursive: true }` resolves
+  // to "the first directory path created", which is an ancestor rather than
+  // `intendedTempDir` whenever an ancestor was missing too, so with an injected
+  // `tmpRoot` that does not exist yet (several smokes, and
+  // test/core/activation-env-forwarding.test.js, pass exactly that) two
+  // concurrent boots could each see a non-`undefined` return and both conclude
+  // they created the leaf. `tempBase` is created above, and a plain mkdir is
+  // atomic: exactly one caller creates the leaf, every other gets EEXIST.
+  let tempDir = intendedTempDir
+  try {
+    await fs.mkdir(intendedTempDir)
+  } catch (err) {
+    if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
+    tempDir = await fs.mkdtemp(`${intendedTempDir}-`)
+  }
+
   return { rootDir, stateDir, cacheDir, tempDir }
+}
+
+/**
+ * Remove the per-boot temp directories a kernel boot created. The boot that
+ * made them is the only thing that can know it is finished with them, and
+ * until issue #2465 nothing removed them at all: one directory per activated
+ * plugin stayed in the user's temp root until the OS temp reaper got to it.
+ *
+ * @param {Iterable<string>} tempDirs `PluginPaths.tempDir` values from one boot.
+ * @returns {Promise<void>}
+ */
+export async function reclaimPluginTempDirs(tempDirs) {
+  for (const dir of tempDirs) {
+    try {
+      await fs.rm(dir, { recursive: true, force: true })
+    } catch {
+      // Teardown runs after the command rendered its result, so a scratch dir
+      // we cannot remove is a leak, not a failure the caller can act on.
+    }
+  }
 }
 
 /**

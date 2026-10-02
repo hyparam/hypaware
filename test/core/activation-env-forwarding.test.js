@@ -97,6 +97,13 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
   const realExports = path.join(os.homedir(), '.hyp', 'exports')
   const realExistedBefore = await exists(realExports)
 
+  // Issue #2465. Deliberately a path that does not exist yet:
+  // `createPluginPaths` mkdirs `<tmpRoot>/<plugin>-<runId>` recursively, so
+  // this directory comes into existence only if the `tmpRoot` forwarding
+  // reached it, and the teardown reclaim removes its children without removing
+  // it. That lets one directory carry both halves of the proof below.
+  const tmpRoot = path.join(hypHome, 'plugin-temp-root')
+
   const fromFile = path.join(hypHome, 'incoming.json')
   await fs.writeFile(fromFile, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n')
 
@@ -108,10 +115,12 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       stderr,
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', DEV_RUN_ID: runId },
       // Issue #2462. The boot gives every activating plugin a temp dir under
-      // `tmpRoot ?? os.tmpdir()` (src/core/runtime/paths.js). Those are siblings
-      // of `hypHome`, not children, so the `fs.rm` below cannot reach them: a
-      // passing direct `node --test` run left 17 of them in the OS temp root.
-      tmpRoot: hypHome,
+      // `tmpRoot ?? os.tmpdir()` (src/core/runtime/paths.js), and left to the
+      // default those land outside everything this test owns: a direct
+      // `node --test` run left 17 of them in the OS temp root. Rooting them
+      // under `hypHome` puts them where the `fs.rm` below reaches them even if
+      // teardown ever stops reclaiming them.
+      tmpRoot,
     })
     assert.equal(code, 0, stderr.text())
 
@@ -124,18 +133,33 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       'the boot created .hyp/exports in the invoking user\'s real home'
     )
 
-    // `tempBase` is `tmpRoot ?? os.tmpdir()`, one or the other, and this boot
-    // passed `tmpRoot: hypHome`, so #2462's actual complaint, survivors in the
-    // shared OS temp root, is checked directly here rather than inferred from
-    // what landed under the test-owned tmpRoot. `runId` is unique to this test
-    // run, so naming `os.tmpdir()` by a suffix match stays safe even when other
-    // test files are writing into the same shared directory under parallel
-    // `npm test` workers. Asserting the negative, instead of asserting that a
-    // scoped temp dir still exists, keeps this check honest if a later change
-    // ever reclaims `PluginPaths.tempDir` at kernel teardown: nothing does
-    // today, but this test should keep passing the day something does.
+    // Issue #2465, two assertions on one directory that fail for opposite
+    // reasons. `tmpRoot` existing is the positive guard on
+    // `DispatchOptions.tmpRoot` reaching `bootKernel`: remove the forwarding
+    // from src/core/cli/dispatch.js and `tempBase` falls back to
+    // `os.tmpdir()`, so nothing ever mkdirs this path. It being empty is the
+    // leak check: before dispatch reclaimed them at teardown, every activated
+    // plugin's boot temp dir was still sitting in it.
+    assert.ok(
+      await exists(tmpRoot),
+      'dispatch did not forward tmpRoot: no plugin temp dir was created under the test-owned root'
+    )
     assert.deepEqual(
-      (await fs.readdir(os.tmpdir())).filter((e) => e.endsWith(runId)),
+      await fs.readdir(tmpRoot),
+      [],
+      'plugin boot temp dirs survived under the test-owned tmpRoot'
+    )
+
+    // #2462's own complaint, survivors in the shared OS temp root, checked
+    // directly rather than inferred from what landed under the test-owned
+    // tmpRoot. `runId` is unique to this test run, so naming `os.tmpdir()` by a
+    // suffix match stays safe even when other test files write into the same
+    // shared directory under parallel `npm test` workers. On its own this says
+    // nothing about `tmpRoot` any more, now that teardown reclaims what the
+    // boot created: it passes whichever root the dirs were made under, which is
+    // why the positive guard above exists.
+    assert.deepEqual(
+      (await fs.readdir(os.tmpdir())).filter((e) => e.endsWith('-' + runId)),
       [],
       'plugin boot temp dirs from this boot survived in the OS temp root'
     )
