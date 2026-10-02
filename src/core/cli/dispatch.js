@@ -769,14 +769,20 @@ async function teardownBootOwnedKernel(kernel) {
     // already completed, and individual source stop failures are not
     // actionable from the dispatcher layer.
   }
-  // The activation contexts are the only record of where this boot's temp dirs
-  // landed: `createPluginPaths` resolves `tempBase` from `tmpRoot ?? os.tmpdir()`,
-  // so re-deriving the paths here would be guessing at a root the kernel
-  // already holds. A plugin whose `activate()` threw is in the map too, and its
-  // dirs were created before the throw, so it gets reclaimed as well.
-  await reclaimPluginTempDirs(
-    Array.from(kernel.activationContexts.values(), (ctx) => ctx.paths.tempDir)
-  )
+  try {
+    // The activation contexts are the only record of where this boot's temp dirs
+    // landed: `createPluginPaths` resolves `tempBase` from `tmpRoot ?? os.tmpdir()`,
+    // so re-deriving the paths here would be guessing at a root the kernel
+    // already holds. A plugin whose `activate()` threw is in the map too, and its
+    // dirs were created before the throw, so it gets reclaimed as well.
+    await reclaimPluginTempDirs(
+      Array.from(kernel.activationContexts.values(), (ctx) => ctx.paths.tempDir)
+    )
+  } catch {
+    // Same best-effort contract as source cleanup above: teardown runs after
+    // the command result is already computed, so a scratch dir we cannot
+    // resolve or remove is a leak, not something the dispatcher can act on.
+  }
 }
 
 /**

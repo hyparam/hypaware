@@ -70,6 +70,19 @@ test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tm
       [],
       'plugin boot temp dirs survived `hyp init` in the invoking user\'s tmpdir'
     )
+    // Positive half of the check: the two assertions above are both
+    // negatives (nothing named `-boot-` is left in tmp), so this test would
+    // pass just as well if plugin activation silently stopped happening
+    // altogether. `createPluginPaths` mkdirs each plugin's durable state dir
+    // (`pluginStateDir` in src/core/runtime/paths.js, under `stateRoot` from
+    // src/core/runtime/boot.js, i.e. `<HYP_HOME>/hypaware/plugins/<plugin>`)
+    // in the same call that creates the temp dir, so a non-empty state
+    // directory root is proof that activation really happened.
+    const pluginStateRoot = path.join(root, 'home', '.hyp', 'hypaware', 'plugins')
+    assert.ok(
+      (await fs.readdir(pluginStateRoot)).length > 0,
+      'expected plugin activation to have created per-plugin state directories'
+    )
 
     // A second run on the now-configured machine, because the growth the issue
     // is about is per invocation: `init` activates once and writes the config,

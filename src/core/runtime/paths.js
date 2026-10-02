@@ -26,8 +26,9 @@ import path from 'node:path'
  *
  * Directories are created eagerly so plugins can write immediately
  * inside `activate(ctx)` without an mkdir dance. `stateDir` and
- * `cacheDir` outlive the boot; `tempDir` does not, and whoever booted
- * the kernel hands the set back to `reclaimPluginTempDirs` at teardown.
+ * `cacheDir` outlive the boot; `tempDir` does not, and a CLI dispatch
+ * that owns its kernel hands the set back to `reclaimPluginTempDirs`
+ * at teardown (daemon and gateway boots, and injected kernels, do not).
  */
 
 /**
@@ -51,13 +52,31 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   const stateDir = pluginStateDir(stateRoot, pluginName)
   const cacheDir = path.join(stateRoot, 'cache', 'plugins', pluginName)
   const tempBase = tmpRoot ?? os.tmpdir()
-  const tempDir = path.join(tempBase, `${sanitizeTempSegment(pluginName)}-${runId}`)
+  // `runId` reaches here straight from `DEV_RUN_ID` (or similar) and is not
+  // otherwise validated, so without sanitizing it the same way as `pluginName`
+  // it could contribute `/` or `..` segments that `path.join` normalizes right
+  // out of `tempBase`. Teardown recursively deletes this path, so an
+  // unsanitized `runId` would turn an attacker- or accident-controlled env
+  // var into an arbitrary recursive delete.
+  const intendedTempDir = path.join(tempBase, `${sanitizeTempSegment(pluginName)}-${sanitizeTempSegment(runId)}`)
 
   await Promise.all([
     fs.mkdir(stateDir, { recursive: true }),
     fs.mkdir(cacheDir, { recursive: true }),
-    fs.mkdir(tempDir, { recursive: true }),
   ])
+
+  // `fs.mkdir(..., { recursive: true })` returns the first path segment it
+  // created, or `undefined` when the directory already existed. The temp dir
+  // name is derived only from plugin name and runId, so two boots sharing a
+  // runId (two kernel boots in one process, which several smokes and any
+  // embedder that boots twice can do) would otherwise resolve to the same
+  // directory. Reclaim deletes whatever this boot thinks it owns at
+  // teardown, so adopting a directory another live boot created would delete
+  // that boot's in-flight scratch data out from under it. If the directory
+  // already existed, it belongs to someone else: fall back to a unique
+  // sibling instead of adopting it.
+  const createdTempDir = await fs.mkdir(intendedTempDir, { recursive: true })
+  const tempDir = createdTempDir === undefined ? await fs.mkdtemp(`${intendedTempDir}-`) : intendedTempDir
 
   return { rootDir, stateDir, cacheDir, tempDir }
 }
