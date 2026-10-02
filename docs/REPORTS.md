@@ -26,8 +26,9 @@ locally or publish it to HypAware Cloud to share with your organization.
 
 ## Generate a report
 
-`hyp report generate` opens Claude Code or Codex to analyze your local recordings.
-Tell it which period to cover and what to investigate:
+`hyp report generate` opens a recorded AI client (Claude Code, Codex, OpenCode,
+or Pi) to analyze your local recordings. Tell it which period to cover and
+what to investigate:
 
 ```sh
 hyp report generate "Cover last week and focus on repeated debugging work"

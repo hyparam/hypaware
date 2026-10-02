@@ -23,7 +23,10 @@ For the syntax and behavior of every command, see the
 ## Requirements
 
 - Node.js 22.12 or later.
-- macOS with `launchd` or Linux with a `systemd` user service.
+- macOS with `launchd`, or Linux with a `systemd` user service, for the
+  persistent background service. A container or CI host without one can run
+  `hyp daemon run` in the foreground instead; see
+  [CI and headless deployment](TEAM_SETUP.md#ci-and-headless-deployment).
 - An interactive terminal for the guided setup.
 
 ## Install HypAware
@@ -109,6 +112,24 @@ hyp update
 ```
 
 The command installs the latest release and restarts the background service.
+
+`hyp update` and the automatic check both take the registry's latest release
+with no major-version bound, so an update can cross a breaking boundary.
+HypAware has no operator-controlled migration rollback, and the updater's
+boot-failure recovery is not a backup of your data. Before a major version,
+read its release notes and copy `~/.hyp` to a new backup path, then install the
+reviewed version and validate before resuming ordinary use:
+
+```sh
+npm install -g hypaware@NEXT_MAJOR_VERSION
+hyp version
+hyp config validate
+hyp daemon install
+hyp status
+```
+
+Replace `NEXT_MAJOR_VERSION` with the version you reviewed. If validation
+fails, stop and restore the saved copy.
 
 ## Reinstall or recover the current version
 

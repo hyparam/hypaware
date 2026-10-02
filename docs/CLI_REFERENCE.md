@@ -234,7 +234,10 @@ hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from
 ```
 
 Provided by `@hypaware/grep`, which standard capture setups enable. An explicit
-`enabled: false` entry keeps it disabled.
+`enabled: false` entry keeps it disabled. An existing configuration gains the
+plugin automatically on startup; the migration backs the local config up before
+writing it. With a read-only config, search remains available for the current
+process and a warning reports that persistence failed.
 
 Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
 case-insensitive substring by default, or a regular expression with `--regex`.
@@ -962,6 +965,7 @@ capture:
 | `@hypaware/codex` (transcript mode) | One minute | Yes |
 | `@hypaware/pi` | Five minutes | Yes |
 | `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
+| `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | No |
 
 A positive `backfill.window_days` bounds both the join-time import and scheduled

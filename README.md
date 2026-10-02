@@ -106,8 +106,9 @@ hyp query sql "select count(*) from ai_gateway_messages" --remote
 ```
 
 First-time browser enrollment provides a review period when its hold is saved.
-Setup can release it immediately: answer **n** at `Upload now? [Y/n]` to keep
-it, and check the deadline with `hyp status`. See the
+Setup then asks `Upload now? [Y/n]`: pressing Enter chooses Yes and uploads
+immediately, so answer **n** to keep the review period. Check the deadline with
+`hyp status`. See the
 [first-sync review](./docs/TEAM_SETUP.md#review-before-the-first-upload)
 before sharing recordings.
 

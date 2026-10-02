@@ -56,6 +56,12 @@ hyp client status codex
 hyp status
 ```
 
+Attach is safe to repeat and preserves unrelated client settings. Start a new
+client process so it reads the updated configuration, complete a short turn,
+then check `hyp query overview` or search for a distinctive phrase with
+`hyp query grep`. Capture and cache visibility can take time to settle. Restart
+running Codex clients after an attach or a detach.
+
 For missing recordings, see [troubleshooting](TROUBLESHOOTING.md#no-new-recordings).
 
 ## Bring in existing history

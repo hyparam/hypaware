@@ -53,8 +53,9 @@ From your terminal, ask a question about your recordings:
 hyp ask "Use HypAware to search my remote logs for sessions about connection refused this week."
 ```
 
-`hyp ask` opens Claude Code or Codex and asks it to look up the answer in
-HypAware. If both are configured and available, you can choose which one to use.
+`hyp ask` opens a recorded AI client (Claude Code, Codex, OpenCode, or Pi) and
+asks it to look up the answer in HypAware. If more than one is configured and
+available, you can choose which one to use.
 
 ## See what is available
 
@@ -77,7 +78,11 @@ inspect their schema before writing SQL.
 ## Find a conversation
 
 The bundled `@hypaware/grep` plugin searches recorded messages. Standard capture
-setups enable it; an explicit `enabled: false` entry keeps it disabled.
+setups enable it; an explicit `enabled: false` entry keeps it disabled. An
+existing configuration gains it automatically on startup, which rewrites
+`hypaware-config.json` and leaves a timestamped `.bak-` copy beside it. With a
+read-only config, search still works for that process and a warning reports
+that the change could not be saved.
 
 ```sh
 hyp query grep "connection refused" --limit 20
