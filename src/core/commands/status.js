@@ -1246,9 +1246,15 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     for (const [index, d] of report.diagnostics.entries()) {
       if (index > 0) stdout.write('\n')
       const tag = d.severity === 'error' ? 'ERROR' : 'WARN '
-      stdout.write(`    [${tag}] ${d.kind}: ${d.message}\n`)
+      // Through `printable` like the Attention line above: a diagnostic's prose
+      // is not all this build's own - an unreadable config reaches `message` as
+      // `JSON.parse`'s excerpt of the file, and a repair names config-supplied
+      // values. Unclamped because clamping is the Attention line's job, and
+      // `printable`'s 120-character default would cut real diagnostics shorter
+      // here than the summary already prints them.
+      stdout.write(`    [${tag}] ${d.kind}: ${printable(d.message, Infinity)}\n`)
       for (const repair of d.repair) {
-        stdout.write(`        repair: ${repair}\n`)
+        stdout.write(`        repair: ${printable(repair, Infinity)}\n`)
       }
     }
   }

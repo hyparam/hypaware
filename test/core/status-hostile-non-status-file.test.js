@@ -11,7 +11,7 @@ import { renderStatusJson, renderStatusText } from '../../src/core/commands/stat
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 // `status.json` is not the only file whose bytes reach `hyp status`'s text
-// surface. Two more do:
+// surface. Three more do:
 //
 //   - `config-control/state.json` and the per-slot etag sidecar. An etag is
 //     authored by whatever server the install joined, and the state file is
@@ -20,10 +20,13 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 //   - a client's own settings file, by way of the attach probe's `error`: a
 //     settings file that is not valid JSON surfaces as `JSON.parse`'s
 //     message, which quotes an excerpt of the file verbatim.
+//   - the local config file, by way of a diagnostic's `message` and `repair`:
+//     a config that does not parse surfaces the same `JSON.parse` excerpt, and
+//     a repair command names config-supplied values.
 //
-// Both are display-only on this surface and both were interpolated raw, so
-// each was a way for a file the operator never chose to trust to repaint the
-// screen or forge a plausible extra status line.
+// All three are display-only on this surface and all three were interpolated
+// raw, so each was a way for a file the operator never chose to trust to
+// repaint the screen or forge a plausible extra status line.
 //
 // @ref LLP 0225#decision [tests]: the render a person reads is cleaned, whichever file the string came from; --json is not
 
@@ -311,4 +314,88 @@ test('a long rollback etag is clamped in the --json message but whole in the --j
   assert.ok(!diag.message.includes(long), 'the assembled sentence does not carry the whole etag')
   assert.ok(diag.message.includes('a'.repeat(117) + '...'), 'it is clamped at a label width, and marked truncated')
   assert.equal(payload.remote_config?.last_rollback?.etag, long, 'the values beside it are not clamped')
+})
+
+// The verbose diagnostics block printed both of a diagnostic's strings raw
+// while the Attention line above it cleaned the same message (issue #2430).
+test('a hostile local config cannot drive the terminal through the verbose diagnostics block', async () => {
+  const hypHome = await makeHome()
+  // A bare token first, so the parse error is the spelling that quotes the
+  // input back rather than one that only reports a position.
+  await fs.writeFile(defaultConfigPath(hypHome), `x${ERASE_LINE}\n  overall:  healthy`)
+
+  const { report, text } = await render(hypHome)
+  const diag = report.diagnostics.find((d) => d.kind === 'config_unreadable')
+  assert.ok(diag, 'the unparseable config is diagnosed')
+  assert.ok(CONTROL_EXCEPT_NEWLINE.test(diag.message), 'whose message quotes the raw bytes back')
+
+  assert.match(text, /\[ERROR\] config_unreadable: config is not valid JSON/, 'the verbose block still reports it')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('  overall:  healthy')).length,
+    0,
+    'the embedded newline cannot forge a second overall line',
+  )
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    payload.diagnostics.find((d) => d.kind === 'config_unreadable')?.message,
+    diag.message,
+    '--json still carries the message byte-exact',
+  )
+})
+
+// Every repair line of that block, not just the first: the Attention line above
+// prints only `repair[0]`, so the rest reach a terminal here alone. Planted
+// rather than driven from a lock file because the render is what is under test.
+test('a hostile repair string cannot drive the terminal from the verbose diagnostics block', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const repair = [
+    `hyp plugin update @acme/p${ERASE_LINE}\n        repair: hyp plugin remove everything`,
+    `hyp plugin doctor /tmp/p${ZERO_WIDTH}`,
+  ]
+  report.diagnostics.push({
+    severity: 'error',
+    kind: 'config_invalid',
+    message: `[plugin_unknown] /plugins/0/name: unknown plugin '@acme/p${ERASE_LINE}'`,
+    repair,
+  })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.ok(!text.includes(ZERO_WIDTH), 'and no zero-width run does either')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('        repair: ')).length,
+    2,
+    'two repair entries stay two lines, whatever they carry',
+  )
+  assert.match(text, /repair: hyp plugin update @acme\/p/, 'the printable part of the first still names the command')
+  assert.match(text, /repair: hyp plugin doctor \/tmp\/p/, 'and of the second')
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.deepEqual(
+    payload.diagnostics.find((d) => d.kind === 'config_invalid')?.repair,
+    repair,
+    '--json still carries the repair commands byte-exact',
+  )
 })
