@@ -253,7 +253,7 @@ async function recordedClientReadsQuerySkill(ctx, descriptors, clients) {
  *
  * @ref LLP 0198#path-probe [implements]: nothing recorded and resolvable is one refusal, said the same way by every form of the verb
  * @ref LLP 0139#repair-must-be-runnable [implements]: an attach is named only where an attach is the repair
- * @ref LLP 0198#split [implements]: the refusal names a recorded client `hyp ask` can never start, not just the unresolved ones
+ * @ref LLP 0198#split [constrained-by]: the clients named here are the ones the manifest withholds `launch` from, so they are recorded and not launchable
  * @param {CommandRunContext} ctx
  * @param {Map<string, ClientDescriptor>} descriptors
  * @param {string[]} clients the recorded clients
@@ -299,11 +299,11 @@ async function writeNoLauncher(ctx, descriptors, clients, paste) {
 /**
  * The name a recorded launch-less client is called by in the no-CLI
  * refusal. Most client names already read fine capitalized plainly
- * (`pi` -> `Pi`); `opencode` does not, so it gets its own entry rather
- * than a refusal that reads "Opencode". Same small-table-with-fallback
- * shape as `summariseCollecting`'s `FRIENDLY_CLIENT_LABELS` in
- * `wizard/fork.js`, kept local here since the two call sites format
- * different sentences.
+ * (`pi` -> `Pi`); `opencode` and `openclaw` do not, so each gets its
+ * own entry rather than a refusal that reads "Opencode" or "Openclaw".
+ * Same small-table-with-fallback shape as `summariseCollecting`'s
+ * `FRIENDLY_CLIENT_LABELS` in `wizard/fork.js`, kept local here since the
+ * two call sites format different sentences.
  *
  * @param {string} client
  * @returns {string}
@@ -315,6 +315,7 @@ function friendlyClientLabel(client) {
 /** @type {Record<string, string>} */
 const FRIENDLY_LAUNCHLESS_LABELS = {
   opencode: 'OpenCode',
+  openclaw: 'OpenClaw',
   pi: 'Pi',
   'claude-desktop': 'Claude Desktop',
 }

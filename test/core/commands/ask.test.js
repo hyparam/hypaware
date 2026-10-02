@@ -199,7 +199,7 @@ test('runAsk: with no client CLI on PATH, the refusal names the binaries and nev
 // as a claim that nothing of its was found, with install advice that could
 // never make it startable - `hyp ask` can never launch OpenCode regardless
 // of PATH, so the refusal must say so by name.
-// @ref LLP 0198#split [tests]: the no-CLI refusal names a recorded client it can never start
+// @ref LLP 0198#split [tests]: opencode declares no `launch`, so it is recorded and not launchable
 test('runAsk: a recorded OpenCode is named by the no-CLI refusal, not left for install advice to mislead', async () => {
   const env = await bareEnv()
   const plugins = path.join(env.HOME, '.config', 'opencode', 'plugins')
@@ -225,6 +225,29 @@ test('runAsk: with OpenCode and Pi both recorded, the no-CLI refusal names both,
   const text = stderr.text()
   assert.match(text, /hyp ask: no client CLI found on your PATH/)
   assert.match(text, /OpenCode and Pi are recorded, but `hyp ask` cannot start them \(see `hyp help ask`\)\./)
+})
+
+// `openclaw` is the other recorded client the plain capitalize fallback
+// gets wrong: the product is OpenClaw, and `wizard/fork.js` already spells it
+// that way, so the refusal must not invent "Openclaw".
+test('runAsk: a recorded OpenClaw is named OpenClaw, not the fallback capitalization', async () => {
+  const env = await bareEnv()
+  const openclaw = path.join(env.HOME, '.openclaw')
+  await fs.mkdir(openclaw, { recursive: true })
+  /** @param {string} upstream */
+  const route = (upstream) => ({
+    baseUrl: `http://127.0.0.1:40000/${upstream}`,
+    headers: { 'x-hypaware-upstream': upstream, 'x-hypaware-client': 'openclaw' },
+  })
+  await fs.writeFile(
+    path.join(openclaw, 'openclaw.json'),
+    JSON.stringify({ models: { providers: { anthropic: route('anthropic'), openai: route('openai') } } })
+  )
+  const { ctx, stderr } = makeCtx({ env })
+  assert.equal(await runAsk([], ctx), 1)
+  const text = stderr.text()
+  assert.match(text, /OpenClaw is recorded, but `hyp ask` cannot start it \(see `hyp help ask`\)\./)
+  assert.doesNotMatch(text, /Openclaw is recorded/)
 })
 
 // A launch-declaring client (Claude Code) must never get the new sentence:

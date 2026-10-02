@@ -167,18 +167,19 @@ says which half is missing: a client CLI that is on `PATH` but not recorded is
 answered with the `hyp client attach` command to run, and no client CLI on
 `PATH` at all is answered with the binaries it looked for, since an attach
 would not give it anything to start. That second refusal also names any
-recorded client it cannot start (OpenCode, Pi), since neither an install nor
-a `PATH` fix would make one of those launchable either. In that second case,
-if a recorded client has the `hypaware-query` skill installed (a Claude or
-Codex desktop app with no
-CLI), `hyp ask` also prints the prompt to paste into the app: the typed question framed for `hyp query`, or for the
-bare form a version of the skill question that looks through the history
-itself, since no evidence is gathered for an app it cannot start. The prompt
-is the only thing written to stdout, so `hyp ask | pbcopy` copies it; the exit
-status is still `1`, because nothing was started. A process-start failure
-returns `1` when a question was supplied; bare `hyp ask` currently reports that
-failure but still exits `0`. Its exit status therefore does not prove a client
-started.
+recorded client it cannot start, since neither an install nor a `PATH` fix
+would make one of those launchable either: only Claude Code and Codex declare
+how to be started on a question, so a recorded Cursor, OpenClaw, OpenCode, Pi
+or Claude Desktop is named there instead. In that second case, if a recorded
+client has the `hypaware-query` skill installed (a Claude or Codex desktop app
+with no CLI), `hyp ask` also prints the prompt to paste into the app: the typed
+question framed for `hyp query`, or for the bare form a version of the skill
+question that looks through the history itself, since no evidence is gathered
+for an app it cannot start. The prompt is the only thing written to stdout, so
+`hyp ask | pbcopy` copies it; the exit status is still `1`, because nothing was
+started. A process-start failure returns `1` when a question was supplied; bare
+`hyp ask` currently reports that failure but still exits `0`. Its exit status
+therefore does not prove a client started.
 
 ```sh
 hyp ask "which sessions changed the authentication module"
