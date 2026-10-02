@@ -9,7 +9,7 @@ import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_st
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
-import { defaultConfigPath } from '../../../../src/core/config/schema.js'
+import { defaultConfigPath, prepareLocalConfigWrite } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
@@ -648,8 +648,9 @@ function booleanFlag(argv, name) {
  *
  * The preset never overwrites an existing config file silently (pass
  * `--force` to opt into overwrite); otherwise the existing file
- * stays and the command returns 1. `--dry-run` reports the path the
- * preset would write and writes nothing, refusing on an existing
+ * stays and the command returns 1. On `--force` the old file is copied
+ * to `hypaware-config.json.bak-<ts>` first. `--dry-run` reports the path
+ * the preset would write and writes nothing, refusing on an existing
  * config exactly as a real run would. `--dry-run` is read the way the
  * CLI codec reads a boolean, so `--dry-run=true` and `--dry-run=false`
  * work as well as the bare flag. `--force` is not: see the comment on
@@ -672,17 +673,20 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
 
-  if (!force) {
-    try {
-      await fs.access(configPath)
-      ctx.stderr.write(
-        `hyp setup: config already exists at ${configPath} (pass --force to overwrite)\n`
-      )
-      return 1
-    } catch (err) {
-      const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
-      if (code !== 'ENOENT') throw err
-    }
+  // A preset is a scripted non-interactive init (LLP 0011
+  // #non-interactive-entry), so it owes the same overwrite contract as every
+  // other local-layer writer: refuse an existing config, and back it up before
+  // replacing it under `--force`.
+  const guard = await prepareLocalConfigWrite({ targetPath: configPath, force, dryRun })
+  if (!guard.proceed) {
+    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
+    return 1
+  }
+  if (guard.backupPath) {
+    // A dry run copied nothing, so it reports the backup it would have made.
+    ctx.stdout.write(dryRun
+      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
+      : `  backed up existing config to ${guard.backupPath}\n`)
   }
 
   /** @type {HypAwareV2Config} */

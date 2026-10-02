@@ -128,6 +128,59 @@ test('init --yes --dry-run writes no config', async () => {
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })
 
+// A preset is the third non-interactive init form (LLP 0011
+// #non-interactive-entry), so it owes the same refuse / --force / backup
+// contract as `--from-file` and `--yes`.
+
+test('init <preset> refuses to clobber an existing local config without --force', async () => {
+  const { hypHome, stderr, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+
+  const code = await dispatch(['init', 'claude-and-otel-local'], opts)
+  assert.equal(code, 1)
+  assert.match(stderr.text(), /refusing to overwrite/)
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.deepEqual(after.plugins, EXISTING.plugins)
+})
+
+test('init <preset> --force backs up then overwrites', async () => {
+  const { hypHome, stdout, stderr, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+
+  const code = await dispatch(['init', 'claude-and-otel-local', '--force'], opts)
+  assert.equal(code, 0, stderr.text())
+
+  // The preset's config landed, so the backup was taken before the write.
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.notDeepEqual(after.plugins, EXISTING.plugins)
+
+  // A timestamped backup of the old config exists with the old content.
+  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  assert.equal(backups.length, 1)
+  const backup = JSON.parse(await fs.readFile(path.join(hypHome, backups[0]), 'utf8'))
+  assert.deepEqual(backup.plugins, EXISTING.plugins)
+  assert.match(stdout.text(), /backed up existing config/i)
+})
+
+test('init <preset> --dry-run --force leaves the existing config and makes no backup', async () => {
+  const { hypHome, stdout, stderr, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+
+  const code = await dispatch(['init', 'claude-and-otel-local', '--dry-run', '--force'], opts)
+  assert.equal(code, 0, stderr.text())
+  // The dry run reports the backup it would make, never one it made.
+  assert.match(stdout.text(), /\(dry-run\) would back up existing config/)
+  assert.deepEqual(
+    (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')),
+    []
+  )
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.deepEqual(after.plugins, EXISTING.plugins)
+})
+
 test('init --yes refuses to clobber an existing local config without --force', async () => {
   const { hypHome, stderr, opts } = await makeHome()
   const configPath = path.join(hypHome, 'hypaware-config.json')
