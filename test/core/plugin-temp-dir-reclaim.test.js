@@ -8,9 +8,15 @@
 // in-flight blob in it and never clean up after themselves.
 //
 // The in-process sibling is activation-env-forwarding.test.js, which can assert
-// on the test-owned `tmpRoot` it injects. This file covers what an in-process
-// `dispatch` call cannot show: that the shipped entrypoint, run as a user runs
-// it, leaves nothing behind after the process exits.
+// on the test-owned `tmpRoot` it injects. The first test here covers what an
+// in-process `dispatch` call cannot show: that the shipped entrypoint, run as a
+// user runs it, leaves nothing behind after the process exits.
+//
+// The rest cover the hazards the reclaim itself created by making a stray
+// `mkdir -p` target into an `fs.rm(recursive)` target: a `runId` that steers
+// the delete out of the temp root, and two boots that adopt one directory.
+// Those live against `createPluginPaths` directly, because neither is
+// reachable by spawning the binary with a well-formed environment.
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -20,7 +26,19 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+import { createPluginPaths, reclaimPluginTempDirs } from '../../src/core/runtime/paths.js'
+
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hypaware.js')
+
+/** @param {string} p */
+async function exists(p) {
+  try {
+    await fs.stat(p)
+    return true
+  } catch {
+    return false
+  }
+}
 
 /**
  * Run the shipped entrypoint with HOME, TMPDIR and HYP_HOME all inside `root`.
@@ -79,8 +97,14 @@ test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tm
     // in the same call that creates the temp dir, so a non-empty state
     // directory root is proof that activation really happened.
     const pluginStateRoot = path.join(root, 'home', '.hyp', 'hypaware', 'plugins')
+    // `readdir` rejects with ENOENT on a missing directory, and missing is
+    // exactly the case this assertion exists to catch: `createPluginPaths` only
+    // ever creates `plugins/` as the parent of a plugin's own state dir, so it
+    // never exists empty. Without the catch the failure surfaces as an ENOENT
+    // stack and the message below can never print.
+    const pluginStateDirs = await fs.readdir(pluginStateRoot).catch(() => [])
     assert.ok(
-      (await fs.readdir(pluginStateRoot)).length > 0,
+      pluginStateDirs.length > 0,
       'expected plugin activation to have created per-plugin state directories'
     )
 
@@ -98,5 +122,117 @@ test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tm
     )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// Both of the following need an environment the spawned binary above will not
+// produce on its own: a hostile `DEV_RUN_ID`, and two kernel boots racing on
+// one runId. So they drive `createPluginPaths` directly, which is the function
+// that decides the path the teardown later deletes.
+
+test('a hostile runId cannot steer the reclaim out of the temp root', async () => {
+  // `runId` arrives from `DEV_RUN_ID` (`src/core/runtime/boot.js`) and is not
+  // validated anywhere on the way in. `pluginName` was sanitized and `runId`
+  // was not, so `path.join` normalized any `/` or `..` the runId contributed
+  // straight out of `tempBase` and the teardown deleted whatever it landed on.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-escape-'))
+  try {
+    const tempBase = path.join(root, 'a', 'b', 'c', 'tmp')
+    await fs.mkdir(tempBase, { recursive: true })
+    for (const runId of ['..', '../..', '../../../victim', '/etc', '..\\..\\victim', '....//victim', '.']) {
+      // A populated directory at every level a traversal out of `tempBase`
+      // could land on, so an escape has something to destroy.
+      const victims = ['victim', 'a/victim', 'a/b/victim', 'a/b/c/victim']
+      for (const v of victims) {
+        await fs.mkdir(path.join(root, v, 'sub'), { recursive: true })
+        await fs.writeFile(path.join(root, v, 'sub', 'keepme.txt'), 'CANARY')
+      }
+      const paths = await createPluginPaths({
+        pluginName: '@hypaware/dummy',
+        rootDir: root,
+        stateRoot: path.join(root, 'state'),
+        runId,
+        tmpRoot: tempBase,
+      })
+      // The only containment that matters: whatever the runId spelled, the
+      // directory handed to the recursive delete is a direct child of
+      // `tempBase`. `sanitizeTempSegment` maps `/` to `__` and everything
+      // outside `[A-Za-z0-9._@-]` to `_`, and the `<plugin>-<runId>` join
+      // always leaves a `-` in the middle, so the segment can never be `.`
+      // or `..` either.
+      assert.equal(
+        path.dirname(paths.tempDir),
+        tempBase,
+        `runId ${JSON.stringify(runId)} resolved a temp dir outside the temp root: ${paths.tempDir}`
+      )
+      await fs.writeFile(path.join(paths.tempDir, 'staged.bin'), 'x')
+      await reclaimPluginTempDirs([paths.tempDir])
+      for (const v of victims) {
+        assert.equal(
+          await exists(path.join(root, v, 'sub', 'keepme.txt')),
+          true,
+          `runId ${JSON.stringify(runId)} let the reclaim delete ${v} outside the temp root`
+        )
+      }
+      assert.equal(await exists(tempBase), true, `runId ${JSON.stringify(runId)} let the reclaim delete the temp root itself`)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('boots sharing a runId get separate temp dirs, so one teardown cannot destroy another', async () => {
+  // The name derives only from plugin name and runId, so two kernel boots
+  // sharing a `DEV_RUN_ID` resolve the same path and the first teardown
+  // recursively deletes the other's in-flight scratch. Whoever creates the
+  // directory owns it; everyone else takes a unique sibling.
+  //
+  // Both `tempBase` states, because the ownership probe depends on it:
+  // `fs.mkdir(p, { recursive: true })` resolves to "the first directory path
+  // created", which is an ancestor rather than `p` whenever an ancestor was
+  // missing too. An injected `tmpRoot` that does not exist yet is the shape
+  // several smokes and activation-env-forwarding.test.js pass, and reading
+  // that return as "I created the leaf" let concurrent boots collide again.
+  for (const tempBaseExists of [true, false]) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-collide-'))
+    try {
+      const tempBase = path.join(root, 'missing', 'tmp')
+      if (tempBaseExists) await fs.mkdir(tempBase, { recursive: true })
+      const runId = 'boot-shared'
+      const boots = await Promise.all(
+        [0, 1, 2, 3].map((i) => createPluginPaths({
+          pluginName: '@hypaware/dummy',
+          rootDir: root,
+          stateRoot: path.join(root, 'state', String(i)),
+          runId,
+          tmpRoot: tempBase,
+        }))
+      )
+      const label = `tempBase ${tempBaseExists ? 'existing' : 'missing'}`
+      assert.equal(
+        new Set(boots.map((b) => b.tempDir)).size,
+        boots.length,
+        `${label}: concurrent boots sharing a runId adopted the same temp dir`
+      )
+      // The uncontended name is still exactly `<plugin>-<runId>`, which is what
+      // makes these dirs recognizable as per-boot.
+      assert.ok(
+        boots.some((b) => path.basename(b.tempDir) === `@hypaware__dummy-${runId}`),
+        `${label}: no boot took the plain <plugin>-<runId> name`
+      )
+      await Promise.all(boots.map((b, i) => fs.writeFile(path.join(b.tempDir, 'inflight.bin'), `boot${i}`)))
+      // One boot tears down while the other three are still live.
+      await reclaimPluginTempDirs([boots[0].tempDir])
+      assert.equal(await exists(boots[0].tempDir), false, `${label}: the reclaimed boot's temp dir survived`)
+      for (const b of boots.slice(1)) {
+        assert.equal(
+          await exists(path.join(b.tempDir, 'inflight.bin')),
+          true,
+          `${label}: one boot's teardown destroyed a concurrently live boot's in-flight scratch`
+        )
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   }
 })

@@ -63,20 +63,32 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   await Promise.all([
     fs.mkdir(stateDir, { recursive: true }),
     fs.mkdir(cacheDir, { recursive: true }),
+    fs.mkdir(tempBase, { recursive: true }),
   ])
 
-  // `fs.mkdir(..., { recursive: true })` returns the first path segment it
-  // created, or `undefined` when the directory already existed. The temp dir
-  // name is derived only from plugin name and runId, so two boots sharing a
-  // runId (two kernel boots in one process, which several smokes and any
-  // embedder that boots twice can do) would otherwise resolve to the same
-  // directory. Reclaim deletes whatever this boot thinks it owns at
-  // teardown, so adopting a directory another live boot created would delete
-  // that boot's in-flight scratch data out from under it. If the directory
-  // already existed, it belongs to someone else: fall back to a unique
-  // sibling instead of adopting it.
-  const createdTempDir = await fs.mkdir(intendedTempDir, { recursive: true })
-  const tempDir = createdTempDir === undefined ? await fs.mkdtemp(`${intendedTempDir}-`) : intendedTempDir
+  // The temp dir name is derived only from plugin name and runId, so two boots
+  // sharing a runId (two kernel boots in one process, which several smokes and
+  // any embedder that boots twice can do) resolve to the same directory.
+  // Reclaim deletes whatever this boot thinks it owns at teardown, so adopting
+  // a directory another live boot created would delete that boot's in-flight
+  // scratch out from under it. Whoever creates the directory owns it; everyone
+  // else takes a unique sibling.
+  //
+  // The probe has to be a *non-recursive* mkdir. `{ recursive: true }` resolves
+  // to "the first directory path created", which is an ancestor rather than
+  // `intendedTempDir` whenever an ancestor was missing too, so with an injected
+  // `tmpRoot` that does not exist yet (several smokes, and
+  // test/core/activation-env-forwarding.test.js, pass exactly that) two
+  // concurrent boots could each see a non-`undefined` return and both conclude
+  // they created the leaf. `tempBase` is created above, and a plain mkdir is
+  // atomic: exactly one caller creates the leaf, every other gets EEXIST.
+  let tempDir = intendedTempDir
+  try {
+    await fs.mkdir(intendedTempDir)
+  } catch (err) {
+    if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
+    tempDir = await fs.mkdtemp(`${intendedTempDir}-`)
+  }
 
   return { rootDir, stateDir, cacheDir, tempDir }
 }
