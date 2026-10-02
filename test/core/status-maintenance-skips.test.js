@@ -520,6 +520,74 @@ test('a status.json carrying only reasons this build does not recognize renders 
   }
 })
 
+// The warning gate fires on a recorded `compaction_attempt_failed` directly,
+// but the sentence it renders interpolates `skippedTotal`, and a foreign
+// `status.json` can record a total smaller than the reasons it also records.
+// With the two floored independently, `skippedTotal: 0` beside
+// `compaction_attempt_failed: 2` rendered "cache maintenance is leaving 0
+// partitions fragmented (2 compaction_attempt_failed)", and the attention
+// line "Cache maintenance left 0 partitions fragmented": a warning asserting
+// nothing is fragmented (issue #2360). The total is floored at the reasons it
+// reports, so every surface reading the snapshot states a count its own
+// breakdown accounts for.
+// @ref LLP 0228#last-tick-only [tests]: the count a foreign status file renders never contradicts the reason breakdown beside it
+test('a status.json recording fewer skips than reasons renders a count its own breakdown accounts for', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const tickAt = new Date(Date.now() - 5 * 60_000).toISOString()
+  /**
+   * @param {Record<string, number>} reasons
+   * @param {number} skippedTotal
+   */
+  const collect = async (reasons, skippedTotal) => {
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [],
+      sinks: [],
+      maintenance: { tickAt, partitionsVisited: 2, skippedTotal, reasons, partitions: [] },
+    }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    return { report, text: stdout.text() }
+  }
+
+  try {
+    const failedOnly = await collect({ compaction_ineffective: 0, compaction_attempt_failed: 2 }, 0)
+    const diagnostic = failedOnly.report.diagnostics.find((d) => d.kind === 'maintenance_partitions_skipped')
+    assert.ok(diagnostic, 'a recorded failed attempt still raises the diagnostic')
+    assert.match(
+      diagnostic.message,
+      /leaving 2 partitions fragmented \(2 compaction_attempt_failed\)/,
+      `the count must account for the reasons printed beside it, got: ${diagnostic.message}`
+    )
+    assert.doesNotMatch(failedOnly.text, /0 partitions fragmented/, 'no surface warns that nothing is fragmented')
+    assert.equal(failedOnly.report.maintenance?.skippedTotal, 2)
+
+    // Mixed, and short by two: the count has to cover both reasons, not just
+    // the failed one.
+    const mixed = await collect({ compaction_ineffective: 2, compaction_attempt_failed: 2 }, 2)
+    const mixedDiagnostic = mixed.report.diagnostics.find((d) => d.kind === 'maintenance_partitions_skipped')
+    assert.ok(mixedDiagnostic, 'a mixed snapshot with a failed attempt raises the diagnostic')
+    assert.match(
+      mixedDiagnostic.message,
+      /leaving 4 partitions fragmented \(2 compaction_ineffective, 2 compaction_attempt_failed\)/,
+      `the count must cover every reason, got: ${mixedDiagnostic.message}`
+    )
+    assert.match(mixed.text, /4 of 4 partitions left fragmented/)
+
+    // The suppression the gate's direct test closed: a recorded total at or
+    // below the ineffective count, with a failed attempt beside it, still
+    // warns.
+    const suppressed = await collect({ compaction_ineffective: 2, compaction_attempt_failed: 1 }, 2)
+    assert.ok(
+      suppressed.report.diagnostics.some((d) => d.kind === 'maintenance_partitions_skipped'),
+      'a recorded failed attempt must never be suppressed by the total beside it'
+    )
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 /* ---------- against a real frozen partition ---------- */
 
 /** @type {ColumnSpec[]} */
