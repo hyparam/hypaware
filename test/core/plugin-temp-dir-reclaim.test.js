@@ -384,6 +384,8 @@ test('a dispatch nested inside another owning dispatch adds no second signal lis
     const before = counts()
     /** @type {number[][]} */
     const inner = []
+    /** @type {number[] | undefined} */
+    let afterInner
     const quiet = { write: () => true }
     const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', DEV_RUN_ID: `issue-2482-nested-${process.pid}-${Date.now()}` }
     const tmpRoot = path.join(hypHome, 'plugin-temp-root')
@@ -399,7 +401,9 @@ test('a dispatch nested inside another owning dispatch adds no second signal lis
         }
         // No `kernel`, so the inner call owns a second boot and reaches the
         // install gate on its own, exactly as `runConfiguredSync` does.
-        return await dispatch(['probe', 'nest', 'inner'], { registry, stdout: quiet, stderr: quiet, env, tmpRoot })
+        const nested = await dispatch(['probe', 'nest', 'inner'], { registry, stdout: quiet, stderr: quiet, env, tmpRoot })
+        afterInner = counts()
+        return nested
       },
     })
     const code = await dispatch(['probe', 'nest'], { registry, stdout: quiet, stderr: quiet, env, tmpRoot })
@@ -408,6 +412,16 @@ test('a dispatch nested inside another owning dispatch adds no second signal lis
       inner,
       [before.map((n) => n + 1)],
       'two owning dispatches installed two signal listeners, so each handler reads the other as a foreign owner and the signal is swallowed'
+    )
+    // The other half of "one pair for the process": it is the *last* live boot
+    // that takes the pair away, not the first one to finish. The outer boot is
+    // still holding its sources and its scratch dirs here, so a pair the inner
+    // dispatch took with it would leave the rest of the outer run back on the
+    // bare default disposition, which is issue #2482 again.
+    assert.deepEqual(
+      afterInner,
+      before.map((n) => n + 1),
+      'the inner dispatch took the shared handler pair with it, so a signal in the rest of the outer boot has nothing to tear it down'
     )
     assert.deepEqual(counts(), before, 'nested dispatches left their SIGINT/SIGTERM listeners installed after both completed')
   } finally {
