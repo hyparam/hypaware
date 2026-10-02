@@ -527,6 +527,7 @@ async function dispatchInternal(argv, opts) {
             stateRoot: obsEnv.stateDir,
             runId: devRunId ?? `cli-${process.pid}`,
             activePlugins,
+            env,
           })
           return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
         },
@@ -550,6 +551,7 @@ async function dispatchInternal(argv, opts) {
           stateRoot: obsEnv.stateDir,
           runId: devRunId ?? `cli-${process.pid}`,
           activePlugins,
+          env,
         }),
       // Same owner, same rule again: registering a verb is a plugin extension
       // point, so a plugin's command body reaches the verb table through the
@@ -1129,10 +1131,11 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
  *   stateRoot: string,
  *   runId: string,
  *   activePlugins: ActivePlugin[],
+ *   env: NodeJS.ProcessEnv,
  * }} args
  * @returns {Promise<void>}
  */
-async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins }) {
+async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins, env }) {
   try {
     if (typeof name !== 'string' || name.length === 0 || name.startsWith('-')) return
     if (registry.match([name])) return
@@ -1159,6 +1162,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
       stateRoot,
       runId,
       activePlugins,
+      env,
     })
     // Parity with the pre-generalization guard: if the owner itself never
     // made it into `activated` (unresolvable, or resolvable but its own
@@ -1218,6 +1222,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
  *   runId: string,
  *   activePlugins: ActivePlugin[],
  *   selection?: Awaited<ReturnType<typeof computeBootSelection>>,
+ *   env: NodeJS.ProcessEnv,
  * }} args
  * @returns {Promise<{ activated: string[], failed: string[] }>}
  * @ref LLP 0174#prompt [implements]: the manual-attach accept path's
@@ -1232,6 +1237,7 @@ export async function activatePluginDependencyClosure({
   runId,
   activePlugins,
   selection,
+  env,
 }) {
   const activeNames = new Set(activePlugins.map((p) => p.name))
   const seeds = seedNames.filter((n) => typeof n === 'string' && n.length > 0 && !activeNames.has(n))
@@ -1302,7 +1308,7 @@ export async function activatePluginDependencyClosure({
       }))
     if (entries.length === 0) return { activated: [], failed: seeds }
 
-    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel })
+    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel, env })
     /** @type {string[]} */
     const activated = []
     for (const r of result.results) {
