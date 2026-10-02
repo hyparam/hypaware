@@ -10,6 +10,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { materializeClientAssets } from '../../src/core/runtime/client_assets.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 function agentsKernelAndRegistry() {
@@ -250,6 +251,142 @@ test('update-mode skills install respects attachment, client filtering, and a su
     await fs.writeFile(settingsPath, '{malformed')
     assert.equal(await dispatch(['skills', 'install', '--attached'], opts), 0)
     await assert.rejects(fs.stat(skillDir), { code: 'ENOENT' })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('hyp skills install sweeps orphaned refresh staging, and only that', async () => {
+  // A v1.39-era refresh killed between its two renames leaves
+  // `<dest>.hyp-refresh` and `<dest>.hyp-refresh-old` in the client's skills
+  // directory, each a complete SKILL.md the client loads as a duplicate of the
+  // same skill. The boot refresher that swept them is gone, so an explicit
+  // install is the recovery path (#2407).
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-refresh-orphan-'))
+  try {
+    const sourceDir = path.join(home, 'src-skill')
+    await fs.mkdir(sourceDir, { recursive: true })
+    await fs.writeFile(path.join(sourceDir, 'SKILL.md'), '---\nname: demo-skill\n---\nv2 body\n', 'utf8')
+    const sourceFile = path.join(home, 'src-agent.md')
+    await fs.writeFile(sourceFile, 'agent body\n', 'utf8')
+
+    const { kernel, registry } = agentsKernelAndRegistry()
+    kernel.skills.register({ name: 'demo-skill', plugin: '@hypaware/claude', clients: ['claude'], sourceDir })
+    kernel.agents.register({ name: 'demo-agent', plugin: '@hypaware/claude', clients: ['claude'], sourceFile })
+
+    const skillsDir = path.join(home, '.claude', 'skills')
+    const dest = path.join(skillsDir, 'demo-skill')
+    const agentDest = path.join(home, '.claude', 'agents', 'demo-agent.md')
+    await fs.mkdir(`${dest}.hyp-refresh`, { recursive: true })
+    await fs.writeFile(path.join(`${dest}.hyp-refresh`, 'SKILL.md'), '---\nname: demo-skill\n---\nv2 body\n', 'utf8')
+    await fs.mkdir(`${dest}.hyp-refresh-old`, { recursive: true })
+    await fs.writeFile(path.join(`${dest}.hyp-refresh-old`, 'SKILL.md'), '---\nname: demo-skill\n---\nv1 body\n', 'utf8')
+    await fs.mkdir(path.dirname(agentDest), { recursive: true })
+    await fs.writeFile(`${agentDest}.hyp-refresh`, 'agent body\n', 'utf8')
+
+    // Canaries: the skills directory is the user's own and the sweep is a
+    // recursive delete inside it, so a file and a directory whose names merely
+    // start with the staging prefix must survive.
+    await fs.mkdir(path.join(skillsDir, 'demo-skill.hyp-refreshed-by-me'), { recursive: true })
+    await fs.writeFile(path.join(skillsDir, 'demo-skill.hyp-refreshed-by-me', 'SKILL.md'), 'mine too\n', 'utf8')
+    await fs.writeFile(path.join(skillsDir, 'notes.hyp-refresh.md'), 'my notes\n', 'utf8')
+    await fs.mkdir(path.join(skillsDir, 'my-own-skill'), { recursive: true })
+    await fs.writeFile(path.join(skillsDir, 'my-own-skill', 'SKILL.md'), 'mine\n', 'utf8')
+
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const opts = { stdout, stderr, env: { ...process.env, HOME: home }, registry, kernel }
+    assert.equal(await dispatch(['skills', 'install'], opts), 0, stderr.text())
+
+    await assert.rejects(fs.stat(`${dest}.hyp-refresh`), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(`${dest}.hyp-refresh-old`), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(`${agentDest}.hyp-refresh`), { code: 'ENOENT' })
+    assert.match(stdout.text(), /removed leftover refresh staging .*demo-skill\.hyp-refresh\n/)
+    assert.match(stdout.text(), /removed leftover refresh staging .*demo-skill\.hyp-refresh-old\n/)
+
+    // Exactly one directory offers the skill now, so the client sees one copy.
+    const offering = []
+    for (const entry of await fs.readdir(skillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const body = await fs.readFile(path.join(skillsDir, entry.name, 'SKILL.md'), 'utf8').catch(() => '')
+      if (body.includes('name: demo-skill')) offering.push(entry.name)
+    }
+    assert.deepEqual(offering, ['demo-skill'])
+    assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), '---\nname: demo-skill\n---\nv2 body\n')
+
+    assert.equal(await fs.readFile(path.join(skillsDir, 'demo-skill.hyp-refreshed-by-me', 'SKILL.md'), 'utf8'), 'mine too\n')
+    assert.equal(await fs.readFile(path.join(skillsDir, 'notes.hyp-refresh.md'), 'utf8'), 'my notes\n')
+    assert.equal(await fs.readFile(path.join(skillsDir, 'my-own-skill', 'SKILL.md'), 'utf8'), 'mine\n')
+
+    // With nothing left over the command says exactly what it always said.
+    const second = makeBuf()
+    assert.equal(await dispatch(['skills', 'install'], { ...opts, stdout: second }), 0, stderr.text())
+    assert.equal(
+      second.text(),
+      `installed skill 'demo-skill' \u2192 ${dest}\n` +
+      `installed agent 'demo-agent' \u2192 ${agentDest}\n` +
+      'installed 1 skill copy(ies), 1 agent copy(ies)\n'
+    )
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a copy that did not land, and a dry run, sweep no refresh staging', async () => {
+  // The sweep is authorized by this run having written the destination, which
+  // is what makes a staging tree redundant rather than the only copy there is:
+  // a kill between the two renames leaves `dest` absent and the previous copy
+  // under `.hyp-refresh-old`.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-refresh-live-'))
+  try {
+    const skillsDir = path.join(home, '.claude', 'skills')
+    const dest = path.join(skillsDir, 'demo-skill')
+    const stepped = `${dest}.hyp-refresh-old`
+    await fs.mkdir(stepped, { recursive: true })
+    await fs.writeFile(path.join(stepped, 'SKILL.md'), 'the only copy\n', 'utf8')
+    const descriptors = new Map([
+      ['claude', { plugin: '@hypaware/claude', name: 'claude', skillDir: '.claude/skills' }],
+    ])
+
+    const failing = agentsKernelAndRegistry()
+    failing.kernel.skills.register({
+      name: 'demo-skill',
+      plugin: '@hypaware/claude',
+      clients: ['claude'],
+      sourceDir: path.join(home, 'no-such-source'),
+    })
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    assert.equal(await dispatch(['skills', 'install'], {
+      stdout, stderr, env: { ...process.env, HOME: home }, registry: failing.registry, kernel: failing.kernel,
+    }), 0)
+    assert.match(stderr.text(), /skill 'demo-skill' for claude failed/)
+    assert.doesNotMatch(stdout.text(), /removed leftover/)
+    // copyDir creates the destination before it reads the source, so a failed
+    // copy can leave an empty `dest`; what it never leaves is a usable copy.
+    await assert.rejects(fs.stat(path.join(dest, 'SKILL.md')), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(stepped, 'SKILL.md'), 'utf8'), 'the only copy\n')
+
+    // A dry run is a plan, so it removes nothing either (hyp init --dry-run,
+    // hyp attach --dry-run).
+    const sourceDir = path.join(home, 'src-skill')
+    await fs.mkdir(sourceDir, { recursive: true })
+    await fs.writeFile(path.join(sourceDir, 'SKILL.md'), 'real body\n', 'utf8')
+    const planning = agentsKernelAndRegistry()
+    planning.kernel.skills.register({ name: 'demo-skill', plugin: '@hypaware/claude', clients: ['claude'], sourceDir })
+    const planned = makeBuf()
+    await materializeClientAssets({
+      clients: ['claude'],
+      descriptors,
+      homeDir: home,
+      skills: planning.kernel.skills,
+      dryRun: true,
+      stdout: planned,
+      stderr,
+    })
+    assert.match(planned.text(), /\(dry-run\) Would install/)
+    assert.doesNotMatch(planned.text(), /removed leftover/)
+    assert.equal(await fs.readFile(path.join(stepped, 'SKILL.md'), 'utf8'), 'the only copy\n')
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }

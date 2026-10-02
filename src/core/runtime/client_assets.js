@@ -82,6 +82,7 @@ export async function materializeClientAssets(options) {
         continue
       }
       stdout?.write(`installed ${asset.kind} '${asset.name}' → ${dest}\n`)
+      await sweepRefreshStaging(dest, stdout, stderr)
     }
     installed.push({ kind: asset.kind, name: asset.name, client, dest, dryRun })
   }
@@ -711,6 +712,64 @@ function attachMarkerAssets(stateRoot, client) {
 }
 
 /* ------------------------------- Internals ------------------------------- */
+
+/**
+ * Take off the machine the staging trees a v1.39-era refresh left beside
+ * `dest`: `<dest>.hyp-refresh`, which held the replacement copy while it was
+ * written, and `<dest>.hyp-refresh-old`, which held the copy being replaced for
+ * the two renames a swap takes. A refresh killed inside that window leaves
+ * either or both behind, each a complete copy of the asset in the client's own
+ * skills directory under a name no ledger record covers: the client reads a
+ * second (sometimes older) `SKILL.md` for the same skill, and no prune reaches
+ * it, because a prune only ever considers destinations a record names. Nothing
+ * sweeps them any more, which left a manual `rm` as the only remedy (#2407).
+ *
+ * **Called only once this run has written `dest` itself**, which is what makes
+ * a leftover a leftover: the authoritative copy is then on disk and freshly
+ * equal to the plugin source, so neither staging tree holds anything it does
+ * not. A copy that failed hits the `continue` above and sweeps nothing - there,
+ * a `.hyp-refresh-old` can be the only surviving copy of the asset, because a
+ * kill between the two renames leaves `dest` absent, and deleting it would
+ * destroy what the staging existed to preserve. No code in this version writes
+ * these names, so a tree carrying one cannot belong to a refresh in flight, and
+ * a concurrently running old binary needs no guard here: {@link copyAsset}
+ * already replaced `dest` out from under it before this is reached.
+ *
+ * Exactly those two names, never a `.hyp-refresh` prefix match. Both were fixed
+ * rather than pid-scoped so that leftovers would stay recognizable, so a prefix
+ * catches nothing we ever wrote that the two names miss, while a recursive
+ * delete authorized by a prefix would reach a user-authored
+ * `<name>.hyp-refreshed-by-me` in a directory whose other contents are the
+ * user's own. Derived names also cost no directory listing.
+ *
+ * Suffixing a destination cannot escape the containment
+ * {@link planClientAssets} already checked: neither suffix holds a separator,
+ * so the result is a sibling of `dest` and still a direct child of the asset
+ * directory. A leftover that cannot be removed is reported rather than thrown,
+ * so it cannot turn a copy that succeeded into a reported failure.
+ *
+ * @param {string} dest
+ * @param {{ write(chunk: string): unknown }} [stdout]
+ * @param {{ write(chunk: string): unknown }} [stderr]
+ * @returns {Promise<void>}
+ * @ref LLP 0457#transition [constrained-by]: that spec removed every per-boot
+ *   asset pass and settled that ordinary startup does not sweep these, so the
+ *   recovery path is an explicit install (`hyp skills install`, attach, the
+ *   wizard finale) and a restart that installs nothing still sweeps nothing.
+ */
+async function sweepRefreshStaging(dest, stdout, stderr) {
+  for (const suffix of ['.hyp-refresh', '.hyp-refresh-old']) {
+    const stage = `${dest}${suffix}`
+    if (!await statShape(stage)) continue
+    try {
+      await fs.rm(stage, { recursive: true, force: true })
+      stdout?.write(`removed leftover refresh staging ${stage}\n`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      stderr?.write(`warning: leftover refresh staging ${stage} could not be removed: ${message}\n`)
+    }
+  }
+}
 
 /**
  * The evidence about a path no digest was ever recorded for. Shared and never
