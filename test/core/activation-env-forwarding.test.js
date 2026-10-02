@@ -100,11 +100,12 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
   await fs.writeFile(fromFile, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n')
 
   try {
+    const runId = `issue-2462-${process.pid}-${Date.now()}`
     const stderr = makeBuf()
     const code = await dispatch(['init', '--from-file', fromFile], {
       stdout: makeBuf(),
       stderr,
-      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', DEV_RUN_ID: runId },
       // Issue #2462. The boot gives every activating plugin a temp dir under
       // `tmpRoot ?? os.tmpdir()` (src/core/runtime/paths.js). Those are siblings
       // of `hypHome`, not children, so the `fs.rm` below cannot reach them: a
@@ -122,13 +123,20 @@ test('a dispatch boot places plugin state under the injected HYP_HOME, not the r
       'the boot created .hyp/exports in the invoking user\'s real home'
     )
 
-    // `tempBase` is `tmpRoot ?? os.tmpdir()`, one or the other, so finding them
-    // here is what proves none landed in the OS temp root. Counted here and not
-    // there because other test files share `os.tmpdir()` under `npm test` and
-    // write the same shape into it.
-    assert.ok(
-      (await fs.readdir(hypHome)).some((e) => e.startsWith('@hypaware__')),
-      'no plugin boot temp dir landed under the test-owned tmpRoot'
+    // `tempBase` is `tmpRoot ?? os.tmpdir()`, one or the other, and this boot
+    // passed `tmpRoot: hypHome`, so #2462's actual complaint, survivors in the
+    // shared OS temp root, is checked directly here rather than inferred from
+    // what landed under the test-owned tmpRoot. `runId` is unique to this test
+    // run, so naming `os.tmpdir()` by a suffix match stays safe even when other
+    // test files are writing into the same shared directory under parallel
+    // `npm test` workers. Asserting the negative, instead of asserting that a
+    // scoped temp dir still exists, keeps this check honest if a later change
+    // ever reclaims `PluginPaths.tempDir` at kernel teardown: nothing does
+    // today, but this test should keep passing the day something does.
+    assert.deepEqual(
+      (await fs.readdir(os.tmpdir())).filter((e) => e.endsWith(runId)),
+      [],
+      'plugin boot temp dirs from this boot survived in the OS temp root'
     )
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
