@@ -53,9 +53,9 @@ From your terminal, ask a question about your recordings:
 hyp ask "Use HypAware to search my remote logs for sessions about connection refused this week."
 ```
 
-`hyp ask` opens a recorded AI client (Claude Code, Codex, OpenCode, or Pi) and
-asks it to look up the answer in HypAware. If more than one is configured and
-available, you can choose which one to use.
+`hyp ask` opens a recorded AI client (Claude Code or Codex) and asks it to look
+up the answer in HypAware. If both are configured and available, you can choose
+which one to use.
 
 ## See what is available
 

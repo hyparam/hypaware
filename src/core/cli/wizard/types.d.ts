@@ -657,7 +657,7 @@ export interface RunWizardSyncNowOptions {
 export type WizardSuggestSkillResult =
   | { asked: true; launched: true }
   | { asked: true; launched: false; reason: 'declined' | 'spawn-failed' | 'child-failed' }
-  | { asked: false; reason: 'no-rows' | 'not-interactive' | 'error' }
+  | { asked: false; reason: 'no-rows' | 'no-launcher' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSuggestSkill`. */
 export interface RunWizardSuggestSkillOptions {
@@ -672,6 +672,12 @@ export interface RunWizardSuggestSkillOptions {
    * could not tell, which never withholds the offer.
    */
   hasRows?: boolean
+  /**
+   * Whether any client `hyp ask` could start is on `$PATH`. `false` drops
+   * the offer and every mention of the verb (LLP 0398#setup-offer);
+   * `undefined` means the caller could not tell, which never withholds it.
+   */
+  launchable?: boolean
   stdin?: NodeJS.ReadableStream
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream

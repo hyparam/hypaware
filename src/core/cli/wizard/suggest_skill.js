@@ -15,6 +15,7 @@
  * @ref LLP 0398#setup-offer [implements]: setup offers the recommendation instead of listing questions
  * @ref LLP 0398#run-directory [constrained-by]: the client starts in the evidence folder, so setup may start it
  *
+ * @import { ClientDescriptor } from '../../../../src/core/types.js'
  * @import { RunWizardSuggestSkillOptions, WizardSuggestSkillResult } from '../../../../src/core/cli/wizard/types.js'
  */
 
@@ -25,7 +26,8 @@ import { fileURLToPath } from 'node:url'
 import { Attr, withSpan } from '../../observability/index.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
-import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
+import { buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory } from '../walkthrough.js'
+import { resolveLaunchers } from './first_ask.js'
 
 /**
  * Ask, and on a yes run the real `hyp ask` as a child on this terminal.
@@ -55,11 +57,22 @@ export async function runWizardSuggestSkill(opts) {
         if (opts.hasRows === false) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-rows')
-          opts.stdout.write(
-            '\nNothing recorded yet: HypAware captures from your next session onward.\n' +
-            'Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions.\n'
-          )
+          opts.stdout.write('\nNothing recorded yet: HypAware captures from your next session onward.\n')
+          // The emptiness is still worth stating, but the verb is not: with
+          // nothing to start, it names a command that would only fail later.
+          if (opts.launchable !== false) {
+            opts.stdout.write('Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions.\n')
+          }
           return { asked: false, reason: /** @type {const} */ ('no-rows') }
+        }
+        // No client `hyp ask` could start is on PATH, so the step is silent:
+        // a yes would spawn a child that finds nothing to launch, and the
+        // line naming the verb would send the reader to that same dead end.
+        // @ref LLP 0398#setup-offer [implements]: nothing launchable means no offer and no mention of the verb
+        if (opts.launchable === false) {
+          span.setAttribute('status', 'skipped')
+          span.setAttribute('skip_reason', 'no-launcher')
+          return { asked: false, reason: /** @type {const} */ ('no-launcher') }
         }
         // A real terminal on both ends, or an injected prompt: the yes hands
         // the terminal to a client, so it is offered only where a person can
@@ -137,6 +150,43 @@ export async function runWizardSuggestSkill(opts) {
     },
     { component: 'wizard' }
   )
+}
+
+/**
+ * Whether any client `hyp ask` could start resolves on `$PATH`, as the
+ * closing offer's `launchable`.
+ *
+ * Probes every client that declares a `launch` block, not only the recorded
+ * ones: which clients are recorded is the child's question, since this boot
+ * cannot see attach state (see `runAskChild`). That makes the probed set a
+ * superset of what the child accepts, so `false` is certain (the child would
+ * find nothing either) while `true` only says the offer is worth making.
+ *
+ * `undefined` means it could not tell (discovery came back empty, or the
+ * probe threw), which never withholds the offer.
+ *
+ * @ref LLP 0198#path-probe [constrained-by]: launchability is a PATH question, not the picker's presence probe
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{
+ *   descriptors?: Map<string, ClientDescriptor>,
+ *   resolve?: (bin: string, env: NodeJS.ProcessEnv, platform?: string) => Promise<string | undefined>,
+ * }} [deps]
+ * @returns {Promise<boolean | undefined>}
+ */
+export async function anyClientLaunchable(env, deps = {}) {
+  try {
+    const descriptors = deps.descriptors ?? await buildWalkthroughClientDescriptorMap()
+    if (descriptors.size === 0) return undefined
+    const launchers = await resolveLaunchers({
+      clients: [...descriptors.keys()],
+      descriptors,
+      env,
+      ...(deps.resolve ? { resolve: deps.resolve } : {}),
+    })
+    return launchers.length > 0
+  } catch {
+    return undefined
+  }
 }
 
 /**

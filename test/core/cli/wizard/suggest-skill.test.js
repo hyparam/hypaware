@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import process from 'node:process'
 
-import { runWizardSuggestSkill } from '../../../../src/core/cli/wizard/suggest_skill.js'
+import { anyClientLaunchable, runWizardSuggestSkill } from '../../../../src/core/cli/wizard/suggest_skill.js'
 
 const VERB = /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/
 
@@ -52,6 +52,43 @@ test('runWizardSuggestSkill: an empty cache states why there is nothing to sugge
   assert.equal(child.calls.length, 0)
   assert.match(stdout.text(), /Nothing recorded yet: HypAware captures from your next session onward/)
   assert.match(stdout.text(), /Once you have some history, run `hyp ask`/)
+})
+
+// @ref LLP 0398#setup-offer [tests]: nothing launchable means no offer and no mention of the verb
+test('runWizardSuggestSkill: with nothing launchable the step is silent and never asks', async () => {
+  const stdout = makeBuf()
+  const child = childExiting(0)
+  let asked = 0
+  const result = await runWizardSuggestSkill({
+    stdout, env: {}, interactive: true, hasRows: true, launchable: false,
+    confirm: async () => { asked += 1; return 'yes' }, spawnFn: child.fn,
+  })
+  assert.deepEqual(result, { asked: false, reason: 'no-launcher' })
+  assert.equal(asked, 0)
+  assert.equal(child.calls.length, 0)
+  assert.equal(stdout.text(), '')
+})
+
+test('runWizardSuggestSkill: an empty cache with nothing launchable keeps the note and drops the verb', async () => {
+  const stdout = makeBuf()
+  const result = await runWizardSuggestSkill({
+    stdout, env: {}, interactive: true, hasRows: false, launchable: false,
+  })
+  // Still `no-rows`: the empty-cache rate is measured whatever is on PATH.
+  assert.deepEqual(result, { asked: false, reason: 'no-rows' })
+  assert.match(stdout.text(), /Nothing recorded yet: HypAware captures from your next session onward/)
+  assert.doesNotMatch(stdout.text(), /hyp ask/)
+})
+
+test('anyClientLaunchable: true when a launch binary resolves, false when none does, undefined when it cannot tell', async () => {
+  const descriptors = /** @type {any} */ (new Map([
+    ['claude', { name: 'claude', launch: { bin: 'claude', args: ['{prompt}'] } }],
+    // Detectable and recorded, but nothing to start: no `launch` block.
+    ['claude-desktop', { name: 'claude-desktop' }],
+  ]))
+  assert.equal(await anyClientLaunchable({}, { descriptors, resolve: async (bin) => `/bin/${bin}` }), true)
+  assert.equal(await anyClientLaunchable({}, { descriptors, resolve: async () => undefined }), false)
+  assert.equal(await anyClientLaunchable({}, { descriptors: new Map() }), undefined)
 })
 
 test('runWizardSuggestSkill: a run that cannot prompt names the verb and starts nothing', async () => {

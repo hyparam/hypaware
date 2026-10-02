@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0445 (restore canonical backfill commands)
 **Extended-by:** LLP 0446 (remove backfill planning; use import dry runs)
 **Extended-by:** LLP 0447 (#aliases: the client history import spelling is removed, not deferred)
+**Extended-by:** LLP 0398 (#one-question: `ask` loses its `--list` flag, since one question leaves nothing to list)
 
 ## Context {#context}
 

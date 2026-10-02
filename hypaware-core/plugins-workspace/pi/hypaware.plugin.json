@@ -22,14 +22,6 @@
         "format": "managed_file",
         "settings_file": ".pi/agent/extensions/hypaware.js",
         "marker_text": "// HYPWARE_PI_EXTENSION v1"
-      },
-      "launch": {
-        "bin": "pi",
-        "args": [
-          "-p",
-          "{prompt}"
-        ],
-        "label": "Pi"
       }
     },
     "picker": [

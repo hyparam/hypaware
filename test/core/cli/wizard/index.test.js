@@ -219,6 +219,10 @@ function wizardOpts(home, over = {}) {
       }
     },
     ...over,
+    // The env above carries no PATH, so the real probe would find nothing to
+    // launch and silence the closing offer. Tests of the offer assume a
+    // client is there; a test of the probe passes `launchable` itself.
+    suggestSkill: { launchable: true, ...over.suggestSkill },
   })
   // Record phase invocations regardless of which stub a test supplied, so
   // ordering assertions hold for overridden phases too.
@@ -1718,6 +1722,28 @@ test('runInitWizard: no detected client or gateway dataset still prints the empt
   assert.match(stdout.text(), /Nothing recorded yet/)
   assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions/)
   assert.doesNotMatch(stdout.text(), /Starting Claude Code|Starting Codex/)
+})
+
+// @ref LLP 0398#setup-offer [tests]: nothing launchable means no offer and no mention of the verb
+test('runInitWizard: with no client CLI on PATH, setup never mentions `hyp ask`', async () => {
+  let asked = 0
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    // `launchable: undefined` hands the question to the real probe, which
+    // finds nothing: the harness env has no PATH.
+    suggestSkill: { launchable: undefined, confirm: async () => { asked += 1; return 'yes' } },
+  })
+  await runInitWizard(opts)
+  assert.equal(asked, 0)
+  assert.ok(!stdout.text().includes('hyp ask'), stdout.text())
+
+  const { opts: emptyOpts, stdout: emptyStdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookStub([], []).runner,
+    suggestSkill: { launchable: false },
+  })
+  await runInitWizard(emptyOpts)
+  assert.match(emptyStdout.text(), /Nothing recorded yet/)
+  assert.ok(!emptyStdout.text().includes('hyp ask'), emptyStdout.text())
 })
 
 // --- firstLookHadRows ---

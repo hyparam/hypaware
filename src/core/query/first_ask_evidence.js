@@ -57,6 +57,21 @@ export const RECOMMEND_LAUNCH_PROMPT =
   'From my HypAware history: what one skill would be the most useful to add first? The evidence is already gathered in this folder. Read ASK.md first and follow it exactly.'
 
 /**
+ * The same question for a client `hyp ask` cannot start: a desktop app the
+ * person pastes it into. No gather precedes it and the app opens in no
+ * folder of ours, so it names no evidence file and instead says how to look:
+ * the method the gather follows, done the slow way through `hyp query`.
+ *
+ * @ref LLP 0398#one-question [constrained-by]: the launch prompt names a folder only the gather creates, so the pasted form is a separate sentence that names none
+ */
+export const RECOMMEND_COLD_PROMPT =
+  'From my HypAware history: what one skill would be the most useful to add first? '
+  + `Look through my recorded sessions from the last ${EVIDENCE_WINDOW_DAYS} days with \`hyp query\` (the hypaware-query skill explains how) `
+  + 'for a task I ask for again and again that the agent works out from scratch each time. '
+  + 'Check the skills I already have so you do not suggest one that exists. '
+  + 'Recommend one skill, show one real example with its date, and offer to write it.'
+
+/**
  * The gate. Below it the answer says how much was recorded and stops:
  * a skill proposed from three sessions is a guess dressed as a finding.
  */
@@ -676,9 +691,9 @@ export function renderCandidates(record, candidates, enough) {
  *
  * The skill's home comes from the descriptor of the client that is about
  * to read this, not from a constant: `hyp ask` starts whichever attached
- * client can be launched, and Codex and OpenCode read a different tree
- * (`.codex/skills`, `.config/opencode/skills`). Naming `.claude/skills`
- * at one of those sends the answer to a directory the reader never loads.
+ * client can be launched, and Codex reads a different tree
+ * (`.codex/skills`). Naming `.claude/skills` there sends the answer to a
+ * directory the reader never loads.
  *
  * @ref LLP 0398#always-a-skill [constrained-by]: the skill lands in the reading client's own tree, from its descriptor
  * @ref LLP 0398#answer-shape [implements]: a colleague's voice, the skill, the offer, one line of sources
@@ -717,7 +732,7 @@ Write it the way you would tell a colleague what you found: short paragraphs, pl
  *
  * The trees come from the descriptor of the client that will read this,
  * for the same reason `askInstructions` takes the skill directory: a
- * Codex or OpenCode run asked about `.claude/skills` is answering "does
+ * Codex run asked about `.claude/skills` is answering "does
  * this skill already exist?" from a tree it does not load. A client with
  * no agent directory gets no agents section rather than an empty one.
  *
