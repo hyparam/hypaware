@@ -275,3 +275,42 @@ test('setup claude-and-otel-local --dry-run=false writes the config', async () =
   assert.match(stdout.text(), /✓ Wrote /)
   await assert.doesNotReject(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })
+
+// `--force` is read out of the same raw argv as `--dry-run`, so it owes
+// the same inline-boolean spelling. `--force=true` used to be inert: the
+// preset refused and left the config byte-identical (#2439).
+test('setup claude-and-otel-local --force=true backs up then overwrites', async () => {
+  const { hypHome, stdout, stderr, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--force=true'], opts)
+  assert.equal(code, 0, stderr.text())
+
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.notDeepEqual(after.plugins, EXISTING.plugins)
+
+  // The newly enabled overwrite still backs up first: one timestamped
+  // .bak carrying the prior content.
+  const backups = (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-'))
+  assert.equal(backups.length, 1)
+  const backup = JSON.parse(await fs.readFile(path.join(hypHome, backups[0]), 'utf8'))
+  assert.deepEqual(backup.plugins, EXISTING.plugins)
+  assert.match(stdout.text(), /backed up existing config/i)
+})
+
+test('setup claude-and-otel-local --force=false refuses to clobber an existing config', async () => {
+  const { hypHome, stderr, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--force=false'], opts)
+  assert.equal(code, 1)
+  assert.match(stderr.text(), /refusing to overwrite/)
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.deepEqual(after.plugins, EXISTING.plugins)
+  assert.deepEqual(
+    (await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')),
+    []
+  )
+})
