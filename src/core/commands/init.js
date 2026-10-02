@@ -5,6 +5,7 @@ import { parseCommandArgv } from '../cli/verb_codec.js'
 import path from 'node:path'
 
 import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
+import { isHelpFlag } from '../cli/group_help.js'
 import { runInitWizard } from '../cli/wizard/index.js'
 import { DEFAULT_RETENTION_DAYS } from '../cli/walkthrough.js'
 import { validateConfig } from '../config/validate.js'
@@ -63,7 +64,10 @@ export function buildPickerBackfillRunner(ctx) {
  *
  * With a `<preset>` argument resolves the preset through the kernel
  * `InitPresetRegistry` and invokes its `run(argv, ctx)`. Unknown
- * presets land on stderr with the list of available names.
+ * presets land on stderr with the list of available names. What follows
+ * the preset name is gated before the preset runs: a help flag renders
+ * help, and a flag `hyp setup` does not advertise is a usage error, so
+ * neither reaches the preset's config write.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -85,7 +89,22 @@ export async function runInit(argv, ctx) {
       }
       return 1
     }
-    return preset.run(argv.slice(1), ctx)
+    const presetArgv = argv.slice(1)
+    // The dispatcher intercepts a help flag only when it leads the command's
+    // argv, so a preset name in front of one lands here instead. Route it back
+    // through that same interception rather than letting a preset speak for the
+    // command with help of its own.
+    // @ref LLP 0009#central-help-interception [implements]: the preset form renders core's registry-backed help for `setup`
+    if (presetArgv.some(isHelpFlag)) return ctx.commands.run('setup', ['--help'])
+    // A preset reads its own argv for the handful of flags it honors, so
+    // anything else here would be ignored on a path that writes user config.
+    // Refuse it as the no-preset form below does.
+    const unknownFlag = presetArgv.find((t) => t.startsWith('-') && !isInitFlag(t))
+    if (unknownFlag !== undefined) {
+      writeUnknownFlag(ctx, unknownFlag)
+      return 2
+    }
+    return preset.run(presetArgv, ctx)
   }
 
   // Phase 5: non-interactive flags. Detected by the presence of any
@@ -142,22 +161,42 @@ export async function runInit(argv, ctx) {
   // Reached only when argv[0] looks like a flag but is not a recognized
   // init flag: preset names are dispatched above, and empty argv is the
   // interactive path.
-  ctx.stderr.write(`hyp setup: unknown flag '${argv[0]}'\n`)
-  ctx.stderr.write('  non-interactive: hyp setup --yes [--client claude] [--source otel] [--force] ...\n')
+  writeUnknownFlag(ctx, argv[0])
   return 2
+}
+
+/**
+ * The one refusal for a flag `hyp setup` does not advertise, so the same typo
+ * cannot mean exit 2 without a preset name and a silent config write with one.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {string} token
+ */
+function writeUnknownFlag(ctx, token) {
+  ctx.stderr.write(`hyp setup: unknown flag '${token}'\n`)
+  ctx.stderr.write('  non-interactive: hyp setup --yes [--client claude] [--source otel] [--force] ...\n')
+}
+
+/**
+ * Whether a token names a recognized init flag, in the bare (`--dry-run`) or
+ * the inline-value (`--dry-run=true`) spelling the CLI codec accepts
+ * everywhere else.
+ *
+ * @param {string} token
+ */
+function isInitFlag(token) {
+  if (INIT_FLAG_NAMES.has(token)) return true
+  for (const name of INIT_FLAG_NAMES) {
+    if (token.startsWith(`${name}=`)) return true
+  }
+  return false
 }
 
 /**
  * @param {string[]} argv
  */
 function hasInitFlags(argv) {
-  return argv.some((t) => {
-    if (INIT_FLAG_NAMES.has(t)) return true
-    for (const name of INIT_FLAG_NAMES) {
-      if (t.startsWith(`${name}=`)) return true
-    }
-    return false
-  })
+  return argv.some(isInitFlag)
 }
 
 /**
