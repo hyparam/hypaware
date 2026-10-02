@@ -23,9 +23,9 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 // happen while the sink stays unregistered.
 //
 // Retention is scoped to the destinations the boot's own config still names,
-// which is also why it cannot re-arm the warning issue #2361 silenced: that
-// warning is gated on the configured set, so a destination no `sinks` key
-// names is retained by nothing here.
+// which is also why it cannot re-arm the warning issue #2361 silenced: a
+// destination no `sinks` key names is retained by nothing here, so no row
+// retention writes can reach that warning's gate.
 
 const PLUGIN = '@third-party/stamp-sink-fixture'
 const SINK = 'central'
@@ -236,8 +236,11 @@ test('a boot that does register the sink still rebuilds the row from its live ha
 
 // Deleting the whole `sinks` key is still a removal (issue #2361): the row is
 // not retained, so it cannot accumulate across boots, and the warning stays
-// silent on both sides of this change. The gate that silences it reads the
-// configured set, never the presence of a recovered row.
+// silent on both sides of this change. What keeps it silent is retention, not
+// the gate: the gate's status-file fallback does read recovered rows (arming
+// on one whose `sinks` key the central merge dropped), but it is reached only
+// when the effective config names no sink, which is exactly when retention's
+// `boot.config.sinks` scope is empty.
 // @ref LLP 0453#warning-rule [tests]: a destination outside the configured set keeps nothing and raises nothing
 test('a boot whose config no longer names the destination drops its row and still raises no warning', async (t) => {
   const staged = await stageInstall({
