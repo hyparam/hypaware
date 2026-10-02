@@ -283,6 +283,11 @@ export async function runDaemon(opts = {}) {
   // that had already recovered, and nothing could clear it afterwards.
   // @ref LLP 0453#warning-rule [implements]: historical success survives daemon exit, so the warning is defined against a stable point
   const sinkSnapshots = recoverSinkSnapshots(runtimeStateRoot)
+  // The first write below lands before any plugin activates, so leaving the
+  // literal's empty list makes the boot erase what it has just recovered
+  // (issue #2359). Copied, so the written rows never alias the map the tick
+  // mutates in place.
+  status.sinks = [...sinkSnapshots.values()].map((row) => ({ ...row }))
   /** @type {NodeJS.Timeout | null} */
   let tickHandle = null
   /** @type {((reason: 'signal'|'manual'|'restart'|'control') => Promise<number>) | null} */
@@ -694,7 +699,17 @@ export async function runDaemon(opts = {}) {
     config: boot.config ?? undefined,
   })
 
-  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
+  // The destinations this boot's effective config still names. Their recovered
+  // stamps survive a boot that registered nothing for them (plugin missing,
+  // activation failed, sink unmaterialized), which otherwise leaves the
+  // destination reading as never-succeeded and warning until a success that
+  // cannot happen while it stays unregistered (issue #2359). Scoped to the
+  // configured set, so rows cannot accumulate across boots and a destination
+  // the operator removed still loses its row.
+  // @ref LLP 0453#warning-rule [implements]: the daemon carries the stamp across its own restarts, and a destination outside the configured set keeps nothing
+  const configuredSinkInstances = new Set(Object.keys(boot.config?.sinks ?? {}))
+
+  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
   persist()
   // Derive the boot health event from the SAME aggregate written to
   // status.json: a degraded boot (any source failed to start) must not log
@@ -875,7 +890,7 @@ export async function runDaemon(opts = {}) {
       const message = err instanceof Error ? err.message : String(err)
       fileLog.error('daemon.tick_failed', { message })
     })
-    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
+    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
     await refreshSourceStatus()
     persist()
 
@@ -1830,8 +1845,9 @@ async function safeStatus(runtime, name, fileLog) {
  * hostile snapshot yields no stamps, and a row without a parseable one is
  * skipped, so a garbled file can lose recovery evidence but never invent it.
  * `readStatusFile` validates only that it read an object, hence the row guards.
- * Rows for instances this boot no longer registers are harmless:
- * `collectSinkSnapshots` emits from the live handles.
+ * A row for an instance this boot does not register is kept only while the
+ * effective config still names the destination: `collectSinkSnapshots` emits
+ * those alongside the live handles, and drops the rest.
  *
  * @param {string} stateRoot
  * @returns {Map<string, SinkSnapshot>}
@@ -1857,16 +1873,24 @@ function recoverSinkSnapshots(stateRoot) {
 }
 
 /**
- * Build a snapshot row per registered sink instance. The kernel sink
- * driver doesn't surface failure / next-tick fields, so those stay
+ * Build a snapshot row per registered sink instance, then one more per
+ * `retain` instance that registered nothing but has a recovered row. The
+ * kernel sink driver doesn't surface failure / next-tick fields, so those stay
  * `undefined`.
  *
- * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot> }} args
+ * `retain` keeps a recorded success from dying with the boot that did not
+ * register its destination (issue #2359): omitted, the live handles alone are
+ * emitted and every recovered stamp they do not account for is erased, so the
+ * daemon passes its configured sink instances.
+ *
+ * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot>, retain?: Set<string> }} args
  * @returns {SinkSnapshot[]}
  */
-function collectSinkSnapshots({ runtime, sinkSnapshots }) {
+function collectSinkSnapshots({ runtime, sinkSnapshots, retain }) {
   /** @type {SinkSnapshot[]} */
   const out = []
+  /** @type {Set<string>} */
+  const live = new Set()
   for (const handle of runtime.sinks.listHandles()) {
     // The registry's key, not the handle's own `instanceName`: this runs on
     // every tick and outside the tick's `.catch`, so an owner's accessor on
@@ -1875,6 +1899,7 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
     // property, still read off the handle, so that outage is narrowed here
     // and not yet closed (issue #2059).
     const instance = sinkInstanceName(handle)
+    live.add(instance)
     const existing = sinkSnapshots.get(instance) ?? {
       instance,
       plugin: handle.plugin,
@@ -1884,6 +1909,13 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
     existing.kind = handle.kind
     sinkSnapshots.set(instance, existing)
     out.push({ ...existing })
+  }
+  // Only an instance `recoverSinkSnapshots` found a usable stamp for has a row
+  // to carry, so a configured destination that never succeeded stays that way.
+  for (const instance of retain ?? []) {
+    if (live.has(instance)) continue
+    const existing = sinkSnapshots.get(instance)
+    if (existing) out.push({ ...existing })
   }
   return out
 }
