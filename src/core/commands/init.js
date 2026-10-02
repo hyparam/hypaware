@@ -112,6 +112,11 @@ export async function runInit(argv, ctx) {
   // legacy preset/walkthrough dispatcher below.
   if (hasInitFlags(argv)) {
     const parsed = parseInitFlags(argv)
+    // Routed back for the same reason the preset form above is: dispatch
+    // intercepts help only when it leads the command's argv, so a help flag
+    // behind an init flag arrives here instead.
+    // @ref LLP 0293#one-contract [implements]: a --help further along argv prints the usage line on stdout and exits 0
+    if (parsed.help) return ctx.commands.run('setup', ['--help'])
     if (parsed.error) {
       ctx.stderr.write(`hyp setup: ${parsed.error}\n`)
       return 2
@@ -231,7 +236,7 @@ export const INIT_CLIENT_CHOICES = Object.freeze(/** @type {InitFlags['clients']
 
 /**
  * @param {string[]} argv
- * @returns {{ flags: InitFlags, error?: string }}
+ * @returns {{ flags: InitFlags, help?: true, error?: string }}
  */
 function parseInitFlags(argv) {
   /** @type {InitFlags} */
@@ -260,9 +265,7 @@ function parseInitFlags(argv) {
       bin: { type: 'string' },
     },
   }, { aliases: { '-y': '--yes' } })
-  if ('help' in parsed) {
-    return { flags, error: 'usage: hyp setup [--yes] [--client <name>] [--source <name>] [--export <choice>] [--retention-days <n>] [--from-file <path>] [--no-daemon] [--dry-run] [--force] [--bin <path>]' }
-  }
+  if ('help' in parsed) return { flags, help: true }
   if (!parsed.ok) return { flags, error: parsed.error }
   const p = /** @type {{ yes: boolean, 'no-daemon': boolean, 'dry-run': boolean, force: boolean, client?: string[], source?: string[], export?: InitFlags['exportChoice'], 'retention-days': number, 'from-file'?: string, bin?: string }} */ (parsed.params)
   flags.yes = p.yes

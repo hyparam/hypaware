@@ -358,3 +358,27 @@ test('setup claude-and-otel-local still writes the config past the flag gate', a
   assert.match(stdout.text(), /Wrote /)
   await assert.doesNotReject(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })
+
+// Regression (#2471): a help flag behind an init flag reached the schema parser
+// as an unrecognized token, so the usage line landed on stderr with exit 2. LLP
+// 0293 #one-contract settles it: a --help further along argv prints the usage
+// line on stdout and exits 0.
+for (const helpFlag of ['--help', '-h']) {
+  test(`setup --yes ${helpFlag} prints help on stdout with exit 0`, async () => {
+    const { hypHome, stdout, stderr, opts } = await makeHome()
+    const code = await dispatch(['setup', '--yes', helpFlag], opts)
+    assert.equal(code, 0, stderr.text())
+    assert.equal(stderr.text(), '')
+    assert.match(stdout.text(), /usage: hyp setup \[preset\] \[flags\]/)
+    await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+  })
+}
+
+// Only a help flag moves to stdout; a genuine typo keeps its exit 2 on stderr.
+test('setup --yes --bogus still refuses with exit 2 on stderr', async () => {
+  const { stdout, stderr, opts } = await makeHome()
+  const code = await dispatch(['setup', '--yes', '--bogus'], opts)
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /unknown flag --bogus/)
+  assert.equal(stdout.text(), '')
+})
