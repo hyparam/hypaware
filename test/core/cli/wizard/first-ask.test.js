@@ -97,6 +97,44 @@ test('resolveOnPath: finds an executable on PATH, ignores a non-executable match
   assert.equal(await resolveOnPath('fakeclient', {}, 'darwin'), undefined)
 })
 
+test('resolveOnPath: a mode-0755 directory named claude on PATH is not an installed CLI', async () => {
+  // @ref LLP 0198#path-probe [tests]: the probe looks for a launch binary, and
+  // the execute bit on a directory means traversable, not runnable
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-dir-'))
+  await fsp.mkdir(path.join(dir, 'claude'), { mode: 0o755 })
+
+  assert.equal(await resolveOnPath('claude', { PATH: dir }, 'darwin'), undefined)
+  // The launchable set, which is what decides which refusal `hyp ask` prints.
+  const launchers = await resolveLaunchers({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    env: { PATH: dir },
+    platform: 'darwin',
+  })
+  assert.deepEqual(launchers, [])
+
+  // Everything else a PATH entry can hold, against one real binary that must
+  // keep resolving: an install is normally a symlink to one.
+  const real = path.join(dir, 'real-claude')
+  await fsp.writeFile(real, '#!/bin/sh\n', { mode: 0o755 })
+  await fsp.symlink(real, path.join(dir, 'linked'))
+  await fsp.symlink(path.join(dir, 'claude'), path.join(dir, 'to-dir'))
+  await fsp.symlink(path.join(dir, 'gone'), path.join(dir, 'dangling'))
+
+  assert.equal(await resolveOnPath('linked', { PATH: dir }, 'darwin'), path.join(dir, 'linked'))
+  assert.equal(await resolveOnPath('to-dir', { PATH: dir }, 'darwin'), undefined)
+  assert.equal(await resolveOnPath('dangling', { PATH: dir }, 'darwin'), undefined)
+
+  // The `PATHEXT` loop walks past a rejected candidate, so a directory named
+  // `claude.EXE` does not shadow the real `claude.CMD` beside it.
+  const win = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-win-'))
+  await fsp.mkdir(path.join(win, 'claude.EXE'), { mode: 0o755 })
+  const cmd = path.join(win, 'claude.CMD')
+  await fsp.writeFile(cmd, 'rem\n', { mode: 0o755 })
+  const winEnv = { PATH: win, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
+  assert.equal(await resolveOnPath('claude', winEnv, 'win32'), cmd)
+})
+
 test('resolveLaunchers: picked and resolvable only; a launch-less client is never offered', async () => {
   // @ref LLP 0198#path-probe [tests]: detection is not launchability
   const launchers = await resolveLaunchers({

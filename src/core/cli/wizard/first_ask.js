@@ -73,6 +73,10 @@ export const SUGGESTED_PROMPTS = Object.freeze([
  * so a manifest may name an absolute binary. Everything else walks
  * `PATH` in order, honouring `PATHEXT` on Windows.
  *
+ * A candidate must be a regular file as well as executable: the execute
+ * bit on a directory means "traversable", so `X_OK` on its own reports a
+ * directory named `claude` as an installed CLI.
+ *
  * Best-effort in the same sense as the picker's detection probes: any
  * failure means "not found", never a throw.
  *
@@ -95,10 +99,17 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
     for (const ext of exts) {
       const full = candidate + ext
       try {
+        // `access` is the authoritative "may I execute this" (effective
+        // uid/gid, ACLs, a `noexec` mount), which mode bits cannot answer,
+        // and it still says yes to a traversable directory - so the
+        // candidate has to be a file as well. `stat`, not `lstat`: a
+        // symlink to a real binary is what nearly every install looks
+        // like, while one pointing at a directory follows through to it.
         await fsp.access(full, fsConstants.X_OK)
+        if (!(await fsp.stat(full)).isFile()) continue
         return full
       } catch {
-        // not here, or not executable: keep walking
+        // not here, not executable, or gone between the probes: keep walking
       }
     }
   }
