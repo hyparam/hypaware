@@ -27,7 +27,12 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createPluginPaths, reclaimPluginTempDirs } from '../../src/core/runtime/paths.js'
+
+/**
+ * @import { ChildProcess } from 'node:child_process'
+ */
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hypaware.js')
 
@@ -66,6 +71,57 @@ function runCli(argv, root) {
     child.on('error', reject)
     child.on('close', (code) => resolve({ code, stderr }))
   })
+}
+
+/**
+ * Start `hyp mcp serve` under `root` and resolve once it has answered an
+ * `initialize` request: a line on stdout only the command body can have
+ * written, so the boot and everything dispatch does after it are complete.
+ *
+ * @param {string} root
+ * @returns {Promise<{ child: ChildProcess, exited: Promise<{ code: number | null, signal: NodeJS.Signals | null }> }>}
+ */
+async function serveMcp(root) {
+  const child = spawn(process.execPath, [BIN, 'mcp', 'serve'], {
+    env: {
+      PATH: process.env.PATH ?? '',
+      HOME: path.join(root, 'home'),
+      TMPDIR: path.join(root, 'tmp'),
+      HYP_HOME: path.join(root, 'home', '.hyp'),
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => { stdout += chunk })
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  /** @type {Promise<{ code: number | null, signal: NodeJS.Signals | null }>} */
+  const exited = new Promise((resolve, reject) => {
+    child.on('error', reject)
+    child.on('close', (code, signal) => resolve({ code, signal }))
+  })
+  child.stdin.write(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 'boot-marker',
+    method: 'initialize',
+    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'issue-2482', version: '0' } },
+  }) + '\n')
+  let settled = false
+  exited.then(() => { settled = true }, () => { settled = true })
+  // Bounded, and bounded by the child's own exit as well as the clock, so a
+  // child that dies on the way up fails here with its stderr instead of
+  // spending the whole budget.
+  const deadline = Date.now() + 60_000
+  while (!stdout.includes('boot-marker') && !settled && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  if (!stdout.includes('boot-marker')) {
+    child.kill('SIGKILL')
+    throw new Error(`hyp mcp serve never answered initialize\nstdout: ${stdout}\nstderr: ${stderr}`)
+  }
+  return { child, exited }
 }
 
 test('a plugin-activating CLI run leaves no plugin boot temp dirs in the user tmpdir', async () => {
@@ -208,6 +264,166 @@ test('a throw from the post-boot sink warning path still reclaims the boot temp 
       [],
       'plugin boot temp dirs from this boot survived in the OS temp root'
     )
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Issue #2482. The post-boot `finally` #2473 added is reached by every `return`
+// and every throw, and by nothing else: a SIGINT or SIGTERM arriving mid-run took
+// the default disposition and killed the process where it stood, so the boot's
+// temp dirs stayed on disk and its sources (`@hypaware/otel` starts its OTLP
+// listener inside `activate()`) stayed listening until process death.
+//
+// The marker this waits on has to come from the command body, not from the
+// boot: the handler is installed between the two, so waiting on anything the
+// activation itself produced (the temp dirs appearing, the OTLP port accepting)
+// can win the race and signal a child that has not installed it yet. `hyp mcp
+// serve` is the shape that gives one: it boots `config`, so plugins activate,
+// then it blocks on stdin, and its JSON-RPC reply to `initialize` is written
+// from inside the command body.
+test('a termination signal mid-run reclaims the boot temp dirs before the signal exit', async () => {
+  for (const signal of /** @type {const} */ (['SIGTERM', 'SIGINT'])) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-signal-'))
+    const tmp = path.join(root, 'tmp')
+    /** @type {{ child: ChildProcess, exited: Promise<{ code: number | null, signal: NodeJS.Signals | null }> } | undefined} */
+    let served
+    try {
+      await fs.mkdir(path.join(root, 'home', '.hyp'), { recursive: true })
+      await fs.mkdir(tmp, { recursive: true })
+      // Same canary as the throw case above: a signal widens *when* the
+      // recursive delete runs, and must not widen *what* it deletes.
+      await fs.mkdir(path.join(tmp, 'not-ours', 'sub'), { recursive: true })
+      await fs.writeFile(path.join(tmp, 'not-ours', 'sub', 'keepme.txt'), 'CANARY')
+      await fs.writeFile(
+        path.join(root, 'home', '.hyp', 'hypaware-config.json'),
+        JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n'
+      )
+
+      served = await serveMcp(root)
+      const before = (await fs.readdir(tmp)).filter((e) => e.includes('-boot-'))
+      assert.ok(
+        before.length > 0,
+        `${signal}: no plugin boot temp dirs existed at the marker, so this fixture no longer activates plugins`
+      )
+
+      served.child.kill(signal)
+      const { code, signal: killedBy } = await served.exited
+      assert.deepEqual(
+        (await fs.readdir(tmp)).filter((e) => e.includes('-boot-')),
+        [],
+        `${signal} mid-run exited dispatch without tearing the boot down (left ${before.join(', ')})`
+      )
+      assert.equal(
+        await fs.readFile(path.join(tmp, 'not-ours', 'sub', 'keepme.txt'), 'utf8'),
+        'CANARY',
+        `${signal}: the signal teardown deleted a directory in the temp root that this boot did not create`
+      )
+      // 128+N, by either of the two spellings a parent can see: re-raising the
+      // signal leaves a signal-terminated child (`code === null`, `killedBy`
+      // set), and a `process.exit(128 + N)` standing in for one would report the
+      // number directly. Anything else, a plain 0 included, is the teardown
+      // having eaten the exit.
+      assert.ok(
+        code === null ? killedBy === signal : code === 128 + os.constants.signals[signal],
+        `${signal}: child went down with ${code === null ? `signal ${killedBy}` : `exit ${code}`}, not the conventional signal status`
+      )
+    } finally {
+      // An assertion that fails before the signal lands would otherwise leave a
+      // live child holding this process's stdio pipes, and the test runner then
+      // cannot exit at all: the failure would read as a hang.
+      served?.child.kill('SIGKILL')
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }
+})
+
+// The control for the test above, and the other half of the same leak: a
+// handler kept past the boot it was there to tear down is a listener this
+// process never gets back. Counted around a real `dispatch`, because the
+// install is conditional on the boot having activated something.
+test('a completed dispatch leaves no signal listeners of its own behind', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-signal-listeners-'))
+  try {
+    await fs.writeFile(
+      path.join(hypHome, 'hypaware-config.json'),
+      JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n'
+    )
+    const counts = () => /** @type {const} */ (['SIGINT', 'SIGTERM']).map((s) => process.listenerCount(s))
+    const before = counts()
+    const code = await dispatch(['query', 'sql', 'select 1'], {
+      stdout: { write: () => true },
+      stderr: { write: () => true },
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', DEV_RUN_ID: `issue-2482-${process.pid}-${Date.now()}` },
+      tmpRoot: path.join(hypHome, 'plugin-temp-root'),
+    })
+    assert.equal(code, 0)
+    assert.deepEqual(counts(), before, 'dispatch left its SIGINT/SIGTERM listeners installed after the command completed')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Issue #2482, the nesting case. The handler decides whether some *other* owner
+// holds the signal by counting process listeners, so two owning dispatches in
+// one process still have to add up to one dispatch-owned listener per signal. A
+// second pair makes both handlers read a foreign owner and both defer, and
+// because a listener is registered the default disposition is gone too: the
+// signal is swallowed whole and Ctrl-C stops working. The wizard's sync step is
+// that shape, and the only one in the tree - `runConfiguredSync` re-enters
+// `dispatch` without passing its kernel (src/core/cli/wizard/sync_now.js), and
+// keeps the terminal delivering Ctrl-C as SIGINT on purpose.
+test('a dispatch nested inside another owning dispatch adds no second signal listener', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-tempdir-signal-nested-'))
+  try {
+    await fs.writeFile(
+      path.join(hypHome, 'hypaware-config.json'),
+      JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/otel' }] }) + '\n'
+    )
+    const counts = () => /** @type {const} */ (['SIGINT', 'SIGTERM']).map((s) => process.listenerCount(s))
+    const before = counts()
+    /** @type {number[][]} */
+    const inner = []
+    /** @type {number[] | undefined} */
+    let afterInner
+    const quiet = { write: () => true }
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', DEV_RUN_ID: `issue-2482-nested-${process.pid}-${Date.now()}` }
+    const tmpRoot = path.join(hypHome, 'plugin-temp-root')
+    const registry = createCommandRegistry()
+    registry.register({
+      name: 'probe nest',
+      summary: 'two owning dispatches in one process',
+      usage: 'probe nest [inner]',
+      run: async (argv) => {
+        if (argv[0] === 'inner') {
+          inner.push(counts())
+          return 0
+        }
+        // No `kernel`, so the inner call owns a second boot and reaches the
+        // install gate on its own, exactly as `runConfiguredSync` does.
+        const nested = await dispatch(['probe', 'nest', 'inner'], { registry, stdout: quiet, stderr: quiet, env, tmpRoot })
+        afterInner = counts()
+        return nested
+      },
+    })
+    const code = await dispatch(['probe', 'nest'], { registry, stdout: quiet, stderr: quiet, env, tmpRoot })
+    assert.equal(code, 0)
+    assert.deepEqual(
+      inner,
+      [before.map((n) => n + 1)],
+      'two owning dispatches installed two signal listeners, so each handler reads the other as a foreign owner and the signal is swallowed'
+    )
+    // The other half of "one pair for the process": it is the *last* live boot
+    // that takes the pair away, not the first one to finish. The outer boot is
+    // still holding its sources and its scratch dirs here, so a pair the inner
+    // dispatch took with it would leave the rest of the outer run back on the
+    // bare default disposition, which is issue #2482 again.
+    assert.deepEqual(
+      afterInner,
+      before.map((n) => n + 1),
+      'the inner dispatch took the shared handler pair with it, so a signal in the rest of the outer boot has nothing to tear it down'
+    )
+    assert.deepEqual(counts(), before, 'nested dispatches left their SIGINT/SIGTERM listeners installed after both completed')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
