@@ -49,6 +49,31 @@ diagnostic and inspection command but moves the partition inventory to verbose.
 Paths, plugin inventory, proxy trust details, configuration etags, recent
 entrypoint inventory, and completed setup actions also move to verbose.
 
+## The verdict rides on the heading {#verdict-headline}
+
+The heading is the compact view's only rank. `Needs attention` alone cannot
+separate an outage from an advisory, so the heading appends ` (degraded)`
+whenever the collector's verdict is not `healthy` or any diagnostic carries
+`error` severity: `HypAware · Needs attention (degraded)`. The two existing
+words are unchanged and the marker only ever follows `Needs attention`, so a
+`Healthy` heading and anything reading either word still see what they saw.
+
+The marker is the verdict and the rank at once because the collector derives
+one from the other: an `error`-severity diagnostic is what degrades `overall`
+(LLP 0385). Reading both is what keeps the heading from contradicting the
+`[ERROR]` tags `--verbose` prints for a report whose `overall` disagrees with
+its own diagnostics. The heading prints a literal, never `overall`'s bytes,
+and both inputs are collector enums rather than anything read back out of
+`status.json`.
+
+The per-diagnostic `[ERROR]`/`[WARN ]` tag stays in `--verbose`, where the
+diagnostics section already prints it. The compact Attention block keeps its
+uniform `!`: severity is a property of diagnostics only, and the block also
+carries a stopped daemon, capture gaps, source and client probe errors,
+unfinished client actions, and flush failures, which have no severity to
+print. Ranking only the rows that have one would read as ranking the rest
+below them. `--verbose` and `--json` are unchanged.
+
 ## Cost and validation {#validation}
 
 Both views use one existing status collection. Rendering adds no filesystem,
@@ -56,6 +81,6 @@ network, process, or cache probes. Client and health maps bound lookup work to
 the number of report entries; flush evidence keeps its eight-table text cap.
 
 Tests cover mixed sharing, unknown policy, probe-less clients, quiet unused
-clients, warning headlines, gap timestamps, privacy notices, bounded flush
-failure evidence, and verbose/JSON CLI dispatch. Existing detailed renderer
-tests continue to cover the verbose report.
+clients, warning and degraded headlines, gap timestamps, privacy notices,
+bounded flush failure evidence, and verbose/JSON CLI dispatch. Existing
+detailed renderer tests continue to cover the verbose report.

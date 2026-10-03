@@ -311,9 +311,10 @@ export function renderStatusSummary({ report, stdout }) {
   for (const name of syncing) names.add(name)
   for (const name of localOnly) names.add(name)
 
-  const { needsAttention } = statusAttention(report)
+  const { needsAttention, degraded } = statusAttention(report)
 
-  stdout.write(`HypAware · ${needsAttention ? 'Needs attention' : 'Healthy'}\n\n`)
+  // @ref LLP 0455#verdict-headline [implements]: the verdict rides on the existing heading, so the two-state cue keeps its words
+  stdout.write(`HypAware · ${needsAttention ? `Needs attention${degraded ? ' (degraded)' : ''}` : 'Healthy'}\n\n`)
   const daemon = report.daemon.running
     ? (report.daemon.state && report.daemon.state !== 'healthy' ? printable(report.daemon.state) : 'Running')
     : 'Not running'
@@ -359,8 +360,14 @@ function statusAttention(report) {
   const needsAttention = report.overall !== 'healthy' || report.diagnostics.length > 0 ||
     sourceProblems.length > 0 || gaps.length > 0 || actions.length > 0 ||
     report.cacheFlushFailuresTotal > 0 || report.clients.some((c) => c.error) || !report.daemon.running
+  // The verdict and the severity that produces it: an error-severity
+  // diagnostic is what degrades `overall`, so reading both keeps the heading
+  // from reading as an advisory on a report whose verdict contradicts its own
+  // breakdown. Both are the collector's enums, never transcribed from
+  // `status.json`, and the heading prints a literal rather than either value.
+  const degraded = report.overall !== 'healthy' || report.diagnostics.some((d) => d.severity === 'error')
 
-  return { sourceProblems, actions, gaps, needsAttention }
+  return { sourceProblems, actions, gaps, needsAttention, degraded }
 }
 
 /**
