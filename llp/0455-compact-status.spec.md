@@ -59,8 +59,8 @@ words are unchanged and the marker only ever follows `Needs attention`, so a
 `Healthy` heading and anything reading either word still see what they saw.
 
 The marker is the verdict and the rank at once because the collector derives
-one from the other: an `error`-severity diagnostic is what degrades `overall`
-(LLP 0385). Reading both is what keeps the heading from contradicting the
+one from the other: an `error`-severity diagnostic is what degrades
+`overall`. Reading both is what keeps the heading from contradicting the
 `[ERROR]` tags `--verbose` prints for a report whose `overall` disagrees with
 its own diagnostics. The heading prints a literal, never `overall`'s bytes,
 and both inputs are collector enums rather than anything read back out of

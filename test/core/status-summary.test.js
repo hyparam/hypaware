@@ -145,5 +145,13 @@ test('an error-rank diagnostic reads differently from a warning-only advisory at
     diagnostics: [{ severity: 'error', kind: 'config_invalid', message: 'bad', repair: [] }],
   }))
   assert.equal(headline(contradictory), 'HypAware · Needs attention (degraded)')
+  // The other direction: a verdict degraded without any error-severity
+  // diagnostic (the fresh no-config install) still carries the rank. The
+  // marker reads the verdict too, never the severity scan alone.
+  const freshInstall = render(report({
+    overall: 'degraded',
+    diagnostics: [{ severity: 'warning', kind: 'config_missing', message: 'no config file found', repair: ['hyp init'] }],
+  }))
+  assert.equal(headline(freshInstall), 'HypAware · Needs attention (degraded)')
   assert.equal(headline(render(report())), 'HypAware · Healthy')
 })
