@@ -126,3 +126,32 @@ test('CLI selects compact, verbose, and unchanged JSON with JSON precedence', as
     await fs.rm(temp, { recursive: true, force: true })
   }
 })
+
+test('an error-rank diagnostic reads differently from a warning-only advisory at default verbosity', () => {
+  const headline = (/** @type {string} */ text) => text.split('\n')[0]
+  const advisory = render(report({
+    diagnostics: [{ severity: 'warning', kind: 'client_attached_not_configured', message: 'codex still points at the gateway', repair: ['hyp client detach codex'] }],
+  }))
+  const outage = render(report({
+    overall: 'degraded',
+    diagnostics: [{ severity: 'error', kind: 'local_only_list_unreadable', message: 'local-only exclusion list is unreadable', repair: ['fix or remove the file'] }],
+  }))
+  assert.notEqual(headline(outage), headline(advisory))
+  assert.equal(headline(advisory), 'HypAware · Needs attention')
+  assert.equal(headline(outage), 'HypAware · Needs attention (degraded)')
+  // A report that contradicts its own breakdown cannot suppress the rank: the
+  // marker reads the error severity too, never the verdict alone.
+  const contradictory = render(report({
+    diagnostics: [{ severity: 'error', kind: 'config_invalid', message: 'bad', repair: [] }],
+  }))
+  assert.equal(headline(contradictory), 'HypAware · Needs attention (degraded)')
+  // The other direction: a verdict degraded without any error-severity
+  // diagnostic (the fresh no-config install) still carries the rank. The
+  // marker reads the verdict too, never the severity scan alone.
+  const freshInstall = render(report({
+    overall: 'degraded',
+    diagnostics: [{ severity: 'warning', kind: 'config_missing', message: 'no config file found', repair: ['hyp init'] }],
+  }))
+  assert.equal(headline(freshInstall), 'HypAware · Needs attention (degraded)')
+  assert.equal(headline(render(report())), 'HypAware · Healthy')
+})
