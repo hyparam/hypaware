@@ -454,9 +454,30 @@ export interface FixBasisQuery {
 }
 
 /**
+ * One status event on a recommendation, as the server records it (server
+ * recommendation-status RFC). `state` is the server's enum (`open`,
+ * `in_progress`, `applied`, `dismissed`) and is carried as the server spelled
+ * it, so a newer server's state still prints. A recommendation never marked
+ * has no status at all; clients read that as `open`.
+ */
+export interface RecommendationStatus {
+  state: string
+  reason?: string
+  links: string[]
+  /** The subject that marked it: a user key, `email:<email>`, or `operator`. */
+  by?: string
+  /** ISO-8601 timestamp of the event. */
+  at?: string
+  /** `cli`, `dashboard`, or `api`. */
+  via?: string
+}
+
+/**
  * A recommendation as `hyp report fix` carries it from the record to the
- * saved brief: the page stem and title, and the citations the server
- * attached at publish, empty when the record carries none.
+ * saved brief: the page stem and title, the citations the server attached at
+ * publish (empty when the record carries none), and the status the server
+ * joins onto the record (`status` absent when never marked, `history` oldest
+ * first and empty off the listing route or an older server).
  */
 export interface FixRecommendation {
   id: string
@@ -464,4 +485,6 @@ export interface FixRecommendation {
   title?: string
   evidence: FixEvidence[]
   basis: FixBasisQuery[]
+  status?: RecommendationStatus
+  history: RecommendationStatus[]
 }

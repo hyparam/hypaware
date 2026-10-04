@@ -1,6 +1,6 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, connecting to HypAware Cloud, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). Also use whenever a request names a token of the form `hyprec-` followed by sixteen hex characters (for example `hyprec-0123456789abcdef`): that is a HypAware report recommendation id, and "fix hyprec-…", "implement hyprec-…", "what does hyprec-… say" map to `hyp report get <hyprec-id>`, even when HypAware is not mentioned (the older `rec-…` form too, when it is). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
+description: Explain what HypAware is, what it captures, how its data flows, config and paths, connecting to HypAware Cloud, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). Also use whenever a request names a token of the form `hyprec-` followed by sixteen hex characters (for example `hyprec-0123456789abcdef`): that is a HypAware report recommendation id, and "fix hyprec-…", "implement hyprec-…", "what does hyprec-… say" map to `hyp report get <hyprec-id>`, and "mark hyprec-… applied", "we did hyprec-…", "dismiss hyprec-…", "that recommendation is done / not happening" map to `hyp report mark <hyprec-id> applied|dismissed`, even when HypAware is not mentioned (the older `rec-…` form too, when it is). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
 user-invocable: false
 ---
 
@@ -122,7 +122,15 @@ curated HypAware registry.
   expecting smaller counts. `hyp report list` prints the ids under each report
   when the user has none. `hyp report fix <id>` is the shell-side form of
   the same thing: it starts a fresh client on the recommendation, so do not
-  run it from inside a session.
+  run it from inside a session. The output of `hyp report get <id>` ends with
+  a `Status` section, the recommendation's current state and history; one
+  already `applied` or `dismissed` is not redone without the user's say.
+  When the change is landed, run
+  `hyp report mark <id> applied --reason "<one line>" --link <PR url>`; if
+  the recommendation should not be done, run
+  `hyp report mark <id> dismissed --reason "<why>"`. Carry the same `--org`
+  and `--remote` the read used. `in_progress` marks work that has started;
+  `open` reopens. A dismissal without a reason is refused.
 
 ## Guardrails
 

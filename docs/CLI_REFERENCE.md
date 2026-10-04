@@ -375,8 +375,8 @@ hyp report --help
 ```
 
 `generate` is local. The other report commands use a remote target and
-resolve the default remote if `--remote` is omitted. Publishing and deletion
-require a write-capable credential.
+resolve the default remote if `--remote` is omitted. `publish`, `recommend`,
+`mark`, and `delete` require a write-capable credential.
 
 ### `hyp report generate`
 
@@ -432,29 +432,80 @@ applies only to an operator credential that can name an organization.
 hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
 ```
 
+### `hyp report recommend`
+
+```text
+hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]
+```
+
+Publishes one recommendation page on its own, with no report around it, for
+an analysis that yields a single recommendation. The file must be `.md` or
+`.markdown` and is written like a `recommendation-<slug>.md` page inside a
+report: the first `# ` heading is the title (`--title` overrides it) and the
+bold paragraph under it is the thesis. A page with no heading and no `--title`
+is refused before upload. The remote wraps the page in a report of kind
+`recommendation` whose period is the publish date (UTC `YYYY-MM-DD`), mints
+the `hyprec-` id, and renders it; the report appears in `hyp report list` like
+any other and `hyp report get recommendation <period> <id>` serves the page.
+Repeat uploads of the same content answer with the existing id (`already
+published`). A remote that predates the standalone route returns `1` and says
+so. Requires the publisher role, like `publish`.
+
+```sh
+hyp report recommend ./recommendation-no-python3.md
+```
+
+```text
+published hyprec-0123456789abcdef (recommendation/2026-10-03/REPORT_ID)
+  view: hyp report get hyprec-0123456789abcdef
+```
+
 ### `hyp report list`
 
 ```text
-hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]
+hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]
 ```
 
 Lists the newest reports visible to the selected organization. An empty list
 succeeds. Each report's recommendations follow its line, one per line, as the
-minted id, the `recommendation-<slug>` page the id names, and the page's
-title, with its thesis on the line below. The page is the artifact path
+minted id, its state in brackets, the `recommendation-<slug>` page the id
+names, and the page's title, with its thesis on the line below. The state is
+`open`, `in_progress`, `applied`, or `dismissed` as last recorded with
+`hyp report mark`; a recommendation nobody has marked is `open`, which is also
+what a remote that records no status lists. The page is the artifact path
 `hyp report get` takes. A remote that does not read the page's opening at
 publish, or a report published before it did, lists the id and page alone.
 `--json` prints the records whole, `recommendations` included.
 
 ```text
   2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review
-      hyprec-0123456789abcdef	recommendation-batch-the-retries	Batch the retries
+      hyprec-0123456789abcdef	[applied]	recommendation-batch-the-retries	Batch the retries
           Every retry is its own call, 506 times a month. One queue fixes it.
-      hyprec-fedcba9876543210	recommendation-tenant-check
+      hyprec-fedcba9876543210	[open]	recommendation-tenant-check
+```
+
+`--recommendations` lists the recommendations themselves, flat across
+reports and newest report first, from the remote's recommendation index: id,
+state, the parent report's publish time, the parent report as
+`kind/period/id` (or `standalone` for one published with `hyp report
+recommend`), and the title, with the thesis below. `--status <state,...>`
+filters by state and implies `--recommendations`; an unknown state is refused
+before any request, and an empty value (an unset shell variable) still selects
+the flat form rather than falling back to the report listing. A remote that
+predates the recommendation index returns `1` and says so. `--kind`,
+`--period`, `--limit`, and `--before` filter on the parent report in either
+form. With `--json`, the flat form prints the remote's recommendation rows
+whole.
+
+```text
+  hyprec-0123456789abcdef	[in_progress]	2026-08-24T09:00:00.000Z	usage-review/2026-W34/REPORT_ID	Batch the retries
+      Every retry is its own call, 506 times a month. One queue fixes it.
+  hyprec-fedcba9876543210	[open]	2026-10-03T09:00:00.000Z	standalone	No python3 on the runner
 ```
 
 ```sh
 hyp report list --kind usage-review --limit 10 --json
+hyp report list --status open,in_progress
 ```
 
 ### `hyp report get`
@@ -481,11 +532,29 @@ Given a recommendation id instead (`hyprec-` and sixteen hex characters, the id
 and page and prints that page (Markdown, or HTML when the report was published
 without it) with a `Citations from the report record` tail: the turns the page
 cites as `evidence:N`, numbered to match, and the queries the report ran to
-reach the recommendation, verbatim in `sql` blocks. This is the read to make
+reach the recommendation, verbatim in `sql` blocks, and then a `Status`
+section: the current state with its reason, links, who recorded it and when,
+followed by the history one line per event, oldest first. A recommendation
+nobody has marked reads `State: open (never marked)`. This is the read to make
 from inside an AI client session when asked to fix a recommendation by id.
 
 ```sh
 hyp report get hyprec-0123456789abcdef
+```
+
+```text
+## Status
+
+State: applied
+Reason: Landed in hyparam/hypaware#912
+Link: https://github.com/hyparam/hypaware/pull/912
+By: email:dev@example.com (via cli)
+At: 2026-10-03T18:21:07.000Z
+
+History, oldest first:
+
+- 2026-10-01T09:00:00.000Z  in_progress  by email:dev@example.com  via dashboard
+- 2026-10-03T18:21:07.000Z  applied  by email:dev@example.com  via cli: Landed in hyparam/hypaware#912 https://github.com/hyparam/hypaware/pull/912
 ```
 
 ### `hyp report fix`
@@ -500,7 +569,11 @@ resolves it to its report, checks the recommendation page still exists, and
 starts the client with instructions to read it through
 `hyp report get <rec-id>` and make the change in the current repository.
 Nothing is written to disk. The client takes over the terminal and nothing is
-pre-authorized: the client asks before running the read.
+pre-authorized: the client asks before running the read. The instructions end
+by telling the client to record the outcome: `hyp report mark <rec-id> applied
+--reason "<one line>" --link <PR url>` once the change is landed, or
+`hyp report mark <rec-id> dismissed --reason "<why>"` if the recommendation
+should not be done, with the run's `--org` and `--remote` carried along.
 
 With no id on a terminal, it asks in two steps: first which report, newest
 first, each with its publish date and how many recommendations it carries
@@ -527,6 +600,38 @@ failure returns `1`.
 ```sh
 hyp report fix hyprec-0123456789abcdef
 hyp report fix --kind usage-review
+```
+
+### `hyp report mark`
+
+```text
+hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]
+```
+
+Records what became of a recommendation. The id is the one `hyp report list`
+prints (the legacy `rec-` spelling is accepted). The state is the remote's
+vocabulary: `open`, `in_progress`, `applied`, or `dismissed`; any state may
+follow any other, so reopening is the same verb. `--reason` (one line, up to
+2000 characters) is required for `dismissed` and optional otherwise; a
+dismissal without one is refused with exit `2` before any request. `--link`
+is repeatable and takes absolute `http(s)` URLs, the pull request that landed
+the change most of all (up to 8; a value with a literal comma is split on it,
+so percent-encode one). An empty `--link` is refused with exit `2` rather than
+recorded as no link. The event is appended on the remote with `via: cli`;
+nothing is kept locally. The receipt is the new state line with the reason
+and links as recorded. An unknown id, or a remote that predates the status
+route, returns `1` and names both readings. Requires the publisher role, like
+`publish`.
+
+```sh
+hyp report mark hyprec-0123456789abcdef applied --reason "Landed in hyparam/hypaware#912" --link https://github.com/hyparam/hypaware/pull/912
+hyp report mark hyprec-0123456789abcdef dismissed --reason "The retry loop was removed in 1.39"
+```
+
+```text
+marked hyprec-0123456789abcdef [applied]	Batch the retries
+  reason: Landed in hyparam/hypaware#912
+  link: https://github.com/hyparam/hypaware/pull/912
 ```
 
 ### `hyp report delete`

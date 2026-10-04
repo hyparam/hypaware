@@ -8,6 +8,15 @@ import { parseCommandArgv } from './verb_codec.js'
  */
 
 /**
+ * The states a recommendation can be marked with, spelled as the server's
+ * recommendation-status RFC spells them. A copy so a typo is refused at the
+ * gate before bytes move; the server stays the owner of the vocabulary.
+ *
+ * @ref LLP 0461#states-are-the-servers [constrained-by]: the CLI repeats the server's states, it does not define them
+ */
+const RECOMMENDATION_STATES = ['open', 'in_progress', 'applied', 'dismissed']
+
+/**
  * One argument-validation contract for the core command set.
  *
  * Before this module a command either declared a schema and rejected
@@ -217,8 +226,21 @@ export const CORE_COMMAND_ARGS = {
       positional: ['source'],
     },
   },
+  'report recommend': {
+    usage: 'hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string' },
+        title: { type: 'string' },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['source'],
+    },
+  },
   'report list': {
-    usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
+    usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -226,10 +248,31 @@ export const CORE_COMMAND_ARGS = {
         period: { type: 'string' },
         limit: { type: 'string' },
         before: { type: 'string' },
+        // The flat form: the recommendations themselves, across reports. A
+        // status filter implies it, since only that route joins status.
+        recommendations: { type: 'boolean', default: false },
+        status: { type: 'array', items: { type: 'string', enum: RECOMMENDATION_STATES } },
         org: { type: 'string' },
         json: { type: 'boolean', default: false },
         remote: { type: 'string' },
       },
+    },
+  },
+  'report mark': {
+    usage: 'hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        state: { type: 'string', enum: RECOMMENDATION_STATES },
+        reason: { type: 'string' },
+        // Repeatable; the codec also splits one value on commas, so a URL
+        // that carries a literal comma must percent-encode it.
+        link: { type: 'array', items: { type: 'string' } },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id', 'state'],
     },
   },
   'report get': {

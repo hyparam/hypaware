@@ -139,7 +139,20 @@ example, a report covering August 2026 can be published with:
 hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08 --remote <target>
 ```
 
-For a custom range, use `YYYY-MM-DD-to-YYYY-MM-DD` as the period. If the team
+For a custom range, use `YYYY-MM-DD-to-YYYY-MM-DD` as the period. When the
+analysis yields one recommendation rather than a full report, publish that
+page on its own instead:
+
+```sh
+hyp report recommend ./recommendation-<slug>.md --remote <target>
+```
+
+The page follows the recommendation page rules in
+[report-contract.md](references/report-contract.md): the first `# ` heading is
+the title and the bold paragraph under it the thesis. The server wraps it in a
+report of kind `recommendation` dated the publish day, mints its `hyprec-` id,
+and renders it; the receipt prints the id and the `hyp report get <id>` that
+reads it. Return both. If the team
 or destination is unclear, resolve it with the user before uploading. Reuse
 existing login credentials; if login is needed, direct the user to
 `hyp remote login <target>`. Publishing requires the organization's publisher

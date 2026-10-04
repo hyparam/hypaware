@@ -35,7 +35,7 @@ import { escapeForDisplay } from '../util/json_util.js'
  * @import { Stats } from 'node:fs'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { FirstAskLauncher } from '../../../src/core/cli/wizard/types.js'
- * @import { FixBasisQuery, FixEvidence, FixRecommendation } from '../../../src/core/cli/types.js'
+ * @import { FixBasisQuery, FixEvidence, FixRecommendation, RecommendationStatus } from '../../../src/core/cli/types.js'
  */
 
 const execFileAsync = promisify(execFile)
@@ -103,7 +103,7 @@ const KIND_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 const PERIOD_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/
 
 /** The value-taking flags shared across the `report` subcommands. */
-const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote', '--limit', '--before', '--output'])
+const VALUE_FLAGS = new Set(['--kind', '--period', '--title', '--org', '--remote', '--limit', '--before', '--output', '--status', '--reason', '--link'])
 
 /**
  * @ref LLP 0450#launch [implements]: the skill owns analysis; the CLI starts a client in the caller's directory
@@ -331,8 +331,117 @@ export async function runReportPublish(argv, ctx) {
 }
 
 /**
- * `hyp report list`: list the org's published reports, newest first.
+ * `hyp report recommend <file.md>`: publish one recommendation page with no
+ * report around it. The server wraps the page in a report of kind
+ * `recommendation` whose period is the publish date, mints the `hyprec-` id,
+ * and dedupes by content hash exactly as `publish` does, so the receipt is
+ * the id and the read that takes it. The page follows the same rules as a
+ * `recommendation-<slug>.md` page inside a report: the first `# ` heading is
+ * the title (`--title` overrides it) and the slug derives from that.
  *
+ * @ref LLP 0461#standalone [implements]: one page is a publish of its own; the server supplies the report around it
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runReportRecommend(argv, ctx) {
+  const gate = parseCoreCommandArgv('report recommend', argv, ctx)
+  if (!gate.ok) return gate.code
+  const source = /** @type {string | undefined} */ (gate.params.source)
+  if (!source) {
+    ctx.stderr.write('usage: hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]\n')
+    return 2
+  }
+  const ext = path.extname(source).toLowerCase()
+  if (ext !== '.md' && ext !== '.markdown') {
+    ctx.stderr.write(`hyp report recommend: a recommendation page must be Markdown (.md or .markdown); the remote renders HTML (got '${esc(ext || source)}')\n`)
+    return 2
+  }
+  /** @type {Buffer} */
+  let body
+  try {
+    body = await fs.readFile(source)
+  } catch {
+    ctx.stderr.write(`hyp report recommend: no such file: ${esc(source)}\n`)
+    return 2
+  }
+  // Emptiness, not presence, as `publish` reads the same parameter: `--title ''`
+  // names no title, so it must neither satisfy the heading check below nor travel
+  // as an empty `title` the server refuses after the upload.
+  const title = /** @type {string | undefined} */ (gate.params.title) || undefined
+  // The slug is derived from the title, so a page with no `# ` heading and no
+  // --title is refused server-side after the upload; catch it here first.
+  // @ref LLP 0155#fail-fast [implements]: the server stays authoritative on the page rules; this rejects the one certain miss
+  if (title === undefined && pageTitle(body.toString('utf8'), 'md') === undefined) {
+    ctx.stderr.write(`hyp report recommend: ${esc(source)} has no '# ' heading to take the title from - add one or pass --title <title>\n`)
+    return 2
+  }
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report recommend')
+  if ('error' in resolved) {
+    ctx.stderr.write(`${resolved.error}\n`)
+    return 2
+  }
+  const url = new URL(`${resolved.endpoint}/_recommendations`)
+  if (title !== undefined) url.searchParams.set('title', title)
+  applyOrgParam(gate.params, url)
+
+  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report recommend' }, (token) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'text/markdown',
+        // Same retry safety as `publish`: a re-run of the same page answers
+        // 200 with the existing recommendation instead of a second id.
+        'x-report-content-hash': crypto.createHash('sha256').update(body).digest('hex'),
+      },
+      body,
+    })
+  )
+  if (!outcome.ok) {
+    ctx.stderr.write(`hyp report recommend: ${outcome.error}\n`)
+    return outcome.exitCode
+  }
+  const { response } = outcome
+  if (response.status === 404) {
+    // The route is new, so a server that predates it answers 404 with nothing
+    // `describeErrorResponse` can name. Say which reading it is, as `mark`
+    // does, for that answer only: a 404 that names an error (an unknown
+    // `--org`, say) is about the request, and shadowing it would misdirect the
+    // one reader who can act on it.
+    ctx.stderr.write(`hyp report recommend: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot publish a standalone recommendation - is the server up to date? publish the page inside a report with 'hyp report publish' meanwhile`)}\n`)
+    return 1
+  }
+  if (response.status !== 200 && response.status !== 201) {
+    ctx.stderr.write(`hyp report recommend: ${await describeErrorResponse(response)}\n`)
+    return 1
+  }
+  const parsed = /** @type {any} */ (await response.json().catch(() => null))
+  const rec = parsed?.recommendation ?? {}
+  const record = parsed?.report ?? {}
+  // The id lands on a command line below, so like a picked id in `fix` it is
+  // held to the grammar before it is pasted; one that is not an id is shown
+  // escaped and the hint keeps the `<id>` placeholder.
+  const id = typeof rec.id === 'string' && RECOMMENDATION_ID_RE.test(rec.id) ? rec.id : undefined
+  const shown = id ?? (rec.id === undefined || rec.id === null ? '?' : esc(rec.id))
+  const where = `${esc(record.kind ?? 'recommendation')}/${esc(record.period ?? '?')}/${esc(record.id ?? '?')}`
+  if (response.status === 200) {
+    ctx.stdout.write(`already published as ${shown} (${where}, same content) - nothing new uploaded\n`)
+  } else {
+    ctx.stdout.write(`published ${shown} (${where})\n`)
+  }
+  ctx.stdout.write(`  view: ${['hyp report get', id ?? '<id>', ...targetFlags(gate.params)].join(' ')}\n`)
+  return 0
+}
+
+/**
+ * `hyp report list`: list the org's published reports, newest first, each
+ * with its recommendations and their status beneath it. With
+ * `--recommendations` (or a `--status` filter, which implies it) the list is
+ * the recommendations themselves, flat across reports, from the server's
+ * `_recommendations` route.
+ *
+ * @ref LLP 0461#status-is-visible [implements]: every listing line that names a recommendation names its state
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -345,7 +454,13 @@ export async function runReportList(argv, ctx) {
     ctx.stderr.write(`${resolved.error}\n`)
     return 2
   }
-  const url = new URL(resolved.endpoint)
+  const status = Array.isArray(gate.params.status) ? gate.params.status.map(String) : []
+  // Presence of `--status`, not the length of what survived the codec's comma
+  // split: the array coercion drops empty parts, so `--status ''` (an unset
+  // shell variable) parses to `[]`, and reading the length would quietly list
+  // reports instead of the flat form the flag asks for.
+  const flat = gate.params.recommendations === true || Array.isArray(gate.params.status)
+  const url = new URL(flat ? `${resolved.endpoint}/_recommendations` : resolved.endpoint)
   // Same reason `--json` below reads the gate: `valueFlag()` drops a value
   // whose first character is `-`, so `--limit -5` used to list with the
   // server's default and exit 0 instead of refusing the token.
@@ -353,6 +468,7 @@ export async function runReportList(argv, ctx) {
     const value = gate.params[flag]
     if (value !== undefined) url.searchParams.set(flag, String(value))
   }
+  if (status.length > 0) url.searchParams.set('status', status.join(','))
   applyOrgParam(gate.params, url)
 
   const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report list' }, (token) =>
@@ -363,11 +479,44 @@ export async function runReportList(argv, ctx) {
     return outcome.exitCode
   }
   const { response } = outcome
+  if (flat && response.status === 404) {
+    // Only the flat form asks for a route an older server may not have, and it
+    // answers 404 with nothing `describeErrorResponse` can name. One that does
+    // name an error came from a server that has the route, so it keeps its own
+    // word, the same relay the plain form gives below.
+    ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot list recommendations on their own - is the server up to date? 'hyp report list' with no --recommendations/--status lists them under their reports`)}\n`)
+    return 1
+  }
   if (response.status !== 200) {
     ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response)}\n`)
     return 1
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
+  if (flat) {
+    const rows = Array.isArray(parsed?.recommendations) ? parsed.recommendations : []
+    if (gate.params.json === true) {
+      ctx.stdout.write(JSON.stringify(rows, null, 2) + '\n')
+      return 0
+    }
+    if (rows.length === 0) {
+      ctx.stdout.write("no recommendations match - 'hyp report list' shows every report; 'hyp report recommend <file.md>' publishes one on its own\n")
+      return 0
+    }
+    for (const c of rows) {
+      if (typeof c?.id !== 'string') continue
+      const r = c.report
+      // A standalone recommendation's report is the wrapper the server made
+      // for it, so naming it would send a reader to a report that is the
+      // same page; the slot says what it is instead.
+      const where = c.standalone === true || r?.kind === 'recommendation'
+        ? 'standalone'
+        : `${esc(r?.kind ?? '?')}/${esc(r?.period ?? '?')}/${esc(r?.id ?? '?')}`
+      const titleCell = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
+      ctx.stdout.write(`  ${esc(c.id)}\t[${esc(recommendationState(c))}]\t${esc(r?.publishedAt ?? '')}\t${where}${titleCell}\n`)
+      if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`      ${esc(c.summary)}\n`)
+    }
+    return 0
+  }
   const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
   // Read the mode the gate parsed, not argv: the codec also accepts
   // `--json=true`, and a token it blessed must not be dropped downstream.
@@ -389,16 +538,30 @@ export async function runReportList(argv, ctx) {
     // the page's opening at publish adds its title and thesis (server LLP
     // 0416); an older server, or a report that predates that, lists the id
     // and page alone. A record with no recommendation pages carries no
-    // field, so a report with none prints nothing extra.
+    // field, so a report with none prints nothing extra. The state marker
+    // reads `open` off a record with no status, which is also what an
+    // older server, which joins none, lists.
     const recommendations = Array.isArray(r.recommendations) ? r.recommendations : []
     for (const c of recommendations) {
       if (typeof c?.id !== 'string' || typeof c?.page !== 'string') continue
       const titleCell = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
-      ctx.stdout.write(`      ${esc(c.id)}\t${esc(c.page)}${titleCell}\n`)
+      ctx.stdout.write(`      ${esc(c.id)}\t[${esc(recommendationState(c))}]\t${esc(c.page)}${titleCell}\n`)
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${esc(c.summary)}\n`)
     }
   }
   return 0
+}
+
+/**
+ * The state a listed recommendation is in. A record that was never marked
+ * carries no `status` field, and the contract reads that as `open`.
+ *
+ * @param {any} c a recommendation row as the server lists it
+ * @returns {string}
+ */
+function recommendationState(c) {
+  const state = c?.status?.state
+  return typeof state === 'string' && state ? state : 'open'
 }
 
 /**
@@ -773,6 +936,11 @@ export async function runReportFix(argv, ctx, deps = {}) {
   // environment, as every `hyp` call the client makes already relies on.
   const readCommand = ['hyp report get', recommendation.id, ...targetFlags(gate.params)].join(' ')
   const queryFlags = queryTargetFlags(resolved, gate.params)
+  // The outcome is recorded by the client that produced it, through the same
+  // verb a person would use, against the same target this run resolved.
+  // @ref LLP 0461#fix-asks-for-the-mark [implements]: the launched session is told how to close the loop it was started on
+  const markCommand = ['hyp report mark', recommendation.id].join(' ')
+  const markFlags = targetFlags(gate.params).map((f) => ` ${f}`).join('')
   const prompt =
     `Run \`${readCommand}\` and read its output. It is one recommendation from a HypAware usage report (${where}): "${title}", ` +
     'followed by the evidence it cites and the queries the report ran to reach it. ' +
@@ -783,7 +951,9 @@ export async function runReportFix(argv, ctx, deps = {}) {
     'and summarise what you changed. If it does not apply to this repository, say why instead of forcing it.' +
     (recommendation.basis.length > 0
       ? ` Re-run the queries with \`hyp query sql ${queryFlags}\` to check the server finding; local queries check only this machine's recordings.`
-      : '')
+      : '') +
+    ` When the change is landed, run \`${markCommand} applied --reason "<one line>" --link <PR url>${markFlags}\`; ` +
+    `if the recommendation should not be done, run \`${markCommand} dismissed --reason "<why>"${markFlags}\`.`
   ctx.stdout.write(`\nStarting ${launcher.label} on "${esc(title)}"...\n\n`)
   const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd: ctx.cwd, env: ctx.env })
   if (!result.ok) {
@@ -888,8 +1058,8 @@ async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommend
       return 1
     }
     const bytes = Buffer.from(await outcome.response.arrayBuffer())
-    const appendix = citationsAppendix(recommendation, ext, queryTargetFlags(resolved, gate.params))
-    return { bytes: appendix ? Buffer.concat([bytes, Buffer.from(appendix, 'utf8')]) : bytes, ext }
+    const appendix = recordAppendix(recommendation, ext, queryTargetFlags(resolved, gate.params))
+    return { bytes: Buffer.concat([bytes, Buffer.from(appendix, 'utf8')]), ext }
   }
   // The repair has to run and do what the sentence says (LLP 0139
   // #repair-must-be-runnable). `report get` on the report fetches its entry
@@ -993,25 +1163,70 @@ function fixRecommendation(id, c) {
       basis.push({ agent: typeof q.agent === 'string' ? q.agent : '', query: q.query })
     }
   }
-  return { id, page: c.page, ...(typeof c.title === 'string' ? { title: c.title } : {}), evidence, basis }
+  // The status the server joins on (its recommendation-status RFC): the
+  // current event, absent when never marked, and on the resolve route the
+  // whole history oldest first. The listing route carries no history, and an
+  // older server carries neither, which reads as never marked.
+  const status = recommendationStatus(c?.status)
+  /** @type {RecommendationStatus[]} */
+  const history = []
+  if (Array.isArray(c?.history)) {
+    for (const e of c.history) {
+      const event = recommendationStatus(e)
+      if (event) history.push(event)
+    }
+  }
+  return {
+    id,
+    page: c.page,
+    ...(typeof c.title === 'string' ? { title: c.title } : {}),
+    evidence,
+    basis,
+    ...(status ? { status } : {}),
+    history,
+  }
 }
 
 /**
- * The citations as a tail for the saved page: an Evidence list the page's
- * `evidence:N` marks number into, and the Basis queries verbatim in fenced
- * blocks. Written as Markdown; on an HTML page (a report published without
- * the Markdown form) the same text sits in one `<pre>` so the file stays
- * HTML and the model still reads it. Empty when there is nothing to append.
+ * One status event in the shape the server types it, or undefined when the
+ * value is not one. The state is admitted as any non-empty string rather
+ * than checked against the known four, so a client older than a server that
+ * grows a state still shows it instead of calling the recommendation open.
  *
+ * @param {any} s
+ * @returns {RecommendationStatus | undefined}
+ */
+function recommendationStatus(s) {
+  if (typeof s?.state !== 'string' || !s.state) return undefined
+  return {
+    state: s.state,
+    ...(typeof s.reason === 'string' && s.reason ? { reason: s.reason } : {}),
+    links: Array.isArray(s.links) ? s.links.filter((/** @type {unknown} */ l) => typeof l === 'string') : [],
+    ...(typeof s.by === 'string' ? { by: s.by } : {}),
+    ...(typeof s.at === 'string' ? { at: s.at } : {}),
+    ...(typeof s.via === 'string' ? { via: s.via } : {}),
+  }
+}
+
+/**
+ * The record as a tail for the page: the citations, an Evidence list the
+ * page's `evidence:N` marks number into and the Basis queries verbatim in
+ * fenced blocks, when the record carries any; then the Status, always, so a
+ * reader who was handed the id sees whether someone already acted on it
+ * before starting. Written as Markdown; on an HTML page (a report published
+ * without the Markdown form) the same text sits in one `<pre>` so the file
+ * stays HTML and the model still reads it.
+ *
+ * @ref LLP 0461#status-is-visible [implements]: the brief ends with the recommendation's state, `open` when nothing was ever recorded
  * @param {FixRecommendation} recommendation
  * @param {string} ext `md` or `html`
  * @param {string} queryFlags the run's resolved target flags, for the re-run sentences
  * @returns {string}
  */
-function citationsAppendix(recommendation, ext, queryFlags) {
+function recordAppendix(recommendation, ext, queryFlags) {
   const { evidence, basis } = recommendation
-  if (evidence.length === 0 && basis.length === 0) return ''
-  const lines = ['', '---', '', '## Citations from the report record', '']
+  const lines = ['', '---', '']
+  if (evidence.length > 0 || basis.length > 0) lines.push('## Citations from the report record', '')
   if (evidence.length > 0) {
     lines.push('### Evidence', '', `The turns this page cites as \`evidence:N\`, by N. Each is a recorded message; look it up with \`hyp query sql ${queryFlags}\` against \`ai_gateway_messages\` by \`session_id\` and \`message_id\` for server evidence.`, '')
     evidence.forEach((e, i) => {
@@ -1031,9 +1246,64 @@ function citationsAppendix(recommendation, ext, queryFlags) {
       lines.push(`${fence}sql`, query, fence, '')
     }
   }
+  lines.push('## Status', '', ...statusLines(recommendation))
   const text = lines.join('\n')
   if (ext !== 'html') return text
   return `\n<pre>${text.replaceAll('&', '&amp;').replaceAll('<', '&lt;')}</pre>\n`
+}
+
+/**
+ * The Status section's lines: the current event field by field, then the
+ * history one line per event, oldest first, when the record carries one.
+ * A reason is a free-text field of the server's, so its whitespace is
+ * collapsed to keep each event on the one line the section promises.
+ *
+ * @param {FixRecommendation} recommendation
+ * @returns {string[]}
+ */
+function statusLines({ status, history }) {
+  if (!status) return ['State: open (never marked)', '']
+  const lines = [`State: ${status.state}`]
+  if (status.reason) lines.push(`Reason: ${oneLine(status.reason)}`)
+  for (const link of status.links) lines.push(`Link: ${link}`)
+  if (status.by) lines.push(`By: ${status.by}${status.via ? ` (via ${status.via})` : ''}`)
+  if (status.at) lines.push(`At: ${status.at}`)
+  lines.push('')
+  if (history.length > 0) {
+    lines.push('History, oldest first:', '')
+    for (const e of history) {
+      const head = [e.at ?? '', e.state, e.by ? `by ${e.by}` : '', e.via ? `via ${e.via}` : ''].filter(Boolean).join('  ')
+      const tail = [e.reason ? `: ${oneLine(e.reason)}` : '', ...e.links.map((l) => ` ${l}`)].join('')
+      lines.push(`- ${head}${tail}`)
+    }
+    lines.push('')
+  }
+  return lines
+}
+
+/**
+ * @param {string} s
+ * @returns {string}
+ */
+function oneLine(s) {
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Whether a `--link` value is an absolute http(s) URL, the one form the
+ * server admits. Checked before the round trip for the fail-fast reason the
+ * other grammars are.
+ *
+ * @param {string} s
+ * @returns {boolean}
+ */
+function isHttpUrl(s) {
+  try {
+    const u = new URL(s)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -1067,6 +1337,93 @@ function pageTitle(text, ext) {
   }
   const md = text.match(/^#\s+(.+?)\s*$/m)
   return md ? md[1].replaceAll('`', '') : undefined
+}
+
+/**
+ * `hyp report mark <id> <state>`: record what became of a recommendation.
+ * One PUT to the server's status route appends an event; the server keeps
+ * the ledger and the vocabulary, the CLI carries the id, the state, the
+ * reason and the links, and says it came from the CLI. Any state may follow
+ * any state, so reopening is the same verb. The id takes the same grammar
+ * `get` and `fix` do, the legacy `rec-` form included.
+ *
+ * @ref LLP 0461#mark [implements]: the outcome is one verb on the id, appended server-side, never a field the CLI keeps
+ * @ref LLP 0461#reason-for-dismissed [implements]: a dismissal is refused without its reason before any bytes move
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runReportMark(argv, ctx) {
+  const gate = parseCoreCommandArgv('report mark', argv, ctx)
+  if (!gate.ok) return gate.code
+  const id = gate.params.id !== undefined ? String(gate.params.id).trim() : ''
+  const state = typeof gate.params.state === 'string' ? gate.params.state : ''
+  if (!id || !state) {
+    ctx.stderr.write('usage: hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]\n')
+    return 2
+  }
+  if (!RECOMMENDATION_ID_RE.test(id)) {
+    ctx.stderr.write(`hyp report mark: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like hyprec-0123456789abcdef)\n`)
+    return 2
+  }
+  const reason = gate.params.reason === undefined ? '' : oneLine(String(gate.params.reason))
+  if (state === 'dismissed' && !reason) {
+    ctx.stderr.write('hyp report mark: dismissed needs --reason "<why>" - the reason is what the next reader sees in place of the change\n')
+    return 2
+  }
+  const links = Array.isArray(gate.params.link) ? gate.params.link.map(String) : []
+  // The codec splits an array flag on commas and drops the empty parts, so
+  // `--link ''` (an unset shell variable) reaches here as no link at all. The
+  // link is the one field a later reader follows to the diff, so a run that
+  // asked for one and carries none is refused rather than recorded without it.
+  if (Array.isArray(gate.params.link) && links.length === 0) {
+    ctx.stderr.write('hyp report mark: --link takes an absolute http(s) URL, got an empty value\n')
+    return 2
+  }
+  for (const link of links) {
+    if (!isHttpUrl(link)) {
+      ctx.stderr.write(`hyp report mark: --link takes an absolute http(s) URL, got '${link}'\n`)
+      return 2
+    }
+  }
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report mark')
+  if ('error' in resolved) {
+    ctx.stderr.write(`${resolved.error}\n`)
+    return 2
+  }
+  const url = new URL(`${resolved.endpoint}/_recommendations/${encodeURIComponent(id)}/status`)
+  applyOrgParam(gate.params, url)
+  const body = JSON.stringify({ state, ...(reason ? { reason } : {}), ...(links.length > 0 ? { links } : {}), via: 'cli' })
+  const outcome = await reportsRequest({ ctx, ...resolved, write: true, cmd: 'report mark' }, (token) =>
+    fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body })
+  )
+  if (!outcome.ok) {
+    ctx.stderr.write(`hyp report mark: ${outcome.error}\n`)
+    return outcome.exitCode
+  }
+  const { response } = outcome
+  if (response.status === 404) {
+    // As on the resolve route: an unknown id and a server that predates the
+    // status route answer alike, so both readings are named.
+    ctx.stderr.write(`hyp report mark: no recommendation '${id}' in this org - list them with 'hyp report list'; if it is on that listing, '${resolved.target}' cannot record recommendation status - is the server up to date?\n`)
+    return 1
+  }
+  if (response.status !== 200 && response.status !== 201) {
+    ctx.stderr.write(`hyp report mark: ${await describeErrorResponse(response)}\n`)
+    return 1
+  }
+  const parsed = /** @type {any} */ (await response.json().catch(() => null))
+  const answered = parsed?.recommendation
+  // The receipt is the server's record where it answered with one, so a
+  // legacy `rec-` id prints as the `hyprec-` id the server now mints; the
+  // fallbacks are this run's own, gate-checked arguments.
+  const shown = typeof answered?.id === 'string' && RECOMMENDATION_ID_RE.test(answered.id) ? answered.id : id
+  const now = recommendationStatus(answered?.status) ?? { state, ...(reason ? { reason } : {}), links }
+  const title = typeof answered?.title === 'string' && answered.title ? `\t${esc(answered.title)}` : ''
+  ctx.stdout.write(`marked ${shown} [${esc(now.state)}]${title}\n`)
+  if (now.reason) ctx.stdout.write(`  reason: ${esc(now.reason)}\n`)
+  for (const link of now.links) ctx.stdout.write(`  link: ${esc(link)}\n`)
+  return 0
 }
 
 /**
@@ -1280,10 +1637,17 @@ function mapRefreshError(err, target) {
  * JSON when present, with the quota error carrying its make-room-explicitly
  * guidance (nothing is ever auto-pruned).
  *
+ * `unnamed` replaces the bare `HTTP <status>` a body that names nothing falls
+ * back to. A route this CLI added answers 404 that way on a server predating
+ * it, a reading worth naming; a server that does name an error on the same
+ * status has the route and is answering about the request, and its own word is
+ * the better one to relay.
+ *
  * @param {Response} response
+ * @param {string} [unnamed] what to say when the body names no error
  * @returns {Promise<string>}
  */
-async function describeErrorResponse(response) {
+async function describeErrorResponse(response, unnamed) {
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   const code = typeof parsed?.error === 'string' ? parsed.error : null
   const detail = typeof parsed?.detail === 'string' ? parsed.detail : null
@@ -1291,7 +1655,7 @@ async function describeErrorResponse(response) {
     return `the org's report quota is full (HTTP 507)${detail ? ` - ${detail}` : ''} - delete old reports with 'hyp report delete' or ask the operator to raise the quota; nothing is auto-pruned`
   }
   if (code) return `HTTP ${response.status}: ${code}${detail ? ` - ${detail}` : ''}`
-  return `HTTP ${response.status}`
+  return unnamed ?? `HTTP ${response.status}`
 }
 
 /**
