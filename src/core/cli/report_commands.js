@@ -405,8 +405,11 @@ export async function runReportRecommend(argv, ctx) {
   const { response } = outcome
   if (response.status === 404) {
     // The route is new, so a server that predates it answers 404 with nothing
-    // `describeErrorResponse` can name. Say which reading it is, as `mark` does.
-    ctx.stderr.write(`hyp report recommend: '${esc(resolved.target)}' cannot publish a standalone recommendation - is the server up to date? publish the page inside a report with 'hyp report publish' meanwhile\n`)
+    // `describeErrorResponse` can name. Say which reading it is, as `mark`
+    // does, for that answer only: a 404 that names an error (an unknown
+    // `--org`, say) is about the request, and shadowing it would misdirect the
+    // one reader who can act on it.
+    ctx.stderr.write(`hyp report recommend: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot publish a standalone recommendation - is the server up to date? publish the page inside a report with 'hyp report publish' meanwhile`)}\n`)
     return 1
   }
   if (response.status !== 200 && response.status !== 201) {
@@ -478,8 +481,10 @@ export async function runReportList(argv, ctx) {
   const { response } = outcome
   if (flat && response.status === 404) {
     // Only the flat form asks for a route an older server may not have, and it
-    // answers 404 with nothing `describeErrorResponse` can name.
-    ctx.stderr.write(`hyp report list: '${esc(resolved.target)}' cannot list recommendations on their own - is the server up to date? 'hyp report list' with no --recommendations/--status lists them under their reports\n`)
+    // answers 404 with nothing `describeErrorResponse` can name. One that does
+    // name an error came from a server that has the route, so it keeps its own
+    // word, the same relay the plain form gives below.
+    ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot list recommendations on their own - is the server up to date? 'hyp report list' with no --recommendations/--status lists them under their reports`)}\n`)
     return 1
   }
   if (response.status !== 200) {
@@ -1632,10 +1637,17 @@ function mapRefreshError(err, target) {
  * JSON when present, with the quota error carrying its make-room-explicitly
  * guidance (nothing is ever auto-pruned).
  *
+ * `unnamed` replaces the bare `HTTP <status>` a body that names nothing falls
+ * back to. A route this CLI added answers 404 that way on a server predating
+ * it, a reading worth naming; a server that does name an error on the same
+ * status has the route and is answering about the request, and its own word is
+ * the better one to relay.
+ *
  * @param {Response} response
+ * @param {string} [unnamed] what to say when the body names no error
  * @returns {Promise<string>}
  */
-async function describeErrorResponse(response) {
+async function describeErrorResponse(response, unnamed) {
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   const code = typeof parsed?.error === 'string' ? parsed.error : null
   const detail = typeof parsed?.detail === 'string' ? parsed.detail : null
@@ -1643,7 +1655,7 @@ async function describeErrorResponse(response) {
     return `the org's report quota is full (HTTP 507)${detail ? ` - ${detail}` : ''} - delete old reports with 'hyp report delete' or ask the operator to raise the quota; nothing is auto-pruned`
   }
   if (code) return `HTTP ${response.status}: ${code}${detail ? ` - ${detail}` : ''}`
-  return `HTTP ${response.status}`
+  return unnamed ?? `HTTP ${response.status}`
 }
 
 /**

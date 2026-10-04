@@ -492,9 +492,10 @@ recommend`), and the title, with the thesis below. `--status <state,...>`
 filters by state and implies `--recommendations`; an unknown state is refused
 before any request, and an empty value (an unset shell variable) still selects
 the flat form rather than falling back to the report listing. A remote that
-predates the recommendation index returns `1` and says so. `--kind`, `--period`, `--limit`, and `--before` filter on
-the parent report in either form. With `--json`, the flat form prints the
-remote's recommendation rows whole.
+predates the recommendation index returns `1` and says so. `--kind`,
+`--period`, `--limit`, and `--before` filter on the parent report in either
+form. With `--json`, the flat form prints the remote's recommendation rows
+whole.
 
 ```text
   hyprec-0123456789abcdef	[in_progress]	2026-08-24T09:00:00.000Z	usage-review/2026-W34/REPORT_ID	Batch the retries

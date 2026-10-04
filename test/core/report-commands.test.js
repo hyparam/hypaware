@@ -27,6 +27,7 @@ import {
 import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /* ---------- endpoint derivation ---------- */
 
@@ -2034,7 +2035,9 @@ test('mark is a write: a surviving 401 names the missing publisher role', async 
 
 /** @param {string} [content] */
 async function tmpRecommendationFile(content = '# No python3 on the runner\n\n**Every job installs it. Pin it in the image.**\n') {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-recommend-test-'))
+  // The shared helper, so this page's call sites leave nothing behind:
+  // it binds node:test's module-level `after` to the test that is running.
+  const dir = temporaryDirectory('hyp-recommend-test-')
   const file = path.join(dir, 'recommendation-no-python3.md')
   await fs.writeFile(file, content)
   return { dir, file, content }
@@ -2191,6 +2194,25 @@ test('the new routes name the stale-server reading of a 404', async (t) => {
     const { ctx, err } = ctxWith()
     assert.equal(await runReportList([], ctx), 1)
     assert.match(err.join(''), /HTTP 404: no_such_org/)
+  }
+})
+
+// A server that answers 404 and names an error has the route: the error is
+// about the request (an unknown --org reaches the server unchecked), so the
+// stale-server reading must not shadow the one word a caller can act on.
+test('the new routes relay a 404 the server named instead of calling it stale', async (t) => {
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'no_such_org' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportList(['--recommendations', '--org', 'typpo'], ctx), 1)
+    assert.match(err.join(''), /^hyp report list: HTTP 404: no_such_org\n$/)
+  }
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'no_such_org', detail: 'typpo' } }))
+    const { file } = await tmpRecommendationFile()
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file, '--org', 'typpo'], ctx), 1)
+    assert.match(err.join(''), /^hyp report recommend: HTTP 404: no_such_org - typpo\n$/)
   }
 })
 
