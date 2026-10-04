@@ -247,9 +247,10 @@ test('reconcile retires every duplicate of one key but the first that matches', 
   const { dir, table } = await makeTable('duplicates')
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
   const seq = { from: 1 }
-  // Three stored rows claim target-p0 inside one row group. The first is
-  // compared against the snapshot and matches, which settles the key, so the
-  // other two are retired unread and nothing is written.
+  // Three stored rows claim target-p0 inside one row group. Candidacy is
+  // settled for the whole group before any comparison, so all three are
+  // read. The first matches and settles the key, so the other two are
+  // retired and nothing is written.
   await writeDataFile(table, [storedRow('target', 0), storedRow('target', 0), storedRow('target', 0, 'drifted')], seq)
 
   const result = await reconcileRowsInTable(table, COLUMNS, [storedRow('target', 0)], scopeFor('target'), allocator())

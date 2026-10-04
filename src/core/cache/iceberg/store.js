@@ -1078,8 +1078,11 @@ export async function reconcileRowsInTable(tablePath, columns, rows, scope, next
     // duplicates sit. A first-come claim would hand the key to whichever copy
     // the file walk met first, and that order is a race:
     // `findDataFileEntries` fills its map inside a `Promise.all` over
-    // manifests (#2346). `keep` ends candidacy, so duplicates past the equal
-    // copy are still retirements the scan settles without reading a payload.
+    // manifests (#2346). Candidacy is settled for a whole row group before
+    // any `keep` runs, so a duplicate sitting behind the equal copy in the
+    // SAME group is still read and compared. The `pending.delete` inside
+    // `keep` is what spares every later group and file, which settle that
+    // key's remaining duplicates as retirements without reading a payload.
     claim: (/** @type {string} */ key) => pending.has(key),
     // The unchanged-row test: a candidate equal to the snapshot's row keeps
     // its place and its ingest sequence, and the snapshot stops owing a write.
