@@ -955,11 +955,11 @@ function addedFilesSize(metadata) {
  * Locate one reconciliation scope's live rows in one data file, reading the
  * wide columns only where the snapshot comparison can still need them.
  *
- * Only the FIRST live in-scope row per snapshot key can survive a
- * reconcile, and which row that is follows from the scope columns and the
- * identity key alone: every other in-scope row is retired whatever its
- * payload holds, and an out-of-scope row is never touched. So the reads
- * stage:
+ * At most ONE live in-scope row per snapshot key survives a reconcile, the
+ * one equal to the snapshot's row, and CANDIDACY for that comparison follows
+ * from the scope columns and the identity key alone: a row whose key the
+ * snapshot no longer owes is retired whatever its payload holds, and an
+ * out-of-scope row is never touched. So the reads stage:
  *
  *  - the SCOPE pass projects the `where` columns plus the key, a handful of
  *    dictionary-encoded strings, over every row group, and settles scope and
@@ -1060,7 +1060,6 @@ export async function reconcileRowsInTable(tablePath, columns, rows, scope, next
   const deleted = await loadDeletedPositions(metadata, resolver, files)
   /** @type {{ file_path: string, pos: number }[]} */
   const deletes = []
-  const matched = new Set()
   const names = columns.map(column => column.name)
   const scopeEntries = /** @type {[string, string][]} */ (Object.entries(scope.where))
   // Both halves of the staged projection stay inside the dataset's own
@@ -1074,16 +1073,19 @@ export async function reconcileRowsInTable(tablePath, columns, rows, scope, next
     key: scope.key,
     scopeColumns,
     valueColumns: names.filter(name => !inScopePass.has(name)),
-    // Only the first live in-scope row for a key the snapshot still carries
-    // can survive, so claiming the key is what makes every later duplicate a
-    // retirement the scan settles without reading a payload.
-    claim: (/** @type {string} */ key) => {
-      if (!pending.has(key) || matched.has(key)) return false
-      matched.add(key)
-      return true
-    },
-    // The unchanged-row test: a claimed row equal to the snapshot's keeps its
-    // place and its ingest sequence, and the snapshot stops owing a write.
+    // Every live in-scope row for a key the snapshot STILL OWES is a
+    // candidate, so the copy equal to the snapshot survives wherever a key's
+    // duplicates sit. A first-come claim would hand the key to whichever copy
+    // the file walk met first, and that order is a race:
+    // `findDataFileEntries` fills its map inside a `Promise.all` over
+    // manifests (#2346). Candidacy is settled for a whole row group before
+    // any `keep` runs, so a duplicate sitting behind the equal copy in the
+    // SAME group is still read and compared. The `pending.delete` inside
+    // `keep` is what spares every later group and file, which settle that
+    // key's remaining duplicates as retirements without reading a payload.
+    claim: (/** @type {string} */ key) => pending.has(key),
+    // The unchanged-row test: a candidate equal to the snapshot's row keeps
+    // its place and its ingest sequence, and the snapshot stops owing a write.
     keep: (/** @type {string} */ key, /** @type {Record<string, unknown>} */ row) => {
       if (!isDeepStrictEqual(rowsToIcebergRecords(columns, [row])[0], pending.get(key))) return false
       pending.delete(key)

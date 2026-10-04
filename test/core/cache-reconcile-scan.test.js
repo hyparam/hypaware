@@ -25,7 +25,8 @@ import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
  * sequences) for every shape the staging could get wrong: one row group,
  * several row groups, several files, a file with nothing in scope, a row that
  * agrees on the scope columns but differs in a wide one, a row identical
- * everywhere, and two stored rows claiming one key.
+ * everywhere, two stored rows claiming one key, and one key's duplicates
+ * split across two data files.
  *
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -246,9 +247,10 @@ test('reconcile retires every duplicate of one key but the first that matches', 
   const { dir, table } = await makeTable('duplicates')
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
   const seq = { from: 1 }
-  // Three stored rows claim target-p0 inside one row group; only the first
-  // may be compared against the snapshot, and it matches, so the other two
-  // are retired and nothing is written.
+  // Three stored rows claim target-p0 inside one row group. Candidacy is
+  // settled for the whole group before any comparison, so all three are
+  // read. The first matches and settles the key, so the other two are
+  // retired and nothing is written.
   await writeDataFile(table, [storedRow('target', 0), storedRow('target', 0), storedRow('target', 0, 'drifted')], seq)
 
   const result = await reconcileRowsInTable(table, COLUMNS, [storedRow('target', 0)], scopeFor('target'), allocator())
@@ -258,17 +260,70 @@ test('reconcile retires every duplicate of one key but the first that matches', 
   ])
 })
 
-test('reconcile retires every duplicate of one key when the first has drifted', async (t) => {
+test('reconcile keeps the duplicate that matches when an earlier one has drifted', async (t) => {
   const { dir, table } = await makeTable('duplicates-drift')
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
   const seq = { from: 1 }
-  // The FIRST duplicate is the one that no longer matches. It claims the key,
-  // so the later identical twin never gets compared and both are retired.
+  // The FIRST duplicate is the one that no longer matches, so it is compared,
+  // rejected and retired, and the identical twin behind it is the row that
+  // survives with the sequence it was written under. Nothing is written.
   await writeDataFile(table, [storedRow('target', 0, 'drifted'), storedRow('target', 0)], seq)
 
   const result = await reconcileRowsInTable(table, COLUMNS, [storedRow('target', 0)], scopeFor('target'), allocator())
-  assert.deepEqual(result, { rowsWritten: 1, rowsDeleted: 2, rowCount: 1 })
-  assert.deepEqual((await sessionRows(table, 'target')).map((row) => [row.part, row.text, row.seq]), [['target-p0', 'text target-0', 1000]])
+  assert.deepEqual(result, { rowsWritten: 0, rowsDeleted: 1, rowCount: 1 })
+  assert.deepEqual((await sessionRows(table, 'target')).map((row) => [row.part, row.text, row.seq]), [['target-p0', 'text target-0', 2]])
+})
+
+// The acceptance for #2346: one key's duplicates in two data files. icebird's
+// `findDataFileEntries` fills its map inside a `Promise.all` over manifests,
+// so which copy the walk meets first is a race. Mirroring two keys forces the
+// adversarial order without reaching into icebird: whichever file the walk
+// reaches first carries one key's drifted copy beside the other key's equal
+// copy, so a first-come claim loses an equal row in EVERY order.
+test('reconcile keeps the matching copy of a key duplicated across data files', async (t) => {
+  const { dir, table } = await makeTable('duplicates-cross-file')
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const seq = { from: 1 }
+  await writeDataFile(table, [storedRow('target', 1, 'drifted'), storedRow('target', 2)], seq)
+  await writeDataFile(table, [storedRow('target', 1), storedRow('target', 2, 'drifted')], seq)
+
+  const result = await reconcileRowsInTable(table, COLUMNS, [storedRow('target', 1), storedRow('target', 2)], scopeFor('target'), allocator())
+  assert.deepEqual(result, { rowsWritten: 0, rowsDeleted: 2, rowCount: 2 })
+  assert.deepEqual((await sessionRows(table, 'target')).map((row) => [row.part, row.text, row.seq]), [
+    ['target-p1', 'text target-1', 3],
+    ['target-p2', 'text target-2', 2],
+  ])
+})
+
+// The same hazard in the shape #2346 reports it: one key with an equal copy in
+// one data file and a drifted copy in another, seeded both ways round and
+// repeated, because the outcome must not follow which manifest's read settles
+// first. Every run must agree, counters included.
+test('reconcile settles a cross-file duplicate identically run to run', async (t) => {
+  const { dir } = await makeTable('duplicates-cross-file-runs')
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  /** @type {string[]} */
+  const outcomes = []
+  for (let run = 0; run < 8; run++) {
+    for (const driftFirst of [false, true]) {
+      const table = path.join(dir, `run${run}-${driftFirst ? 'drift' : 'equal'}`)
+      const copies = [storedRow('target', 0), storedRow('target', 0, 'drifted')]
+      if (driftFirst) copies.reverse()
+      const seq = { from: 1 }
+      await writeDataFile(table, [copies[0]], seq)
+      await writeDataFile(table, [copies[1]], seq)
+
+      const result = await reconcileRowsInTable(table, COLUMNS, [storedRow('target', 0)], scopeFor('target'), allocator())
+      const seqs = (await sessionRows(table, 'target')).map((row) => row.seq).join(',')
+      outcomes.push(`${driftFirst ? 'drift-first' : 'equal-first'} written=${result.rowsWritten} deleted=${result.rowsDeleted} seq=${seqs}`)
+    }
+  }
+  // The equal copy survives carrying the sequence it was written under,
+  // whichever of the two files holds it, and no run writes a replacement.
+  assert.deepEqual([...new Set(outcomes)].sort(), [
+    'drift-first written=0 deleted=1 seq=2',
+    'equal-first written=0 deleted=1 seq=1',
+  ])
 })
 
 /** @param {string} table */
