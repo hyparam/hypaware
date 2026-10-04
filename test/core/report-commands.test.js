@@ -20,7 +20,9 @@ import {
   runReportGet,
   runReportGenerate,
   runReportList,
+  runReportMark,
   runReportPublish,
+  runReportRecommend,
 } from '../../src/core/cli/report_commands.js'
 import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
@@ -433,16 +435,17 @@ test('list forwards a dash-leading filter value instead of dropping it', async (
   assert.equal(calls[0].url.searchParams.get('limit'), '-5')
 })
 
-test('list prints each report\'s recommendations, by id and page, under its line', async (t) => {
+// @ref LLP 0461#status-is-visible [tests]: every listed recommendation carries its state, `open` when the record has no status
+test('list prints each report\'s recommendations, by id, state and page, under its line', async (t) => {
   stubServer(t, () => ({
     status: 200,
     json: { reports: [
       {
         id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z',
         recommendations: [
-          // A server that reads the page's opening at publish (server LLP 0416).
-          { id: 'hyprec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' },
-          // A report that predates that, or a page with no heading: id and page alone.
+          // A server that reads the page's opening at publish (server LLP 0416), marked applied.
+          { id: 'hyprec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.', status: { state: 'applied', by: 'email:a@b.c', at: '2026-07-21T10:00:00.000Z', via: 'cli' } },
+          // A report that predates that, or a page with no heading: id and page alone; never marked, so open.
           { id: 'hyprec-fedcba9876543210', page: 'recommendation-tenant-check' },
         ],
       },
@@ -455,11 +458,65 @@ test('list prints each report\'s recommendations, by id and page, under its line
   const lines = out.join('').split('\n').filter(Boolean)
   assert.deepEqual(lines, [
     '  2026-07-20T10:00:00.000Z\tusage-review/2026-W29\trpt-b\t1200 bytes\tWeekly',
-    '      hyprec-0123456789abcdef\trecommendation-batch-the-retries\tBatch the retries',
+    '      hyprec-0123456789abcdef\t[applied]\trecommendation-batch-the-retries\tBatch the retries',
     '          Every retry is its own call. One queue fixes it.',
-    '      hyprec-fedcba9876543210\trecommendation-tenant-check',
+    '      hyprec-fedcba9876543210\t[open]\trecommendation-tenant-check',
     '  2026-07-13T10:00:00.000Z\tusage-review/2026-W28\trpt-a\t900 bytes',
   ])
+})
+
+/* ---------- list --recommendations / --status ---------- */
+
+/** The flat listing the server's `_recommendations` route answers with. */
+const FLAT_ROWS = [
+  {
+    id: 'hyprec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.',
+    status: { state: 'in_progress', by: 'email:a@b.c', at: '2026-07-21T10:00:00.000Z', via: 'dashboard' },
+    standalone: false,
+    report: { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', publishedAt: '2026-07-20T10:00:00.000Z' },
+  },
+  {
+    id: 'hyprec-fedcba9876543210', page: 'recommendation-no-python3', title: 'No python3 on the runner',
+    standalone: true,
+    report: { id: 'rpt-s', kind: 'recommendation', period: '2026-10-03', title: 'No python3 on the runner', publishedAt: '2026-10-03T09:00:00.000Z' },
+  },
+]
+
+test('list --recommendations lists recommendations flat from the _recommendations route, standalone rows saying so', async (t) => {
+  const { calls } = stubServer(t, (method, url) => {
+    assert.equal(url.pathname, '/v1/reports/_recommendations')
+    return { status: 200, json: { recommendations: FLAT_ROWS } }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--recommendations', '--kind', 'usage-review', '--limit', '5'], ctx), 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url.searchParams.get('kind'), 'usage-review')
+  assert.equal(calls[0].url.searchParams.get('limit'), '5')
+  assert.equal(calls[0].url.searchParams.has('status'), false)
+  assert.deepEqual(out.join('').split('\n').filter(Boolean), [
+    '  hyprec-0123456789abcdef\t[in_progress]\t2026-07-20T10:00:00.000Z\tusage-review/2026-W29/rpt-b\tBatch the retries',
+    '      Every retry is its own call. One queue fixes it.',
+    '  hyprec-fedcba9876543210\t[open]\t2026-10-03T09:00:00.000Z\tstandalone\tNo python3 on the runner',
+  ])
+})
+
+test('list --status filters on the server, implies --recommendations, and refuses a state the server has not got', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendations: [] } }))
+  const { ctx, out, err } = ctxWith()
+  assert.equal(await runReportList(['--status', 'open,in_progress'], ctx), 0)
+  assert.equal(calls[0].url.pathname, '/v1/reports/_recommendations')
+  assert.equal(calls[0].url.searchParams.get('status'), 'open,in_progress')
+  assert.match(out.join(''), /no recommendations match/)
+  assert.equal(await runReportList(['--status', 'done'], ctx), 2)
+  assert.match(err.join(''), /--status expects open\|in_progress\|applied\|dismissed \(got done\)/)
+  assert.equal(calls.length, 1, 'the refused state never reaches the server')
+})
+
+test('list --recommendations --json prints the rows as the server sent them', async (t) => {
+  stubServer(t, () => ({ status: 200, json: { recommendations: FLAT_ROWS } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--recommendations', '--json'], ctx), 0)
+  assert.deepEqual(JSON.parse(out.join('')), FLAT_ROWS)
 })
 
 test('list escapes server text for the terminal; --json stays byte-exact (LLP 0225)', async (t) => {
@@ -1017,20 +1074,23 @@ test('get <rec-id> prints the page with the record\'s evidence and basis under i
   assert.match(tail, /Run by subagent-2:\n\n```sql\nSELECT session_id FROM ai_gateway_messages LIMIT 5\n```\n/)
 })
 
-test('get <rec-id> prints the bare page when the record carries no citations, and saves with --output', async (t) => {
+// @ref LLP 0461#status-is-visible [tests]: a record with no citations and no status still ends in a Status section reading open
+test('get <rec-id> prints the page with only the Status tail when the record carries no citations, and saves with --output', async (t) => {
   stubFixServer(t)
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-get-'))
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const expected = `${PAGE}\n---\n\n## Status\n\nState: open (never marked)\n`
   {
     const { ctx, out } = ctxWith()
     assert.equal(await runReportGet([REC], ctx), 0)
-    assert.equal(out.join(''), PAGE)
+    assert.equal(out.join(''), expected)
+    assert.doesNotMatch(out.join(''), /Citations from the report record/)
   }
   {
     const { ctx, err } = ctxWith()
     const output = path.join(dir, 'rec.md')
     assert.equal(await runReportGet([REC, '--output', output], ctx), 0)
-    assert.equal(await fs.readFile(output, 'utf8'), PAGE)
+    assert.equal(await fs.readFile(output, 'utf8'), expected)
     assert.match(err.join(''), /saved \d+ bytes to /)
   }
 })
@@ -1128,7 +1188,7 @@ test('get and fix still admit the pre-rename rec- form and pass it to the server
   {
     const { ctx, out } = ctxWith()
     assert.equal(await runReportGet([OLD], ctx), 0)
-    assert.equal(out.join(''), PAGE)
+    assert.equal(out.join(''), `${PAGE}\n---\n\n## Status\n\nState: open (never marked)\n`)
     assert.equal(calls[0].url.pathname, `/v1/reports/_recommendations/${OLD}`)
   }
   {
@@ -1779,4 +1839,288 @@ test('fix: an answer the picker never offered is reported once, not re-asked for
   assert.equal(prompts.length, 2, 'the off-list answer is not re-asked')
   assert.equal(launches.length, 0)
   assert.match(err.join(''), /is not one of the recommendations offered/)
+})
+
+/* ---------- status: the tail of `get`, and `fix`'s closing instruction ---------- */
+
+/** A status event as the server records it. */
+const APPLIED = { state: 'applied', reason: 'Landed in hyparam/hypaware#912', links: ['https://github.com/hyparam/hypaware/pull/912'], by: 'email:a@b.c', at: '2026-10-03T18:21:07.000Z', via: 'cli' }
+const STARTED = { state: 'in_progress', by: 'email:a@b.c', at: '2026-10-01T09:00:00.000Z', via: 'dashboard' }
+
+/**
+ * A reports plane whose resolve route joins a status and history onto the
+ * recommendation, as a server with the status ledger does.
+ *
+ * @param {TestContext} t
+ * @param {{ md?: boolean }} [opts]
+ */
+function stubStatusServer(t, { md = true } = {}) {
+  return stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === `/v1/reports/_recommendations/${REC}`) {
+      return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', ...CITED, status: APPLIED, history: [STARTED, APPLIED], standalone: false }, report: REPORT } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') {
+      return md ? { status: 200, body: new TextEncoder().encode(PAGE) } : { status: 404, json: { error: 'not_found' } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.html') {
+      return { status: 200, body: new TextEncoder().encode('<h1>Batch the retries</h1>') }
+    }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+}
+
+// @ref LLP 0461#status-is-visible [tests]: the Status section follows the citations, current event first, then the history oldest first
+test('get <rec-id> ends with a Status section: the current event, then the history oldest first', async (t) => {
+  stubStatusServer(t)
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.ok(printed.startsWith(PAGE))
+  const citations = printed.indexOf('## Citations from the report record')
+  const status = printed.indexOf('## Status')
+  assert.ok(citations > 0 && status > citations, 'citations first, status after them')
+  assert.equal(printed.slice(status), [
+    '## Status',
+    '',
+    'State: applied',
+    'Reason: Landed in hyparam/hypaware#912',
+    'Link: https://github.com/hyparam/hypaware/pull/912',
+    'By: email:a@b.c (via cli)',
+    'At: 2026-10-03T18:21:07.000Z',
+    '',
+    'History, oldest first:',
+    '',
+    '- 2026-10-01T09:00:00.000Z  in_progress  by email:a@b.c  via dashboard',
+    '- 2026-10-03T18:21:07.000Z  applied  by email:a@b.c  via cli: Landed in hyparam/hypaware#912 https://github.com/hyparam/hypaware/pull/912',
+    '',
+  ].join('\n'))
+})
+
+test('get <rec-id> on an HTML-only page keeps the Status inside the one escaped <pre>', async (t) => {
+  stubStatusServer(t, { md: false })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.ok(printed.startsWith('<h1>Batch the retries</h1>\n<pre>'))
+  assert.match(printed, /## Status\n\nState: applied\n/)
+  assert.match(printed, /<\/pre>\n$/)
+  assert.doesNotMatch(printed.slice(printed.indexOf('<pre>') + 5), /<(?!\/pre>)/, 'nothing inside the pre opens a tag')
+})
+
+test('a reason with line breaks stays on its one Status line', async (t) => {
+  stubServer(t, (method, url) => {
+    if (url.pathname === `/v1/reports/_recommendations/${REC}`) {
+      return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', status: { ...APPLIED, reason: 'two\nlines\r\n- 2026 forged  event' }, history: [] }, report: REPORT } }
+    }
+    return { status: 200, body: new TextEncoder().encode(PAGE) }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  assert.match(out.join(''), /\nReason: two lines - 2026 forged event\n/)
+})
+
+// @ref LLP 0461#fix-asks-for-the-mark [tests]: the launched client is told how to record the outcome, against the same target
+test('fix ends its prompt with the mark instruction, carrying the run\'s target flags', async (t) => {
+  stubFixServer(t)
+  {
+    const { deps, launches } = fixDeps()
+    assert.equal(await runReportFix([REC], ctxWith().ctx, deps), 0)
+    assert.ok(launches[0].prompt.endsWith(
+      ` When the change is landed, run \`hyp report mark ${REC} applied --reason "<one line>" --link <PR url>\`; ` +
+      `if the recommendation should not be done, run \`hyp report mark ${REC} dismissed --reason "<why>"\`.`
+    ), launches[0].prompt)
+  }
+  {
+    const { deps, launches } = fixDeps()
+    assert.equal(await runReportFix([REC, '--org', 'acme corp', '--remote', 'prod'], ctxWith().ctx, deps), 0)
+    assert.match(launches[0].prompt, new RegExp(`run \`hyp report mark ${REC} applied --reason "<one line>" --link <PR url> --org 'acme corp' --remote prod\`;`))
+    assert.match(launches[0].prompt, new RegExp(`run \`hyp report mark ${REC} dismissed --reason "<why>" --org 'acme corp' --remote prod\`\\.$`))
+  }
+})
+
+/* ---------- mark ---------- */
+
+// @ref LLP 0461#mark [tests]: one PUT on the id with the state, reason, links and `via: cli`; the receipt is the server's record
+test('mark PUTs the status event with via cli and prints the new state', async (t) => {
+  const { calls } = stubServer(t, (method, url) => {
+    assert.equal(method, 'PUT')
+    assert.equal(url.pathname, `/v1/reports/_recommendations/${REC}/status`)
+    return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', title: 'Batch the retries', status: APPLIED, history: [STARTED, APPLIED], report: REPORT } } }
+  })
+  const { ctx, out } = ctxWith()
+  const code = await runReportMark([REC, 'applied', '--reason', 'Landed in hyparam/hypaware#912', '--link', 'https://github.com/hyparam/hypaware/pull/912', '--org', 'acme'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].headers['content-type'], 'application/json')
+  assert.equal(calls[0].headers.authorization, 'Bearer tok')
+  assert.equal(calls[0].url.searchParams.get('org'), 'acme')
+  assert.deepEqual(JSON.parse(String(calls[0].body)), {
+    state: 'applied',
+    reason: 'Landed in hyparam/hypaware#912',
+    links: ['https://github.com/hyparam/hypaware/pull/912'],
+    via: 'cli',
+  })
+  assert.equal(out.join(''), `marked ${REC} [applied]\tBatch the retries\n  reason: Landed in hyparam/hypaware#912\n  link: https://github.com/hyparam/hypaware/pull/912\n`)
+})
+
+test('mark sends only the state when there is no reason or link; --link repeats', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendation: { id: REC, status: { state: 'in_progress' } } } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportMark([REC, 'in_progress'], ctx), 0)
+  assert.deepEqual(JSON.parse(String(calls[0].body)), { state: 'in_progress', via: 'cli' })
+  assert.equal(out.join(''), `marked ${REC} [in_progress]\n`)
+  assert.equal(await runReportMark([REC, 'open', '--link', 'https://a.example/1', '--link', 'http://b.example/2'], ctx), 0)
+  assert.deepEqual(JSON.parse(String(calls[1].body)).links, ['https://a.example/1', 'http://b.example/2'])
+})
+
+// @ref LLP 0461#reason-for-dismissed [tests]: a dismissal without a reason never reaches the server
+test('mark refuses dismissed without --reason, a blank one included, before any request', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: {} }))
+  for (const argv of [[REC, 'dismissed'], [REC, 'dismissed', '--reason', '  ']]) {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark(argv, ctx), 2)
+    assert.match(err.join(''), /dismissed needs --reason "<why>"/)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('mark refuses a state the server has not got, a malformed id, and a link that is not an http(s) URL', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: {} }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportMark([REC, 'done'], ctx), 2)
+  assert.match(err.join(''), /state expects open\|in_progress\|applied\|dismissed \(got done\)/)
+  assert.equal(await runReportMark(['rpt-b', 'applied'], ctx), 2)
+  assert.match(err.join(''), /'rpt-b' is not a recommendation id/)
+  assert.equal(await runReportMark([REC, 'applied', '--link', 'github.com/x/y/pull/1'], ctx), 2)
+  assert.match(err.join(''), /--link takes an absolute http\(s\) URL, got 'github.com\/x\/y\/pull\/1'/)
+  assert.equal(await runReportMark([REC], ctx), 2)
+  assert.match(err.join(''), /usage: hyp report mark <id> <open\|in_progress\|applied\|dismissed>/)
+  assert.equal(calls.length, 0)
+})
+
+test('mark takes a legacy rec- id and prints the hyprec- id the server answers with', async (t) => {
+  const legacy = 'rec-0123456789abcdef'
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendation: { id: REC, status: { state: 'applied' } } } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportMark([legacy, 'applied'], ctx), 0)
+  assert.equal(calls[0].url.pathname, `/v1/reports/_recommendations/${legacy}/status`)
+  assert.equal(out.join(''), `marked ${REC} [applied]\n`)
+})
+
+test('mark names both readings of a 404 and relays the server\'s validation errors', async (t) => {
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'unknown_recommendation' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark([REC, 'applied'], ctx), 1)
+    assert.match(err.join(''), new RegExp(`no recommendation '${REC}' in this org - list them with 'hyp report list'; if it is on that listing, 'prod' cannot record recommendation status - is the server up to date\\?`))
+  }
+  {
+    stubServer(t, () => ({ status: 400, json: { error: 'invalid_link', detail: 'links[0] is not absolute' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark([REC, 'applied', '--link', 'https://ok.example/'], ctx), 1)
+    assert.match(err.join(''), /HTTP 400: invalid_link - links\[0\] is not absolute/)
+  }
+})
+
+test('mark is a write: a surviving 401 names the missing publisher role', async (t) => {
+  stubServer(t, () => ({ status: 401, json: { error: 'unauthorized' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportMark([REC, 'applied'], ctx), 1)
+  assert.match(err.join(''), /HTTP 401/)
+})
+
+/* ---------- recommend ---------- */
+
+/** @param {string} [content] */
+async function tmpRecommendationFile(content = '# No python3 on the runner\n\n**Every job installs it. Pin it in the image.**\n') {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-recommend-test-'))
+  const file = path.join(dir, 'recommendation-no-python3.md')
+  await fs.writeFile(file, content)
+  return { dir, file, content }
+}
+
+// @ref LLP 0461#standalone [tests]: one Markdown page POSTs to the _recommendations route with the publish headers, and the receipt is the id and its read
+test('recommend POSTs the page as text/markdown with the content hash and prints the id and its read', async (t) => {
+  const { file, content } = await tmpRecommendationFile()
+  const { calls } = stubServer(t, (method, url) => {
+    assert.equal(method, 'POST')
+    assert.equal(url.pathname, '/v1/reports/_recommendations')
+    return {
+      status: 201,
+      json: {
+        recommendation: { id: REC, page: 'recommendation-no-python3', title: 'No python3 on the runner', standalone: true },
+        report: { id: 'rpt-s', kind: 'recommendation', period: '2026-10-03', files: 2, bytes: content.length },
+      },
+    }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', 'No python3', '--org', 'acme'], ctx), 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].headers['content-type'], 'text/markdown')
+  assert.equal(calls[0].headers['x-report-content-hash'], crypto.createHash('sha256').update(content).digest('hex'))
+  assert.equal(calls[0].url.searchParams.get('title'), 'No python3')
+  assert.equal(calls[0].url.searchParams.get('org'), 'acme')
+  assert.equal(String(calls[0].body), content)
+  assert.equal(out.join(''), `published ${REC} (recommendation/2026-10-03/rpt-s)\n  view: hyp report get ${REC} --org acme\n`)
+})
+
+test('recommend says already published on a 200 and sends no title param when none was given', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  const { calls } = stubServer(t, () => ({
+    status: 200,
+    json: { recommendation: { id: REC, page: 'recommendation-no-python3' }, report: { id: 'rpt-s', kind: 'recommendation', period: '2026-10-03' } },
+  }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportRecommend([file], ctx), 0)
+  assert.equal(calls[0].url.searchParams.has('title'), false)
+  assert.equal(out.join(''), `already published as ${REC} (recommendation/2026-10-03/rpt-s, same content) - nothing new uploaded\n  view: hyp report get ${REC}\n`)
+})
+
+test('recommend refuses a non-Markdown file, a missing file, and a page with no heading and no --title before any request', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
+  const { dir, file } = await tmpRecommendationFile('**A thesis with no title.**\n')
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([path.join(dir, 'page.html')], ctx), 2)
+    assert.match(err.join(''), /must be Markdown \(\.md or \.markdown\)/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([path.join(dir, 'missing.md')], ctx), 2)
+    assert.match(err.join(''), /no such file/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 2)
+    assert.match(err.join(''), /has no '# ' heading to take the title from - add one or pass --title <title>/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([], ctx), 2)
+    assert.match(err.join(''), /usage: hyp report recommend <file\.md>/)
+  }
+  assert.equal(calls.length, 0)
+  // --title stands in for the heading.
+  const { ctx } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', 'Given'], ctx), 0)
+  assert.equal(calls.length, 1)
+})
+
+test('recommend relays the server\'s refusal and keeps an id that is not one off the command line', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  {
+    stubServer(t, () => ({ status: 507, json: { error: 'report_quota_exceeded' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 1)
+    assert.match(err.join(''), /report quota is full \(HTTP 507\)/)
+  }
+  {
+    stubServer(t, () => ({ status: 201, json: { recommendation: { id: 'x\u001b[31m; rm -rf /' }, report: {} } }))
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 0)
+    const printed = out.join('')
+    assert.doesNotMatch(printed, /\u001b/)
+    assert.match(printed, /view: hyp report get <id>\n$/)
+  }
 })

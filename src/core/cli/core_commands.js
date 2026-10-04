@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportPublish } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportMark, runReportPublish, runReportRecommend } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -777,11 +777,12 @@ function buildCoreCommands(registry) {
         "'generate' starts a recorded AI client with the report skill in the\n" +
         "current directory. Optional instructions set its period and focus.\n\n" +
         'The rest talk to the remote. Reports are hosted there (there is no\n' +
-        'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
-        '<target> and default to the default remote target, the same resolution\n' +
-        'as bare --remote on queries. Reads use your login session; publish and\n' +
-        'delete need the publisher role (or an operator-minted publish token\n' +
-        "stored via 'hyp remote login <target> --token-file <path>').",
+        'local reports plane), so publish/recommend/list/get/fix/mark/delete each\n' +
+        'take --remote <target> and default to the default remote target, the same\n' +
+        'resolution as bare --remote on queries. Reads use your login session;\n' +
+        'publish, recommend, mark and delete need the publisher role (or an\n' +
+        "operator-minted publish token stored via 'hyp remote login <target>\n" +
+        "--token-file <path>').",
     }),
     {
       name: 'report generate',
@@ -823,9 +824,33 @@ function buildCoreCommands(registry) {
       run: runReportPublish,
     },
     {
+      name: 'report recommend',
+      summary: 'Publish one recommendation page on its own, with no report around it',
+      usage: coreUsage('report recommend'),
+      help: [
+        'Upload a single recommendation page (.md/.markdown), written like a',
+        "recommendation-<slug>.md page inside a report: the first '# ' heading is",
+        'the title (--title overrides it) and the bold paragraph under it the',
+        "thesis. The remote wraps it in a report of kind 'recommendation' whose",
+        'period is the publish date, mints its hyprec- id, and renders it; the',
+        "receipt prints the id and the 'hyp report get <id>' that reads it.",
+        'Repeat uploads of the same content answer with the existing id. Needs',
+        'the publisher role, like publish.',
+      ].join('\n'),
+      run: runReportRecommend,
+    },
+    {
       name: 'report list',
-      summary: "List the org's published reports (newest first)",
+      summary: "List the org's published reports (newest first), with their recommendations",
       usage: coreUsage('report list'),
+      help: [
+        'Under each report, one line per recommendation: id, [state], page, and',
+        'title. The state is open, in_progress, applied, or dismissed; a',
+        "recommendation nobody has marked is open. --recommendations lists the",
+        'recommendations themselves, flat across reports (a standalone one says',
+        "'standalone' where its report would be); --status <state,...> filters",
+        "them and implies --recommendations. --json prints the remote's records whole.",
+      ].join('\n'),
       run: runReportList,
     },
     {
@@ -859,6 +884,21 @@ function buildCoreCommands(registry) {
         'asking. The client takes over the terminal; nothing is pre-authorised.',
       ].join('\n'),
       run: runReportFix,
+    },
+    {
+      name: 'report mark',
+      summary: 'Record what became of a recommendation: open, in_progress, applied, or dismissed',
+      usage: coreUsage('report mark'),
+      help: [
+        "The id is a recommendation's, as 'hyp report list' prints. The state is",
+        "the remote's vocabulary; any state may follow any other, so marking one",
+        'open again is the same verb. --reason is required for dismissed and',
+        'is what the next reader sees in place of the change; --link (repeatable)',
+        'takes absolute http(s) URLs, the pull request that landed it most of all.',
+        "'hyp report get <id>' shows the current state and the history. Needs the",
+        'publisher role, like publish.',
+      ].join('\n'),
+      run: runReportMark,
     },
     {
       name: 'report delete',
