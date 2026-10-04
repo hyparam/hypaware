@@ -6,10 +6,6 @@ export const MAX_RECORDS = 100
 export const HISTOGRAM_BOUNDS = Object.freeze([
   1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 30000
 ])
-export const PRODUCT_DATASETS = Object.freeze([
-  'product_events',
-  'product_metrics'
-])
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
