@@ -487,6 +487,4 @@ export interface FixRecommendation {
   basis: FixBasisQuery[]
   status?: RecommendationStatus
   history: RecommendationStatus[]
-  /** True when the recommendation was published on its own (`hyp report recommend`). */
-  standalone: boolean
 }

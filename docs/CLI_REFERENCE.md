@@ -448,7 +448,8 @@ is refused before upload. The remote wraps the page in a report of kind
 the `hyprec-` id, and renders it; the report appears in `hyp report list` like
 any other and `hyp report get recommendation <period> <id>` serves the page.
 Repeat uploads of the same content answer with the existing id (`already
-published`). Requires the publisher role, like `publish`.
+published`). A remote that predates the standalone route returns `1` and says
+so. Requires the publisher role, like `publish`.
 
 ```sh
 hyp report recommend ./recommendation-no-python3.md
@@ -489,7 +490,9 @@ state, the parent report's publish time, the parent report as
 `kind/period/id` (or `standalone` for one published with `hyp report
 recommend`), and the title, with the thesis below. `--status <state,...>`
 filters by state and implies `--recommendations`; an unknown state is refused
-before any request. `--kind`, `--period`, `--limit`, and `--before` filter on
+before any request, and an empty value (an unset shell variable) still selects
+the flat form rather than falling back to the report listing. A remote that
+predates the recommendation index returns `1` and says so. `--kind`, `--period`, `--limit`, and `--before` filter on
 the parent report in either form. With `--json`, the flat form prints the
 remote's recommendation rows whole.
 
@@ -612,7 +615,8 @@ follow any other, so reopening is the same verb. `--reason` (one line, up to
 dismissal without one is refused with exit `2` before any request. `--link`
 is repeatable and takes absolute `http(s)` URLs, the pull request that landed
 the change most of all (up to 8; a value with a literal comma is split on it,
-so percent-encode one). The event is appended on the remote with `via: cli`;
+so percent-encode one). An empty `--link` is refused with exit `2` rather than
+recorded as no link. The event is appended on the remote with `via: cli`;
 nothing is kept locally. The receipt is the new state line with the reason
 and links as recorded. An unknown id, or a remote that predates the status
 route, returns `1` and names both readings. Requires the publisher role, like

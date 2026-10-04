@@ -365,7 +365,10 @@ export async function runReportRecommend(argv, ctx) {
     ctx.stderr.write(`hyp report recommend: no such file: ${esc(source)}\n`)
     return 2
   }
-  const title = /** @type {string | undefined} */ (gate.params.title)
+  // Emptiness, not presence, as `publish` reads the same parameter: `--title ''`
+  // names no title, so it must neither satisfy the heading check below nor travel
+  // as an empty `title` the server refuses after the upload.
+  const title = /** @type {string | undefined} */ (gate.params.title) || undefined
   // The slug is derived from the title, so a page with no `# ` heading and no
   // --title is refused server-side after the upload; catch it here first.
   // @ref LLP 0155#fail-fast [implements]: the server stays authoritative on the page rules; this rejects the one certain miss
@@ -400,6 +403,12 @@ export async function runReportRecommend(argv, ctx) {
     return outcome.exitCode
   }
   const { response } = outcome
+  if (response.status === 404) {
+    // The route is new, so a server that predates it answers 404 with nothing
+    // `describeErrorResponse` can name. Say which reading it is, as `mark` does.
+    ctx.stderr.write(`hyp report recommend: '${esc(resolved.target)}' cannot publish a standalone recommendation - is the server up to date? publish the page inside a report with 'hyp report publish' meanwhile\n`)
+    return 1
+  }
   if (response.status !== 200 && response.status !== 201) {
     ctx.stderr.write(`hyp report recommend: ${await describeErrorResponse(response)}\n`)
     return 1
@@ -443,7 +452,11 @@ export async function runReportList(argv, ctx) {
     return 2
   }
   const status = Array.isArray(gate.params.status) ? gate.params.status.map(String) : []
-  const flat = gate.params.recommendations === true || status.length > 0
+  // Presence of `--status`, not the length of what survived the codec's comma
+  // split: the array coercion drops empty parts, so `--status ''` (an unset
+  // shell variable) parses to `[]`, and reading the length would quietly list
+  // reports instead of the flat form the flag asks for.
+  const flat = gate.params.recommendations === true || Array.isArray(gate.params.status)
   const url = new URL(flat ? `${resolved.endpoint}/_recommendations` : resolved.endpoint)
   // Same reason `--json` below reads the gate: `valueFlag()` drops a value
   // whose first character is `-`, so `--limit -5` used to list with the
@@ -463,6 +476,12 @@ export async function runReportList(argv, ctx) {
     return outcome.exitCode
   }
   const { response } = outcome
+  if (flat && response.status === 404) {
+    // Only the flat form asks for a route an older server may not have, and it
+    // answers 404 with nothing `describeErrorResponse` can name.
+    ctx.stderr.write(`hyp report list: '${esc(resolved.target)}' cannot list recommendations on their own - is the server up to date? 'hyp report list' with no --recommendations/--status lists them under their reports\n`)
+    return 1
+  }
   if (response.status !== 200) {
     ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response)}\n`)
     return 1
@@ -486,7 +505,7 @@ export async function runReportList(argv, ctx) {
       // same page; the slot says what it is instead.
       const where = c.standalone === true || r?.kind === 'recommendation'
         ? 'standalone'
-        : `${esc(r?.kind)}/${esc(r?.period)}/${esc(r?.id)}`
+        : `${esc(r?.kind ?? '?')}/${esc(r?.period ?? '?')}/${esc(r?.id ?? '?')}`
       const titleCell = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
       ctx.stdout.write(`  ${esc(c.id)}\t[${esc(recommendationState(c))}]\t${esc(r?.publishedAt ?? '')}\t${where}${titleCell}\n`)
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`      ${esc(c.summary)}\n`)
@@ -1160,7 +1179,6 @@ function fixRecommendation(id, c) {
     basis,
     ...(status ? { status } : {}),
     history,
-    standalone: c?.standalone === true,
   }
 }
 
@@ -1349,6 +1367,14 @@ export async function runReportMark(argv, ctx) {
     return 2
   }
   const links = Array.isArray(gate.params.link) ? gate.params.link.map(String) : []
+  // The codec splits an array flag on commas and drops the empty parts, so
+  // `--link ''` (an unset shell variable) reaches here as no link at all. The
+  // link is the one field a later reader follows to the diff, so a run that
+  // asked for one and carries none is refused rather than recorded without it.
+  if (Array.isArray(gate.params.link) && links.length === 0) {
+    ctx.stderr.write('hyp report mark: --link takes an absolute http(s) URL, got an empty value\n')
+    return 2
+  }
   for (const link of links) {
     if (!isHttpUrl(link)) {
       ctx.stderr.write(`hyp report mark: --link takes an absolute http(s) URL, got '${link}'\n`)
@@ -1377,7 +1403,7 @@ export async function runReportMark(argv, ctx) {
     ctx.stderr.write(`hyp report mark: no recommendation '${id}' in this org - list them with 'hyp report list'; if it is on that listing, '${resolved.target}' cannot record recommendation status - is the server up to date?\n`)
     return 1
   }
-  if (response.status !== 200) {
+  if (response.status !== 200 && response.status !== 201) {
     ctx.stderr.write(`hyp report mark: ${await describeErrorResponse(response)}\n`)
     return 1
   }

@@ -2124,3 +2124,87 @@ test('recommend relays the server\'s refusal and keeps an id that is not one off
     assert.match(printed, /view: hyp report get <id>\n$/)
   }
 })
+
+/* ---------- the flags' empty forms, and an older server ---------- */
+
+// An unset shell variable arrives as an empty argument, and the codec's array
+// coercion splits on commas and drops the empty parts, so `--status ''` and
+// `--link ''` reach the command carrying nothing. Neither may read as "the
+// flag was not given": one would list a different thing, the other would
+// record a mark without the link the caller asked to attach.
+test('list --status with an empty value still lists the flat form, unfiltered', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendations: FLAT_ROWS } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--status', ''], ctx), 0)
+  assert.equal(calls[0].url.pathname, '/v1/reports/_recommendations')
+  assert.equal(calls[0].url.searchParams.has('status'), false)
+  assert.match(out.join(''), /hyprec-0123456789abcdef\t\[in_progress\]/)
+})
+
+test('mark refuses a --link that carries no link instead of recording the mark without it', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: {} }))
+  for (const argv of [[REC, 'applied', '--link', ''], [REC, 'applied', '--link', ',']]) {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark(argv, ctx), 2)
+    assert.match(err.join(''), /--link takes an absolute http\(s\) URL, got an empty value/)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('recommend with an empty --title still refuses a page with no heading', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
+  const { file } = await tmpRecommendationFile('**A thesis with no title.**\n')
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', ''], ctx), 2)
+  assert.match(err.join(''), /has no '# ' heading to take the title from/)
+  assert.equal(calls.length, 0)
+})
+
+test('recommend sends no title param for an empty --title on a page that has a heading', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { recommendation: { id: REC }, report: {} } }))
+  const { ctx } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', ''], ctx), 0)
+  assert.equal(calls[0].url.searchParams.has('title'), false)
+})
+
+// `mark` already named both readings of a 404; the two other new routes
+// answered a bare `HTTP 404`, which names neither.
+test('the new routes name the stale-server reading of a 404', async (t) => {
+  {
+    stubServer(t, () => ({ status: 404 }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportList(['--recommendations'], ctx), 1)
+    assert.match(err.join(''), /'prod' cannot list recommendations on their own - is the server up to date\?/)
+  }
+  {
+    stubServer(t, () => ({ status: 404 }))
+    const { file } = await tmpRecommendationFile()
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 1)
+    assert.match(err.join(''), /'prod' cannot publish a standalone recommendation - is the server up to date\?/)
+  }
+  // A plain `list` asks for a route every server has, so its 404 keeps the
+  // generic relay rather than claiming the server is out of date.
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'no_such_org' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportList([], ctx), 1)
+    assert.match(err.join(''), /HTTP 404: no_such_org/)
+  }
+})
+
+test('mark takes a 201 on the first status event as the success it is', async (t) => {
+  stubServer(t, () => ({ status: 201, json: { recommendation: { id: REC, status: { state: 'in_progress' } } } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportMark([REC, 'in_progress'], ctx), 0)
+  assert.equal(out.join(''), `marked ${REC} [in_progress]\n`)
+})
+
+test('a flat row the server sent without its report join reads as unknown, not undefined', async (t) => {
+  stubServer(t, () => ({ status: 200, json: { recommendations: [{ id: REC, title: 'Orphan' }] } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--recommendations'], ctx), 0)
+  assert.equal(out.join(''), `  ${REC}\t[open]\t\t?/?/?\tOrphan\n`)
+  assert.doesNotMatch(out.join(''), /undefined/)
+})
