@@ -103,7 +103,7 @@ export class IdentityClient {
         // A login-seeded identity re-enrolls with a fresh login, not a join
         // token (LLP 0061 D3): point the operator at the seam that minted it.
         const remedy = persisted.origin === 'login'
-          ? 'Re-run `hyp remote login` against the new server to enroll this host'
+          ? `Run \`hyp remote login <name>\` for a remote that points at ${this.centralUrl} to enroll this host (register one with \`hyp remote add <name> ${this.centralUrl}\`)`
           : `Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`
         throw new Error(
           `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. ${remedy}`
