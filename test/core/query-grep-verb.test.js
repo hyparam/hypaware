@@ -244,6 +244,22 @@ test('an interrupted walk reports the interruption, not an empty machine', async
   assert.doesNotMatch(stopped.stderr ?? '', /nothing is recorded on this machine/)
 })
 
+test('interruption notices explain known reasons without exposing the abort payload', () => {
+  const controls = /** @type {any} */ ({ format: 'json', json: false, maxCell: 200, maxBytes: 32768 })
+  const timeout = queryGrepVerb.render(
+    { hits: [], truncated: true, exhausted: false, interruptionReason: 'timeout' }, controls
+  )
+  assert.match(timeout.stderr ?? '', /search timed out/)
+  assert.match(timeout.stderr ?? '', /Narrow with --from\/--to or --session-id and retry/)
+  assert.match(timeout.stderr ?? '', /more matches exist beyond the limit/)
+  assert.doesNotThrow(() => JSON.parse(timeout.stdout))
+  const cancelled = queryGrepVerb.render(
+    { hits: [], truncated: false, exhausted: false, interruptionReason: 'cancelled' }, controls
+  )
+  assert.match(cancelled.stderr ?? '', /search was cancelled; results may be incomplete/)
+  assert.doesNotMatch(cancelled.stderr ?? '', /timed out/)
+})
+
 test('a truncated AND interrupted search prints both notices, not the louder one', () => {
   // They mean different things and the skill doc teaches them as such: a
   // wider limit reaches the matches the limit cut, and nothing reaches the

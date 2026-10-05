@@ -53,6 +53,8 @@ export interface GrepSearchResult {
   hits: GrepSearchHit[]
   truncated: boolean
   exhausted: boolean
+  /** Why the search was interrupted, when known. Absent for older backends. */
+  interruptionReason?: 'timeout' | 'cancelled'
 }
 
 /**

@@ -269,10 +269,12 @@ test('a deadline signal returns the partial answer rather than throwing', async 
   await new Promise((resolve) => setTimeout(resolve, 10))
   const res = await grep(storage, { signal: deadline })
   assert.equal(res.exhausted, false, 'an aborted walk is not exhausted')
+  assert.equal(res.interruptionReason, 'timeout')
   const controller = new AbortController()
   controller.abort()
   const plain = await grep(storage, { signal: controller.signal })
   assert.equal(plain.exhausted, false)
+  assert.equal(plain.interruptionReason, 'cancelled')
 })
 
 test('scan tier: from/to narrow by day at the file walk', async () => {

@@ -234,7 +234,11 @@ export const queryGrepVerb = {
         : 'grep: more matches exist beyond the limit - narrow with --from/--to or --session-id, or raise --limit\n'
     }
     if (r.exhausted === false) {
-      stderr += 'grep: the search stopped before covering every file; results may be incomplete\n'
+      stderr += r.interruptionReason === 'timeout'
+        ? 'grep: search timed out; results may be incomplete. Narrow with --from/--to or --session-id and retry.\n'
+        : r.interruptionReason === 'cancelled'
+          ? 'grep: search was cancelled; results may be incomplete.\n'
+          : 'grep: the search stopped before covering every file; results may be incomplete. Narrow with --from/--to or --session-id and retry.\n'
     }
     // Zero hits over zero files is not the answer the summary's coverage
     // clause promises to make honest: "searched everything, found nothing"
