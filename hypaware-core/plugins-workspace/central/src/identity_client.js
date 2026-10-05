@@ -2,7 +2,7 @@
 
 import fs from 'node:fs'
 
-import { atomicWriteJsonSync, isPlainObject, sha256Hex } from 'hypaware/core/util'
+import { atomicWriteJsonSync, isPlainObject, sameServer, sha256Hex } from 'hypaware/core/util'
 
 /**
  * @import { AcquireSource, PersistedIdentity } from './types.js'
@@ -99,7 +99,9 @@ export class IdentityClient {
       // cross-tenant leak. Refuse rather than silently mis-route; the
       // operator must re-run `hyp join` against the new server.
       // @ref LLP 0031#physical-layout [implements]: a re-point with no token cannot safely reuse the old identity, so loading is refused
-      if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
+      // An old host of the built-in server is the same server, not a re-point.
+      // @ref LLP 0062#builtin [constrained-by]: BUILTIN_ORIGIN_ALIASES folds a moved built-in's old host into its new one
+      if (persisted.central_url !== undefined && !sameServer(persisted.central_url, this.centralUrl)) {
         // A login-seeded identity re-enrolls with a fresh login, not a join
         // token (LLP 0061 D3): point the operator at the seam that minted it.
         const remedy = persisted.origin === 'login'
@@ -287,7 +289,7 @@ function readPersistedFile(filePath) {
  * @returns {boolean}
  */
 function mintChanged(persisted, centralUrl, bootstrapToken) {
-  if (persisted.central_url !== undefined && persisted.central_url !== centralUrl) {
+  if (persisted.central_url !== undefined && !sameServer(persisted.central_url, centralUrl)) {
     return true
   }
   // A login-seeded identity was minted by a human login, not by any bootstrap
