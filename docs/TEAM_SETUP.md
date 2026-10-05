@@ -204,7 +204,8 @@ secret handling:
 # setup
 printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
 # Exit 75 is a restart request (the org config just arrived): run it again.
-(while hyp daemon run; [ $? -eq 75 ]; do :; done) &
+# Any other exit ends the loop with the daemon's own status.
+( rc=75; while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done; exit "$rc" ) &
 
 # Check that the daemon and required integration are ready before running the agent.
 hyp status
@@ -245,7 +246,7 @@ jobs:
         run: |
           npm install -g hypaware
           printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
-          (while hyp daemon run; [ $? -eq 75 ]; do :; done) &
+          ( rc=75; while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done; exit "$rc" ) &
           hyp status
           # Verify the required integration is ready before the next step.
       - name: Run the agent

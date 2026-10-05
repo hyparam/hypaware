@@ -1434,10 +1434,13 @@ Runs the daemon in the current terminal until it receives a stop signal.
 When the daemon applies a new organization configuration or a plugin change,
 it exits with code `75` to be relaunched on the new code. An installed service
 relaunches automatically. In the foreground, nothing does, so whatever starts
-`hyp daemon run` has to run it again on `75`:
+`hyp daemon run` has to run it again on `75`. This loop does that and exits with
+the daemon's own status otherwise, so a supervisor still sees a failed start:
 
 ```sh
-while hyp daemon run; [ $? -eq 75 ]; do :; done
+rc=75
+while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done
+exit "$rc"
 ```
 
 The first daemon start after `hyp join` or `hyp remote login --no-daemon`
