@@ -203,7 +203,8 @@ secret handling:
 ```sh
 # setup
 printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
-hyp daemon run &
+# Exit 75 is a restart request (the org config just arrived): run it again.
+(while hyp daemon run; [ $? -eq 75 ]; do :; done) &
 
 # Check that the daemon and required integration are ready before running the agent.
 hyp status
@@ -244,7 +245,7 @@ jobs:
         run: |
           npm install -g hypaware
           printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
-          hyp daemon run &
+          (while hyp daemon run; [ $? -eq 75 ]; do :; done) &
           hyp status
           # Verify the required integration is ready before the next step.
       - name: Run the agent
@@ -274,7 +275,8 @@ systemd. Both are per-user services, not system ones: on Linux it is a systemd
 to start at boot and to survive the last session logging out, and on macOS it
 is a LaunchAgent, which needs a logged-in user session. In a container image or a host without a
 service manager, keep `--no-daemon` and run `hyp daemon run` as
-the entrypoint or under your own supervisor. No teardown flush is needed on a
+the entrypoint or under your own supervisor, and relaunch it when it exits
+with code 75. No teardown flush is needed on a
 machine that keeps running; the scheduled exports drain it. Flush with
 `hyp sync --yes` before deliberately retiring the machine.
 
