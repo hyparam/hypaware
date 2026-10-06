@@ -1420,7 +1420,7 @@ permission-restricted central seed layer, and installs or restarts the daemon.
 It does not authenticate with the server. Authentication and the full organization
 configuration arrive when the daemon connects. Local configuration and history remain.
 `--no-daemon` writes only the seed. Start `hyp daemon run` under your own
-supervisor, or install the service separately where a service manager exists. `--force` allows the existing CLI path if global
+supervisor that relaunches it on exit code `75` (see [`hyp daemon run`](#hyp-daemon-run)), or install the service separately where a service manager exists. `--force` allows the existing CLI path if global
 installation fails.
 
 ```sh
@@ -1506,6 +1506,22 @@ hyp daemon run [--config <path>]
 
 Runs the daemon in the current terminal until it receives a stop signal.
 `daemon start` starts the installed service.
+
+When the daemon applies a new organization configuration or a plugin change,
+it exits with code `75` to be relaunched on the new code. An installed service
+relaunches automatically. In the foreground, nothing does, so whatever starts
+`hyp daemon run` has to run it again on `75`. This loop does that and exits with
+the daemon's own status otherwise, so a supervisor still sees a failed start:
+
+```sh
+rc=75
+while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done
+exit "$rc"
+```
+
+The first daemon start after `hyp join` or `hyp remote login --no-daemon`
+usually takes this path, because that is when the organization configuration
+arrives.
 
 ```sh
 hyp daemon run

@@ -2,7 +2,7 @@
 
 import fs from 'node:fs'
 
-import { atomicWriteJsonSync, isPlainObject, sha256Hex } from 'hypaware/core/util'
+import { atomicWriteJsonSync, canonicalOrigin, isPlainObject, sha256Hex } from 'hypaware/core/util'
 
 /**
  * @import { AcquireSource, PersistedIdentity } from './types.js'
@@ -99,7 +99,7 @@ export class IdentityClient {
       // cross-tenant leak. Refuse rather than silently mis-route; the
       // operator must re-run `hyp join` against the new server.
       // @ref LLP 0031#physical-layout [implements]: a re-point with no token cannot safely reuse the old identity, so loading is refused
-      if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
+      if (persisted.central_url !== undefined && !sameCentral(persisted.central_url, this.centralUrl)) {
         // A login-seeded identity re-enrolls with a fresh login, not a join
         // token (LLP 0061 D3): point the operator at the seam that minted it.
         const remedy = persisted.origin === 'login'
@@ -275,8 +275,37 @@ function readPersistedFile(filePath) {
 }
 
 /**
+ * Whether two central URLs name the same target. The origins must match after
+ * folding a moved built-in's old host into its new one, and the paths must
+ * match too: a path-scoped `central.url` is a distinct target on a shared host,
+ * so origin equality alone would reuse one tenant's gateway identity for
+ * another. Trailing slashes are ignored, as `joinUrl` ignores them.
+ *
+ * @ref LLP 0062#builtin [constrained-by]: BUILTIN_ORIGIN_ALIASES folds the built-in's old host into its new one
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function sameCentral(a, b) {
+  if (a === b) return true
+  const origin = canonicalOrigin(a)
+  return origin !== null && origin === canonicalOrigin(b) && centralPath(a) === centralPath(b)
+}
+
+/**
+ * The part of a parseable central URL after its origin, without trailing slashes.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function centralPath(url) {
+  const { pathname, search } = new URL(url)
+  return `${pathname.replace(/\/+$/, '')}${search}`
+}
+
+/**
  * Whether a persisted identity was minted by a different bootstrap token
- * or central URL than the ones now configured (i.e. a re-enrollment).
+ * or central target than the ones now configured (i.e. a re-enrollment).
  * An identity written by an older build (no stamp) cannot be proven to
  * match, so it counts as changed whenever a bootstrap token is set; that
  * forces one safe re-bootstrap rather than reusing a possibly-stale JWT.
@@ -287,7 +316,7 @@ function readPersistedFile(filePath) {
  * @returns {boolean}
  */
 function mintChanged(persisted, centralUrl, bootstrapToken) {
-  if (persisted.central_url !== undefined && persisted.central_url !== centralUrl) {
+  if (persisted.central_url !== undefined && !sameCentral(persisted.central_url, centralUrl)) {
     return true
   }
   // A login-seeded identity was minted by a human login, not by any bootstrap
