@@ -61,13 +61,29 @@ user, testing their claims against current-period evidence.
 
 ## Write and deliver
 
-Write to `./hypaware-report-<from>-to-<to>/` or the requested destination. Append
-`-2`, `-3`, etc. if it exists; overwrite only when requested. Use the linked
-report contract for page structure and the final review.
+Draft in `./hypaware-report-<from>-to-<to>/` or the requested destination. Append
+`-2`, `-3`, etc. if it exists; overwrite only when requested. Keep the ledger
+and raw query output outside this folder: it holds only report pages. Use the
+linked report contract for page structure and the final review.
 
 Review the draft separately from writing it: use an independent reviewer when
 available and permitted, otherwise self-review. The reviewer gets the pages and
 contract; the coordinator checks figures and locators against the ledger.
 Resolve unsupported claims and contradictions, then recheck affected content.
-Return `report.md`'s path, scope, dates, and any incomplete coverage or review.
-Do not apply proposals, change settings, or publish unless the user requests it.
+
+When the review is complete, move the folder into HypAware's reports store,
+unless the user asked for another destination:
+
+```sh
+hyp report save ./hypaware-report-<from>-to-<to>
+```
+
+It admits only a folder holding `report.md` and supported pages, copies it to
+`$HYP_HOME/reports/<name>` (suffixing a taken name), and removes the draft. If
+it refuses a stray file, remove that file and run it again; do not write under
+the user's home directory yourself. Its receipt prints the saved path and the
+publish command for this report.
+
+Return the saved `report.md` path, scope, dates, and any incomplete coverage or
+review. Do not apply proposals, change settings, or publish unless the user
+requests it.

@@ -26,16 +26,16 @@ import { positionals } from './remote_commands.js'
 import { isTty } from './stdio.js'
 import { PromptCancelledError, select } from './tui/index.js'
 import { isPromptBackError, isPromptCancelledError } from './tui/runtime.js'
-import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
+import { buildWalkthroughClientDescriptorMap, resolveHypHome } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
 import { PICK_DEADLINE_NOTICE, armPickDeadline, askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
 
 /**
- * @import { Stats } from 'node:fs'
+ * @import { Dir, Stats } from 'node:fs'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { FirstAskLauncher } from '../../../src/core/cli/wizard/types.js'
- * @import { FixBasisQuery, FixEvidence, FixRecommendation, RecommendationStatus } from '../../../src/core/cli/types.js'
+ * @import { FixBasisQuery, FixEvidence, FixRecommendation, LocalReportRow, RecommendationStatus } from '../../../src/core/cli/types.js'
  */
 
 const execFileAsync = promisify(execFile)
@@ -178,7 +178,7 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
     }
     const instructions = String(gate.params.instructions ?? '')
     const prompt = `Use the hypaware-report skill at ${JSON.stringify(chosen.skill)} to generate a report from this machine's local HypAware recordings. ` +
-      `Follow its analysis, review, and delivery workflow. Unless the user requests another destination, save the report in a new hypaware-report-<from>-to-<to> directory under ${JSON.stringify(cwd)}, using a numbered suffix if it already exists. ` +
+      `Follow its analysis, review, and delivery workflow. Unless the user requests another destination, draft the report in a new hypaware-report-<from>-to-<to> directory under ${JSON.stringify(cwd)}, using a numbered suffix if it already exists, and when it is reviewed move it into HypAware's reports store by running 'hyp report save <that directory>' and return the saved path it prints. ` +
       'Use the skill\'s default reporting period unless the instructions below specify one.' +
       (instructions ? `\n\nAdditional instructions from the user:\n${instructions}` : '')
     span.setAttribute('client', chosen.launcher.client)
@@ -190,6 +190,139 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
       return 1
     }
     markSpanStatus(span, 'ok')
+    return 0
+  })
+}
+
+/**
+ * `hyp report save <dir> [--keep]`: move a finished report folder into the
+ * store, `$HYP_HOME/reports/<name>`, where `hyp report list` finds it and
+ * `hyp report publish <name>` can take it by name.
+ *
+ * The skill drafts in the caller's directory (LLP 0450), so without this step
+ * finished reports accumulate wherever a report was last asked for. The CLI
+ * does the move because the alternative, an agent writing under the user's
+ * home directory itself, is an access the skill should never need to ask for.
+ * The folder is held to the publish allow-list before a byte moves, so the
+ * store only ever holds what a publish would accept: no ledgers, raw logs, or
+ * stray files. The default moves rather than copies, since the draft left
+ * behind is the clutter the store exists to end; only the pages that were
+ * copied are removed, one by one, so a file that appears mid-move is left
+ * where it is and named.
+ *
+ * @ref LLP 0465#save [implements]: the CLI moves a validated folder into the store; the agent never writes under HYP_HOME
+ * @ref LLP 0465#move [implements]: move by default, remove only what was copied, --keep leaves the draft
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runReportSave(argv, ctx) {
+  const gate = parseCoreCommandArgv('report save', argv, ctx)
+  if (!gate.ok) return gate.code
+  const source = /** @type {string | undefined} */ (gate.params.source)
+  if (!source) {
+    ctx.stderr.write('usage: hyp report save <dir> [--keep]\n')
+    return 2
+  }
+  const keep = gate.params.keep === true
+  return withSpan('report.save', {
+    [Attr.COMPONENT]: 'reports',
+    [Attr.OPERATION]: 'report.save',
+    status: 'error',
+    keep,
+  }, async (span) => {
+    const abs = path.resolve(ctx.cwd ?? process.cwd(), source)
+    /** @type {Stats} */
+    let stat
+    try {
+      stat = await fs.stat(abs)
+    } catch {
+      span.setAttribute('error_kind', 'missing')
+      ctx.stderr.write(`hyp report save: no such directory: ${esc(source)}\n`)
+      return 2
+    }
+    if (!stat.isDirectory()) {
+      span.setAttribute('error_kind', 'not-directory')
+      ctx.stderr.write(`hyp report save: ${esc(source)} is not a directory; save the report folder (the one holding report.md)\n`)
+      return 2
+    }
+    const name = path.basename(abs)
+    if (!SAVED_NAME_RE.test(name)) {
+      span.setAttribute('error_kind', 'name')
+      ctx.stderr.write(`hyp report save: folder name must match ${SAVED_NAME_RE.source} (got '${esc(name)}'); rename it, e.g. hypaware-report-<from>-to-<to>\n`)
+      return 2
+    }
+    const root = reportsStoreRoot(ctx)
+    // The store's own members are already saved; refuse early rather than
+    // copying a folder onto a sibling of itself. Realpath on both ends so a
+    // symlinked HYP_HOME compares equal to its target.
+    const [realRoot, realAbs] = await Promise.all([fs.realpath(root).catch(() => root), fs.realpath(abs).catch(() => abs)])
+    if (path.dirname(realAbs) === realRoot) {
+      span.setAttribute('error_kind', 'already-saved')
+      ctx.stderr.write(`hyp report save: ${esc(name)} is already in the store (${esc(root)}); 'hyp report list --local' shows it\n`)
+      return 2
+    }
+    if (!await fileExists(path.join(abs, 'report.md'))) {
+      span.setAttribute('error_kind', 'no-entry')
+      ctx.stderr.write(`hyp report save: ${esc(source)} must contain report.md at its root\n`)
+      return 2
+    }
+    /** @type {string[]} */
+    let pages
+    try {
+      pages = await reportSourcePages(abs)
+    } catch (err) {
+      span.setAttribute('error_kind', 'unsupported-entry')
+      ctx.stderr.write(`hyp report save: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 2
+    }
+    /** @type {string} */
+    let dest
+    try {
+      await fs.mkdir(root, { recursive: true })
+      dest = await claimStoreSlot(root, name)
+    } catch (err) {
+      span.setAttribute('error_kind', 'store')
+      ctx.stderr.write(`hyp report save: could not create the store under ${esc(root)}: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+    try {
+      for (const page of pages) {
+        await fs.copyFile(path.join(abs, page), path.join(dest, page), fs.constants.COPYFILE_EXCL)
+      }
+    } catch (err) {
+      span.setAttribute('error_kind', 'copy')
+      ctx.stderr.write(`hyp report save: could not copy into ${esc(dest)}: ${err instanceof Error ? err.message : String(err)}; the source is untouched\n`)
+      return 1
+    }
+    const savedName = path.basename(dest)
+    span.setAttribute('page_count', pages.length)
+    span.setAttribute('renamed', savedName !== name)
+    /** @type {string | null} */
+    let leftBehind = null
+    if (!keep) {
+      // Only the pages that were copied are unlinked, never `rm -rf`: the
+      // list was validated above, so an rmdir that fails afterwards means a
+      // file appeared since, and that file is left where it is and named. An
+      // unlink that fails (a read-only draft) is named the same way: the copy
+      // already landed, so the save still succeeds with its receipt.
+      try {
+        for (const page of pages) await fs.unlink(path.join(abs, page))
+        await fs.rmdir(abs)
+      } catch (err) {
+        leftBehind = err instanceof Error ? err.message : String(err)
+      }
+    }
+    markSpanStatus(span, 'ok')
+    ctx.stdout.write(`saved ${esc(savedName)} to ${esc(dest)}${savedName !== name ? ` (${esc(name)} was taken)` : ''}\n`)
+    if (keep) ctx.stdout.write(`  kept: ${esc(abs)}\n`)
+    else if (leftBehind) ctx.stdout.write(`  not removed: ${esc(abs)} (${esc(leftBehind)}); its report pages are saved\n`)
+    ctx.stdout.write(`  list: hyp report list --local\n`)
+    // The bare name only when publish would resolve it to this slot: a path of
+    // that name under cwd wins over the store (another `-N` draft, say), and a
+    // suffixed name can outgrow the grammar. Otherwise the slot's own path.
+    const publishArg = SAVED_NAME_RE.test(savedName) && !await fileExists(path.resolve(ctx.cwd ?? process.cwd(), savedName)) ? savedName : dest
+    ctx.stdout.write(`  publish: hyp report publish ${shellWord(publishArg)} --kind usage-review --period ${publishPeriodHint(savedName)}\n`)
     return 0
   })
 }
@@ -233,42 +366,43 @@ export async function runReportPublish(argv, ctx) {
   let contentType
   /** @type {Stats} */
   let stat
-  try {
-    stat = await fs.stat(source)
-  } catch {
-    ctx.stderr.write(`hyp report publish: no such file or directory: ${source}\n`)
+  const located = await locateReportSource(ctx, source)
+  if (!located) {
+    ctx.stderr.write(`hyp report publish: no such file or directory: ${esc(source)}${SAVED_NAME_RE.test(source) ? `, and no saved report of that name in ${esc(reportsStoreRoot(ctx))} ('hyp report list --local' shows them)` : ''}\n`)
     return 2
   }
+  ;({ stat } = located)
+  const sourcePath = located.path
   if (stat.isDirectory()) {
     // A bundle without an entry document is rejected server-side after the
     // whole upload; catch it here in milliseconds instead.
-    const hasEntry = await fileExists(path.join(source, 'report.md'))
+    const hasEntry = await fileExists(path.join(sourcePath, 'report.md'))
     if (!hasEntry) {
       ctx.stderr.write(`hyp report publish: ${esc(source)} must contain report.md at its root\n`)
       return 2
     }
     let pages
     try {
-      pages = await reportSourcePages(source)
+      pages = await reportSourcePages(sourcePath)
     } catch (err) {
       ctx.stderr.write(`hyp report publish: ${err instanceof Error ? err.message : String(err)}\n`)
       return 2
     }
     try {
-      body = await packUstarBundle(source, pages)
+      body = await packUstarBundle(sourcePath, pages)
     } catch (err) {
       ctx.stderr.write(`hyp report publish: could not build the bundle: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
     contentType = 'application/gzip'
   } else {
-    const ext = path.extname(source).toLowerCase()
+    const ext = path.extname(sourcePath).toLowerCase()
     if (ext === '.md' || ext === '.markdown') contentType = 'text/markdown'
     else {
       ctx.stderr.write(`hyp report publish: a single-file report must be Markdown (.md or .markdown); the remote renders HTML (got '${esc(ext || source)}')\n`)
       return 2
     }
-    body = await fs.readFile(source)
+    body = await fs.readFile(sourcePath)
   }
 
   const resolved = resolveReportsTarget(gate.params, ctx, 'report publish')
@@ -449,17 +583,62 @@ export async function runReportRecommend(argv, ctx) {
 export async function runReportList(argv, ctx) {
   const gate = parseCoreCommandArgv('report list', argv, ctx)
   if (!gate.ok) return gate.code
-  const resolved = resolveReportsTarget(gate.params, ctx, 'report list')
-  if ('error' in resolved) {
-    ctx.stderr.write(`${resolved.error}\n`)
-    return 2
-  }
+  const json = gate.params.json === true
   const status = Array.isArray(gate.params.status) ? gate.params.status.map(String) : []
   // Presence of `--status`, not the length of what survived the codec's comma
   // split: the array coercion drops empty parts, so `--status ''` (an unset
   // shell variable) parses to `[]`, and reading the length would quietly list
   // reports instead of the flat form the flag asks for.
   const flat = gate.params.recommendations === true || Array.isArray(gate.params.status)
+  // The remote's selectors and filters. `--local` refuses them because none
+  // has a local meaning; their absence is also what makes a remote read
+  // implicit, the one case a failed read degrades to the saved section.
+  const remoteFlags = ['kind', 'period', 'limit', 'before', 'org', 'remote'].filter((flag) => gate.params[flag] !== undefined)
+  if (flat) remoteFlags.push(gate.params.recommendations === true ? 'recommendations' : 'status')
+  // @ref LLP 0465#list [implements]: saved reports are a section of the one listing; --local is that section alone
+  if (gate.params.local === true) {
+    if (remoteFlags.length > 0) {
+      ctx.stderr.write(`hyp report list: --local lists saved reports only and takes none of ${remoteFlags.map((f) => `--${f}`).join(', ')}\n`)
+      ctx.stderr.write('usage: hyp report list [--local] [--json]\n')
+      return 2
+    }
+    const inventory = await localReportInventory(reportsStoreRoot(ctx))
+    if (inventory.error) {
+      ctx.stderr.write(`hyp report list: cannot read saved reports in ${esc(inventory.root)}: ${esc(inventory.error)}\n`)
+      return 1
+    }
+    if (json) {
+      ctx.stdout.write(JSON.stringify(inventory.rows.map(localRow), null, 2) + '\n')
+      return 0
+    }
+    writeLocalSection(ctx, inventory, { standalone: true })
+    return 0
+  }
+  // @ref LLP 0467#json-remote-only [implements]: --json is the remote listing alone, so its paging stays the remote's; saved rows are --local --json
+  const inventory = flat || json ? null : await localReportInventory(reportsStoreRoot(ctx))
+  if (inventory?.error) ctx.stderr.write(`hyp report list: cannot read saved reports in ${esc(inventory.root)}: ${esc(inventory.error)}\n`)
+  /**
+   * A remote read that failed. With nothing selecting or filtering the remote,
+   * saved reports to show, and a person reading (not `--json`, whose array a
+   * script would take for the whole listing), the failure becomes a warning
+   * above the saved section; otherwise it is the exit it always was.
+   *
+   * @ref LLP 0465#list [implements]: an implicit remote failure still lists saved reports; an explicit one keeps its exit code
+   * @param {string} line the whole stderr line, prefix included
+   * @param {number} code
+   * @returns {number}
+   */
+  const failRemote = (line, code) => {
+    if (remoteFlags.length === 0 && !json && inventory && inventory.rows.length > 0) {
+      ctx.stderr.write(`${line} - listing saved reports only\n`)
+      writeLocalSection(ctx, inventory, { standalone: true })
+      return 0
+    }
+    ctx.stderr.write(`${line}\n`)
+    return code
+  }
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report list')
+  if ('error' in resolved) return failRemote(resolved.error, 2)
   const url = new URL(flat ? `${resolved.endpoint}/_recommendations` : resolved.endpoint)
   // Same reason `--json` below reads the gate: `valueFlag()` drops a value
   // whose first character is `-`, so `--limit -5` used to list with the
@@ -474,10 +653,7 @@ export async function runReportList(argv, ctx) {
   const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report list' }, (token) =>
     fetch(url, { headers: { authorization: `Bearer ${token}` } })
   )
-  if (!outcome.ok) {
-    ctx.stderr.write(`hyp report list: ${outcome.error}\n`)
-    return outcome.exitCode
-  }
+  if (!outcome.ok) return failRemote(`hyp report list: ${outcome.error}`, outcome.exitCode)
   const { response } = outcome
   if (flat && response.status === 404) {
     // Only the flat form asks for a route an older server may not have, and it
@@ -487,14 +663,11 @@ export async function runReportList(argv, ctx) {
     ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response, `'${esc(resolved.target)}' cannot list recommendations on their own - is the server up to date? 'hyp report list' with no --recommendations/--status lists them under their reports`)}\n`)
     return 1
   }
-  if (response.status !== 200) {
-    ctx.stderr.write(`hyp report list: ${await describeErrorResponse(response)}\n`)
-    return 1
-  }
+  if (response.status !== 200) return failRemote(`hyp report list: ${await describeErrorResponse(response)}`, 1)
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   if (flat) {
     const rows = Array.isArray(parsed?.recommendations) ? parsed.recommendations : []
-    if (gate.params.json === true) {
+    if (json) {
       ctx.stdout.write(JSON.stringify(rows, null, 2) + '\n')
       return 0
     }
@@ -520,13 +693,14 @@ export async function runReportList(argv, ctx) {
   const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
   // Read the mode the gate parsed, not argv: the codec also accepts
   // `--json=true`, and a token it blessed must not be dropped downstream.
-  if (gate.params.json === true) {
+  // The remote's records alone: `--limit` bounds the array and the last row's
+  // `publishedAt` is the next `--before`.
+  if (json) {
     ctx.stdout.write(JSON.stringify(reports, null, 2) + '\n')
     return 0
   }
   if (reports.length === 0) {
     ctx.stdout.write("no reports published - publish one with 'hyp report publish <file-or-dir> --kind <kind> --period <period>'\n")
-    return 0
   }
   for (const r of reports) {
     const title = typeof r.title === 'string' && r.title ? `\t${esc(r.title)}` : ''
@@ -549,6 +723,7 @@ export async function runReportList(argv, ctx) {
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${esc(c.summary)}\n`)
     }
   }
+  if (inventory) writeLocalSection(ctx, inventory, { standalone: false })
   return 0
 }
 
@@ -1692,6 +1867,193 @@ async function packUstarBundle(dir, pages) {
     maxBuffer: 1024 * 1024 * 1024,
   })
   return stdout
+}
+
+/* ---------- the saved-report store ---------- */
+
+/**
+ * What a saved report may be called: a plain directory name, nothing hidden,
+ * no separator. The skill's `hypaware-report-<from>-to-<to>[-N]` fits; so
+ * does a hand-named folder. The grammar is also what lets `publish` tell a
+ * saved name from a path it should look up on disk alone.
+ */
+const SAVED_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+/** The newest saved reports a listing shows; the rest are counted, not read. */
+const LOCAL_LIST_LIMIT = 100
+
+/** Slots tried for one name before giving up: `name`, `name-2`, ... */
+const STORE_SLOT_LIMIT = 1000
+
+/**
+ * The store: `$HYP_HOME/reports`, beside `$HYP_HOME/ask` and under the same
+ * resolution (`HYP_HOME`, else `~/.hyp`). Outside every project directory, so
+ * no folder marking applies to it, and fixed, so a listing knows where to look.
+ *
+ * @ref LLP 0465#store [implements]: one fixed folder under HYP_HOME holds finished reports; the caller's directory holds drafts
+ * @param {CommandRunContext} ctx
+ * @returns {string}
+ */
+function reportsStoreRoot(ctx) {
+  return path.resolve(ctx.cwd ?? process.cwd(), resolveHypHome(ctx.env), 'reports')
+}
+
+/**
+ * Claim `root/<name>`, else `root/<name>-2`, `-3`, ... with an exclusive
+ * mkdir, so two saves of the same name at once cannot share a slot.
+ *
+ * @param {string} root
+ * @param {string} name
+ * @returns {Promise<string>} the directory created
+ */
+async function claimStoreSlot(root, name) {
+  for (let n = 1; n <= STORE_SLOT_LIMIT; n++) {
+    const dest = path.join(root, n === 1 ? name : `${name}-${n}`)
+    try {
+      await fs.mkdir(dest)
+      return dest
+    } catch (err) {
+      if (!(err instanceof Error) || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
+    }
+  }
+  throw new Error(`${STORE_SLOT_LIMIT} folders already share the name '${name}'`)
+}
+
+/**
+ * The saved reports, newest first by the brief's mtime, capped at
+ * `LOCAL_LIST_LIMIT` with the rest counted. One `opendir` and one `lstat` per
+ * candidate; no page is read and no symlink followed (a Dirent that is a
+ * symlink answers `isDirectory()` false, and a symlinked `report.md` is not a
+ * regular file). A missing store is an empty one; any other read failure is
+ * returned for the caller to name, never thrown.
+ *
+ * @ref LLP 0465#list [implements]: directory entries and one stat each, bounded to the newest 100, never report contents
+ * @param {string} root
+ * @returns {Promise<{ root: string, rows: LocalReportRow[], total: number, error: string | null }>}
+ */
+async function localReportInventory(root) {
+  /** @type {LocalReportRow[]} */
+  const rows = []
+  let total = 0
+  /** @type {Dir} */
+  let dir
+  try {
+    dir = await fs.opendir(root)
+  } catch (err) {
+    const code = err instanceof Error ? /** @type {NodeJS.ErrnoException} */ (err).code : undefined
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { root, rows, total, error: null }
+    return { root, rows, total, error: err instanceof Error ? err.message : String(err) }
+  }
+  try {
+    for await (const entry of dir) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+      /** @type {Stats} */
+      let brief
+      try {
+        brief = await fs.lstat(path.join(root, entry.name, 'report.md'))
+      } catch {
+        continue
+      }
+      if (!brief.isFile()) continue
+      total++
+      insertNewest(rows, { name: entry.name, path: path.join(root, entry.name), modifiedAt: brief.mtime.toISOString(), mtimeMs: brief.mtimeMs })
+    }
+  } catch (err) {
+    return { root, rows, total, error: err instanceof Error ? err.message : String(err) }
+  }
+  return { root, rows, total, error: null }
+}
+
+/**
+ * Keep `rows` sorted newest first and no longer than `LOCAL_LIST_LIMIT`: a
+ * row older than a full set's last member is dropped without a sort.
+ *
+ * @param {LocalReportRow[]} rows
+ * @param {LocalReportRow} row
+ */
+function insertNewest(rows, row) {
+  let i = rows.length
+  while (i > 0 && rows[i - 1].mtimeMs < row.mtimeMs) i--
+  if (i >= LOCAL_LIST_LIMIT) return
+  rows.splice(i, 0, row)
+  if (rows.length > LOCAL_LIST_LIMIT) rows.pop()
+}
+
+/**
+ * A saved report as `--json` lists it beside the remote's records: marked
+ * `source: 'local'`, with the path derived here, never read from anywhere.
+ *
+ * @param {LocalReportRow} row
+ * @returns {{ source: 'local', name: string, path: string, modifiedAt: string }}
+ */
+function localRow(row) {
+  return { source: 'local', name: row.name, path: row.path, modifiedAt: row.modifiedAt }
+}
+
+/**
+ * The saved section of a listing. Nothing is printed when there is nothing
+ * saved and the section follows a remote listing, so a reader with no store
+ * sees the listing they always did; `--local` says so instead.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {Awaited<ReturnType<typeof localReportInventory>>} inventory
+ * @param {{ standalone: boolean }} opts
+ */
+function writeLocalSection(ctx, inventory, { standalone }) {
+  const { rows, total, root } = inventory
+  if (rows.length === 0) {
+    if (standalone) ctx.stdout.write(`no saved reports in ${esc(root)} - 'hyp report save <dir>' moves a finished report folder there\n`)
+    return
+  }
+  if (!standalone) ctx.stdout.write('\n')
+  ctx.stdout.write(`saved reports (${esc(root)}):\n`)
+  for (const row of rows) ctx.stdout.write(`  ${row.modifiedAt}\tlocal\t${esc(row.name)}\n`)
+  if (total > rows.length) ctx.stdout.write(`  ${total - rows.length} more not listed (newest ${LOCAL_LIST_LIMIT} shown)\n`)
+  ctx.stdout.write('  publish one: hyp report publish <name> --kind <kind> --period <period>\n')
+}
+
+/**
+ * Where `publish` reads from: the path as given, else the saved report of
+ * that name. A path wins when both exist, since a path is what the argument
+ * always meant; a token that is not a plain name is never looked up in the
+ * store. A saved name resolves only to a directory, the one thing `save`
+ * puts there.
+ *
+ * @ref LLP 0465#publish-by-name [implements]: a saved report publishes by its name; a path that exists still wins
+ * @param {CommandRunContext} ctx
+ * @param {string} source
+ * @returns {Promise<{ path: string, stat: Stats } | null>}
+ */
+async function locateReportSource(ctx, source) {
+  const direct = path.resolve(ctx.cwd ?? process.cwd(), source)
+  try {
+    return { path: direct, stat: await fs.stat(direct) }
+  } catch {
+    // Not a path on disk; try the store below.
+  }
+  if (!SAVED_NAME_RE.test(source)) return null
+  const saved = path.join(reportsStoreRoot(ctx), source)
+  try {
+    const stat = await fs.stat(saved)
+    return stat.isDirectory() ? { path: saved, stat } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The `--period` a saved report's name suggests: the skill encodes the
+ * covered range as `hypaware-report-<from>-to-<to>`, and `<from>-to-<to>` is
+ * a valid period. Any other name yields the bare placeholder. A hint in a
+ * receipt, never a default the command applies.
+ *
+ * @ref LLP 0155#period-explicit [constrained-by]: the period is only ever suggested from the name the generator chose, never defaulted from today
+ * @param {string} name
+ * @returns {string}
+ */
+function publishPeriodHint(name) {
+  const m = /^hypaware-report-(\d{4}-\d{2}-\d{2})-to-(\d{4}-\d{2}-\d{2})(?:-\d+)?$/.exec(name)
+  return m ? `${m[1]}-to-${m[2]}` : '<period>'
 }
 
 /**

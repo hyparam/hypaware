@@ -8,6 +8,7 @@
 **Extends:** LLP 0436, LLP 0393
 **Related:** LLP 0414, LLP 0448 (unmerged proposal replaced by this narrower scope)
 **Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
+**Extended-by:** LLP 0465 (finished reports move into `$HYP_HOME/reports` through `hyp report save`; `list` gains a saved section)
 
 ## Launch the skill {#launch}
 

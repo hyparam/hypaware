@@ -430,6 +430,20 @@ export interface CoreCommandArgSpec {
 }
 
 /**
+ * One saved report as `hyp report list` inventories the store
+ * (`$HYP_HOME/reports`): the folder's name and path and the brief's mtime,
+ * never its contents.
+ */
+export interface LocalReportRow {
+  name: string
+  path: string
+  /** `report.md`'s mtime as ISO-8601, the listing's sort key and display. */
+  modifiedAt: string
+  /** The same mtime as a number, for ordering without re-parsing. */
+  mtimeMs: number
+}
+
+/**
  * One turn a recommendation page cites, as the server records it (server
  * LLP 0419#evidence): enough to find the message, never its content.
  */

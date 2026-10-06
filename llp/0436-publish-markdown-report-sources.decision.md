@@ -9,6 +9,7 @@
 **Extended-by:** LLP 0450 (launch the local report skill in the caller's directory)
 **Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 **Extended-by:** LLP 0464 (concise report guidance and verified usage identity across captures)
+**Extended-by:** LLP 0465 (the #sources allow-list also admits a folder to the saved-report store)
 
 ## Decision
 

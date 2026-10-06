@@ -211,8 +211,21 @@ export const CORE_COMMAND_ARGS = {
       positional: ['instructions'],
     },
   },
+  'report save': {
+    usage: 'hyp report save <dir> [--keep]',
+    schema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string' },
+        // The default moves: the folder the skill drafted in the caller's
+        // directory is the clutter the store exists to end. `--keep` leaves it.
+        keep: { type: 'boolean', default: false },
+      },
+      positional: ['source'],
+    },
+  },
   'report publish': {
-    usage: 'hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]',
+    usage: 'hyp report publish <file-or-dir-or-saved-name> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -240,10 +253,13 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'report list': {
-    usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]',
+    usage: 'hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
+        // Saved reports only, no remote read. The remote's selectors and
+        // filters have no local meaning, so the handler refuses them together.
+        local: { type: 'boolean', default: false },
         kind: { type: 'string' },
         period: { type: 'string' },
         limit: { type: 'string' },
