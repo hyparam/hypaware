@@ -124,19 +124,6 @@ test('the unignore receipt reports the removal, not a resumption it cannot verif
   })
 })
 
-test('the reader carries the same qualifier, so writer and reader cannot drift', async () => {
-  // `status` answers the same `Set.has` question, so a confirmed `ignored`
-  // there rests on the identical bound. One shared constant, as with the
-  // ephemerality caveat: two statements of one contract drift apart.
-  const set = new Set(['sess-live'])
-  await withControlServer(set, async (base) => {
-    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-live' } })
-    assert.equal(await runSessionStatus([], ctx.ctx), 0)
-    assert.match(ctx.stdout(), /only exchanges tagged with this exact session id are dropped/)
-    assert.match(ctx.stdout(), /drops nothing/)
-  })
-})
-
 test('a confirmed ignore says earlier rows remain and names the purge for this session', async () => {
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {

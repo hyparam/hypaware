@@ -41,31 +41,6 @@ const SESSION_IGNORE_NOTE =
   'this opt-out survives daemon restarts until `hyp session unignore`; a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers.'
 
 /**
- * What a confirmed `ignored` establishes, printed beside a `status` read. The
- * ignore receipt leaves it out to stay short; its `--json` keeps `guarantee`.
- *
- * The control route is a `Set` over opaque tokens: `POST` adds whatever it was
- * handed and answers `ignored: true`, `GET` is the same `Set.has`. Neither verb
- * sees a single exchange, so neither can establish that the id is one live
- * traffic carries - the drop happens later, in the client adapter, keyed on the
- * `session_id` it stamps on the row (LLP 0066 R5). "the gateway will drop this
- * session" was therefore a promise the receipt could not support: an id no
- * exchange will ever carry (a Codex thread id, a finished session's id, a typo)
- * prints exactly the same line and suppresses nothing.
- *
- * Naming the caller's own responsibility is the other half. The gap is closed
- * by resolving the right key BEFORE the call (`resolveSessionIdForCli`), not by
- * anything the route can answer afterwards, so the receipt says which of the
- * two claims it is making.
- *
- * @ref LLP 0066#receipt-is-membership [implements]: R14 - the receipt states
- * set membership and names who owns the key, rather than reporting a drop
- * nothing verified.
- */
-const MEMBERSHIP_NOTE =
-  'only exchanges tagged with this exact session id are dropped. A wrong id is accepted the same way and drops nothing, so check it is the right one.'
-
-/**
  * The opt-out is prospective: rows captured before it stay in the cache (and
  * on any remote they already reached). The receipt names the exact purge
  * command, with the resolved id, so removing them is one deliberate step
@@ -116,10 +91,12 @@ function shellArg(value) {
 }
 
 /**
- * The machine-readable form of `MEMBERSHIP_NOTE`, carried by the write verbs'
- * `--json` receipt. `status: 'ok'` on its own reads as "done" to the skills
- * that parse it, which is the same overclaim in the shape an agent actually
- * consumes.
+ * What a confirmed `ignored` establishes, carried by the write verbs'
+ * `--json` receipt. The control route is a `Set` over opaque tokens: `POST`
+ * adds whatever it was handed and `GET` is the same `Set.has`, so neither can
+ * establish that the id is one live traffic carries. `status: 'ok'` on its
+ * own reads as "done" to the skills that parse it. The human output no longer
+ * spells this out (LLP 0463); its headline still says "in the drop set".
  *
  * The reader's `--json` needs no equivalent: it already reports `status` as
  * `ignored` / `not_ignored` / `unknown` beside a tri-state `ignored`, which is
@@ -482,11 +459,11 @@ async function runMutation(argv, ctx, method, usage) {
   // the route added an opaque token to a set (LLP 0066#receipt-is-membership).
   // The removal says no more than that either. "recording resumed" was the same
   // overclaim mirrored: a token nothing carried suppressed nothing to resume,
-  // and the folder governor below is a separate reason a session stays unrecorded.
+  // and folder policy is a separate reason a session stays unrecorded.
   ctx.stdout.write(
     primary.ignored
       ? `session ${resolvedId.sessionId}: ignored - this id is in the ${primary.recorder} drop set (${ignoreListCount(primary.total)})\n`
-      : `session ${resolvedId.sessionId}: not ignored - this id is out of the ${primary.recorder} drop set, so this opt-out suppresses nothing now (${ignoreListCount(primary.total)})\n`
+      : `session ${resolvedId.sessionId}: not ignored - this id is out of the ${primary.recorder} drop set (${ignoreListCount(primary.total)})\n`
   )
   // Every further confirmed recorder gets its own line: "ignored" on one
   // recorder is not ignored while a second one records, so each write is
@@ -602,7 +579,6 @@ function writeStatus(ctx, json, report) {
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
     ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
-    ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
     writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
@@ -713,7 +689,7 @@ function provenanceNotes(args) {
   }
   if (idSource === 'codex_env_rollout') {
     notes.push(
-      `session id: the session containing the thread ${CODEX_THREAD_ENV} states, read from ${idEvidence ?? 'that rollout'} on disk. Codex states the thread, not the session, so the container had to be read rather than stated.`
+      `session id: the session containing the thread ${CODEX_THREAD_ENV} states, read from ${idEvidence ?? 'that rollout'} on disk.`
     )
   }
   if (threadId) {

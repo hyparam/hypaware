@@ -39,6 +39,13 @@ the answer the user asked for:
   provenance note is removed from human output. `endpoint_source` stays in
   `--json`. The session-id half (an inferred Codex id is still flagged as
   inferred) is unchanged.
+- LLP 0066 R14: `ignore` and `status` no longer print the membership note
+  naming where the guarantee comes from. The `ignore` receipt still reports
+  the write as set membership ("this id is in the drop set"), and
+  `guarantee: set_membership` stays in `--json`. The `unignore` receipt drops
+  its "suppresses nothing now" clause, and the Codex `CODEX_THREAD_ID`
+  provenance note drops its explanation of why the session had to be read
+  from disk.
 
 Nothing about what the verbs believe changes: `validateControlResponse` keeps
 every refusal, and fail-closed `unknown` answers are untouched.

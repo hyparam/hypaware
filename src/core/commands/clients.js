@@ -1876,7 +1876,7 @@ function parseIgnoreArgs(argv) {
  * stay until a separate purge, so the write receipt names that step.
  */
 const FOLDER_PURGE_NOTE =
-  'To delete what was already recorded under this folder on this machine, run `hyp privacy purge --ignored`.'
+  'To delete what was already recorded in ignored folders on this machine, run `hyp privacy purge --ignored`.'
 
 /**
  * Write a .hypignore at the explicit path, or the repo root by default.

@@ -205,7 +205,7 @@ test('hyp policy set <path> ignore also names the marking as machine-local', asy
     assert.equal(
       res.stdout,
       `marked ${root} as ignore (machine-local policy store)\n` +
-        'To delete what was already recorded under this folder on this machine, run `hyp privacy purge --ignored`.\n'
+        'To delete what was already recorded in ignored folders on this machine, run `hyp privacy purge --ignored`.\n'
     )
   })
 })

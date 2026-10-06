@@ -1216,7 +1216,8 @@ hyp privacy set <path> sync|local-only|ignore
 
 Upserts an exact machine-local path marking. It doesn't write a dotfile or
 delete rows. An `ignore` marking prints a line naming
-`hyp privacy purge --ignored` for what was already recorded there.
+`hyp privacy purge --ignored`, which deletes what was already recorded in
+every ignored folder.
 
 ```sh
 hyp privacy set ./private-research local-only
@@ -1260,7 +1261,8 @@ path. With no path, uses
 the repository root, or the current directory when outside a repository.
 Use `hyp privacy set <path> sync|local-only|ignore` for machine-local markings
 and `hyp privacy show [path]` to report without writing. The receipt names
-`hyp privacy purge --ignored` to delete what was already recorded there.
+`hyp privacy purge --ignored` to delete what was already recorded in ignored
+folders.
 
 ```sh
 hyp privacy ignore ./customer-data
