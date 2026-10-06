@@ -201,7 +201,8 @@ const invalid = [
   ['no user', { request_body: JSON.stringify(request({ messages: [{ role: 'system', content: 'SECRET' }] })) }, 'invalid_request'],
   ['bad model', { request_body: JSON.stringify(request({ model: '' })) }, 'invalid_request'],
   ['bad stream', { request_body: JSON.stringify(request({ stream: 'false' })) }, 'invalid_request'],
-  ['request tools', { request_body: JSON.stringify(request({ tools: [] })) }, 'unsupported_shape'],
+  ['request tools', { request_body: JSON.stringify(request({ tools: [{ type: 'function', function: { name: 'SECRET' } }] })) }, 'unsupported_shape'],
+  ['request tools object', { request_body: JSON.stringify(request({ tools: {} })) }, 'unsupported_shape'],
   ['request thinking', { request_body: JSON.stringify(request({ think: true })) }, 'unsupported_shape'],
   ['unknown request field', { request_body: JSON.stringify(request({ secret_future_content: 'SECRET' })) }, 'unsupported_shape'],
   ...['images', 'audio', 'thinking', 'tool_calls'].map(field => [`message ${field}`, { request_body: JSON.stringify(request({ messages: [{ role: 'user', content: 'SECRET', [field]: 'SECRET' }] })) }, 'unsupported_shape']),
@@ -222,6 +223,12 @@ const invalid = [
   ['NDJSON conflict', { request_body: JSON.stringify(request({ stream: true })), response_body: JSON.stringify(terminal({ done: false, model: 'other' })) + '\n' + JSON.stringify(terminal()) }, 'invalid_response'],
   ['byte ceiling', { request_body: ' '.repeat(CAPTURE_BYTES), response_body: '{}' }, 'capture_limit'],
 ]
+test('an empty tools array (sent by ollama-python on every chat) is admitted as plain text capture', async () => {
+  const result = await rows(exchange({ request_body: JSON.stringify(request({ tools: [] })) }))
+  assert.deepEqual(result.rows.map(row => row.role), ['user', 'assistant'])
+  assert.equal(result.logs.some(log => log.event === 'plugin.ollama.capture_dropped'), false)
+})
+
 for (const [label, overrides, reason] of invalid) {
   test(`whole-exchange drop: ${label} emits secret-safe ${reason} and zero rows`, async () => {
     const result = await rows(exchange(/** @type {Partial<AiGatewayExchangeInput>} */ (overrides)))

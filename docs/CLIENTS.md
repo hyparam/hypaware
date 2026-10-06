@@ -156,7 +156,8 @@ audio or thinking. Use an installed model producing supported text responses.
 Unsupported shapes are forwarded but omitted from capture as a whole exchange.
 
 Admission is strict: request keys are limited to `model`, `messages`, `stream`,
-`format`, `options` and `keep_alive`. Message keys are only `role` and `content`,
+`format`, `options`, `keep_alive` and an empty `tools` array (the official
+Python client sends `tools: []` on every chat). Message keys are only `role` and `content`,
 with system/user/assistant roles and string content (including empty strings).
 Response-record keys are limited to `model`, `created_at`, `message`, `done`,
 `done_reason`, `total_duration`, `load_duration`, `prompt_eval_count`,

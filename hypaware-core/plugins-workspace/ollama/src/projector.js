@@ -8,7 +8,7 @@ import { CAPTURE_BYTES } from '../../ai-gateway/src/process_transport.js'
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
-const REQUEST_FIELDS = new Set(['model', 'messages', 'stream', 'format', 'options', 'keep_alive'])
+const REQUEST_FIELDS = new Set(['model', 'messages', 'stream', 'format', 'options', 'keep_alive', 'tools'])
 const RESPONSE_FIELDS = new Set(['model', 'created_at', 'message', 'done', 'done_reason', 'total_duration', 'load_duration', 'prompt_eval_count', 'prompt_eval_cached_count', 'prompt_eval_duration', 'eval_count', 'eval_duration'])
 const MESSAGE_FIELDS = new Set(['role', 'content'])
 const COUNTERS = ['prompt_eval_count', 'prompt_eval_cached_count', 'eval_count']
@@ -43,7 +43,8 @@ export function createOllamaExchangeProjector() {
       if (Buffer.byteLength(input.request_body ?? '') + Buffer.byteLength(input.response_body ?? '') > CAPTURE_BYTES) return drop('capture_limit')
       const request = parseMaybeJson(input.request_body)
       if (!isPlainObject(request) || !nonempty(request.model) || !Array.isArray(request.messages) || (request.stream !== undefined && typeof request.stream !== 'boolean')) return drop('invalid_request')
-      if (hasUnknownFields(request, REQUEST_FIELDS)) return drop('unsupported_shape')
+      // ollama-python serializes `tools: []` on every chat call; an empty list declares no tools, any entry is unsupported
+      if (hasUnknownFields(request, REQUEST_FIELDS) || (request.tools !== undefined && !(Array.isArray(request.tools) && request.tools.length === 0))) return drop('unsupported_shape')
       if (!request.messages.every(message => textMessage(message, false))) return drop('unsupported_shape')
       if (!request.messages.some(message => message.role === 'user')) return drop('invalid_request')
       const response = readResponse(input.response_body ?? '', request.stream !== false)
