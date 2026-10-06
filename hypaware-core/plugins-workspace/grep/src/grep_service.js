@@ -222,8 +222,6 @@ export async function executeGrepSearch(args) {
        * search, which is the one place it must not.
        */
       let interrupted = false
-      /** @type {GrepSearchResult['interruptionReason']} */
-      let interruptionReason
       let scannedFiles = 0
 
       /**
@@ -341,7 +339,6 @@ export async function executeGrepSearch(args) {
         // The caller aborting mid-walk keeps what was found: a partial
         // answer marked not exhausted, never an error.
         if (!isAbort(err, signal)) throw err
-        interruptionReason = err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'cancelled'
         interrupted = true
       }
 
@@ -388,7 +385,6 @@ export async function executeGrepSearch(args) {
         // distinction.
         // @ref LLP 0303#completeness-signals [implements]: truncation and walk completion are two facts, reported as two
         exhausted: !interrupted,
-        ...(interruptionReason ? { interruptionReason } : {}),
         localOnly,
         freshnessMessages,
         indexedFiles: 0,
