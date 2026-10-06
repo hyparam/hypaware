@@ -1945,6 +1945,129 @@ over unchanged history by design too.
 
 ---
 
+## `ollama_direct_capture`
+
+**What it proves:** at the exact candidate commit, native local Ollama text
+`POST /api/chat` JSON and NDJSON preserve wire content/model and produce ordered
+request-context snapshots with one current-response usage carrier. Failed and
+interrupted exchanges produce no rows, diagnostics reach the documented local
+JSONL channel, collector restart retains IDs without growth, and switching to
+direct requests before stopping the collector is reversible.
+
+**What it does not prove:** automatic CLI/attach/history capture, other API paths,
+tools/images/audio/thinking, raw replay after capture loss, a total RSS ceiling,
+directory exclusion for directory-blind rows, installed-service behavior, or
+export withholding in configurations with sinks. The fake-upstream
+`gateway_ollama_capture` smoke does not replace this real-model procedure.
+
+**Requires:** the candidate checkout/package with dependencies, a running local
+Ollama service, an already installed text-only model such as `gemma3:4b`, curl,
+Node and ripgrep. Record candidate SHA, Ollama version, model identity and the
+disposable home. Do not download models, alter the existing service/config, or
+stop it. Use only short synthetic text. Related: [LLP 0398](../llp/0398-ollama-direct-capture.spec.md),
+[LLP 0399](../llp/0399-ollama-direct-capture.design.md),
+[LLP 0400](../llp/0400-ollama-direct-capture.plan.md).
+
+### Steps
+
+1. Follow [Direct Ollama API text capture](CLIENTS.md#direct-ollama-api-text-capture)
+   from the candidate root. Retain every exported variable, the no-sink config,
+   collector PID and logs. Validate config and confirm the installed model.
+   Verify gateway and processor healthy at the explicit free loopback address.
+   All commands use `node "$HYP_BIN"` and this disposable `HYP_HOME`/`HYP_CONFIG`.
+   If the port is occupied, choose another and update both config and request URL.
+
+2. Send the documented JSON request, saving the response and exact correlated
+   query. Match submitted context/new assistant content, provider `ollama`,
+   reported model, request/session/exchange ID and ordered predecessor links.
+   Check unknown cwd/repository are null. Record normalized nullable usage,
+   native raw counters and completion reason. Only the new response carries usage.
+   Missing cached counts leave normalized input absent; zero is distinct from
+   absence. Do not invent a count when this service version omits it.
+
+3. Build a short second request containing empty system/user/historical-assistant
+   entries, equal text at two positions, the first response's actual assistant
+   text, and a new user question. Save it as `$PILOT_ROOT/stream-request.json`.
+   Include `stream: true` and the same model, then:
+
+   ```sh
+   curl --fail --silent --show-error --no-buffer "$CAPTURE_URL/api/chat" \
+     -H 'Content-Type: application/json' -H "x-hyp-dev-run-id: $DEV_RUN_ID" \
+     --data-binary "@$PILOT_ROOT/stream-request.json" > "$PILOT_ROOT/response.ndjson"
+   ```
+
+   Compare the joined assistant fragments (terminal content included) with the
+   query. Verify a last nonblank `done: true` record, reported model consistency,
+   real `done_reason` and terminal counters. Every admitted empty position has a
+   row/index/link even though `content_text` is null. Historical assistant rows
+   have no usage. Repeat the identical real request and prove its new exchange ID
+   and message IDs are distinct. Record nonzero cache counts when observed;
+   if none occur, report that rather than making fixture values into live proof.
+
+4. Record the current provider row count and ordered IDs. Exercise an unsupported
+   request (for example, add `tools: []` to a short text request) through the
+   capture URL. Save the upstream response/status; success at the caller is
+   allowed. Verify no added snapshot rows and read the bounded adapter reason:
+
+   ```sh
+   rg 'plugin\.ollama\.(capture_dropped|invalid_usage)|aigw\.exchange_write_failed' \
+     "$HYP_HOME/hypaware/dev-telemetry" -g 'logs-*.jsonl'
+   ```
+
+   Inspect emitted fields and processor PID files, with stable `DEV_RUN_ID`.
+   They must contain no prompt, partial response, tool content, credentials or
+   unfiltered upstream error. `invalid_usage` is required only when observed;
+   the smoke covers malformed counters and a controlled append failure. Adapter
+   reasons use these JSONL files, not daemon.log/default status; gateway transport
+   drops use the separate daemon log/status channel. Without dev telemetry or an
+   existing OTel exporter, adapter-specific reasons have limited visibility.
+
+5. Abort a pilot streaming request using an already installed model and a bounded
+   long-enough synthetic generation. For example, request a numbered list with
+   `options: { "num_predict": 512 }` and use `curl --max-time 1 --no-buffer`.
+   Confirm from captured wire that it actually interrupted before `done: true`;
+   a completed response is not interruption proof. Save the partial output and
+   curl result. Verify no added prompt/partial rows and a `transport_error` reason
+   in the actual processor JSONL. If the model completes too quickly or no bytes
+   arrive, adjust the bounded request/time and repeat with the limitation recorded.
+
+6. Test upstream unavailable using a **pilot-owned refused loopback endpoint**.
+   Restore the client's direct URL, stop only `$PILOT_PID` with SIGTERM and wait.
+   Preserve the successful config; write a temporary gateway `upstreams` entry
+   named `ollama`, with `base_url` pointing to an independently verified unused
+   local port, `path_prefix: "/api/chat"`, provider `ollama`. Never stop the real
+   Ollama service. Validate/relaunch this temporary collector, verify readiness,
+   and send the short JSON request to its capture URL. Save HTTP 502 plus the
+   secret-safe `transport_error` JSONL reason; prove no new rows. Switch direct
+   first, stop the temporary collector, restore the original config, and relaunch
+   with the same home. Preserve each PID, command and output rather than silently
+   replacing evidence from a failure.
+
+7. Before sending more captured requests, compare retained provider row IDs/counts
+   with step 4 (plus any intentionally admitted repeat). They must match exactly
+   after collector restart. If waiting spool rows were present, record their
+   state before/after querying with `--refresh always`. This proves ordinary
+   cache/spool retention; there is no transcript/raw recovery lane for data lost
+   before append. Re-read JSONL across old/new processor PID files.
+
+8. Restore the test client's direct Ollama request URL, then SIGTERM/wait only
+   the collector PID you launched. Prove a fresh direct request succeeds and
+   saved HypAware rows stay queryable with no new capture. Leave the existing
+   Ollama service running. Retain exact SHA/config/commands/wire/query/diagnostics
+   and any limitations in mission evidence or release notes. Acceptance requires
+   independent candidate checks and review as well as this real journey.
+
+### If it fails
+
+Inspect the run-specific JSONL and gateway/processor lifecycle logs before
+changing code. A successful caller response with no rows can mean unsupported
+content, malformed completion, capture budgets, processor outage or append
+failure. Preserve the failed candidate SHA and artifacts; rerun affected proof
+at the corrected SHA. Do not change service ownership, download a model, widen
+permissions or replace live-model evidence with the fake-upstream smoke.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written

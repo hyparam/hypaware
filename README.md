@@ -22,6 +22,9 @@ There are two ways to run it:
 
 **[Documentation](./docs/README.md):** setup, clients, querying, configuration, privacy, and troubleshooting.
 
+For explicit native Ollama text API capture, see the
+[disposable capture/query/stop recipe](./docs/CLIENTS.md#direct-ollama-api-text-capture).
+
 **Contents:**
 [Requirements](#requirements) ·
 [Quickstart](#quickstart-solo-fully-local) ·
