@@ -324,7 +324,10 @@ identifies the owner. Contention fails immediately for retry, with no polling
 or additional waiter queue. A live or unverifiable owner is never evicted by
 age. A dead owner is reclaimed by unlinking its exact filename, then removing
 the empty directory; a contender losing that unlink must stop. PID reuse may
-delay recovery but cannot permit concurrent writers. An empty or malformed
+delay recovery but cannot permit concurrent writers. An owner naming the
+claimant's own PID that the claimant does not hold is dead: a containerized
+daemon restarts as the same PID, so a liveness probe alone would keep that
+guard forever. An empty or malformed
 lock fails closed; after stopping all writers an operator may remove such a
 lock left by an interrupted ownership publication or recovery. Updated writers
 must be restarted before relying on this protocol; old binaries do not honor

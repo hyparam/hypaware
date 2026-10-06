@@ -458,12 +458,12 @@ test('a busy partition mutation guard skips that partition and still purges the 
       { session_id: 'delete', body: `secret ${source}` }, { session_id: 'keep', body: `neighbor ${source}` },
     ])
   }
-  // A live owner this process did not claim: claimPartitionMutation refuses on
+  // A live owner in another process (the parent): claimPartitionMutation refuses on
   // sight, with no polling and no waiter queue (LLP 0417 #cache-mutation-guard).
   const busy = storage.cacheTablePath('events', ['source=a'])
   const lock = path.join(path.dirname(busy), `.${path.basename(busy)}.mutation-lock`)
   await fs.mkdir(lock, { recursive: true, mode: 0o700 })
-  await fs.writeFile(path.join(lock, `${process.pid}-${randomUUID()}`), '')
+  await fs.writeFile(path.join(lock, `${process.ppid}-${randomUUID()}`), '')
   t.after(() => fs.rm(lock, { recursive: true, force: true }))
 
   assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 1)
@@ -508,10 +508,10 @@ test('a non-busy failure after a busy skip still names the skipped partition', a
   const busy = partitions[0]
   const corrupt = partitions[partitions.length - 1]
 
-  // A live owner this process did not claim: the guard refuses on sight.
+  // A live owner in another process (the parent): the guard refuses on sight.
   const lock = path.join(path.dirname(busy), `.${path.basename(busy)}.mutation-lock`)
   await fs.mkdir(lock, { recursive: true, mode: 0o700 })
-  await fs.writeFile(path.join(lock, `${process.pid}-${randomUUID()}`), '')
+  await fs.writeFile(path.join(lock, `${process.ppid}-${randomUUID()}`), '')
   t.after(() => fs.rm(lock, { recursive: true, force: true }))
   // A published generation with no table metadata: not a busy guard, so it
   // aborts the run.
