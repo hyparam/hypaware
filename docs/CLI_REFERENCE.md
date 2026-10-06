@@ -730,10 +730,9 @@ Saves the exact session ID as ignored and adds it to every available
 recorder's drop set. This stops future capture only. It doesn't delete existing rows. The Claude
 telemetry listener deletes ignored-session bodies from its transient spool.
 
-A confirmed ignore prints an `earlier:` line naming the exact purge command for
-the resolved session ID, `hyp privacy purge --session <id>`, plus its
-`--local-only` form. The default form also deletes the session's rows from
-configured remotes. With `--json`, the same hint is a `purge` object:
+A confirmed ignore prints the exact command to delete what the session already
+recorded, `hyp privacy purge --session <id>`, plus its `--local-only` form.
+The default form also deletes the session's rows from configured remotes. With `--json`, the same hint is a `purge` object:
 `earlier_rows` (`retained`), `command`, `command_deletes_remote` (`true`), and
 `local_only_command`.
 
@@ -1217,7 +1216,7 @@ hyp privacy set <path> sync|local-only|ignore
 
 Upserts an exact machine-local path marking. It doesn't write a dotfile or
 delete rows. An `ignore` marking prints a line naming
-`hyp privacy purge --ignored` for rows captured before it.
+`hyp privacy purge --ignored` for what was already recorded there.
 
 ```sh
 hyp privacy set ./private-research local-only
@@ -1260,9 +1259,8 @@ Writes a shareable `.hypignore` file in an existing directory at the explicit
 path. With no path, uses
 the repository root, or the current directory when outside a repository.
 Use `hyp privacy set <path> sync|local-only|ignore` for machine-local markings
-and `hyp privacy show [path]` to report without writing. Rows captured before
-the file existed stay in the cache, and the receipt names
-`hyp privacy purge --ignored` to delete them locally.
+and `hyp privacy show [path]` to report without writing. The receipt names
+`hyp privacy purge --ignored` to delete what was already recorded there.
 
 ```sh
 hyp privacy ignore ./customer-data

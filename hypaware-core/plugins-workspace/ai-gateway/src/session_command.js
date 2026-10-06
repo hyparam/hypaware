@@ -86,7 +86,7 @@ function sessionPurgeCommands(sessionId) {
  */
 function sessionPurgeNote(sessionId) {
   const { command, localOnlyCommand } = sessionPurgeCommands(sessionId)
-  return `earlier: rows captured before this opt-out stay in the cache. To delete them here and from configured remotes, run \`${command}\` (\`${localOnlyCommand}\` keeps remote copies).`
+  return `To delete what this session already recorded, run \`${command}\`. It also deletes copies on configured remotes; \`${localOnlyCommand}\` keeps those.`
 }
 
 /**
