@@ -110,6 +110,12 @@ immediate previous-message links, starting with `[]`; retain equal strings at
 different positions. `part_id` remains the gateway's message-ID/part-index
 composition. No client header or content hash is needed.
 
+Preserve every admitted empty context position as an explicit
+`[{ type: 'text', text: '' }]` block, as for the empty generated response.
+The existing row builder drops a bare empty-string content value. System, user
+and historical assistant entries must retain their row, index and links even
+when their canonical content_text follows the existing empty-value convention.
+
 @ref LLP 0026#decision: prefer actual identity where it exists; this native API has none, so do not invent transcript UUIDs
 @ref LLP 0030#decision: retain the required session key and nullable thread key
 
@@ -211,7 +217,24 @@ model; do not download one. Show exact query correlation using request_id or
 attributes.gateway.exchange_id, provider/model, ordered content and nullable
 usage/raw counts. Inspect schema rather than assume SQL JSON coercions.
 
-Show diagnostics in the existing gateway/processing logs and status counters.
+For this disposable foreground recipe, set `HYP_DEV_TELEMETRY=1` and a stable
+`DEV_RUN_ID` in the collector environment, inherited by its processor. Adapter
+`ctx.log` emits through the existing OTel logger; its local diagnostic files are
+`<HYP_HOME>/hypaware/dev-telemetry/logs-<pid>.jsonl`, including the processor PID.
+Read the concrete adapter/write reasons with:
+
+```sh
+rg 'plugin\.ollama\.(capture_dropped|invalid_usage)|aigw\.exchange_write_failed' "$HYP_HOME/hypaware/dev-telemetry" -g 'logs-*.jsonl'
+```
+
+These files are distinct from the gateway/processing daemon.log files. Existing
+transport-drop events/counts still use the gateway daemon channel/status. Without
+dev telemetry or an existing configured OTel exporter, adapter ctx.log reasons
+are not automatically available in daemon.log or status; default-production
+adapter-specific diagnostic visibility is a stated limitation of this pilot.
+No new exporter, status field or infrastructure is added. Smoke and live failure
+evidence must verify the exact local JSONL channel, including secret-safe fields.
+
 Use a pilot-owned refused endpoint for unavailable-upstream proof, never stop the
 owner's Ollama service. Abort a pilot request for interruption proof. Restart
 only the collector with the same state/config, then compare retained IDs/counts.
@@ -229,6 +252,9 @@ and completion/usage proof. Steward `01M47X8K526F0B2TQ0ABWP221W` and
 with ordinary-session regression coverage. Documentarian
 `01M47X85EECD4CKRPA4WS6XZ3T` and `01M47XAYYBPDDHK1WDPSD820RR` supply the
 exact documentation homes and unknown-counter/stop/recovery distinctions.
+Final guardian check `01M47XNCC5D4VXJAAXZE7CQEVE` clarifies empty-context row
+preservation. Final documentarian check `01M47XNNPNXD5PKMJJ3R9JMNA0` corrects
+the diagnostic channel to existing local JSONL for this foreground recipe.
 Owner scope and retention decisions are `01M47XAP04SQFYVNP31BDH2Q1H` and
 `01M47XBZYNZ51H5CX63Y3DAXYY`. Full evidence stays in mission DESIGN-EVIDENCE.md.
 These consultations settle design direction, not implementation or acceptance.

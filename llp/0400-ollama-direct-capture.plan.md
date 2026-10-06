@@ -80,7 +80,9 @@ Traditional tests cover activation/manifest/config discovery, exact route and
 projector matching, coexistence with Claude/Codex/OpenClaw, JSON and arbitrarily
 chunked NDJSON reconstruction, CRLF/terminal newline/no-final-newline,
 content-bearing terminal, real done_reason, model fallback/conflict and empty
-text response. Cover identical context positions/requests and ordered IDs/links;
+text response. Preserve empty system/user/assistant context positions with explicit
+text blocks, never bare empty strings, and verify their rows/indexes/links.
+Cover identical context positions/requests and ordered IDs/links;
 historical assistant context must have no usage. Counters cover nonzero cache,
 zero, absence, invalid/noninteger/negative/inconsistent counts and exactly one
 carrier. Show output rows, not just private helper results.
@@ -103,6 +105,12 @@ fake-upstream use after collector stop. Test the actual transport route and
 capture abandonment; reuse process-transport tests for queue/slot/timeout/outage
 coverage rather than copy a separate transport implementation. The smoke must
 assert internal telemetry and user-visible behavior. It is fixture proof only.
+Set `HYP_DEV_TELEMETRY=1` in the foreground environment and assert adapter
+drop/invalid-usage/write reasons in the existing
+`<HYP_HOME>/hypaware/dev-telemetry/logs-<pid>.jsonl` channel. Do not infer these
+reasons from daemon.log or default status. Existing transport-drop events and
+counts are a separate gateway channel. Carry this exact diagnostic recipe into
+user docs and live failure proof, including the default-telemetry limitation.
 
 Document the exact disposable no-sink configuration and foreground commands in
 docs/CLIENTS.md, add a narrow README link and the `ollama_direct_capture` manual
