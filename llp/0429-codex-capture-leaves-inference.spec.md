@@ -6,7 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-22
 **Related:** LLP 0141, LLP 0313, LLP 0359, LLP 0045
-**Extended-by:** LLP 0432 (saved Codex provider compatibility and key-scoped TOML undo)
+**Extended-by:** LLP 0432 (saved Codex provider compatibility and key-scoped TOML undo), LLP 0466 (`on_join` no longer gates the capture sweep; detach is the off switch)
 
 ## Default {#default}
 

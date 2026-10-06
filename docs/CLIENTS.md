@@ -89,7 +89,7 @@ rows can subsequently leave through those sinks. Apply your
 
 Some integrations run scheduled recovery automatically. A positive
 `backfill.window_days` limits both join-time backfill and scheduled recovery;
-widening it can make older history eligible on the next sweep. The adapters
+widening it can make older history eligible on the next sweep. `hyp detach` stops a client's schedules. The adapters
 differ in how `backfill.on_join` affects schedules, so consult the
 [recovery reference](CLI_REFERENCE.md#scheduled-recovery-sweeps-and-backfillwindow_days)
 before changing those settings.
@@ -101,10 +101,13 @@ hyp detach codex --dry-run
 hyp detach codex
 ```
 
-Detach reverses managed client settings and retains recorded history. To remove
-an integration from ongoing automatic capture and history recovery, reconfigure
-it with `hyp setup`; detaching settings alone does not remove configured
-transcript schedules. Team policy can require an integration.
+Detach stops recording this client: no new sessions from it reach the cache,
+including the scheduled transcript imports, and the running daemon picks this
+up without a restart. Detach also reverses the client's managed settings.
+Recorded history is kept; [`hyp privacy purge`](PRIVACY.md) deletes it.
+`hyp status` then shows the client as "Not recording". Run `hyp attach codex`
+to record it again. If team policy requires the integration, detach refuses
+and changes nothing.
 
 To keep a client's recordings local, exclude a directory or session, or delete
 recorded rows, use [privacy controls](PRIVACY.md). For missing recordings, see

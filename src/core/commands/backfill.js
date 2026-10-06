@@ -10,6 +10,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 import { resolveEntrypointOwners } from '../backfill/entrypoint_owner.js'
 import { resolveConfigPath } from '../runtime/boot.js'
+import { readRecordingStateFromDisk } from '../config/client_recording.js'
 import { loadClientDescriptors } from '../daemon/status.js'
 
 /**
@@ -347,6 +348,24 @@ async function runProvider(args) {
       // @ref LLP 0140#manifest-declares-ownership [implements]: the runner resolves entrypoint ownership from the catalog and hands providers the resolved map
       const owners = await resolveOwnersForRun(ctx, log)
 
+      // A detached client is not recorded, by the sweep or by anything else
+      // that runs its provider. A provider that classifies sessions by
+      // transcript entrypoint (Claude's, which also carries Desktop) runs on:
+      // its classifier drops the detached client's sessions one by one, so a
+      // still-recording client sharing the tree keeps its lane.
+      // @ref LLP 0466#runner-gate [implements]: the runner, not each plugin, skips a detached client's provider
+      if (owners.providerDetached?.(provider) === true) {
+        log.info('backfill.provider_not_recording', {
+          [Attr.COMPONENT]: 'backfill',
+          [Attr.OPERATION]: 'backfill.provider_start',
+          [Attr.PLUGIN]: provider.plugin,
+          provider: provider.name,
+          reason: 'client_detached',
+          status: 'ok',
+        })
+        return result
+      }
+
       const runCtx = buildRunContext({
         env: ctx.env,
         storage: ctx.storage,
@@ -358,6 +377,7 @@ async function runProvider(args) {
         log,
         entrypointOwners: owners.entrypointOwners,
         isPluginConfigured: owners.isPluginConfigured,
+        isPluginDetached: owners.isPluginDetached,
       })
 
       try {
@@ -712,6 +732,7 @@ function handleEvent(args) {
  *   log: PluginLogger,
  *   entrypointOwners?: EntrypointOwners,
  *   isPluginConfigured?: (plugin: PluginName) => boolean,
+ *   isPluginDetached?: (plugin: PluginName) => boolean,
  * }} args
  * @returns {BackfillRunContext}
  */
@@ -726,6 +747,7 @@ function buildRunContext(args) {
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
     ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
+    ...(args.isPluginDetached !== undefined ? { isPluginDetached: args.isPluginDetached } : {}),
     ...(args.sweep !== undefined ? { sweep: args.sweep } : {}),
     dryRun: args.dryRun,
     itemsFailed: 0,
@@ -751,18 +773,33 @@ function buildRunContext(args) {
  *
  * @param {BackfillRunnerContext} ctx
  * @param {PluginLogger} log
- * @returns {Promise<{ entrypointOwners: EntrypointOwners, isPluginConfigured?: (plugin: PluginName) => boolean }>}
+ * A detached client (`recording: false`, LLP 0466) counts as not configured
+ * here, so its claimed entrypoints and its container close exactly the way an
+ * unconfigured client's do. The switch is read fresh, so a daemon that booted
+ * before the detach honors it on its next run.
+ *
+ * @returns {Promise<{ entrypointOwners: EntrypointOwners, isPluginConfigured?: (plugin: PluginName) => boolean, isPluginDetached?: (plugin: PluginName) => boolean, providerDetached?: (provider: BackfillContribution) => boolean }>}
  */
 async function resolveOwnersForRun(ctx, log) {
   try {
     const { stateDir, hypHome } = readObservabilityEnv(ctx.env)
     const descriptors = await loadClientDescriptors({ stateDir })
     const configured = await resolveConfiguredPlugins(ctx, hypHome)
+    const { detached } = await readRecordingStateFromDisk({ env: ctx.env })
     /** @param {PluginName} plugin */
-    const isPluginConfigured = (plugin) => configured.has(plugin)
+    const isPluginConfigured = (plugin) => configured.has(plugin) && !detached.has(plugin)
+    /** @param {BackfillContribution} provider */
+    const providerDetached = (provider) => {
+      if (!detached.has(provider.plugin)) return false
+      const own = descriptors.get(provider.name)
+      return !(own?.plugin === provider.plugin && (own.transcriptEntrypoints?.length ?? 0) > 0)
+    }
     return {
       entrypointOwners: resolveEntrypointOwners(descriptors.values(), isPluginConfigured),
       isPluginConfigured,
+      /** @param {PluginName} plugin */
+      isPluginDetached: (plugin) => detached.has(plugin),
+      providerDetached,
     }
   } catch (err) {
     log.warn('backfill.entrypoint_owners_unavailable', {

@@ -279,7 +279,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'claude detach #2 stdout reported nothing to do',
       detach2Stdout.text(),
-      (v) => typeof v === 'string' && v.includes('No HypAware marker found')
+      (v) => typeof v === 'string' && v.includes('nothing to do')
     )
 
     // ----------------------------------------------------------------
@@ -449,7 +449,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'codex detach #2 stdout reported nothing to do',
       codexDetach2Stdout.text(),
-      (v) => typeof v === 'string' && v.includes('No HypAware marker found')
+      (v) => typeof v === 'string' && v.includes('nothing to do')
     )
 
     code = await runAttach(['codex'], { registry, kernel, env })

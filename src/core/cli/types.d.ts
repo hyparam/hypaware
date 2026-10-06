@@ -259,7 +259,7 @@ export interface FinaleSummary {
    * deliberate no-attach-on-join posture): not applicable to the attach
    * lane, so `ok: true` and the run summary prints nothing for it.
    */
-  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean }[]
+  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean; notRecording?: boolean }[]
   skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   /**

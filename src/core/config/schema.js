@@ -111,7 +111,7 @@ export function isForgedGrepOnlyConfig(config) {
 // is one the parser drops, invisible to the reader holding the parsed
 // document, so the forged-shape test ignores it too. Extend this set and
 // `parsePluginEntry` together.
-const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'version', 'artifact_hash', 'source'])
+const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'version', 'artifact_hash', 'source', 'recording'])
 
 /**
  * Guard a write to the user-owned **local** config layer
@@ -480,6 +480,9 @@ function parsePluginEntry(entry, pointer, errors) {
   if (obj.enabled !== undefined && typeof obj.enabled !== 'boolean') {
     errors.push({ pointer: `${pointer}/enabled`, message: 'enabled must be a boolean when present' })
   }
+  if (obj.recording !== undefined && typeof obj.recording !== 'boolean') {
+    errors.push({ pointer: `${pointer}/recording`, message: 'recording must be a boolean when present' })
+  }
   if (obj.config !== undefined && !isPlainObject(obj.config)) {
     errors.push({ pointer: `${pointer}/config`, message: 'config must be an object when present' })
   }
@@ -493,6 +496,7 @@ function parsePluginEntry(entry, pointer, errors) {
   /** @type {PluginConfigInstance} */
   const out = { name: obj.name }
   if (typeof obj.enabled === 'boolean') out.enabled = obj.enabled
+  if (typeof obj.recording === 'boolean') out.recording = obj.recording
   if (isPlainObject(obj.config)) out.config = /** @type {JsonObject} */ (obj.config)
   if (isNonEmptyString(obj.version)) out.version = obj.version
   if (isNonEmptyString(obj.artifact_hash)) out.artifact_hash = obj.artifact_hash

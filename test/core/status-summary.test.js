@@ -37,31 +37,31 @@ test('compact status shows mixed sharing, probe-less sources, and hides unused c
   const text = render(report({
     layered: managed,
     clients: [
-      { name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true, attachable: true, mode: 'otel' },
-      { name: 'codex', plugin: '@hypaware/codex', configured: true, attached: false, attachable: false },
-      { name: 'cursor', plugin: '@hypaware/cursor', configured: false, attached: false, attachable: true },
+      { name: 'claude', plugin: '@hypaware/claude', configured: true, recording: true, attached: true, attachable: true, mode: 'otel' },
+      { name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false },
+      { name: 'cursor', plugin: '@hypaware/cursor', configured: false, recording: false, attached: false, attachable: true },
     ],
     clientSync: { syncing: ['claude'], localOnly: ['codex', 'hermes'] },
   }))
   assert.match(text, /^HypAware · Healthy/)
   assert.match(text, /606 MB · 90-day retention/)
-  assert.match(text, /claude\s+Attached \(otel\)\s+Sync/)
-  assert.match(text, /codex\s+Configured\s+Local only/)
-  assert.match(text, /hermes\s+Configured\s+Local only/)
+  assert.match(text, /claude\s+Recording \(otel\)\s+Sync/)
+  assert.match(text, /codex\s+Recording\s+Local only/)
+  assert.match(text, /hermes\s+Recording\s+Local only/)
   assert.doesNotMatch(text, /cursor|attach n\/a|active plugins|config:/)
   assert.match(text, /not delivery confirmation/)
 })
 
 test('missing enrolled policy stays unknown, while a solo client is local only', () => {
-  const clients = [{ name: 'codex', plugin: '@hypaware/codex', configured: true, attached: false, attachable: false }]
-  assert.match(render(report({ clients, layered: managed })), /codex\s+Configured\s+Unknown/)
-  assert.match(render(report({ clients })), /codex\s+Configured\s+Local only/)
+  const clients = [{ name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false }]
+  assert.match(render(report({ clients, layered: managed })), /codex\s+Recording\s+Unknown/)
+  assert.match(render(report({ clients })), /codex\s+Recording\s+Local only/)
 })
 
 test('warning gaps show both ages and one primary repair without asserting lost sessions', () => {
   const now = Date.now()
   const text = render(report({
-    clients: [{ name: 'claude', plugin: '@hypaware/claude', configured: true, attached: true, attachable: true }],
+    clients: [{ name: 'claude', plugin: '@hypaware/claude', configured: true, recording: true, attached: true, attachable: true }],
     captureHealth: [{
       client: 'claude', plugin: '@hypaware/claude', source: 'claude-telemetry', state: 'gap',
       lastEventAt: new Date(now - 21 * 60000).toISOString(),
@@ -91,7 +91,7 @@ test('sharing holds and privacy exclusions remain visible in compact status', ()
 test('source and client probe errors remain visible and terminal-safe', () => {
   const text = render(report({
     sources: [{ name: 'github', plugin: '@hypaware/github', state: 'started', health: { state: 'ready', lastError: 'API timed out' } }],
-    clients: [{ name: 'broken', plugin: '@acme/broken', configured: false, attached: false, attachable: true, error: 'bad\n\u001b[31msettings' }],
+    clients: [{ name: 'broken', plugin: '@acme/broken', configured: false, recording: false, attached: false, attachable: true, error: 'bad\n\u001b[31msettings' }],
   }))
   assert.match(text, /^HypAware · Needs attention/)
   assert.match(text, /github: API timed out/)
