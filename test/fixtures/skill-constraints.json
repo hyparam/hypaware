@@ -45,7 +45,7 @@
     },
     {
       "id": "graph-derived-facets",
-      "pattern": "Always answer skill and program questions from the graph|derived facets|Skills and programs are derived by the graph",
+      "pattern": "Prefer the graph for skill and program inventories, identities, and relationships\\.[\\s\\S]*Distinguish observed invocations from mere mentions, and disclose fallback coverage limits",
       "harm": "Skills and programs have no column in ai_gateway_messages; they are derived at projection time. Ad hoc SQL reconstruction measurably disagrees with the canonical derivation: a 3-surface LIKE approximation returned 52 sessions where the strict rules give 44, and a first-token approximation of programs returned 470 garbage tokens against the graph's 86. The answer is confidently wrong with no error."
     },
     {

@@ -8,6 +8,8 @@ user-invocable: false
 
 Use `hyp query` to inspect recorded activity. Commands run locally unless you add `--remote <target>`.
 
+Start with `ai_gateway_messages` for recorded AI conversations, prompts, responses, and tool calls/results. Use other datasets when the question specifically concerns telemetry, graph relationships, or another source.
+
 ## Local or remote
 
 Use local queries for this machine's activity. Use a configured remote for a team, multiple machines, or a named host. If the scope is ambiguous and would change the answer, ask whether the user means this machine or a remote.
@@ -18,7 +20,7 @@ Use local queries for this machine's activity. Use a configured remote for a tea
 2. Use the default refresh mode for most local SQL queries. Use `--refresh always` when the answer needs the newest captured rows; the default may leave pending rows out for up to two minutes after the last successful cache flush. Automatic refresh failures return committed data with a warning; forced refresh failures fail the query.
    For cache-write permission failures in Codex, read [troubleshooting.md](troubleshooting.md).
 3. Check the exit code and stderr before interpreting empty output as zero matching rows. Never discard or merge stderr (`2>/dev/null`, `2>&1`) or cut output with `| head`/`| tail`: merged notices break `--format json`, and a pager cuts rows silently. Bound output with `--max-bytes <n>` or `--output <file>` instead.
-4. Query output may shorten long cells or omit rows to fit the display limit. Check stderr for truncation notices. When you need complete results, use `--format json --output <file>` and read the file.
+4. To avoid CLI display truncation, use `--format json --output <file>`. This saves all rows and full cell values returned by the query, but does not bypass query, scan, or server limits. Check exit status and stderr for incomplete-result notices, then inspect the file in bounded sections or process it programmatically.
 5. Inspect unfamiliar tables with `hyp query schema <table>`, including each table in a cross-table query. For queryable datasets reporting `columns: 0`, use `SELECT * FROM <table> LIMIT 1` to inspect their inferred columns.
 
 ## Common Commands
@@ -77,13 +79,17 @@ Read [sql.md](sql.md) when writing SQL for supported syntax, functions, and colu
 - Message text is in `content_text`; tool calls use `tool_name`, `tool_call_id`, and `tool_args`.
 - Token usage is under `attributes.usage` on assistant rows: `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`. OpenAI omits cache-write tokens and adds `reasoning_tokens` and `total_tokens`.
 
-Extract token fields with `COALESCE(CAST(JSON_EXTRACT(attributes, '$.usage.input_tokens') AS BIGINT), 0)`. Use COALESCE for each term in an addition and each aggregate sum. Usage appears on exactly one assistant part per response, so SUM needs no deduplication.
+Extract token fields with `COALESCE(CAST(JSON_EXTRACT(attributes, '$.usage.input_tokens') AS BIGINT), 0)`. Use COALESCE for each term in an addition and each aggregate sum. Usage appears on one assistant part per captured response, but that does not guarantee uniqueness across capture sources or historical stream updates.
+
+Before summing token volumes, check usage-bearing records for repeated provider request identities and inspect bounded examples. Verify identity semantics for each provider and source. Count proven copies/updates of one response once: prefer the final usage record, or the record with the highest output count when these are verified cumulative updates of the same response. Take all counters from that same record. Do not sum updates or take independent maxima of different counters. Keep unmatched captures; filtering to one entrypoint can discard real requests. Never merge unrelated records with missing request IDs or deduplicate on identical token values alone. Reconcile identities across date partitions before combining totals. If identity cannot be resolved, report the defensible scope and coverage instead of a falsely exact combined total.
+
+Read usage from `attributes.usage`, not `raw_frame`. Keep input, output, cache read, and cache write separate; reasoning may already be included in output. Missing usage is not zero consumption.
 
 Run `hyp query schema ai_gateway_messages` for the full column list. For OpenClaw activity, read [openclaw.md](openclaw.md) before choosing a source filter.
 
 ## Activity graph: `node` / `edge`
 
-Use the graph for inventories, relationships, and questions about skills or programs. Skills and programs are derived by the graph; do not reconstruct them from message text or tool arguments. Repo keys normalize different remote-URL spellings that a raw `git_remote LIKE` misses, and Skill and Program keys are shared across Claude and Codex. The graph is derived and rebuildable; never hand-edit it to correct captured activity.
+Prefer the graph for skill and program inventories, identities, and relationships. Use message text or tool arguments for invocation details, verification, or fallback when graph coverage is unavailable or incomplete. Distinguish observed invocations from mere mentions, and disclose fallback coverage limits. Repo keys normalize different remote-URL spellings that a raw `git_remote LIKE` misses, and Skill and Program keys are shared across Claude and Codex. The graph is derived and rebuildable; never hand-edit it to correct captured activity.
 
 - Run `hyp graph project` before querying a local graph. Remote projection is maintained by the server and cannot be run from here.
 - If `node`/`edge` or graph commands are unavailable, the graph is not composed on this install: report that limitation rather than treating it as zero activity, use messages where they can answer the question, and tell the user to re-run `hyp setup` to add it.
@@ -121,7 +127,7 @@ When the user asks you to analyze recorded sessions and recommend changes:
 
 ## Response Format
 
-Answer the question first, using concise, plain language. Use a table for rankings or comparisons, with a short explanation of the main finding.
+Answer directly. Default to one short paragraph or a few bullets; expand only when the question requires it or the user asks for detail. Include only the evidence needed to support the answer, and omit process narration and repeated summaries. Use a compact table when it makes rankings or comparisons clearer.
 
 State whether you queried local data or a named remote, and give the date range. Disclose limits, truncation, stale data, or other incomplete coverage.
 
@@ -129,4 +135,4 @@ Start with the narrowest query that can answer the question and give a useful fi
 
 Explain what the evidence suggests about agent behavior when it helps answer the question. Keep that interpretation proportional to the request, support it with examples, and distinguish observations from possible causes.
 
-When a useful deeper investigation stands out, suggest it briefly and explain what it could reveal. Offer one or several directions as appropriate, such as examining repeated corrections, comparing successful and failed sessions, or tracing how an agent recovered from an error. Make suggestions specific to the findings; avoid formulaic “If useful, the next step would be...” closings.
+Suggest at most one follow-up, in one sentence, only when it adds clear value; otherwise stop after answering.

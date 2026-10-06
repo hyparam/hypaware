@@ -1,6 +1,6 @@
 # SQL dialect reference
 
-The engine is SELECT-only with a deliberately small SQL surface. When a query fails, the error message echoes the available columns, so read it before retrying.
+The engine is SELECT-only with a deliberately small SQL surface.
 
 - SELECT-only: `SHOW`, `DESCRIBE`, DDL, and `information_schema` are parse errors. Discover a table's columns with `hyp query schema <table>` or `SELECT * FROM <table> LIMIT 1`, never introspection statements. Dataset names come from `hyp cache status` (on a standard install: `ai_gateway_messages`, `node`, `edge`); never guess a table name.
 - Boolean predicates: `IS NOT TRUE` / `IS TRUE` are not parsed (`NOT` must be followed by `NULL`). Compare directly: `col = true`, `col = false`, or `col IS NULL`.
