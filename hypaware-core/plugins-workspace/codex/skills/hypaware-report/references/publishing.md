@@ -15,9 +15,12 @@ without the ledger, raw logs, images, HTML, or assets. The server renders it;
 no local render step is needed. Links may use http(s), mailto, page fragments,
 or another page in the report. See [report-contract.md](report-contract.md).
 
-For a standalone recommendation, check `hyp report --help` for installed
-support before choosing a command; do not assume `recommend` exists. If the
-installed CLI cannot publish that form, retain the page and report the limitation.
+When the analysis yields one recommendation rather than a report, publish that
+page on its own with `hyp report recommend <recommendation-page>.md --remote
+<target>`. Its first `# ` heading is the title. The server wraps it in a report
+of kind `recommendation`, mints its `hyprec-` id, and the receipt prints the id
+and its `hyp report get` command. If the installed CLI lacks `recommend`
+(`hyp report --help`), retain the page and report the limitation.
 
 Return the report ID and a receipt-backed link or `hyp report get` command with
 the remote. On failure, retain the sources and report the error; do not silently
