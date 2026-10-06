@@ -7,6 +7,7 @@
 **Date:** 2026-06-01
 **Related:** LLP 0006, LLP 0012, LLP 0015
 **Extended-by:** LLP 0234, decryption follows the routing table and recording follows the path anchor (proxy mode qualifies the pure-passthrough claim: the gateway now holds a name-constrained local CA per LLP 0235, but still adds no credential of its own and stays byte-transparent to the upstream)
+**Extended-by:** LLP 0398 (direct Ollama text API capture and exchange-scoped projection lifetime, designed in LLP 0399; provider projection stays adapter-owned)
 
 > The load-bearing capability for client adapters. Decomposed from
 > `hypaware-design.md` (AI Gateway as a Plugin).
