@@ -32,8 +32,8 @@ capture normalization or the meaning of net input.
 Keep scope, coverage, delegation budgets, and delivery in the entrypoint. Keep
 analysis and page requirements in one contract; let bounded experiments and
 workflow decisions be usable recommendation artifacts alongside patches. Rank
-by outcome improvement and evidence, not ease of producing a patch. A fixed
-mix of recommendation types is not required.
+by outcome improvement and evidence, not ease of producing a patch. Recommendation count follows the
+evidence and usefulness, with no fixed cap or required mix of types.
 
 Keep the analyst assignment in one template and publishing in a reference read
 only when requested. Preserve host-specific worker selection, registered-dataset
