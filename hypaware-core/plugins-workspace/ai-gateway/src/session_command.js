@@ -51,7 +51,9 @@ const SESSION_IGNORE_NOTE =
  * @returns {{ command: string, localOnlyCommand: string }}
  */
 function sessionPurgeCommands(sessionId) {
-  const command = `hyp privacy purge --session ${shellArg(sessionId)}`
+  // A dash-led id would parse as a flag after a space, so it binds with `=`.
+  const sep = sessionId.startsWith('-') ? '=' : ' '
+  const command = `hyp privacy purge --session${sep}${shellArg(sessionId)}`
   return { command, localOnlyCommand: `${command} --local-only` }
 }
 

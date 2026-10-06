@@ -152,6 +152,17 @@ test('the --json ignore receipt carries the purge command an agent can run', asy
   })
 })
 
+test('a dash-led session id binds to --session with = so the purge command parses', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['--json', '--', '--opaque-id'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.purge.command, 'hyp privacy purge --session=--opaque-id')
+    assert.equal(out.purge.local_only_command, 'hyp privacy purge --session=--opaque-id --local-only')
+  })
+})
+
 test('the unignore receipt carries no purge hint', async () => {
   const set = new Set(['sess-purge-hint'])
   await withControlServer(set, async (base) => {
