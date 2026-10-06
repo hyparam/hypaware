@@ -2507,8 +2507,9 @@ test('list caps the saved section at the newest 100 and counts the rest', async 
   assert.equal(lines[101], '  1 more not listed (newest 100 shown)')
 })
 
-// @ref LLP 0465#list [tests]: saved reports are a section after the remote's rows, in text and in the one JSON array
-test('list appends the saved section after the published reports, and the JSON array', async (t) => {
+// @ref LLP 0465#list [tests]: saved reports are a section after the remote's rows in text
+// @ref LLP 0467#json-remote-only [tests]: --json carries the remote's rows alone
+test('list appends the saved section after the published reports, but not to the JSON array', async (t) => {
   const { ctx, out, store } = await storeFixture(t)
   stubServer(t, () => ({
     status: 200,
@@ -2527,10 +2528,52 @@ test('list appends the saved section after the published reports, and the JSON a
   out.length = 0
   assert.equal(await runReportList(['--json'], ctx), 0)
   const rows = JSON.parse(out.join(''))
-  assert.equal(rows.length, 2)
+  assert.equal(rows.length, 1)
   assert.equal(rows[0].id, 'rpt-b')
   assert.equal(rows[0].source, undefined)
-  assert.deepEqual(rows[1], { source: 'local', name: 'hypaware-report-2026-08-01-to-2026-08-31', path: path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31'), modifiedAt: '2026-09-02T10:00:00.000Z' })
+  out.length = 0
+  assert.equal(await runReportList(['--local', '--json'], ctx), 0)
+  assert.deepEqual(JSON.parse(out.join('')), [
+    { source: 'local', name: 'hypaware-report-2026-08-01-to-2026-08-31', path: path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31'), modifiedAt: '2026-09-02T10:00:00.000Z' },
+  ])
+})
+
+// @ref LLP 0467#json-remote-only [tests]: a --limit/--before page holds only remote rows, so the next cursor is the last row's publishedAt
+test('list --json pages by --limit and --before with no saved rows mixed in', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  const published = [
+    { id: 'rpt-c', kind: 'usage-review', period: '2026-W30', bytes: 1, publishedAt: '2026-07-27T10:00:00.000Z' },
+    { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', bytes: 1, publishedAt: '2026-07-20T10:00:00.000Z' },
+    { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 1, publishedAt: '2026-07-13T10:00:00.000Z' },
+  ]
+  const { calls } = stubServer(t, (/** @type {string} */ _method, /** @type {URL} */ url) => {
+    const params = url.searchParams
+    const before = params.get('before')
+    const limit = Number(params.get('limit') ?? 100)
+    return { status: 200, json: { reports: published.filter((r) => before === null || r.publishedAt < before).slice(0, limit) } }
+  })
+  await savedReport(store, 'hypaware-report-2026-08-01-to-2026-08-31', new Date('2026-09-02T10:00:00Z'))
+  await savedReport(store, 'hypaware-report-2026-09-01-to-2026-09-30', new Date('2026-10-02T10:00:00Z'))
+  /** @type {string[]} */
+  const seen = []
+  /** @type {string | null} */
+  let before = null
+  for (let page = 0; page < 5; page++) {
+    out.length = 0
+    const argv = ['--kind', 'usage-review', '--limit', '2', '--json', ...(before ? ['--before', before] : [])]
+    assert.equal(await runReportList(argv, ctx), 0)
+    const rows = JSON.parse(out.join(''))
+    assert.ok(rows.length <= 2, `page ${page} exceeds --limit: ${rows.length}`)
+    for (const row of rows) {
+      assert.equal(row.source, undefined, `page ${page} carries a saved row`)
+      assert.equal(typeof row.publishedAt, 'string')
+      seen.push(row.id)
+    }
+    if (rows.length < 2) break
+    before = rows[rows.length - 1].publishedAt
+  }
+  assert.deepEqual(seen, ['rpt-c', 'rpt-b', 'rpt-a'])
+  assert.equal(calls.length, 2)
 })
 
 test('list with nothing published still shows the saved section after the hint', async (t) => {

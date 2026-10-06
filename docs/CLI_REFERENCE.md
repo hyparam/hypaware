@@ -522,9 +522,10 @@ with the rest counted. A machine with nothing saved prints no section.
 of the remote's selectors or filters. When nothing selects or filters the
 remote and it cannot be read, the saved reports are still listed under a
 one-line warning and the command exits `0`; `--remote`, any filter, or
-`--json` keeps the failure and its exit code. In `--json` the output stays one
-array: the remote's records, then a row per saved report as
-`{ "source": "local", "name", "path", "modifiedAt" }`.
+`--json` keeps the failure and its exit code. `--json` prints the remote's
+records alone, so `--limit` bounds the array and the last row's `publishedAt`
+is the next `--before`; `--local --json` prints the saved reports, one row
+each as `{ "source": "local", "name", "path", "modifiedAt" }`.
 
 ```text
 saved reports (/Users/me/.hyp/reports):
@@ -571,6 +572,7 @@ whole.
 
 ```sh
 hyp report list --kind usage-review --limit 10 --json
+hyp report list --local --json
 hyp report list --status open,in_progress
 ```
 

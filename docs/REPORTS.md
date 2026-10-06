@@ -40,7 +40,8 @@ The report skill drafts `./hypaware-report-<from>-to-<to>/`, adding a numbered
 suffix if needed, and when the report is reviewed runs `hyp report save` on it,
 which moves the folder into `~/.hyp/reports` (`$HYP_HOME/reports`). Every
 finished report is in that one place, and `hyp report list` shows them beside
-the published ones (`hyp report list --local` shows them alone). The agent
+the published ones (`hyp report list --local` shows them alone; in JSON, only
+`--local --json` lists them, and `--json` alone lists published reports). The agent
 never writes under your home directory itself; the CLI does the move, and
 only a folder that would publish is admitted. The session follows the current
 directory's recording and sync policy, excerpts it quotes from `local-only`

@@ -614,7 +614,8 @@ export async function runReportList(argv, ctx) {
     writeLocalSection(ctx, inventory, { standalone: true })
     return 0
   }
-  const inventory = flat ? null : await localReportInventory(reportsStoreRoot(ctx))
+  // @ref LLP 0467#json-remote-only [implements]: --json is the remote listing alone, so its paging stays the remote's; saved rows are --local --json
+  const inventory = flat || json ? null : await localReportInventory(reportsStoreRoot(ctx))
   if (inventory?.error) ctx.stderr.write(`hyp report list: cannot read saved reports in ${esc(inventory.root)}: ${esc(inventory.error)}\n`)
   /**
    * A remote read that failed. With nothing selecting or filtering the remote,
@@ -690,14 +691,12 @@ export async function runReportList(argv, ctx) {
     return 0
   }
   const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
-  const local = inventory ? inventory.rows : []
   // Read the mode the gate parsed, not argv: the codec also accepts
   // `--json=true`, and a token it blessed must not be dropped downstream.
-  // One array, as before: the remote's records whole, then a row per saved
-  // report marked `source: 'local'`, so a reader with no saved reports sees
-  // the bytes it always did.
+  // The remote's records alone: `--limit` bounds the array and the last row's
+  // `publishedAt` is the next `--before`.
   if (json) {
-    ctx.stdout.write(JSON.stringify([...reports, ...local.map(localRow)], null, 2) + '\n')
+    ctx.stdout.write(JSON.stringify(reports, null, 2) + '\n')
     return 0
   }
   if (reports.length === 0) {

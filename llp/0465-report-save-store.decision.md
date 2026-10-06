@@ -7,6 +7,7 @@
 **Date:** 2026-10-05
 **Extends:** LLP 0450 (#launch: the skill still drafts in the caller's directory; this decision adds where the finished report goes), LLP 0436 (#sources: the publish allow-list is also what admits a folder to the store), LLP 0155 (#core-group: `save` joins `generate` as the group's second local member, and `list` gains a local section; #period-explicit: the save receipt suggests a period from the generator's folder name and never applies one)
 **Related:** LLP 0393 (#contract: `report save` joins the finite command vocabulary), LLP 0398 (#run-directory: `$HYP_HOME/ask` is the precedent for a fixed folder under `HYP_HOME` that a command, not the caller's cwd, owns), LLP 0448 (unmerged; its #local-list section is revived here, its launch-in-the-store section stays replaced by LLP 0450), issue of reports accumulating wherever `hyp report generate` was last typed
+**Extended-by:** LLP 0467 (#list: `--json` stays the remote listing alone; saved reports are `--local --json`)
 
 > LLP 0450 kept report generation in the caller's directory so a session is
 > never silently relocated. The cost showed up as clutter: every directory a
