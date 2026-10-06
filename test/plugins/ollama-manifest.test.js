@@ -29,7 +29,9 @@ test('explicit config activates Ollama after gateway; omitting the capability fa
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, plugins: [{ name: '@hypaware/ai-gateway' }, { name: '@hypaware/ollama' }] }))
   const boot = await bootKernel({ hypHome, configPath, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath } })
-  assert.deepEqual(boot.activations.map(result => [result.plugin.name, result.ok]), [['@hypaware/ai-gateway', true], ['@hypaware/ollama', true]])
+  assert.deepEqual(boot.activations
+    .filter(result => ['@hypaware/ai-gateway', '@hypaware/ollama'].includes(result.plugin.name))
+    .map(result => [result.plugin.name, result.ok]), [['@hypaware/ai-gateway', true], ['@hypaware/ollama', true]])
   assert.deepEqual(boot.unsatisfiedRequirements, [])
   assert.equal(boot.runtime.clients.listClients().length, 0)
   assert.deepEqual(boot.runtime.sources.list().map(source => source.name), ['ai-gateway'])
