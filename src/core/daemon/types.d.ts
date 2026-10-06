@@ -382,6 +382,11 @@ export interface ClientAttachReport {
   /** Plugin enabled in config. */
   configured: boolean
   /**
+   * HypAware records this client: configured, and not switched off by
+   * `hyp client detach` (`recording: false` on the plugin entry, LLP 0464).
+   */
+  recording: boolean
+  /**
    * The client declares an `attach_probe`, so attach is a state that can be
    * observed (and reversed). False for a probe-less client (`claude-desktop`
    * is the only one shipping today, LLP 0115 #no-attach-on-join), whose attach

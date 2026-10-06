@@ -798,8 +798,10 @@ hyp client attach [client] [--dry-run] [--json]
 
 Short form: `hyp attach`, which the guides use.
 
-Writes only HypAware-managed client settings and installs registered skills and
-subagents. Repeating the command is a no-op. Claude Code uses its OTEL settings
+Starts recording this client. Writes only HypAware-managed client settings and
+installs registered skills and subagents, and turns recording back on for a
+client you detached. Repeating the command is a no-op. Claude Desktop has no
+settings to write, so attaching it only turns its recording back on. Claude Code uses its OTEL settings
 and requires version 2.1.193 or later. Gateway-backed clients require an active
 gateway configuration. OpenCode installs a HypAware-owned plugin in its shared
 CLI/Desktop config home and requires no gateway. `--dry-run` writes nothing.
@@ -822,9 +824,17 @@ hyp client detach [client] [--dry-run] [--purge] [--json]
 
 Short form: `hyp detach`, which the guides use.
 
-Replays the on-disk undo marker and removes only managed settings. It keeps
-recordings. Claude telemetry detach removes the managed OTEL settings and
-sweeps the raw-body spool. For a legacy or other proxy attach, `--purge` also
+Stops recording this client. Detach switches the client off in the local
+config (`"recording": false` on its plugin entry), so the daemon's scheduled
+transcript import and every other capture lane stop picking up its new
+sessions, with no daemon restart. It then replays the on-disk undo marker and
+removes only managed settings. Recorded history is kept; use
+[`hyp privacy purge`](#hyp-privacy-purge) to delete it. `hyp status` shows a
+detached client as "Not recording", with no warning. Run
+`hyp client attach <client>` to record it again. If your organization's
+central config requires the client, detach refuses and changes nothing.
+Claude telemetry detach removes the managed OTEL settings and sweeps the
+raw-body spool. For a legacy or other proxy attach, `--purge` also
 removes the local interception CA and its keychain trust. `--dry-run` writes
 nothing. The command doesn't ask for confirmation.
 
@@ -1110,11 +1120,14 @@ capture:
 
 | Plugin | Default interval | Does `backfill.on_join: false` stop scheduled recovery? |
 | --- | --- | --- |
-| `@hypaware/codex` (transcript mode) | One minute | Yes |
+| `@hypaware/codex` (transcript mode) | One minute | No (it is Codex's only capture lane) |
 | `@hypaware/pi` | Five minutes | Yes |
 | `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
 | `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | No |
+
+`hyp client detach <client>` stops every client's scheduled recovery, whatever
+`on_join` says; `hyp client attach <client>` resumes it.
 
 A positive `backfill.window_days` bounds both the join-time import and scheduled
 recovery. Older sessions remain on disk but are not imported. Widening the
@@ -1131,8 +1144,8 @@ or 90 days if that setting is absent. A retention value of `0` means no age
 limit. See [retention configuration](CONFIGURATION.md#set-local-retention).
 
 `sweep_cron` changes the recovery cadence. OpenClaw schedules recovery even when
-`backfill.on_join` is false; bound it with `window_days` or disable the integration
-to stop its automatic capture.
+`backfill.on_join` is false; bound it with `window_days`, or run
+`hyp client detach openclaw` to stop its capture.
 
 ## Collect GitHub activity
 

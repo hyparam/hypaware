@@ -490,13 +490,13 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
     // A configured client whose attach is n/a (`attachable: false`) has no
     // settings marker to miss - Codex in its default transcript mode, for
     // one - so a missing marker there is not detachment. `configured` is the
-    // strongest thing the status report carries for such a client: it says
-    // the plugin is enabled, not that its lane is running, so a codex whose
-    // sweep is switched off (`backfill.on_join: false`, #2076) still reaches
-    // the offer. Clients with no `launch` block (Claude Desktop) are
-    // still dropped later by `resolveLaunchers`.
+    // strongest thing the status report carries for such a client, beside
+    // `recording`, which a detach switches off. Clients with no `launch`
+    // block (Claude Desktop) are still dropped later by `resolveLaunchers`.
     // @ref LLP 0429#status [constrained-by]: a probe whose marker this capture mode never writes is n/a, not missing
-    return report.clients.filter((c) => c.attached || (c.configured && c.attachable === false)).map((c) => c.name)
+    return report.clients
+      .filter((c) => !(c.configured && c.recording === false) && (c.attached || (c.configured && c.attachable === false)))
+      .map((c) => c.name)
   } catch {
     // fall through to the unfiltered list
   }

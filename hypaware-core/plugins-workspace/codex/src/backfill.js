@@ -15,7 +15,6 @@ import {
 } from '../../../../src/core/backfill/scan_util.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import { detach } from './settings.js'
-import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
   copyNumberAlias,
   firstString,
@@ -138,8 +137,13 @@ export function createCodexBackfillProvider(opts) {
     // Gateway mode selects the provider writer, so it registers no sweep:
     // running both lanes forever would be permanent unpaid work for a route
     // the operator explicitly opted out of.
+    // `backfill.on_join` does not gate it: in transcript mode the sweep is
+    // the only capture lane, so opting out of the join-time history import
+    // must not also stop recording (#2076). The off switch for recording is
+    // `hyp client detach codex`, which the backfill runner enforces.
     // @ref LLP 0429#sweep [implements]: ordinary capture rides the existing background queue, including Desktop
-    ...(config?.capture_mode !== 'gateway' && readBackfillPolicy({ name: pluginName, config }).onJoin !== false
+    // @ref LLP 0464#on-join [implements]: on_join is the join-time import only; recording is the detach switch
+    ...(config?.capture_mode !== 'gateway'
       ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } }
       : {}),
     async *run(ctx) {

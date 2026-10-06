@@ -61,15 +61,20 @@ export function resolveEntrypointOwners(descriptors, isConfigured) {
  * that actually breaks consent.
  *
  * @ref LLP 0140#fail-open-on-unknown [implements]: in the scanning client's own tree, only a claimed-but-unconfigured entrypoint is skipped; unknown values import and are logged
+ * The fail-open default belongs to the scanning client, so it closes when that
+ * client is detached (`scanningRecording: false`): an unclaimed session would
+ * be filed under a client the user switched off.
+ *
+ * @ref LLP 0464#runner-gate [implements]: unclaimed sessions follow the scanning client's switch
  * @param {string | undefined} entrypoint
  * @param {EntrypointOwners} owners
  * @param {string} scanningClient
+ * @param {boolean} [scanningRecording]
  * @returns {{ import: boolean, clientName: string, owner?: EntrypointOwner }}
  */
-export function classifyTranscriptEntrypoint(entrypoint, owners, scanningClient) {
-  if (!entrypoint) return { import: true, clientName: scanningClient }
-  const owner = owners.get(entrypoint)
-  if (!owner) return { import: true, clientName: scanningClient }
+export function classifyTranscriptEntrypoint(entrypoint, owners, scanningClient, scanningRecording = true) {
+  const owner = entrypoint ? owners.get(entrypoint) : undefined
+  if (!owner) return { import: scanningRecording, clientName: scanningClient }
   if (!owner.configured) return { import: false, clientName: owner.client, owner }
   // Owned and configured: attribute to the owner, not to the plugin whose
   // transcript tree the session happened to live in. Without this, Desktop

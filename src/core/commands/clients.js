@@ -14,6 +14,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
+import { writeClientRecording } from '../config/client_recording.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
 import { removeCaTrust } from '../tls/darwin_trust.js'
@@ -55,7 +56,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
- * @import { ClientEnableResult, DetachFromDiskResult } from '../../../src/core/config/types.js'
+ * @import { ClientEnableResult, ClientRecordingWriteResult, DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -129,11 +130,49 @@ async function runClientLifecycle(action, argv, ctx) {
           exitCode = 1
           continue
         }
+        // The switch is flipped first, and a refusal stops here with the
+        // client's settings untouched: org policy that requires the
+        // integration leaves nothing half-detached.
+        // @ref LLP 0464#central-refuses [implements]: detach refuses whole when the central layer owns the client's plugin
+        const recording = await writeClientRecording({
+          env: ctx.env,
+          plugin: descriptor.plugin,
+          recording: false,
+          dryRun: parsed.dryRun,
+        })
+        if (recording.status === 'central_managed' || recording.status === 'failed') {
+          const message = recording.status === 'central_managed'
+            ? `your organization's HypAware policy requires ${name} (the central config enables ${descriptor.plugin}), so it cannot be detached on this machine; ask your HypAware admin, or run 'hyp leave' to leave the organization`
+            : `could not switch off recording in ${recording.configPath}: ${recording.message ?? 'unknown error'}`
+          getLogger('cmd-detach').warn('client.detach.refused', {
+            [Attr.COMPONENT]: 'cmd-detach',
+            [Attr.OPERATION]: 'client.detach',
+            hyp_client: name,
+            hyp_plugin: descriptor.plugin,
+            status: 'failed',
+            error_kind: recording.status === 'central_managed' ? 'central_managed' : 'config_write_failed',
+          })
+          if (parsed.json) {
+            ctx.stdout.write(JSON.stringify({
+              status: 'failed',
+              action: 'detach',
+              client: name,
+              dry_run: parsed.dryRun === true,
+              error_kind: recording.status === 'central_managed' ? 'central_managed' : 'config_write_failed',
+              error: message,
+            }) + '\n')
+          } else {
+            ctx.stderr.write(`error: ${message}\n`)
+          }
+          exitCode = 1
+          continue
+        }
         await detachClientViaCore({
           name,
           descriptor,
           dryRun: parsed.dryRun,
           json: parsed.json,
+          recordingSwitch: recording.status,
           ctx,
         })
       } catch (err) {
@@ -153,6 +192,32 @@ async function runClientLifecycle(action, argv, ctx) {
       }
     }
     return exitCode
+  }
+
+  // A client with no settings to write (Claude Desktop: its lane is the
+  // Claude transcript import) registers no adapter, so attach for it is the
+  // recording switch alone.
+  // @ref LLP 0464#switch [implements]: attach turns recording back on, adapter or not
+  if (parsed.client !== 'all') {
+    const descriptor = (await buildClientDescriptorMap(ctx)).get(parsed.client)
+    if (descriptor && !descriptor.attachProbe && !(ctx.clients?.getClient(parsed.client))) {
+      const resumed = await resumeRecording({ name: parsed.client, ctx, parsed })
+      if (resumed === 'changed' || resumed === 'unchanged') {
+        if (parsed.json) {
+          ctx.stdout.write(JSON.stringify({
+            status: 'ok',
+            action: 'attach',
+            client: parsed.client,
+            dry_run: parsed.dryRun === true,
+            changed: resumed === 'changed',
+            recording: true,
+          }) + '\n')
+        } else if (resumed === 'unchanged') {
+          ctx.stdout.write(`HypAware is already recording ${parsed.client}.\n`)
+        }
+        return 0
+      }
+    }
   }
 
   // Attach dispatches to the per-adapter attach() hook. Gateway-backed
@@ -479,6 +544,7 @@ async function runClientLifecycle(action, argv, ctx) {
               // logs and swallows its own marker error.
               // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
               rearmRefusedAttachMarker({ name, ctx, dryRun: false })
+              await resumeRecording({ name, ctx, parsed })
               // The settings are already wired, but attach means settings *and*
               // assets, and this branch is the one an operator on a
               // daemon-managed install actually reaches. Short-circuiting past
@@ -554,6 +620,7 @@ async function runClientLifecycle(action, argv, ctx) {
         json: parsed.json,
       })
       rearmRefusedAttachMarker({ name, ctx, dryRun: parsed.dryRun === true })
+      await resumeRecording({ name, ctx, parsed })
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the
       // inconsistency, not the norm (the wizard has always treated
@@ -1369,12 +1436,13 @@ async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json 
  *   json: boolean,
  *   quiet?: boolean,
  *   quietNoop?: boolean,
+ *   recordingSwitch?: ClientRecordingWriteResult['status'],
  *   ctx: CommandRunContext,
  * }} args
  * @returns {Promise<DetachFromDiskResult | undefined>}
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, quiet, quietNoop, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, quiet, quietNoop, recordingSwitch, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -1404,11 +1472,13 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
               dry_run: true,
               ...(settingsPath !== undefined ? { settings_path: settingsPath } : {}),
               changed: false,
+              ...(recordingSwitch !== undefined ? { recording: false } : {}),
             }) + '\n'
           )
         } else {
           ctx.stdout.write(
-            `(dry-run) Would detach ${name}${settingsPath !== undefined ? ` from ${settingsPath}` : ''}\n`
+            `(dry-run) Would detach ${name}${settingsPath !== undefined ? ` from ${settingsPath}` : ''}` +
+            `${recordingSwitch === 'changed' ? ' and stop recording it' : ''}\n`
           )
         }
         return
@@ -1430,7 +1500,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
             changed: true,
           })
         }
-        if (!quiet) writeCoreDetachOutput({ ctx, name, json, quietNoop, result })
+        if (!quiet) writeCoreDetachOutput({ ctx, name, json, quietNoop, recordingSwitch, result })
         const stateRoot = readObservabilityEnv(ctx.env).stateDir
 
         // Retract the attach marker so the CLI undo and the marker store stay in
@@ -1610,6 +1680,7 @@ export async function detachAllClientsFromDisk(ctx) {
  *   name: string,
  *   json: boolean,
  *   quietNoop?: boolean,
+ *   recordingSwitch?: ClientRecordingWriteResult['status'],
  *   result: {
  *     changed: boolean,
  *     settingsPath?: string,
@@ -1620,8 +1691,12 @@ export async function detachAllClientsFromDisk(ctx) {
  *   },
  * }} args
  */
-function writeCoreDetachOutput({ ctx, name, json, quietNoop, result }) {
+function writeCoreDetachOutput({ ctx, name, json, quietNoop, recordingSwitch, result }) {
   const settingsPath = result.settingsPath
+  // `recordingSwitch` is set only by `hyp client detach`, the one caller that
+  // turns recording off (LLP 0464); leave and uninstall reverse settings only.
+  const stoppedRecording = recordingSwitch === 'changed'
+  const notRecording = recordingSwitch !== undefined
   if (json) {
     /** @type {Record<string, unknown>} */
     const payload = {
@@ -1636,11 +1711,13 @@ function writeCoreDetachOutput({ ctx, name, json, quietNoop, result }) {
     if (result.restoredValue !== undefined) payload.restored_value = result.restoredValue
     if (result.restoredPaths !== undefined) payload.restored_paths = result.restoredPaths
     if (result.warning !== undefined) payload.warning = result.warning
+    if (notRecording) payload.recording = false
+    if (stoppedRecording) payload.recording_changed = true
     ctx.stdout.write(JSON.stringify(payload) + '\n')
     return
   }
-  if (result.changed === true) {
-    ctx.stdout.write(`✓ Detached ${name}${settingsPath !== undefined ? ` (${settingsPath})` : ''}\n`)
+  if (result.changed === true || stoppedRecording) {
+    ctx.stdout.write(`✓ Detached ${name}${settingsPath !== undefined && result.changed === true ? ` (${settingsPath})` : ''}\n`)
     if (result.removed !== undefined) ctx.stdout.write(`  Removed ${result.removed}\n`)
     if (result.restoredValue !== undefined) ctx.stdout.write(`  Restored ${result.restoredValue}\n`)
     // Named by path, never by value: this is the block attach repaired, and a
@@ -1650,6 +1727,10 @@ function writeCoreDetachOutput({ ctx, name, json, quietNoop, result }) {
       ctx.stdout.write(`  Restored ${restoredPath} from the marker's malformed-block backup\n`)
     }
     if (result.warning !== undefined) ctx.stdout.write(`  warning: ${result.warning}\n`)
+    if (notRecording) writeNotRecordingReceipt(ctx, name)
+  } else if (notRecording) {
+    ctx.stdout.write(`HypAware is not recording ${name}; nothing to do.\n`)
+    ctx.stdout.write(`  Run 'hyp client attach ${name}' to record it.\n`)
   } else if (quietNoop !== true) {
     // `changed: false` from a disk-driven undo means "this client's settings
     // hold nothing of ours", which is an answer when the user named the client
@@ -1660,6 +1741,56 @@ function writeCoreDetachOutput({ ctx, name, json, quietNoop, result }) {
       `No HypAware marker found${settingsPath !== undefined ? ` in ${settingsPath}` : ''}; nothing to do.\n`
     )
   }
+}
+
+/**
+ * Turn a client's recording switch back on after an attach succeeded (LLP
+ * 0464). Reports only a change: an attach of a client that was never
+ * detached prints nothing new. A failed write is a warning, not an attach
+ * failure: the settings are wired, and `hyp status` names the contradiction.
+ *
+ * @param {{ name: string, ctx: CommandRunContext, parsed: { dryRun: boolean, json: boolean } }} args
+ * @returns {Promise<ClientRecordingWriteResult['status'] | undefined>}
+ */
+async function resumeRecording({ name, ctx, parsed }) {
+  const descriptor = (await buildClientDescriptorMap(ctx)).get(name)
+  if (!descriptor) return undefined
+  const result = await writeClientRecording({
+    env: ctx.env,
+    plugin: descriptor.plugin,
+    recording: true,
+    dryRun: parsed.dryRun,
+  })
+  if (result.status === 'changed') {
+    getLogger('cmd-attach').info('client.attach.recording_resumed', {
+      [Attr.COMPONENT]: 'cmd-attach',
+      [Attr.OPERATION]: 'client.attach',
+      hyp_client: name,
+      hyp_plugin: descriptor.plugin,
+      dry_run: parsed.dryRun,
+      status: 'ok',
+    })
+    if (!parsed.json) {
+      ctx.stdout.write(parsed.dryRun
+        ? `(dry-run) Would resume recording ${name}\n`
+        : `✓ HypAware is recording ${name} again.\n`)
+    }
+  } else if (result.status === 'failed') {
+    ctx.stderr.write(`warning: could not switch recording back on in ${result.configPath}: ${result.message ?? 'unknown error'}\n`)
+  }
+  return result.status
+}
+
+/**
+ * The two lines every `hyp client detach` receipt ends with: what stopped,
+ * what was kept, and the way back.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {string} name
+ */
+function writeNotRecordingReceipt(ctx, name) {
+  ctx.stdout.write(`  HypAware stopped recording ${name}. Recorded history is kept; 'hyp privacy purge' deletes it.\n`)
+  ctx.stdout.write(`  Run 'hyp client attach ${name}' to record it again.\n`)
 }
 
 /**

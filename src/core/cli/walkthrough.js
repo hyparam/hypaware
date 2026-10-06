@@ -7,6 +7,7 @@ import readline from 'node:readline/promises'
 import { Attr, withSpan } from '../observability/index.js'
 import { loadConfigFile } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
+import { isEntryRecording } from '../config/client_recording.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { DurableBinRequiredError, GlobalInstallError } from './global_install.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
@@ -518,6 +519,10 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary, 
     }
   }
   for (const a of finaleSummary?.attach ?? []) {
+    if (a.notRecording) {
+      stdout.write(`attach: ${a.client} not recording (detached); run 'hyp client attach ${a.client}' to record it\n`)
+      continue
+    }
     if (a.skipped) {
       stdout.write(`attach: ${a.client} already attached\n`)
       continue
@@ -915,6 +920,23 @@ function carryForwardExistingConfig(composed, existing, descriptors, composeWith
   if (Object.keys(sinks).length > 0) merged.sinks = sinks
   else delete merged.sinks
   return merged
+}
+
+/**
+ * The picked clients whose plugin entry says `recording: false` (LLP 0464).
+ *
+ * @param {string[]} clients
+ * @param {HypAwareV2Config} config
+ * @returns {Promise<Set<string>>}
+ */
+async function detachedClients(clients, config) {
+  const off = new Set((config.plugins ?? []).filter((entry) => !isEntryRecording(entry)).map((entry) => entry.name))
+  if (off.size === 0 || clients.length === 0) return new Set()
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  return new Set(clients.filter((client) => {
+    const plugin = descriptors.get(client)?.plugin
+    return plugin !== undefined && off.has(plugin)
+  }))
 }
 
 /**
@@ -1456,7 +1478,16 @@ export async function runPickerFinale(args) {
         ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
       })
     }
+    // A client the user detached stays detached through a reconfigure: the
+    // carried-forward plugin entry keeps its `recording: false`, and only an
+    // explicit `hyp client attach` turns it back on.
+    // @ref LLP 0464#reattach-paths [implements]: setup never silently re-attaches a detached client
+    const notRecording = await detachedClients(clientsPicked, config)
     for (const client of clientsPicked) {
+      if (notRecording.has(client)) {
+        summary.attach.push({ client, dryRun, ok: true, skipped: true, notRecording: true })
+        continue
+      }
       if (args.skipAttachClients?.has(client)) {
         summary.attach.push({ client, dryRun, ok: true, skipped: true })
         continue
@@ -1521,8 +1552,11 @@ export async function runPickerFinale(args) {
   const descriptorMap = clientsPicked.length > 0 && (skills || agents)
     ? await buildWalkthroughClientDescriptorMap()
     : new Map()
+  // Skills and agents are part of the attach wiring a detach removed.
+  const notRecordingAssets = await detachedClients(clientsPicked, config)
+  const assetClients = clientsPicked.filter((client) => !notRecordingAssets.has(client))
 
-  if (clientsPicked.length > 0 && (skills || agents)) {
+  if (assetClients.length > 0 && (skills || agents)) {
     // Span name kept from when skills and agents were two steps: this is now
     // the one client-asset materialization, and it is what the release smoke
     // battery asserts on.
@@ -1552,7 +1586,7 @@ export async function runPickerFinale(args) {
         // @ref LLP 0219#automatic-not-gated [implements]: the finale counts its
         //   removals out loud rather than reporting them down a stream it withholds
         const { installed, pruned } = await materializeClientAssets({
-          clients: clientsPicked,
+          clients: assetClients,
           descriptors: descriptorMap,
           homeDir,
           stateRoot: clientAssetStateRoot(env, homeDir),

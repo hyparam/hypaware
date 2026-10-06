@@ -842,6 +842,15 @@ export interface PluginConfigInstance {
    * maps to its canonical git source.
    */
   source?: string
+  /**
+   * Whether HypAware records the client this plugin contributes
+   * (`contributes.client`). Absent means recording. `hyp client detach`
+   * writes `false` to the local entry and `hyp client attach` removes it;
+   * the backfill runner, the attach-on-join reconciler, `hyp setup`, and
+   * `hyp status` all read it. Ignored for a plugin that contributes no
+   * client.
+   */
+  recording?: boolean
 }
 
 /**
@@ -2938,6 +2947,14 @@ export interface BackfillRunContext {
    * while the shared-tree gate keeps its own fail-open rules.
    */
   isPluginConfigured?: (plugin: PluginName) => boolean
+  /**
+   * Whether a plugin's client is detached (`recording: false`, LLP 0464),
+   * read fresh by the runner. `isPluginConfigured` already answers false for
+   * a detached plugin; this is the narrower question a shared-tree provider
+   * asks about its own client, whose unclaimed sessions otherwise fail open.
+   * Absent means nothing is detached.
+   */
+  isPluginDetached?: (plugin: PluginName) => boolean
   storage: QueryStorageService
   /** True only for a daemon-scheduled provider pass. */
   sweep?: boolean

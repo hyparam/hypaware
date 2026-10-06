@@ -229,7 +229,9 @@ test('provider advertises a stable contribution shape', async () => {
   assert.deepEqual(provider.datasets, ['ai_gateway_messages'])
   assert.equal(typeof provider.run, 'function')
   assert.equal(provider.sweep?.cron, '* * * * *')
-  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { backfill: { on_join: false } } }).sweep, undefined)
+  // Opting out of the join-time import keeps the only capture lane (#2076).
+  // @ref LLP 0464#on-join [tests]: on_join no longer switches recording off
+  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { backfill: { on_join: false } } }).sweep?.cron, '* * * * *')
   // Gateway mode selects the provider writer, so the rollout sweep must not
   // also run: both lanes forever is permanent unpaid work on a route the
   // operator explicitly opted out of.
