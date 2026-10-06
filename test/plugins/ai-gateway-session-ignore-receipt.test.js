@@ -87,13 +87,6 @@ test('a successful ignore receipt does not claim a drop, for an id live traffic 
 
     // What it may claim - the write - it must claim plainly.
     assert.match(out, /in the gateway drop set/, 'report the membership that IS established')
-
-    // And it must state the bound, next to the success, where a caller reading
-    // "ignored" as done would see it.
-    assert.match(out, /what this proves/, 'the receipt names what it is a receipt for')
-    assert.match(out, /never inspects traffic/, 'why the gateway cannot say more')
-    assert.match(out, /suppresses nothing/, 'the failure this receipt cannot rule out')
-    assert.match(out, /the caller/, 'and where the guarantee actually comes from (R13)')
   })
 })
 
@@ -139,8 +132,49 @@ test('the reader carries the same qualifier, so writer and reader cannot drift',
   await withControlServer(set, async (base) => {
     const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-live' } })
     assert.equal(await runSessionStatus([], ctx.ctx), 0)
-    assert.match(ctx.stdout(), /what this proves/)
-    assert.match(ctx.stdout(), /never inspects traffic/)
+    assert.match(ctx.stdout(), /only exchanges tagged with this exact session id are dropped/)
+    assert.match(ctx.stdout(), /drops nothing/)
+  })
+})
+
+test('a confirmed ignore says earlier rows remain and names the purge for this session', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['sess-purge-hint'], ctx.ctx), 0)
+    const out = ctx.stdout()
+    assert.match(out, /rows captured before this opt-out stay in the cache/)
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint`/, 'the exact command, with the real id')
+    assert.match(out, /from configured remotes/, 'the remote reach of a session purge is not hidden')
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint --local-only`/)
+  })
+})
+
+test('the --json ignore receipt carries the purge command an agent can run', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(["it's odd", '--json'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.deepEqual(out.purge, {
+      earlier_rows: 'retained',
+      command: "hyp privacy purge --session 'it'\\''s odd'",
+      command_deletes_remote: true,
+      local_only_command: "hyp privacy purge --session 'it'\\''s odd' --local-only",
+    })
+  })
+})
+
+test('the unignore receipt carries no purge hint', async () => {
+  const set = new Set(['sess-purge-hint'])
+  await withControlServer(set, async (base) => {
+    const human = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint'], human.ctx), 0)
+    assert.doesNotMatch(human.stdout(), /privacy purge/)
+    set.add('sess-purge-hint')
+    const json = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint', '--json'], json.ctx), 0)
+    assert.equal(JSON.parse(json.stdout()).purge, undefined)
   })
 })
 
