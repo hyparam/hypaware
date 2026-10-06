@@ -318,7 +318,11 @@ export async function runReportSave(argv, ctx) {
     if (keep) ctx.stdout.write(`  kept: ${esc(abs)}\n`)
     else if (leftBehind) ctx.stdout.write(`  not removed: ${esc(abs)} (${esc(leftBehind)}); its report pages are saved\n`)
     ctx.stdout.write(`  list: hyp report list --local\n`)
-    ctx.stdout.write(`  publish: hyp report publish ${shellWord(savedName)} --kind usage-review --period ${publishPeriodHint(savedName)}\n`)
+    // The bare name only when publish would resolve it to this slot: a path of
+    // that name under cwd wins over the store (another `-N` draft, say), and a
+    // suffixed name can outgrow the grammar. Otherwise the slot's own path.
+    const publishArg = SAVED_NAME_RE.test(savedName) && !await fileExists(path.resolve(ctx.cwd ?? process.cwd(), savedName)) ? savedName : dest
+    ctx.stdout.write(`  publish: hyp report publish ${shellWord(publishArg)} --kind usage-review --period ${publishPeriodHint(savedName)}\n`)
     return 0
   })
 }

@@ -2349,6 +2349,23 @@ test('save suffixes a taken name instead of overwriting, and says so', async (t)
   assert.deepEqual(await fs.readdir(cwd), [])
 })
 
+test('the save receipt names the slot by path when its bare name would publish something else', async (t) => {
+  const { ctx, out, draft, name, store, cwd } = await storeFixture(t)
+  assert.equal(await runReportSave([draft, '--keep'], ctx), 0)
+  // Another draft under cwd already carries the name the store suffixes to:
+  // a bare name would publish that unreviewed draft, since a path wins.
+  await fs.mkdir(path.join(cwd, `${name}-2`))
+  out.length = 0
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.match(out.join(''), new RegExp(`publish: hyp report publish ${path.join(store, `${name}-2`).replaceAll('.', '\\.')} --kind`))
+  // A suffix that outgrows the name grammar is printed by path too.
+  const long = 'r'.repeat(128)
+  const { ctx: ctx2, out: out2, draft: draft2, store: store2 } = await storeFixture(t, { name: long })
+  assert.equal(await runReportSave([draft2, '--keep'], ctx2), 0)
+  assert.equal(await runReportSave([draft2], ctx2), 0)
+  assert.match(out2.join(''), new RegExp(`publish: hyp report publish ${path.join(store2, `${long}-2`).replaceAll('.', '\\.')} --kind`))
+})
+
 test('save refuses a folder that is already in the store', async (t) => {
   const { ctx, err, draft, name, store } = await storeFixture(t)
   assert.equal(await runReportSave([draft], ctx), 0)
