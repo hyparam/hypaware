@@ -104,10 +104,11 @@ data rather than treating old prose as new evidence.
 
 ## Write, review, deliver
 
-Write into a new `./hypaware-report-<from>-to-<to>/` directory under the
+Draft into a new `./hypaware-report-<from>-to-<to>/` directory under the
 current working directory, or the user's requested destination. If the default
 folder exists, append `-2`, `-3`, etc. Do not overwrite an existing report
-without instruction.
+without instruction. Keep the working ledger and any raw query output outside
+this folder: it must hold only the report pages.
 Save section pages first, then the linked `report.md` brief. Follow the report
 contract for content, evidence, and Markdown replacements for server visuals.
 
@@ -123,10 +124,24 @@ An optional readability pass may simplify sentences but must preserve numbers,
 dates, claims, citations, links, and proposed file contents. The server's
 readability pass is optional too.
 
-Return the path to `report.md`, the period and local scope, and any incomplete
-coverage or review. The output is a proposal: do not install recommended skills,
-edit project instructions, change settings, or upload logs. Publishing is an
-optional step only when the user requests it, as described below.
+When the review is complete, move the folder into HypAware's reports store by
+running the CLI, unless the user asked for another destination:
+
+```sh
+hyp report save ./hypaware-report-<from>-to-<to>
+```
+
+The command admits only a folder holding `report.md` and the supported pages,
+copies it to `$HYP_HOME/reports/<name>` (suffixing a taken name), and removes
+the draft. If it refuses a stray file, remove that file from the folder and
+run it again; do not write under the user's home directory yourself. Its
+receipt prints the saved path and the publish command for this report.
+
+Return the saved path to `report.md`, the period and local scope, and any
+incomplete coverage or review. The output is a proposal: do not install
+recommended skills, edit project instructions, change settings, or upload
+logs. Publishing is an optional step only when the user requests it, as
+described below.
 
 ## Optional publishing
 
@@ -138,8 +153,10 @@ Use the user's selected remote and the report's actual coverage period. For
 example, a report covering August 2026 can be published with:
 
 ```sh
-hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08 --remote <target>
+hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08 --remote <target>
 ```
+
+The saved name resolves to the store; a path to a folder works too.
 
 For a custom range, use `YYYY-MM-DD-to-YYYY-MM-DD` as the period. When the
 analysis yields one recommendation rather than a full report, publish that

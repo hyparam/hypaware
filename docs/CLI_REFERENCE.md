@@ -385,9 +385,9 @@ Use `hyp report --help` to list report operations:
 hyp report --help
 ```
 
-`generate` is local. The other report commands use a remote target and
-resolve the default remote if `--remote` is omitted. `publish`, `recommend`,
-`mark`, and `delete` require a write-capable credential.
+`generate` and `save` are local. The other report commands use a remote
+target and resolve the default remote if `--remote` is omitted. `publish`,
+`recommend`, `mark`, and `delete` require a write-capable credential.
 
 ### `hyp report generate`
 
@@ -415,13 +415,48 @@ the directory you typed the command in does
 ([PRIVACY.md](PRIVACY.md#marking-directories)). No remote login is required,
 and nothing is published unless requested.
 
-The skill writes `./hypaware-report-<from>-to-<to>/report.md` and linked pages,
-using `-2`, `-3`, etc. if the folder already exists, unless you request another
-destination. A declined pick starts nothing and succeeds; no recorded client
-carrying the skill, or a process-start failure, returns `1`. The exit status
-covers the launch only, never whether report generation completed.
-`hyp report list` continues to list published reports only; use
-`hyp report publish <folder> ...` to share one.
+The skill drafts `./hypaware-report-<from>-to-<to>/report.md` and linked
+pages, using `-2`, `-3`, etc. if the folder already exists, unless you request
+another destination, and once the report is reviewed runs
+`hyp report save` on that folder, which moves it into `$HYP_HOME/reports`.
+A declined pick starts nothing and succeeds; no recorded client carrying the
+skill, or a process-start failure, returns `1`. The exit status covers the
+launch only, never whether report generation completed. `hyp report list`
+shows the saved report; `hyp report publish <name> ...` shares it.
+
+### `hyp report save`
+
+```text
+hyp report save <dir> [--keep]
+```
+
+Moves a finished report folder into the store, `$HYP_HOME/reports/<name>/`
+(`~/.hyp/reports` unless `HYP_HOME` is set), where `hyp report list` finds it
+and `hyp report publish <name>` takes it by name. The skill ends with this
+step so an agent never writes under your home directory itself.
+
+The folder is held to the publish allow-list before anything moves: it must
+hold `report.md` and otherwise only `usage.md`, `work.md`, `health.md`, and
+`recommendation-<slug>.md` as regular files. A stray file (a working ledger,
+`.DS_Store`) is named and the command exits `2` with nothing created. The
+folder keeps its name, which must be a plain directory name with no hidden
+prefix; a taken name gets `-2`, `-3`, etc. rather than overwriting. By default
+the source folder is removed once its pages are copied: only those pages are
+unlinked and the folder removed with a plain `rmdir`, so a file that appeared
+since is left where it is and named. `--keep` copies and leaves the draft.
+
+```sh
+hyp report save ./hypaware-report-2026-08-01-to-2026-08-31
+```
+
+```text
+saved hypaware-report-2026-08-01-to-2026-08-31 to /Users/me/.hyp/reports/hypaware-report-2026-08-01-to-2026-08-31
+  list: hyp report list --local
+  publish: hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08-01-to-2026-08-31
+```
+
+The period on the publish line is read off the folder name the generator
+chose; a name in another shape leaves a `<period>` placeholder to fill in.
 
 ### `hyp report publish`
 
@@ -429,8 +464,10 @@ covers the launch only, never whether report generation completed.
 hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]
 ```
 
-Uploads Markdown for the remote to render. A single file must be `.md` or
-`.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
+Uploads Markdown for the remote to render. The source is a path, or the name
+of a saved report (`hyp report list --local`), which resolves to
+`$HYP_HOME/reports/<name>` when no such path exists here. A single file must
+be `.md` or `.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
 its root and may otherwise contain only `usage.md`, `work.md`, `health.md`,
 and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`).
 The legacy `change-<slug>.md` spelling is also accepted. HTML,
@@ -440,7 +477,7 @@ publish path. The remote identifies repeat uploads by content hash. `--org`
 applies only to an operator credential that can name an organization.
 
 ```sh
-hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
+hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
 ```
 
 ### `hyp report recommend`
@@ -474,10 +511,28 @@ published hyprec-0123456789abcdef (recommendation/2026-10-03/REPORT_ID)
 ### `hyp report list`
 
 ```text
-hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]
+hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]
 ```
 
-Lists the newest reports visible to the selected organization. An empty list
+Lists the newest reports visible to the selected organization, then this
+machine's saved reports (`$HYP_HOME/reports`, as `hyp report save` leaves
+them) in their own section, newest first by `report.md` mtime, at most 100
+with the rest counted. A machine with nothing saved prints no section.
+`--local` prints the saved section alone, with no remote read, and takes none
+of the remote's selectors or filters. When nothing selects or filters the
+remote and it cannot be read, the saved reports are still listed under a
+one-line warning and the command exits `0`; `--remote`, any filter, or
+`--json` keeps the failure and its exit code. In `--json` the output stays one
+array: the remote's records, then a row per saved report as
+`{ "source": "local", "name", "path", "modifiedAt" }`.
+
+```text
+saved reports (/Users/me/.hyp/reports):
+  2026-09-02T10:00:00.000Z	local	hypaware-report-2026-08-01-to-2026-08-31
+  publish one: hyp report publish <name> --kind <kind> --period <period>
+```
+
+An empty remote list
 succeeds. Each report's recommendations follow its line, one per line, as the
 minted id, its state in brackets, the `recommendation-<slug>` page the id
 names, and the page's title, with its thesis on the line below. The state is
