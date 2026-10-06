@@ -923,7 +923,7 @@ function carryForwardExistingConfig(composed, existing, descriptors, composeWith
 }
 
 /**
- * The picked clients whose plugin entry says `recording: false` (LLP 0464).
+ * The picked clients whose plugin entry says `recording: false` (LLP 0466).
  *
  * @param {string[]} clients
  * @param {HypAwareV2Config} config
@@ -1481,7 +1481,7 @@ export async function runPickerFinale(args) {
     // A client the user detached stays detached through a reconfigure: the
     // carried-forward plugin entry keeps its `recording: false`, and only an
     // explicit `hyp client attach` turns it back on.
-    // @ref LLP 0464#reattach-paths [implements]: setup never silently re-attaches a detached client
+    // @ref LLP 0466#reattach-paths [implements]: setup never silently re-attaches a detached client
     const notRecording = await detachedClients(clientsPicked, config)
     for (const client of clientsPicked) {
       if (notRecording.has(client)) {

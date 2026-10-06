@@ -230,7 +230,7 @@ test('provider advertises a stable contribution shape', async () => {
   assert.equal(typeof provider.run, 'function')
   assert.equal(provider.sweep?.cron, '* * * * *')
   // Opting out of the join-time import keeps the only capture lane (#2076).
-  // @ref LLP 0464#on-join [tests]: on_join no longer switches recording off
+  // @ref LLP 0466#on-join [tests]: on_join no longer switches recording off
   assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { backfill: { on_join: false } } }).sweep?.cron, '* * * * *')
   // Gateway mode selects the provider writer, so the rollout sweep must not
   // also run: both lanes forever is permanent unpaid work on a route the
@@ -361,6 +361,27 @@ test('scheduled capture migrates the route, skips unchanged files, and retries f
     assert.equal((await collect(provider.run(ctx))).items.length, 0)
     ctx.sweep = false
     assert.equal((await collect(provider.run(ctx))).items.length, 1, 'manual import bypasses fingerprints')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('with on_join false the sweep records new sessions but not prior history', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-old.jsonl', modernConversation('old'))
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir, config: { backfill: { on_join: false } } })
+    const fresh = modernConversation('fresh')
+    const now = Date.now()
+    fresh.items = fresh.items.map((item, i) => ({ ...item, timestamp: new Date(now + 1000 + i).toISOString() }))
+    await writeModernRollout(env, 'rollout-fresh.jsonl', fresh)
+    const { ctx } = runContext()
+    ctx.sweep = true
+    const swept = await collect(provider.run(ctx))
+    // @ref LLP 0466#on-join [tests]: the sweep records without importing declined history
+    assert.deepEqual(swept.items.map((item) => value(item).session_id), ['fresh'])
+    ctx.sweep = false
+    assert.equal((await collect(provider.run(ctx))).items.length, 2, 'manual import is not floored')
   } finally {
     await env.cleanup()
   }

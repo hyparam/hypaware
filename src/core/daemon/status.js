@@ -2150,7 +2150,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // (`recording: false`) is a choice, not a fault, so nothing below warns
     // about it; only a client that should be recording and whose wiring is
     // gone does.
-    // @ref LLP 0464#status [implements]: status reads the same switch the runner and reconciler read
+    // @ref LLP 0466#status [implements]: status reads the same switch the runner and reconciler read
     const recording = configured && isEntryRecording(config?.plugins?.find((entry) => entry.name === descriptor.plugin))
     // Attach state is only a real state for a client that declares an
     // `attach_probe`. Without one there is no settings-file write to read back,
@@ -3085,7 +3085,7 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     const inert = !descriptor.attachProbe
     const raw = entry.config?.attach
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
-    // A detached client is one the reconciler skips (LLP 0464), so its attach
+    // A detached client is one the reconciler skips (LLP 0466), so its attach
     // action is suppressed, never pending.
     if (!isEntryRecording(entry)) {
       declaredAttach.set(clientName, { onJoin: false, inert })

@@ -336,10 +336,10 @@ export function renderStatusSummary({ report, stdout }) {
   for (const name of names) {
     const client = clients.get(name)
     const capture = health.get(name)
-    // One state per client (LLP 0464): recording, or not. "Settings missing"
+    // One state per client (LLP 0466): recording, or not. "Settings missing"
     // is the one contradiction, a client that should be recording whose
     // wiring is gone, and the attention block carries its warning.
-    // @ref LLP 0464#status [implements]: a detached client reads "Not recording", with a hint and no warning
+    // @ref LLP 0466#status [implements]: a detached client reads "Not recording", with a hint and no warning
     if (client && client.configured && client.recording === false) notRecording.push(name)
     const state = client?.error ? 'Could not check'
       : client && client.configured && client.recording === false ? 'Not recording'
@@ -945,7 +945,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       seen.add(c.name)
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
-      // @ref LLP 0464#status [implements]: the verbose row names the recording state beside the attach facts
+      // @ref LLP 0466#status [implements]: the verbose row names the recording state beside the attach facts
       if (c.configured && c.recording === false) state.push('not recording')
       // A client with no attach probe has no attach state to report: printing
       // `not attached` for it invites a `hyp client attach` that is a documented

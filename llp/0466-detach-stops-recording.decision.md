@@ -1,4 +1,4 @@
-# LLP 0464: Detach stops recording a client
+# LLP 0466: Detach stops recording a client
 
 **Type:** Decision
 **Status:** Accepted
@@ -94,6 +94,10 @@ contradiction: the client should be recording but its settings marker is gone.
 
 `backfill.on_join` stays a knob, but only for the join-time history import.
 Recording is the detach switch. For transcript-mode Codex the sweep is the only
-capture lane, so it no longer gates on `on_join` (fixes #2076). Claude, Cursor
+capture lane, so it no longer gates on `on_join` (fixes #2076). With
+`on_join: false` the sweep is floored at plugin activation instead: it records
+what happens from then on and never imports the declined history. The floor is
+process-local, so messages written while the daemon is down are not recovered by
+the sweep; a manual `hyp backfill` is not floored. Claude, Cursor
 and Pi keep their existing `on_join` sweep gate: they have a live lane, and
 narrowing their history import is LLP 0041's consent knob.

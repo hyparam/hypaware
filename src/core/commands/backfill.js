@@ -353,7 +353,7 @@ async function runProvider(args) {
       // transcript entrypoint (Claude's, which also carries Desktop) runs on:
       // its classifier drops the detached client's sessions one by one, so a
       // still-recording client sharing the tree keeps its lane.
-      // @ref LLP 0464#runner-gate [implements]: the runner, not each plugin, skips a detached client's provider
+      // @ref LLP 0466#runner-gate [implements]: the runner, not each plugin, skips a detached client's provider
       if (owners.providerDetached?.(provider) === true) {
         log.info('backfill.provider_not_recording', {
           [Attr.COMPONENT]: 'backfill',
@@ -773,7 +773,7 @@ function buildRunContext(args) {
  *
  * @param {BackfillRunnerContext} ctx
  * @param {PluginLogger} log
- * A detached client (`recording: false`, LLP 0464) counts as not configured
+ * A detached client (`recording: false`, LLP 0466) counts as not configured
  * here, so its claimed entrypoints and its container close exactly the way an
  * unconfigured client's do. The switch is read fresh, so a daemon that booted
  * before the detach honors it on its next run.

@@ -105,7 +105,7 @@ export function createAttachHandler(opts = {}) {
 
       // Read fresh: the daemon booted on an older copy of the config, and a
       // `hyp client detach` since then must not be undone by this pass.
-      // @ref LLP 0464#reattach-paths [implements]: no automatic path re-attaches a detached client
+      // @ref LLP 0466#reattach-paths [implements]: no automatic path re-attaches a detached client
       const { detached } = readRecordingStateFromDiskSync({ env: ctx.env })
 
       /** @type {DesiredAction[]} */

@@ -267,7 +267,7 @@ test('desired() honors an explicit attach.on_join:false opt-out (no action)', ()
 
 test('desired() never names a detached client, even one detached after boot', async () => {
   const handler = createAttachHandler()
-  // @ref LLP 0464#reattach-paths [tests]: the reconciler skips a detached client
+  // @ref LLP 0466#reattach-paths [tests]: the reconciler skips a detached client
   const inBoot = handler.desired(makeCtx({
     plugins: [{ name: '@hypaware/claude', enabled: true, recording: false, config: {} }],
     descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),

@@ -5,7 +5,7 @@
  * every surface with a plain attach hint and raises no warning. A client that
  * should be recording but whose settings marker is gone still warns.
  *
- * @ref LLP 0464#status [tests]
+ * @ref LLP 0466#status [tests]
  */
 
 import test from 'node:test'

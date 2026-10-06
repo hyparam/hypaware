@@ -122,6 +122,7 @@ async function runClientLifecycle(action, argv, ctx) {
       return 1
     }
     let exitCode = 0
+    let refused = false
     for (const name of clientNames) {
       try {
         const descriptor = clientDescriptors.get(name)
@@ -133,7 +134,7 @@ async function runClientLifecycle(action, argv, ctx) {
         // The switch is flipped first, and a refusal stops here with the
         // client's settings untouched: org policy that requires the
         // integration leaves nothing half-detached.
-        // @ref LLP 0464#central-refuses [implements]: detach refuses whole when the central layer owns the client's plugin
+        // @ref LLP 0466#central-refuses [implements]: detach refuses whole when the central layer owns the client's plugin
         const recording = await writeClientRecording({
           env: ctx.env,
           plugin: descriptor.plugin,
@@ -164,6 +165,7 @@ async function runClientLifecycle(action, argv, ctx) {
           } else {
             ctx.stderr.write(`error: ${message}\n`)
           }
+          refused = true
           exitCode = 1
           continue
         }
@@ -185,7 +187,11 @@ async function runClientLifecycle(action, argv, ctx) {
     // detach deliberately keeps the CA and its keychain trust so the password
     // dialog stays once-per-machine; `--purge` is the explicit opt-out.
     // @ref LLP 0238#ca-survives-detach [implements]: purge is the explicit removal path, never the default
-    if (parsed.purge && !parsed.dryRun) {
+    // A refused client is still attached and may still route through the
+    // proxy, so the CA and its trust stay with it.
+    if (parsed.purge && !parsed.dryRun && refused) {
+      if (!parsed.json) ctx.stderr.write('Skipped --purge: a client that could not be detached may still use the local CA.\n')
+    } else if (parsed.purge && !parsed.dryRun) {
       const purged = await purgeProxyTrustResidue({ ctx })
       if (!parsed.json) {
         for (const line of purged.lines) ctx.stdout.write(`${line}\n`)
@@ -197,7 +203,7 @@ async function runClientLifecycle(action, argv, ctx) {
   // A client with no settings to write (Claude Desktop: its lane is the
   // Claude transcript import) registers no adapter, so attach for it is the
   // recording switch alone.
-  // @ref LLP 0464#switch [implements]: attach turns recording back on, adapter or not
+  // @ref LLP 0466#switch [implements]: attach turns recording back on, adapter or not
   if (parsed.client !== 'all') {
     const descriptor = (await buildClientDescriptorMap(ctx)).get(parsed.client)
     if (descriptor && !descriptor.attachProbe && !(ctx.clients?.getClient(parsed.client))) {
@@ -1694,7 +1700,7 @@ export async function detachAllClientsFromDisk(ctx) {
 function writeCoreDetachOutput({ ctx, name, json, quietNoop, recordingSwitch, result }) {
   const settingsPath = result.settingsPath
   // `recordingSwitch` is set only by `hyp client detach`, the one caller that
-  // turns recording off (LLP 0464); leave and uninstall reverse settings only.
+  // turns recording off (LLP 0466); leave and uninstall reverse settings only.
   const stoppedRecording = recordingSwitch === 'changed'
   const notRecording = recordingSwitch !== undefined
   if (json) {
@@ -1745,7 +1751,7 @@ function writeCoreDetachOutput({ ctx, name, json, quietNoop, recordingSwitch, re
 
 /**
  * Turn a client's recording switch back on after an attach succeeded (LLP
- * 0464). Reports only a change: an attach of a client that was never
+ * 0466). Reports only a change: an attach of a client that was never
  * detached prints nothing new. A failed write is a warning, not an attach
  * failure: the settings are wired, and `hyp status` names the contradiction.
  *

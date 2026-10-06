@@ -65,7 +65,7 @@ export function resolveEntrypointOwners(descriptors, isConfigured) {
  * client is detached (`scanningRecording: false`): an unclaimed session would
  * be filed under a client the user switched off.
  *
- * @ref LLP 0464#runner-gate [implements]: unclaimed sessions follow the scanning client's switch
+ * @ref LLP 0466#runner-gate [implements]: unclaimed sessions follow the scanning client's switch
  * @param {string | undefined} entrypoint
  * @param {EntrypointOwners} owners
  * @param {string} scanningClient

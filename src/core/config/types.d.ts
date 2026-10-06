@@ -903,7 +903,7 @@ export type { ConfigStageResult, ConfigApplyErrorKind }
 
 /**
  * The per-client recording switch as read fresh from disk
- * (`readRecordingStateFromDisk`, LLP 0464).
+ * (`readRecordingStateFromDisk`, LLP 0466).
  */
 export interface RecordingState {
   /** Plugins whose client is switched off (`recording: false`). */

@@ -2948,7 +2948,7 @@ export interface BackfillRunContext {
    */
   isPluginConfigured?: (plugin: PluginName) => boolean
   /**
-   * Whether a plugin's client is detached (`recording: false`, LLP 0464),
+   * Whether a plugin's client is detached (`recording: false`, LLP 0466),
    * read fresh by the runner. `isPluginConfigured` already answers false for
    * a detached plugin; this is the narrower question a shared-tree provider
    * asks about its own client, whose unclaimed sessions otherwise fail open.

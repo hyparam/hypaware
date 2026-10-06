@@ -19,7 +19,7 @@ import { prepareLocalConfigWrite } from './schema.js'
  * an explicit `recording: false`, which `hyp client detach` writes, switches
  * it off.
  *
- * @ref LLP 0464#switch [implements]: one per-client on/off switch, on the owning plugin's entry
+ * @ref LLP 0466#switch [implements]: one per-client on/off switch, on the owning plugin's entry
  * @param {Pick<PluginConfigInstance, 'recording'> | undefined} entry
  * @returns {boolean}
  */
@@ -38,7 +38,7 @@ export function isEntryRecording(entry) {
  * missing file. An unreadable local layer answers "nothing detached", the
  * pre-switch behavior.
  *
- * @ref LLP 0464#fresh-read [implements]: the daemon learns about a detach on its next run, with no restart
+ * @ref LLP 0466#fresh-read [implements]: the daemon learns about a detach on its next run, with no restart
  * @param {{ env: NodeJS.ProcessEnv }} args
  * @returns {Promise<RecordingState>}
  */
@@ -99,7 +99,7 @@ function recordingState(local, central) {
  * layer names is refused: the merge drops the local entry, so the write would
  * be inert, and the org config is what requires the integration.
  *
- * @ref LLP 0464#central-refuses [implements]: org policy wins; detach refuses rather than half-detach
+ * @ref LLP 0466#central-refuses [implements]: org policy wins; detach refuses rather than half-detach
  * @param {{ env: NodeJS.ProcessEnv, plugin: PluginName, recording: boolean, dryRun?: boolean }} args
  * @returns {Promise<ClientRecordingWriteResult>}
  */

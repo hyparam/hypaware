@@ -2,7 +2,7 @@
 
 /**
  * `hyp client detach X` stops recording X with the daemon running, and
- * `hyp client attach X` resumes it (LLP 0464).
+ * `hyp client attach X` resumes it (LLP 0466).
  *
  * Each test boots a "daemon" view of the config (the copy the sweep was
  * started with, which never learns about the detach), then runs the real
@@ -10,8 +10,8 @@
  * provider through the kernel's sweep runner. The detach is visible only on
  * disk, which is the point: the runner must read the switch fresh.
  *
- * @ref LLP 0464#runner-gate [tests]
- * @ref LLP 0464#fresh-read [tests]
+ * @ref LLP 0466#runner-gate [tests]
+ * @ref LLP 0466#fresh-read [tests]
  *
  * @import { BackfillContribution, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -289,6 +289,28 @@ test('detach refuses whole when the org config requires the client', async () =>
     assert.match(cli.err(), /organization's HypAware policy requires codex/)
     assert.deepEqual(await s.readLocal(), before)
   } finally {
+    await s.cleanup()
+  }
+})
+
+test('a refused detach skips --purge and keeps the local CA', async () => {
+  const s = await stage()
+  // Never let a regression reach the macOS keychain or launchd from a test.
+  const platform = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'))
+  Object.defineProperty(process, 'platform', { value: 'linux' })
+  try {
+    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'config-control')
+    await fsp.mkdir(controlDir, { recursive: true })
+    await fsp.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/codex' }] }))
+    const caKey = path.join(s.env.HYP_HOME, 'hypaware', 'tls', 'ca-key.pem')
+    await fsp.mkdir(path.dirname(caKey), { recursive: true })
+    await fsp.writeFile(caKey, 'key')
+    const cli = cliCtx(s)
+    assert.equal(await runDetach(['codex', '--purge'], cli.ctx), 1)
+    assert.match(cli.err(), /Skipped --purge/)
+    assert.equal(await fsp.readFile(caKey, 'utf8'), 'key')
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
     await s.cleanup()
   }
 })

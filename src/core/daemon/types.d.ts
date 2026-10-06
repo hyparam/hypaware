@@ -383,7 +383,7 @@ export interface ClientAttachReport {
   configured: boolean
   /**
    * HypAware records this client: configured, and not switched off by
-   * `hyp client detach` (`recording: false` on the plugin entry, LLP 0464).
+   * `hyp client detach` (`recording: false` on the plugin entry, LLP 0466).
    */
   recording: boolean
   /**
