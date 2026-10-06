@@ -5,9 +5,9 @@
     "hash": "89a57ccf7e0aca45"
   },
   "hypaware-query": {
-    "claudeOnly": 2,
+    "claudeOnly": 0,
     "codexOnly": 3,
-    "hash": "51b0dc6be60deee9"
+    "hash": "992def97167d4984"
   },
   "hypaware-reference": {
     "claudeOnly": 0,

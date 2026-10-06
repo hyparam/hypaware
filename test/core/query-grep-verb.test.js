@@ -244,6 +244,16 @@ test('an interrupted walk reports the interruption, not an empty machine', async
   assert.doesNotMatch(stopped.stderr ?? '', /nothing is recorded on this machine/)
 })
 
+test('the incomplete-walk notice tells the caller how to retry and keeps JSON stdout clean', () => {
+  const rendered = queryGrepVerb.render(
+    { hits: [], truncated: false, exhausted: false },
+    /** @type {any} */ ({ format: 'json', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.match(rendered.stderr ?? '', /stopped before covering every file; results may be incomplete/)
+  assert.match(rendered.stderr ?? '', /Narrow with --from\/--to or --session-id and retry/)
+  assert.doesNotThrow(() => JSON.parse(rendered.stdout))
+})
+
 test('a truncated AND interrupted search prints both notices, not the louder one', () => {
   // They mean different things and the skill doc teaches them as such: a
   // wider limit reaches the matches the limit cut, and nothing reaches the
