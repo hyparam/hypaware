@@ -44,7 +44,8 @@ existing flags and privacy commands. It explains harness approval prompts
 and macOS trust dialogs. It never guesses an org or requests secrets in chat.
 
 Cloud enrollment uses `hyp remote login --no-browser` or `--browser` so piped
-stdin cannot select static-token login. GitHub uses `hyp github login
+stdin cannot select static-token login. Unattended setup does not enable
+GitHub collection; once the person enables it, GitHub uses `hyp github login
 --no-browser`. The person follows the printed URL/device code while the
 command waits. If the harness cannot keep it running, the agent gives the
 person the command. Login's existing first-sync review remains authoritative.

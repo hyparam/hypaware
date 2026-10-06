@@ -84,6 +84,7 @@ test('guide explains human handoffs and verification', async (t) => {
   await writeSetupGuide(f.ctx, { catalog: catalog(), platform: 'linux' })
   for (const instruction of [
     'hyp remote login --no-browser', 'hyp github login --no-browser',
+    'unattended setup does not enable GitHub collection',
     'hyp privacy folders ask', 'hyp privacy client <name> local-only',
     'Existing enrollment remains', 'hyp leave', 'first-sync privacy review',
     'Never ask the person to paste passwords or access tokens',

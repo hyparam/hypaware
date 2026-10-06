@@ -7,12 +7,13 @@ import path from 'node:path'
 import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
 import { isHelpFlag } from '../cli/group_help.js'
 import { runInitWizard } from '../cli/wizard/index.js'
-import { DEFAULT_RETENTION_DAYS, orderPickerDescriptors, visiblePickerDescriptors } from '../cli/walkthrough.js'
+import { DEFAULT_RETENTION_DAYS, LOCAL_INSTALL_RETENTION_DAYS, orderPickerDescriptors, visiblePickerDescriptors } from '../cli/walkthrough.js'
 import { detectPickerSources } from '../cli/detect.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { noteInvocation } from '../product_telemetry/client.js'
 import { validateConfig } from '../config/validate.js'
 import { runBackfillProvider } from './backfill.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
@@ -176,6 +177,8 @@ export async function writeSetupGuide(ctx, opts = {}) {
     [Attr.COMPONENT]: 'wizard', [Attr.OPERATION]: 'wizard.setup.guide', status: 'ok',
     hyp_reason: 'guide_only', exit_code: 0,
   }, async () => {
+    // Printing the guide installs nothing, so it must not count as a setup run.
+    noteInvocation({ kind: 'help' })
     const catalog = opts.catalog ?? await (async () => {
       const bundled = await discoverBundledPlugins()
       return buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
@@ -183,7 +186,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
     const rows = visiblePickerDescriptors([...orderPickerDescriptors(catalog.pickerDescriptors).values()], opts.platform)
       .filter((row) => INIT_SOURCE_CHOICES.includes(/** @type {PickerSource} */ (row.id)))
     const detected = await detectPickerSources(catalog, ctx.env)
-    const configPath = ctx.env.HYP_CONFIG || defaultConfigPath(readObservabilityEnv(ctx.env).hypHome)
+    const configPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(readObservabilityEnv(ctx.env).hypHome)
     let existing = 'none'
     try {
       await fs.access(configPath)
@@ -202,7 +205,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
       `Existing local config: ${existing}`,
       '',
       '1. Ask what to record. Detection is a hint, not consent or proof of a working CLI.',
-      ...rows.map((row) => `  ${row.label}${detected.has(row.id) ? ' (detected)' : ''}: --source ${row.id}\n    ${row.summary}`),
+      ...rows.map((row) => `  ${row.label}${detected.has(row.id) ? ' (detected)' : ''}: --source ${row.id}${row.summary ? `\n    ${row.summary}` : ''}`),
       `  Other source IDs: ${INIT_SOURCE_CHOICES.filter((id) => !rows.some((row) => row.id === id)).join(', ') || 'none'}`,
       '  --source is repeatable. --client is an equivalent for client choices.',
       '  --yes alone selects claude + otel, regardless of detection. Name choices explicitly.',
@@ -219,14 +222,14 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '3. Explain local storage and choose overrides only if wanted.',
       '  --export local-parquet: local cache plus scheduled Parquet files (default).',
       '  --export keep-local: local query cache only. configure-later defers export.',
-      `  --retention-days <n>: unattended default ${DEFAULT_RETENTION_DAYS} days; interactive local default 120.`,
+      `  --retention-days <n>: unattended default ${DEFAULT_RETENTION_DAYS} days; interactive local default ${LOCAL_INSTALL_RETENTION_DAYS}.`,
       '  The unattended run imports existing history for chosen clients within the retention window.',
       '  It installs a per-user background service, attaches clients, and installs their skills.',
       '',
       '4. Run the agreed choices. First preview the same command with --dry-run.',
-      ...(suggested ? [`  Example for detected sources (confirm these first):`, `  hyp setup ${suggested} --export local-parquet --retention-days 120`] : [
+      ...(suggested ? [`  Example for detected sources (confirm these first):`, `  hyp setup ${suggested} --export local-parquet --retention-days ${LOCAL_INSTALL_RETENTION_DAYS}`] : [
         '  No sources detected. Ask which source to use; do not fall back to --yes.',
-        '  Command shape: hyp setup --source <chosen-id> --export local-parquet --retention-days 120',
+        `  Command shape: hyp setup --source <chosen-id> --export local-parquet --retention-days ${LOCAL_INSTALL_RETENTION_DAYS}`,
       ]),
       '  --force backs up and replaces local config; ask before using it.',
       '    It also allows a temporary CLI if global installation fails.',
@@ -240,7 +243,9 @@ export async function writeSetupGuide(ctx, opts = {}) {
       '    Alternatively --browser opens it locally. These flags are required with piped stdin.',
       '    If an org choice is required, ask and retry with --org <name>. Do not choose for them.',
       '    Login enables forwarding; follow the printed first-sync privacy review instructions.',
-      '  GitHub: hyp github login --no-browser prints a URL and device code.',
+      '  GitHub: unattended setup does not enable GitHub collection; the person enables it',
+      '    by running hyp setup on a terminal. Once enabled, hyp github login --no-browser',
+      '    prints a URL and device code.',
       '    Disclose that authorization includes private repos and grants write scope; HypAware only reads.',
       '  Never ask the person to paste passwords or access tokens into chat.',
       '  If the agent cannot keep a login command running, hand that command to the person.',

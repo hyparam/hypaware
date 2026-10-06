@@ -103,8 +103,8 @@ or enabling cloud sync, then runs explicit unattended flags. `hyp setup
 --guide` prints the same guide even on a terminal; use this flag alone.
 Cloud login from an agent shell needs `hyp remote login --no-browser` (print
 the sign-in URL) or `--browser` (open it); without either flag piped stdin is
-treated as a static token. GitHub's `hyp github login --no-browser` prints a
-device code. The person completes each browser sign-in while the command waits.
+treated as a static token. Unattended setup does not enable GitHub collection;
+once the person enables it, `hyp github login --no-browser` prints a device code. The person completes each browser sign-in while the command waits.
 
 `--dry-run` reports what would be written and writes no configuration,
 including with `--from-file`. It still refuses an existing configuration
