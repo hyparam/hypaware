@@ -2376,7 +2376,22 @@ test('save leaves a draft folder in place when a file appeared during the move, 
   assert.equal(await runReportSave([draft], ctx), 0)
   assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
   assert.deepEqual(await fs.readdir(draft), ['late-notes.txt'])
-  assert.match(out.join(''), /not removed: .*; its report pages moved/)
+  assert.match(out.join(''), /not removed: .*; its report pages are saved/)
+})
+
+test('save still succeeds with its receipt when the draft cannot be removed', async (t) => {
+  const { ctx, out, draft, name, store } = await storeFixture(t)
+  // A read-only draft: the copy lands, the first unlink fails. Stub unlink so
+  // the test holds under root too, where chmod would not stop it.
+  const original = fs.unlink
+  t.after(() => { fs.unlink = original })
+  fs.unlink = /** @type {any} */ (async () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }) })
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['report.md', 'usage.md'])
+  const text = out.join('')
+  assert.match(text, /not removed: .*EACCES.*; its report pages are saved/)
+  assert.match(text, /publish: hyp report publish /)
 })
 
 test('save telemetry records the outcome and never a path or name', async (t) => {

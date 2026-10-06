@@ -303,9 +303,11 @@ export async function runReportSave(argv, ctx) {
     if (!keep) {
       // Only the pages that were copied are unlinked, never `rm -rf`: the
       // list was validated above, so an rmdir that fails afterwards means a
-      // file appeared since, and that file is left where it is and named.
-      for (const page of pages) await fs.unlink(path.join(abs, page))
+      // file appeared since, and that file is left where it is and named. An
+      // unlink that fails (a read-only draft) is named the same way: the copy
+      // already landed, so the save still succeeds with its receipt.
       try {
+        for (const page of pages) await fs.unlink(path.join(abs, page))
         await fs.rmdir(abs)
       } catch (err) {
         leftBehind = err instanceof Error ? err.message : String(err)
@@ -314,7 +316,7 @@ export async function runReportSave(argv, ctx) {
     markSpanStatus(span, 'ok')
     ctx.stdout.write(`saved ${esc(savedName)} to ${esc(dest)}${savedName !== name ? ` (${esc(name)} was taken)` : ''}\n`)
     if (keep) ctx.stdout.write(`  kept: ${esc(abs)}\n`)
-    else if (leftBehind) ctx.stdout.write(`  not removed: ${esc(abs)} (${esc(leftBehind)}); its report pages moved\n`)
+    else if (leftBehind) ctx.stdout.write(`  not removed: ${esc(abs)} (${esc(leftBehind)}); its report pages are saved\n`)
     ctx.stdout.write(`  list: hyp report list --local\n`)
     ctx.stdout.write(`  publish: hyp report publish ${shellWord(savedName)} --kind usage-review --period ${publishPeriodHint(savedName)}\n`)
     return 0
