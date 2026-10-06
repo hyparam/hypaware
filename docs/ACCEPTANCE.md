@@ -1961,7 +1961,7 @@ export withholding in configurations with sinks. The fake-upstream
 `gateway_ollama_capture` smoke does not replace this real-model procedure.
 
 **Requires:** the candidate checkout/package with dependencies, a running local
-Ollama service, an already installed text-only model such as `gemma3:4b`, curl,
+Ollama service, an installed model producing supported text responses such as `gemma3:4b`, curl,
 Node and ripgrep. Record candidate SHA, Ollama version, model identity and the
 disposable home. Do not download models, alter the existing service/config, or
 stop it. Use only short synthetic text. Related: [LLP 0398](../llp/0398-ollama-direct-capture.spec.md),
@@ -1978,7 +1978,10 @@ stop it. Use only short synthetic text. Related: [LLP 0398](../llp/0398-ollama-d
    If the port is occupied, choose another and update both config and request URL.
 
 2. Send the documented JSON request, saving the response and exact correlated
-   query. Match submitted context/new assistant content, provider `ollama`,
+   query. Use the CLIENTS bounded retry (30 seconds, one-second intervals) for
+   asynchronous processor arrival; `--refresh always` settles only already
+   appended data. On timeout, inspect diagnostics before concluding capture is
+   missing. Match submitted context/new assistant content, provider `ollama`,
    reported model, request/session/exchange ID and ordered predecessor links.
    Check unknown cwd/repository are null. Record normalized nullable usage,
    native raw counters and completion reason. Only the new response carries usage.
@@ -1997,23 +2000,30 @@ stop it. Use only short synthetic text. Related: [LLP 0398](../llp/0398-ollama-d
    ```
 
    Compare the joined assistant fragments (terminal content included) with the
-   query. Verify a last nonblank `done: true` record, reported model consistency,
+   query, retrying the correlated query to the same deadline until every expected
+   position arrives. Verify a last nonblank `done: true` record, reported model consistency,
    real `done_reason` and terminal counters. Every admitted empty position has a
    row/index/link even though `content_text` is null. Historical assistant rows
    have no usage. Repeat the identical real request and prove its new exchange ID
    and message IDs are distinct. Record nonzero cache counts when observed;
    if none occur, report that rather than making fixture values into live proof.
 
-4. Record the current provider row count and ordered IDs. Exercise an unsupported
+4. First settle every prior successful snapshot with those bounded correlated
+   queries, then record the current provider row count and ordered IDs. Exercise an unsupported
    request (for example, add `tools: []` to a short text request) through the
    capture URL. Save the upstream response/status; success at the caller is
-   allowed. Verify no added snapshot rows and read the bounded adapter reason:
+   allowed. Read the bounded adapter reason:
 
    ```sh
    rg 'plugin\.ollama\.(capture_dropped|invalid_usage)|aigw\.exchange_write_failed' \
      "$HYP_HOME/hypaware/dev-telemetry" -g 'logs-*.jsonl'
    ```
 
+   Retry the diagnostic read once per second for up to 30 seconds, requiring this
+   run/exchange's `unsupported_shape` reason before querying with `--refresh always`
+   and verifying no added snapshot rows. A deadline without the expected reason
+   leaves the drop unproved. The strict request/message/response field allowlists
+   in CLIENTS apply even to otherwise text responses, including `think: false`.
    Inspect emitted fields and processor PID files, with stable `DEV_RUN_ID`.
    They must contain no prompt, partial response, tool content, credentials or
    unfiltered upstream error. `invalid_usage` is required only when observed;
@@ -2027,8 +2037,9 @@ stop it. Use only short synthetic text. Related: [LLP 0398](../llp/0398-ollama-d
    `options: { "num_predict": 512 }` and use `curl --max-time 1 --no-buffer`.
    Confirm from captured wire that it actually interrupted before `done: true`;
    a completed response is not interruption proof. Save the partial output and
-   curl result. Verify no added prompt/partial rows and a `transport_error` reason
-   in the actual processor JSONL. If the model completes too quickly or no bytes
+   curl result. Allow the same bounded diagnostic wait for a `transport_error`
+   reason in the actual processor JSONL, then refresh and verify no added
+   prompt/partial rows against the settled baseline. If the model completes too quickly or no bytes
    arrive, adjust the bounded request/time and repeat with the limitation recorded.
 
 6. Test upstream unavailable using a **pilot-owned refused loopback endpoint**.
@@ -2038,12 +2049,13 @@ stop it. Use only short synthetic text. Related: [LLP 0398](../llp/0398-ollama-d
    local port, `path_prefix: "/api/chat"`, provider `ollama`. Never stop the real
    Ollama service. Validate/relaunch this temporary collector, verify readiness,
    and send the short JSON request to its capture URL. Save HTTP 502 plus the
-   secret-safe `transport_error` JSONL reason; prove no new rows. Switch direct
+   secret-safe `transport_error` JSONL reason, allowing the same bounded arrival
+   wait before refreshing and proving no new rows. Switch direct
    first, stop the temporary collector, restore the original config, and relaunch
    with the same home. Preserve each PID, command and output rather than silently
    replacing evidence from a failure.
 
-7. Before sending more captured requests, compare retained provider row IDs/counts
+7. Before sending more captured requests, compare refreshed retained provider row IDs/counts
    with step 4 (plus any intentionally admitted repeat). They must match exactly
    after collector restart. If waiting spool rows were present, record their
    state before/after querying with `--refresh always`. This proves ordinary

@@ -11,6 +11,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
 import { getLogger, installObservability } from '../../../src/core/observability/index.js'
 import { SPOOL_DIR } from '../../../src/core/cache/spool.js'
 import { CAPTURE_BYTES } from '../../plugins-workspace/ai-gateway/src/process_transport.js'
+import { aiGatewayTablePath } from '../../plugins-workspace/ai-gateway/src/dataset.js'
 
 /** @import { AddressInfo } from 'node:net' */
 
@@ -102,8 +103,8 @@ export async function run({ harness, expect }) {
 
     step('write_failure')
     // Block only a new disposable spool file; no production fault switch or fixture plugin.
-    const table = handle?.runtime.storage.cacheTablePath('ai_gateway_messages', ['all'])
-    assert.ok(table)
+    assert.ok(handle)
+    const table = aiGatewayTablePath(handle.runtime.storage)
     const blockedFile = path.join(table, SPOOL_DIR, 'active.jsonl')
     await fs.mkdir(blockedFile, { recursive: true })
     const failedWrite = await post(base, 'json', body)

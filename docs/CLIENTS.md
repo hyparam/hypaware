@@ -116,8 +116,19 @@ and NDJSON (`stream: true` or omitted), through a request URL you choose.
 It captures ordered system/user/assistant text context and the new assistant
 response. It does not attach a client, capture `ollama` CLI history, import
 transcripts, or cover `/api/generate`, OpenAI-compatible endpoints, tools, images,
-audio or thinking. Use an already installed text-only model. Unsupported shapes
-are forwarded but omitted from capture as a whole exchange.
+audio or thinking. Use an installed model producing supported text responses.
+Unsupported shapes are forwarded but omitted from capture as a whole exchange.
+
+Admission is strict: request keys are limited to `model`, `messages`, `stream`,
+`format`, `options` and `keep_alive`. Message keys are only `role` and `content`,
+with system/user/assistant roles and string content (including empty strings).
+Response-record keys are limited to `model`, `created_at`, `message`, `done`,
+`done_reason`, `total_duration`, `load_duration`, `prompt_eval_count`,
+`prompt_eval_cached_count`, `prompt_eval_duration`, `eval_count` and `eval_duration`.
+An extra key in any of these objects drops the whole exchange with
+`unsupported_shape`, even when the response would otherwise be text. For example,
+the request control `think: false` is not admitted. This does not restrict nested
+keys inside the admitted `options` or `format` values.
 
 Each request is a **context snapshot**, identified by its gateway exchange ID.
 Earlier context submitted again appears again in the next snapshot. Equal text
@@ -160,8 +171,8 @@ node "$HYP_BIN" config validate --path "$HYP_CONFIG"
 curl --fail --silent --show-error "$DIRECT_URL/api/tags"
 ```
 
-Confirm the tags include `$MODEL`; select an installed text-only model if they
-do not. Do not download a model for this check. The adapter's upstream defaults
+Confirm the tags include `$MODEL`; otherwise select an installed model producing
+supported text responses. Do not download a model for this check. The upstream defaults
 to `127.0.0.1:11434`. If your local service uses a different address, use the
 gateway's existing `upstreams` setting with name `ollama`, `base_url` set to that
 address and `path_prefix: "/api/chat"`. Keep `DIRECT_URL` consistent.
@@ -192,10 +203,30 @@ curl --fail --silent --show-error "$CAPTURE_URL/api/chat" \
   --data-binary "@$PILOT_ROOT/request.json" > "$PILOT_ROOT/response.json"
 cat "$PILOT_ROOT/response.json"
 node "$HYP_BIN" query schema ai_gateway_messages
-node "$HYP_BIN" query sql "select request_id, message_index, role, content_text, model
-  from ai_gateway_messages where provider = 'ollama'
-  order by message_created_at desc, message_index limit 30" --refresh always --format json
+QUERY_DEADLINE=$(($(date +%s) + 30))
+SNAPSHOT_READY=0
+while [ "$(date +%s)" -lt "$QUERY_DEADLINE" ]; do
+  node "$HYP_BIN" query sql "select request_id, message_index, role, content_text, model
+    from ai_gateway_messages where provider = 'ollama'
+    order by message_created_at desc, message_index limit 30" --refresh always --format json \
+    > "$PILOT_ROOT/snapshot.json" || break
+  if node -e 'const rows = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.exit(rows.some(row => Number(row.message_index) === 2 && row.role === "assistant") ? 0 : 1)' "$PILOT_ROOT/snapshot.json"; then
+    SNAPSHOT_READY=1
+    break
+  fi
+  sleep 1
+done
+cat "$PILOT_ROOT/snapshot.json"
+test "$SNAPSHOT_READY" = 1
 ```
+
+Capture and JSONL export are asynchronous. The bounded retry above waits for the
+initial disposable request's new assistant row; `--refresh always` only settles
+data already appended, and does not wait for pending processor work. If the
+deadline expires or a query fails, preserve the output and inspect the run's
+diagnostics below before declaring missing capture. For later requests, retry
+their correlated query on the same 30-second deadline until all expected
+positions, including the new response, arrive.
 
 Take the generated response's `request_id` from the output. Set `EXCHANGE_ID`
 to that opaque ID, then inspect exactly that snapshot:
@@ -240,7 +271,13 @@ rg 'plugin\.ollama\.(capture_dropped|invalid_usage)|aigw\.exchange_write_failed'
 ```
 
 Adapter diagnostics carry an exchange ID and bounded reason, without prompts,
-response text or credentials. These JSONL files differ from gateway and processing
+response text or credentials. Allow up to 30 seconds for processor/exporter
+arrival, checking these files once per second for the expected run/exchange and
+reason. A missing diagnostic at that deadline is unresolved evidence, not proof
+that an exchange was dropped. For failed-exchange checks, first obtain its
+expected diagnostic, then refresh and compare rows against a baseline whose
+prior successful snapshots have all arrived.
+These JSONL files differ from gateway and processing
 `logs/daemon.log`. Transport drops use `gateway.capture_dropped` in the gateway
 daemon log and capture-drop counts in status. Without dev telemetry or an existing
 configured OTel exporter, adapter-specific reasons are not automatically visible
@@ -258,7 +295,8 @@ this recipe stays local because it has no sinks.
 
 ### Restart and stop only this collector
 
-Save the queried IDs/counts. Restore your test client's direct URL **first**, then
+Before saving IDs/counts, use the bounded correlated queries above to settle
+every prior successful request. Restore your test client's direct URL **first**, then
 stop only the process you launched, leaving the Ollama service running:
 
 ```sh
