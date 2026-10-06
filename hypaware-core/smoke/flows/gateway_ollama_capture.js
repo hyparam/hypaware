@@ -160,7 +160,8 @@ export async function run({ harness, expect }) {
     const drops = await diagnostic('plugin.ollama.capture_dropped')
     for (const reason of ['unsupported_shape', 'malformed_stream', 'http_error', 'transport_error']) assert.ok(drops.some(record => record.attributes.reason === reason), `missing ${reason}`)
     assert.doesNotMatch(JSON.stringify(drops), /SECRET|partial|unsupported.*image/)
-    assert.ok(drops.every(record => record.attributes.component === 'ollama' && record.attributes.operation === 'project_exchange' && record.attributes.status === 'dropped' && /^[a-f0-9]{32}$/.test(record.attributes.exchange_id)))
+    // @ref LLP 0021#the-attribute-contract [tests]: emitted status uses the logger's fixed vocabulary; dropped normalizes to failed
+    assert.ok(drops.every(record => record.attributes.component === 'ollama' && record.attributes.operation === 'project_exchange' && record.attributes.status === 'failed' && /^[a-f0-9]{32}$/.test(record.attributes.exchange_id)))
     const files = await fs.readdir(harness.telemetryDir)
     assert.ok(files.includes(`logs-${processorPid}.jsonl`), 'processor did not inherit local JSONL diagnostics')
     const processorLogs = await fs.readFile(path.join(harness.telemetryDir, `logs-${processorPid}.jsonl`), 'utf8')
