@@ -95,6 +95,17 @@ daemon, attach clients, install client assets, and import history.
 Important options include repeatable `--source` and `--client`, `--export`,
 `--retention-days`, `--from-file`, `--no-daemon`, and `--bin`.
 
+With no arguments and no output terminal, setup prints an agent guide on
+stdout and exits `0` without configuring the machine. It lists detected
+sources, recording disclosures, choices and commands, browser sign-in
+handoffs, and verification. An agent asks the person before selecting sources
+or enabling cloud sync, then runs explicit unattended flags. `hyp setup
+--guide` prints the same guide even on a terminal; use this flag alone.
+Cloud login from an agent shell needs `hyp remote login --no-browser` (print
+the sign-in URL) or `--browser` (open it); without either flag piped stdin is
+treated as a static token. GitHub's `hyp github login --no-browser` prints a
+device code. The person completes each browser sign-in while the command waits.
+
 `--dry-run` reports what would be written and writes no configuration,
 including with `--from-file`. It still refuses an existing configuration
 without `--force`, exactly where a real run would.
