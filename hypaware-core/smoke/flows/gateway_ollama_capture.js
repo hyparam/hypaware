@@ -55,8 +55,15 @@ export async function run({ harness, expect }) {
       } else if (which === 'stream' || which === 'malformed') {
         res.writeHead(200, { 'content-type': 'application/x-ndjson' })
         const bytes = Buffer.from(which === 'stream' ? streamResponse : JSON.stringify(message('SECRET partial')) + '\n{"done":true')
-        // Split every byte, including the accented character and emoji.
-        for (let index = 0; index < bytes.length; index++) res.write(bytes.subarray(index, index + 1))
+        // Split UTF-8 and CRLF without flooding the bounded IPC frame credits.
+        const cuts = which === 'stream'
+          ? [bytes.indexOf(Buffer.from('é')) + 1, bytes.indexOf(Buffer.from('\r\n')) + 1, bytes.indexOf(Buffer.from('🙂')) + 2, bytes.length]
+          : [Math.floor(bytes.length / 2), bytes.length]
+        let offset = 0
+        for (const end of cuts) {
+          res.write(bytes.subarray(offset, end))
+          offset = end
+        }
         res.end()
       } else if (which === 'usage') {
         res.writeHead(200, { 'content-type': 'application/json' })
@@ -163,6 +170,7 @@ export async function run({ harness, expect }) {
     assert.ok(processorLogs.includes(harness.devRunId), 'processor diagnostics lack stable DEV_RUN_ID')
 
     step('capture_budget_abandonment')
+    assert.equal(Number(/** @type {Record<string, unknown> | undefined} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.capture_dropped ?? 0), 0, 'unexpected transport loss before intentional budget overflow')
     const large = await post(base, 'json', JSON.stringify({ model: 'smoke-ollama', messages: [{ role: 'user', content: 'x'.repeat(CAPTURE_BYTES) }], stream: false }))
     assert.equal(large.status, 200)
     assert.equal(await large.text(), jsonResponse)
