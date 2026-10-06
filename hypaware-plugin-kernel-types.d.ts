@@ -2320,6 +2320,11 @@ export interface AiGatewayProjectedExchange {
    * Partition key and session container, always present: the Claude
    * session id or Codex `metadata.session_id`. A session holds the main
    * loop plus N subagent / side-chat threads. (LLP 0030)
+   * On the live wire dispatcher, equality with a nonempty input.exchange_id
+   * and an absent/null conversation_id declares an exchange snapshot: row
+   * expansion uses temporary state without committed seeding or shared
+   * history/dedup. Other sessions and the projected writer/backfill retain
+   * their existing state contracts. (LLP 0399#exchange-scope)
    */
   session_id: string
   /**

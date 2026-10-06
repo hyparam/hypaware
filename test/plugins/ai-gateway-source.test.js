@@ -553,3 +553,64 @@ test('a failure after the append does not roll the dedupe back onto rows that la
 async function settleFinalizers() {
   for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve))
 }
+
+// @ref LLP 0399#exchange-scope [tests]: source append failure cannot retain snapshot identity or trigger history reads
+test('source appends independent exchange snapshots and reports append failure without seeding', async () => {
+  const upstream = await startEchoUpstream('snapshot-ok')
+  const state = createGatewayState()
+  state.projectors.push({
+    name: 'snapshot', _seq: 0, match: () => true,
+    project: (input) => ({
+      provider: 'native', session_id: input.exchange_id, request_id: input.exchange_id,
+      messages: [0, 1].map((index) => ({
+        role: index === 0 ? 'user' : 'assistant', content: 'same text',
+        message_id: `${input.exchange_id}:${index}`,
+        previous_message_id: index === 0 ? [] : [`${input.exchange_id}:0`],
+      })),
+    }),
+  })
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const ctx = fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+  }, logged)
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  let appends = 0
+  let discoveries = 0
+  ctx.storage.discoverCachePartitions = async () => { discoveries++; return [] }
+  ctx.storage.readRows = async function* () { throw new Error('unexpected seed read') }
+  ctx.storage.appendRows = async (_path, _columns, rows) => {
+    if (++appends === 1) throw new Error('snapshot append failed')
+    appended.push(...rows)
+  }
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status)
+    const status = await source.status()
+    assert.ok(status.details)
+    const url = `http://${status.details.host}:${status.details.port}/snapshot`
+    for (let i = 0; i < 20; i++) {
+      const response = await fetch(url, { method: 'POST', body: 'same request' })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'snapshot-ok', 'append failure never changes upstream traffic')
+      await settleFinalizers()
+    }
+    assert.equal(appends, 20, 'all finalized exchanges reach append, including the failed first exchange')
+    assert.equal(appended.length, 38)
+    assert.equal(new Set(appended.map((row) => row.session_id)).size, 19)
+    assert.equal(new Set(appended.map((row) => row.part_id)).size, 38)
+    for (let i = 0; i < appended.length; i += 2) {
+      assert.deepEqual(appended[i].previous_message_id, [])
+      assert.deepEqual(appended[i + 1].previous_message_id, [appended[i].message_id])
+      assert.equal(appended[i].request_id, appended[i + 1].request_id)
+    }
+    assert.equal(discoveries, 0, 'success and append failure both bypass committed history')
+    assert.equal(logged.filter((entry) => entry.event === 'aigw.exchange_write_failed').length, 1)
+    assert.equal(logged.filter((entry) => entry.event === 'aigw.exchange').length, 19)
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})

@@ -234,6 +234,16 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
 
+      // @ref LLP 0399#exchange-scope [implements]: snapshots have no shared history or committed seed
+      if (typeof input.exchange_id === 'string' && input.exchange_id.length > 0 &&
+          projection.session_id === input.exchange_id && projection.conversation_id == null) {
+        return aiGatewayRowsFromProjectedExchange(projection, {
+          gatewayId,
+          gatewayAttributes: buildGatewayAttributes(input),
+          tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
+        })
+      }
+
       // @ref LLP 0030#decision: seed by session_id (the partition key,
       // always present). Claude `conversation_id` is null, so seeding on it
       // would never dedup a replayed Claude session.
@@ -641,9 +651,9 @@ function canScanCommittedRows(storage) {
  * session: the started-at memo, per-conversation message-id history,
  * the cross-exchange dedup set, and the tool-call → tool-name lookup.
  *
- * Live capture keeps one instance per listener so identity fallback and
- * dedup span the whole session; backfill creates a fresh instance per
- * provider item (each item already carries a whole conversation), so the
+ * Ordinary live capture keeps one instance per listener so identity fallback
+ * and dedup span the whole session; exchange snapshots and backfill create
+ * fresh state per item (each item already carries a whole conversation), so the
  * identical expansion logic scopes naturally to that one conversation.
  */
 export function createAiGatewayConversationState() {
@@ -705,8 +715,8 @@ function threadMessageIds(state, threadScope, agentId) {
  *  - stripping to the advertised `AI_GATEWAY_MESSAGE_COLUMNS` set.
  *
  * Cross-message dedup and identity history live on `state`, owned by the
- * caller. Live capture passes one persistent state per listener;
- * backfill passes a fresh state per conversation item (the default).
+ * caller. Ordinary live capture passes one persistent state per listener;
+ * exchange snapshots and backfill use fresh state per item (the default).
  *
  * Expansion MUTATES `state` (the dedup set and the per-thread chain) as it
  * builds rows, but the append that makes those rows real happens after this
