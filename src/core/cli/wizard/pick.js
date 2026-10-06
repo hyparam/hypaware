@@ -7,7 +7,7 @@ import { Attr, getLogger, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { configRecordsPickAnswer, defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
-import { narrateAcceptedGate } from './express.js'
+import { joinNames } from './express.js'
 import {
   DEFAULT_RETENTION_DAYS,
   WALKTHROUGH_CANCEL_EXIT_CODE,
@@ -15,7 +15,6 @@ import {
   composePickerConfig,
   configuredExportChoice,
   configuredPickerSources,
-  defaultOverwriteConfirmFactory,
   defaultPickerDetect,
   defaultPromptFactory,
   derivePickedClients,
@@ -40,23 +39,7 @@ import {
  * silent state, using the LLP 0031 provenance vocabulary. Exported so the
  * sync-scope lane labels the same rows the same way.
  */
-export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
-
-/**
- * Label suffix for a `needs_setup` row listed on the accept narration.
- * Such a row reaches the default rows only off a recorded answer (the
- * config on disk, or this run's own confirmed selection - detection never
- * seeds one). Its extra setup (a sign-in, a sudo prompt) runs when it is
- * newly picked; a reconfigure's carried row is not re-asked. Saying so is
- * what keeps "record everything" from reading as if enter alone finished
- * the job.
- *
- * No BUNDLED row reaches it today: `claude-desktop` was the only one, and
- * LLP 0358 turned it into a plain transcript row with no `needs_setup` and no
- * configure phase. `needs_setup` remains a kernel contract any plugin may
- * declare, so the suffix stays and is tested against a synthetic descriptor.
- */
-export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
+export const LOCKED_LABEL_SUFFIX = ' · set by your team'
 
 /**
  * Everything the pick lane decides *before* it asks anything: the ordered
@@ -268,31 +251,9 @@ export async function resolvePickSeeding(opts) {
 }
 
 /**
- * The rows the accept narration lists, one label per line, locked rows
- * fleet-suffixed. The express gate's summary sentence names these same
- * rows (plain, unsuffixed) from the same `resolvePickSeeding` computation,
- * so the two can never disagree about what "the defaults" are.
- *
- * @ref LLP 0201#narrate [implements]: the accept narration lists the rows the express gate accepted, from one computation
- * @param {{ defaultRows: PickerDescriptor[], lockedSet: Set<string> }} seeding
- * @returns {string[]}
- */
-export function defaultRowLabels({ defaultRows, lockedSet }) {
-  // Locked wins when both apply: a fleet-managed row's config is the org's,
-  // and stacking both suffixes buys length, not clarity.
-  return defaultRows.map((d) => {
-    const suffix = lockedSet.has(d.id)
-      ? LOCKED_LABEL_SUFFIX
-      : d.needsSetup === true ? NEEDS_SETUP_LABEL_SUFFIX : ''
-    return `  ${d.label}${suffix}`
-  })
-}
-
-/**
- * The wizard pick phase (LLP 0135 #pick). Keeps `runPickerWalkthrough`'s
- * prompt/write/guard/overwrite-confirm shape but sources its rows from the
- * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
- * `PICKER_SOURCES` table, and understands central-layer-locked rows. The
+ * The wizard pick phase (LLP 0135 #pick) sources its rows from the
+ * catalog's picker descriptors (LLP 0130) and understands
+ * central-layer-locked rows. The
  * lane asks one question, the multiselect, seeded by detection and the
  * locked set; the accept-or-customize question lives on the express gate
  * (LLP 0201), whose accept auto-answers this lane (`autoAccept`).
@@ -300,7 +261,7 @@ export function defaultRowLabels({ defaultRows, lockedSet }) {
  * A row's initial checked state is `locked.includes(id)`, then whatever the
  * local config on disk already collects, and only on a first run (no config
  * yet) `detected.has(id)`. A locked id renders `disabled: true` with the
- * `· managed by your fleet`
+ * `· set by your team`
  * suffix and is filtered out of the returned sources before composition: it
  * is already in the central layer, so composing it again into the local
  * layer would be the exact collision join-before-pick exists to avoid
@@ -438,18 +399,16 @@ export async function runWizardPick(opts) {
   })
 
   // The wizard orchestrator defers the write until every question lane has
-  // run (LLP 0190 #commit-point): the overwrite confirm then lands after
-  // the sync lane, and a cancel there leaves the existing config untouched.
+  // run (LLP 0190 #commit-point): the save then lands after the sync
+  // lane, and a cancel there leaves the existing config untouched.
   // Without `deferWrite` the write (and its guard) happens here, keeping
   // the standalone shape every direct caller and test relies on.
   if (!opts.deferWrite) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
       stderr: opts.stderr,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
       interactive,
       ...(opts.force !== undefined ? { force: opts.force } : {}),
-      ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
       configPath,
       config,
     })
@@ -520,14 +479,18 @@ export async function runWizardPick(opts) {
 
 /**
  * Commit a composed pick config to disk: the overwrite guard (LLP 0031),
- * the backup notice, and the write itself. Split out of `runWizardPick` so
+ * the write itself, and the one line confirming it. Split out of `runWizardPick` so
  * the wizard orchestrator can run it after the sync lane (LLP 0190
  * #commit-point) - the last thing before the wizard starts acting - while
- * the non-deferred pick keeps calling it inline. Interactive runs prompt
- * for confirmation; non-interactive runs require `--force`. Either path
+ * the non-deferred pick keeps calling it inline. Attended runs save
+ * without asking (LLP 0433); non-interactive runs require `--force`. Either path
  * backs the file up before replacing it. A refusal is reported here
  * (message to stderr) and returned as `ok: false` for the caller to turn
  * into its exit-1 result.
+ *
+ * With `dryRun` neither the backup nor the write happens: the guard still
+ * answers, so the run refuses exactly where the real one would, and the
+ * line says what would be saved.
  *
  * @ref LLP 0031#local-layer-writers [implements]: pick-phase overwrite safety on the config write path
  * @ref LLP 0190#commit-point [implements]: the config write is callable after the question lanes, not only inside pick
@@ -535,23 +498,21 @@ export async function runWizardPick(opts) {
  * @param {{
  *   stdout: { write(chunk: string): unknown },
  *   stderr: { write(chunk: string): unknown },
- *   stdin?: NodeJS.ReadableStream,
  *   interactive: boolean,
  *   force?: boolean,
- *   confirmOverwrite?: (targetPath: string) => Promise<boolean>,
+ *   dryRun?: boolean,
  *   configPath: string,
  *   config: HypAwareV2Config,
  * }} args
  * @returns {Promise<{ ok: boolean }>}
  */
 export async function commitWizardPickedConfig(args) {
-  const overwriteConfirm = args.interactive
-    ? (args.confirmOverwrite ?? defaultOverwriteConfirmFactory({ ...(args.stdin ? { stdin: args.stdin } : {}), stdout: args.stdout }))
-    : undefined
+  const dryRun = args.dryRun === true
+  // @ref LLP 0433#scope [implements]: an attended run backs up and saves without asking
   const guard = await prepareLocalConfigWrite({
     targetPath: args.configPath,
-    force: args.force,
-    ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
+    force: args.interactive || args.force,
+    dryRun,
   })
   if (!guard.proceed) {
     args.stderr.write(`hyp setup: ${guard.message}\n`)
@@ -569,9 +530,6 @@ export async function commitWizardPickedConfig(args) {
     )
     return { ok: false }
   }
-  if (guard.backupPath) {
-    args.stdout.write(`Backed up existing config to ${guard.backupPath}\n`)
-  }
 
   await withSpan(
     'wizard.pick.write_config',
@@ -580,15 +538,23 @@ export async function commitWizardPickedConfig(args) {
       [Attr.OPERATION]: 'wizard.pick.write_config',
       config_path: args.configPath,
       plugin_count: args.config.plugins?.length ?? 0,
-      ...(guard.backupPath ? { config_backed_up: true } : {}),
+      ...(dryRun ? { dry_run: true } : {}),
+      ...(guard.backupPath && !dryRun ? { config_backed_up: true } : {}),
       status: 'ok',
     },
     async () => {
+      if (dryRun) return
       await fs.mkdir(path.dirname(args.configPath), { recursive: true })
       await fs.writeFile(args.configPath, JSON.stringify(args.config, null, 2) + '\n', 'utf8')
     },
     { component: 'wizard' }
   )
+  if (dryRun) {
+    args.stdout.write(`(dry-run) Would save settings${guard.backupPath ? ' (previous config would be backed up)' : ''}\n`)
+    return { ok: true }
+  }
+  // One line once the save lands, under the recap (LLP 0437 #recap).
+  args.stdout.write(`✓ Saved settings${guard.backupPath ? ' (previous config backed up)' : ''}\n`)
   return { ok: true }
 }
 
@@ -632,12 +598,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
   // defaults" must have one definition, not two that happen to agree.
   // @ref LLP 0201#narrate [implements]: an auto-accepted lane prints its statement instead of prompting
   if (defaultRows.length > 0 && opts.autoAccept) {
-    narrateAcceptedGate({
-      stdout: opts.stdout,
-      title: 'HypAware will record:',
-      // One source per line; the locked suffix matches the menu rows'.
-      items: defaultRowLabels({ defaultRows, lockedSet }),
-    })
+    stateRecording(opts, defaultRows)
     return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
   }
   try {
@@ -653,7 +614,9 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
       // No keys in the title: the TUI's hint line and the numbered
       // fallback's own select instructions each carry their controls,
       // so a parenthetical here said it twice on every terminal.
-      title: 'What do you want to collect?',
+      title: opts.collectAndSync
+        ? 'What do you want to collect and sync?'
+        : 'What do you want to collect?',
       // Carried on the question rather than composed into the title, so
       // the TUI paints it dim on its own line and the legacy numbered
       // fallback prints the same text as plain text.
@@ -665,7 +628,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
       // Without this the non-TTY menu printed bare labels and read a
       // bare enter as "collect nothing", so a reconfigure that reached
       // the menu and pressed enter rewrote a seeded config to collect
-      // nothing - past an overwrite confirm that defaults to yes.
+      // nothing.
       // Opted in only when a box is actually checked: with none there
       // is no state to keep, so enter stays the historical empty
       // selection and a dropped terminal still cancels the run rather
@@ -674,6 +637,8 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
       ...(hasChecked ? { enterKeepsChecked: true } : {}),
       ...(opts.allowBack ? { allowBack: true } : {}),
     })
+    const chosen = new Set(sourceRaw)
+    stateRecording(opts, visibleList.filter((d) => chosen.has(d.id)))
     return {
       rawSources: withCarried(sourceRaw.filter((v) => descriptors.has(v))),
     }
@@ -684,15 +649,30 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
 }
 
 /**
+ * The lane's one-line statement of what will be recorded, for the wizard's
+ * recap (LLP 0437 #recap). Plain names: whether a row is the team's is said
+ * on the sync line, where it matters.
+ *
+ * @param {RunWizardPickOptions} opts
+ * @param {PickerDescriptor[]} rows
+ */
+function stateRecording(opts, rows) {
+  const said = opts.statement ?? opts.stdout
+  said.write(rows.length > 0 ? `✓ Recording ${joinNames(rows.map((d) => d.label))}\n` : '✓ Nothing picked to record\n')
+}
+
+/**
  * Build one picker row's prompt option from its descriptor. A locked row
- * is checked and disabled with the `· managed by your fleet` suffix; a
+ * is checked and disabled with the `· set by your team` suffix; a
  * seeded row (from the config on a reconfigure, a prior confirmed
  * selection on a re-entry, or detection on a first run) is checked,
  * carrying the ` · detected` suffix only when detection put it there;
  * otherwise the bare descriptor label. The retired `· stays on this
  * machine` suffix is deliberately absent: under LLP 0188 an addition on a
- * managed machine syncs by default, and the sync-scope step after this
- * prompt is where local-only is offered.
+ * managed machine syncs by default, and on an enrolled run this menu is
+ * itself the sharing choice (LLP 0396 #combined-selection) - a checked row
+ * is collected and synced. `hyp privacy client <name> local-only` is the
+ * standing control afterwards.
  *
  * @param {PickerDescriptor} d
  * @param {ReadonlySet<string>} seed
@@ -759,8 +739,8 @@ function configuredRetentionDays(config) {
 }
 
 /**
- * Build the cancel result returned when the user cancels at a prompt. Mirrors
- * `runPickerWalkthrough`'s cancel shape: a cancel notice to stderr, the
+ * Build the cancel result returned when the user cancels at a prompt:
+ * a cancel notice to stderr, the
  * deterministic 130 exit code, and an empty config the orchestrator ignores
  * once it sees `cancelled`.
  *
@@ -785,7 +765,7 @@ async function cancelledResult(opts) {
     { component: 'wizard' }
   )
   try {
-    opts.stderr.write('hyp setup: cancelled\n')
+    opts.stderr.write('Setup cancelled.\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

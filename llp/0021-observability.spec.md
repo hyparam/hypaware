@@ -14,6 +14,7 @@ LLP 0343 (the reverse-order close in #shutdown-and-flush is no longer ordered:
 the three channels close concurrently, so a hung close costs one budget rather
 than three; the dev flush and the flush-before-close order within a channel
 stand)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > How HypAware instruments itself. Lifts the "Self-Instrumentation Contract" from
 > the tombstoned implementation plan ([LLP 0018](./tombstones/0018-implementation-plan.plan.md))
@@ -54,7 +55,7 @@ The provider's exporter set is chosen from env, with three states:
 The OTLP branch is gated on `!devTelemetry && otlpEndpoint`: the two export
 modes are **mutually exclusive by construction**. This is the load-bearing
 invariant behind the `otel_self_loop_guard` acceptance smoke
-([LLP 0002](./0002-v1-scope.decision.md#v1-acceptance-criteria-summary)): a
+([LLP 0002](./0002-v1-scope.decision.md)): a
 daemon that runs its own OTLP listener must not also export *into* it, or it
 feeds itself in a runaway loop. Any change that lets both exporters install at
 once reintroduces that loop.

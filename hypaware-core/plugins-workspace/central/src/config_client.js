@@ -407,10 +407,15 @@ function abortReason(signal) {
 }
 
 /**
+ * Redundant trailing slashes in the base collapse, so a url an operator typed
+ * as `https://host//` reaches the same single-slash route product telemetry's
+ * `safeDestination` targets, not the doubled-slash path the receiver will not
+ * route.
+ *
  * @param {string} base
  * @param {string} suffix
  */
 function joinUrl(base, suffix) {
-  const baseWithSlash = base.endsWith('/') ? base : `${base}/`
+  const baseWithSlash = `${base.replace(/\/+$/, '')}/`
   return new URL(suffix.replace(/^\//, ''), baseWithSlash).toString()
 }

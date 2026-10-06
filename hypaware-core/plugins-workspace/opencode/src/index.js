@@ -1,6 +1,7 @@
 // @ts-check
 
 import os from 'node:os'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
@@ -33,7 +34,7 @@ export async function activate(ctx) {
 
   ensureAiGatewayStorageContracts(ctx)
   const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
-  const ignoredSessions = new Set()
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
   ctx.backfills.register(createOpenCodeBackfillProvider({
     localOnlyListPath: localPolicyPath,
     ignoredSessions,
@@ -116,7 +117,7 @@ function registerSessionCommands(ctx) {
   for (const command of [
     {
       name: 'session ignore',
-      summary: 'Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)',
+      summary: 'Stop recording this AI session on every local recorder (saved until explicitly unignored)',
       usage: 'hyp session ignore [session-id] [--json]',
       run: runSessionIgnore,
     },

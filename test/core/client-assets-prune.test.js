@@ -24,6 +24,7 @@ import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
 import { clientAssetStateRoot, digestClientAsset } from '../../src/core/runtime/client_asset_ledger.js'
 import { materializeClientAssets, removeClientAssets } from '../../src/core/runtime/client_assets.js'
+import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
  * A fresh kernel + command registry, the way a new process would boot one. Each
@@ -991,6 +992,123 @@ test('a skill the boot profile withheld is never read as retired', async () => {
   await fs.rm(home, { recursive: true, force: true })
 })
 
+
+/**
+ * Stage a third-party plugin the way `hyp plugin install` leaves one: a real
+ * install directory contributing one skill, and a `plugin-lock.json` row
+ * pointing at it.
+ *
+ * @param {{ hypHome: string, name: string, skill: string }} args
+ * @returns {Promise<{ installDir: string, lockPath: string }>}
+ */
+async function writeInstalledPluginWithSkill({ hypHome, name, skill }) {
+  const stateDir = path.join(hypHome, 'hypaware')
+  const installDir = path.join(stateDir, 'plugins', name)
+  await fs.mkdir(path.join(installDir, 'skills', skill), { recursive: true })
+  await fs.writeFile(path.join(installDir, 'skills', skill, 'SKILL.md'), `${skill} body\n`, 'utf8')
+  await fs.writeFile(
+    path.join(installDir, 'hypaware.plugin.json'),
+    JSON.stringify({
+      schema_version: 1,
+      name,
+      version: '1.0.0',
+      hypaware_api: '^1.0.0',
+      runtime: 'node',
+      entrypoint: './index.js',
+      contributes: { skills: [{ name: skill, clients: ['claude'] }] },
+    })
+  )
+  await fs.writeFile(
+    path.join(installDir, 'index.js'),
+    "import path from 'node:path'\n" +
+      "import { fileURLToPath } from 'node:url'\n" +
+      'export async function activate(ctx) {\n' +
+      '  ctx.skills.register({\n' +
+      `    name: ${JSON.stringify(skill)},\n` +
+      `    plugin: ${JSON.stringify(name)},\n` +
+      "    clients: ['claude'],\n" +
+      `    sourceDir: path.join(path.dirname(fileURLToPath(import.meta.url)), 'skills', ${JSON.stringify(skill)}),\n` +
+      '  })\n' +
+      '}\n'
+  )
+  await writeLock(stateDir, {
+    schema_version: 1,
+    plugins: {
+      [name]: {
+        name: /** @type {any} */ (name),
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: installDir, path: installDir },
+        install_dir: installDir,
+        content_hash: 'a'.repeat(64),
+        manifest_hash: 'b'.repeat(64),
+        installed_at: '2026-05-21T00:00:00.000Z',
+      },
+    },
+  })
+  return { installDir, lockPath: path.join(stateDir, 'plugin-lock.json') }
+}
+
+test('a lock entry with no install_dir is a boot that came up short, so its client assets survive', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-prune-lock-entry-'))
+  const env = { ...process.env, HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const workspaceDir = await writeBundledWorkspace(home)
+  const installed = '@third-party/assets'
+  const { lockPath } = await writeInstalledPluginWithSkill({
+    hypHome: path.join(home, '.hyp'),
+    name: installed,
+    skill: 'probe-skill',
+  })
+  const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/claude', config: {} }, { name: installed, config: {} }],
+    })
+  )
+
+  const bootArgs = /** @type {const} */ ({
+    hypHome: path.join(home, '.hyp'),
+    configPath,
+    workspaceDir,
+    mode: 'smoke',
+    env,
+  })
+
+  // The installed plugin's skill lands and is ledgered with a matching digest.
+  const first = await bootKernel({ ...bootArgs, runId: 'prune-lock-entry-1' })
+  await materializeFromBoot({ boot: first, home, env })
+  const dest = path.join(home, '.claude', 'skills', 'probe-skill')
+  assert.ok(await exists(path.join(dest, 'SKILL.md')), 'the installed plugin\'s skill must land first')
+
+  // The lock is hand-edited and the row loses its `install_dir`. Discovery
+  // cannot attempt a manifest for it, so it is in neither `loaded` nor
+  // `failed`, nothing threw in `activate()`, and no profile withheld it: this
+  // is a fifth door onto the same shortfall, and the copy under `~/.claude`
+  // is now missing from the plan for a reason that is not a retirement.
+  // `@hypaware/claude` still contributes, so the client stays in scope and the
+  // copied-nothing guard does not cover this.
+  const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+  delete lock.plugins[installed].install_dir
+  await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
+
+  const second = await bootKernel({ ...bootArgs, runId: 'prune-lock-entry-2' })
+  assert.deepEqual(
+    second.activations.filter((/** @type {any} */ r) => r.ok === false),
+    [],
+    'nothing threw, so an activation-only stand-down sees no reason to stand down'
+  )
+  const outcome = await materializeFromBoot({ boot: second, home, env })
+
+  assert.deepEqual(outcome.pruned, [], 'a boot that came up short deletes nothing')
+  assert.ok(
+    await exists(path.join(dest, 'SKILL.md')),
+    'a hand-edited lock row must not delete the plugin\'s skill out of the user\'s home'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
 /* ------------------------------------------------------------------------ *
  * The door next to those four, which deliberately does not stand the prune
  * down. Pinned so the reading cannot drift silently into either behaviour.
@@ -1077,6 +1195,49 @@ test('a directory and a file never share a content digest', async () => {
     await digestClientAsset(treeDir),
     await digestClientAsset(flatFile),
     'a skill tree and a file spelling out that tree must not hash alike'
+  )
+
+  await fs.rm(root, { recursive: true, force: true })
+})
+
+// @ref LLP 0402#framed-entries [tests]: the digest a crafted edit must not be
+//   able to keep, which is what makes the prune's evidence gate mean anything.
+test('two distinct skill trees never share a content digest', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-digest-'))
+
+  // Inside the directory domain the entry line framed the path and stopped
+  // there, so one tree's next entry line was another tree's file content: two
+  // files of `''` and `'hello'` wrote the same stream as one file holding
+  // `f:b\nhello` (#1669). A crafted edit of that shape keeps the recorded
+  // digest intact, and the recorded digest is what lets the prune delete.
+  const pair = path.join(root, 'pair')
+  await fs.mkdir(pair, { recursive: true })
+  await fs.writeFile(path.join(pair, 'a'), '', 'utf8')
+  await fs.writeFile(path.join(pair, 'b'), 'hello', 'utf8')
+  const single = path.join(root, 'single')
+  await fs.mkdir(single, { recursive: true })
+  await fs.writeFile(path.join(single, 'a'), 'f:b\nhello', 'utf8')
+  assert.notEqual(
+    await digestClientAsset(pair),
+    await digestClientAsset(single),
+    'a two-file skill and a one-file skill spelling it out must not hash alike'
+  )
+
+  // Framing the bytes alone leaves the same ambiguity one level up, because a
+  // file name may itself hold a newline: the tail of the crafted name reads as
+  // the length line of the entry it stands in for: this pair digests alike
+  // under a hasher that frames the bytes and terminates the path at a newline,
+  // and only a path carrying its own length closes it.
+  const named = path.join(root, 'named')
+  await fs.mkdir(named, { recursive: true })
+  await fs.writeFile(path.join(named, 'a\n2'), '', 'utf8')
+  const lined = path.join(root, 'lined')
+  await fs.mkdir(lined, { recursive: true })
+  await fs.writeFile(path.join(lined, 'a'), '0\n', 'utf8')
+  assert.notEqual(
+    await digestClientAsset(named),
+    await digestClientAsset(lined),
+    'a newline in a file name must not read as another tree\'s framing'
   )
 
   await fs.rm(root, { recursive: true, force: true })
@@ -1186,7 +1347,7 @@ test('the wizard finale says how many retired assets it removed', async () => {
   )
   assert.match(
     stdout.text(),
-    /removed 1 retired skill for claude/,
+    /^Removed 1 retired skill for claude$/m,
     'a wizard that deletes a skill under the user\'s nose must count it out loud'
   )
 })

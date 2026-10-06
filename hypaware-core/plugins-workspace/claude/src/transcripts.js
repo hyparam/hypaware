@@ -32,7 +32,7 @@ import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBloc
 
 /**
  * @import { JsonObject, PluginName } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { TranscriptEntry } from './types.js'
+ * @import { Desktop3pDirsEntry, TranscriptEntry } from './types.js'
  */
 
 /**
@@ -117,15 +117,26 @@ export function findDesktop3pProjectsDirs(homeDir) {
 const DESKTOP_3P_DIRS_TTL_MS = 30_000
 
 /**
+ * How many session ids one home remembers having spent a forced re-sweep
+ * on. The memo is dropped whenever the container changes, but a daemon that
+ * keeps running sees an unbounded stream of sessions that will never match
+ * (SDK and headless traffic with no transcript, harness aux exchanges,
+ * wire-only reminders), so it is capped rather than left to grow with
+ * uptime.
+ */
+export const DESKTOP_3P_SWEPT_SESSIONS_MAX = 1024
+
+/**
  * TTL cache over {@link findDesktop3pProjectsDirs}, keyed by home dir.
  *
  * The live projector resolves the 3p roots on every primary-tree miss,
  * and for an attached Desktop every exchange is a primary miss by
  * construction, so the uncached sweep re-walked a container whose
  * per-session sandbox homes grow monotonically with conversations. The
- * cache bounds that to one sweep per TTL; callers that miss inside the
- * cached list can force a `refresh` so a sandbox home created after the
- * last sweep is still found (see `loadTranscript`).
+ * cache bounds that to one sweep per TTL; a caller whose session was in
+ * none of the cached dirs forces one more through {@link
+ * createDesktop3pDirsCache}'s `refreshFor`, so a sandbox home created
+ * after the last sweep is still found (see `loadTranscript`).
  *
  * `ttlMs` and `now` are injectable for tests only.
  *
@@ -134,23 +145,129 @@ const DESKTOP_3P_DIRS_TTL_MS = 30_000
 export function createDesktop3pDirsCache(opts) {
   const ttlMs = opts?.ttlMs ?? DESKTOP_3P_DIRS_TTL_MS
   const now = opts?.now ?? Date.now
-  /** @type {Map<string, { atMs: number, dirs: string[] }>} */
+  /** @type {Map<string, Desktop3pDirsEntry>} */
   const byHome = new Map()
+
+  /**
+   * @param {string} homeDir
+   * @param {Desktop3pDirsEntry} [hit]
+   * @returns {{ entry: Desktop3pDirsEntry, unchanged: boolean }}
+   */
+  function sweep(homeDir, hit) {
+    const dirs = findDesktop3pProjectsDirs(homeDir)
+    // A container that changed re-arms every session remembered against the
+    // list it replaced, which is what keeps a new sandbox home findable.
+    const unchanged = !!hit && sameDirs(hit.dirs, dirs)
+    // `moved` carries that verdict to a caller who missed inside a list it
+    // did not ask to have swept (a `get()` past the TTL walks on its own),
+    // so that miss settles on the same rule a forced walk uses. A first
+    // sweep replaced no list, so it has nothing to have moved from.
+    const entry = { atMs: now(), dirs, moved: !!hit && !unchanged, swept: unchanged ? hit.swept : new Set() }
+    byHome.set(homeDir, entry)
+    return { entry, unchanged }
+  }
+
+  /**
+   * Memoise this session's spent walk against the list `entry` names.
+   * Oldest out first, so a daemon streaming one-off sessions that never
+   * match cannot grow the memo with uptime. An evicted session costs one
+   * more sweep, never a wrong answer.
+   *
+   * The `!cached` arm reaches here without the memo check the forced walk
+   * makes, and a TTL rollover re-settles every session the memo still
+   * holds, so a session already remembered against this list must cost no
+   * other one its place.
+   *
+   * @param {Desktop3pDirsEntry} entry
+   * @param {string} sessionId
+   */
+  function remember(entry, sessionId) {
+    if (entry.swept.has(sessionId)) return
+    if (entry.swept.size >= DESKTOP_3P_SWEPT_SESSIONS_MAX) {
+      entry.swept.delete(/** @type {string} */ (entry.swept.values().next().value))
+    }
+    entry.swept.add(sessionId)
+  }
+
   return {
     /**
      * @param {string} homeDir
-     * @param {{ refresh?: boolean }} [get]
      * @returns {{ dirs: string[], cached: boolean }}
      */
-    get(homeDir, get) {
+    get(homeDir) {
       const atMs = now()
       const hit = byHome.get(homeDir)
-      if (!get?.refresh && hit && atMs - hit.atMs < ttlMs) return { dirs: hit.dirs, cached: true }
-      const dirs = findDesktop3pProjectsDirs(homeDir)
-      byHome.set(homeDir, { atMs, dirs })
-      return { dirs, cached: false }
+      if (hit && atMs - hit.atMs < ttlMs) return { dirs: hit.dirs, cached: true }
+      return { dirs: sweep(homeDir, hit).entry.dirs, cached: false }
+    },
+    /**
+     * Settle one session's miss inside the dirs a `get()` just named, given
+     * that `get()`'s own `cached` back: a list `get()` had to sweep for
+     * already holds everything a walk here would find, so the miss is
+     * remembered rather than walked again, and only a miss inside a cached
+     * list buys the re-sweep.
+     *
+     * Both loaders take this leg per settle pass, and with the caller
+     * gating on `cached` alone a sweeping `get()` settled no miss, so the
+     * second loader walked the identical container again (issue #1795).
+     *
+     * The walk is spent at most once per session per container list either
+     * way: a second walk of a list this session already missed reads the
+     * same directories to the same answer.
+     *
+     * A sandbox home usually appears before the session it belongs to has
+     * ever missed, so that session is not memoised yet and still gets the
+     * walk that finds it, and that walk re-arms every session remembered
+     * against the older list. A walk that found the container still moving
+     * settles no miss at all, whichever of the two made it.
+     *
+     * A home that lands after its own session already missed is the case
+     * this does not find at once: the first exchange of a new conversation
+     * can miss before the CLI inside the sandbox has written anything, and
+     * that spends the session's sweep. It waits for the first sweep another
+     * session forces, or for the TTL, whichever comes first, so the bound
+     * is one TTL. Transcript identity re-settles later and is unharmed, and
+     * so does `loadAgentMeta`'s `spawned_by_tool_use_id`: settlement calls
+     * this loader too (issue #1794), so a sidechain exchange inside that
+     * window recovers its provenance on the same pass that recovers its
+     * identity.
+     *
+     * @param {string} homeDir
+     * @param {string} sessionId
+     * @param {boolean} cached  the `cached` of the `get()` whose dirs this
+     *   session missed inside
+     * @returns {string[] | null} freshly swept dirs, or null when no walk
+     *   was owed: this session's is spent, or the list it missed inside was
+     *   swept by the `get()` that served it
+     */
+    refreshFor(homeDir, sessionId, cached) {
+      const hit = byHome.get(homeDir)
+      if (!cached) {
+        if (hit && !hit.moved) remember(hit, sessionId)
+        return null
+      }
+      if (hit?.swept.has(sessionId)) return null
+      const { entry, unchanged } = sweep(homeDir, hit)
+      if (unchanged) remember(entry, sessionId)
+      return entry.dirs
     },
   }
+}
+
+/**
+ * Whether two sweeps of the same container named the same dirs. The walk
+ * visits the roots in a fixed order, so element-wise is enough; a reordered
+ * listing reads as a change, which only costs a sweep.
+ *
+ * @param {string[]} a
+ * @param {string[]} b
+ */
+function sameDirs(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
 }
 
 /** Shared instance for the live path; keyed by home dir, so one is enough. */
@@ -190,9 +307,10 @@ function collectNestedProjectsDirs(dir, depth, out) {
  *    session-context state file), read THAT file plus the subagent
  *    files under its sibling session directory. Cheap and direct,
  *    no projects-wide walk.
- *  - Otherwise scan `<projectsDir>/**\/<sessionId>.jsonl` (which also
- *    descends into `<sessionId>/` directories for subagent files) and
- *    concatenate matching files.
+ *  - With no `transcriptPath`, or when reading it yielded nothing (a
+ *    stale or dead path), scan `<projectsDir>/**\/<sessionId>.jsonl`
+ *    (which also descends into `<sessionId>/` directories for subagent
+ *    files) and concatenate matching files.
  *  - When that scan finds nothing and `homeDir` is provided, scan the
  *    Desktop 3p sandbox trees ({@link findDesktop3pProjectsDirs}):
  *    an attached Desktop writes its transcripts there, not under
@@ -227,7 +345,13 @@ export async function loadTranscript(opts, readFile = readTranscriptFile) {
     for (const filePath of walkJsonlFiles(sessionDir, undefined)) {
       await readFile(filePath, entries)
     }
-  } else {
+  }
+  // A hook-written `transcript_path` can be stale or dead (the file is gone,
+  // or was never written where it said), and a read of nothing must not end
+  // the lookup: the session would hold gateway-fallback identity for good. A
+  // direct read that yielded entries never reaches here, so the fast path
+  // stays one file read.
+  if (entries.length === 0) {
     for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
       await readFile(filePath, entries)
     }
@@ -240,12 +364,14 @@ export async function loadTranscript(opts, readFile = readTranscriptFile) {
       const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
       await readSessionFromDirs(dirs, opts.sessionId, entries, readFile)
       // A new sandbox home appears exactly when a session starts, so a
-      // cached list cannot contain the newest session's root. One forced
-      // re-sweep on a miss keeps the cache invisible to correctness: the
-      // cached path never finds less than the uncached walk did.
-      if (entries.length === 0 && cached) {
-        const refreshed = desktop3pDirsCache.get(opts.homeDir, { refresh: true })
-        await readSessionFromDirs(refreshed.dirs, opts.sessionId, entries, readFile)
+      // cached list cannot contain the newest session's root: the session
+      // it appeared for gets one forced re-sweep to find it, spent once per
+      // session per container list. Whether the dirs just missed inside were
+      // cached is `refreshFor`'s to weigh rather than a gate here: a list it
+      // saw swept costs no second walk.
+      if (entries.length === 0) {
+        const refreshed = desktop3pDirsCache.refreshFor(opts.homeDir, opts.sessionId, cached)
+        if (refreshed) await readSessionFromDirs(refreshed, opts.sessionId, entries, readFile)
       }
     }
   }
@@ -298,12 +424,22 @@ export function* walkTranscriptRoots(roots) {
  * nor the wire exchange. Returns a map keyed by the agent id parsed from
  * each filename.
  *
- * Resolution mirrors `loadTranscript`: a `transcriptPath` scans just that
- * session's directory (cheap: the live path); otherwise `projectsDir`
- * is scanned recursively (the backfill path). Best-effort: a missing
+ * A `transcriptPath` roots the walk at just that session's directory
+ * (cheap: the live path). When that directory is not there at all the
+ * path is stale, and the same two fallbacks `loadTranscript` uses recover
+ * the session's real directory: a `sessionId` scan of `projectsDir`, then
+ * a sweep of the Desktop 3p sandbox roots under `homeDir`, where an
+ * attached Desktop's sessions live instead of under `~/.claude/projects`.
+ * A row whose transcript identity either fallback recovered therefore also
+ * carries its `spawned_by_tool_use_id`. A named directory that does exist
+ * ends the lookup even when it holds no sidecar: that is a session whose
+ * sidecar is simply not written, and neither fallback can find one for it
+ * either, so it must not pay a projects-wide walk per exchange. With no
+ * `transcriptPath` at all, `projectsDir` is scanned recursively for every
+ * session's sidecars (the backfill path). Best-effort: a missing
  * directory or an unparseable sidecar is skipped, never thrown.
  *
- * @param {{ transcriptPath?: string, projectsDir?: string }} opts
+ * @param {{ transcriptPath?: string, projectsDir?: string, sessionId?: string, homeDir?: string }} opts
  * @returns {Map<string, { tool_use_id: string }>}
  */
 export function loadAgentMeta(opts) {
@@ -312,7 +448,106 @@ export function loadAgentMeta(opts) {
   const rootDir = opts.transcriptPath
     ? path.join(path.dirname(opts.transcriptPath), path.basename(opts.transcriptPath, '.jsonl'))
     : opts.projectsDir
-  if (!rootDir) return meta
+  if (rootDir) collectAgentMeta(rootDir, meta)
+  // Only a `transcriptPath` whose session directory is not there at all is
+  // stale: fall through to the session-id scans `loadTranscript` uses, whose
+  // session directory is where the sidecars are. An empty map alone is not
+  // the signal. A live session that has simply written no sidecar yet is the
+  // common sidechain case, and gating on the map would make every one of its
+  // exchanges walk the whole projects tree, a cost that grows with the user's
+  // history.
+  if (
+    meta.size === 0 && opts.transcriptPath && opts.sessionId &&
+    rootDir && !fs.existsSync(rootDir)
+  ) {
+    /** @type {Set<string>} */
+    const seen = new Set()
+    let located = opts.projectsDir
+      ? collectSessionAgentMeta([opts.projectsDir], opts.sessionId, meta, seen)
+      : false
+    // An attached Desktop runs each conversation in a sandbox home inside its
+    // own container, so a session the scan above cannot find is not missing,
+    // just somewhere `projectsDir` does not reach. It is the session being
+    // unfound that says so, not the map being empty: a session the scan
+    // located owns its sidecars whether or not it has written any yet, so
+    // gating on the map would sweep the container on every spawn under such a
+    // session, at a cost that grows with the conversations the container
+    // holds, and would let the container answer for a session the projects
+    // tree already found. Ordered and guarded like `loadTranscript`'s
+    // matching leg, sharing its TTL-cached root discovery and its one forced
+    // re-sweep.
+    if (meta.size === 0 && !located && opts.homeDir) {
+      const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
+      if (collectSessionAgentMeta(dirs, opts.sessionId, meta, seen)) located = true
+      // A sandbox home appears exactly when its session starts, so a cached
+      // list can be one short: ask for one more sweep when the session was in
+      // none of the dirs scanned, which `refreshFor` spends only on a list it
+      // did not just sweep itself. It is the session being nowhere, not the
+      // map being empty, that says the list may be stale. An empty map is the
+      // standing state of a located session whose sidecar is simply not
+      // written, and an attached Desktop's hook-written path never resolves on
+      // the host, so re-sweeping on the map would put a whole-container walk
+      // on every one of that conversation's exchanges.
+      if (meta.size === 0 && !located) {
+        const refreshed = desktop3pDirsCache.refreshFor(opts.homeDir, opts.sessionId, cached)
+        if (refreshed) collectSessionAgentMeta(refreshed, opts.sessionId, meta, seen)
+      }
+    }
+  }
+  return meta
+}
+
+/**
+ * Parse the sidecars of `<sessionId>`'s session directory under each projects
+ * dir into `meta`, stopping at the first dir that yields one (a session lives
+ * in exactly one directory). The sidecar mirror of {@link readSessionFromDirs}:
+ * the same session-id scan, resolved to directories rather than read as
+ * transcripts. `seen` carries across calls so a directory two legs both reach
+ * is walked once.
+ *
+ * @param {string[]} projectsDirs
+ * @param {string} sessionId
+ * @param {Map<string, { tool_use_id: string }>} meta
+ * @param {Set<string>} seen
+ * @returns {boolean} whether the session was found at all, sidecar or not:
+ *   what tells a caller its dir list was complete, the way a non-empty
+ *   `entries` tells `loadTranscript`'s
+ */
+function collectSessionAgentMeta(projectsDirs, sessionId, meta, seen) {
+  let located = false
+  for (const projectsDir of projectsDirs) {
+    for (const filePath of walkJsonlFiles(projectsDir, sessionId)) {
+      located = true
+      // Sidecars live in the session file's sibling `<sessionId>/` directory,
+      // and beside a subagent transcript already inside it (all the scan
+      // yields when the session file itself is gone). The scan yields one
+      // file per subagent, so those resolve to the same directory: walk and
+      // parse each one once.
+      const dir = path.basename(filePath, '.jsonl') === sessionId
+        ? path.join(path.dirname(filePath), sessionId)
+        : path.dirname(filePath)
+      if (seen.has(dir)) continue
+      seen.add(dir)
+      collectAgentMeta(dir, meta)
+      if (meta.size > 0) return true
+    }
+    // A session lives in exactly one dir, so the dir that held it answers for
+    // it even with no sidecar in it: walking on would both cost the rest of
+    // the container and let another dir under the same session id answer
+    // instead. The same stop `readSessionFromDirs` makes on its first match.
+    if (located) return true
+  }
+  return located
+}
+
+/**
+ * Parse every agent-meta sidecar under `rootDir` into `meta`, keyed by
+ * agent id. Best-effort: an unreadable or unparseable sidecar is skipped.
+ *
+ * @param {string} rootDir
+ * @param {Map<string, { tool_use_id: string }>} meta
+ */
+function collectAgentMeta(rootDir, meta) {
   for (const { agentId, filePath } of walkAgentMetaFiles(rootDir)) {
     let parsed
     try { parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) } catch { continue }
@@ -320,7 +555,6 @@ export function loadAgentMeta(opts) {
     const toolUseId = stringValue(parsed.toolUseId)
     if (toolUseId) meta.set(agentId, { tool_use_id: toolUseId })
   }
-  return meta
 }
 
 /**
@@ -389,7 +623,12 @@ function byTimestampAsc(a, b) {
  *  - `byToolUseId`   : `tool_use_id` of a user tool_result line →
  *                      entry. Each tool_result is its own line, so
  *                      this is a unique join key.
+ *  - `byToolCallId`  : assistant tool_use id → entry, independent of
+ *                      whether the result has arrived yet.
  *  - `byContentKey`  : canonicalized role+content key → entry.
+ *  - `previousUuid`  : uuid → the uuid of the line before it in the SAME
+ *                      agent thread, built on first call because only a
+ *                      settlement that re-scoped a row's `agent_id` reads it.
  *
  * @param {TranscriptEntry[]} entries
  */
@@ -402,6 +641,8 @@ export function indexTranscriptEntries(entries) {
   const byMessageId = new Map()
   /** @type {Map<string, TranscriptEntry>} */
   const byToolUseId = new Map()
+  /** @type {Map<string, TranscriptEntry>} */
+  const byToolCallId = new Map()
   for (const entry of entries) {
     if (entry.provider_uuid) byUuid.set(entry.provider_uuid, entry)
     if (entry.messageId) {
@@ -412,8 +653,75 @@ export function indexTranscriptEntries(entries) {
     if (entry.contentKey) byContentKey.set(agentScopedKey(entry.agent_id, entry.contentKey), entry)
     const toolUseId = entryToolUseId(entry)
     if (toolUseId) byToolUseId.set(toolUseId, entry)
+    if (entry.role === 'assistant' && Array.isArray(entry.content)) {
+      for (const block of entry.content) {
+        if (!isPlainObject(block) || (block.type !== 'tool_use' && block.type !== 'server_tool_use')) continue
+        const id = stringValue(block.id)
+        if (id) byToolCallId.set(id, entry)
+      }
+    }
   }
-  return { byUuid, byContentKey, byMessageId, byToolUseId, ordered: entries }
+  /** @type {Map<string, string> | undefined} */
+  let previousByUuid
+  return {
+    byUuid,
+    byContentKey,
+    byMessageId,
+    byToolUseId,
+    byToolCallId,
+    ordered: entries,
+    /** @param {string} uuid @returns {string | undefined} */
+    // @ref LLP 0439#lazy-predecessor-index [implements]: a settle pass that
+    // re-scopes no row never pays for the map; one that does builds it once
+    // per session.
+    previousUuid(uuid) {
+      previousByUuid ??= buildPreviousByUuid(entries)
+      return previousByUuid.get(uuid)
+    },
+  }
+}
+
+/**
+ * Map each uuid-bearing line to the uuid of the line before it in the SAME
+ * agent thread, which is the predecessor the transcript backfill's own
+ * expansion chains it to (the gateway keys its `previous_message_id` state by
+ * `(thread, agent_id)`). `entries` is already timestamp-sorted, so one pass
+ * carrying the last uuid per agent is enough. Roots are simply absent, and so
+ * is a line that never projects a row (see `projectsAMessage`): it is
+ * skipped entirely, so it neither receives a predecessor nor becomes one.
+ *
+ * @param {TranscriptEntry[]} entries
+ * @returns {Map<string, string>}
+ */
+function buildPreviousByUuid(entries) {
+  /** @type {Map<string, string>} */
+  const previousByUuid = new Map()
+  /** @type {Map<string, string>} */
+  const lastByAgent = new Map()
+  for (const entry of entries) {
+    if (!entry.provider_uuid || !projectsAMessage(entry)) continue
+    const scope = entry.agent_id ?? ''
+    const previous = lastByAgent.get(scope)
+    if (previous !== undefined) previousByUuid.set(entry.provider_uuid, previous)
+    lastByAgent.set(scope, entry.provider_uuid)
+  }
+  return previousByUuid
+}
+
+/**
+ * Whether a line becomes an `ai_gateway_messages` row, and so advances the
+ * gateway's `previous_message_id` chain. The backfill expansion drops a
+ * roleless line and the gateway expansion drops an empty-content one, so a
+ * `system` / `summary` / snapshot line is neither a predecessor nor gets one.
+ * Emptiness mirrors `normalizeContent` without allocating its array.
+ *
+ * @param {TranscriptEntry} entry
+ */
+function projectsAMessage(entry) {
+  if (!entry.role) return false
+  const content = entry.content
+  if (typeof content === 'string') return content.length > 0
+  return Array.isArray(content) && content.length > 0
 }
 
 /**

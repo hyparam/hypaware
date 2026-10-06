@@ -2,6 +2,7 @@
 
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
@@ -411,4 +412,55 @@ function compareDupRows(a, b) {
   const ra = typeof a.row._hyp_cache_row_id === 'string' ? a.row._hyp_cache_row_id : ''
   const rb = typeof b.row._hyp_cache_row_id === 'string' ? b.row._hyp_cache_row_id : ''
   return compareStrings(ra, rb)
+}
+
+/**
+ * Replace only re-derived identities from the same projector. The input rows
+ * have already been fully projected before any generation is touched. A
+ * concurrent append aborts the affected swap; retry is safe after a partial run.
+ * @param {ExtendedQueryStorageService} storage
+ * @param {'node' | 'edge'} dataset
+ * @param {GraphRow[]} rows
+ * @returns {Promise<void>}
+ * @ref LLP 0428#refresh [implements]: explicit refresh reuses conditional generation replacement.
+ */
+export async function refreshGraphRows(storage, dataset, rows) {
+  const idCol = ID_COLUMNS[dataset]
+  const byId = new Map(rows.map(row => [row[idCol], row]))
+  const parts = await discoverCachePartitions(storage.cacheRoot, { datasets: [dataset] })
+  for (const part of parts) {
+    if (part.legacy) throw new Error(`graph refresh: unsupported legacy partition ${part.path}`)
+    const cursor = tryReadCursorSync(part.path)
+    if (!cursor || cursor.layout !== 'source-table') throw new Error(`graph refresh: unreadable partition ${part.path}`)
+    const tableDir = path.join(part.path, cursor.tableDir ?? 'table')
+    if (!tableExists(tableDir)) continue
+    const replacements = new Map()
+    const foreign = new Set()
+    for await (const existing of scanRowsFromTable(tableDir)) {
+      const fresh = byId.get(existing[idCol])
+      if (!fresh) continue
+      if (fresh.projector !== existing.projector || fresh.source_dataset !== existing.source_dataset) {
+        foreign.add(String(existing[idCol]))
+        continue
+      }
+      // Avoid a generation rewrite when this projection is already current.
+      const same = Object.keys(fresh).every(key => {
+        let value = existing[key]
+        if ((key === 'props' || key === 'source_keys') && typeof value === 'string') {
+          try { value = JSON.parse(value) } catch { return false }
+        }
+        return isDeepStrictEqual(value, fresh[key])
+          || (key === 'first_seen' && firstSeenTime(value) === firstSeenTime(fresh[key]))
+      })
+      if (!same) replacements.set(String(existing[idCol]), { ...existing, ...fresh })
+    }
+    for (const id of foreign) {
+      if (replacements.has(id)) throw new Error('graph refresh: shared projector identity requires a full graph rebuild')
+    }
+    if (!replacements.size) continue
+    const result = await rewritePartition({ partitionDir: part.path, idCol,
+      dropIds: new Set(replacements.keys()), extraRows: [...replacements.values()],
+      expectedCursor: cursor, fallbackColumns: FALLBACK_COLUMNS[dataset], sortOrder: SORT_ORDERS[dataset] })
+    if (result.status !== 'rewritten') throw new Error(`graph refresh: ${result.reason}; retry when graph writers are idle`)
+  }
 }

@@ -36,10 +36,12 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *
  * Assertions (per bead hy-5oz4):
  *
+ * - The dry run names the config it would write and writes none.
  * - Non-interactive picker selections generate a config matching the
  *   expected v2 shape (both AI upstreams, OTEL, Parquet sink), plus the
  *   riders those picks pull in (LLP 0213 #d1): the written config is wider
- *   than the seven plugins this smoke activates by injection.
+ *   than the seven plugins this smoke activates by injection. Checked on
+ *   the same picks run for real with `--no-daemon`.
  * - Dry-run daemon install chooses the stable binary path passed via
  *   `--bin <stable-bin>` and outputs a sensible target path.
  * - Claude + Codex + OpenCode attach dry-runs produce expected file edits
@@ -117,6 +119,39 @@ export async function run({ harness, expect }) {
   // never depends on whatever `claude` binary the machine running it carries.
   const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
   process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
+  // Neither HOME nor XDG_CONFIG_HOME sandboxes `opencode` itself: both
+  // setup runs in this flow pick `opencode` and shell out to it, the
+  // earlier --dry-run run included, which still emits
+  // backfill.provider_start{dry_run:true, provider:'opencode'} and an
+  // opencode.backfill.selection log row, so it also executes the host
+  // CLI and reads its session list. That is why PATH has to be planted
+  // before the first dispatch below, not just before the widened real
+  // run. `runOpenCode` (hypaware-core/plugins-workspace/opencode/src/backfill.js)
+  // resolves a bare `opencode` from PATH. An inherited PATH would make this
+  // release-gate smoke read and import whatever real session history is
+  // installed on the machine running it. Plant a fake `opencode` ahead of
+  // it on PATH, the way opencode_capture.js already does.
+  const previousPath = process.env.PATH
+  const fakeOpenCodeBinDir = path.join(harness.tmpDir, 'bin')
+  await fs.mkdir(fakeOpenCodeBinDir, { recursive: true })
+  const fakeOpenCodePath = path.join(fakeOpenCodeBinDir, 'opencode')
+  await fs.writeFile(
+    fakeOpenCodePath,
+    [
+      '#!/usr/bin/env node',
+      'const args = process.argv.slice(2)',
+      "if (args[0] === 'session' && args[1] === 'list') {",
+      '  process.stdout.write(JSON.stringify([]))',
+      '  process.exit(0)',
+      '}',
+      "process.stderr.write('unsupported fake opencode args')",
+      'process.exit(2)',
+      '',
+    ].join('\n'),
+    'utf8'
+  )
+  await fs.chmod(fakeOpenCodePath, 0o755)
+  process.env.PATH = `${fakeOpenCodeBinDir}:${previousPath ?? ''}`
 
   // Pre-existing settings files would let us detect that dry-runs do
   // not modify them. Seed harmless baselines and snapshot them.
@@ -192,6 +227,24 @@ export async function run({ harness, expect }) {
   try {
     await activateInjectedPlugins(kernel, 'picker_activate')
 
+    // @ref LLP 0462#verification [tests]: the guide handoff emits a run-scoped signal and leaves config absent
+    const guideStdout = makeBuf()
+    const guideStderr = makeBuf()
+    const guideCode = await runRoot('smoke.setup.guide', {
+      [Attr.COMPONENT]: 'smoke', [Attr.OPERATION]: 'setup.guide',
+      [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'agent_guide',
+      [Attr.DEV_RUN_ID]: harness.devRunId,
+    }, () => dispatch(['setup'], {
+      stdout: guideStdout, stderr: guideStderr, kernel, registry,
+      env: smokeEnv(harness),
+    }))
+    expect.that('guide: guide prints successfully (exit 0)', guideCode, (v) => v === 0)
+    expect.that('guide: detection and browser handoff reach the agent', guideStdout.text(),
+      (v) => typeof v === 'string' && v.includes('Codex (detected)') && v.includes('hyp remote login --no-browser'))
+    expect.that('guide: stderr remains empty', guideStderr.text(), (v) => v === '')
+    const guideConfigExists = await fs.access(defaultConfigPath(harness.hypHome)).then(() => true, () => false)
+    expect.that('guide: no config was written', guideConfigExists, (v) => v === false)
+
     // ----- 1. hyp setup via Phase 5 flags -----
     const initStdout = makeBuf()
     const initStderr = makeBuf()
@@ -263,14 +316,20 @@ export async function run({ harness, expect }) {
         v.includes('Dry run: nothing was written.')
     )
 
-    // ----- 2. Config written matches Phase 5 shape -----
+    // ----- 2. Dry-run reported the config and did not write it -----
     const configPath = defaultConfigPath(harness.hypHome)
-    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
-    const expected = await goldenPickerConfig(harness.hypHome)
     expect.that(
-      'config: Phase 5 picker config matches expected shape',
-      written,
-      (v) => deepEqual(v, expected)
+      'stdout: dry-run named the config it would write',
+      initText,
+      (v) =>
+        typeof v === 'string' &&
+        v.includes('(dry-run) Would save settings') &&
+        v.includes(`(dry-run) Would write ${configPath}`)
+    )
+    expect.that(
+      'dry-run did not write the config',
+      await fs.stat(configPath).then(() => true, () => false),
+      (v) => v === false
     )
 
     // ----- 3. Dry-run did not touch real per-client files -----
@@ -421,18 +480,23 @@ export async function run({ harness, expect }) {
     // Runs after the capture + SQL phase: init re-boots the kernel from
     // the picker-written config (post-attach one-shot re-boot), which
     // replaces this smoke's injected echo upstream, so the echo
-    // round-trip must complete first. The dry-run above already wrote
-    // the config, and init refuses to overwrite an existing config
-    // without --force (LLP 0129).
+    // round-trip must complete first. The same picks as the dry-run
+    // above, which wrote nothing, so this is the run that writes the
+    // config the golden shape is checked against.
     const realInitStdout = makeBuf()
     const realInitStderr = makeBuf()
     const realInitCode = await dispatch(
       [
         'setup',
         '--yes',
-        '--force',
+        '--client', 'claude',
+        '--client', 'codex',
+        '--client', 'opencode',
         '--source', 'claude',
-        '--export', 'keep-local',
+        '--source', 'codex',
+        '--source', 'opencode',
+        '--source', 'otel',
+        '--export', 'local-parquet',
         '--retention-days', '30',
         '--no-daemon',
         '--bin', stableBinPath,
@@ -450,6 +514,13 @@ export async function run({ harness, expect }) {
       'stderr: real hyp setup attach had no errors',
       realInitStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
+    )
+    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    const expected = await goldenPickerConfig(harness.hypHome)
+    expect.that(
+      'config: Phase 5 picker config matches expected shape',
+      written,
+      (v) => deepEqual(v, expected)
     )
     // The picker writes no `listen`, so the port the client is wired to is the
     // fixed default the daemon's gateway will bind, not a wizard-pinned one.
@@ -481,19 +552,37 @@ export async function run({ harness, expect }) {
 
     const traces = await expect.traces()
 
+    const guideSpan = traces.find((s) => s.name === 'wizard.setup.guide')
+    expect.that('traces: guide emitted its run-scoped skip reason', guideSpan,
+      (v) => v?.attributes?.hyp_reason === 'guide_only' && v.attributes?.exit_code === 0 &&
+        v.resource?.dev_run_id === harness.devRunId)
+    const guideRoot = traces.find((s) => s.name === 'smoke.setup.guide')
+    expect.that('traces: guide smoke step is named', guideRoot?.attributes,
+      (v) => v?.smoke_step === 'agent_guide' && v.dev_run_id === harness.devRunId)
+
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
-    // 9 bundled picker rows: claude, codex, opencode, claude-desktop,
-    // openclaw, hermes, raw-anthropic, raw-openai, otel.
+    // Derived from the manifests rather than restated as a literal: a
+    // hardcoded count drifts the moment a plugin adds or drops a picker row
+    // (issue #2075 - a bundled `pi` row shipped with no update here). Reads
+    // `contributes.picker` off the same loaded+excluded buckets the catalog
+    // this run builds draws its descriptor map from, so it stays a check on
+    // the manifests rather than a rerun of the code under test.
+    const expectedSourcesAvailable = await totalPickerRowCount()
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available=9',
+      `traces: wizard.pick.start span emitted with sources_available=${expectedSourcesAvailable} (the shipped picker row count)`,
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 9
+        v.sources_available === expectedSourcesAvailable
     )
 
+    // Two `wizard.pick.write_config` spans have landed by now, both from
+    // runs above: the dry run and the real `--no-daemon` run, in no
+    // asserted order. `dry_run` is the internal signal that proves the dry
+    // run skipped its write, so each span is identified by that tag rather
+    // than by position in the array.
     const writeSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.write_config'
     )
@@ -505,6 +594,28 @@ export async function run({ harness, expect }) {
         typeof v.plugin_count === 'number' &&
         v.plugin_count >= 4 &&
         typeof v.config_path === 'string'
+    )
+    const dryRunWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run === true
+    )
+    // Not `!Object.hasOwn(..., 'dry_run')`: that couples the smoke to the
+    // omission style one emitter happens to use (wizard/pick.js spreads
+    // `...(dryRun ? { dry_run: true } : {})`), while the sibling
+    // client.attach assertion below asserts an explicit `dry_run === false`.
+    // `!== true` expresses the intent ("not tagged as a dry run") and
+    // survives either emitter style.
+    const realWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run !== true
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span is tagged dry_run (the dry run above)',
+      dryRunWriteSpans.length,
+      (v) => v === 1
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span has no dry_run attribute (the real run above)',
+      realWriteSpans.length,
+      (v) => v === 1
     )
 
     const finishSpans = traces.filter(
@@ -592,6 +703,8 @@ export async function run({ harness, expect }) {
     else process.env.XDG_CONFIG_HOME = previousXdgConfigHome
     if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
     else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
     await echo.close()
   }
 }
@@ -664,6 +777,33 @@ async function composedRiders(picked) {
 }
 
 /**
+ * Count every picker row the bundled workspace ships, across both the
+ * default-activated and excluded-from-default manifest buckets. That is the
+ * discovery scope (`[...loaded, ...excluded]`) both catalog builders use:
+ * `loadWizardCatalog` (`src/core/cli/wizard/index.js`), which is the one
+ * `hyp setup` reaches through `runInitWizard` and therefore the one this
+ * smoke drives, and `loadPickerCatalog` (`src/core/cli/walkthrough.js`) on
+ * the legacy path. A row like `claude-desktop`'s stays a picker source
+ * (selectable, just not default-activated) even though its plugin sits in
+ * the excluded bucket, so counting only `loaded` would land back on 10.
+ *
+ * Reads `contributes.picker` off the manifests directly rather than calling
+ * either catalog builder or `buildPluginCatalog`: an expectation built from
+ * the code under test would assert nothing (see `composedRiders` above for
+ * the same reasoning applied to riders).
+ *
+ * @returns {Promise<number>}
+ */
+async function totalPickerRowCount() {
+  const { loaded, excluded } = await discoverBundledPlugins()
+  let total = 0
+  for (const { manifest } of [...loaded, ...excluded]) {
+    total += manifest.contributes?.picker?.length ?? 0
+  }
+  return total
+}
+
+/**
  * @param {string} hypHome
  */
 async function goldenPickerConfig(hypHome) {
@@ -672,10 +812,11 @@ async function goldenPickerConfig(hypHome) {
     {
       name: '@hypaware/ai-gateway',
       config: {
-        upstreams: [
-          { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
-          { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
-        ],
+        // Empty since Codex left the inference path: no bundled picker row
+        // composes an inference upstream any more, but the gateway is still
+        // the shared writer every client's rows land through.
+        // @ref LLP 0429#default [tests]: onboarding composes no inference upstream for Codex
+        upstreams: [],
         // No `proxy_mode`: no bundled picker row declares proxy attach since
         // the claude client went otel-only, so the wizard composes a gateway
         // that mints no CA.
@@ -692,10 +833,7 @@ async function goldenPickerConfig(hypHome) {
     { name: '@hypaware/local-fs' },
     { name: '@hypaware/format-parquet' },
     { name: '@hypaware/claude' },
-    {
-      name: '@hypaware/codex',
-      config: { proxy: '@hypaware/ai-gateway' },
-    },
+    { name: '@hypaware/codex', config: {} },
   ]
 
   // Riders land after every picked plugin, in the order the composer folds

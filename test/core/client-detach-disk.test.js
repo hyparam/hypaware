@@ -38,7 +38,7 @@ const CODEX_DESCRIPTOR = {
   plugin: /** @type {any} */ ('@hypaware/codex'),
   name: 'codex',
   skillDir: 'skills/codex',
-  attachProbe: { format: 'toml', settings_file: '.codex/config.toml', marker_header: '[model_providers.hypaware]' },
+  attachProbe: { format: 'toml', settings_file: '.codex/config.toml', marker_header: '# BEGIN hypaware codex provider' },
 }
 
 const ATTACH = { port: 4123, version: '0.2.0', stateFile: '/abs/session-context.jsonl' }
@@ -509,7 +509,7 @@ test('claude undo is a no-op when the settings file is absent', async () => {
 
 /* -------------------------------- codex (toml) -------------------------------- */
 
-test('codex undo strips the managed blocks and restores model_provider byte-for-byte', async () => {
+test('codex undo restores model_provider and retains saved-chat compatibility', async () => {
   const home = await stageHome()
   try {
     const original = 'model_provider = "openai"\n'
@@ -522,13 +522,14 @@ test('codex undo strips the managed blocks and restores model_provider byte-for-
     assert.equal(result.removed, 'http://127.0.0.1:4388/backend-api/codex')
     assert.equal(result.settingsPath, configPath)
 
-    assert.equal(await fs.readFile(configPath, 'utf8'), original)
+    assert.ok((await fs.readFile(configPath, 'utf8')).startsWith(original))
+    assert.match(await fs.readFile(configPath, 'utf8'), /\[model_providers.hypaware\]/)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-test('codex undo of a no-previous-provider attach round-trips to empty', async () => {
+test('codex undo without a previous provider leaves the default implicit', async () => {
   const home = await stageHome()
   try {
     const attached = codexPrepareAttach('', 4388, '0.2.0')
@@ -538,7 +539,7 @@ test('codex undo of a no-previous-provider attach round-trips to empty', async (
     assert.equal(result.changed, true)
     assert.equal('restoredValue' in result, false)
 
-    assert.equal(await fs.readFile(configPath, 'utf8'), '')
+    assert.match(await fs.readFile(configPath, 'utf8'), /\[model_providers.hypaware\]/)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -555,7 +556,7 @@ test('codex undo preserves unrelated config alongside the restored provider', as
 
     const raw = await fs.readFile(configPath, 'utf8')
     assert.equal(raw.includes('# BEGIN hypaware'), false)
-    assert.equal(raw.includes('[model_providers.hypaware]'), false)
+    assert.equal(raw.includes('[model_providers.hypaware]'), true)
     assert.match(raw, /model_provider = "openai"/)
     assert.match(raw, /\[profiles\.default\]\nmodel = "gpt-5"/)
   } finally {
@@ -588,21 +589,22 @@ test('codex undo strips a hand-written marked block (no plugin loaded)', async (
     assert.equal(result.restoredValue, 'openai')
     assert.equal(result.removed, 'http://127.0.0.1:4388/v1')
 
-    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "openai"\n')
+    assert.match(await fs.readFile(configPath, 'utf8'), /^model_provider = "openai"\n/)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-test('codex undo is a no-op when no managed block is present', async () => {
+test('codex undo repairs the missing provider when no managed block is present', async () => {
   const home = await stageHome()
   try {
     const text = 'model_provider = "openai"\n'
     const configPath = await writeCodexConfig(home, text)
 
     const result = await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })
-    assert.equal(result.changed, false)
-    assert.equal(await fs.readFile(configPath, 'utf8'), text)
+    assert.equal(result.changed, true)
+    assert.ok((await fs.readFile(configPath, 'utf8')).startsWith(text))
+    assert.equal((await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })).changed, false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -621,7 +623,7 @@ test('codex undo warning carries the user value verbatim, so `warning` is never 
     const attached = codexPrepareAttach('model_provider = "openai"\n', 4388, '0.2.0')
     // The user re-points model_provider outside the managed block after we
     // attached, to an ordinary TOML value that happens to contain a pipe.
-    const configPath = await writeCodexConfig(home, attached.content + 'model_provider = "acme | prod"\n')
+    const configPath = await writeCodexConfig(home, attached.content.replace('model_provider = "hypaware"', 'model_provider = "acme | prod"'))
 
     const result = await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, true)

@@ -79,9 +79,10 @@ const HOST_REFUSALS_BY_NAME = new Map()
  * @returns {Server | undefined}
  */
 function acceptingServer(req) {
-  // Node sets the accepting server on every server-side socket but does not
-  // declare it on `net.Socket`.
-  return /** @type {{ server?: Server }} */ (req.socket).server
+  // Node sets the accepting server on every server-side socket, and declares
+  // it on `net.Socket` as the wider `net.Server | null`. On a socket an
+  // http.Server accepted it is that server, and `null` where there is none.
+  return /** @type {Server | null} */ (req.socket.server) ?? undefined
 }
 
 /**

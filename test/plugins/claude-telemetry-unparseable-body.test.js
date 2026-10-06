@@ -193,33 +193,126 @@ test('loadSpooledBodies reports the bytes an unparseable body took with it', asy
   }
 })
 
-// Two reads of the same `body_ref` overlapping in the handler: both are issued
-// before either resolves, so both find the file and both call it unparseable,
-// but only one of them can be the call that removed it. `fs.rm(..., { force:
-// true })` resolves for a path that is already gone, so it reported the bytes
-// twice and brought `spool_bytes` down by 2x one deletion.
-test('two overlapping reads of one unparseable body report its bytes once', async () => {
+// Hold deletion open while a later caller reads the same body. Both callers
+// classify it, but only the caller owning removal may report its bytes.
+test('two overlapping reads of one unparseable body report its bytes once', async (t) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-race-'))
+  const removing = Promise.withResolvers()
+  const release = Promise.withResolvers()
   try {
     const content = 'not json at all'
     const file = path.join(dir, 'broken.request.json')
     await fsp.writeFile(file, content, 'utf8')
+    const raw = await fsp.readFile(file)
+    const readFile = fsp.readFile
+    const unlink = fsp.unlink
+    t.mock.method(fsp, 'readFile', (target) => target === file ? Promise.resolve(raw) : readFile(target))
+    const deletion = release.promise.then(() => unlink(file))
+    const remove = t.mock.method(fsp, 'unlink', (target) => {
+      if (target !== file) return unlink(target)
+      removing.resolve(undefined)
+      // Concurrent unlink calls can both succeed on macOS. Sharing this
+      // completion reproduces that behavior on every platform.
+      return deletion
+    })
     const events = [{
       name: 'api_request_body',
       timestamp: '2026-08-17T19:31:00.000Z',
       attributes: { body_ref: file, request_id: REQUEST_ID },
     }]
-    const both = await Promise.all([
-      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
-      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
-    ])
+    const first = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    await removing.promise
+    const second = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    release.resolve(undefined)
+    const both = await Promise.all([first, second])
     assert.equal(both[0].unparseable + both[1].unparseable, 2, 'both reads saw it')
     assert.equal(
       both[0].unparseableBytes + both[1].unparseableBytes,
       content.length,
       'one file left the disk, so its bytes are reported once'
     )
+    assert.equal(remove.mock.callCount(), 1, 'only one caller removes the body')
+    await assert.rejects(fsp.stat(file), { code: 'ENOENT' })
   } finally {
+    release.resolve(undefined)
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Nothing the callers return can tell the shared read from its absence: reads
+// issued in one tick all resolve before any `unlink`, so the counts and the
+// bytes agree either way. Counting `readFile` is what distinguishes them, and
+// it is the assertion that fails both when the dedup is deleted and when its
+// `reading.set` moves behind an `await` (which narrows the window instead of
+// closing it: the next caller then arrives before the read has been claimed).
+test('overlapping loadSpooledBodies calls for one body_ref issue exactly one readFile', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dedup-'))
+  const realReadFile = fsp.readFile
+  try {
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, 'not json at all', 'utf8')
+    const events = [{
+      name: 'api_request_body',
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    }]
+    let reads = 0
+    // The reader and this test hold the same `node:fs/promises` module object,
+    // and the reader looks `readFile` up at call time, so counting its calls
+    // needs no hook in the production path.
+    fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+      if (target === file) reads += 1
+      return realReadFile(target)
+    })
+    // Started in one tick, so all three overlap: each runs synchronously as far
+    // as its first `await`, which is where the shared read has to be claimed.
+    await Promise.all([
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+    ])
+    assert.equal(reads, 1, 'three overlapping callers share one read of the file')
+  } finally {
+    fsp.readFile = realReadFile
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// One call, two events naming the SAME unparseable ref. Deduping on
+// `bodies.has(ref)` missed it, because an unparseable ref never lands in
+// `bodies`: the second event read the file again after the first event had
+// deleted it, saw ENOENT, and counted `missing`, so one result called one ref
+// both `unparseable` and `missing`. The shared `reading` entry does not
+// cover it: it is dropped when the read settles, before the first `unlink`.
+test('one batch naming an unparseable body_ref twice counts it once, never missing', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dup-'))
+  const realReadFile = fsp.readFile
+  try {
+    const content = 'not json at all'
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, content, 'utf8')
+    let reads = 0
+    fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+      if (target === file) reads += 1
+      return realReadFile(target)
+    })
+    /** @param {string} name */
+    const event = (name) => ({
+      name,
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    })
+    const loaded = await loadSpooledBodies(
+      /** @type {any} */ ([event('api_request_body'), event('api_response_body')]),
+      { spoolDir: dir }
+    )
+    assert.equal(loaded.missing, 0, 'a ref this call just deleted is not also missing')
+    assert.equal(loaded.unparseable, 1, 'one file, classified once')
+    assert.equal(loaded.unparseableBytes, content.length, 'one deletion, sized once')
+    assert.equal(reads, 1, 'the second event reuses the first classification, not a fresh read')
+    await assert.rejects(fsp.stat(file))
+  } finally {
+    fsp.readFile = realReadFile
     await fsp.rm(dir, { recursive: true, force: true })
   }
 })

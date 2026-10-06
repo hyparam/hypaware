@@ -2,13 +2,14 @@
 
 import { execFile } from 'node:child_process'
 import path from 'node:path'
+import { readGithubAuth, resolveGithubOAuth } from './auth.js'
 
 /**
  * Thin GitHub REST client. Three things it guarantees, all from the credential
  * posture (LLP 0360 / LLP 0028):
  *
- *   1. The token comes from the configured env var, or from the local `gh`
- *      credential store when that env var is absent. It is never logged.
+ *   1. The token comes from the configured env var, selected local OAuth, or
+ *      legacy `gh`. OAuth failures never fall through. Tokens are never logged.
  *   2. Error paths never copy the response **body** (which can echo a token or
  *      sensitive content) into the thrown error or logs - only status + the
  *      query-less path.
@@ -34,20 +35,38 @@ const COMMIT_FILES_CAP = 300
  * @param {string} opts.tokenEnv  the env-var NAME the token is read from
  * @param {NodeJS.ProcessEnv} opts.env
  * @param {PluginLogger} opts.log
+ * @param {string} [opts.stateDir]
  * @param {typeof fetch} [opts.fetchImpl]
  * @param {string} [opts.baseUrl]
  * @param {() => Promise<string>} [opts.ghToken] test seam for `gh auth token`
  * @param {(file: string, args: string[], options: Record<string, unknown>, callback: (err: NodeJS.ErrnoException | null, stdout: string) => void) => void} [opts.execFileImpl]
  * @returns {GithubClient}
  */
-export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = API_BASE, ghToken, execFileImpl }) {
+export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, baseUrl = API_BASE, ghToken, execFileImpl }) {
   const doFetch = fetchImpl ?? fetch
   /** @type {Promise<string> | null} */
   let resolvedToken = null
+  /** @type {{ generation: string, refreshToken?: string, error: unknown } | null} */
+  let oauthFailure = null
 
   async function token() {
     const fromEnv = env[tokenEnv]?.trim()
     if (fromEnv) return fromEnv
+    // Check before even a cached gh token: login/logout must take effect in a
+    // running client, and selected OAuth failures never select another identity.
+    if (stateDir) {
+      const selected = readGithubAuth(stateDir)
+      if (oauthFailure && selected?.generation === oauthFailure.generation && selected?.refresh_token === oauthFailure.refreshToken) throw oauthFailure.error
+      try {
+        const oauth = await resolveGithubOAuth(stateDir, { fetchImpl })
+        if (oauth !== null) return oauth
+      } catch (error) {
+        // One failed refresh per short-lived capture client, rather than one
+        // per repository. A new tick retries; a new login is visible at once.
+        if (selected) oauthFailure = { generation: selected.generation, refreshToken: selected.refresh_token, error }
+        throw error
+      }
+    }
     if (!resolvedToken) {
       const resolveGhToken = ghToken ?? (() => tokenFromGh(env, execFileImpl))
       // Cache the resolved token, never the failure. `gh auth token` fails for
@@ -94,13 +113,33 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     headers.Authorization = `Bearer ${authToken}`
     if (opts.etag) headers['If-None-Match'] = opts.etag
 
-    const res = await doFetch(url, { headers })
+    let res
+    try {
+      // Never follow a redirect on a credential-bearing request: the token
+      // must not be re-sent to a Location the server chose. `manual` keeps
+      // that refusal while preserving the status, so a renamed or transferred
+      // repository reports `GitHub API 301` below instead of collapsing into
+      // a generic network failure.
+      res = await doFetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+    } catch (cause) {
+      // Carry a diagnosis without echoing anything server-controlled: an
+      // errno code or error name is a runtime constant, while messages can
+      // embed URLs or upstream text.
+      const code = /** @type {{ cause?: { code?: unknown } }} */ (cause)?.cause?.code
+      const name = /** @type {{ name?: unknown }} */ (cause)?.name
+      const tag = typeof code === 'string' ? code : name === 'TimeoutError' || name === 'AbortError' ? name : null
+      const err = /** @type {HypError} */ (new Error(`GitHub API request failed or timed out${tag ? ` (${tag})` : ''}`))
+      err.hypErrorKind = 'github_network_error'
+      throw err
+    }
 
     if (res.status === 304) return { notModified: true }
     if (!res.ok) {
       // No body, no token, no query string - just status + the path.
       const safePath = pathOf(url)
-      const err = /** @type {HypError} */ (new Error(`GitHub API ${res.status} for GET ${safePath}`))
+      const hint = res.status === 401 ? '; check the configured token or run `hyp github login` again'
+        : res.status >= 300 && res.status < 400 ? '; redirects are not followed - the repository may have been renamed or transferred' : ''
+      const err = /** @type {HypError} */ (new Error(`GitHub API ${res.status} for GET ${safePath}${hint}`))
       err.hypErrorKind = 'github_api_error'
       err.status = res.status
       throw err
@@ -116,7 +155,14 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     // across ticks.
     const link = parseNextLink(res.headers.get('link'))
     const next = link === null ? null : resolveUrl(baseUrl, link)
-    const data = await res.json()
+    let data
+    try {
+      data = await res.json()
+    } catch {
+      const err = /** @type {HypError} */ (new Error('GitHub API response was unreadable or timed out'))
+      err.hypErrorKind = 'github_response_error'
+      throw err
+    }
     return { notModified: false, data, next, etag }
   }
 
@@ -229,7 +275,7 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
  * @returns {Promise<string>}
  */
 // @ref LLP 0360#authentication [implements]: reuse local gh credentials without persisting or logging them
-function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile)) {
+export function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile)) {
   return new Promise((resolve, reject) => {
     execFileImpl('gh', ['auth', 'token'], {
       encoding: 'utf8',
@@ -241,7 +287,9 @@ function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile)) {
         PATH: githubCliPath(env),
       },
     }, (err, stdout) => {
-      if (err) return reject(authUnavailable())
+      // An empty stdout on exit 0 is as unusable as a failure: guarding here
+      // covers every caller, not only the capture client's own token().
+      if (err || !stdout.trim()) return reject(authUnavailable())
       resolve(stdout)
     })
   })
@@ -315,7 +363,7 @@ function foreignOrigin(url) {
 
 /** @returns {HypError} */
 function authUnavailable() {
-  const err = /** @type {HypError} */ (new Error('GitHub authentication unavailable: set the configured token env var or run `gh auth login`'))
+  const err = /** @type {HypError} */ (new Error('GitHub authentication unavailable: run `hyp github login` or set the configured token env var (legacy `gh auth login` is also supported)'))
   err.hypErrorKind = 'github_auth_unavailable'
   return err
 }

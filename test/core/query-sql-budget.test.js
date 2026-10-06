@@ -2,6 +2,8 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import v8 from 'node:v8'
+import vm from 'node:vm'
 
 import { asyncRow } from 'squirreling'
 import { executeQuerySql, QueryExecutionBudgetError, resolveHeapBudgetBytes } from '../../src/core/query/sql.js'
@@ -109,6 +111,156 @@ test('a query whose heap growth exceeds the execution budget refuses with the ty
       return true
     }
   )
+})
+
+/**
+ * A source that mints each padded value as the scan reaches it, so the bytes a
+ * blocking ORDER BY retains are growth measured inside the query rather than an
+ * array allocated before the baseline was taken. ~20MB retained against the 1MB
+ * budgets below.
+ *
+ * @returns {AsyncDataSource}
+ */
+function growingSource() {
+  const numRows = 20000
+  return {
+    columns: ['a'],
+    numRows,
+    scan(options) {
+      const rowColumns = options?.columns ?? ['a']
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (let i = 0; i < numRows; i++) yield asyncRow({ a: `value-${i}-${'x'.repeat(1000)}` }, rowColumns)
+        },
+      }
+    },
+  }
+}
+
+/** @type {(() => void) | null | undefined} */
+let forcedGc
+
+/**
+ * Collect a sibling test's garbage before a refusal test measures growth.
+ * executeQuerySql baselines on live `heapUsed` and its confirming full GC
+ * (LLP 0097#confirm-with-gc) subtracts collected garbage from this query's
+ * growth, so garbage left in the baseline hides a genuine retention: the
+ * environment half below refused when run alone and not after its sibling.
+ * Resolved the way the guard resolves its own handle; a runtime that refuses
+ * one leaves the baseline as it was.
+ *
+ * @returns {void}
+ */
+function collectSiblingGarbage() {
+  if (forcedGc === undefined) {
+    const exposed = Reflect.get(globalThis, 'gc')
+    if (typeof exposed === 'function') {
+      forcedGc = /** @type {() => void} */ (exposed)
+    } else {
+      try {
+        v8.setFlagsFromString('--expose-gc')
+        const candidate = vm.runInNewContext('gc')
+        forcedGc = typeof candidate === 'function' ? /** @type {() => void} */ (candidate) : null
+      } catch {
+        forcedGc = null
+      } finally {
+        // The reset has to run on the throwing path too, or --expose-gc stays
+        // set for the rest of the runner process.
+        v8.setFlagsFromString('--no-expose-gc')
+      }
+    }
+  }
+  if (forcedGc) forcedGc()
+}
+
+/**
+ * @param {string} mb
+ * @param {() => Promise<void>} body
+ * @returns {Promise<void>}
+ */
+async function withHeapMbEnv(mb, body) {
+  const prev = process.env.HYP_QUERY_MAX_HEAP_MB
+  process.env.HYP_QUERY_MAX_HEAP_MB = mb
+  try {
+    await body()
+  } finally {
+    if (prev === undefined) delete process.env.HYP_QUERY_MAX_HEAP_MB
+    else process.env.HYP_QUERY_MAX_HEAP_MB = prev
+  }
+}
+
+/**
+ * The advice the refusal may only offer where it works. Matched as a concept
+ * rather than a sentence: pointing a reader at the override means naming it,
+ * and telling them to make the budget bigger means one of these verbs, so a
+ * reworded or longer sentence still trips both halves of the pair below.
+ */
+const OVERRIDE_NAME = /HYP_[A-Z0-9_]+/i
+const RAISE_ADVICE = /rais|increas|bigger|higher|larger|lift|expand|needs more/i
+
+/**
+ * Both halves refuse at the same 1MB budget over the same source, so the only
+ * difference is where that budget came from. The pair is mirrored on purpose:
+ * dropping the advice everywhere fails the second test, and reintroducing it on
+ * the caller-budgeted path fails the first.
+ */
+test('a caller-budgeted refusal does not advise the operator override it cannot reach', async () => {
+  // 4096MB asked for by the environment, 1MB passed as an option. The option
+  // wins ahead of the environment (resolveHeapBudgetBytes returns it before
+  // reading process.env), which is what makes advice to change the
+  // environment value advice that cannot work on this path.
+  await withHeapMbEnv('4096', async () => {
+    collectSiblingGarbage()
+    await assert.rejects(
+      executeQuerySql({
+        query: 'SELECT a FROM t ORDER BY a',
+        registry: registryFor(growingSource()),
+        storage,
+        maxHeapBytes: 1024 * 1024,
+      }),
+      (err) => {
+        assert.ok(err instanceof QueryExecutionBudgetError, 'the typed refusal, not a generic error')
+        assert.equal(err.limitBytes, 1024 * 1024, 'the explicit option refused, not the 4096MB environment value')
+        assert.doesNotMatch(err.message, OVERRIDE_NAME, 'names no environment knob')
+        assert.doesNotMatch(err.message, RAISE_ADVICE, 'offers no raise-the-budget advice')
+        // Not vacuous: an empty message, or a different error class reaching
+        // the same assertions, fails here.
+        assert.match(err.message, /execution memory budget \(\d+MB used of 1MB\)/)
+        assert.match(err.message, /WHERE|LIMIT|aggregate/, 'still carries actionable guidance')
+        assert.match(
+          err.message,
+          /\[site=[a-z_]+ raw=\d+MB gc=(confirmed|unavailable) baseline=\d+MB\]$/,
+          'still carries the trip-site diagnosis'
+        )
+        return true
+      }
+    )
+  })
+})
+
+test('an environment-budgeted refusal keeps advising HYP_QUERY_MAX_HEAP_MB, the lever that works there', async () => {
+  await withHeapMbEnv('1', async () => {
+    collectSiblingGarbage()
+    await assert.rejects(
+      executeQuerySql({
+        // No maxHeapBytes: the environment override is what bounds this run,
+        // so raising it is something the reader can actually act on.
+        query: 'SELECT a FROM t ORDER BY a',
+        registry: registryFor(growingSource()),
+        storage,
+      }),
+      (err) => {
+        assert.ok(err instanceof QueryExecutionBudgetError, 'the typed refusal, not a generic error')
+        assert.equal(err.limitBytes, 1024 * 1024, 'the environment override is the budget that refused')
+        assert.match(err.message, /HYP_QUERY_MAX_HEAP_MB/, 'names the override this path does read')
+        assert.match(err.message, RAISE_ADVICE, 'and says to make it bigger')
+        assert.match(err.message, /WHERE|LIMIT|aggregate/, 'alongside the narrowing guidance')
+        return true
+      }
+    )
+  })
 })
 
 test('resolveHeapBudgetBytes resolves the effective ceiling and never disables on a blank env', () => {

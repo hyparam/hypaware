@@ -5,12 +5,15 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { asyncRow } from 'squirreling'
+
+import { TracerProvider } from '../../src/core/observability/runtime.js'
 
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { EDGE_COLUMNS, graphDatasetRegistration, NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
-import { queryNeighbors, resolveSeed, traverse } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
+import { queryNeighbors, resolveSeed } from '../../hypaware-core/plugins-workspace/context-graph/src/query.js'
 import { graphNeighborsVerb } from '../../hypaware-core/plugins-workspace/context-graph/src/verb.js'
 
 /**
@@ -54,8 +57,304 @@ const EDGES = [
 ]
 
 /**
+ * Exercise the real SQL engine, including residual filtering on an unindexed
+ * source. Noise is generated lazily so the fixture itself is not a large heap.
+ * @param {any[]} nodes
+ * @param {any[]} edges
+ * @param {number} noise
+ */
+function memoryGraph(nodes = NODES, edges = EDGES, noise = 0) {
+  const scans = []
+  const registry = /** @type {any} */ ({
+    getDataset: name => ({
+      discoverPartitions: async () => [],
+      createDataSource: async () => ({
+        columns: (name === 'node' ? NODE_COLUMNS : EDGE_COLUMNS).map(c => c.name),
+        numRows: noise + (name === 'node' ? nodes.length : edges.length),
+        // Large sources use the engine's real vector filter, as Iceberg does.
+        // The fixture leaves WHERE and LIMIT residual: it never guesses what
+        // the graph query meant or filters by its own copy of that logic.
+        ...(noise ? {
+          schema: { fields: (name === 'node' ? NODE_COLUMNS : EDGE_COLUMNS).map((c, id) => ({ id, name: c.name, dataType: { type: 'unknown' }, nullable: true })) },
+          prepareScan(request) {
+            const fields = request.columns.map(c => ({ id: c.field, name: (name === 'node' ? NODE_COLUMNS : EDGE_COLUMNS)[c.field].name, dataType: { type: 'unknown' }, nullable: true }))
+            scans.push({ dataset: name, where: request.filter, columns: fields.map(f => f.name) })
+            return {
+              schema: { fields }, residual: { filter: request.filter, limit: request.limit, offset: request.offset }, properties: {},
+              async *batches({ signal }) {
+                const rows = name === 'node' ? nodes.map(fullNode) : edges.map((row, i) => fullEdge({ edge_id: `e-${i}`, ...row }))
+                for (let at = 0; at < noise + rows.length; at += 1024) {
+                  signal?.throwIfAborted()
+                  const length = Math.min(1024, noise + rows.length - at)
+                  const values = fields.map(() => [])
+                  for (let i = at; i < at + length; i++) {
+                    const row = i >= noise ? rows[i - noise] : name === 'node'
+                      ? fullNode({ node_id: `noise-${i}`, natural_key: `noise-${i}` })
+                      : fullEdge({ edge_id: `noise-${i}`, src_id: `noise-${i}`, dst_id: `noise-${i + 1}` })
+                    fields.forEach((f, j) => values[j].push(row[f.name]))
+                  }
+                  yield { selection: { type: 'all', length }, columns: values.map(values => ({ type: 'values', values, length })) }
+                }
+              },
+            }
+          },
+        } : {}),
+        scan(options) {
+          scans.push({ dataset: name, ...options })
+          return {
+            appliedWhere: false, appliedLimitOffset: false,
+            async *rows() {
+              for (let i = 0; i < noise; i++) {
+                const row = name === 'node'
+                  ? fullNode({ node_id: `noise-${i}`, natural_key: `noise-${i}` })
+                  : fullEdge({ edge_id: `noise-${i}`, src_id: `noise-${i}`, dst_id: `noise-${i + 1}` })
+                yield asyncRow(row, options.columns)
+              }
+              const rows = name === 'node' ? nodes.map(fullNode)
+                : edges.map((row, i) => fullEdge({ edge_id: `e-${i}`, ...row }))
+              for (const row of rows) yield asyncRow(row, options.columns)
+            },
+          }
+        },
+      }),
+    }),
+    listDatasets: () => [],
+  })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/graph-query-test', pendingInfo: async () => ({ pending: false }) })
+  return { query: registry, storage, scans, includeLocalOnly: true }
+}
+
+test('a small neighborhood remains queryable beyond 100000 unrelated nodes and edges', async () => {
+  const fixture = memoryGraph(NODES, EDGES, 100_010)
+  const result = ok(await queryNeighbors({ ...fixture, seed: 'conv-1', direction: 'out', limit: 1 }))
+  assert.equal(result.neighbors.length, 1)
+  assert.equal(result.reachable, 4)
+  assert.equal(result.truncated, true)
+  assert.equal(result.neighbors[0].node.node_id, 'a1')
+  assert.ok(fixture.scans.every(scan => scan.where), 'every nonempty-graph read is narrowed in SQL')
+})
+
+test('SQL neighborhoods preserve BFS, cycles, dangling endpoints and exact reachable totals', async () => {
+  const edges = [...EDGES, e('s2', 'missing', 'touched'), e('missing', 's1', 'used'), EDGES[0]]
+  // From f1: incoming sessions at hop 1, then missing via its edge to s1.
+  // Walking both ways also reaches a1, m1 and t1. Cycles and duplicate
+  // edges add no new nodes, and f1 has no outgoing edges.
+  const reachable = { in: [2, 3, 3], out: [0, 0, 0], both: [2, 6, 6] }
+  for (const direction of /** @type {const} */ (['in', 'out', 'both'])) {
+    for (const [index, depth] of [1, 2, 4].entries()) {
+      const actual = ok(await queryNeighbors({ ...memoryGraph(NODES, edges), seed: 'f1', direction, depth, limit: 2 }))
+      assert.equal(actual.reachable, reachable[direction][index])
+      assert.equal(actual.truncated, reachable[direction][index] > 2)
+      assert.deepEqual(actual.neighbors.map(({ hop, direction, from, node, edge_type }) =>
+        ({ hop, direction, from, node, edge_type })), direction === 'out' ? [] : [
+        { hop: 1, direction: 'in', from: 'f1', node: NODES[0], edge_type: 'touched' },
+        { hop: 1, direction: 'in', from: 'f1', node: NODES[1], edge_type: 'touched' },
+      ])
+    }
+  }
+  const all = ok(await queryNeighbors({ ...memoryGraph(NODES, edges), seed: 'f1', direction: 'both', depth: 4 }))
+  assert.deepEqual(all.neighbors.map(({ hop, node }) => [hop, node.node_id]),
+    [[1, 's1'], [1, 's2'], [2, 'a1'], [2, 'm1'], [2, 't1'], [2, 'missing']])
+  assert.equal(all.neighbors.at(-1).node.node_type, '?', 'a dangling endpoint keeps its placeholder')
+})
+
+test('SQL seed resolution escapes literals and preserves tier precedence and ambiguity', async () => {
+  const nodes = [...NODES, n("id'quoted", 'File', "key'quoted", "label'quoted"), n('other', 'Tool', 's1', null)]
+  const fixture = memoryGraph(nodes, [])
+  for (const seed of ["id'quoted", "key'quoted", "label'quoted"])
+    assert.equal(ok(await queryNeighbors({ ...fixture, seed })).seed.node_id, "id'quoted")
+  assert.equal(ok(await queryNeighbors({ ...fixture, seed: 's1' })).seed.node_id, 's1')
+  assert.equal(ok(await queryNeighbors({ ...fixture, seed: 's1', type: 'Tool' })).seed.node_id, 'other')
+  const ambiguous = await queryNeighbors({ ...fixture, seed: 'index.js' })
+  assert.equal(ambiguous.ok, false)
+  assert.deepEqual(!ambiguous.ok && ambiguous.candidates?.map(n => n.node_id), ['f1', 'f2'])
+})
+
+test('wide frontiers cross query batches without losing reachability or fetching hidden output payloads', async () => {
+  const nodes = [n('root', 'Session', 'root', null)]
+  const edges = []
+  for (let i = 0; i < 300; i++) {
+    nodes.push(n(`child-${i}`, 'File', `child-${i}`, null))
+    edges.push(e('root', `child-${i}`, 'touched'), e(`child-${i}`, 'leaf', 'touched'))
+  }
+  const fixture = memoryGraph(nodes, edges)
+  const result = ok(await queryNeighbors({ ...fixture, seed: 'root', depth: 2, direction: 'out', limit: 1 }))
+  assert.equal(result.reachable, 301)
+  assert.equal(result.neighbors.length, 1)
+  assert.equal(result.totalEdges, 600)
+  const topology = fixture.scans.filter(s => s.dataset === 'edge' && !s.columns.includes('props'))
+  assert.equal(topology.length, 3, 'root plus two frontier batches')
+  const payload = fixture.scans.filter(s => s.dataset === 'edge' && s.columns.includes('props'))
+  assert.equal(payload.length, 1, 'evidence is fetched only for the returned neighbor')
+})
+
+test('the shared deadline allows traversal within thirty seconds', async t => {
+  const fixture = memoryGraph()
+  const started = Date.now()
+  let now = started
+  t.mock.method(Date, 'now', () => now)
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    if (name === 'edge') now = started + 29_999
+    return get(name)
+  })
+  assert.equal(ok(await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })).reachable, 5)
+})
+
+// A budget refusal names its remedy, as the 100k-row and 128 MiB ones do.
+const GUIDED_TIME_BUDGET = /thirty-second time budget; reduce depth or narrow --edge-type/
+
+test('the shared deadline refuses a read at thirty seconds before starting another hop', async t => {
+  const fixture = memoryGraph()
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    if (name === 'edge') now += 30_000
+    return get(name)
+  })
+  assert.match(refused(await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })), GUIDED_TIME_BUDGET)
+  assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 1)
+})
+
+/**
+ * Collect the traversal spans `run` emits, so a claim about telemetry is
+ * asserted rather than described.
+ * @param {() => Promise<unknown>} run
+ */
+async function graphSpans(run) {
+  /** @type {any[]} */
+  const captured = []
+  const provider = new TracerProvider({ resource: { attributes: {} },
+    exporters: [{ exportBatch(spans) { captured.push(...spans) } }] })
+  provider.register()
+  try {
+    await run()
+  } finally {
+    await provider.shutdown()
+  }
+  return captured.filter(span => span.name === 'graph.neighbors')
+}
+
+test('a budget refusal names its error_kind, and a clean traversal names none', async t => {
+  // A refusal returns, and returning takes withSpan's success arm, which
+  // records no exception and no kind. Without naming it on the refusal
+  // branches, a thirty-second trip reads in telemetry exactly like an
+  // unresolved seed, which also returns.
+  const [clean] = await graphSpans(() => queryNeighbors({ ...memoryGraph(), seed: 's1', depth: 3 }))
+  assert.equal(clean.attributes.error_kind, undefined)
+
+  const fixture = memoryGraph()
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    if (name === 'edge') now += 30_000
+    return get(name)
+  })
+  const [trip] = await graphSpans(() => queryNeighbors({ ...fixture, seed: 's1', depth: 3 }))
+  assert.equal(trip.attributes.error_kind, 'budget_refused')
+})
+
+/**
+ * Serve every dataset through `wrap(source)`, so a test can control what a
+ * read does inside the engine without restating the registry.
+ * @param {any} fixture @param {any} t @param {(source: any) => any} wrap
+ */
+function wrapSources(fixture, t, wrap) {
+  const get = fixture.query.getDataset
+  t.mock.method(fixture.query, 'getDataset', name => {
+    const dataset = get(name)
+    return { ...dataset, createDataSource: async (...args) => wrap(await dataset.createDataSource(...args)) }
+  })
+}
+
+test('the budget signal firing inside a blocked read refuses with the same guidance', async t => {
+  // Arm this traversal's own signal in milliseconds rather than thirty
+  // seconds. Date.now is untouched, so the wall-clock branch cannot fire and
+  // the assertion sees a real timer aborting a read still in flight.
+  const arm = AbortSignal.timeout.bind(AbortSignal)
+  t.mock.method(AbortSignal, 'timeout', ms => arm(ms === 30_000 ? 20 : ms))
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: options => {
+    const handle = source.scan(options)
+    return { ...handle, async *rows() {
+      for await (const row of handle.rows()) {
+        await new Promise(resolve => setTimeout(resolve, 40))
+        yield row
+      }
+    } }
+  } }))
+  const result = await queryNeighbors({ ...fixture, seed: 's1', depth: 3 })
+  assert.match(refused(result), GUIDED_TIME_BUDGET)
+  // The verb renders it through the branch the row and payload budgets take,
+  // off the visibility report the local-only notice is built from.
+  assert.ok(result.localOnly)
+  const rendered = graphNeighborsVerb.render(result, /** @type {any} */ ({}))
+  assert.equal(rendered.exitCode, 1)
+  assert.match(rendered.stderr ?? '', GUIDED_TIME_BUDGET)
+})
+
+test('a source throwing its own abort on a blocked read refuses with the same guidance', async t => {
+  // icebird and the parquet source throw a fresh AbortError of their own when
+  // a row-group read finds the signal down, rather than relaying its reason,
+  // so demanding the reason's own object would leave the real graph datasets
+  // reporting a bare 'Aborted' - the symptom, on the path that has it.
+  const own = new AbortController()
+  t.mock.method(AbortSignal, 'timeout', () => own.signal)
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => {
+    own.abort()
+    throw new DOMException('Aborted', 'AbortError')
+  } }))
+  assert.match(refused(await queryNeighbors({ ...fixture, seed: 's1' })), GUIDED_TIME_BUDGET)
+})
+
+test('an unrelated abort is not relabelled as the traversal time budget', async t => {
+  // The shared query path relays whatever reason aborted it, and another
+  // caller's timeout carries the same name and text as this traversal's. This
+  // traversal's own signal is untouched, so nothing here is out of time.
+  const foreign = new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => { throw foreign } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => err === foreign)
+})
+
+test('a read failing for its own reason while out of time keeps its own error', async t => {
+  // Being out of time is not a licence to relabel: only an abort-shaped
+  // failure is the budget expiring. A heap-budget trip arrives as
+  // QueryExecutionBudgetError and a bad read as itself, and both stay so.
+  const own = new AbortController()
+  const broken = new Error('parquet footer is unreadable')
+  t.mock.method(AbortSignal, 'timeout', () => own.signal)
+  const fixture = memoryGraph()
+  wrapSources(fixture, t, source => ({ ...source, scan: () => { own.abort(); throw broken } }))
+  await assert.rejects(queryNeighbors({ ...fixture, seed: 's1' }), err => err === broken)
+})
+
+test('large labels are subject to the cumulative payload budget', async () => {
+  // A repeated string stays cheap to allocate in the fixture but represents
+  // a large decoded payload; one cell cannot evade a row-count-only guard.
+  const fixture = memoryGraph([n('root', 'Session', 'root', 'x'.repeat(65 * 1024 * 1024))], [])
+  const result = await queryNeighbors({ ...fixture, seed: 'root' })
+  assert.equal(result.ok, false)
+  assert.match(!result.ok && result.error || '', /payload budget/)
+  assert.equal(fixture.scans.filter(s => s.dataset === 'edge').length, 0)
+})
+
+/**
+ * Assert a traversal refused and return the message it refused with.
+ * @param {Awaited<ReturnType<typeof queryNeighbors>>} r
+ * @returns {string}
+ */
+function refused(r) {
+  assert.equal(r.ok, false)
+  return r.ok ? '' : r.error
+}
+
+/**
  * Assert a traversal succeeded and return it as a plain object for field access.
- * @param {ReturnType<typeof traverse>} r
+ * @param {Awaited<ReturnType<typeof queryNeighbors>>} r
  * @returns {any}
  */
 function ok(r) {
@@ -66,51 +365,9 @@ function ok(r) {
 /** @param {any[]} neighbors */
 const idsOf = (neighbors) => new Set(neighbors.map((x) => x.node.node_id))
 
-test('depth-1 out from a Session reaches its app/model/tool/file', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 's1', depth: 1, direction: 'out' }))
-  assert.equal(r.neighbors.length, 4)
-  assert.deepEqual(idsOf(r.neighbors), new Set(['a1', 'm1', 't1', 'f1']))
-  assert.ok(r.neighbors.every((x) => x.hop === 1 && x.direction === 'out'))
-})
-
-test('depth-1 in from a File reaches the Sessions that touched it', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: '/repo/index.js', depth: 1, direction: 'in' }))
-  assert.deepEqual(idsOf(r.neighbors), new Set(['s1', 's2']))
-  assert.ok(r.neighbors.every((x) => x.hop === 1 && x.direction === 'in' && x.edge_type === 'touched'))
-})
-
-test('depth-2 both from a File yields co-occurrence (file → sessions → resources)', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 'f1', depth: 2, direction: 'both' }))
-  // hop1: s1, s2 ; hop2: a1, m1, t1 (f1 already visited, not revisited)
-  assert.equal(r.neighbors.length, 5)
-  const hop2 = r.neighbors.filter((x) => x.hop === 2)
-  assert.deepEqual(idsOf(hop2), new Set(['a1', 'm1', 't1']))
-})
-
-test('--edge-type restricts which relations are walked', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 's1', depth: 1, direction: 'out', edgeTypes: ['used'] }))
+test('--edge-type restricts which relations are walked', async () => {
+  const r = ok(await queryNeighbors({ ...memoryGraph(), seed: 's1', depth: 1, direction: 'out', edgeTypes: ['used'] }))
   assert.deepEqual(idsOf(r.neighbors), new Set(['t1']))
-})
-
-test('direction out from a leaf File yields no neighbors (but succeeds)', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 'f1', depth: 2, direction: 'out' }))
-  assert.equal(r.neighbors.length, 0)
-})
-
-test('--limit truncates in BFS order and reports the true reachable total', () => {
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 's1', depth: 1, direction: 'out', limit: 2 }))
-  assert.equal(r.neighbors.length, 2)
-  assert.equal(r.truncated, true)
-  assert.equal(r.reachable, 4)
-})
-
-test('a node with no visited dedup is never revisited across hops', () => {
-  // s1 is reachable from f1 (hop1) and would re-appear via s2→f1→... ; ensure
-  // the seed and already-seen nodes are not re-emitted.
-  const r = ok(traverse({ nodes: NODES, edges: EDGES, seed: 'f1', depth: 3, direction: 'both' }))
-  const ids = [...idsOf(r.neighbors)]
-  assert.equal(ids.includes('f1'), false, 'seed not emitted as its own neighbor')
-  assert.equal(new Set(ids).size, ids.length, 'no duplicate neighbors')
 })
 
 test('resolveSeed matches node_id, then natural_key, then label', () => {
@@ -134,8 +391,8 @@ test('resolveSeed --type narrows the match', () => {
   assert.equal(r.ok && r.node.node_id, 'm1')
 })
 
-test('traverse returns an error shape for an unresolved seed', () => {
-  const r = traverse({ nodes: NODES, edges: EDGES, seed: 'does-not-exist' })
+test('queryNeighbors returns an error shape for an unresolved seed', async () => {
+  const r = await queryNeighbors({ ...memoryGraph(), seed: 'does-not-exist' })
   assert.equal(r.ok, false)
 })
 
@@ -346,4 +603,92 @@ test('an ordinary not-found still renders its own error and candidates', () => {
   assert.match(rendered.stderr ?? '', /ambiguous seed/)
   assert.match(rendered.stderr ?? '', /x\.js/)
   assert.doesNotMatch(rendered.stderr ?? '', /graph is empty/)
+})
+
+/**
+ * A walk whose frontier and output both exceed the 256-id batch size, so the
+ * traversal genuinely issues many reads per dataset rather than one.
+ * @param {number} width
+ */
+function wideGraph(width) {
+  const nodes = [n('root', 'Session', 'root', 'root-label')]
+  const edges = []
+  for (let i = 0; i < width; i++) {
+    nodes.push(n(`m${i}`, 'Tool', `mid-${i}`, null), n(`l${i}`, 'File', `leaf-${i}`, null))
+    edges.push(e('root', `m${i}`, 'used'), e(`m${i}`, `l${i}`, 'touched'))
+  }
+  return { nodes, edges }
+}
+
+/**
+ * `memoryGraph` with the refresh path instrumented: each dataset reports one
+ * partition and the declared no-op `refreshPartition` the graph datasets
+ * register, and the storage models a spool a live writer keeps pending, so a
+ * forced settle flushes on every read and a debounced one does not.
+ * @param {any[]} nodes
+ * @param {any[]} edges
+ */
+function refreshCountingGraph(nodes, edges) {
+  const base = memoryGraph(nodes, edges)
+  /** @type {{ refreshPartition: any[], flushTable: any[] }} */
+  const calls = { refreshPartition: [], flushTable: [] }
+  const tablePath = dataset => `${base.storage.cacheRoot}/datasets/${dataset}/label`
+  const getDataset = base.query.getDataset
+  const query = /** @type {any} */ ({
+    ...base.query,
+    getDataset: name => ({
+      ...getDataset(name),
+      discoverPartitions: async () => [{ dataset: name, partition: { partition: 'label' }, tablePath: tablePath(name) }],
+      refreshPartition: async (_partition, ctx) => {
+        calls.refreshPartition.push({ dataset: name, force: ctx.force === true })
+        return { status: 'skipped', rows: 0 }
+      },
+    }),
+  })
+  /** @type {Map<string, number>} */
+  const lastFlushAtMs = new Map()
+  const storage = /** @type {any} */ ({
+    ...base.storage,
+    pendingInfo: async path => ({ pending: true, lastFlushAtMs: lastFlushAtMs.get(path) ?? null, flushFailedAtMs: null }),
+    flushTable: async (path, options) => {
+      calls.flushTable.push({ path, force: options?.force === true })
+      lastFlushAtMs.set(path, Date.now())
+    },
+  })
+  const dataset = name => ({
+    forcedRefreshes: calls.refreshPartition.filter(c => c.dataset === name && c.force).length,
+    forcedFlushes: calls.flushTable.filter(c => c.path === tablePath(name) && c.force).length,
+    reads: base.scans.filter(s => s.dataset === name).length,
+  })
+  return { ...base, query, storage, dataset }
+}
+
+test('a depth-3 multi-batch traversal forces a refresh at most once per graph dataset', async () => {
+  const { nodes, edges } = wideGraph(300)
+  const fixture = refreshCountingGraph(nodes, edges)
+  // Seeded by label, the tier that reads all three times: a fixture resolving
+  // at the node_id tier cannot see a force reintroduced on the seed read.
+  const result = ok(await queryNeighbors({ ...fixture, seed: 'root-label', depth: 3 }))
+
+  // The walk itself, unchanged by the refresh mode: 300 mids at hop 1 and 300
+  // leaves at hop 2, reached over multiple frontier and output batches.
+  assert.equal(result.reachable, 600)
+  assert.equal(result.totalNodes, 601)
+  assert.equal(result.totalEdges, 600)
+  assert.equal(result.neighbors.length, 600)
+  assert.equal(result.truncated, false)
+  assert.equal(result.neighbors.filter(x => x.hop === 1).length, 300)
+  assert.equal(result.neighbors.filter(x => x.hop === 2).length, 300)
+  assert.deepEqual(idsOf(result.neighbors.slice(0, 2)), new Set(['m0', 'm1']))
+  assert.equal(result.neighbors[0].node.natural_key, 'mid-0')
+
+  // Not vacuous: each dataset really is read many times over.
+  const node = fixture.dataset('node'), edge = fixture.dataset('edge')
+  assert.equal(node.reads, 6)
+  assert.equal(edge.reads, 8)
+
+  assert.equal(node.forcedRefreshes, 1, `node forced refreshes: want 1, got ${node.forcedRefreshes}`)
+  assert.equal(edge.forcedRefreshes, 1, `edge forced refreshes: want 1, got ${edge.forcedRefreshes}`)
+  assert.equal(node.forcedFlushes, 1, `node forced flushes: want 1, got ${node.forcedFlushes}`)
+  assert.equal(edge.forcedFlushes, 1, `edge forced flushes: want 1, got ${edge.forcedFlushes}`)
 })

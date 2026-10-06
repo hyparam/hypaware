@@ -73,6 +73,27 @@ const CODEX_DESCRIPTOR = {
   attachProbe: { format: 'toml', settings_file: '.codex/config.toml', marker_header: '[model_providers.hypaware]' },
 }
 
+test('Codex migration settles once without an endpoint and reopens when mode changes', async () => {
+  const handler = createAttachHandler()
+  const registration = { ...attachRegistration('codex', { prose: 'no JSON' }), requiresEndpoint: false }
+  const ctx = makeCtx({
+    plugins: [{ name: '@hypaware/codex', config: {} }],
+    descriptors: descriptorMap([CODEX_DESCRIPTOR]),
+    clients: clientsWith({ codex: registration }),
+  })
+  ctx.endpoint = undefined
+  const action = handler.desired(ctx)[0]
+  assert.ok(action)
+  assert.equal(handler.isCurrent?.(/** @type {any} */ ({ status: 'done' }), action, ctx), false)
+  const result = await handler.perform(action, ctx)
+  assert.equal(result.status, 'done')
+  const marker = /** @type {any} */ ({ status: 'done', ...result.detail })
+  assert.equal(marker.mode, 'transcript', 'mode is recorded even without a parsed report')
+  assert.equal(handler.isCurrent?.(marker, action, ctx), true)
+  ctx.config.plugins = [{ name: '@hypaware/codex', config: { capture_mode: 'gateway' } }]
+  assert.equal(handler.isCurrent?.(marker, action, ctx), false)
+})
+
 /**
  * A client descriptor with **no `attachProbe`**. perform() can attach it (it
  * only needs a live adapter), but the disk-driven reverse() has nothing to
@@ -242,6 +263,34 @@ test('desired() honors an explicit attach.on_join:false opt-out (no action)', ()
     clients: clientsWith({ claude: attachRegistration('claude') }),
   }))
   assert.deepEqual(desired, [])
+})
+
+test('desired() never names a detached client, even one detached after boot', async () => {
+  const handler = createAttachHandler()
+  // @ref LLP 0466#reattach-paths [tests]: the reconciler skips a detached client
+  const inBoot = handler.desired(makeCtx({
+    plugins: [{ name: '@hypaware/claude', enabled: true, recording: false, config: {} }],
+    descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+    clients: clientsWith({ claude: attachRegistration('claude') }),
+  }))
+  assert.deepEqual(inBoot, [])
+  // The daemon booted before `hyp client detach` wrote the switch: the
+  // in-memory entry still records, the file on disk does not.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'action-attach-detached-'))
+  try {
+    await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({
+      version: 2, plugins: [{ name: '@hypaware/claude', recording: false }],
+    }))
+    const afterBoot = handler.desired(makeCtx({
+      env: { HOME: hypHome, HYP_HOME: hypHome },
+      plugins: [{ name: '@hypaware/claude', enabled: true, config: {} }],
+      descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+      clients: clientsWith({ claude: attachRegistration('claude') }),
+    }))
+    assert.deepEqual(afterBoot, [])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
 })
 
 test('desired() does not fail open on a non-boolean on_join (treats it as opt-out)', () => {

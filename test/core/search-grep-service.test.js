@@ -5,15 +5,15 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 
-import { ByteWriter } from 'hyparquet-writer'
-import { createIndex } from 'hypgrep'
 
 import { urlToPath } from '../../src/core/cache/iceberg/resolver.js'
 import { deleteMatchingRows, listLiveDataFiles } from '../../src/core/cache/iceberg/store.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
-import { executeGrepSearch } from '../../src/core/search/grep_service.js'
+import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
+import { executeGrepSearch } from '../../hypaware-core/plugins-workspace/grep/src/grep_service.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
@@ -107,31 +107,6 @@ function grep(storage, over = {}) {
   }))
 }
 
-/**
- * Build a hypgrep sidecar beside every live data file of the table, the
- * shape T6's maintenance pass will produce.
- *
- * @param {string} tableDir
- * @returns {Promise<number>} how many sidecars were written
- */
-async function buildSidecars(tableDir) {
-  const files = await listLiveDataFiles(tableDir)
-  for (const file of files) {
-    const sourcePath = urlToPath(file.filePath)
-    const bytes = await fs.readFile(sourcePath)
-    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-    const sourceFile = {
-      byteLength: buffer.byteLength,
-      /** @param {number} start @param {number} [end] */
-      slice: (start, end) => buffer.slice(start, end),
-    }
-    const writer = new ByteWriter()
-    await createIndex({ sourceFile, indexFile: writer })
-    await fs.writeFile(sourcePath.replace(/\.parquet$/, '.index.parquet'), Buffer.from(writer.getBuffer()))
-  }
-  return files.length
-}
-
 const OLD = mkRow({ date: '2026-08-10', session_id: 's1', content_text: 'alpha needle one' })
 const NEW = mkRow({
   date: '2026-08-12',
@@ -139,6 +114,50 @@ const NEW = mkRow({
   conversation_id: 'c2',
   agent_id: 'a2',
   content_text: 'the needle two',
+})
+
+test('retained snippets release large message bodies and preserve Unicode', async (t) => {
+  const count = 24
+  const { cacheRoot } = await makeCache([
+    Array.from({ length: count }, (_, i) => mkRow({
+      content_text: `${i}:` + 'x'.repeat(1024 * 1024) + 'needle😀終',
+    })),
+  ])
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  // A fresh process isolates the result's retained heap from the writer and
+  // other tests. The generous 12 MiB ceiling leaves room for metadata and GC
+  // variation but fails if the snippets pin the 24 MiB of source strings.
+  const probe = `
+    import assert from 'node:assert/strict'
+    const { executeGrepSearch } = await import(process.env.GREP_SERVICE_URL)
+    const { createQueryStorageService } = await import(process.env.GREP_STORAGE_URL)
+    const storage = createQueryStorageService({ cacheRoot: process.env.GREP_CACHE_ROOT })
+    global.gc()
+    const before = process.memoryUsage().heapUsed
+    const result = await executeGrepSearch({
+      storage, query: 'needle', limit: 24, includeLocalOnly: true, refresh: 'never',
+    })
+    // Let completed read promises and their row groups leave the stack.
+    await new Promise(resolve => setImmediate(resolve))
+    global.gc()
+    const retained = process.memoryUsage().heapUsed - before
+    assert.equal(result.hits.length, 24)
+    for (const hit of result.hits) {
+      assert.equal(hit.matches[0].snippet, '...' + 'x'.repeat(80) + 'needle😀終')
+    }
+    assert.ok(retained < 12 * 1024 * 1024, 'snippets retained ' + retained + ' heap bytes')
+  `
+  const child = spawnSync(process.execPath, ['--expose-gc', '--input-type=module', '--eval', probe], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      GREP_CACHE_ROOT: cacheRoot,
+      GREP_SERVICE_URL: new URL('../../hypaware-core/plugins-workspace/grep/src/grep_service.js', import.meta.url).href,
+      GREP_STORAGE_URL: new URL('../../src/core/cache/storage.js', import.meta.url).href,
+    },
+  })
+  assert.equal(child.status, 0, child.stderr || child.error?.message || 'heap probe failed')
 })
 
 test('scan tier: hits carry locators and snippets, newest day first', async () => {
@@ -282,30 +301,19 @@ test('literal matching is case-insensitive; regex mode is operator-shaped', asyn
   assert.deepEqual(rx.hits.map((h) => h.sessionId), ['s2'])
 })
 
-test('a row matching only in tool_args returns zero hits from BOTH tiers', async () => {
-  // The invariant is tier agreement, not coverage. `tool_args` is VARIANT,
-  // the index worker filters it out, so an indexed file can never answer a
-  // match through it; the scan tier must therefore not answer one either.
-  // Dropping the column from the allowlist is what makes the two agree, and
-  // hyparam/hypaware#977 is where they would agree the other way instead.
+test('a row matching only in tool_args stays outside the shared server coverage', async () => {
   const toolRow = mkRow({
     date: '2026-08-11',
     session_id: 's3',
     tool_name: 'Read',
     tool_args: { file_path: '/repo/hidden_needle_path.js' },
   })
-  const { storage, tableDir } = await makeCache([[toolRow]])
+  const { storage } = await makeCache([[toolRow]])
 
   const scanned = await grep(storage, { query: 'hidden_needle_path' })
   assert.equal(scanned.hits.length, 0)
   assert.equal(scanned.indexedFiles, 0)
   assert.ok(scanned.scannedFiles >= 1, 'the scan tier really read the file')
-
-  assert.ok(await buildSidecars(tableDir()) >= 1, 'a sidecar was built')
-  const indexed = await grep(storage, { query: 'hidden_needle_path' })
-  assert.equal(indexed.hits.length, 0)
-  assert.equal(indexed.scannedFiles, 0)
-  assert.ok(indexed.indexedFiles >= 1, 'the indexed tier really served the file')
 
   // The row itself is still reachable, so the zero above is the column
   // being unsearchable rather than the row being missing.
@@ -364,87 +372,21 @@ test('a purged row cannot surface from the scan tier', async () => {
   assert.deepEqual(res.hits.map((h) => h.sessionId), ['s1'])
 })
 
-test('indexed tier: sidecars serve every file with identical hits', async () => {
+test('legacy sidecars are ignored, including malformed files and directories', async () => {
   const { storage, tableDir } = await makeCache([[OLD], [NEW]])
   const before = await grep(storage)
-  const sidecars = await buildSidecars(tableDir())
-  assert.ok(sidecars >= 2)
-  const res = await grep(storage)
-  assert.equal(res.indexedFiles, sidecars, 'every file was served through its sidecar')
-  assert.equal(res.scannedFiles, 0)
-  assert.deepEqual(res.hits, before.hits, 'the two tiers answer identically')
-})
-
-test('indexed tier: a query below the ngram length still answers exactly', async () => {
-  const { storage, tableDir } = await makeCache([[OLD], [NEW]])
-  await buildSidecars(tableDir())
-  // 'dle' is shorter than hypgrep's default ngram, so the index proposes
-  // every block and the shared matcher does the real work: slower, never
-  // wrong (the LLP 0265 T7 "literal cliff" is performance, not truth).
-  const res = await grep(storage, { query: 'dle' })
-  assert.equal(res.hits.length, 2)
-  assert.equal(res.indexedFiles >= 2, true)
-})
-
-test('indexed tier: a stale sidecar cannot resurrect a purged row', async () => {
-  const { storage, tableDir } = await makeCache([[OLD], [NEW]])
-  await buildSidecars(tableDir())
+  const files = await listLiveDataFiles(tableDir())
+  /** @param {{ filePath: string }} file */
+  const sidecar = (file) => urlToPath(file.filePath).replace(/\.parquet$/, '.index.parquet')
+  await fs.writeFile(sidecar(files[0]), 'retired index bytes')
+  await fs.mkdir(sidecar(files[1]))
+  const result = await grep(storage)
+  assert.deepEqual(result.hits, before.hits)
+  assert.equal(result.indexedFiles, 0)
+  assert.equal(result.scannedFiles, files.length)
   await deleteMatchingRows(tableDir(), (row) => row.session_id === 's2', { columns: ['session_id'] })
-  const res = await grep(storage)
-  assert.ok(res.indexedFiles >= 1, 'the walk still ran through the sidecars')
-  assert.deepEqual(res.hits.map((h) => h.sessionId), ['s1'], 'the purged row is filtered by position')
-})
-
-// The sidecar is the whole answer for a file it prunes to zero blocks, so
-// nothing should open the source: not to read it, and not to read its footer
-// for the physical projection. Deleting the data files and keeping the
-// sidecars is how that is observable from outside - it is also the real
-// failure it prevents, since a concurrent compaction or purge unlinks data
-// files under a running walk. On a tree that opens the source first this
-// fails the whole query with ENOENT before the index is ever consulted.
-test('indexed tier: a file the index prunes to nothing is answered without opening it', async () => {
-  const { storage, tableDir } = await makeCache([[OLD], [NEW]])
-  await buildSidecars(tableDir())
-  const files = await listLiveDataFiles(tableDir())
-  for (const file of files) await fs.rm(urlToPath(file.filePath))
-  // Long enough to yield n-grams, and present in no block of either file.
-  const res = await grep(storage, { query: 'quixotic-haberdashery' })
-  assert.deepEqual(res.hits, [])
-  assert.equal(res.indexedFiles, files.length, 'the sidecar served every file whole')
-  assert.equal(res.scannedFiles, 0, 'nothing fell through to the scan tier')
-})
-
-test('indexed tier: a poisoned sidecar degrades that file, it does not fail the search', async () => {
-  const { storage, tableDir } = await makeCache([[OLD], [NEW]])
-  const before = await grep(storage)
-  await buildSidecars(tableDir())
-  // A half-written index: the file exists, so the existence probe accepts
-  // it, and the footer parse inside parquetFind is what fails. LLP 0264
-  // #lifecycle makes index state a performance property only, so this one
-  // file falls back to the scan tier and the answer is unchanged.
-  const files = await listLiveDataFiles(tableDir())
-  const poisoned = urlToPath(files[0].filePath).replace(/\.parquet$/, '.index.parquet')
-  await fs.writeFile(poisoned, 'PAR1 not really an index')
-  const res = await grep(storage)
-  assert.deepEqual(res.hits, before.hits, 'the poisoned file still answers, through the scan tier')
-  assert.equal(res.scannedFiles, 1, 'exactly the poisoned file degraded')
-  assert.equal(res.indexedFiles, files.length - 1)
-})
-
-test('indexed tier: an unreadable sidecar degrades that file rather than throwing', async () => {
-  const { storage, tableDir } = await makeCache([[NEW]])
-  const before = await grep(storage)
-  await buildSidecars(tableDir())
-  const files = await listLiveDataFiles(tableDir())
-  const sidecar = urlToPath(files[0].filePath).replace(/\.parquet$/, '.index.parquet')
-  // A directory where the sidecar should be: the probe sees it, the read
-  // fails with EISDIR rather than the ENOENT the delete race produces.
-  await fs.rm(sidecar)
-  await fs.mkdir(sidecar)
-  const res = await grep(storage)
-  assert.deepEqual(res.hits, before.hits)
-  assert.equal(res.indexedFiles, 0)
-  assert.equal(res.scannedFiles, files.length)
+  const purged = await grep(storage)
+  assert.deepEqual(purged.hits.map((hit) => hit.sessionId), ['s1'])
 })
 
 test('rows captured into the spool are found after the freshness flush', async () => {
@@ -551,4 +493,32 @@ test('unreadable table metadata fails the search rather than answering zero', as
     if (name.endsWith('.metadata.json')) await fs.writeFile(path.join(metadataDir, name), '{ truncated')
   }
   await assert.rejects(() => grep(storage), 'a corrupt table raises, matching the SQL read path')
+})
+
+// @ref LLP 0417#operation [tests]: final fence removes already accumulated and just-accepted hits
+for (const abort of [false, true]) test(`grep rechecks undelivered hits after purge, abort=${abort}`, async t => {
+  const { cacheRoot, storage } = await makeCache([[
+    mkRow({ session_id: 'target', cwd: '/home/target', content_text: 'needle first' }),
+    mkRow({ session_id: 'target', cwd: '/home/target', content_text: 'needle second' }),
+  ], [mkRow({ session_id: 'keep', date: '2026-08-09', content_text: 'needle survivor' })]])
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const controller = new AbortController()
+  let matched = 0
+  const result = await grep(storage, {
+    includeLocalOnly: false, callerCwd: '/home/caller', signal: controller.signal,
+    usagePolicyResolver: {
+      resolve(cwd) {
+        if (cwd === '/home/target' && ++matched === 2) {
+          createSessionPurgeStore(cacheRoot).add('target')
+          if (abort) controller.abort()
+        }
+        return { class: 'full', governedBy: null, declared: null }
+      },
+      isIgnored: () => false,
+    },
+  })
+  assert.equal(matched, 2, 'purge occurs after a hit was already accumulated')
+  assert(!result.hits.some(hit => hit.sessionId === 'target'))
+  assert.equal(result.exhausted, false)
+  if (!abort) assert.deepEqual(result.hits.map(hit => hit.sessionId), ['keep'])
 })

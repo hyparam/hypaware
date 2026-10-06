@@ -1,7 +1,7 @@
 // @ts-check
 
 import { createOutbox } from './outbox.js'
-import { effectivePolicy } from './policy.js'
+import { effectivePolicy, safeDestination } from './policy.js'
 import { validateBatch } from './contract.js'
 
 /** @param {string|null} value @param {number} now */
@@ -62,7 +62,12 @@ export function createDelivery(
         outbox.noteDrop()
         return
       }
-      const target = effective.policy.url + '/v1/telemetry'
+      // Deliver to the destination the guard accepted, not the string it
+      // accepted it from: a url that spells itself differently from its parse
+      // (a hand-edited trailing backslash) would aim the POST at a route the
+      // guard never approved. Organization mode means the guard returned one.
+      const destination = /** @type {string} */ (safeDestination(effective.policy.url))
+      const target = destination + '/v1/telemetry'
       const attempt = Math.min(16, (previous.attempt ?? 0) + 1)
       /** @param {string} state @param {number} [delay] */
       function pause(state, delay = 3600_000) {
@@ -92,7 +97,7 @@ export function createDelivery(
         if (effectivePolicy(root).binding !== binding)
           throw new Error('policy changed')
         const refresh = await fetchFn(
-          effective.policy.url + '/v1/identity/refresh',
+          destination + '/v1/identity/refresh',
           {
             method: 'POST',
             headers: { authorization: `Bearer ${token}` },

@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { resolveSessionIdForCli } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
 import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -485,3 +486,59 @@ function makeBuf() {
 // import keeps tree-shakers from dropping it when this test runs in
 // isolation. (No-op assertion, but compiles the symbol.)
 assert.equal(typeof registerCoreCommands, 'function')
+
+
+// @ref LLP 0403#hook-identity [tests]: real shell loads hook exports into the CLI resolver.
+test('session hook exports exact IDs to Bash tools, preserving other hooks and resumed IDs', async () => {
+  const staged = await stageEnv()
+  try {
+    const envFile = path.join(staged.homeDir, 'session-env.sh')
+    const sentinel = path.join(staged.homeDir, 'injected')
+    await fs.writeFile(envFile, 'export KEEP_ME=kept')
+    for (const sessionId of ['desktop-session', ` quote' \n$(touch ${sentinel}) \`touch ${sentinel}\` `, 'resumed-session']) {
+      const code = await runClaudeSessionContextHook(['--state-file', staged.stateFile], /** @type {any} */ ({
+        env: { HOME: staged.homeDir, CLAUDE_ENV_FILE: envFile },
+        stdin: stdinFor({ session_id: sessionId, cwd: staged.homeDir, hook_event_name: 'SessionStart' }),
+        stdout: makeBuf(), stderr: makeBuf(),
+      }), { gitBranch: async () => undefined, gitRepoFacts: async () => ({}), sweepSpool: async () => {} })
+      assert.equal(code, 0)
+      const result = await execFileAsync('/bin/sh', ['-c',
+        `. "$1"; exec "$2" -e 'process.stdout.write(JSON.stringify({id:process.env.CLAUDE_CODE_SESSION_ID,keep:process.env.KEEP_ME}))'`,
+        'session-test', envFile, process.execPath], { env: { HOME: staged.homeDir } })
+      const actual = JSON.parse(result.stdout)
+      assert.equal(actual.id, sessionId)
+      assert.equal(actual.keep, 'kept')
+      assert.deepEqual(resolveSessionIdForCli({ env: { CLAUDE_CODE_SESSION_ID: actual.id }, cwd: staged.homeDir }),
+        { ok: true, sessionId, source: 'claude_env' })
+      await assert.rejects(fs.access(sentinel), { code: 'ENOENT' })
+    }
+  } finally { await staged.cleanup() }
+})
+
+test('session ID export skips per-turn events and reports write failure without interrupting context capture', async () => {
+  const staged = await stageEnv()
+  try {
+    const envFile = path.join(staged.homeDir, 'session-env.sh')
+    const stderr = makeBuf()
+    let sweeps = 0
+    const invoke = (event, file = envFile) => runClaudeSessionContextHook(['--state-file', staged.stateFile], /** @type {any} */ ({
+      env: { HOME: staged.homeDir, CLAUDE_ENV_FILE: file },
+      stdin: stdinFor({ session_id: 'desktop-session', cwd: staged.homeDir, ...event }),
+      stdout: makeBuf(), stderr,
+    }), { gitBranch: async () => undefined, gitRepoFacts: async () => ({}), sweepSpool: async () => { sweeps++ } })
+    for (const hook_event_name of ['PostToolUse', 'UserPromptSubmit', 'CwdChanged']) {
+      assert.equal(await invoke({ hook_event_name }), 0)
+      await assert.rejects(fs.access(envFile), { code: 'ENOENT' })
+    }
+    assert.equal(await invoke({ hook_event_name: 'SessionStart' }, ''), 0)
+    assert.equal(stderr.text(), '')
+    assert.equal(await invoke({ hook_event_name: 'SessionStart' }, staged.homeDir), 0)
+    assert.match(stderr.text(), /could not export the session ID/)
+    assert.equal((await readSessionContext(staged.stateFile)).length, 5)
+    assert.equal(sweeps, 5)
+    for (const session_id of ['bad\0id', '\ud800', 'x'.repeat(65537)]) {
+      assert.equal(await invoke({ hook_event_name: 'SessionStart', session_id }), 0)
+      await assert.rejects(fs.access(envFile), { code: 'ENOENT' })
+    }
+  } finally { await staged.cleanup() }
+})

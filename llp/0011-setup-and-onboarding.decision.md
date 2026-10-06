@@ -6,6 +6,9 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0010, LLP 0012
+**Extended-by:** LLP 0404 (durable CLI setup and explicit temporary-install override)
+**Extended-by:** LLP 0411 (separate GitHub collection and browser-login offer)
+**Extended-by:** LLP 0462 (agent setup guide on the non-terminal entry)
 
 > The first-run experience. Decomposed from `hypaware-design.md`
 > (Setup and Onboarding).

@@ -8,11 +8,9 @@ import test from 'node:test'
 
 import { DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import {
-  parsePlanArgv,
   parseRunArgv,
   resolveRetentionDays,
   runBackfill,
-  runBackfillPlan,
   runBackfillProvider,
   selectProviders,
 } from '../../src/core/commands/backfill.js'
@@ -70,18 +68,6 @@ test('parseRunArgv accepts an equal since/until boundary', () => {
   })
 })
 
-/* ------------------------------ parsePlanArgv ----------------------------- */
-
-test('parsePlanArgv accepts retention-days but rejects since/until', () => {
-  assert.deepEqual(parsePlanArgv(['claude', '--retention-days=14', '--json']), {
-    providers: ['claude'],
-    retentionDays: 14,
-    json: true,
-  })
-  assert.ok('error' in parsePlanArgv(['--since', '2026-01-01']))
-  assert.ok('error' in parsePlanArgv(['--until', '2026-01-01']))
-})
-
 /* ----------------------------- selectProviders ---------------------------- */
 
 /** @param {string} name @param {string} plugin */
@@ -127,6 +113,7 @@ test('resolveRetentionDays prefers the flag, then config, then the default', () 
  *
  * @param {{
  *   item?: { dataset: string, kind: string, value: Record<string, unknown> },
+ *   extraItem?: { dataset: string, kind: string, value: Record<string, unknown> },
  *   registerMaterializer?: boolean,
  *   materializerDataset?: string,
  *   materializeRows?: Record<string, unknown>[],
@@ -134,10 +121,14 @@ test('resolveRetentionDays prefers the flag, then config, then the default', () 
  *   env?: NodeJS.ProcessEnv,
  *   config?: Record<string, unknown>,
  *   plugins?: { name: string }[],
+ *   runError?: Error,
+ *   flushError?: Error,
+ *   flushErrorDataset?: string,
  * }} [options]
  */
 function makeCtx(options = {}) {
   const item = options.item ?? { dataset: 'ds', kind: 'test.kind', value: { x: 1 } }
+  const extraItem = options.extraItem
   const registerMaterializer = options.registerMaterializer ?? true
   const materializerDataset = options.materializerDataset ?? item.dataset
   const materializeRows = options.materializeRows ?? [{ a: 1 }]
@@ -146,19 +137,15 @@ function makeCtx(options = {}) {
   const backfills = createBackfillRegistry()
   /** @type {any[]} */
   const runContexts = []
-  /** @type {any[]} */
-  const planContexts = []
   backfills.register({
     name: 'tester',
     plugin: '@test/plugin',
-    datasets: [item.dataset],
-    async plan(planCtx) {
-      planContexts.push(planCtx)
-      return undefined
-    },
+    datasets: extraItem ? [item.dataset, extraItem.dataset] : [item.dataset],
     async *run(runCtx) {
       runContexts.push(runCtx)
       yield item
+      if (extraItem) yield extraItem
+      if (options.runError) throw options.runError
     },
   })
   const backfillMaterializers = createBackfillMaterializerRegistry()
@@ -169,6 +156,14 @@ function makeCtx(options = {}) {
       plugin: '@test/plugin',
       materialize() { return materializeRows },
     })
+    if (extraItem) {
+      backfillMaterializers.register({
+        kind: extraItem.kind,
+        dataset: extraItem.dataset,
+        plugin: '@test/plugin',
+        materialize() { return materializeRows },
+      })
+    }
   }
 
   /** @type {Array<{ tablePath: string, rows: Record<string, unknown>[] }>} */
@@ -182,7 +177,16 @@ function makeCtx(options = {}) {
     /** @param {string} tablePath @param {unknown} _columns @param {Record<string, unknown>[]} rows */
     async appendRows(tablePath, _columns, rows) { appended.push({ tablePath, rows }) },
     /** @param {string} tablePath */
-    async flushTable(tablePath) { flushed.push({ tablePath }) },
+    async flushTable(tablePath) {
+      flushed.push({ tablePath })
+      // Without `flushErrorDataset` every dataset throws. Naming one lets a
+      // test pin that the datasets behind a failing flush complete theirs,
+      // not merely that the loop reached them.
+      const only = options.flushErrorDataset
+      if (options.flushError && (!only || tablePath.startsWith(`/tmp/fake-cache/datasets/${only}/`))) {
+        throw options.flushError
+      }
+    },
   }
   const query = {
     /** @param {string} name */
@@ -214,7 +218,7 @@ function makeCtx(options = {}) {
     query,
     storage,
   }))
-  return { ctx, appended, flushed, out, err, runContexts, planContexts }
+  return { ctx, appended, flushed, out, err, runContexts }
 }
 
 test('runBackfill materializes rows, appends to the dataset path, and flushes', async () => {
@@ -292,6 +296,66 @@ test('runBackfill leaves the run context item-failure count at zero when rows la
   assert.equal(await runBackfill(['tester'], ctx), 0)
   assert.equal(appended.length, 1)
   assert.equal(runContexts[0].itemsFailed, 0)
+})
+
+// A provider generator may yield rows and only then fail. Those rows are
+// already appended, so they need the same force-flush a clean run gets, while
+// the run still has to report the failure.
+test('runBackfill flushes the rows a provider yielded before it threw, and still fails', async () => {
+  const { ctx, appended, flushed, out } = makeCtx({ runError: new Error('scan failed at end') })
+  const code = await runBackfill(['tester', '--json'], ctx)
+  assert.equal(code, 1, 'a provider that throws still fails the run')
+  assert.equal(appended.length, 1, 'the row yielded before the throw was written')
+  assert.equal(flushed.length, 1, 'the touched dataset is force-flushed so the row is queryable now')
+  assert.equal(flushed[0].tablePath, '/tmp/fake-cache/datasets/ds/backfill')
+  const payload = JSON.parse(out.join(''))
+  assert.equal(payload.providers[0].status, 'failed')
+  assert.match(payload.providers[0].error, /scan failed at end/)
+})
+
+test('a flush that throws while handling a provider error does not mask that error', async () => {
+  const { ctx, flushed, out } = makeCtx({
+    runError: new Error('scan failed at end'),
+    flushError: new Error('flush failed'),
+  })
+  const code = await runBackfill(['tester', '--json'], ctx)
+  assert.equal(code, 1)
+  assert.equal(flushed.length, 1, 'the flush was attempted')
+  const payload = JSON.parse(out.join(''))
+  assert.equal(payload.providers[0].status, 'failed')
+  assert.match(payload.providers[0].error, /scan failed at end/, 'the provider error is the reported one')
+})
+
+test('runBackfill still fails when only the flush throws', async () => {
+  const { ctx, out } = makeCtx({ flushError: new Error('flush failed') })
+  const code = await runBackfill(['tester', '--json'], ctx)
+  assert.equal(code, 1)
+  const payload = JSON.parse(out.join(''))
+  assert.equal(payload.providers[0].status, 'failed')
+  assert.match(payload.providers[0].error, /flush failed/)
+})
+
+// One failing dataset must not strand the datasets behind it in the same
+// delayed-visibility state the force-flush exists to prevent.
+// @ref LLP 0333#every-table-before-failure [tests]: every touched dataset gets
+//   its attempt before the run's failure is declared
+test('a dataset whose flush throws does not strand the flush of the next dataset', async () => {
+  const { ctx, flushed, out } = makeCtx({
+    extraItem: { dataset: 'ds2', kind: 'test.kind.2', value: { y: 2 } },
+    registeredDatasets: ['ds', 'ds2'],
+    flushError: new Error('flush failed'),
+    flushErrorDataset: 'ds',
+  })
+  const code = await runBackfill(['tester', '--json'], ctx)
+  assert.equal(code, 1)
+  assert.deepEqual(
+    flushed.map((f) => f.tablePath),
+    ['/tmp/fake-cache/datasets/ds/backfill', '/tmp/fake-cache/datasets/ds2/backfill'],
+    'ds2 completed its flush behind the failing ds, it was not stranded'
+  )
+  const payload = JSON.parse(out.join(''))
+  assert.equal(payload.providers[0].status, 'failed')
+  assert.match(payload.providers[0].error, /flush failed/)
 })
 
 test('runBackfill fails with exit 1 for an unknown explicit provider', async () => {
@@ -423,20 +487,4 @@ test('a plugin listed with enabled:false is not configured', async () => {
   })
   await runBackfillProvider({ ctx, provider: 'tester', dryRun: true })
   assert.equal(runContexts[0]?.entrypointOwners.get('claude-desktop')?.configured, false)
-})
-
-// `entrypointOwners` is declared on `BackfillPlanContext`, so a provider
-// that consults it while planning has to see the same answer the run will,
-// or `hyp backfill plan` estimates over sessions the run then gates out.
-test('hyp backfill plan hands providers the same entrypoint owner map the run gets', async () => {
-  const { ctx, planContexts } = makeCtx({
-    env: envWithConfig(['@hypaware/claude']),
-    plugins: [{ name: '@hypaware/claude' }],
-    config: { version: 2, plugins: [{ name: '@test/plugin' }] },
-  })
-  const code = await runBackfillPlan(['tester'], ctx)
-  assert.equal(code, 0)
-  const owners = planContexts[0]?.entrypointOwners
-  assert.ok(owners instanceof Map, 'the plan context carries the resolved owner map')
-  assert.equal(owners.get('claude-desktop')?.configured, false)
 })

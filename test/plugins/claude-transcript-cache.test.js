@@ -238,7 +238,11 @@ test('a read that fails partway is re-read from zero on the next load, not left 
   try {
     const loader = createTranscriptLoader()
     await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n' + line('u-2', 'two', 2) + '\n')
-    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    // An empty projects dir, deliberately: a direct read that yields nothing
+    // falls through to the session-id scan, which would find this very file
+    // again and heal the failed read before it could be observed. What is
+    // under test is the per-file cache state, not the resolution order.
+    const opts = { projectsDir: path.join(env.dir, 'empty'), sessionId: SESSION, transcriptPath: env.file }
 
     const patchable = /** @type {any} */ (fs)
     const realCreate = patchable.createReadStream

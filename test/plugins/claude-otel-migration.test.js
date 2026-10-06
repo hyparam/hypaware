@@ -33,6 +33,7 @@ import {
   otelModeEnv,
 } from '../../hypaware-core/plugins-workspace/claude/src/settings.js'
 import { ensureLocalCa } from '../../src/core/tls/ca.js'
+import { attachReportOutcome } from '../../src/core/cli/walkthrough.js'
 import { collectHypAwareStatus, probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
 import { renderStatusText } from '../../src/core/commands/status.js'
 import { createActionReconciler } from '../../src/core/config/action_reconciler.js'
@@ -326,6 +327,10 @@ test('hyp attach claude migrates a proxy attach: marker flips, proxy keys releas
   assert.match(out, /Migrated from proxy attach/)
   assert.match(out, /keep proxying until they restart/)
   assert.match(out, /hyp client detach claude --purge/)
+  // Setup's finish step condenses this report to its `!` lines; the purge
+  // offer is one of them, so a migration run through `hyp setup` still says
+  // it (LLP 0262 #migration).
+  assert.ok(attachReportOutcome(out).kept.some((line) => /! .*hyp client detach claude --purge/.test(line)))
   await fsp.access(ca.certPath)
 
   // The launchd unwind ran through the real seam. Under the test runner the

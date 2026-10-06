@@ -44,7 +44,6 @@ function compose(descriptors, sources, exportChoice = 'local-parquet') {
 
 const ANTHROPIC = { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' }
 const OPENAI = { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' }
-const CHATGPT = { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' }
 
 const LOCAL_SINK = {
   local: {
@@ -72,15 +71,15 @@ test('claude alone composes the gateway writer with no proxy upstream plus the c
   })
 })
 
-test('codex alone composes the gateway + openai + chatgpt upstreams + codex adapter', async () => {
+test('codex composes the shared writer with no inference upstreams', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: {} },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,
@@ -179,16 +178,16 @@ test('claude + hermes share the gateway; hermes adds no upstream', async () => {
   })
 })
 
-test('claude + codex compose only the upstreams codex still routes through the gateway', async () => {
+test('claude and codex compose the shared writer without inference upstreams', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['claude', 'codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude' },
-      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: {} },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,
@@ -200,12 +199,12 @@ test('all five sources dedupe upstreams by name and order otel before the export
   assert.deepEqual(compose(d, ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI] } },
       { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 4318 } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude' },
-      { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/codex', config: {} },
     ],
     query: QUERY,
     sinks: LOCAL_SINK,

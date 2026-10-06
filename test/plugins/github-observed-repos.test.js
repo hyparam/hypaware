@@ -476,7 +476,7 @@ test('a failed session_repos inventory read does not retire backlog the cursors 
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-backlog-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
   // A prior tick ran out of budget mid-repository and saved its continuation.
-  writeCursors(stateDir, { schema_version: 1, repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } } })
+  await writeCursors(stateDir, { schema_version: 1, repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } } })
 
   const report = await runCaptureTick(
     failingInventoryRuntime(stateDir, new Error('cache partition unreadable')),
@@ -498,7 +498,7 @@ test('a failed session_repos inventory read counts only continuations the live i
   // keeps the continuation its last tick saved: `acme/retired` contracted out
   // of the session evidence, `acme/ignored` was added to `ignore[]`. Neither
   // can be captured again, so neither is backlog a later tick could retire.
-  writeCursors(stateDir, {
+  await writeCursors(stateDir, {
     schema_version: 1,
     repos: {
       'acme/retired': { work: { mode: 'poll', phase: 'issues' } },
@@ -526,7 +526,7 @@ test('a failed session_repos inventory read reports no backlog when the inventor
   // empty inventory. Reporting the cursors anyway is the pin issue #1316
   // removed: no repository the next tick could select holds that continuation,
   // so nothing would ever retire the backlog it claims.
-  writeCursors(stateDir, { schema_version: 1, repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } } })
+  await writeCursors(stateDir, { schema_version: 1, repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } } })
   const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
   runtime.observedRepos.lastKnown = () => []
 
@@ -561,7 +561,54 @@ test('a failed session_repos inventory read keeps an unfinished revalidation on 
   )
 })
 
-test('hyp github backfill reports the inventory failure without contradicting it', async (t) => {
+// @ref LLP 0438#readers [tests]: the recorded verdict wins over the cursor scan in both directions issue #1305 raised
+test('a failed session_repos inventory read trusts the recorded verdict over the cursor scan (over-report direction)', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-verdict-over-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // A failed repository capture leaves `work` behind but is NOT backlog
+  // (LLP 0360#cadence): the cursor scan would read this as pending, but the
+  // recorded verdict says otherwise and wins.
+  await writeCursors(stateDir, {
+    schema_version: 1,
+    pending: false,
+    repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } },
+  })
+  const sidecarPath = path.join(stateDir, 'github-cursors.json')
+  const before = fs.readFileSync(sidecarPath)
+
+  const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
+  const report = await runCaptureTick(runtime, { mode: 'poll' })
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(report.pending, false, 'the recorded verdict is trusted over the scan, which would say true')
+  assert.deepEqual(
+    fs.readFileSync(sidecarPath),
+    before,
+    'the failed-inventory early return deliberately never persists (LLP 0438#writers)',
+  )
+})
+
+test('a failed session_repos inventory read trusts the recorded verdict over the cursor scan (under-report direction)', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-verdict-under-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // A rotation the budget stopped exactly at a repository boundary is recorded
+  // by no cursor: the scan would read this as no backlog, but the recorded
+  // verdict says otherwise and wins.
+  await writeCursors(stateDir, {
+    schema_version: 1,
+    pending: true,
+    next_repo: 'acme/widgets',
+    repos: { 'acme/widgets': { since: { issues: '2024-01-01T00:00:00Z' } } },
+  })
+
+  const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
+  const report = await runCaptureTick(runtime, { mode: 'poll' })
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(report.pending, true, 'the recorded verdict is trusted over the scan, which would say false')
+})
+
+test('unnamed hyp github backfill reports the inventory failure without contradicting it', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backfill-cli-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
   setGithubRuntime(failingInventoryRuntime(stateDir, new Error('cache partition unreadable')))
@@ -572,7 +619,7 @@ test('hyp github backfill reports the inventory failure without contradicting it
     stderr: { write(/** @type {string} */ s) { err += s } },
   })
 
-  const code = await runGithubBackfill(['acme/widgets'], ctx)
+  const code = await runGithubBackfill([], ctx)
 
   assert.equal(code, 1, 'an unresolved inventory is a failed backfill')
   assert.match(err, /! \(inventory\): cache partition unreadable/, 'the real cause is reported')
@@ -589,16 +636,16 @@ test('hyp github backfill reports the inventory failure without contradicting it
 })
 
 // @ref LLP 0392#retry [tests]: a failed projection shares the tick's error list, so it must not be read as the capture verdict
-test('a failed projection does not swallow the inventory-miss reason for a named repository', async (t) => {
+test('a failed projection does not swallow the exclusion reason for a named repository', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backfill-miss-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
-  // The inventory resolves fine and simply does not hold the named repository,
+  // The explicit exclusion prevents importing the named repository,
   // which is the one thing the operator needs told. Automatic projection puts
   // its own failure in the same error list (LLP 0392#retry), and that list is
   // what the guard reads.
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
-    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
+    config: { ignore: ['acme/widgets'], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
     observedRepos: { async list() { return [] } },
     clientFactory: () => fakeClient({}),
     storage: { cacheTablePath() { return '/cache/github_events' } },
@@ -617,7 +664,7 @@ test('a failed projection does not swallow the inventory-miss reason for a named
   assert.match(err, /! \(graph\): graph storage unavailable/, 'the projection failure is still reported')
   assert.match(
     err,
-    /none of \[acme\/widgets\] are in the active repository inventory/,
+    /none of \[acme\/widgets\] are eligible; check repository exclusions/,
     'and it does not stand in for a capture error the tick never had',
   )
 })

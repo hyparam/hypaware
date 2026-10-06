@@ -8,6 +8,7 @@
 **Related:** LLP 0003, LLP 0017, LLP 0086, LLP 0114, LLP 0130, LLP 0131, LLP 0133, LLP 0141
 **Extended-by:** LLP 0394 (the tick refresh records the rest of what `status()`
 returns, not only its `details`; `state` is still left alone)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Closes the one consequence [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)
 > left deliberately open: `hyp status` could not say "Codex Desktop traffic
@@ -20,7 +21,7 @@ returns, not only its `details`; `state` is still left alone)
 
 [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md) made
 Codex Desktop coverage legible in the picker, the reference docs, and the
-`unsupported_location` event, and wrote the manual `codex_desktop_capture`
+`unsupported_location` event, and wrote a manual Codex Desktop capture
 procedure. It closed with one item open, and named four candidate shapes for
 closing it:
 
@@ -174,9 +175,8 @@ invite reading the value as a query bound it is not.
 - **A restart clears the list.** The tracker is in-memory, so a daemon that
   restarts after a conversation reports no recent client for it even though
   the rows are in the cache. This is the price of not adding a durable store
-  for a diagnostic, and it is documented as an expected outcome in
-  [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md)'s `codex_desktop_capture`
-  step 4 and its failure notes. The query remains the durable check.
+  for a diagnostic, and it is an expected outcome. The query remains the
+  durable check.
 - **Row counts are per daemon process, not per install.** `rows` in the
   status output counts what this process committed. It is an activity
   signal; `select count(*) from ai_gateway_messages` is the number.
@@ -195,5 +195,5 @@ invite reading the value as a query bound it is not.
   `rowsAffordable`, LLP 0135#window); this decision leaves it untouched.
 - **The live route is still only provable on real hardware.** Nothing here
   changes that: `gateway_codex_capture` asserts the plumbing against a
-  synthetic Desktop-shaped exchange, and the real-app claim stays with the
-  manual `codex_desktop_capture` procedure.
+  synthetic Desktop-shaped exchange, and the real-app claim needs a
+  manual run on real hardware.

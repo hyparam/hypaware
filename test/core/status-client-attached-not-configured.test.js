@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { prepareDetach } from '../../src/core/config/codex_toml.js'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
@@ -35,7 +36,7 @@ async function homeWithAttachedCodex() {
   await fs.mkdir(path.join(home, '.codex'), { recursive: true })
   await fs.writeFile(
     path.join(home, '.codex', 'config.toml'),
-    '# BEGIN hypaware\n[model_providers.hypaware]\nname = "hypaware"\n# END hypaware\n',
+    '# BEGIN hypaware codex provider\n[model_providers.hypaware]\nname = "hypaware"\n# END hypaware codex provider\n',
     'utf8'
   )
   return home
@@ -121,4 +122,19 @@ test('a missing config still names the client its marker strands', async () => {
   const found = report.diagnostics.find((d) => d.kind === 'client_attached_not_configured')
   assert.ok(found, JSON.stringify(report.diagnostics, null, 2))
   assert.deepEqual(found.repair, ['hyp client detach codex'])
+})
+
+
+test('a direct compatibility provider does not look like a stranded gateway attachment', async t => {
+  const hypHome = await makeHome()
+  const homeDir = await homeWithAttachedCodex()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  t.after(() => fs.rm(homeDir, { recursive: true, force: true }))
+  const settingsPath = path.join(homeDir, '.codex', 'config.toml')
+  const repaired = prepareDetach(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal(repaired.changed, true)
+  await fs.writeFile(settingsPath, repaired.content)
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }))
+  const report = await collectHypAwareStatus({ env: env(hypHome), homeDir })
+  assert.equal(report.diagnostics.some(d => d.kind === 'client_attached_not_configured'), false)
 })

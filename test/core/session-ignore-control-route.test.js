@@ -2,6 +2,11 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import net from 'node:net'
 import test from 'node:test'
 
@@ -464,3 +469,36 @@ async function rawRequest(base, method, path, reqBody) {
   }
   return { status: res.status, headers: res.headers, body: parsed }
 }
+
+
+test('control writes survive a fresh gateway and DELETE survives another restart', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-route-'))
+  try {
+    const fresh = () => createGatewayState(new SessionIgnoreSet(root)).ignoredSessions
+    await withControlServer(fresh(), async (base) => {
+      assert.equal((await postSession(base, 'private')).body.ignored, true)
+    })
+    const restarted = fresh()
+    assert.equal(restarted.has('private'), true)
+    await withControlServer(restarted, async (base) => {
+      assert.equal((await deleteSession(base, 'private')).body.ignored, false)
+    })
+    assert.equal(fresh().has('private'), false)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('failed persistence returns HTTP 500 and retains the previous membership', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-route-'))
+  try {
+    const set = new SessionIgnoreSet(root)
+    set.add('keep')
+    fs.renameSync(set.directory, `${set.directory}-away`)
+    fs.writeFileSync(set.directory, 'unavailable')
+    await withControlServer(set, async (base) => {
+      assert.equal((await postSession(base, 'new')).status, 500)
+      assert.equal((await deleteSession(base, 'keep')).status, 500)
+      assert.equal(set.has('keep'), true)
+      assert.equal(set.has('new'), false)
+    })
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

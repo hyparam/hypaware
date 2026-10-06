@@ -16,7 +16,7 @@ import { productStatus } from '../product_telemetry/commands.js'
  */
 
 /**
- * `hyp status [--json]`
+ * `hyp status [--verbose] [--json]`
  *
  * Renders the V1 install state (config path, daemon install/run
  * state, active plugins, source/sink/client status, cache + retention
@@ -101,14 +101,20 @@ export async function runStatus(argv, ctx) {
         ctx.stdout.write(JSON.stringify({ ...payload, product_telemetry: productStatus(ctx.env) }, null, 2) + '\n')
         return 0
       }
-      renderStatusText({
+      const render = parsed.params.verbose === true ? renderStatusText : renderStatusSummary
+      const renderArgs = {
         report,
         clientNames,
         datasets,
         cacheRoot: ctx.storage.cacheRoot,
         stdout: ctx.stdout,
-      })
-      ctx.stdout.write(`product telemetry: ${productStatus(ctx.env).collection} (hyp telemetry status; hyp telemetry preview)\n`)
+        env: ctx.env,
+      }
+      render(renderArgs)
+      const telemetry = productStatus(ctx.env)
+      if (parsed.params.verbose === true || telemetry.collection !== 'off') {
+        ctx.stdout.write(`product telemetry: ${telemetry.collection} (hyp telemetry status; hyp telemetry preview)\n`)
+      }
       return 0
     },
     { component: 'status' }
@@ -187,6 +193,7 @@ export function projectClientStatus(report, clients) {
     return {
       name: client.name,
       configured: client.configured,
+      recording: client.configured && client.recording !== false,
       attachable: client.attachable !== false,
       attached: client.attached,
       mode: client.mode ?? null,
@@ -234,7 +241,8 @@ export function renderClientStatusText(rows, stdout) {
         ? (row.mode ? `attached (${row.mode})` : 'attached')
         : 'not attached'
       : 'attach n/a'
-    stdout.write(`  ${row.name}: ${row.configured ? 'configured' : 'not configured'}, ${attach}, ${row.provenance}\n`)
+    stdout.write(`  ${row.name}: ${row.recording ? 'recording' : 'not recording'}, ${attach}, ${row.provenance}\n`)
+    if (row.configured && !row.recording) stdout.write(`    to record it again: hyp client attach ${row.name}\n`)
     if (row.telemetry_endpoint || row.listener_endpoint) {
       const clientEndpoint = row.telemetry_endpoint ?? 'unknown client endpoint'
       const listenerEndpoint = row.listener_endpoint ?? 'listener not running'
@@ -244,7 +252,11 @@ export function renderClientStatusText(rows, stdout) {
     if (row.capture_health) {
       const events = row.capture_health.last_event_at ?? 'none'
       const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
-      const gap = row.capture_health.state === 'gap' ? ' [capture gap]' : ''
+      // `unknown` is the bounded confirmation read declining to answer, and
+      // the line says so rather than picking a side (LLP 0257 #status-and-health).
+      const gap = row.capture_health.state === 'gap'
+        ? ' [capture gap]'
+        : row.capture_health.state === 'unknown' ? ' [capture unconfirmed]' : ''
       stdout.write(`    capture: ${row.capture_health.state}; last event ${events}; last transcript activity ${transcripts}${gap}\n`)
     }
     if (row.error) stdout.write(`    error: ${row.error}\n`)
@@ -284,6 +296,177 @@ function listenerEndpointFromReport(report, sourceName) {
   return {
     endpoint: host !== null && port !== null ? `http://${host}:${port}` : null,
     port,
+  }
+}
+
+/**
+ * Compact status uses the existing report, without additional probes or reads.
+ * @param {{ report: HypAwareStatusReport, stdout: { write(chunk: string): unknown } }} args
+ */
+// @ref LLP 0455#compact-view [implements]: policy and actionable health lead; inventory stays in --verbose
+export function renderStatusSummary({ report, stdout }) {
+  const clients = new Map(report.clients.map((c) => [c.name, c]))
+  const health = new Map(report.captureHealth.map((c) => [c.client, c]))
+  const syncing = new Set(report.clientSync?.syncing)
+  const localOnly = new Set(report.clientSync?.localOnly)
+  const names = new Set(report.clients.filter((c) => c.configured || c.attached || c.error).map((c) => c.name))
+  for (const name of syncing) names.add(name)
+  for (const name of localOnly) names.add(name)
+
+  const { needsAttention, degraded } = statusAttention(report)
+
+  // @ref LLP 0455#verdict-headline [implements]: the verdict rides on the existing heading, so the two-state cue keeps its words
+  stdout.write(`HypAware · ${needsAttention ? `Needs attention${degraded ? ' (degraded)' : ''}` : 'Healthy'}\n\n`)
+  const daemon = report.daemon.running
+    ? (report.daemon.state && report.daemon.state !== 'healthy' ? printable(report.daemon.state) : 'Running')
+    : 'Not running'
+  stdout.write(`  Daemon     ${daemon}\n`)
+  const bytes = report.cache.totalBytes
+  const unit = bytes >= 1e9 ? 'GB' : bytes >= 1e6 ? 'MB' : bytes >= 1e3 ? 'KB' : 'B'
+  const divisor = unit === 'GB' ? 1e9 : unit === 'MB' ? 1e6 : unit === 'KB' ? 1e3 : 1
+  stdout.write(`  Storage    ${unit === 'GB' ? (bytes / divisor).toFixed(1) : Math.round(bytes / divisor)} ${unit} · ${report.retention.days}-day retention\n`)
+  stdout.write(`  Sharing    ${report.layered?.hasCentral ? 'Organization sync configured' : 'No organization sync'}\n`)
+  renderSharingNotices(report, stdout)
+  if (report.selfUpdate?.line) stdout.write(`  ${printable(report.selfUpdate.line, MAX_ERROR_CHARS)}\n`)
+
+  stdout.write('\n  Clients                 Status                           Data\n')
+  if (names.size === 0) stdout.write('    None configured\n')
+  /** @type {string[]} */
+  const notRecording = []
+  for (const name of names) {
+    const client = clients.get(name)
+    const capture = health.get(name)
+    // One state per client (LLP 0466): recording, or not. "Settings missing"
+    // is the one contradiction, a client that should be recording whose
+    // wiring is gone, and the attention block carries its warning.
+    // @ref LLP 0466#status [implements]: a detached client reads "Not recording", with a hint and no warning
+    if (client && client.configured && client.recording === false) notRecording.push(name)
+    const state = client?.error ? 'Could not check'
+      : client && client.configured && client.recording === false ? 'Not recording'
+      : capture?.state === 'gap' ? 'Telemetry may be interrupted'
+      : client?.attached ? `Recording${client.mode ? ` (${printable(client.mode)})` : ''}`
+      : client?.attachable !== false && client?.configured ? 'Settings missing'
+      // A probe-less source listed only by its sharing policy has no client
+      // row, and it records whenever it is listed.
+      : !client || client.configured ? 'Recording'
+      : 'Not recording'
+    // A missing policy on an enrolled host is unknown, never permission to sync.
+    const sharing = localOnly.has(name) ? 'Local only' : syncing.has(name) ? 'Sync'
+      : report.layered?.hasCentral ? 'Unknown' : 'Local only'
+    stdout.write(`  ${printable(name, 22).padEnd(22)}  ${state.padEnd(31)}  ${sharing}\n`)
+  }
+  if (syncing.size > 0) stdout.write('\n  Sync = organization sharing policy, not delivery confirmation.\n')
+  for (const name of notRecording) {
+    stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
+  }
+
+  renderStatusAttention(report, stdout)
+  stdout.write('\nMore details: hyp status --verbose\n')
+}
+
+/** @param {HypAwareStatusReport} report */
+function statusAttention(report) {
+  const sourceProblems = report.sources.flatMap((s) => {
+    const reported = sourceHealth(s.health)
+    const line = sourceHealthLine(reported)
+    return line ? [`${printable(s.name)}: ${printable(reported?.lastError, MAX_ERROR_CHARS) || line}`] : []
+  })
+  const actions = report.clientActions?.actions.filter((a) => a.state !== 'done' && a.state !== 'n/a') ?? []
+  const gaps = report.captureHealth.filter((c) => c.state === 'gap')
+  const needsAttention = report.overall !== 'healthy' || report.diagnostics.length > 0 ||
+    sourceProblems.length > 0 || gaps.length > 0 || actions.length > 0 ||
+    report.cacheFlushFailuresTotal > 0 || report.clients.some((c) => c.error) || !report.daemon.running
+  // The verdict and the severity that produces it: an error-severity
+  // diagnostic is what degrades `overall`, so reading both keeps the heading
+  // from reading as an advisory on a report whose verdict contradicts its own
+  // breakdown. Both are the collector's enums, never transcribed from
+  // `status.json`, and the heading prints a literal rather than either value.
+  const degraded = report.overall !== 'healthy' || report.diagnostics.some((d) => d.severity === 'error')
+
+  return { sourceProblems, actions, gaps, needsAttention, degraded }
+}
+
+/**
+ * Both text views lead readers to the same warnings and primary next steps.
+ * @param {HypAwareStatusReport} report
+ * @param {{ write(chunk: string): unknown }} stdout
+ */
+function renderStatusAttention(report, stdout) {
+  const { sourceProblems, actions, gaps, needsAttention } = statusAttention(report)
+  if (needsAttention) {
+    stdout.write('\nAttention\n')
+    if (!report.daemon.running) stdout.write('  ! Daemon is not running.\n')
+    for (const c of gaps) {
+      const events = c.lastEventAt === null ? 'no telemetry received yet' : `last telemetry ${formatEntrypointAge(c.lastEventAt)}`
+      const activity = c.lastTranscriptActivityAt === null ? 'no transcript activity seen' : `transcripts active ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
+      stdout.write(`  ! ${printable(c.client)}: ${activity}; ${events}.\n`)
+      stdout.write('    Next: hyp daemon restart\n')
+    }
+    for (const d of report.diagnostics) {
+      if (d.kind === 'capture_gap' && gaps.length > 0) continue
+      const message = d.kind === 'maintenance_partitions_skipped' && report.maintenance
+        ? `Cache maintenance left ${report.maintenance.skippedTotal} partition${report.maintenance.skippedTotal === 1 ? '' : 's'} fragmented (${formatEntrypointAge(report.maintenance.tickAt)}).`
+        : printable(d.message, MAX_ERROR_CHARS)
+      stdout.write(`  ! ${message}\n`)
+      if (d.repair[0]) stdout.write(`    Next: ${printable(d.repair[0], MAX_ERROR_CHARS)}\n`)
+    }
+    for (const problem of sourceProblems) stdout.write(`  ! ${problem}\n`)
+    for (const c of report.clients) {
+      if (c.error) stdout.write(`  ! ${printable(c.name)}: ${printable(c.error, MAX_ERROR_CHARS)}\n`)
+    }
+    for (const a of actions) {
+      stdout.write(`  ! ${printable(a.kind)} ${printable(a.requestKey)}: ${printable(a.state)}${a.reason ? ` (${printable(a.reason, MAX_ERROR_CHARS)})` : ''}\n`)
+      if (a.state === 'refused') stdout.write(`    Next: hyp client attach ${printable(a.requestKey)} (after fixing the cause)\n`)
+    }
+    // Preserve the bounded failure evidence and attempt tense from LLP 0330.
+    const failures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)
+    for (const f of failures) {
+      stdout.write(`    ${printable(f.table, 80)}: last flush attempt failed ${formatEntrypointAge(f.failedAt)}: ${printable(f.errorMessage, MAX_FLUSH_FAILURE_CHARS)}${f.stillCoolingDown ? ' [refresh cooling down]' : ''}\n`)
+    }
+    if (report.cacheFlushFailuresTotal > failures.length) {
+      stdout.write(`    ... and ${report.cacheFlushFailuresTotal - failures.length} more tables (hyp status --json lists them all)\n`)
+    }
+  } else {
+    stdout.write('\nNo issues detected.\n')
+  }
+}
+
+/**
+ * Privacy notices stay visible in both text views.
+ * @param {HypAwareStatusReport} report
+ * @param {{ write(chunk: string): unknown }} stdout
+ * @param {string} [indent]
+ */
+function renderSharingNotices(report, stdout, indent = '  ') {
+  // Never-silent withholding (LLP 0069 R9): only rendered when a directory
+  // is actually excluded, so an ordinary host's text output is unchanged.
+  if (report.usagePolicy && report.usagePolicy.localOnlyDirCount > 0) {
+    stdout.write(
+      `${indent}local-only:      withholding ${report.usagePolicy.localOnlyDirCount} directories from forwarding (recorded locally)\n`
+    )
+  }
+
+  // What happens the next time the user works somewhere new (LLP 0200).
+  // Enrolled hosts only: on a machine with no server the question has no
+  // stakes and the hook is inert (LLP 0106 #enrolled-only), so a solo
+  // host's text output is unchanged. Both modes are stated - the default
+  // is the one with data consequences, so it is exactly the one that must
+  // not be silent.
+  if (report.layered?.hasCentral && report.usagePolicy) {
+    stdout.write(
+      report.usagePolicy.folderAsk === 'sync'
+        ? `${indent}new folders:     sync without asking (\`hyp privacy folders ask\` to be asked instead)\n`
+        : `${indent}new folders:     asked about once each (\`hyp privacy folders sync\` to stop asking)\n`
+    )
+  }
+
+  // Never-silent first-sync hold (LLP 0100 R9): only rendered while a hold is
+  // actually live, so an ordinary (never-enrolled, or past-deadline) host's
+  // text output is unchanged.
+  if (report.firstSyncHoldDeadline !== null) {
+    stdout.write(
+      `${indent}first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
+    )
   }
 }
 
@@ -371,6 +554,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     client_attach: report.clients.map((c) => ({
       name: c.name,
       configured: c.configured,
+      recording: c.configured && c.recording !== false,
       // `attached` stays a boolean for every row so a consumer can keep
       // pinning it; `attachable: false` is what says the boolean carries no
       // information for this client (#544).
@@ -679,9 +863,11 @@ const MAX_CACHE_FLUSH_FAILURES = 8
  *   datasets: { name: string, plugin: string }[],
  *   cacheRoot: string,
  *   stdout: { write(chunk: string): unknown },
+ *   env?: NodeJS.ProcessEnv,
  * }} args
  */
-export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
+export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout, env }) {
+  const section = (/** @type {string} */ label) => stdout.write(`\n  ${label}:\n`)
   stdout.write('hypaware\n')
   stdout.write(`  overall:  ${report.overall}\n`)
   const configState = report.configExists
@@ -698,7 +884,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(`  ${report.selfUpdate.line}\n`)
   }
 
-  stdout.write('  active plugins:\n')
+  renderStatusAttention(report, stdout)
+
+  section('active plugins')
   if (report.activePlugins.length === 0) {
     stdout.write('    (none - no config or no plugins selected)\n')
   } else {
@@ -718,7 +906,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  stdout.write('  sources:\n')
+  section('sources')
   if (report.sources.length === 0) {
     stdout.write('    (none)\n')
   } else {
@@ -729,7 +917,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  stdout.write('  sinks:\n')
+  section('sinks')
   if (report.sinks.length === 0) {
     stdout.write('    (none - keeping captured data local only)\n')
   } else {
@@ -738,7 +926,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  stdout.write('  clients:\n')
+  section('clients')
   // A probe that could not answer at all carries `error`, and the text surface
   // is where a human reads status. Collapsing such a client into `(none)`, or
   // printing it as a bare `not attached`, restores exactly the wrong negative
@@ -757,6 +945,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       seen.add(c.name)
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
+      // @ref LLP 0466#status [implements]: the verbose row names the recording state beside the attach facts
+      if (c.configured && c.recording === false) state.push('not recording')
       // A client with no attach probe has no attach state to report: printing
       // `not attached` for it invites a `hyp client attach` that is a documented
       // no-op and can never change the line (#544). Where there is an attach,
@@ -780,6 +970,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
             : 'not attached'
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
+      if (c.configured && c.recording === false) stdout.write(`        to record it again: hyp client attach ${c.name}\n`)
       // The probe's error is not this build's prose: a settings file that is
       // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
       // an excerpt of the file back. The client wrote that file, so it is
@@ -805,15 +996,17 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   }
 
   // Which client surfaces have actually produced rows, and when (LLP 0164).
-  // This is the line that answers "did Codex Desktop traffic arrive?" and
-  // "did Claude Desktop's 3p route land?" without a query. Rendered only when
+  // This is the line that answers "did Claude Desktop's 3p route land?"
+  // without a query. It counts gateway entrypoints, so it names only clients
+  // whose traffic crosses the gateway: Codex left that path in LLP 0429 and
+  // Claude Code in LLP 0262, and neither appears here any more. Rendered only when
   // the daemon recorded something, so an install that has never captured
   // keeps the V1 text surface unchanged; the entrypoint strings are printed
   // verbatim because they are the client's to choose, and they are the exact
   // values a follow-up `ai_gateway_messages` query filters on.
   // @ref LLP 0164#status-reads-it-from-the-status-file [implements]: hyp status names recent client surfaces and their age
   if (report.recentEntrypoints.length > 0) {
-    stdout.write('  recent clients:\n')
+    section('recent clients')
     for (const e of report.recentEntrypoints) {
       const client = e.clientName ? `  (${e.clientName})` : ''
       stdout.write(
@@ -828,7 +1021,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // only knows what WAS captured, and a silent capture gap is precisely rows
   // that never arrived. Rendered only when a configured client is
   // otel-attached, so every other install's text surface is unchanged; the
-  // `[capture gap]` tag points at the diagnostics block, which carries the
+  // `[telemetry may be interrupted]` tag points at the diagnostics block, which carries the
   // repair.
   // @ref LLP 0257#status-and-health [implements]: hyp status renders last event seen vs last transcript activity
   //
@@ -852,7 +1045,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // @ref LLP 0330#capture-health-line [implements]: the stamp renders on the capture-health line
   // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: a rendered stamp stays a reason for a paced retry, never a freshness claim
   if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
-    stdout.write('  capture health:\n')
+    section('capture health')
     for (const c of report.captureHealth) {
       const events = c.lastEventAt !== null
         ? `last event ${formatEntrypointAge(c.lastEventAt)}`
@@ -860,7 +1053,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const transcripts = c.lastTranscriptActivityAt !== null
         ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
         : 'no transcript activity'
-      const tag = c.state === 'gap' ? '  [capture gap]' : ''
+      const tag = c.state === 'gap'
+        ? '  [telemetry may be interrupted]'
+        : c.state === 'unknown' ? '  [capture unconfirmed]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
     const namedFailures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)
@@ -906,7 +1101,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so the standing grant stays informed and not just the moment it was asked for
   // @ref LLP 0239#terminals-predating-attach [implements]: and next to it, whether the launchd environment carries the variable
   if (report.proxyTrust) {
-    stdout.write('  proxy trust:\n')
+    section('proxy trust')
     stdout.write(`    ca fingerprint: ${report.proxyTrust.caFingerprint}\n`)
     stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
@@ -955,45 +1150,20 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
-  stdout.write(`  cache:           ${cacheRoot}\n`)
+  section('storage')
+  stdout.write(`    cache:           ${cacheRoot}\n`)
   stdout.write(
-    `  cache retention: ${report.retention.days} days${
+    `    cache retention: ${report.retention.days} days${
       report.retention.source === 'default' ? ' (default)' : ''
     }\n`
   )
-  stdout.write(`  cache size:      ${report.cache.totalBytes} bytes\n`)
-  stdout.write(`  datasets:        ${datasets.length}\n`)
-  stdout.write(`  recent errors:   ${report.recentErrorCount}\n`)
+  stdout.write(`    cache size:      ${report.cache.totalBytes} bytes\n`)
+  stdout.write(`    datasets:        ${datasets.length}\n`)
+  stdout.write(`    recent errors:   ${report.recentErrorCount} (24h history, includes recovered failures)\n`)
 
-  // Never-silent withholding (LLP 0069 R9): only rendered when a directory
-  // is actually excluded, so an ordinary host's text output is unchanged.
-  if (report.usagePolicy && report.usagePolicy.localOnlyDirCount > 0) {
-    stdout.write(
-      `  local-only:      withholding ${report.usagePolicy.localOnlyDirCount} directories from forwarding (recorded locally)\n`
-    )
-  }
-
-  // What happens the next time the user works somewhere new (LLP 0200).
-  // Enrolled hosts only: on a machine with no server the question has no
-  // stakes and the hook is inert (LLP 0106 #enrolled-only), so a solo
-  // host's text output is unchanged. Both modes are stated - the default
-  // is the one with data consequences, so it is exactly the one that must
-  // not be silent.
-  if (report.layered?.hasCentral && report.usagePolicy) {
-    stdout.write(
-      report.usagePolicy.folderAsk === 'sync'
-        ? '  new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)\n'
-        : '  new folders:     asked about once each (`hyp privacy folders sync` to stop asking)\n'
-    )
-  }
-
-  // Never-silent first-sync hold (LLP 0100 R9): only rendered while a hold is
-  // actually live, so an ordinary (never-enrolled, or past-deadline) host's
-  // text output is unchanged.
-  if (report.firstSyncHoldDeadline !== null) {
-    stdout.write(
-      `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
-    )
+  if (report.usagePolicy?.localOnlyDirCount || (report.layered?.hasCentral && report.usagePolicy) || report.firstSyncHoldDeadline !== null) {
+    section('sharing')
+    renderSharingNotices(report, stdout, '    ')
   }
 
   // Partitions the daemon's last maintenance tick deliberately left
@@ -1006,7 +1176,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.maintenance && report.maintenance.skippedTotal > 0) {
     const m = report.maintenance
     const breakdown = describeMaintenanceSkipReasons(m.reasons)
-    stdout.write('  maintenance:\n')
+    section('maintenance')
     stdout.write(
       `    ${m.skippedTotal} of ${m.partitionsVisited} partitions left fragmented, as of the tick ${formatEntrypointAge(m.tickAt)} (${breakdown})\n`
     )
@@ -1030,7 +1200,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // merge, listed here with their reason. Loud, but not an outage signal.
   // The gateway runs fine on the central config.
   if (report.layered && (report.layered.drops.length > 0 || report.layered.centralQueryIgnored)) {
-    stdout.write('  local config (not applied):\n')
+    section('local config (not applied)')
     for (const d of report.layered.drops) {
       const why = d.detail
         ? `${d.reason.replace(/_/g, ' ')}: ${d.detail.replace(/_/g, ' ')}`
@@ -1051,7 +1221,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     // here, so all of it is cleaned at the interpolation. An etag is whatever
     // the joined server put in the header; a `reason` and a timestamp are
     // this build's own vocabulary only if this build wrote the file.
-    stdout.write('  remote config:\n')
+    section('remote config')
     if (rc.runningEtag) stdout.write(`    running etag:  ${printable(rc.runningEtag)}\n`)
     if (rc.probation) {
       stdout.write(`    probation:     ${printable(rc.probation.etag)} until ${printable(rc.probation.until)}\n`)
@@ -1068,18 +1238,28 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // backfill-on-join target is configured or a pass has run; a `failed`
   // line is loud but informational. It never degrades `overall`.
   if (report.clientActions && report.clientActions.actions.length > 0) {
-    stdout.write('  client actions:\n')
+    section('client actions')
     for (const a of report.clientActions.actions) {
+      // Through `printable` like the Attention line above: every string on this
+      // row comes off a marker file, not from this build. `requestKey` is a
+      // marker name or a configured plugin and `kind` a marker store, while
+      // `reason`, `last_attempt` and `at` are read out of marker JSON behind a
+      // `typeof === 'string'` guard alone. Those two identifiers keep the label
+      // default like every other name on this surface; the reason and the two
+      // timestamps are unclamped, because at 120 characters the reason would be
+      // cut shorter than the Attention line already prints it and a timestamp is
+      // only useful exact. `state`, `rows` and `attempts` need nothing: they are
+      // literals of this build and numbers.
       let detail = ''
       if (a.state === 'done') {
         const bits = []
         if (a.rows !== undefined) bits.push(`${a.rows} rows`)
-        if (a.at) bits.push(`at ${a.at}`)
+        if (a.at) bits.push(`at ${printable(a.at, Infinity)}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
       } else if (a.state === 'failed') {
         const bits = []
-        if (a.reason) bits.push(a.reason)
-        if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
+        if (a.reason) bits.push(printable(a.reason, Infinity))
+        if (a.lastAttempt) bits.push(`last attempt ${printable(a.lastAttempt, Infinity)}`)
         if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
         if (bits.length > 0) detail = `  (${bits.join(', ')})`
       } else if (a.state === 'refused') {
@@ -1090,24 +1270,37 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         // the attention signal without the action.
         // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
         const bits = []
-        if (a.reason) bits.push(a.reason)
-        const repair = `run 'hyp client attach ${a.requestKey}' after fixing the cause`
+        if (a.reason) bits.push(printable(a.reason, Infinity))
+        const repair = `run 'hyp client attach ${printable(a.requestKey)}' after fixing the cause`
         detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
-      stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
+      stdout.write(`    - ${printable(a.kind)} ${printable(a.requestKey)}  [${a.state}]${detail}\n`)
     }
   }
 
   if (report.diagnostics.length > 0) {
-    stdout.write('  diagnostics:\n')
-    for (const d of report.diagnostics) {
+    section('diagnostics')
+    for (const [index, d] of report.diagnostics.entries()) {
+      if (index > 0) stdout.write('\n')
       const tag = d.severity === 'error' ? 'ERROR' : 'WARN '
-      stdout.write(`    [${tag}] ${d.kind}: ${d.message}\n`)
+      // Through `printable` like the Attention line above: a diagnostic's strings
+      // are not all this build's own. An unreadable config reaches `message` as
+      // `JSON.parse`'s excerpt of the file, a repair names config-supplied values,
+      // and `kind` is only nearly a closed set: `V1DiagnosticKind` spells one entry
+      // `gateway_missing_${string}_upstream`, and that `${string}` is a plugin
+      // manifest's `contributes.client.required_upstreams[0]`, which the manifest
+      // validator accepts opaquely and the catalog copies verbatim. The prose is
+      // unclamped because clamping is the Attention line's job, and `printable`'s
+      // 120-character default would cut real diagnostics shorter here than the
+      // summary already prints them; `kind` keeps that default, like every other
+      // identifier on this surface.
+      stdout.write(`    [${tag}] ${printable(d.kind)}: ${printable(d.message, Infinity)}\n`)
       for (const repair of d.repair) {
-        stdout.write(`        repair: ${repair}\n`)
+        stdout.write(`        repair: ${printable(repair, Infinity)}\n`)
       }
     }
   }
+  stdout.write('\n')
 }
 
 /**

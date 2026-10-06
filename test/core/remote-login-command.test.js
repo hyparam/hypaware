@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'
@@ -14,7 +15,7 @@ import { deriveIdentityBase, readCredentials } from '../../src/core/remote/crede
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
 async function tmpHome() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-login-'))
+  return temporaryDirectory('hyp-login-')
 }
 
 /**
@@ -206,6 +207,26 @@ test('post-auth failures name their step rather than collapsing into the login f
   )
 })
 
+// @ref LLP 0404#install-policy [tests]: the login lane forwards the CLI decision to the installer it wraps
+test('--force and a pre-settled binPath reach enrollment verbatim', async () => {
+  const gwLogin = /** @type {any} */ (async () => gatewaySession())
+  const { ctx } = await makeCtx({ hypHome: await tmpHome() })
+  /** @type {any} */
+  let seen
+  const enroll = /** @type {any} */ (async (/** @type {any} */ args) => {
+    seen = args
+    return { provisioned: true, daemonCode: 3 }
+  })
+  const waitForAttach = /** @type {any} */ (async () => [])
+  await remoteLogin(['prod', '--force'], ctx, { login: gwLogin, enroll, waitForAttach, binPath: '/opt/hyp/bin/hypaware' })
+  assert.equal(seen.force, true)
+  assert.equal(seen.binPath, '/opt/hyp/bin/hypaware')
+  const { ctx: plain } = await makeCtx({ hypHome: await tmpHome() })
+  await remoteLogin(['prod'], plain, { login: gwLogin, enroll, waitForAttach })
+  assert.equal(seen.force, false)
+  assert.equal(seen.binPath, undefined)
+})
+
 test('a usage error and the exclusivity gate are distinguishable, both exit 2', async () => {
   const { ctx: usageCtx } = await makeCtx({ hypHome: await tmpHome() })
   assert.deepEqual(await remoteLogin(['prod', '--org'], usageCtx, {}), { exitCode: 2, reason: 'usage' })
@@ -302,6 +323,21 @@ test('a configured persisted_path is honored and non-matching central sinks are 
   await assert.rejects(fs.access(otherPath))
 })
 
+// @ref LLP 0063#d3 [tests]: the wide pre-auth notice names the destination the way serverDisplayName does
+test('wide login notice names the destination before the browser opens', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, both } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(
+    both.join(''),
+    /^ {2}your recorded sessions are sent to hyp\.internal and a background$/m,
+    'the wide notice names the target host, not a hard-coded product'
+  )
+})
+
 test('compact login (the wizard join lane) prints one line per event and no privacy block', async () => {
   const hypHome = await tmpHome()
   const { ctx, both } = await makeCtx({ hypHome })
@@ -311,31 +347,25 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   assert.equal(code, 0)
   const text = both.join('')
   const lines = text.split('\n')
-  // LLP 0063 D3 mechanic 1 names what the notice must say, and asks for the
-  // copy to be pinned verbatim: it is the consent surface, so compact may lose
-  // the line breaks but not the hedge and not one of the three consequences
-  // (forwarding, org config that attaches clients and backfills local history,
-  // the background service).
+  // LLP 0063 D3 mechanic 1 asks for the notice copy to be pinned verbatim: it
+  // is the consent surface, so compact may lose the line breaks but not the
+  // hedge, the forwarding consequence, or the background service. The org
+  // config consequence D3 also lists is deliberately not in the copy (see the
+  // comment above the write in remote_commands.js).
   assert.match(
     text,
-    /^note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config \(which can attach clients and backfill existing local history\), and installs a background service \(Ctrl-C to cancel\)$/m,
-    'the pre-auth notice keeps its hedge and all three consequences, as one line'
+    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to hyp\.internal and a background service is installed\. Ctrl-C to cancel\.$/m,
+    'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
-  assert.match(text, /✓ Signed in to 'prod' as org /)
-  assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)
-  assert.match(text, /✓ First sync no later than .+; nothing has been uploaded yet/)
-  // Compact drops the privacy block, so the deadline line is the second half of
-  // the R1a pair: it names no server itself and reads as being about this target
-  // only while it sits directly under the forwarding line. The pair spans stdout
-  // and stderr, so adjacency is only visible in the interleaved capture.
-  // @ref LLP 0100#requirements [tests]: R1a - the compact pair holds only while the two lines stay consecutive
-  const forwardingAt = lines.findIndex((line) => line.startsWith("✓ Forwarding to the 'prod' server"))
-  assert.notEqual(forwardingAt, -1, 'the compact forwarding line is written')
-  assert.match(
-    lines[forwardingAt + 1] ?? '',
-    /^✓ First sync no later than .+; nothing has been uploaded yet$/,
-    'the deadline line comes next, with no other write between it and the forwarding line'
-  )
+  // Named the way the recap names it (LLP 0437 #server-name): the host, not
+  // the target key.
+  assert.match(text, /✓ Signed in to hyp\.internal as org /)
+  assert.doesNotMatch(text, /Signed in to 'prod'/)
+  // The deadline line still gives the hold's deadline and the fact that
+  // nothing has been sent. There is no forwarding line: the wizard's recap
+  // says what syncs to the cloud (LLP 0437 #recap).
+  assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
+  assert.doesNotMatch(text, /Logs will sync to/)
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,
   // and the deadline itself just lapses (LLP 0101 #no-release), so the line
   // must not promise a prompt.
@@ -1134,7 +1164,7 @@ test('a missing target name resolves the default (built-in) target; a value flag
   const code = await runRemoteLogin(['--org', 'acme'], ctx, { login })
   assert.equal(code, 0)
   assert.ok(seen)
-  assert.match(seen.identityBase, /hypaware\.hyperparam\.app/)
+  assert.match(seen.identityBase, /api\.hypaware\.ai/)
   assert.equal(seen.org, 'acme')
   assert.match(out.join(''), /logged in to 'hyperparam' as org 'acme'/)
 })
@@ -1266,6 +1296,43 @@ test('the re-seed exit suppresses the durable hint under compact, like the enrol
   const code = await runRemoteLogin(['prod'], ctx, { login, compact: true })
   assert.equal(code, 0)
   assert.doesNotMatch(err.join(''), /hyp privacy set \[path\] local-only/)
+})
+
+test('a machine enrolled under the built-in target\'s previous host re-logs in as the same server: no leave, re-seeded, no second sink', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  // Enrolled by a login on a release whose built-in shipped the old host.
+  await writeCentralSeed(hypHome, 'https://hypaware.hyperparam.app')
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
+
+  const code = await runRemoteLogin([], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(called, true)
+  assert.doesNotMatch(err.join(''), /this machine is connected to/)
+  // A re-seed, not a second enrollment: the layer still names the one sink at
+  // the URL it saved, and the login-minted gateway landed in its identity.
+  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
+  assert.deepEqual(Object.keys(seed.sinks), ['central'])
+  assert.equal(seed.sinks.central.config.url, 'https://hypaware.hyperparam.app')
+  const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
+  assert.equal(persisted.jwt, 'gw-jwt')
+})
+
+test('a hand-joined sink at the built-in target\'s previous host is re-seeded, not joined by a second sink at the new host', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hypaware.hyperparam.app', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin([], ctx, { login })
+  assert.equal(code, 0)
+  // No enrollment happened (no central layer), and the existing sink got the gateway.
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
+  assert.equal(persisted.jwt, 'gw-jwt')
 })
 
 /* --------------------------------------------------------------------------

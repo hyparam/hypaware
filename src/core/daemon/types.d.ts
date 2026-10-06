@@ -98,6 +98,19 @@ export interface FailedPluginSnapshot {
   message: string
 }
 
+/**
+ * A plugin directory this boot found but could not load a manifest from
+ * (issue #1576). Deliberately not a `FailedPluginSnapshot`: a manifest that is
+ * corrupt, unparseable, or fails schema validation has no plugin name, and a
+ * `rootDir` in a `name` field would be read as one by every consumer of it.
+ */
+export interface UnloadableManifestSnapshot {
+  /** The plugin directory, which is the only identity it has. Never a name. */
+  rootDir: string
+  /** Why `loadManifest` rejected it, clamped the way a throw's message is. */
+  message: string
+}
+
 export interface SinkSnapshot {
   instance: string
   plugin: string
@@ -220,6 +233,15 @@ export interface DaemonStatus {
    */
   failedPlugins?: FailedPluginSnapshot[]
   /**
+   * The plugin directories this daemon's boot could not load a manifest from,
+   * with the rejection reason (issue #1576). The third door into
+   * `unavailablePlugins`, kept in a field of its own because it is the one
+   * that names a directory rather than a plugin. Absent, never `[]`, when
+   * every manifest loaded, so a boot with nothing to report writes the file
+   * shape it always wrote.
+   */
+  unloadableManifests?: UnloadableManifestSnapshot[]
+  /**
    * What the last completed cache-maintenance tick left fragmented, and why
    * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
    */
@@ -233,6 +255,7 @@ export type StatusDiagnosticKind =
   | 'config_missing'
   | 'config_unreadable'
   | 'config_local_unreadable'
+  | 'config_central_unreadable'
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
   | 'daemon_heartbeat_stale'
@@ -246,6 +269,7 @@ export type StatusDiagnosticKind =
   | 'gateway_idle_no_upstreams'
   | 'gateway_upstreams_dropped'
   | 'recent_errors'
+  | 'sink_export_failing'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
   | 'client_sync_list_unreadable'
@@ -256,6 +280,8 @@ export type StatusDiagnosticKind =
   | 'source_name_unregistered'
   | 'plugin_activate_failed'
   | 'plugin_requires_unsatisfied'
+  | 'plugin_manifest_unloadable'
+  | 'plugin_lock_entry_invalid'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -356,6 +382,11 @@ export interface ClientAttachReport {
   /** Plugin enabled in config. */
   configured: boolean
   /**
+   * HypAware records this client: configured, and not switched off by
+   * `hyp client detach` (`recording: false` on the plugin entry, LLP 0466).
+   */
+  recording: boolean
+  /**
    * The client declares an `attach_probe`, so attach is a state that can be
    * observed (and reversed). False for a probe-less client (`claude-desktop`
    * is the only one shipping today, LLP 0115 #no-attach-on-join), whose attach
@@ -407,7 +438,16 @@ export interface CaptureHealthReport {
   source: string | null
   /** Last telemetry event the listener saw, or null when none is recorded. */
   lastEventAt: string | null
-  /** Newest activity-probe file mtime, or null when the trail is empty or unprobed. */
+  /**
+   * The newest transcript activity the probe could establish, or null when
+   * the trail is empty or unprobed.
+   *
+   * The newest matching file mtime, which is the cheap first pass. When that
+   * pass alone would report a gap it is replaced by the timestamp of the
+   * newest *conversation* record the bounded confirmation read found, because
+   * a metadata write, a local slash command, or a bare touch moves an mtime
+   * without producing a turn that owed any telemetry.
+   */
   lastTranscriptActivityAt: string | null
   /** The attach timestamp the marker records, or null when unreadable. */
   attachedAt: string | null
@@ -419,9 +459,22 @@ export interface CaptureHealthReport {
    * can be weeks old.
    */
   listenerStartedAt: string | null
-  /** Milliseconds of activity past the capture baseline (0 when none). */
+  /**
+   * Milliseconds of activity past the capture baseline (0 when none).
+   *
+   * Under `state: 'unknown'` this is still the filesystem's unconfirmed
+   * suspicion, which is all it ever was: it is `state`, not this number,
+   * that says whether anything stands behind it.
+   */
   gapMs: number
-  state: 'ok' | 'gap'
+  /**
+   * `gap` is confirmed against transcript content, never against an mtime
+   * alone. `unknown` is the third answer the bounded confirmation read owes
+   * when its budget ran out before the question was settled: it asserts
+   * neither an interruption nor a healthy capture path, and raises no
+   * diagnostic.
+   */
+  state: 'ok' | 'gap' | 'unknown'
 }
 
 /**
@@ -824,19 +877,23 @@ export interface LaunchAgentInstallPlan {
 export type DaemonInstallPlan = LaunchAgentInstallPlan | SystemdInstallPlan
 
 /**
- * Override seam for the npx->durable global-bin upgrade installDaemon
- * runs before writing the service unit. Production leaves this unset
- * (process.env / process streams / the real npm runner); tests inject a
- * fake env + runner so no global npm install actually happens.
+ * CLI resolution context for installDaemon, before writing the service unit.
+ * Commands pass their streams and interaction mode; tests can replace npm
+ * and the confirmation prompt without changing a real installation.
  */
 export interface DurableBinUpgradeSeam {
   env?: NodeJS.ProcessEnv
   stdout?: { write(chunk: string): unknown }
   stderr?: { write(chunk: string): unknown }
   runner?: CommandRunner
+  stdin?: NodeJS.ReadableStream
+  interactive?: boolean
+  confirm?: (question: string) => Promise<boolean>
 }
 
 export interface DaemonInstallOptions {
+  /** Allow a temporary CLI when a durable installation cannot be established. */
+  force?: boolean
   /** Absolute path to the HypAware CLI entrypoint. */
   binPath: string
   /**
@@ -845,7 +902,7 @@ export interface DaemonInstallOptions {
    * `_npx` path (the explicit-bin escape hatch).
    */
   binExplicit?: boolean
-  /** Override seam for the npx->durable global-bin upgrade (tests only). */
+  /** CLI resolution context, including test overrides for npm and prompts. */
   durableBin?: DurableBinUpgradeSeam
   /** Config path passed to the daemon (defaults to ~/.hyp/hypaware-config.json). */
   configPath?: string
@@ -869,7 +926,7 @@ export interface DaemonInstallOptions {
   restart?: boolean
   /** Linux: RestartSec= seconds (default 5). */
   restartSec?: number
-  /** Pass `--foreground` to the daemon (default true). */
+  /** @deprecated Service commands always run in the foreground. */
   foreground?: boolean
   /** macOS: override LaunchAgents dir. */
   plistDir?: string
@@ -894,6 +951,8 @@ export interface DaemonUninstallOptions {
   launchctl?: LaunchctlAdapter
   systemctl?: SystemctlAdapter
   userDomain?: string
+  /** Override the poll delay the uninstall waits out the unload with (tests only). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface DaemonServiceOptions {
@@ -938,9 +997,16 @@ export interface RunDaemonOptions {
   runId?: string
   /** Sink tick cadence (default 60_000). */
   tickIntervalMs?: number
-  /** Default true; smoke flows opt out and drive shutdown directly. */
+  /**
+   * Default true; smoke flows and in-process tests opt out and drive shutdown
+   * directly. It also declares that the caller does not own this process, so
+   * the gateway's stop deadline kills the processing child without exiting
+   * (#1531): left default inside `node --test`, a stop that reaches its
+   * deadline ends the worker mid-file, dropping every later test in it while
+   * the run still reports green.
+   */
   installSignalHandlers?: boolean
-  /** Phase 3 only supports foreground; surfaced for symmetry with `--foreground`. */
+  /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
   tmpRoot?: string
@@ -988,7 +1054,14 @@ export interface BackfillSweepRunner {
     devRunId?: string
     retentionDays?: number
     sweep?: boolean
-  }): Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>
+  }): Promise<{
+    ok: boolean
+    scanned: number
+    rowsWritten: number
+    skipped: number
+    /** Which step failed, for the settlement log; absent on a clean run. */
+    errorKind?: string
+  }>
 }
 
 /**

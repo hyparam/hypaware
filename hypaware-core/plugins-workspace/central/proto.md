@@ -5,9 +5,9 @@ The central HypAware server is implemented in a separate package
 the TypeScript types in [`src/types.d.ts`](./src/types.d.ts); this
 document is the wire-level reference.
 
-The contract has three surfaces: identity (bootstrap + refresh), config
-pull (operator-defined config delivered to gateways), and ingest (cache
-partitions forwarded as NDJSON, per signal).
+The contract covers identity (bootstrap + refresh), config pull
+(operator-defined config delivered to gateways), ingest (cache partitions
+forwarded as NDJSON, per signal), and human-authorized session purging.
 
 All endpoints are HTTPS in production. Bodies are UTF-8 JSON unless
 explicitly NDJSON (`application/x-ndjson`). Errors return a JSON object
@@ -288,3 +288,33 @@ the canonical mapping is 1:1), the gateway sends one POST per dataset.
 
 `dev_run_id` is preserved end-to-end as a payload attribute so smoke
 tests can correlate ingested rows with the run that produced them.
+
+## Session purge
+
+### POST `/v1/sessions/purge`
+
+Invoked by `hyp privacy purge --session ID` for configured, signed-in, and
+enrolled servers by default. `--remote NAME` limits remote scope;
+`--local-only` opts out. Bearer credentials
+must belong to a live human refresh session with `report-publish` write
+scope. Upload gateway and standalone read credentials are refused. The
+server derives the organization from the credential and permits verified
+session owners or current organization admins.
+
+Request: `{ "session_id": "<exact opaque session id>" }`.
+
+Response 200 includes `session_id`, `org`, `status: "completed"`,
+`stage: "completed"`, `cache_rows_deleted`, `archive_rows_deleted`,
+`scope: "session_keyed_rows"`, and `retained`. Counts describe this attempt;
+retrying an already completed purge can return zero. Completion covers
+spools and position deletes in session-keyed cache/archive tables, plus a
+durable exclusion against replay. Physical files remain until compaction;
+derived copies without session lineage, including generated report copies,
+are disclosed in `retained` and are outside this operation.
+
+Response 401 means a live human credential is required; 403 means the caller
+cannot purge this session; 404 means no ownership evidence exists. Response
+503 signals busy or incomplete work. An incomplete response includes the
+failed `stage` when available. Retry the same request; a durable receipt
+preserves the authorized owner's retry permission after rows are removed.
+Ordinary ignore never calls this endpoint.

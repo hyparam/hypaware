@@ -127,7 +127,7 @@ export async function run({ harness, expect }) {
 
     const okStdout = makeBuf()
     const okStderr = makeBuf()
-    const okExit = await dispatch(['status'], {
+    const okExit = await dispatch(['status', '--verbose'], {
       stdout: okStdout,
       stderr: okStderr,
       kernel,
@@ -307,7 +307,7 @@ export async function run({ harness, expect }) {
 
     const badTextStdout = makeBuf()
     const badTextStderr = makeBuf()
-    const badTextExit = await dispatch(['status'], {
+    const badTextExit = await dispatch(['status', '--verbose'], {
       stdout: badTextStdout,
       stderr: badTextStderr,
       kernel,

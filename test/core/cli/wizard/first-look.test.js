@@ -45,7 +45,7 @@ const ROWS_BY_SQL = {
   [SECTION_SQL.tools]: TOOL_ROWS,
 }
 
-test('runWizardFirstLook: writes the two setup sections, names the fuller command, reports row counts', async () => {
+test('runWizardFirstLook: writes the two setup sections, reports row counts', async () => {
   const stdout = makeBuf()
   /** @type {string[]} */
   const seen = []
@@ -74,8 +74,8 @@ test('runWizardFirstLook: writes the two setup sections, names the fuller comman
   assert.ok(!text.includes('Bash'))
   // A section that was never requested is never called unfinished.
   assert.ok(!text.includes('did not finish'))
-  // One pointer line, and it says the full block is bigger than this one.
-  assert.match(text, /See more anytime: hyp query overview \(adds repos and tools; --sql shows the queries\)/)
+  // No pointer line: the block ends on its last section.
+  assert.ok(!text.includes('See more anytime'))
   assert.ok(!text.includes('The SQL behind these'))
 })
 
@@ -109,8 +109,7 @@ test('runWizardFirstLook: an expired deadline keeps the sections that finished',
   assert.match(stopped, /Stopped here to keep setup moving: the daily section did not finish\./)
   // Only the requested section is named. Repos and tools were never asked
   // for, so calling them unfinished would be a claim about work nobody
-  // started (the pointer line below mentions them, which is a different
-  // sentence and a different claim).
+  // started.
   assert.ok(!stopped.includes('repos') && !stopped.includes('tools'))
 })
 

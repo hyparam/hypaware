@@ -60,7 +60,7 @@ export interface PromptChrome {
   /**
    * Draw a border around the whole frame. For a prompt that has to read as
    * its own screen rather than as one more paragraph in a scrolling run:
-   * the wizard's closing question list lands under the first look's tables
+   * the wizard's closing skill offer lands under the first look's tables
    * and rules, where an unframed prompt does not announce itself as the
    * one thing on screen still waiting for a keypress. Suppressed when the
    * frame would be wider than the terminal. An omitted field changes no
@@ -148,6 +148,13 @@ export interface SelectSpec extends PromptChrome {
   stdout?: NodeJS.WritableStream
   env?: NodeJS.ProcessEnv
   clearOnResolve?: boolean
+  /**
+   * Settles the prompt as a cancel when aborted, for a caller that cannot
+   * assume anyone is at the terminal. The caller owns the controller, so it
+   * can tell its own abort apart from an escape the person pressed. Omitted
+   * means the prompt waits, which is every attended caller.
+   */
+  signal?: AbortSignal
 }
 
 export interface TextSpec extends PromptChrome {
@@ -168,12 +175,22 @@ export interface RenderOpts {
    * suppresses one.
    */
   columns?: number
+  /**
+   * Terminal height, when the caller knows it. A select whose options do
+   * not all fit is windowed around the cursor so the frame stays inside
+   * the terminal; omitted means "unknown" (a pipe, a test double), which
+   * windows nothing and renders every option, as it did before this
+   * field existed.
+   */
+  rows?: number
 }
 
 export interface RunOpts {
   stdin: NodeJS.ReadableStream
   stdout: NodeJS.WritableStream
   env?: NodeJS.ProcessEnv
+  /** See `SelectSpec.signal`: aborting settles the prompt as a cancel. */
+  signal?: AbortSignal
   /**
    * Erase the prompt's frame from the terminal when it settles (resolve or
    * cancel) so the next prompt redraws in its place instead of stacking

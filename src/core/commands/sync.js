@@ -5,7 +5,8 @@ import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { sinkInstanceConfig, sinkInstanceName } from '../registry/sinks.js'
+import { serverDisplayName } from '../remote/builtin_remotes.js'
 import { previewPendingRows } from '../sinks/pending.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
@@ -22,7 +23,7 @@ import { groupThousands } from '../util/format_number.js'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
- * @import { PendingVolume } from '../../../src/core/sinks/types.js'
+ * @import { PendingVolume, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
@@ -91,10 +92,22 @@ export async function runSync(argv, ctx) {
   const deadline = await readFirstSyncDeadline({ stateDir })
 
   const allHandles = /** @type {ExtendedSinkRegistry} */ (ctx.sinks).listHandles?.() ?? []
-  const handles = instance ? allHandles.filter((h) => h.instanceName === instance) : allHandles
+  // The name a positional selects by, and the names the refusal offers, come
+  // from the registry's record rather than off the handle, because the driver
+  // this verb hands `instance` to matches on that record (`sinkInstance`
+  // against `sinkInstanceName`, `src/core/sinks/driver.js`). A handle is a live
+  // object its owner still holds through `ctx.sinks.get`, so reading
+  // `handle.instanceName` here selects by a second key: an owner that renames
+  // it gates an instance the driver would drive, offers the refusal a name the
+  // driver will not match, or throws out of the filter before the driver's own
+  // guarded read (issue #2066). The display lane below is keyed the same way,
+  // for a reason of its own: the plan is a consent surface, so the name it
+  // prints beside "what would leave" has to be the name that receives it
+  // (issue #2087).
+  const handles = instance ? allHandles.filter((h) => sinkInstanceName(h) === instance) : allHandles
   if (instance && handles.length === 0) {
     ctx.stderr.write(`hyp sync: no sink named '${instance}' was instantiated\n`)
-    const available = allHandles.map((h) => h.instanceName)
+    const available = allHandles.map(sinkInstanceName)
     if (available.length > 0) ctx.stderr.write(`  available: ${available.join(', ')}\n`)
     return 1
   }
@@ -136,8 +149,7 @@ export async function runSync(argv, ctx) {
     return 0
   }
 
-  const remotes = effectiveRemotes(ctx.config)
-  const destinations = handles.map((handle) => describeDestination(handle, remotes))
+  const destinations = handles.map((handle) => describeDestination(handle))
 
   if (history) {
     return runHistorySync({
@@ -152,6 +164,12 @@ export async function runSync(argv, ctx) {
       log,
     })
   }
+
+  // @ref LLP 0396#combined-selection [implements]: shared setup describes uploads; the accompanying file copy is not a second user choice
+  const displayedDestinations = destinations.some((d) => d.offMachine === true)
+    ? destinations.filter((d) => d.offMachine !== false)
+    : destinations
+  const displayedInstances = new Set(displayedDestinations.map((d) => d.instance))
 
   // Two refusals, both because the hold is driver-wide (LLP 0101 #hold)
   // while the consent in front of it would not be. They come before the plan
@@ -216,7 +234,7 @@ export async function runSync(argv, ctx) {
       label: 'Counting pending rows...',
     },
     () => previewPendingRows({
-      handles,
+      handles: handles.filter((handle) => displayedInstances.has(sinkInstanceName(handle))),
       query: ctx.query,
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       stateRoot: stateDir,
@@ -226,17 +244,23 @@ export async function runSync(argv, ctx) {
   // The elapsed time is the point of this line as much as the counts are: the
   // preview sits between the user's keystroke and the prompt, so if `hyp sync`
   // ever feels hung again the log says whether the count was the reason.
+  //
+  // The counts are over the displayed destinations, so they agree with the
+  // plan printed below. On a sharing machine the hidden file copy still
+  // exports, so the line says how many destinations it left out rather than
+  // narrowing in silence. It spends none of the elapsed time above: the count
+  // is handed the displayed handles only.
   log.info('sync.pending_preview', {
     [Attr.COMPONENT]: 'cmd-sync',
     [Attr.OPERATION]: 'sync.pending_preview',
     hyp_elapsed_ms: Date.now() - previewStartedAt,
     destinations: volumes.size,
+    hyp_hidden_destinations: destinations.length - displayedDestinations.length,
     hyp_pending_rows: sum(volumes, (v) => v.rows),
     hyp_withheld_rows: sum(volumes, (v) => v.withheldRows),
     hyp_exact_counts: [...volumes.values()].filter((v) => v.status === 'counted').length,
   })
-  ctx.stdout.write(renderPlan({ destinations, volumes, exclusions: await readExclusions(stateDir) }))
-  if (deadline !== null) ctx.stdout.write(renderFirstSyncWarning(deadline))
+  ctx.stdout.write(renderPlan({ destinations: displayedDestinations, volumes, exclusions: await readExclusions(stateDir), deadline }))
 
   if (dryRun) {
     ctx.stdout.write('\n[dry-run] nothing was sent\n')
@@ -247,8 +271,8 @@ export async function runSync(argv, ctx) {
     ctx,
     yes,
     question: deadline !== null
-      ? 'Send now and end the review window? [Y/n] '
-      : `Send now to ${describeScope(destinations)}? [Y/n] `,
+      ? 'Upload now? [Y/n] '
+      : `Send now to ${describeScope(displayedDestinations)}? [Y/n] `,
     defaultYes: true,
   })
   if (outcome === 'no-tty') {
@@ -291,6 +315,10 @@ export async function runSync(argv, ctx) {
       [Attr.OPERATION]: 'sync.first_sync_hold_released',
       hyp_deadline: new Date(deadline).toISOString(),
       hyp_released_early_ms: deadline - Date.now(),
+      // Unfiltered, unlike the two preview lines, which count what they
+      // previewed. A scoped run was refused above, so this is every
+      // destination the machine has, and clearing the marker unblocks all of
+      // them, including any the plan did not print.
       destinations: destinations.length,
       off_machine_destinations: destinations.filter((d) => d.offMachine === true).length,
     })
@@ -304,15 +332,32 @@ export async function runSync(argv, ctx) {
     stateRoot: stateDir,
     config: ctx.config,
   })
-  /** @type {{ now: Date, force: true, source: 'manual', sinkInstance?: string }} */
-  const tickOpts = { now: new Date(), force: true, source: 'manual' }
+  const progress = createSyncProgress(volumes)
+  let showProgress = false
+  // Counted, not a flag: destinations tick serially in instance-name order, so
+  // an accompanying file copy can run between two upload targets, and a flag
+  // set by the first would label that gap `Finishing` with an upload to come.
+  let displayedStarts = 0
+  let phaseStarted = Date.now()
+  /** @type {TickOptions} */
+  const tickOpts = {
+    now: new Date(), force: true, source: 'manual',
+    onProgress: (name, delta) => {
+      if (!delta) {
+        showProgress = displayedInstances.has(name)
+        if (showProgress) displayedStarts += 1
+        phaseStarted = Date.now()
+      }
+      if (showProgress) progress.update(name, delta)
+    },
+  }
   if (instance) tickOpts.sinkInstance = instance
-  // The tick is the long silent wait of this verb: one export per sink, each
-  // a network round trip, with nothing on screen between the user's "y" and
-  // the result lines. The driver reports per sink only once the whole tick
-  // settles, so an elapsed-time spinner is the progress that is available.
   const report = await withSpinner(
-    { stdout: ctx.stdout, env: ctx.env, label: `Sending to ${describeScope(destinations)}...` },
+    {
+      stdout: ctx.stdout, env: ctx.env, label: 'Sending',
+      status: () => showProgress ? progress.render()
+        : `${displayedStarts >= displayedInstances.size ? 'Finishing' : 'Preparing upload'}... (${Math.floor((Date.now() - phaseStarted) / 1000)}s)`,
+    },
     () => driver.tick(tickOpts)
   )
 
@@ -323,14 +368,92 @@ export async function runSync(argv, ctx) {
     return 1
   }
 
+  const described = new Map(destinations.map((d) => [d.instance, d]))
   for (const r of report.sinks) {
-    ctx.stdout.write(
-      `${r.instance}: ${r.status} (partitions=${r.partitionsExported}, bytes=${r.bytesWritten}${
-        r.error ? `, error=${r.error}` : ''
-      })\n`
-    )
+    // Successful file copies are incidental to sharing. Failures still need
+    // their diagnostic and continue to determine the command's exit code.
+    if (!displayedInstances.has(r.instance) && r.status === 'exported') continue
+    ctx.stdout.write(renderResult(r, described.get(r.instance)))
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+}
+
+/**
+ * Reuse the consent preview without rescanning the backlog. Keep only the
+ * current destination's counters: sinks run sequentially, and each ETA covers
+ * that destination.
+ * @param {Map<string, PendingVolume>} volumes
+ * @param {() => number} [now]
+ */
+export function createSyncProgress(volumes, now = Date.now) {
+  let instance = ''
+  let rows = 0
+  let firstAck = 0
+  let lastAck = now()
+  /** @type {TickOptions['onProgress']} */
+  const update = (name, delta) => {
+    if (!delta) {
+      instance = name
+      rows = 0
+      firstAck = 0
+      lastAck = now()
+      return
+    }
+    // A zero-row report acknowledges nothing. `onProgress` is on the published
+    // export contract and a bare `opts.onProgress()` arrives here normalized to
+    // zero rows, so a sink calling it in a loop would otherwise refresh
+    // `lastAck` on every pass and hold the stall warning off the line for as
+    // long as the loop ran.
+    if (!(delta.rows > 0)) return
+    // The rate is measured from the first acknowledgement, not from the
+    // destination's start. The driver announces a destination before
+    // `discoverReadyPartitions` lists every dataset, flushes every pending
+    // spool and re-discovers, which on a first sync - the run this line exists
+    // for - is often the dominant cost and is paid once rather than per row.
+    // Charging it to the rate made the first ETA, the one the user reads,
+    // arbitrarily pessimistic: 60s of flush ahead of 12,000 rows at 2,000
+    // rows/s reported ~88s for 3.5s of remaining work.
+    if (firstAck === 0) firstAck = now()
+    rows += delta.rows
+    lastAck = now()
+  }
+  const render = () => {
+    if (!instance) return 'Preparing upload...'
+    const volume = volumes.get(instance)
+    const total = volume?.status === 'counted' ? volume.rows : undefined
+    const count = total !== undefined && total > 0 && rows <= total
+      ? `${groupThousands(rows)}/${groupThousands(total)} rows (${Math.min(99, Math.floor(rows / total * 100))}%)`
+      : `${groupThousands(rows)} rows sent`
+    const prefix = `${instance}: ${count}`
+    // Every line that cannot quote an ETA still ticks, and what it ticks is
+    // the time since anything last moved. `onProgress` is optional on the
+    // export contract and half the shipped sinks never call it
+    // (`@hypaware/s3`, and the table-format sink an iceberg destination
+    // instantiates), so without this their whole export renders one frozen
+    // line - worse than the elapsed seconds it replaced, and the exact "this
+    // has hung" reading the spinner exists to prevent. Measuring the gap from
+    // the last acknowledgement rather than from the destination's start costs
+    // those sinks nothing (`lastAck` begins at the destination's start) and is
+    // the only reading that answers the question a waiting line raises: a
+    // destination that transferred healthily for 100s and has then been quiet
+    // for 20 otherwise reads `waiting for progress (120s)`, six times the gap.
+    const waited = Math.floor((now() - lastAck) / 1000)
+    if (rows === 0) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
+    // Ahead of the stall check, because a finalize is a stall: the last chunk
+    // is acknowledged and the export is committing, so no further
+    // acknowledgement is coming and a long one would otherwise flip a finished
+    // transfer to "99% | waiting for progress" - the one reading that is both
+    // alarming and wrong.
+    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing... (${waited}s)`
+    if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
+    const seconds = Math.max(1, (now() - firstAck) / 1000)
+    const rate = rows / seconds
+    if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
+    const remaining = Math.max(1, Math.ceil((total - rows) / rate))
+    const eta = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`
+    return `${prefix} | ETA ~${eta}`
+  }
+  return { update, render }
 }
 
 /**
@@ -391,6 +514,7 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   const previews = new Map()
   const previewStartedAt = Date.now()
   for (const handle of capable) {
+    const instance = sinkInstanceName(handle)
     try {
       // A full scan of the client's retained history, once per destination,
       // and like the ordinary plan's count it runs before anything is on
@@ -400,15 +524,15 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
           stdout: ctx.stdout,
           env: ctx.env,
           quietWhenPlain: true,
-          label: `Counting retained '${source}' history on ${handle.instanceName}...`,
+          label: `Counting retained '${source}' history on ${instance}...`,
         },
         async () => handle.sink.previewSourceHistory?.({ source })
       )
       if (!preview) throw new Error('history preview became unavailable')
-      previews.set(handle.instanceName, preview)
+      previews.set(instance, preview)
     } catch (err) {
       ctx.stderr.write(
-        `hyp sync --history: could not preview '${handle.instanceName}' (${err instanceof Error ? err.message : String(err)})\n` +
+        `hyp sync --history: could not preview '${instance}' (${err instanceof Error ? err.message : String(err)})\n` +
         '  Nothing was sent.\n'
       )
       return 1
@@ -419,6 +543,10 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   // capable destination, and it sits between the keystroke and the prompt.
   // Same reason the ordinary plan logs its own elapsed time: if this ever
   // feels hung, the log should say whether the count was why.
+  //
+  // The counts are over the capable destinations only, since they are what the
+  // rows and the elapsed time cover, so the line also says how many it left out
+  // rather than narrowing in silence.
   const previewRows = [...previews.values()]
   // `max`, not `sum`: every capable destination replays the same retained
   // history, so adding their counts would quote double the rows a two-sink
@@ -431,11 +559,12 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     hyp_elapsed_ms: Date.now() - previewStartedAt,
     hyp_sink_source: source,
     destinations: previews.size,
+    hyp_unsupported_destinations: destinations.length - previews.size,
     hyp_pending_rows: totalRows,
     hyp_withheld_rows: totalWithheld,
   })
 
-  const capableNames = new Set(capable.map((handle) => handle.instanceName))
+  const capableNames = new Set(capable.map(sinkInstanceName))
   const selectedDestinations = destinations.filter((destination) => capableNames.has(destination.instance))
   const unsupported = destinations.filter((destination) => !capableNames.has(destination.instance))
   ctx.stdout.write(renderHistoryPlan({ source, destinations: selectedDestinations, previews, unsupported }))
@@ -490,26 +619,27 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
 
   let failed = false
   for (const handle of capable) {
+    const instance = sinkInstanceName(handle)
     let result
     try {
       result = await withSpinner(
-        { stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${handle.instanceName}...` },
+        { stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${instance}...` },
         async () => handle.sink.replaySourceHistory?.({ source })
       )
     } catch (err) {
       failed = true
       ctx.stdout.write(
-        `${handle.instanceName}: failed (${err instanceof Error ? err.message : String(err)})\n`
+        `${instance}: failed (${err instanceof Error ? err.message : String(err)})\n`
       )
       continue
     }
     if (!result) {
       failed = true
-      ctx.stdout.write(`${handle.instanceName}: failed (history replay became unavailable)\n`)
+      ctx.stdout.write(`${instance}: failed (history replay became unavailable)\n`)
       continue
     }
     ctx.stdout.write(
-      `${handle.instanceName}: ${result.status} (rows=${result.rowsReplayed}, bytes=${result.bytesWritten}${
+      `${instance}: ${result.status} (rows=${result.rowsReplayed}, bytes=${result.bytesWritten}${
         result.error ? `, error=${result.error}` : ''
       })\n`
     )
@@ -562,62 +692,68 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  * own config rather than inventing a registration concept for one prompt.
  * An `http(s)` destination is off-machine on the evidence of the URL; a
  * filesystem path is on-machine on the evidence of the path. Anything else
- * reports `null` and the summary stays silent about it - a confirmation
- * prompt that guesses is worse than one that admits the gap.
+ * reports `null`, and a `null` is the one a sharing plan keeps: the filter
+ * drops what it knows stays here, never what it could not place. A
+ * confirmation prompt that guesses is worse than one that admits the gap.
  *
  * A server is named, never spelled as a URL. R1a binds the enrolling login's
  * surfaces by its own text, but its reason is about terminals, not about
  * which command printed the line: any `https://` run autolinks with no way
  * to opt out, and the server root answers `{"error":"unknown_path"}` in a
  * browser. This prompt appears at the same moment in onboarding and would
- * collect the same dead-link click. An origin with no configured name falls
- * back to its host, which is still not a URL a terminal will linkify.
+ * collect the same dead-link click. The hosted default reads as "HypAware
+ * Cloud" and any other server as its host, which says which server it is
+ * without a lookup and is still not a URL a terminal will linkify
+ * (LLP 0437 #server-name).
+ *
+ * The name is the registry's key, because it is the one field of the row that
+ * is not description: the plan is read as "these destinations will receive
+ * data", and what receives data is what the driver matches, which is that
+ * record (`sinkInstance` against `sinkInstanceName`,
+ * `src/core/sinks/driver.js`). Off the live `handle.instanceName` the row was
+ * named by a second key its owner can move: a non-string accessor ended the
+ * command at `dest.instance.padEnd` before the plan printed, and a lying one
+ * printed a name no receipt line and no `hyp sync <name>` answers to
+ * (issue #2087). No placeholder guards an empty name: these handles all come
+ * from `listHandles()`, whose keys are the non-empty strings `instantiate`
+ * validated and recorded beside the handle.
+ *
+ * The config is the registry's record too, and for a harder reason than the
+ * name: `offMachine` does not merely label a row, it decides whether the row
+ * is printed at all. Off the live `handle.config`, an owner claiming a local
+ * `dir` for an instance configured with a remote `url` reported
+ * `offMachine: false`, and `displayedDestinations` drops exactly those rows
+ * as soon as any destination is genuinely off-machine - so the destination
+ * left the plan, the counts, the progress display and the receipts while the
+ * driver kept exporting to it, exit 0 (issue #2095). `handle.plugin` in the
+ * last line is still a live read, in the separate unguarded-read class
+ * issue #2059 tracks.
+ *
+ * Both reads are own-property reads because none of the objects they run on
+ * is proof against `Object.prototype`: the record is a plain `{ ...config }`
+ * and the answer for a handle this module did not build is `handle.config`
+ * or `{}`. A plugin setting `Object.prototype.dir` turned every destination
+ * carrying neither key into `offMachine: false` and the filter dropped it,
+ * the same disappearance (issue #2098), and that class is populated:
+ * `@hypaware/s3` configures an instance on `bucket`/`region`. Guarding the
+ * reads rather than the record is what reaches the fallback path as well.
  *
  * @ref LLP 0100#requirements [constrained-by]: R1a's reason - name the server, never its URL - applied to the consent prompt R1a's text does not reach
  * @param {ExtendedSinkHandle} handle
- * @param {Record<string, { url?: string }>} remotes configured targets, name to URL
  * @returns {{ instance: string, text: string, offMachine: boolean | null }}
  */
-function describeDestination(handle, remotes) {
-  const config = /** @type {Record<string, unknown>} */ (handle.config ?? {})
-  const url = config.url
+function describeDestination(handle) {
+  const instance = sinkInstanceName(handle)
+  const config = /** @type {Record<string, unknown>} */ (sinkInstanceConfig(handle))
+  const url = Object.hasOwn(config, 'url') ? config.url : undefined
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
-    return { instance: handle.instanceName, text: nameServer(url, remotes), offMachine: true }
+    return { instance, text: serverDisplayName(url), offMachine: true }
   }
-  const dir = config.dir
+  const dir = Object.hasOwn(config, 'dir') ? config.dir : undefined
   if (typeof dir === 'string' && dir.length > 0) {
-    return { instance: handle.instanceName, text: dir, offMachine: false }
+    return { instance, text: dir, offMachine: false }
   }
-  return { instance: handle.instanceName, text: handle.plugin ?? 'unknown destination', offMachine: null }
-}
-
-/**
- * Render a server URL as the name the user configured for it, matching on
- * origin so a target registered with a trailing path or slash still resolves.
- *
- * @param {string} url
- * @param {Record<string, { url?: string }>} remotes
- * @returns {string}
- */
-function nameServer(url, remotes) {
-  /** @param {string} value */
-  const originOf = (value) => {
-    try {
-      return new URL(value).origin
-    } catch {
-      return null
-    }
-  }
-  const origin = originOf(url)
-  if (origin) {
-    for (const [name, target] of Object.entries(remotes ?? {})) {
-      if (typeof target?.url === 'string' && originOf(target.url) === origin) {
-        return `the '${name}' server`
-      }
-    }
-    return new URL(url).host
-  }
-  return url
+  return { instance, text: handle.plugin ?? 'unknown destination', offMachine: null }
 }
 
 /**
@@ -649,9 +785,12 @@ async function readExclusions(stateDir) {
 }
 
 /**
- * The pre-confirmation summary: every destination, named, with **how much**
- * would leave through it, how far back that reaches, and the exclusions that
- * will not travel. "Are you sure?" with nothing to be sure *about* is a
+ * The pre-confirmation summary: every destination it is given, named, with
+ * **how much** would leave through it, how far back that reaches, and the
+ * exclusions that will not travel. On a sharing run the caller hands it the
+ * upload targets only (see `displayedDestinations`), so "every destination"
+ * is the caller's decision, not this renderer's.
+ * "Are you sure?" with nothing to be sure *about* is a
  * keystroke, not a decision, and a size-free plan was exactly that: identical
  * on a machine with three queued rows and one with a quarter of a million.
  *
@@ -659,95 +798,105 @@ async function readExclusions(stateDir) {
  *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
  *   volumes?: Map<string, PendingVolume>,
  *   exclusions: { localOnly: number, ignore: number, clientLocalOnly?: string[] } | { error: string },
+ *   deadline?: number | null,
  * }} args
  * @returns {string}
  */
-function renderPlan({ destinations, volumes, exclusions }) {
-  const width = Math.max(...destinations.map((d) => d.instance.length))
-  const lines = [`hyp sync: ${plural(destinations.length, 'destination')}\n`, '\n']
+function renderPlan({ destinations, volumes, exclusions, deadline = null }) {
+  const lines = []
   for (const dest of destinations) {
-    const note = dest.offMachine === true
-      ? '  (leaves this machine)'
-      : dest.offMachine === false
-        ? '  (stays on this machine)'
-        : ''
-    lines.push(`  ${dest.instance.padEnd(width)}  ${dest.text}${note}\n`)
-    for (const line of renderVolume(volumes?.get(dest.instance))) {
-      lines.push(`  ${' '.repeat(width)}  ${line}\n`)
+    const volume = volumes?.get(dest.instance)
+    // The hold is driver-wide, so its deadline applies to every off-machine
+    // destination on the plan; a local copy was never held.
+    const automatic = deadline !== null && dest.offMachine === true
+      ? ` (automatic by ${formatFirstSyncDeadline(deadline)})`
+      : ''
+    lines.push(`${renderVolume(volume, dest, automatic)}\n`)
+    if (volume && volume.withheldRows > 0) {
+      const floor = volume.status === 'partial' ? 'at least ' : ''
+      lines.push(`  ${floor}${plural(volume.withheldRows, 'row')} withheld by policy (not sent)\n`)
     }
   }
-  // Naming a server instead of its URL is only safe if the name stays
-  // auditable: R1a's second half, applied here for the same reason.
-  if (destinations.some((d) => d.offMachine === true)) {
-    lines.push("  (run 'hyp remote list' to see server URLs)\n")
-  }
-  lines.push('\n')
   if ('error' in exclusions) {
-    lines.push(`  warning: could not read the local-only list (${exclusions.error});\n`)
-    lines.push('  exclusions still apply, but cannot be summarized here\n')
+    lines.push(`Could not read the exclusions (${exclusions.error}); they still apply, but cannot be summarized here.\n`)
   } else {
-    const clientLocalOnly = exclusions.clientLocalOnly ?? []
+    const excluded = []
     if (exclusions.localOnly > 0 || exclusions.ignore > 0) {
-      const parts = []
-      if (exclusions.localOnly > 0) parts.push(`${plural(exclusions.localOnly, 'directory', 'directories')} marked local-only`)
-      if (exclusions.ignore > 0) parts.push(`${plural(exclusions.ignore, 'directory', 'directories')} marked ignore`)
-      lines.push(`  withholding ${parts.join(', ')}\n`)
-    } else if (clientLocalOnly.length === 0) {
-      lines.push('  no directories or clients are marked local-only or ignore\n')
+      excluded.push(plural(exclusions.localOnly + exclusions.ignore, 'directory', 'directories'))
     }
-    if (clientLocalOnly.length > 0) {
-      lines.push(`  keeping these clients local-only: ${clientLocalOnly.join(' · ')}\n`)
-    }
+    const clientLocalOnly = exclusions.clientLocalOnly ?? []
+    if (clientLocalOnly.length > 0) excluded.push(clientLocalOnly.join(', '))
+    if (excluded.length > 0) lines.push(`Excluded: ${excluded.join('; ')}\n`)
+  }
+  // The one prompt where the user has never sent anything: say how to
+  // exclude things first, so the answer is not only yes or no.
+  // @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
+  if (deadline !== null) {
+    lines.push('To exclude anything first, use `hyp privacy` or the `/hypaware-privacy` skill.\n')
   }
   return lines.join('')
 }
 
 /**
- * The volume disclosure under one destination: what would go, how far back it
- * reaches, and what is being held back.
+ * The plan's line for one destination: what would go, how far back it
+ * reaches, and where, with `suffix` (the hold's deadline) before the period.
+ * The withheld tally is its own line under it (`renderPlan`), because
+ * folding it into the pending count would overstate the egress and dropping
+ * it is how a machine that withholds everything looks like one that
+ * withholds nothing (#958).
  *
- * Three rules, all of them about not misleading the person at the prompt:
+ * Two rules about not misleading the person at the prompt:
  *
- * - **Withheld rows get their own line.** Folding them into the pending count
- *   would overstate the egress; dropping them entirely is how a machine that
- *   withholds *everything* looks identical to one that withholds nothing (#958
- *   was invisible at exactly this prompt).
- * - **A floor says so, on every line the scan produced.** A truncated count
- *   renders "at least N", never N, and the withheld tally carries the same
- *   mark: it came off the same short scan, so an exact-looking number beside
- *   an "at least" claims a precision the count never had and understates what
- *   policy held back, on the one line that says policy is working at all.
+ * - **A floor says so.** A truncated count renders "at least N", never N,
+ *   and `renderPlan` marks the withheld tally the same way, since it came
+ *   off the same short scan.
  * - **An unknown count says unknown.** Rendering it as "nothing pending" would
  *   be a false all-clear on a consent surface, which is worse than a gap.
  *
  * @param {PendingVolume | undefined} volume
- * @returns {string[]}
+ * @param {{ text: string, offMachine: boolean | null }} dest
+ * @param {string} [suffix]
+ * @returns {string}
  */
-function renderVolume(volume) {
-  if (!volume) return []
+function renderVolume(volume, dest, suffix = '') {
+  const verb = dest.offMachine === true ? 'upload' : 'export'
+  if (!volume) return `Ready to ${verb} to ${dest.text}${suffix}.`
   if (volume.status === 'unknown') {
-    return [`pending volume unknown${volume.reason ? ` (${volume.reason})` : ''}`]
+    return `Ready to ${verb} to ${dest.text} (pending volume unknown${volume.reason ? `: ${volume.reason}` : ''})${suffix}.`
   }
-  // One scan produced the payload tally and the withheld tally together, so
-  // one truncation marks both.
+  // The suffix stays on an empty count too: a yes still ends the hold, so the
+  // deadline it ends must be said whatever is pending right now.
+  if (volume.rows === 0 && volume.status === 'counted') return `Nothing pending for ${dest.text}${suffix}.`
+  if (volume.rows === 0) {
+    // A floor of zero is not a floor. "at least 0 rows" reads as a bug on
+    // the one line somebody is deciding from, and it is reachable: a
+    // destination whose whole pending range is withheld, counted short.
+    return `Ready to ${verb} to ${dest.text} (pending volume not fully counted${volume.reason ? `: ${volume.reason}` : ''})${suffix}.`
+  }
   const floor = volume.status === 'partial' ? 'at least ' : ''
-  const lines = []
-  if (volume.rows === 0 && volume.status === 'counted') {
-    lines.push('nothing pending')
-  } else if (volume.rows === 0) {
-    // A floor of zero is not a floor. "at least 0 rows pending" reads as a bug
-    // on the one line somebody is deciding from, and it is reachable: a
-    // destination whose whole pending range is withheld, counted short. Say the
-    // payload count is incomplete and let the withheld line below carry the
-    // magnitude, marked as the floor it is.
-    lines.push(`pending volume not fully counted${volume.reason ? ` (${volume.reason})` : ''}`)
-  } else {
-    lines.push(`${floor}${plural(volume.rows, 'row')} pending${renderResume(volume.resume)}`)
+  return `Ready to ${verb} ${floor}${plural(volume.rows, 'row')}${renderResume(volume.resume)} to ${dest.text}${suffix}.`
+}
+
+/**
+ * One line per destination the tick reached: what went where, in the plan's
+ * words, or the failure and its error. No row count: the plan's count was
+ * taken before the prompt, the tick sends whatever is pending when it runs,
+ * and the tick report does not say how many rows that was.
+ *
+ * @param {TickReport['sinks'][number]} r
+ * @param {{ text: string, offMachine: boolean | null } | undefined} dest
+ * @returns {string}
+ */
+function renderResult(r, dest) {
+  const where = dest?.text ?? r.instance
+  if (r.status === 'failed') {
+    return `Could not send to ${where}: ${r.error ?? 'no reason given; see `hyp status`'}\n`
   }
-  if (volume.withheldRows > 0) {
-    lines.push(`${floor}${plural(volume.withheldRows, 'row')} withheld by policy (not sent)`)
+  const verb = dest?.offMachine === true ? 'uploaded' : 'exported'
+  if (r.status === 'partial') {
+    return `Partly ${verb} to ${where}${r.error ? ` (${r.error})` : ''}; the rest goes on the next sync\n`
   }
-  return lines
+  return `✓ ${verb.charAt(0).toUpperCase()}${verb.slice(1)} to ${where}\n`
 }
 
 /**
@@ -759,8 +908,8 @@ function renderVolume(volume) {
  * @returns {string}
  */
 function renderResume(resume) {
-  if (resume.kind === 'beginning') return ', the full local history'
-  if (resume.kind === 'since') return `, captured since ${formatResumeInstant(resume.at)}`
+  if (resume.kind === 'beginning') return ' (the full history)'
+  if (resume.kind === 'since') return ` (captured since ${formatResumeInstant(resume.at)})`
   return ''
 }
 
@@ -777,42 +926,14 @@ function formatResumeInstant(iso) {
 }
 
 /**
- * The escalated warning shown while the first-sync review window is open.
- *
- * This is the one prompt in the CLI where the user has never sent anything
- * before, so it says so, states what confirming gives up (the rest of the
- * window), and names the skill and the command that exclude something
- * first: a warning that only warns leaves the user with no move except yes
- * or no. On an attended enrolling `hyp init` this is also the only place the
- * review hint appears, since the wizard's own narration stands down for it.
- *
- * @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
- * @param {number} deadlineMs
- * @returns {string}
- */
-function renderFirstSyncWarning(deadlineMs) {
-  return (
-    '\n' +
-    '  FIRST SYNC: nothing has left this machine yet. Sending now ends the review\n' +
-    `  window (until ${formatFirstSyncDeadline(deadlineMs)}), includes your imported history,\n` +
-    '  and cannot be undone. To review or exclude anything first, run the\n' +
-    '  hypaware-privacy skill in Claude or Codex, or:\n' +
-    '    hyp privacy set <path> local-only\n'
-  )
-}
-
-/**
  * Name the scope of an ordinary (unheld) confirmation by where the data
  * goes, so the question is answerable without scrolling back to the plan.
  *
- * @param {{ offMachine: boolean | null }[]} destinations
+ * @param {{ text: string }[]} destinations
  * @returns {string}
  */
 function describeScope(destinations) {
-  const offMachine = destinations.filter((d) => d.offMachine === true).length
-  if (offMachine === 0) return plural(destinations.length, 'destination')
-  if (offMachine === destinations.length) return `${plural(offMachine, 'destination')} off this machine`
-  return `${plural(destinations.length, 'destination')} (${offMachine} off this machine)`
+  return destinations.map((d) => d.text).join(', ')
 }
 
 /**

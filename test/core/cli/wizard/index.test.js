@@ -3,16 +3,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { DurableBinRequiredError } from '../../../../src/core/cli/global_install.js'
+import { PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
-import { writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
+import { clientSyncListPath, readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
-import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
+import { centralSeedPath } from '../../../../src/core/config/apply.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
 // the fork/join loop, phase threading (locked/managed), the
@@ -32,7 +34,91 @@ function makeBuf() {
 }
 
 async function tmpHome() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-index-'))
+  return temporaryDirectory('hypaware-wizard-index-')
+}
+
+for (const pathway of ['local', 'team']) {
+  test(`GitHub opt-in on ${pathway} connects after the finale and upload offer`, async () => {
+    const home = await tmpHome()
+    const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+    let loggedIn = false
+    const order = []
+    if (pathway === 'team') await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+    const { opts } = wizardOpts(home, {
+      fork: async () => pathway,
+      catalog: detectableCatalog(),
+      detect: async () => new Set(['claude']),
+      express: async () => 'defaults',
+      pick: async () => pickResult({ configPending: true, configPath }),
+      syncNow: { dispatchFn: async () => { order.push('upload'); return 0 } },
+      github: { confirm: async () => { order.push('github'); return 'yes' } },
+      ctx: { commands: { run: async (name, args) => {
+        const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+        assert.deepEqual(config.plugins.map((p) => p.name), ['@hypaware/context-graph', '@hypaware/github'])
+        assert.equal(name, 'github login')
+        assert.deepEqual(args, [])
+        order.push('login')
+        loggedIn = true
+        return 0
+      } } },
+      configure: async () => {
+        assert.equal(loggedIn, false)
+        order.push('configure')
+        return { results: [] }
+      },
+    })
+    const result = await runInitWizard(opts)
+    assert.equal(result.exitCode, 0)
+    assert.equal(loggedIn, true)
+    assert.deepEqual(order, pathway === 'team'
+      ? ['configure', 'upload', 'github', 'login']
+      : ['configure', 'github', 'login'])
+  })
+}
+
+test('declining GitHub writes no GitHub activation and starts no login', async () => {
+  const home = await tmpHome()
+  const { opts } = wizardOpts(home, {
+    github: { confirm: async () => 'no' },
+    ctx: { commands: { run: async () => assert.fail('decline started login') } },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(result.config?.plugins, [])
+})
+
+test('already configured GitHub does not repeat the offer or login', async () => {
+  const home = await tmpHome()
+  const { opts } = wizardOpts(home, {
+    pick: async () => pickResult({ config: { version: 2, plugins: [{ name: '@hypaware/github' }] } }),
+    github: { confirm: async () => assert.fail('configured GitHub re-asked') },
+    ctx: { commands: { run: async () => assert.fail('configured GitHub re-authenticated') } },
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+})
+
+test('cancelling the closing GitHub offer preserves completed setup', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, 'config.json')
+  const { opts } = wizardOpts(home, {
+    pick: async () => pickResult({ configPending: true, configPath }),
+    github: { confirm: async () => { throw new PromptCancelledError() } },
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, [])
+})
+
+for (const skipped of ['unattended', 'dry-run']) {
+  test(`${skipped} setup skips GitHub consent and login`, async () => {
+    const { opts } = wizardOpts(await tmpHome(), {
+      ...(skipped === 'unattended'
+        ? { picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 } }
+        : { finale: { dryRun: true } }),
+      github: { confirm: async () => assert.fail('skipped run asked') },
+      ctx: { commands: { run: async () => assert.fail('skipped run logged in') } },
+    })
+    assert.equal((await runInitWizard(opts)).exitCode, 0)
+  })
 }
 
 /**
@@ -113,7 +199,7 @@ function wizardOpts(home, over = {}) {
     fork: async () => 'local',
     join: async () => ({ status: 'ok', lockedSources: [], managed: true }),
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
-    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return {} },
     folderAsk: async (/** @type {any} */ o) => { opts._folderOpts = o; return { mode: 'sync' } },
     // The express gate (LLP 0201) fronts the lanes on every attended run
     // with default rows; these tests exercise the step-by-step path, so it
@@ -133,6 +219,10 @@ function wizardOpts(home, over = {}) {
       }
     },
     ...over,
+    // The env above carries no PATH, so the real probe would find nothing to
+    // launch and silence the closing offer. Tests of the offer assume a
+    // client is there; a test of the probe passes `launchable` itself.
+    suggestSkill: { launchable: true, ...over.suggestSkill },
   })
   // Record phase invocations regardless of which stub a test supplied, so
   // ordering assertions hold for overridden phases too.
@@ -270,7 +360,7 @@ test('runInitWizard: cancelling the disconnect question ends the run without dis
   assert.equal(leaveRan, false, 'a cancel never disconnects')
   assert.equal(calls.filter((c) => c === 'fork').length, 1, 'the fork is not re-presented')
   assert.ok(!calls.includes('pick'), 'the cancel ended the run before any phase')
-  assert.match(stderr.text(), /hyp setup: cancelled/)
+  assert.match(stderr.text(), /Setup cancelled./)
 })
 
 test('runInitWizard: an unmanaged machine choosing local is never asked about disconnecting', async () => {
@@ -337,14 +427,25 @@ test('runInitWizard: accepting the express gate auto-accepts every lane and stat
   // remove them.
   assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
   assert.equal(opts._pickOpts.autoAccept, true)
-  assert.equal(opts._syncOpts.autoAccept, true)
   assert.equal(opts._folderOpts.autoAccept, true)
   assert.equal(opts._expressOpts.enrolled, true, 'the gate is told whether it can promise anything about a server')
   // No lane is answering anything, so no lane states a position.
   assert.equal(opts._pickOpts.progress, undefined)
-  assert.equal(opts._syncOpts.progress, undefined)
   assert.equal(opts._folderOpts.progress, undefined)
   assert.equal(opts._finaleArgs.progress, undefined)
+  // The finale's history import is one of the answered questions.
+  assert.equal(opts._finaleArgs.autoAccept, true)
+})
+
+test('runInitWizard: Customize leaves the finale to ask about the history import', async () => {
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'choose',
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  assert.equal(opts._finaleArgs.autoAccept, undefined)
 })
 
 test('runInitWizard: with nothing detected and nothing locked, no express gate is shown', async () => {
@@ -366,7 +467,7 @@ test('runInitWizard: declining the express gate leaves the lanes prompting, posi
   assert.equal(opts._pickOpts.autoAccept, undefined)
   assert.equal(opts._syncOpts.autoAccept, undefined)
   assert.equal(opts._folderOpts.autoAccept, undefined)
-  assert.equal(opts._pickOpts.progress, 'Step 2 of 5 · Choose what to collect')
+  assert.equal(opts._pickOpts.progress, 'Step 2 of 4 · Choose what to collect and sync')
 })
 
 test('runInitWizard: a cancelled express gate exits 130 before any lane runs', async () => {
@@ -439,10 +540,12 @@ test('runInitWizard: a managed machine reconfiguring down the local pathway stil
   assert.deepEqual(calls, ['gate', 'fork', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
 })
 
-// The accept row's sync claim is read off the store the sync lane reads,
-// because an express accept preserves standing opt-outs rather than
-// clearing them (LLP 0188 #opt-out).
-test('runInitWizard: a standing opt-out on a named row narrows the express gate\'s sync claim', async () => {
+// A standing opt-out no longer narrows anything: under the combined
+// selection the confirm clears it, so the row can promise sync (LLP 0396
+// #combined-selection). The store is still read - what it now answers is
+// whether the confirm *can* clear, not whether anything is standing.
+// @ref LLP 0396#combined-selection [tests]: a readable store lets the accept row keep its sync claim over a row the store withholds today
+test('runInitWizard: a standing opt-out no longer narrows the express gate\'s sync claim', async () => {
   const home = await tmpHome()
   const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
@@ -455,7 +558,7 @@ test('runInitWizard: a standing opt-out on a named row narrows the express gate\
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.equal(opts._expressOpts.enrolled, true)
-  assert.equal(opts._expressOpts.syncWithheld, true, 'the gate may not promise sync for a row the store withholds')
+  assert.equal(opts._expressOpts.syncWithheld, undefined, 'accepting explicitly enables sync for the selected row')
 })
 
 test('runInitWizard: with nothing withheld the express gate keeps its unqualified sync claim', async () => {
@@ -485,6 +588,101 @@ test('runInitWizard: a solo run never pays for the store read', async () => {
   // Unenrolled the row claims no sync at all, so the store has no say.
   assert.equal(opts._expressOpts.enrolled, false)
   assert.equal(opts._expressOpts.syncWithheld, undefined)
+  // Nothing forwards from a solo machine, so the picker asks about
+  // collection only and never claims to be the sharing choice.
+  assert.equal(opts._pickOpts.collectAndSync, undefined)
+})
+
+/**
+ * A client policy store that exists and cannot be parsed: the one state in
+ * which confirming the combined picker cannot enable sharing.
+ *
+ * @param {string} home
+ */
+async function corruptClientSyncStore(home) {
+  const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
+  const file = clientSyncListPath(stateDir)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, '{ not json')
+}
+
+// Both sharing claims drop together or neither does. The gate row is the
+// screen an express run decides on; the picker's title and accept
+// narration are the screens a Customize run decides on, and on an
+// unreadable store neither can be kept: `sync_scope.js` warns and writes
+// nothing, and the export seam then withholds every row.
+// @ref LLP 0396#combined-selection [tests]: an unreadable store drops the sync claim from the gate row and from the picker alike
+test('runInitWizard: an unreadable policy store drops the sync claim from every enrolled screen', async () => {
+  const home = await tmpHome()
+  await corruptClientSyncStore(home)
+  const { opts } = wizardOpts(home, {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(opts._expressOpts.enrolled, true)
+  assert.equal(opts._expressOpts.syncWithheld, true, 'the gate may not promise sync it cannot enable')
+  assert.equal(opts._pickOpts.collectAndSync, undefined, 'nor may the menu behind a decline')
+})
+
+// The machine the probe exists for. Everything the gate names is the
+// fleet's, so there is no non-locked row to check a standing opt-out
+// against - and that is exactly the machine whose entire export the
+// corrupt file stops, org rows included (`source_withhold.js` throws
+// before it filters the central ids out). A probe that ran only where a
+// non-locked row was named would report "everything syncs" here.
+// @ref LLP 0396#combined-selection [tests]: the store probe runs on every enrolled gate, including the machine with no row of its own
+test('runInitWizard: a fully fleet-managed machine still probes the store for its sync claim', async () => {
+  const home = await tmpHome()
+  await corruptClientSyncStore(home)
+  const { opts } = wizardOpts(home, {
+    fork: async () => 'team',
+    join: async () => ({ status: 'ok', lockedSources: ['claude'], managed: true }),
+    catalog: detectableCatalog(),
+    detect: async () => new Set(),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  // The gate was shown at all: the locked row is a default row, so there
+  // is something to accept even with nothing detected.
+  assert.deepEqual(opts._expressOpts.rows, ['Claude Code'])
+  assert.equal(opts._expressOpts.syncWithheld, true, 'no non-locked row is not the same as nothing to check')
+  assert.equal(opts._pickOpts.collectAndSync, undefined)
+})
+
+// The express fast path is one keypress over two lanes, and each states its
+// own half of the combined picture exactly once: the picker what is
+// recorded, the sync lane where it goes. Counted off a real run through both
+// lanes, because the wiring that collects them into the recap is the
+// orchestrator's.
+// @ref LLP 0396#combined-selection [tests]: an express run states the combined picture once
+// @ref LLP 0437#recap [tests]: the recording and syncing lines print together before the save
+test('runInitWizard: an express enrolled run states what it records and where it syncs once each', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'defaults',
+  })
+  // The real pick and sync lanes: the statements under test are theirs, and
+  // the wiring that collects them is the orchestrator's.
+  delete opts.pick
+  delete opts.syncScope
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+
+  const lines = stdout.text().split('\n')
+  const recording = lines.indexOf('✓ Recording Claude Code')
+  const syncing = lines.indexOf("✓ Syncing it to the cloud")
+  // Nothing goes unsaid on the fast path (LLP 0188 #never-silent): the sync
+  // claim is stated, and neither line is restated.
+  assert.ok(recording >= 0 && syncing === recording + 1, stdout.text())
+  assert.equal(lines.filter((l) => l.includes('Claude Code')).length, 1, stdout.text())
+  assert.equal(lines.filter((l) => l.startsWith('✓ Syncing')).length, 1, stdout.text())
 })
 
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
@@ -511,13 +709,10 @@ test('runInitWizard: the sync-scope step receives the locked descriptors so it c
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor])
 })
 
-// The new-folder question's title names the tools whose sessions raise it
-// (LLP 0200 #wizard). A source the user sent local-only one screen earlier
-// never reaches the server from any folder, so naming it would promise
-// "syncs without asking" for a client that syncs nothing at all. Locked
-// rows always sync (LLP 0188 #locked) and are never filtered.
-// @ref LLP 0200#wizard [tests]: the title names the syncing rows, not the ones the sync menu just opted out
-test('runInitWizard: the new-folder title drops the sources the sync step opted out, and keeps the locked ones', async () => {
+// The new-folder title names the tools this run records, locked rows
+// included (they always sync, LLP 0188 #locked).
+// @ref LLP 0200#wizard [tests]: the title names the rows that sync
+test('runInitWizard: the new-folder title names the picked and locked sources', async () => {
   const catalog = emptyCatalog()
   const claude = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
   const codex = { plugin: '@hypaware/codex', id: 'codex', label: 'Codex' }
@@ -527,17 +722,16 @@ test('runInitWizard: the new-folder title drops the sources the sync step opted 
     fork: async () => 'team',
     catalog,
     pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex, openclaw] }),
-    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: ['codex'] } },
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return {} },
   })
   await runInitWizard(opts)
-  assert.deepEqual(opts._folderOpts.names, ['Claude Code', 'OpenClaw'])
+  assert.deepEqual(opts._folderOpts.names, ['Claude Code', 'Codex', 'OpenClaw'])
 })
 
-// The filter above reads `optedOut`, and a skipped lane returns `[]`
-// because it could not read the store, not because the store withholds
-// nothing (`sync_scope.js` warns and skips on an unreadable client policy
-// store). Naming every picked tool off that empty list promises "syncs
-// without asking" for rows the run has just said it cannot account for.
+// A skipped lane could not read the store (`sync_scope.js` warns and skips
+// on an unreadable client policy store), so the run cannot say what syncs.
+// Naming every picked tool would promise "syncs without asking" for rows
+// it has just said it cannot account for.
 // @ref LLP 0200#wizard [tests]: an unreadable sync store leaves the new-folder title with no names it can stand behind
 test('runInitWizard: a skipped sync step leaves the new-folder title tool-free', async () => {
   const catalog = emptyCatalog()
@@ -548,7 +742,7 @@ test('runInitWizard: a skipped sync step leaves the new-folder title tool-free',
     fork: async () => 'team',
     catalog,
     pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex] }),
-    syncScope: async () => ({ skipped: true, noQuestion: true, optedOut: [] }),
+    syncScope: async () => ({ skipped: true }),
   })
   await runInitWizard(opts)
   assert.deepEqual(opts._folderOpts.names, [], 'no list the run can stand behind, so no names')
@@ -695,8 +889,8 @@ test('runInitWizard: a hidden picked row with a standing opt-out does not make t
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  assert.match(text, /nothing syncs to your server/, 'the only standing pick is withheld by the store, so nothing ships')
-  assert.doesNotMatch(text, /still syncs to your server/)
+  assert.match(text, /Nothing syncs to the cloud/, 'the only standing pick is withheld by the store, so nothing ships')
+  assert.doesNotMatch(text, /still syncs/)
   assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
 })
 
@@ -716,8 +910,9 @@ test('runInitWizard: a hidden picked row with no opt-out keeps the sentence that
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  assert.match(text, /still syncs to your server/)
-  assert.doesNotMatch(text, /nothing syncs to your server/)
+  assert.match(text, /Capture already set up on this machine still syncs to the cloud/)
+  assert.doesNotMatch(text, /Nothing syncs/)
+  assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the carried row is still never named')
 })
 
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {
@@ -744,18 +939,6 @@ test('runInitWizard: non-interactive picks skip the sync-scope step (default-syn
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.ok(!calls.includes('syncScope'))
-})
-
-test('runInitWizard: a cancelled sync-scope step exits 130 and runs nothing further', async () => {
-  const { opts, calls } = wizardOpts(await tmpHome(), {
-    fork: async () => 'team',
-    syncScope: async () => ({ cancelled: true, optedOut: [] }),
-  })
-  const result = await runInitWizard(opts)
-  assert.equal(result.exitCode, 130)
-  assert.equal(result.cancelled, true)
-  assert.ok(!calls.includes('configure'), 'cancel stops before the configure phase')
-  assert.ok(!calls.includes('finale'))
 })
 
 test('runInitWizard: local pathway runs pick -> configure -> finale, no join', async () => {
@@ -890,6 +1073,7 @@ test('runInitWizard: an abandoned join is retriable and re-presents the fork', a
 test('runInitWizard: pre-baked picks skip gate, fork, and join entirely', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
     picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    force: true,
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
@@ -899,6 +1083,64 @@ test('runInitWizard: pre-baked picks skip gate, fork, and join entirely', async 
   assert.deepEqual(calls, ['pick', 'configure', 'finale'])
   assert.equal(opts._pickOpts.picks.sources[0], 'claude')
   assert.equal(result.pathway, undefined)
+  assert.equal(opts._finaleArgs.force, true, 'force reaches the durable CLI decision')
+  assert.equal(opts._finaleArgs.interactive, false, 'headless setup must not prompt for a global install')
+})
+
+// --- the durable CLI is settled before the fork (LLP 0404) ---
+
+const NPX_BIN = '/tmp/_npx/abc/node_modules/hypaware/bin/hypaware.js'
+
+/** @param {{ installOk?: boolean }} [o] */
+function fakeNpm(o = {}) {
+  /** @type {string[][]} */
+  const calls = []
+  const runner = async (/** @type {string} */ _cmd, /** @type {string[]} */ args) => {
+    calls.push(args)
+    if (args[0] === 'config') return { exitCode: 0, stdout: '/tmp/global', stderr: '' }
+    return { exitCode: o.installOk === false ? 1 : 0, stdout: '', stderr: 'EACCES' }
+  }
+  return { runner, calls }
+}
+
+// @ref LLP 0404#install-policy [tests]: the CLI question comes before the pathway question, and its answer reaches both pathways
+test('runInitWizard: the durable CLI is settled before the fork and its answer reaches join and finale', async () => {
+  const npm = fakeNpm()
+  let asked = 0
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    durableBin: { binPath: NPX_BIN, runner: npm.runner, confirm: async () => { asked++; return true } },
+    fork: async () => { assert.equal(asked, 1, 'the CLI question precedes the fork'); return 'team' },
+    join: async (/** @type {any} */ o) => { opts._joinOpts = o; return { status: 'ok', lockedSources: [], managed: true } },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
+  assert.deepEqual(npm.calls[0], ['install', '-g', 'hypaware'])
+  assert.equal(opts._joinOpts.binPath, '/tmp/global/bin/hypaware', 'enrollment installs the settled CLI')
+  assert.equal(opts._finaleArgs.finale.binPath, '/tmp/global/bin/hypaware', 'the finale records the same CLI')
+})
+
+test('runInitWizard: refusing the temporary CLI ends the run before the fork, with nothing written', async () => {
+  const home = await tmpHome()
+  const npm = fakeNpm({ installOk: false })
+  const { opts, calls } = wizardOpts(home, {
+    durableBin: { binPath: NPX_BIN, runner: npm.runner, confirm: async () => false },
+  })
+  await assert.rejects(runInitWizard(opts), DurableBinRequiredError)
+  assert.deepEqual(calls, ['gate'], 'no fork, no join, no pick, no finale')
+  assert.equal(npm.calls.length, 0, 'a declined install is not attempted')
+  await assert.rejects(fs.access(path.join(home, '.hyp', 'hypaware-config.json')), 'no config is written before the fork')
+})
+
+test('runInitWizard: no daemon install means no CLI question', async () => {
+  for (const finale of [{ skipDaemon: true }, { dryRun: true }, { binPath: '/opt/hyp/bin/hypaware.js' }]) {
+    const { opts } = wizardOpts(await tmpHome(), {
+      finale,
+      durableBin: { binPath: NPX_BIN, runner: async () => assert.fail('npm must not run'), confirm: async () => assert.fail('no question') },
+    })
+    assert.equal((await runInitWizard(opts)).exitCode, 0)
+    assert.equal(opts._finaleArgs.finale.binPath, finale.binPath, 'an explicit --bin passes through untouched')
+  }
 })
 
 // --- exits: cancel and refusal ---
@@ -925,8 +1167,8 @@ test('runInitWizard: an overwrite refusal returns the pick phase exit 1', async 
 
 // --- deferred config commit (LLP 0190 #commit-point) ---
 // The pick lane composes; the orchestrator commits after the sync lane, so
-// the overwrite confirm is the last question and a cancel at the sync lane
-// leaves the existing config untouched.
+// the overwrite confirm is the last question and a cancel at the folders
+// lane leaves the existing config untouched.
 // @ref LLP 0190#commit-point [tests]:
 
 test('runInitWizard: a pending config lands on disk after the sync lane, before configure', async () => {
@@ -938,7 +1180,7 @@ test('runInitWizard: a pending config lands on disk after the sync lane, before 
     pick: async () => pickResult({ configPath, configPending: true }),
     syncScope: async () => {
       onDiskDuringSync = await fs.access(configPath).then(() => true, () => false)
-      return { optedOut: [] }
+      return {}
     },
   })
   const result = await runInitWizard(opts)
@@ -948,24 +1190,40 @@ test('runInitWizard: a pending config lands on disk after the sync lane, before 
   assert.ok(calls.includes('configure'), 'the acting phases still run after the commit')
 })
 
-test('runInitWizard: a declined commit exits 1, runs nothing further, and narrates on the team pathway', async () => {
+test('runInitWizard: an attended run overwrites an existing config without asking, and backs it up', async () => {
   const home = await tmpHome()
   const configPath = path.join(home, '.hyp', 'config.json')
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
-  const { opts, calls, stdout } = wizardOpts(home, {
-    fork: async () => 'team',
+  const { opts, stdout } = wizardOpts(home, {
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'defaults',
     pick: async () => pickResult({ configPath, configPending: true }),
-    confirmOverwrite: async () => false,
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')), pickResult().config)
+  assert.match(stdout.text(), /✓ Saved settings \(previous config backed up\)\n/)
+  const backups = (await fs.readdir(path.dirname(configPath))).filter((f) => f.startsWith('config.json.bak-'))
+  assert.equal(backups.length, 1, 'the previous config is kept on disk')
+  assert.equal(await fs.readFile(path.join(path.dirname(configPath), backups[0]), 'utf8'), '{"version":2,"plugins":["existing"]}\n')
+})
+
+test('runInitWizard: a non-interactive commit over an existing config without --force exits 1 and leaves it untouched', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":["existing"]}\n', 'utf8')
+  const { opts, calls, stderr } = wizardOpts(home, {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    pick: async () => pickResult({ configPath, configPending: true }),
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 1)
-  assert.notEqual(result.cancelled, true)
-  assert.ok(calls.includes('syncScope'), 'the questions all ran before the commit refused')
   assert.ok(!calls.includes('configure'))
-  assert.ok(!calls.includes('finale'))
-  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n', 'the existing config is untouched')
-  assert.match(stdout.text(), /This machine is enrolled/)
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n')
+  assert.match(stderr.text(), /hyp setup: /)
 })
 
 test('runInitWizard: a scripted pick result without configPending is never committed by the orchestrator', async () => {
@@ -995,11 +1253,11 @@ test('runInitWizard: a team-path overwrite refusal narrates the enrolled state a
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 1)
   const text = stdout.text()
-  assert.match(text, /This machine is enrolled/)
+  assert.match(text, /syncs to your team by default/)
   assert.match(text, /hyp privacy client <name> local-only/)
   assert.match(text, /Nothing has been uploaded yet/)
   // No sync offer follows an abort, so the narration keeps the way out.
-  assert.match(text, /To send it sooner, run `hyp sync`/)
+  assert.match(text, /or sooner if you run `hyp sync`/)
 })
 
 test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hold means no deadline claim', async () => {
@@ -1010,18 +1268,8 @@ test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hol
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 130)
   const text = stdout.text()
-  assert.match(text, /This machine is enrolled/)
+  assert.match(text, /syncs to your team by default/)
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
-})
-
-test('runInitWizard: a team-path sync-scope cancel narrates that default-sync stands', async () => {
-  const { opts, stdout } = wizardOpts(await tmpHome(), {
-    fork: async () => 'team',
-    syncScope: async () => ({ cancelled: true, optedOut: [] }),
-  })
-  const result = await runInitWizard(opts)
-  assert.equal(result.exitCode, 130)
-  assert.match(stdout.text(), /This machine is enrolled/)
 })
 
 test('runInitWizard: a local-path abort stays quiet - nothing enrolled this run', async () => {
@@ -1030,7 +1278,7 @@ test('runInitWizard: a local-path abort stays quiet - nothing enrolled this run'
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 1)
-  assert.doesNotMatch(stdout.text(), /This machine is enrolled/)
+  assert.doesNotMatch(stdout.text(), /syncs to your team by default/)
 })
 
 test('runInitWizard: a cancelled finale returns 130 with the cancel notice', async () => {
@@ -1048,18 +1296,41 @@ test('runInitWizard: a cancelled finale returns 130 with the cancel notice', asy
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 130)
-  assert.match(stderr.text(), /hyp setup: cancelled/)
+  assert.match(stderr.text(), /Setup cancelled./)
 })
 
 // --- run summary + privacy narration ---
 
-test('runInitWizard: prints the run summary with the written config path', async () => {
-  const { opts, stdout } = wizardOpts(await tmpHome())
+test('runInitWizard: a non-interactive run prints the run summary with the written config path', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+  })
   await runInitWizard(opts)
   assert.match(stdout.text(), /✓ Wrote \/tmp\/x\/config\.json/)
   // The old `next: hyp query sql 'select count(*) from logs'` hint named a
   // dataset most installs do not register (LLP 0135 #first-look).
   assert.ok(!stdout.text().includes('next: hyp query sql'))
+})
+
+test('runInitWizard: a dry run saves no config and its summary says so', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, 'config.json')
+  const { opts, stdout } = wizardOpts(home, {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    pick: async () => pickResult({ configPending: true, configPath }),
+    finale: { dryRun: true },
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  assert.match(stdout.text(), /\(dry-run\) Would save settings\n/)
+  assert.ok(stdout.text().includes(`(dry-run) Would write ${configPath}\n`))
+  assert.doesNotMatch(stdout.text(), /✓ (Wrote|Saved)/)
+  await assert.rejects(fs.access(configPath))
+})
+
+test('runInitWizard: an attended run skips the run summary, having said each step as it ran', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome())
+  await runInitWizard(opts)
+  assert.doesNotMatch(stdout.text(), /✓ Wrote /)
 })
 
 // --- first look ---
@@ -1298,8 +1569,8 @@ function firstLookWithRows() {
   ).runner
 }
 
-test('runInitWizard: the suggested questions come last, after the privacy narration', async () => {
-  // @ref LLP 0198#onboarding-list [tests]: onboarding closes with text and never starts a client
+test('runInitWizard: the skill offer comes last, after the privacy narration, and a run that cannot prompt names the verb', async () => {
+  // @ref LLP 0398#run-directory [tests]: setup closes on the offer; where it cannot ask, it names `hyp ask` and starts nothing
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
   const { opts, stdout } = wizardOpts(home, {
@@ -1308,27 +1579,22 @@ test('runInitWizard: the suggested questions come last, after the privacy narrat
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  for (const prompt of SUGGESTED_PROMPTS) assert.match(text, new RegExp(prompt.prompt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.doesNotMatch(text, /Worth asking your AI client/)
   assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
-  // Order: rows, then what leaves this machine, then the question.
+  // Order: rows, then what leaves this machine, then the offer's verb.
   assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
-  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Questions worth asking'))
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start/)
+  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Run `hyp ask` any time'))
+  assert.match(text, /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/)
 })
 
-// @ref LLP 0203#offer [tests]: the sync offer sits between the first look it follows and the closing question list
-test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync question, before the suggested questions', async () => {
-  const home = await tmpHome()
-  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
-  let spawned = 0
-  const { opts, stdout } = wizardOpts(home, {
-    fork: async () => 'team',
+test('runInitWizard: a yes to the skill offer runs `hyp ask` on this terminal', async () => {
+  // @ref LLP 0398#run-directory [tests]: the offer taken is the ask itself, as a child that inherits the terminal
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
     firstLook: firstLookWithRows(),
-    syncNow: {
-      // A child that leaves the marker in place: the user read the plan and
-      // answered no.
-      spawnFn: /** @type {any} */ (() => {
-        spawned += 1
+    suggestSkill: {
+      confirm: async (/** @type {any} */ q) => { opts._suggestQuestion = q; return 'yes' },
+      spawnFn: /** @type {any} */ ((/** @type {string} */ cmd, /** @type {string[]} */ args, /** @type {any} */ o) => {
+        opts._askSpawn = { cmd, args, o }
         /** @type {Record<string, (arg: any) => void>} */
         const handlers = {}
         queueMicrotask(() => handlers.close?.(0))
@@ -1337,51 +1603,147 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
     },
   })
   await runInitWizard(opts)
+  assert.match(opts._suggestQuestion.title, /Suggest a new skill\?/)
+  assert.equal(opts._suggestQuestion.eofValue, 'no')
+  assert.equal(opts._askSpawn.cmd, process.execPath)
+  assert.equal(opts._askSpawn.args.at(-1), 'ask')
+  assert.equal(opts._askSpawn.o.stdio, 'inherit')
+  // The child owns the closing screen; setup adds nothing after it.
+  assert.doesNotMatch(stdout.text(), /Run `hyp ask` any time/)
+})
 
-  assert.equal(spawned, 1)
+test('runInitWizard: a no to the skill offer names the verb and starts nothing', async () => {
+  let spawned = 0
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    suggestSkill: {
+      confirm: async () => 'no',
+      spawnFn: /** @type {any} */ (() => { spawned += 1; return { on() {} } }),
+    },
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned, 0)
+  assert.match(stdout.text(), /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/)
+})
+
+// @ref LLP 0203#offer [tests]: the sync offer sits between the first look it follows and the closing skill offer
+test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync question, before the skill offer', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  let syncRuns = 0
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    firstLook: firstLookWithRows(),
+    syncNow: {
+      // Sync leaves the marker in place: the user read the plan and
+      // answered no.
+      dispatchFn: async () => {
+        syncRuns += 1
+        return 0
+      },
+    },
+  })
+  await runInitWizard(opts)
+
+  assert.equal(syncRuns, 1)
   const text = stdout.text()
   // The wizard asks nothing of its own, and its narration stands down for
-  // the child's plan: no paragraph, no menu, one lead line.
+  // the sync plan: no paragraph, no menu, one lead line.
   // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt on the attended path
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
   assert.doesNotMatch(text, /Send your recorded history/)
-  assert.ok(text.indexOf('First look') < text.indexOf('`hyp sync` shows what would leave'))
-  assert.ok(text.indexOf('`hyp sync` shows what would leave') < text.indexOf('Questions worth asking'))
+  assert.ok(text.indexOf('First look') >= 0, text)
+  assert.ok(text.indexOf('First look') < text.indexOf('Nothing was sent.'), text)
+  assert.ok(text.indexOf('Nothing was sent.') < text.indexOf('Run `hyp ask` any time'), text)
   // A run that ends on the wait still leaves the deadline and the release
   // verb on screen.
   assert.match(text, /Nothing was sent\. Your history stays on this machine until /)
   assert.match(text, /run `hyp sync` any time to send it sooner/)
 })
 
+// @ref LLP 0437#first-look [tests]: nothing recorded, so no upload offer
+// @ref LLP 0100#requirements [tests]: R1 - with no offer, the held paragraph still names `hyp sync` and the privacy review
+test('runInitWizard: an enrolled run whose first look finds nothing makes no sync offer', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  let syncRuns = 0
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    // Every section comes back empty: the dataset exists and holds nothing.
+    firstLook: firstLookStub([], []).runner,
+    syncNow: {
+      dispatchFn: async () => {
+        syncRuns += 1
+        return 0
+      },
+    },
+  })
+  await runInitWizard(opts)
+
+  assert.equal(syncRuns, 0, 'there is nothing to upload, so nothing to offer')
+  const text = stdout.text()
+  // The empty block is not printed; setup's closing note says it once.
+  assert.doesNotMatch(text, /First look/, text)
+  assert.match(text, /Nothing recorded yet/, text)
+  // No offer follows, so the held paragraph carries the release verb and
+  // the review hint.
+  assert.match(text, /Nothing has been uploaded yet/, text)
+  assert.match(text, /or sooner if you run `hyp sync`/, text)
+  assert.match(text, /hypaware-privacy/, text)
+  assert.doesNotMatch(text, /Nothing was sent\./, text)
+})
+
 test('runInitWizard: a local install with no hold is never offered a sync', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     fork: async () => 'local',
-    syncNow: { spawnFn: () => { throw new Error('a local install must not sync') } },
+    syncNow: { dispatchFn: () => { throw new Error('a local install must not sync') } },
   })
   await runInitWizard(opts)
   assert.doesNotMatch(stdout.text(), /hyp sync/)
 })
 
-test('runInitWizard: a first look with no rows still prints the questions with an empty-history note', async () => {
+test('runInitWizard: a first look with no rows replaces the skill offer with an empty-history note', async () => {
   // @ref LLP 0198#empty-cache [tests]: a fresh install with nothing backfilled
-  // gets future-facing questions, never a launch
+  // gets the offer framed as something to come back to, never a launch
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     // Every section comes back empty: the dataset exists and holds nothing.
     firstLook: firstLookStub([], []).runner,
   })
   await runInitWizard(opts)
   assert.match(stdout.text(), /Nothing recorded yet/)
-  assert.match(stdout.text(), new RegExp(SUGGESTED_PROMPTS[0].prompt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions/)
 })
 
-test('runInitWizard: no detected client or gateway dataset still prints the question list', async () => {
+test('runInitWizard: no detected client or gateway dataset still prints the empty-history note', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     firstLook: { hasDataset: () => false, async run() { return { columns: [], rows: [] } } },
   })
   await runInitWizard(opts)
   assert.match(stdout.text(), /Nothing recorded yet/)
-  assert.match(stdout.text(), new RegExp(SUGGESTED_PROMPTS[0].prompt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests a skill based on your recent sessions/)
   assert.doesNotMatch(stdout.text(), /Starting Claude Code|Starting Codex/)
+})
+
+// @ref LLP 0398#setup-offer [tests]: nothing launchable means no offer and no mention of the verb
+test('runInitWizard: with no client CLI on PATH, setup never mentions `hyp ask`', async () => {
+  let asked = 0
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    // `launchable: undefined` hands the question to the real probe, which
+    // finds nothing: the harness env has no PATH.
+    suggestSkill: { launchable: undefined, confirm: async () => { asked += 1; return 'yes' } },
+  })
+  await runInitWizard(opts)
+  assert.equal(asked, 0)
+  assert.ok(!stdout.text().includes('hyp ask'), stdout.text())
+
+  const { opts: emptyOpts, stdout: emptyStdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookStub([], []).runner,
+    suggestSkill: { launchable: false },
+  })
+  await runInitWizard(emptyOpts)
+  assert.match(emptyStdout.text(), /Nothing recorded yet/)
+  assert.ok(!emptyStdout.text().includes('hyp ask'), emptyStdout.text())
 })
 
 // --- firstLookHadRows ---
@@ -1402,17 +1764,18 @@ test('firstLookHadRows: an absent or errored first look reports hasRows undefine
   assert.equal(firstLookHadRows({ shown: false, reason: 'error' }), undefined)
 })
 
-test('runInitWizard: a non-interactive or dry run does not print the question list', async () => {
+test('runInitWizard: a non-interactive or dry run makes no skill offer', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
   })
   await runInitWizard(opts)
-  assert.ok(!stdout.text().includes('Questions worth asking'))
+  assert.ok(!stdout.text().includes('hyp ask'))
 
-  const { opts: dryOpts } = wizardOpts(await tmpHome(), {
+  const { opts: dryOpts, stdout: dryStdout } = wizardOpts(await tmpHome(), {
     finale: { dryRun: true },
   })
   await runInitWizard(dryOpts)
+  assert.ok(!dryStdout.text().includes('hyp ask'))
 })
 
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {
@@ -1426,9 +1789,9 @@ test('runInitWizard: team pathway with a live first-sync hold narrates the deadl
   const text = stdout.text()
   // No tty here, so the sync step cannot put the question and states the
   // hold itself: the deadline, the way out, and the review hint.
-  assert.match(text, /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.match(text, /Nothing has been uploaded yet\. Your logs upload by/)
   assert.match(text, /hypaware-privacy/)
-  assert.match(text, /To send it sooner, run `hyp sync`/)
+  assert.match(text, /or sooner if you run `hyp sync`/)
 })
 
 test('runInitWizard: local pathway never narrates the first-sync hold', async () => {
@@ -1440,3 +1803,81 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
   await runInitWizard(opts)
   assert.doesNotMatch(stdout.text(), /Nothing has been uploaded yet/)
 })
+
+// @ref LLP 0396#combined-selection [tests]: cancellation and Back cannot revoke a standing privacy choice
+for (const scenario of ['cancel', 'back', 'config-failure', 'policy-failure', 'corrupt-policy', 'commit']) {
+  test(`combined sharing is deferred through setup: ${scenario}`, async (t) => {
+    const home = await tmpHome()
+    const env = { HYP_HOME: path.join(home, '.hyp') }
+    const stateDir = readObservabilityEnv(env).stateDir
+    const original = [{ source: 'claude', class: /** @type {'local-only'} */ ('local-only') }]
+    await writeClientSyncEntries({ stateDir, entries: original })
+    const configPath = path.join(home, 'config.json')
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    if (scenario === 'commit') {
+      // An enrollment the wizard can name, so the commit line has to carry
+      // the server the sync lane resolved rather than fall back.
+      const seedPath = centralSeedPath(stateDir)
+      await fs.mkdir(path.dirname(seedPath), { recursive: true })
+      await fs.writeFile(seedPath, JSON.stringify({
+        version: 2,
+        plugins: [],
+        sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.acme.dev' } } },
+      }))
+    }
+    let passes = 0
+    let configured = false
+    const { opts, stdout } = wizardOpts(home, {
+      gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+      confirm: async () => 'stay',
+      pick: async () => {
+        passes += 1
+        return pickResult({
+          configPath: scenario === 'config-failure' ? path.join(configPath, 'blocked.json') : configPath,
+          configPending: true,
+          sourcesPicked: passes === 1 ? ['claude'] : [],
+          descriptors: passes === 1 ? [{ id: 'claude', label: 'Claude Code' }] : [],
+        })
+      },
+      syncScope: runWizardSyncScope,
+      folderAsk: async () => {
+        assert.deepEqual(await readClientSyncEntries({ stateDir }), original,
+          'the running daemon still sees the old privacy choice throughout the questions')
+        assert.doesNotMatch(stdout.text(), /No longer local-only/)
+        if (scenario === 'cancel') return { cancelled: true }
+        if (scenario === 'back' && passes === 1) return { back: true }
+        if (scenario === 'corrupt-policy') await fs.writeFile(clientSyncListPath(stateDir), 'broken')
+        if (scenario === 'policy-failure') {
+          const rename = fs.rename.bind(fs)
+          t.mock.method(fs, 'rename', async (from, to) => {
+            if (to === clientSyncListPath(stateDir)) throw new Error('policy rename failed')
+            return rename(from, to)
+          })
+        }
+        if (scenario === 'commit') await writeClientSyncEntries({ stateDir, entries: [
+          ...original, { source: 'codex', class: 'local-only' },
+        ] })
+        return { mode: 'sync' }
+      },
+      configure: async () => { configured = true; return { results: [] } },
+    })
+    if (scenario === 'config-failure' || scenario === 'policy-failure' || scenario === 'corrupt-policy') {
+      await assert.rejects(runInitWizard(opts))
+    } else {
+      const result = await runInitWizard(opts)
+      assert.equal(result.exitCode, scenario === 'cancel' ? 130 : 0)
+    }
+    if (scenario === 'corrupt-policy') {
+      assert.equal(await fs.readFile(clientSyncListPath(stateDir), 'utf8'), 'broken')
+    } else {
+      assert.deepEqual(await readClientSyncEntries({ stateDir }), scenario === 'commit'
+        ? [{ source: 'codex', class: 'local-only' }]
+        : original)
+    }
+    assert.equal(configured, scenario === 'commit' || scenario === 'back')
+    // @ref LLP 0437#server-name [tests]: the commit line names the server the sync lane resolved
+    if (scenario === 'commit') assert.match(stdout.text(), /No longer local-only: claude\. Future rows sync to hyp\.acme\.dev;/)
+    else assert.doesNotMatch(stdout.text(), /No longer local-only/)
+    if (scenario === 'back') assert.equal(passes, 2)
+  })
+}

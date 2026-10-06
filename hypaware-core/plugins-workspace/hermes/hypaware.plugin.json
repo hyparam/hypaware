@@ -22,7 +22,7 @@
       {
         "name": "hermes",
         "label": "Hermes Agent",
-        "summary": "Imports history and new sessions from its local database.",
+        "summary": "Records your Hermes Agent conversations, past and new.",
         "detect": { "settings_file": ".hermes/state.db" },
         "compose": {
           "plugin": { "name": "@hypaware/hermes" },

@@ -403,7 +403,7 @@ test('an interactive session with NULL cwd records unconditionally (no scope to 
 // A session with no messages and no end yields nothing to write
 // ---------------------------------------------------------------------------
 
-test('a session with no messages and no end yields undefined', async () => {
+test('an empty session yields a snapshot so previously captured rows can be removed', async () => {
   const session = openInteractiveSession()
   const item = await projectHermesSession({
     session,
@@ -411,7 +411,8 @@ test('a session with no messages and no end yields undefined', async () => {
     deriveRepo: noopDeriveRepo(),
     resolver: fakeResolver(),
   })
-  assert.equal(item, undefined)
+  assert.deepEqual(item?.value.messages, [])
+  assert.equal(item?.reconcile?.where.session_id, 'hermes-1')
 })
 
 // ---------------------------------------------------------------------------

@@ -3,12 +3,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
 
+import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
-import { defaultOverwriteConfirmFactory, derivePickedClients } from '../../../../src/core/cli/walkthrough.js'
+import { derivePickedClients } from '../../../../src/core/cli/walkthrough.js'
 import { discoverBundledPlugins } from '../../../../src/core/runtime/bundled.js'
 import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
 
@@ -72,7 +72,7 @@ function hermeticEnv(tmp) {
 }
 
 async function mkTmp() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-pick-'))
+  return temporaryDirectory('hypaware-wizard-pick-')
 }
 
 /**
@@ -217,7 +217,6 @@ test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured
     prompt: capturingPrompt(['claude-desktop']).prompt,
     detect: async () => new Set(),
     platform: 'darwin',
-    confirmOverwrite: async () => true,
   }))
   assert.ok(result.sourcesPicked.includes('claude-desktop'))
   assert.ok(result.previouslyConfigured.includes('claude-desktop'), 'the carried pick is reported')
@@ -237,10 +236,9 @@ test('runWizardPick: a fresh pick reports nothing as previously configured', asy
 
 // A needs_setup row can still reach the default rows off a recorded answer
 // (a config already composing it, or this run's own confirmed selection on a
-// re-entry). There the narration keeps it but says the part that is coming:
-// its configure phase walks a sign-in and a sudo prompt when it is newly
-// picked.
-test('runWizardPick: a seeded needs_setup row is narrated with the needs-extra-setup suffix', async () => {
+// re-entry). The express path keeps it and names it on the Recording line
+// like any other row; its configure phase says what it needs when it runs.
+test('runWizardPick: a seeded needs_setup row is taken on the express path and named plainly', async () => {
   const tmp = await mkTmp()
   const catalog = await catalogWithVisibleNeedsSetup()
   const stdout = makeBuf()
@@ -252,11 +250,7 @@ test('runWizardPick: a seeded needs_setup row is narrated with the needs-extra-s
     platform: 'darwin',
     initialSelection: ['codex', 'claude-desktop'],
   }))
-  assert.match(
-    stdout.text(),
-    /Claude Desktop · needs extra setup/,
-    'the narration names the consent still to come'
-  )
+  assert.equal(stdout.text(), '✓ Recording Claude Desktop and Codex\n✓ Saved settings\n')
   assert.deepEqual(result.sourcesPicked.sort(), ['claude-desktop', 'codex'])
 })
 
@@ -281,10 +275,10 @@ test('runWizardPick: autoAccept takes the default rows and prints what it accept
     detect: async () => new Set(['codex']),
     locked: ['claude'],
   }))
-  const out = stdout.text()
-  assert.match(out, /HypAware will record:/)
-  assert.match(out, /· managed by your fleet/, 'the locked row is named on the fast path too')
-  assert.match(out, /codex/i)
+  // One line, plain names: the locked row is named on the fast path too,
+  // and whether it is the team's is said on the sync line, not here. The
+  // save confirmation follows it.
+  assert.equal(stdout.text(), '✓ Recording Claude Code and Codex\n✓ Saved settings\n')
   assert.deepEqual(result.sourcesPicked, ['codex'])
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
@@ -402,7 +396,7 @@ test('runWizardPick: a locked row renders checked, disabled, and fleet-labeled',
   const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
   assert.equal(claudeRow.checked, true)
   assert.equal(claudeRow.disabled, true)
-  assert.match(claudeRow.label, /managed by your fleet/)
+  assert.match(claudeRow.label, /set by your team/)
 })
 
 test('runWizardPick: a locked source is filtered out of the returned picks and composition', async () => {
@@ -493,7 +487,7 @@ test('runWizardPick: a managed machine no longer labels non-locked rows "stays o
   const rows = state.question.options
   // The locked row keeps the fleet label.
   const claudeRow = rows.find((/** @type {any} */ o) => o.value === 'claude')
-  assert.match(claudeRow.label, /managed by your fleet/)
+  assert.match(claudeRow.label, /set by your team/)
   // No row carries the retired suffix; a detected row keeps its own label.
   const codexRow = rows.find((/** @type {any} */ o) => o.value === 'codex')
   assert.match(codexRow.label, /detected/)
@@ -570,19 +564,16 @@ test('runWizardPick: deferWrite composes but never writes, guards, or prompts to
   const configPath = path.join(tmp, '.hyp', 'config.json')
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
-  let overwriteAsked = false
 
   const { prompt } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env, catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => { overwriteAsked = true; return true },
     deferWrite: true,
   }))
 
   assert.equal(result.exitCode, 0)
   assert.equal(result.configPending, true)
-  assert.equal(overwriteAsked, false, 'the guard belongs to the commit, not the deferred pick')
   assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n', 'the existing config is untouched')
   assert.ok(result.config.plugins?.some((/** @type {any} */ p) => p.name === '@hypaware/otel'), 'the composed config is returned in memory')
 })
@@ -598,18 +589,20 @@ test('commitWizardPickedConfig: writes the config, backing up an existing one fi
   const committed = await commitWizardPickedConfig({
     stdout, stderr: makeBuf(),
     interactive: true,
-    confirmOverwrite: async () => true,
     configPath,
     config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/otel' }] }),
   })
 
   assert.equal(committed.ok, true)
-  assert.match(stdout.text(), /Backed up existing config to /)
+  assert.equal(stdout.text(), '✓ Saved settings (previous config backed up)\n')
   const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.ok(written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/otel'))
+  const backups = (await fs.readdir(path.dirname(configPath))).filter((f) => f.startsWith('config.json.bak-'))
+  assert.equal(backups.length, 1, 'the existing config is backed up before the write')
+  assert.equal(await fs.readFile(path.join(path.dirname(configPath), backups[0]), 'utf8'), '{"version":2,"plugins":[]}\n')
 })
 
-test('commitWizardPickedConfig: a declined overwrite refuses without touching the config', async () => {
+test('commitWizardPickedConfig: an unattended run without --force refuses without touching the config', async () => {
   const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
   const tmp = await mkTmp()
   const configPath = path.join(tmp, '.hyp', 'config.json')
@@ -619,8 +612,7 @@ test('commitWizardPickedConfig: a declined overwrite refuses without touching th
 
   const committed = await commitWizardPickedConfig({
     stdout: makeBuf(), stderr,
-    interactive: true,
-    confirmOverwrite: async () => false,
+    interactive: false,
     configPath,
     config: /** @type {any} */ ({ version: 2, plugins: [] }),
   })
@@ -628,6 +620,68 @@ test('commitWizardPickedConfig: a declined overwrite refuses without touching th
   assert.equal(committed.ok, false)
   assert.match(stderr.text(), /hyp setup: /)
   assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n')
+})
+
+test('commitWizardPickedConfig: a dry run creates no config', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  const stdout = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout, stderr: makeBuf(),
+    interactive: false,
+    dryRun: true,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/otel' }] }),
+  })
+
+  assert.equal(committed.ok, true)
+  assert.equal(stdout.text(), '(dry-run) Would save settings\n')
+  await assert.rejects(fs.access(path.dirname(configPath)), 'not even the config directory is created')
+})
+
+test('commitWizardPickedConfig: a dry run over an existing config writes neither the config nor a backup', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
+  const stdout = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout, stderr: makeBuf(),
+    interactive: false,
+    force: true,
+    dryRun: true,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/otel' }] }),
+  })
+
+  assert.equal(committed.ok, true)
+  assert.equal(stdout.text(), '(dry-run) Would save settings (previous config would be backed up)\n')
+  assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":[]}\n')
+  assert.deepEqual(await fs.readdir(path.dirname(configPath)), ['config.json'])
+})
+
+test('commitWizardPickedConfig: a dry run without --force refuses where the real run would', async () => {
+  const { commitWizardPickedConfig } = await import('../../../../src/core/cli/wizard/pick.js')
+  const tmp = await mkTmp()
+  const configPath = path.join(tmp, '.hyp', 'config.json')
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n', 'utf8')
+  const stderr = makeBuf()
+
+  const committed = await commitWizardPickedConfig({
+    stdout: makeBuf(), stderr,
+    interactive: false,
+    dryRun: true,
+    configPath,
+    config: /** @type {any} */ ({ version: 2, plugins: [] }),
+  })
+
+  assert.equal(committed.ok, false)
+  assert.match(stderr.text(), /refusing to overwrite/)
 })
 
 // --- cancel ---
@@ -645,7 +699,7 @@ test('runWizardPick: a cancelled prompt returns the deterministic cancel result'
   assert.equal(result.cancelled, true)
   assert.equal(result.exitCode, 130)
   assert.equal(result.configPath, '')
-  assert.match(stderr.text(), /hyp setup: cancelled/)
+  assert.match(stderr.text(), /Setup cancelled./)
 })
 
 // --- clientsPicked derivation (LLP 0180) ---
@@ -681,7 +735,7 @@ test('derivePickedClients: the derived set over every bundled picker row is pinn
     catalog.pickerDescriptors,
     catalog.clientDescriptors
   )
-  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'openclaw', 'opencode'])
+  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'cursor', 'openclaw', 'opencode', 'pi'])
 })
 
 // --- reconfigure: the existing config, not detection, is the starting state ---
@@ -720,7 +774,6 @@ test('runWizardPick: a reconfigure pre-checks the undetectable otel row it alrea
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   const otelRow = state.question.options.find((/** @type {any} */ o) => o.value === 'otel')
   assert.equal(otelRow.checked, true)
@@ -741,7 +794,6 @@ test('runWizardPick: a reconfigure leaves a deliberately excluded client uncheck
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(['claude']),
-    confirmOverwrite: async () => true,
   }))
   const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
   assert.notEqual(claudeRow.checked, true)
@@ -765,7 +817,6 @@ test('runWizardPick: a 120-day retention survives a team-path reconfigure', asyn
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.equal(result.retentionDays, 120)
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -810,7 +861,6 @@ test('runWizardPick: a reconfigure carries forward plugins and sink edits the pi
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   // A plugin no picker row and no export choice contributes is not the
@@ -840,7 +890,6 @@ test('runWizardPick: a reconfigure of a cache-only install does not silently add
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.equal(result.exportPicked, 'keep-local')
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -869,7 +918,6 @@ test('runWizardPick: unchecking a row still removes its plugin and its gateway u
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.deepEqual(result.sourcesPicked, ['claude'])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -890,7 +938,6 @@ test('runWizardPick: a disabled plugin reads as an off row, and re-picking it tu
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   const otelRow = state.question.options.find((/** @type {any} */ o) => o.value === 'otel')
   assert.notEqual(otelRow.checked, true)
@@ -926,7 +973,6 @@ test('runWizardPick: a reconfigure does not add a second export sink beside a re
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.equal(result.exportPicked, 'local-parquet')
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -960,7 +1006,6 @@ test('runWizardPick: a request sink parked on the composer sink id is not folded
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   for (const [id, sink] of Object.entries(written.sinks)) {
@@ -1009,7 +1054,6 @@ test('runWizardPick: a differently written blob sink parked on the composer sink
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   assert.deepEqual(written.sinks.local, {
@@ -1023,36 +1067,6 @@ test('runWizardPick: a differently written blob sink parked on the composer sink
     config: { dir: '/srv/parquet', schedule: '0 4 * * *' },
   })
   assert.deepEqual(Object.keys(written.sinks).sort(), ['archive', 'local'])
-})
-
-test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated from the picks', async () => {
-  const asked = makeBuf()
-  const confirm = defaultOverwriteConfirmFactory({
-    stdin: /** @type {any} */ (Readable.from(['n\n'])),
-    stdout: /** @type {any} */ (asked),
-  })
-  await confirm('/home/tester/.hyp/hypaware-config.json')
-  // "Overwrite it?" reads as "keep adjusting my picks"; the file is rewritten
-  // from the picks, and the prompt has to say so before the y/N.
-  assert.match(asked.text(), /rewritten from your picks/i)
-  assert.match(asked.text(), /carried over/i)
-})
-
-// The confirm is the end of the happy path, after every question was
-// answered: a bare enter completes the run (the backup is what keeps that
-// safe), and only an explicit no declines.
-test('defaultOverwriteConfirmFactory: bare enter proceeds, an explicit no declines', async () => {
-  const enter = defaultOverwriteConfirmFactory({
-    stdin: /** @type {any} */ (Readable.from(['\n'])),
-    stdout: /** @type {any} */ (makeBuf()),
-  })
-  assert.equal(await enter('/home/tester/.hyp/hypaware-config.json'), true)
-
-  const no = defaultOverwriteConfirmFactory({
-    stdin: /** @type {any} */ (Readable.from(['n\n'])),
-    stdout: /** @type {any} */ (makeBuf()),
-  })
-  assert.equal(await no('/home/tester/.hyp/hypaware-config.json'), false)
 })
 
 // --- hidden rows (LLP 0202) ---
@@ -1075,7 +1089,6 @@ test('runWizardPick: a hidden row is absent from the menu', async () => {
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
   assert.ok(!rendered.includes('raw-anthropic'))
@@ -1097,7 +1110,6 @@ test('runWizardPick: a raw-only config survives a reconfigure that picks nothing
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   // The menu could not show the row, so it must not have silently dropped
   // it: the upstream the install runs on is still there.
@@ -1131,10 +1143,9 @@ test('runWizardPick: the express path carries a raw-only config and never states
     prompt: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(),
     locked: ['claude'],
-    confirmOverwrite: async () => true,
   }))
   const out = stdout.text()
-  assert.match(out, /HypAware will record:/)
+  assert.match(out, /^✓ Recording Claude Code$/m)
   assert.doesNotMatch(out, /raw|API/i, 'the hidden row is not narrated on the fast path either')
   // Locked claude is dropped from local-layer composition; the carried raw
   // row is what the local layer still collects.
@@ -1167,7 +1178,6 @@ test('runWizardPick: a hidden row seeded only derivatively does not resurrect an
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.deepEqual(result.sourcesPicked, ['claude'])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -1205,7 +1215,6 @@ test('runWizardPick: a hidden row that is merely detected is not carried on a fi
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     // No config on disk: the seed is this detection result and nothing else.
     detect: async () => new Set(['raw-anthropic']),
-    confirmOverwrite: async () => true,
   }))
   assert.deepEqual(result.sourcesPicked, [])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -1240,7 +1249,6 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt(['claude']).prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.deepEqual([...first.sourcesPicked].sort(), ['claude', 'raw-openai'])
 
@@ -1252,7 +1260,6 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
     initialSelection: first.sourcesPicked,
     prompt: capturingPrompt(['claude']).prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.deepEqual([...second.sourcesPicked].sort(), ['claude', 'raw-openai'])
   const written = JSON.parse(await fs.readFile(second.configPath, 'utf8'))
@@ -1283,7 +1290,6 @@ test('runWizardPick: detected claude-desktop is offered and pre-checked', async 
     stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     platform: 'darwin',
     detect: async () => new Set(['claude-desktop']),
-    confirmOverwrite: async () => true,
   }))
   const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
   assert.ok(rendered.includes('claude-desktop'), 'present in the menu')
@@ -1307,7 +1313,6 @@ test('runWizardPick: claude-desktop is withheld from the Linux menu', async () =
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     platform: 'linux',
     detect: async () => new Set(['claude-desktop']),
-    confirmOverwrite: async () => true,
   }))
   const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
   assert.ok(!rendered.includes('claude-desktop'), 'absent from the menu')
@@ -1335,7 +1340,6 @@ test('runWizardPick: a Linux reconfigure carries the configured claude-desktop i
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
     platform: 'linux',
-    confirmOverwrite: async () => true,
   }))
   const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
   assert.ok(!rendered.includes('claude-desktop'), 'the menu still cannot offer it')
@@ -1358,7 +1362,6 @@ test('runWizardPick: a configured claude-desktop stays selected when the user ke
     prompt: capturingPrompt(['claude', 'claude-desktop']).prompt,
     detect: async () => new Set(),
     platform: 'darwin',
-    confirmOverwrite: async () => true,
   }))
   assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -1390,7 +1393,6 @@ test('runWizardPick: widening the carry rule leaves the derivative raw rows alon
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt([]).prompt,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
   assert.deepEqual(result.sourcesPicked, [])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -1476,7 +1478,6 @@ test('runWizardPick: the numbered menu keeps the seeded rows on a bare enter', a
   const result = await runWizardPick(/** @type {any} */ ({
     stdout, stderr: makeBuf(), stdin: input, env: hermeticEnv(tmp), catalog,
     detect: async () => new Set(),
-    confirmOverwrite: async () => true,
   }))
 
   assert.deepEqual(
@@ -1543,7 +1544,6 @@ test('runWizardPick: an answer-less config (hyp remote add before init) still se
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(['claude', 'codex']),
-    confirmOverwrite: async () => true,
   }))
   // The menu seeded from detection and pre-checked both rows.
   const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
@@ -1564,7 +1564,6 @@ test('runWizardPick: an answer-less config carries its keys forward and takes th
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(['claude']),
-    confirmOverwrite: async () => true,
   }))
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   // Answer-less is a seeding classification, not a license to discard the
@@ -1587,7 +1586,53 @@ test('runWizardPick: plugins: [] is an answer - detection does not re-seed an em
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(['claude']),
-    confirmOverwrite: async () => true,
+  }))
+  const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
+  assert.notEqual(claudeRow.checked, true)
+  assert.match(claudeRow.label, /detected/)
+})
+
+// The forged grep-only document (issue #1892) and its hand-authored
+// near-twin classify answer-less in this lane exactly as they do in
+// `collectHypAwareStatus`, even though this lane reads a raw `JSON.parse`
+// while status reads `parseConfigShape` output: the predicate ignores entry
+// keys the parser drops, so one document gets one classification and the
+// first picker seeds from detection instead of opening every detected row
+// unchecked (the LLP 0277 symptom the carve-out removes).
+// @ref LLP 0426#consequences [tests]: a parser-dropped entry key does not defeat the carve-out, so the raw-reading pick lane agrees with the status reader
+test('runWizardPick: the forged document and its parser-dropped-key near-twin seed from detection', async () => {
+  const docs = [
+    { version: 2, plugins: [{ name: '@hypaware/grep' }] },
+    { version: 2, plugins: [{ name: '@hypaware/grep', note: 'mine' }] },
+  ]
+  for (const doc of docs) {
+    const tmp = await mkTmp()
+    const catalog = await realCatalog()
+    await seedLocalConfig(tmp, doc)
+    const { prompt, state } = capturingPrompt(['claude'])
+    await runWizardPick(/** @type {any} */ ({
+      stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+      detect: async () => new Set(['claude', 'codex']),
+    }))
+    const checked = state.question.options
+      .filter((/** @type {any} */ o) => o.checked)
+      .map((/** @type {any} */ o) => o.value)
+      .sort()
+    assert.deepEqual(checked, ['claude', 'codex'], JSON.stringify(doc))
+  }
+})
+
+// A decoration the parser keeps (`enabled`) defeats the carve-out in this
+// lane just as it does at the status reader: the document records an answer,
+// so detection labels but does not re-check (LLP 0183).
+test('runWizardPick: a decorated grep entry still reads as a recorded answer', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, { version: 2, plugins: [{ name: '@hypaware/grep', enabled: false }] })
+  const { prompt, state } = capturingPrompt(['claude'])
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(['claude']),
   }))
   const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
   assert.notEqual(claudeRow.checked, true)

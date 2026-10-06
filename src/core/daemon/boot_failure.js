@@ -8,8 +8,8 @@
  * neither, which is why they live in a leaf module.
  *
  * @import { ActivationResult } from '../../../src/core/runtime/types.js'
- * @import { UnsatisfiedRequirement } from '../../../src/core/types.js'
- * @import { DaemonLogger, FailedPluginSnapshot } from '../../../src/core/daemon/types.js'
+ * @import { FailedManifest, UnsatisfiedRequirement } from '../../../src/core/types.js'
+ * @import { DaemonLogger, FailedPluginSnapshot, UnloadableManifestSnapshot } from '../../../src/core/daemon/types.js'
  */
 
 import { sanitizeLabel } from '../util/json_util.js'
@@ -82,6 +82,42 @@ export function warningsRecordBootFailure(warnings) {
 }
 
 /**
+ * How `dep_graph` words the one `plugin_missing` detail that names a plugin
+ * nothing on this host supplies, with `recordFailedPlugins`'s kind prefix in
+ * front of it.
+ */
+const MISSING_PLUGIN_MESSAGE_PREFIX = 'plugin_missing: requires plugin '
+
+/**
+ * The dependency a `requires_unsatisfied` snapshot entry's `message` names as
+ * absent, or `undefined` when it names no plugin.
+ *
+ * Read back out of the composed string rather than carried as a field of its
+ * own, because `FailedPluginSnapshot` is serialized into `status.json` and
+ * read by whichever CLI is installed when the operator looks: a new field is
+ * absent from every snapshot an already-running daemon wrote, so the reader
+ * needs this path regardless. It sits beside the `<kind>: <detail>`
+ * composition below so the two cannot drift apart unnoticed.
+ *
+ * Only the absent-manifest wording is read. The resolver's other
+ * `plugin_missing` detail is a version mismatch (`<name>@<version> does not
+ * satisfy <range>`), where the dependency is present and enabling nothing
+ * repairs it, and `cap_missing` names a capability rather than a plugin;
+ * both fall through to `undefined` deliberately.
+ *
+ * @param {string} message
+ * @returns {string | undefined}
+ */
+export function requiredPluginFromMessage(message) {
+  if (!message.startsWith(MISSING_PLUGIN_MESSAGE_PREFIX)) return undefined
+  const spec = message.slice(MISSING_PLUGIN_MESSAGE_PREFIX.length)
+  // A scoped plugin name carries an `@` of its own and a semver range carries
+  // none, so the last one is always the separator.
+  const at = spec.lastIndexOf('@')
+  return at > 0 ? spec.slice(0, at) : undefined
+}
+
+/**
  * Record the plugins a boot could not activate on the daemon's own file log,
  * and return them in the shape the status snapshot carries.
  *
@@ -99,7 +135,8 @@ export function warningsRecordBootFailure(warnings) {
  *
  * The other two doors into `unavailablePlugins` are deliberately not here. A
  * manifest that would not load is named by its directory rather than by a
- * plugin name, and what to render for it is open as issue #1576. A plugin the
+ * plugin name, so it cannot share this shape at all and is recorded by
+ * {@link recordUnloadableManifests} instead (issue #1576). A plugin the
  * boot profile withheld is not a shortfall in either writer: the processing
  * daemon boots the `config` profile, which withholds nothing the config
  * enabled, and the gateway profile withholds every non-routing plugin by
@@ -167,4 +204,60 @@ export function recordFailedPlugins({ activations, unsatisfied = [], log }) {
     log.error('daemon.plugin_requires_unsatisfied', { plugin: name, error_kind: entry.errorKind, message })
   }
   return failed
+}
+
+/**
+ * Record the plugin directories a boot could not load a manifest from on the
+ * daemon's own file log, and return them in the shape the status snapshot
+ * carries.
+ *
+ * The sibling of `recordFailedPlugins` above, for the one door into
+ * `unavailablePlugins` that names no plugin (issue #1576): a manifest that is
+ * corrupt, unparseable, or fails schema validation contributes nothing and has
+ * no name to be known by, so the directory is its whole identity. Recorded
+ * apart rather than folded in because that is exactly the difference: a
+ * `FailedPluginSnapshot.name` is a plugin name and every reader treats it as
+ * one, so a `rootDir` put there would be read as a plugin (which is the call
+ * `hyp plugin list` already made for itself in issue #1570).
+ *
+ * Same two surfaces and the same reason as its sibling: the kernel's own
+ * `getLogger` record reaches nothing on a shipped install, so `hyp status`
+ * reported the install healthy while a configured plugin captured nothing.
+ *
+ * `errorKind` is not carried. `ManifestErrorKind` has one member, so it would
+ * discriminate nothing at the read, and the sentence the operator needs (not
+ * valid JSON, missing at <path>, which field failed validation) is already in
+ * `message`.
+ *
+ * @param {object} args
+ * @param {FailedManifest[]} args.unloadableManifests `bootKernel`'s
+ *   `unloadableManifests`: the directories whose manifest was rejected.
+ * @param {DaemonLogger} args.log The process's own file log.
+ * @returns {UnloadableManifestSnapshot[]} Empty when every manifest loaded.
+ */
+export function recordUnloadableManifests({ unloadableManifests, log }) {
+  /** @type {UnloadableManifestSnapshot[]} */
+  const unloadable = []
+  for (const entry of unloadableManifests) {
+    // Both halves are bounded where they are recorded, for the reason
+    // `MAX_ACTIVATION_MESSAGE_CHARS` gives: `status.json` is rewritten for the
+    // life of the daemon and nothing on the way in bounds either string. The
+    // same width serves both, since a rejection reason and the path it is
+    // about are sentence-scale, not name-scale.
+    const rootDir = sanitizeLabel(entry.rootDir, MAX_ACTIVATION_MESSAGE_CHARS)
+    if (rootDir === undefined) continue
+    unloadable.push({
+      rootDir,
+      message: sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded',
+    })
+    // The whole message, the way the activation record keeps its throw whole:
+    // written once per boot, and where the diagnostic's repair sends the
+    // operator when the clamp above cut the reason short.
+    log.error('daemon.plugin_manifest_unloadable', {
+      root_dir: entry.rootDir,
+      error_kind: entry.errorKind,
+      message: entry.message,
+    })
+  }
+  return unloadable
 }

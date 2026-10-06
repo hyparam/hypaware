@@ -7,6 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -15,10 +16,18 @@ import zlib from 'node:zlib'
 import { deriveReportsEndpoint } from '../../src/core/remote/credentials.js'
 import {
   runReportDelete,
+  runReportFix,
   runReportGet,
+  runReportGenerate,
   runReportList,
+  runReportMark,
   runReportPublish,
+  runReportRecommend,
 } from '../../src/core/cli/report_commands.js'
+import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
+import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
+import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /* ---------- endpoint derivation ---------- */
 
@@ -95,6 +104,29 @@ async function tmpReportFile(content = '# Weekly\n') {
   return { dir, file, content }
 }
 
+/**
+ * Walk a plain-ustar archive and return each member's exact name field
+ * (bytes 0-99 of its 512-byte header, NUL-trimmed), in on-disk order.
+ *
+ * @param {Buffer} tar
+ * @returns {string[]}
+ */
+function ustarMemberNames(tar) {
+  const HEADER_SIZE = 512
+  /** @type {string[]} */
+  const names = []
+  let offset = 0
+  while (offset + HEADER_SIZE <= tar.length) {
+    const nameField = tar.subarray(offset, offset + 100).toString('latin1').split('\0')[0]
+    if (!nameField) break
+    names.push(nameField)
+    const sizeField = tar.subarray(offset + 124, offset + 136).toString('latin1').split('\0')[0].trim()
+    const size = sizeField ? parseInt(sizeField, 8) : 0
+    offset += HEADER_SIZE + Math.ceil(size / HEADER_SIZE) * HEADER_SIZE
+  }
+  return names
+}
+
 /* ---------- publish ---------- */
 
 test('publish sends a single .md file with kind/period/title params and the content hash', async (t) => {
@@ -133,9 +165,10 @@ test('publish reports a 200 dedup hit as already published', async (t) => {
 
 test('publish packs a folder as a gzipped ustar bundle', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-bundle-'))
-  await fs.writeFile(path.join(dir, 'report.html'), '<h1>hi</h1>')
-  await fs.mkdir(path.join(dir, 'assets'))
-  await fs.writeFile(path.join(dir, 'assets', 'style.css'), 'h1{}')
+  await fs.writeFile(path.join(dir, 'report.md'), '# Brief\n[Usage](usage.md)')
+  await fs.writeFile(path.join(dir, 'usage.md'), '# Usage')
+  await fs.writeFile(path.join(dir, 'recommendation-batch.md'), '# Batch')
+  await fs.writeFile(path.join(dir, 'change-legacy.md'), '# Legacy')
   const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-2', kind: 'k', period: 'p', files: 2, bytes: 15 } } }))
   const { ctx } = ctxWith()
   const code = await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx)
@@ -145,9 +178,23 @@ test('publish packs a folder as a gzipped ustar bundle', async (t) => {
   const tar = zlib.gunzipSync(/** @type {Buffer} */ (call.body))
   assert.equal(tar.subarray(257, 262).toString('ascii'), 'ustar')
   const names = tar.toString('latin1')
-  assert.match(names, /report\.html/)
-  assert.match(names, /style\.css/)
+  assert.match(names, /report\.md/)
+  assert.match(names, /usage\.md/)
+  assert.match(names, /recommendation-batch\.md/)
+  assert.match(names, /change-legacy\.md/)
+  assert.doesNotMatch(names, /report\.html|style\.css/)
   assert.equal(call.headers['x-report-content-hash'], crypto.createHash('sha256').update(/** @type {Buffer} */ (call.body)).digest('hex'))
+  // Pin the exact ustar name field (bytes 0-99 of each 512-byte header)
+  // rather than a substring match: the server keys a page by its bare
+  // filename, and the old `tar -C dir .` whole-directory pack emitted a
+  // `./` prefix (plus a `./` directory entry) that the substring checks
+  // above cannot tell apart from the bare form. reportSourcePages() sorts
+  // entries before packing, so 'change-legacy.md' sorts ahead of
+  // 'report.md' and is the first member on the wire.
+  const memberNames = ustarMemberNames(tar)
+  assert.equal(memberNames[0], 'change-legacy.md')
+  assert.equal(memberNames.includes('report.md'), true)
+  assert.ok(memberNames.every((name) => !name.startsWith('./')))
 })
 
 test('publish rejects a folder without an entry document before any upload', async (t) => {
@@ -158,7 +205,7 @@ test('publish rejects a folder without an entry document before any upload', asy
   const code = await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx)
   assert.equal(code, 2)
   assert.equal(calls.length, 0)
-  assert.match(err.join(''), /must contain report\.html or report\.md/)
+  assert.match(err.join(''), /must contain report\.md/)
 })
 
 test('publish rejects an invalid kind before any network call', async (t) => {
@@ -171,16 +218,72 @@ test('publish rejects an invalid kind before any network call', async (t) => {
   assert.match(err.join(''), /kind must match/)
 })
 
-test('publish rejects a single file that is neither .html nor .md', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-ext-'))
-  const file = path.join(dir, 'report.pdf')
-  await fs.writeFile(file, 'pdfish')
+for (const extension of ['html', 'htm', 'HTML', 'pdf', 'css']) {
+  test(`publish rejects a single .${extension} file before any upload`, async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-ext-'))
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    const file = path.join(dir, `report.${extension}`)
+    await fs.writeFile(file, '<h1>Not Markdown</h1>')
+    const { calls } = stubServer(t, () => ({ status: 500 }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportPublish([file, '--kind', 'k', '--period', 'p'], ctx), 2)
+    assert.equal(calls.length, 0)
+    assert.match(err.join(''), /must be Markdown/)
+  })
+}
+
+// Use work.MD so the case fixture cannot overwrite report.md on case-insensitive filesystems.
+for (const entry of ['report.html', 'style.css', 'image.png', 'notes.md', 'assets', 'usage.md', '.DS_Store', 'work.MD']) {
+  test(`publish rejects unsupported bundle entry ${entry} before any upload`, async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-invalid-entry-'))
+    t.after(() => fs.rm(dir, { recursive: true, force: true }))
+    await fs.writeFile(path.join(dir, 'report.md'), '# Brief')
+    if (entry === 'assets') await fs.mkdir(path.join(dir, entry))
+    else if (entry === 'usage.md') await fs.symlink('report.md', path.join(dir, entry))
+    else await fs.writeFile(path.join(dir, entry), 'not a report source')
+    const { calls } = stubServer(t, () => ({ status: 500 }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx), 2)
+    assert.equal(calls.length, 0)
+    assert.match(err.join(''), /unsupported report entry/)
+  })
+}
+
+test('publish rejects unsupported bundle entry with a message stating the slug grammar and case rule', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-ds-store-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  await fs.writeFile(path.join(dir, 'report.md'), '# Brief')
+  await fs.writeFile(path.join(dir, '.DS_Store'), 'not a report source')
   const { calls } = stubServer(t, () => ({ status: 500 }))
   const { ctx, err } = ctxWith()
-  const code = await runReportPublish([file, '--kind', 'k', '--period', 'p'], ctx)
-  assert.equal(code, 2)
+  assert.equal(await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx), 2)
   assert.equal(calls.length, 0)
-  assert.match(err.join(''), /must be \.html or \.md/)
+  const message = err.join('')
+  assert.match(message, /unsupported report entry '\.DS_Store'/)
+  assert.match(message, /names are lowercase/)
+  assert.match(message, /\[a-z0-9\]\[a-z0-9-\]\*/)
+  assert.match(message, /\.DS_Store/)
+})
+
+test('publish requires report.md even when the folder has report.html', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-report-html-only-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  await fs.writeFile(path.join(dir, 'report.html'), '<h1>Brief</h1>')
+  const { calls } = stubServer(t, () => ({ status: 500 }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportPublish([dir, '--kind', 'k', '--period', 'p'], ctx), 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /must contain report\.md/)
+})
+
+test('publish surfaces server Markdown validation errors without retrying or rendering locally', async (t) => {
+  const { file } = await tmpReportFile()
+  await fs.writeFile(file, '<script>alert(1)</script>')
+  const { calls } = stubServer(t, () => ({ status: 400, json: { error: 'invalid_markdown', detail: 'raw HTML is not accepted' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportPublish([file, '--kind', 'k', '--period', 'p'], ctx), 1)
+  assert.equal(calls.length, 1)
+  assert.match(err.join(''), /HTTP 400: invalid_markdown - raw HTML is not accepted/)
 })
 
 test('publish surfaces the quota error with its make-room guidance', async (t) => {
@@ -248,6 +351,60 @@ test('publish accepts the inline --flag=value form the gate parses', async (t) =
   assert.equal(calls[0].url.searchParams.get('title'), 'Weekly')
 })
 
+/**
+ * The receipt one publish prints, for a 201 answer carrying `report`. The run's
+ * own argv stays in grammar, so what the receipt renders is what the server sent.
+ *
+ * @param {TestContext} t
+ * @param {Record<string, unknown>} report
+ * @returns {Promise<string>}
+ */
+async function publishReceipt(t, report) {
+  const { file } = await tmpReportFile()
+  stubServer(t, () => ({ status: 201, json: { report } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportPublish([file, '--kind', 'usage-review', '--period', '2026-W29'], ctx), 0)
+  return out.join('')
+}
+
+/** The command the receipt hands back, taken from its own line. */
+const viewCommand = (/** @type {string} */ text) => (text.match(/^ {2}view: (hyp report get .*)$/m) ?? [])[1] ?? ''
+
+test('the publish receipt quotes a server-authored kind, period and id as one shell word each', async (t) => {
+  const text = await publishReceipt(t, {
+    id: "rpt-1'; echo pwn", kind: "usage review'; echo pwn", period: "2026-W29' rm -rf x", files: 1, bytes: 12,
+  })
+  assert.equal(
+    viewCommand(text),
+    "hyp report get 'usage review'\\''; echo pwn' '2026-W29'\\'' rm -rf x' 'rpt-1'\\''; echo pwn'"
+  )
+})
+
+// @ref LLP 0225#escape-not-strip [tests]: a control character in a remote value stays escaped where a person reads it, on the prose line as well as inside the quoting
+test('the publish receipt lets no raw control byte from the server reach stdout', async (t) => {
+  const escChar = String.fromCharCode(0x1b)
+  const cr = String.fromCharCode(0x0d)
+  const text = await publishReceipt(t, { id: `rpt${escChar}[2K1`, kind: `usage${escChar}[2Kreview`, period: '2026-W29', files: `1${cr}`, bytes: `12${cr}` })
+  assert.ok(!text.includes(escChar), 'no raw escape byte reaches stdout')
+  assert.ok(!text.includes(cr), 'no raw carriage return reaches stdout')
+  assert.equal(viewCommand(text), "hyp report get 'usage\\u001b[2Kreview' 2026-W29 'rpt\\u001b[2K1'")
+  // The `where` receipt and the counts beside it are prose, so each takes the
+  // escape and not the quoting. The counts are the server's own too.
+  assert.match(text, /^published usage\\u001b\[2Kreview\/2026-W29\/rpt\\u001b\[2K1 \(1\\r file\(s\), 12\\r bytes\)$/m)
+})
+
+test('the publish receipt is byte-identical for a conforming record', async (t) => {
+  assert.equal(
+    await publishReceipt(t, { id: 'rpt-1', kind: 'usage-review', period: '2026.07.20', files: 3, bytes: 1200 }),
+    'published usage-review/2026.07.20/rpt-1 (3 file(s), 1200 bytes)\n  view: hyp report get usage-review 2026.07.20 rpt-1\n'
+  )
+})
+
+test('a 201 answer with no id leaves the <id> placeholder bare for the reader to fill in', async (t) => {
+  const text = await publishReceipt(t, { kind: 'usage-review', period: '2026-W29', files: 1, bytes: 12 })
+  assert.equal(viewCommand(text), 'hyp report get usage-review 2026-W29 <id>')
+})
+
 /* ---------- list ---------- */
 
 test('list renders the index newest first and passes filters through', async (t) => {
@@ -277,6 +434,121 @@ test('list forwards a dash-leading filter value instead of dropping it', async (
   const code = await runReportList(['--limit', '-5'], ctx)
   assert.equal(code, 0)
   assert.equal(calls[0].url.searchParams.get('limit'), '-5')
+})
+
+// @ref LLP 0461#status-is-visible [tests]: every listed recommendation carries its state, `open` when the record has no status
+test('list prints each report\'s recommendations, by id, state and page, under its line', async (t) => {
+  stubServer(t, () => ({
+    status: 200,
+    json: { reports: [
+      {
+        id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z',
+        recommendations: [
+          // A server that reads the page's opening at publish (server LLP 0416), marked applied.
+          { id: 'hyprec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.', status: { state: 'applied', by: 'email:a@b.c', at: '2026-07-21T10:00:00.000Z', via: 'cli' } },
+          // A report that predates that, or a page with no heading: id and page alone; never marked, so open.
+          { id: 'hyprec-fedcba9876543210', page: 'recommendation-tenant-check' },
+        ],
+      },
+      { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 900, publishedAt: '2026-07-13T10:00:00.000Z' },
+    ] },
+  }))
+  const { ctx, out } = ctxWith()
+  const code = await runReportList([], ctx)
+  assert.equal(code, 0)
+  const lines = out.join('').split('\n').filter(Boolean)
+  assert.deepEqual(lines, [
+    '  2026-07-20T10:00:00.000Z\tusage-review/2026-W29\trpt-b\t1200 bytes\tWeekly',
+    '      hyprec-0123456789abcdef\t[applied]\trecommendation-batch-the-retries\tBatch the retries',
+    '          Every retry is its own call. One queue fixes it.',
+    '      hyprec-fedcba9876543210\t[open]\trecommendation-tenant-check',
+    '  2026-07-13T10:00:00.000Z\tusage-review/2026-W28\trpt-a\t900 bytes',
+  ])
+})
+
+/* ---------- list --recommendations / --status ---------- */
+
+/** The flat listing the server's `_recommendations` route answers with. */
+const FLAT_ROWS = [
+  {
+    id: 'hyprec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.',
+    status: { state: 'in_progress', by: 'email:a@b.c', at: '2026-07-21T10:00:00.000Z', via: 'dashboard' },
+    standalone: false,
+    report: { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', publishedAt: '2026-07-20T10:00:00.000Z' },
+  },
+  {
+    id: 'hyprec-fedcba9876543210', page: 'recommendation-no-python3', title: 'No python3 on the runner',
+    standalone: true,
+    report: { id: 'rpt-s', kind: 'recommendation', period: '2026-10-03', title: 'No python3 on the runner', publishedAt: '2026-10-03T09:00:00.000Z' },
+  },
+]
+
+test('list --recommendations lists recommendations flat from the _recommendations route, standalone rows saying so', async (t) => {
+  const { calls } = stubServer(t, (method, url) => {
+    assert.equal(url.pathname, '/v1/reports/_recommendations')
+    return { status: 200, json: { recommendations: FLAT_ROWS } }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--recommendations', '--kind', 'usage-review', '--limit', '5'], ctx), 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url.searchParams.get('kind'), 'usage-review')
+  assert.equal(calls[0].url.searchParams.get('limit'), '5')
+  assert.equal(calls[0].url.searchParams.has('status'), false)
+  assert.deepEqual(out.join('').split('\n').filter(Boolean), [
+    '  hyprec-0123456789abcdef\t[in_progress]\t2026-07-20T10:00:00.000Z\tusage-review/2026-W29/rpt-b\tBatch the retries',
+    '      Every retry is its own call. One queue fixes it.',
+    '  hyprec-fedcba9876543210\t[open]\t2026-10-03T09:00:00.000Z\tstandalone\tNo python3 on the runner',
+  ])
+})
+
+test('list --status filters on the server, implies --recommendations, and refuses a state the server has not got', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendations: [] } }))
+  const { ctx, out, err } = ctxWith()
+  assert.equal(await runReportList(['--status', 'open,in_progress'], ctx), 0)
+  assert.equal(calls[0].url.pathname, '/v1/reports/_recommendations')
+  assert.equal(calls[0].url.searchParams.get('status'), 'open,in_progress')
+  assert.match(out.join(''), /no recommendations match/)
+  assert.equal(await runReportList(['--status', 'done'], ctx), 2)
+  assert.match(err.join(''), /--status expects open\|in_progress\|applied\|dismissed \(got done\)/)
+  assert.equal(calls.length, 1, 'the refused state never reaches the server')
+})
+
+test('list --recommendations --json prints the rows as the server sent them', async (t) => {
+  stubServer(t, () => ({ status: 200, json: { recommendations: FLAT_ROWS } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--recommendations', '--json'], ctx), 0)
+  assert.deepEqual(JSON.parse(out.join('')), FLAT_ROWS)
+})
+
+test('list escapes server text for the terminal; --json stays byte-exact (LLP 0225)', async (t) => {
+  // Every listed field is remote-authored, and the listing is what pairs a
+  // title with the id a reader pastes into `hyp report fix`: a `\r` plus SGR
+  // in a title could repaint the line to show that title beside another id.
+  const hostile = 'Weekly\r\u001b[31mrec-aaaaaaaaaaaaaaaa\u001b[0m'
+  stubServer(t, () => ({
+    status: 200,
+    json: { reports: [{
+      id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: hostile, bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z',
+      recommendations: [
+        { id: 'hyprec-0123456789abcdef', page: 'recommendation-x', title: 'Batch\u001b[2Kthe retries', summary: 'One queue.\u0007' },
+      ],
+    }] },
+  }))
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportList([], ctx), 0)
+    const text = out.join('')
+    assert.ok(!text.includes('\u001b') && !text.includes('\r') && !text.includes('\u0007'))
+    assert.match(text, /Weekly\\r\\u001b\[31mrec-aaaaaaaaaaaaaaaa/)
+    assert.match(text, /Batch\\u001b\[2Kthe retries/)
+    assert.match(text, /One queue\.\\u0007/)
+  }
+  // The machine render keeps the captured bytes.
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportList(['--json'], ctx), 0)
+    assert.equal(JSON.parse(out.join(''))[0].title, hostile)
+  }
 })
 
 test('list --json prints the raw records', async (t) => {
@@ -392,6 +664,889 @@ test('get reports an unknown report from the server error body', async (t) => {
   assert.match(err.join(''), /HTTP 404: unknown_report/)
 })
 
+/* ---------- fix ---------- */
+
+// `hyp report fix` launches through the seams `hyp ask` uses (status probe,
+// PATH probe, spawn, prompt), so the tests inject all four and check what
+// reaches them: which id was resolved, which page was fetched, and what the
+// client was started with.
+// @ref LLP 0414#id-is-the-handle [tests]: a bare id resolves to its report and page with nothing else in hand
+
+const REC = 'hyprec-0123456789abcdef'
+const REPORT = { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z' }
+const PAGE = '# Batch the retries\n\nEvery retry is its own call.\n'
+
+/** The citations a server attaches at publish (server LLP 0419), as the record lists them. */
+const CITED = {
+  evidence: [
+    { sessionId: 'sess-1', chainId: null, messageId: 'msg-1', toolCallId: null, day: '2026-07-14', note: 'three retries of one edit in a row' },
+    { sessionId: 'sess-2', chainId: 'agent-7', messageId: 'msg-9', toolCallId: 'call-3', day: '2026-07-15', note: 'the retried call itself' },
+  ],
+  basis: [
+    { agent: 'coordinator', query: "SELECT COUNT(*) FROM ai_gateway_messages WHERE tool_name = 'edit'" },
+    { agent: 'subagent-2', query: 'SELECT session_id FROM ai_gateway_messages LIMIT 5' },
+  ],
+}
+
+/**
+ * A reports plane holding one report with one recommendation. `md` false
+ * publishes the page as HTML only; `opening` lists the page's title and
+ * thesis on the record, as a server that reads them at publish does;
+ * `cited` attaches `CITED` to the entry on both the listing and the resolve
+ * route, as a server that verified them does; an object attaches exactly the
+ * lists it names, for a recommendation the server cited one way only.
+ *
+ * @param {TestContext} t
+ * @param {{ md?: boolean, opening?: boolean, cited?: boolean | Partial<typeof CITED> }} [opts]
+ */
+function stubFixServer(t, { md = true, opening = false, cited = false } = {}) {
+  const citations = cited === true ? CITED : cited || {}
+  const listed = {
+    ...(opening
+      ? { id: REC, page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' }
+      : { id: REC, page: 'recommendation-batch-the-retries' }),
+    ...citations,
+  }
+  return stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [listed] }] } }
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', ...citations }, report: REPORT } }
+    if (p.startsWith('/v1/reports/_recommendations/')) return { status: 404, json: { error: 'unknown_recommendation' } }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') {
+      return md ? { status: 200, body: new TextEncoder().encode(PAGE) } : { status: 404, json: { error: 'not_found' } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.html') {
+      return { status: 200, body: new TextEncoder().encode('<h1>Batch the <em>retries</em></h1>') }
+    }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+}
+
+/**
+ * The injected seams: one attached client, a recording spawn, and a scripted prompt.
+ * @param {{ launchers?: any[], pick?: (spec: any) => Promise<string | number> }} [opts]
+ */
+function fixDeps({ launchers = [{ client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] }], pick = async () => { throw new Error('unexpected prompt') } } = {}) {
+  /** @type {any[]} */ const launches = []
+  /** @type {any[]} */ const prompts = []
+  return {
+    launches,
+    prompts,
+    deps: /** @type {any} */ ({
+      collectStatus: async () => ({ clients: [{ name: 'claude', attached: true }, { name: 'codex', attached: true }] }),
+      resolveLaunchers: async () => launchers,
+      launchClient: async (/** @type {any} */ args) => { launches.push(args); return { ok: true, code: 0 } },
+      select: async (/** @type {any} */ spec) => { prompts.push(spec); return pick(spec) },
+    }),
+  }
+}
+
+/** @param {TestContext} t */
+async function generateFixture(t) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-generate-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  for (const client of ['claude', 'codex']) {
+    const dir = path.join(home, `.${client}`, 'skills', 'hypaware-report')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'SKILL.md'), '# Report skill\n')
+  }
+  // The caller's directory is deliberately outside HOME: the whole point of
+  // this command is that the client starts where it was typed, so a fixture
+  // where cwd and HOME are the same path cannot tell a preserved cwd from a
+  // relocation into a HypAware-owned folder.
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-generate-cwd-'))
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }))
+  const io = ctxWith({ HOME: home, HYP_HOME: undefined })
+  io.ctx.config = { version: 2 }
+  io.ctx.cwd = cwd
+  return { ...io, home, cwd }
+}
+
+test('generate launches locally with the skill and preserves optional instructions verbatim', async (t) => {
+  const { ctx, home, cwd: where } = await generateFixture(t)
+  const { calls } = stubServer(t, () => { throw new Error('generation must not contact a server') })
+  const { deps, launches } = fixDeps()
+  // A sentinel the command never reads: it can only reach the spawn by being
+  // passed through, so its presence is the environment's inheritance, which
+  // comparing ctx.env to itself could never show.
+  ctx.env.HYP_TEST_INHERITED = 'sentinel'
+  const instructions = 'Cover August 2026\nFocus on `debugging`, $HOME, and "retries".'
+  assert.equal(await runReportGenerate([instructions], ctx, deps), 0)
+  assert.equal(calls.length, 0)
+  assert.equal(launches.length, 1)
+  const { cwd, prompt, env } = launches[0]
+  assert.equal(cwd, where)
+  assert.notEqual(cwd, home)
+  assert.ok((await fs.stat(cwd)).isDirectory())
+  assert.ok(prompt.includes(JSON.stringify(path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md'))))
+  // The destination the skill is told to write into is the caller's
+  // directory, not HOME and not a directory the CLI chose.
+  assert.ok(prompt.includes(JSON.stringify(where)))
+  assert.ok(prompt.endsWith(instructions))
+  assert.equal(env.HYP_TEST_INHERITED, 'sentinel')
+  // The CLI creates no workspace: neither a state directory under HOME nor
+  // anything at all in the directory it was typed in.
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readdir(where), [])
+})
+
+test('generate preserves cwd and environment even with a custom or relative HYP_HOME', async (t) => {
+  const { ctx, home } = await generateFixture(t)
+  ctx.env.HYP_HOME = path.join(home, 'custom')
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[0].cwd, ctx.cwd)
+  assert.match(launches[0].prompt, /default reporting period/)
+  assert.doesNotMatch(launches[0].prompt, /Additional instructions/)
+  ctx.env.HYP_HOME = 'relative-home'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[1].cwd, ctx.cwd)
+  assert.equal(launches[1].env.HYP_HOME, 'relative-home')
+})
+
+test('generate telemetry distinguishes a launch failure from success without recording instructions', async (t) => {
+  const { ctx } = await generateFixture(t)
+  const captured = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch(spans) { captured.push(...spans) } }],
+  })
+  provider.register()
+  t.after(() => provider.shutdown())
+  const { deps } = fixDeps()
+  assert.equal(await runReportGenerate(['private-instruction-marker'], ctx, deps), 0)
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  const spans = captured.filter((span) => span.name === 'report.generate')
+  assert.equal(spans.length, 2)
+  assert.equal(spans[0].attributes.status, 'ok')
+  assert.equal(spans[0].status.code, SpanStatusCode.OK)
+  assert.equal(spans[1].attributes.error_kind, 'client-launch')
+  assert.equal(spans[1].status.code, SpanStatusCode.ERROR)
+  assert.ok(!JSON.stringify(spans).includes('private-instruction-marker'))
+})
+
+test('generate rejects invalid arguments before probing or launching', async () => {
+  for (const args of [['--unknown'], ['one', 'two']]) {
+    const { ctx } = ctxWith()
+    const { deps, launches } = fixDeps()
+    deps.collectStatus = async () => { throw new Error('must not probe') }
+    deps.resolveLaunchers = async () => { throw new Error('must not resolve') }
+    assert.equal(await runReportGenerate(args, ctx, deps), 2)
+    assert.equal(launches.length, 0)
+  }
+})
+
+test('generate requires an available client with an installed report skill', async (t) => {
+  const { ctx, home, err } = await generateFixture(t)
+  await fs.rm(path.join(home, '.claude'), { recursive: true })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  assert.equal(launches.length, 0)
+  assert.match(err.join(''), /no recorded client with the hypaware-report skill/)
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+})
+
+test('generate chooses a client on a terminal and uses the first without a TUI', async (t) => {
+  const { ctx } = await generateFixture(t)
+  const launchers = [
+    { client: 'claude', label: 'Claude', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
+    { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
+  ]
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ launchers, pick: async () => 'codex' })
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[0].launcher.client, 'codex')
+  assert.match(launches[0].prompt, /\.codex/)
+  assert.equal(prompts.length, 1)
+  ctx.env.HYP_NO_TUI = '1'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches[1].launcher.client, 'claude')
+  assert.equal(prompts.length, 1)
+})
+
+test('generate cancellation does not create a directory or start a client', async (t) => {
+  const { ctx, home, out } = await generateFixture(t)
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches } = fixDeps({
+    launchers: [
+      { client: 'claude', label: 'Claude' },
+      { client: 'codex', label: 'Codex' },
+    ],
+    pick: async () => { throw new PromptCancelledError() },
+  })
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches.length, 0)
+  await assert.rejects(fs.stat(path.join(home, '.hyp')), { code: 'ENOENT' })
+  // A picker answer that is not one of the clients it offered exits the same
+  // way rather than throwing past the command: the user sees 'Nothing
+  // started.', not a stack trace, and no client is spawned. Only the output
+  // of this second run is inspected; the cancel above already wrote the same
+  // line, so asserting over the whole buffer would pass without it.
+  const before = out.length
+  deps.select = async () => 'a-client-that-was-never-offered'
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.equal(launches.length, 0)
+  assert.match(out.slice(before).join(''), /Nothing started\./)
+})
+
+test('generate reports spawn failures', async (t) => {
+  const { ctx, err } = await generateFixture(t)
+  const { deps } = fixDeps()
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportGenerate([], ctx, deps), 1)
+  assert.match(err.join(''), /could not start claude: ENOENT/)
+})
+
+test('fix <id> resolves the id, checks the page exists, and starts the client here with the read command', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, out } = ctxWith()
+  ctx.cwd = '/work/repo'
+  const { deps, launches } = fixDeps()
+  const code = await runReportFix([REC], ctx, deps)
+  assert.equal(code, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    `/v1/reports/_recommendations/${REC}`,
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md',
+  ])
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].cwd, '/work/repo')
+  assert.equal(launches[0].launcher.client, 'claude')
+  assert.match(launches[0].prompt, new RegExp('^Run `hyp report get ' + REC + '` and read its output\\.'))
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+  assert.match(launches[0].prompt, /usage-review\/2026-W29, "Weekly"/)
+  assert.doesNotMatch(launches[0].prompt, /hyp query sql/, 'no basis, so no re-run hint')
+  assert.match(out.join(''), /Starting Claude Code on "Batch the retries"/)
+})
+
+// @ref LLP 0414#page-is-the-brief [tests]: nothing is written under HYP_HOME; the client is pointed at the same read a session makes on its own
+test('fix writes nothing to disk and carries the target flags into the read command', async (t) => {
+  stubFixServer(t, { cited: true })
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const { ctx } = ctxWith({ HYP_HOME: hypHome })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC, '--org', 'acme', '--remote', 'prod'], ctx, deps), 0)
+  assert.deepEqual(await fs.readdir(hypHome), [])
+  assert.match(launches[0].prompt, new RegExp('^Run `hyp report get ' + REC + ' --org acme --remote prod` and read its output\\.'))
+  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql --remote prod --org acme`/)
+})
+
+// A bare run carries no `--remote` into readCommand (targetFlags only echoes
+// what was typed), so the re-run hint must still name a concrete target -
+// otherwise the client has nothing to substitute and queries the local cache.
+test('fix with no --remote names the resolved default target in the re-run hint, not a placeholder', async (t) => {
+  stubFixServer(t, { cited: true })
+  const { ctx } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql --remote prod`/)
+  assert.doesNotMatch(launches[0].prompt, /<target>/)
+})
+
+// The client reads the prompt and the output of the `hyp report get` the prompt
+// tells it to run, and with evidence and no basis the prompt carries no re-run
+// hint, so that output is its only remote guidance.
+// @ref LLP 0414#page-is-the-brief [tests]: the citations tail names this run's resolved target, so the read the prompt sends the client to make is runnable
+test('fix on a recommendation with evidence and no basis shows the client no <target>, by either route', async (t) => {
+  stubFixServer(t, { cited: { evidence: CITED.evidence } })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctxWith().ctx, deps), 0)
+  assert.doesNotMatch(launches[0].prompt, /hyp query sql/, 'no basis, so no re-run hint in the prompt')
+  assert.doesNotMatch(launches[0].prompt, /<target>/)
+  // The read the prompt names, made the way the client makes it.
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.doesNotMatch(printed, /<target>/)
+  assert.match(printed, /look it up with `hyp query sql --remote prod` against `ai_gateway_messages`/)
+})
+
+// The appendix carries the org scope the same way the prompt does, so the
+// command it hands over reaches the population the report was measured over.
+test('the citations tail names the resolved remote and the org scope, shell-quoted', async (t) => {
+  stubFixServer(t, { cited: true })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC, '--org', 'acme corp', '--remote', 'prod'], ctx), 0)
+  const printed = out.join('')
+  assert.doesNotMatch(printed, /<target>/)
+  assert.match(printed, /look it up with `hyp query sql --remote prod --org 'acme corp'` against/)
+  assert.match(printed, /Re-run them with `hyp query sql --remote prod --org 'acme corp'`, keeping the report's date filters\./)
+})
+
+/**
+ * Split a `shellWord`-quoted flag string the way a shell splits it, so a hint
+ * is checked as the argv the launched client's `hyp` process receives rather
+ * than as the text of the sentence carrying it.
+ *
+ * @param {string} s
+ * @returns {string[]}
+ */
+function shellSplit(s) {
+  /** @type {string[]} */ const words = []
+  let word = ''
+  let quoted = false
+  let started = false
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i]
+    if (c === "'") { quoted = !quoted; started = true; continue }
+    if (!quoted && c === '\\') { i += 1; word += s[i] ?? ''; started = true; continue }
+    if (!quoted && /\s/.test(c)) {
+      if (started) words.push(word)
+      word = ''
+      started = false
+      continue
+    }
+    word += c
+    started = true
+  }
+  if (started) words.push(word)
+  return words
+}
+
+/**
+ * Every `hyp query sql` hint in a piece of emitted text, as its flag words.
+ *
+ * @param {string} text
+ * @returns {string[][]}
+ */
+function queryHints(text) {
+  return [...text.matchAll(/`hyp query sql ([^`]*)`/g)].map((m) => shellSplit(m[1]))
+}
+
+// `--org=` is the admin single-org form the reports plane takes and the query
+// plane has no form for, so a hint naming it is a command `hyp query sql`
+// rejects. Both routes to the hint are checked, and as argv rather than text:
+// a naive split reads the emitted `''` as a two-character org and passes.
+test('the admin single-org form yields a query hint hyp query sql accepts, by either route', async (t) => {
+  const { calls } = stubFixServer(t, { cited: true })
+  const { ctx } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC, '--org', '', '--remote', 'prod'], ctx, deps), 0)
+  // The run's own scope is untouched: the reports plane still gets `org=`.
+  assert.equal(calls.at(-1)?.url.searchParams.get('org'), '')
+  // The citations tail is the other route to the same builder, and the client
+  // reads it too: the prompt's first instruction is to run `hyp report get`.
+  const { ctx: getCtx, out } = ctxWith()
+  assert.equal(await runReportGet([REC, '--org', '', '--remote', 'prod'], getCtx), 0)
+  const hints = [...queryHints(launches[0].prompt), ...queryHints(out.join(''))]
+  assert.equal(hints.length, 3)
+  for (const argv of hints) {
+    assert.equal(parseControlFlags(argv).ok, true, `hyp query sql refuses '${argv.join(' ')}'`)
+    assert.deepEqual(argv, ['--remote', 'prod'])
+  }
+})
+
+// The gate is on emptiness, not on truthiness of some other kind: `*` (read
+// every org the account may read) is a scope the hint must keep naming.
+test('fix keeps an --org * scope in the re-run hint', async (t) => {
+  stubFixServer(t, { cited: true })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC, '--org', '*', '--remote', 'prod'], ctxWith().ctx, deps), 0)
+  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql --remote prod --org '\*'`/)
+})
+
+test('fix falls back to the HTML page when the report has no Markdown one', async (t) => {
+  const { calls } = stubFixServer(t, { md: false })
+  const { ctx } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.equal(calls.at(-1)?.url.pathname, '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.html')
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+})
+
+// @ref LLP 0414#page-is-the-brief [tests]: `hyp report get <rec-id>` is the one read of a recommendation, citations under the page
+test('get <rec-id> prints the page with the record\'s evidence and basis under it', async (t) => {
+  const { calls } = stubFixServer(t, { cited: true })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    `/v1/reports/_recommendations/${REC}`,
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md',
+  ])
+  const printed = out.join('')
+  assert.ok(printed.startsWith(PAGE), 'the page comes first, unchanged')
+  const tail = printed.slice(PAGE.length)
+  assert.match(tail, /^\n---\n\n## Citations from the report record\n/)
+  assert.match(tail, /### Evidence\n[\s\S]*\n1\. three retries of one edit in a row \(session sess-1, message msg-1, 2026-07-14\)\n2\. the retried call itself \(session sess-2, chain agent-7, message msg-9, tool call call-3, 2026-07-15\)\n/)
+  assert.match(tail, /### Basis\n[\s\S]*Run by coordinator:\n\n```sql\nSELECT COUNT\(\*\) FROM ai_gateway_messages WHERE tool_name = 'edit'\n```\n/)
+  assert.match(tail, /Run by subagent-2:\n\n```sql\nSELECT session_id FROM ai_gateway_messages LIMIT 5\n```\n/)
+})
+
+// @ref LLP 0461#status-is-visible [tests]: a record with no citations and no status still ends in a Status section reading open
+test('get <rec-id> prints the page with only the Status tail when the record carries no citations, and saves with --output', async (t) => {
+  stubFixServer(t)
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-get-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const expected = `${PAGE}\n---\n\n## Status\n\nState: open (never marked)\n`
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportGet([REC], ctx), 0)
+    assert.equal(out.join(''), expected)
+    assert.doesNotMatch(out.join(''), /Citations from the report record/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    const output = path.join(dir, 'rec.md')
+    assert.equal(await runReportGet([REC, '--output', output], ctx), 0)
+    assert.equal(await fs.readFile(output, 'utf8'), expected)
+    assert.match(err.join(''), /saved \d+ bytes to /)
+  }
+})
+
+test('get <rec-id> on an HTML-only page keeps the output HTML: the citations sit in one escaped <pre>', async (t) => {
+  stubFixServer(t, { md: false, cited: true })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.ok(printed.startsWith('<h1>Batch the <em>retries</em></h1>\n<pre>'))
+  assert.match(printed, /## Citations from the report record/)
+  assert.match(printed, /<\/pre>\n$/)
+  assert.doesNotMatch(printed.slice(printed.indexOf('<pre>') + 5), /<(?!\/pre>)/, 'nothing inside the pre opens a tag')
+})
+
+test('get <rec-id> refuses extra positionals and reports an unknown id like fix does', async (t) => {
+  stubFixServer(t)
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportGet([REC, 'extra'], ctx), 2)
+    assert.match(err.join(''), /is a recommendation id and takes no other positional/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportGet(['hyprec-ffffffffffffffff'], ctx), 1)
+    assert.match(err.join(''), /hyp report get: no recommendation 'hyprec-ffffffffffffffff' in this org/)
+  }
+})
+
+test('get <kind> <period> <id> stays a report read when the kind is spelled like a recommendation id', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, body: new TextEncoder().encode('<h1>r</h1>') }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC, '2026-W29', 'rpt-b'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [`/v1/reports/${REC}/2026-W29/rpt-b/`])
+  assert.equal(out.join(''), '<h1>r</h1>')
+})
+
+test('get <rec-id> fences a basis query longer than any backtick run inside it', async (t) => {
+  const query = 'SELECT 1 /*\n```\n*/'
+  stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', basis: [{ agent: '', query }] }, report: REPORT } }
+    return { status: 200, body: new TextEncoder().encode(PAGE) }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  assert.ok(out.join('').includes(`\n\`\`\`\`sql\n${query}\n\`\`\`\`\n`), 'a four-backtick fence holds the three-backtick line')
+})
+
+test('fix with an unknown id exits 1 and points at the listing, before any launch', async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix(['hyprec-ffffffffffffffff'], ctx, deps), 1)
+  // The skew reading is conditional on the id being on that listing, so a
+  // genuinely bad id still reads as a bad id and not as an old server.
+  assert.match(err.join(''), /no recommendation 'hyprec-ffffffffffffffff' in this org - list them with 'hyp report list'; if it is on that listing,/)
+  assert.equal(launches.length, 0)
+})
+
+test('fix against a server predating the resolve route names the version skew, not just a bad id', async (t) => {
+  // A server without GET /v1/reports/_recommendations/<id> answers a listed
+  // id with the same 404 an unknown one gets.
+  stubServer(t, () => ({ status: 404, json: { error: 'not_found', detail: 'no route for GET /v1/reports/_recommendations/:id' } }))
+  const { ctx, err } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 1)
+  const message = err.join('')
+  assert.match(message, /cannot resolve recommendation ids/)
+  assert.match(message, /is the server up to date\?/)
+  assert.equal(launches.length, 0)
+})
+
+test('fix refuses a token that is not a recommendation id without a round trip', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportFix(['rpt-b'], ctx, fixDeps().deps), 2)
+  assert.match(err.join(''), /'rpt-b' is not a recommendation id/)
+  assert.equal(calls.length, 0)
+})
+
+test('get and fix still admit the pre-rename rec- form and pass it to the server as typed; the picker admits a listed one', async (t) => {
+  // Server LLP 0432 renamed the prefix to hyprec-; an older server lists
+  // rec- ids and a token copied before the rename is still rec-. The CLI
+  // never rewrites an id, so the server (which reads both) sees what the
+  // user held.
+  const OLD = 'rec-0123456789abcdef'
+  const { calls } = stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [{ id: OLD, page: 'recommendation-batch-the-retries' }] }] } }
+    if (p === `/v1/reports/_recommendations/${OLD}`) return { status: 200, json: { recommendation: { id: OLD, page: 'recommendation-batch-the-retries' }, report: REPORT } }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') return { status: 200, body: new TextEncoder().encode(PAGE) }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportGet([OLD], ctx), 0)
+    assert.equal(out.join(''), `${PAGE}\n---\n\n## Status\n\nState: open (never marked)\n`)
+    assert.equal(calls[0].url.pathname, `/v1/reports/_recommendations/${OLD}`)
+  }
+  {
+    const { ctx } = ctxWith()
+    const { deps, launches } = fixDeps()
+    assert.equal(await runReportFix([OLD], ctx, deps), 0)
+    assert.match(launches[0].prompt, new RegExp('`hyp report get ' + OLD + '`'))
+  }
+  {
+    const { ctx } = ctxWith()
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+    assert.equal(await runReportFix([], ctx, deps), 0)
+    assert.deepEqual(prompts[1].options, [{ value: OLD, label: 'batch the retries', summary: OLD }])
+    assert.equal(launches.length, 1)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportFix(['xrec-0123456789abcdef'], ctx, fixDeps().deps), 2)
+    assert.match(err.join(''), /is not a recommendation id .*hyprec-0123456789abcdef/)
+  }
+})
+
+test('fix with no id and no terminal is a usage error', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportFix([], ctx, fixDeps().deps), 2)
+  assert.match(err.join(''), /usage: hyp report fix <id>/)
+  assert.equal(calls.length, 0)
+})
+
+// @ref LLP 0414#listing-is-the-picker [tests]: the reports first, newest as listed, then the picked report's recommendations
+test('fix with no id on a terminal asks which report, then which of its recommendations, and starts the picked one', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+  assert.equal(await runReportFix(['--kind', 'usage-review'], ctx, deps), 0)
+  assert.equal(calls[0].url.pathname, '/v1/reports')
+  assert.equal(calls[0].url.searchParams.get('kind'), 'usage-review')
+  assert.equal(prompts.length, 2)
+  assert.equal(prompts[0].title, 'Which report?')
+  assert.deepEqual(prompts[0].options, [{ value: '0', label: 'Weekly', summary: '2026-07-20  usage-review/2026-W29  1 recommendation' }])
+  assert.equal(prompts[1].title, 'Which recommendation should be fixed?')
+  assert.equal(prompts[1].allowBack, true)
+  assert.deepEqual(prompts[1].options, [{ value: REC, label: 'batch the retries', summary: REC }])
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+})
+
+test('fix labels the recommendation rows by the page title and the thesis\'s first sentence when the server sends them', async (t) => {
+  stubFixServer(t, { opening: true })
+  const { ctx } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.deepEqual(prompts[1].options, [{ value: REC, label: 'Batch the retries', summary: 'Every retry is its own call.' }])
+  assert.equal(launches.length, 1)
+})
+
+test('fix lists reports in the order the server returns them, skips one with nothing to fix, and back returns to the report list', async (t) => {
+  const older = { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 900, publishedAt: '2026-07-13T10:00:00.000Z' }
+  const empty = { id: 'rpt-c', kind: 'usage-review', period: '2026-W30', title: 'Nothing here', bytes: 100, publishedAt: '2026-07-27T10:00:00.000Z', recommendations: [] }
+  const OLD_REC = 'hyprec-fedcba9876543210'
+  stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') {
+      return { status: 200, json: { reports: [
+        empty,
+        { ...REPORT, recommendations: [{ id: REC, page: 'recommendation-batch-the-retries' }] },
+        { ...older, recommendations: [{ id: OLD_REC, page: 'recommendation-tenant-check', title: 'Tenant check' }] },
+      ] } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W28/rpt-a/recommendation-tenant-check.md') return { status: 200, body: new TextEncoder().encode('# Tenant check\n') }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+  const { ctx } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  // Pick the newest report, back out of its recommendations, pick the
+  // older report, then its one recommendation.
+  const script = [
+    (/** @type {any} */ spec) => spec.options[0].value,
+    () => { throw new PromptBackRequestedError() },
+    (/** @type {any} */ spec) => spec.options[1].value,
+    (/** @type {any} */ spec) => spec.options[0].value,
+  ]
+  const { deps, launches, prompts } = fixDeps({ pick: async (spec) => script.shift()?.(spec) })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.deepEqual(prompts.map((p) => p.title), ['Which report?', 'Which recommendation should be fixed?', 'Which report?', 'Which recommendation should be fixed?'])
+  assert.deepEqual(prompts[0].options.map((/** @type {any} */ o) => o.label), ['Weekly', 'usage-review/2026-W28'], 'the empty report is not offered; an untitled one is named by kind and period')
+  assert.equal(prompts[2].default, '0', 'the cursor returns to the report that was backed out of')
+  assert.deepEqual(prompts[3].options, [{ value: OLD_REC, label: 'Tenant check', summary: OLD_REC }])
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, new RegExp('`hyp report get ' + OLD_REC + '`'))
+  assert.match(launches[0].prompt, /usage-review\/2026-W28/)
+})
+
+test('fix does not offer a listed recommendation whose id is not one, so nothing of the server\'s choosing reaches the launch command', async (t) => {
+  // The picked id is pasted into the command the client is told to run, so
+  // a listing that names a row with shell text rather than an id would put
+  // that text on a command line. Such a row is not a recommendation this
+  // verb can act on.
+  const hostileId = 'hyprec-x; rm -rf ~'
+  stubServer(t, (method, url) => {
+    if (url.pathname === '/v1/reports') {
+      return { status: 200, json: { reports: [{
+        ...REPORT,
+        recommendations: [{ id: hostileId, page: 'recommendation-x' }],
+      }] } }
+    }
+    return { status: 200, body: new TextEncoder().encode(PAGE) }
+  })
+  const { ctx, out } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.match(out.join(''), /no recommendations to fix/)
+  assert.equal(prompts.length, 0)
+  assert.equal(launches.length, 0)
+})
+
+test('fix: a cancelled pick starts nothing and succeeds', async (t) => {
+  stubFixServer(t)
+  const { ctx, out } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches } = fixDeps({ pick: async () => { throw new PromptCancelledError() } })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.match(out.join(''), /Nothing started/)
+  assert.equal(launches.length, 0)
+})
+
+test('fix asks which client only when more than one could start, and only on a terminal', async (t) => {
+  stubFixServer(t)
+  const two = [
+    { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
+    { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
+  ]
+  // Piped with an id: no prompt is possible, the first launcher is taken.
+  {
+    const { ctx } = ctxWith()
+    const { deps, launches, prompts } = fixDeps({ launchers: two })
+    assert.equal(await runReportFix([REC], ctx, deps), 0)
+    assert.equal(prompts.length, 0)
+    assert.equal(launches[0].launcher.client, 'claude')
+  }
+  // On a terminal the client is asked for, and the answer is honoured.
+  {
+    const { ctx } = ctxWith()
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const { deps, launches, prompts } = fixDeps({ launchers: two, pick: async () => 'codex' })
+    assert.equal(await runReportFix([REC], ctx, deps), 0)
+    assert.equal(prompts.length, 1)
+    assert.match(prompts[0].title, /Which client/)
+    assert.equal(launches[0].launcher.client, 'codex')
+  }
+})
+
+/* ---------- the client picker's deadline ---------- */
+
+// The picker's gate reads two `isTTY` flags, and a TTY says a terminal is
+// attached, never that a person is reading it: under `docker run -t`, a
+// tty-allocating CI runner, tmux or expect the prompt drew and waited for a
+// keypress that never came, so the run only ended when something killed it
+// (#2393, the same defect `hyp ask` carried as #2373). These drive the real
+// prompt runtime rather than a stubbed `select`: what is stubbed is the
+// deadline's length, not the branch under test.
+
+/** A stdout that claims a terminal, as a pty's does. */
+function ttyOut() {
+  /** @type {string[]} */ const chunks = []
+  return {
+    isTTY: true,
+    columns: 80,
+    rows: 24,
+    /** @param {any} chunk */
+    write(chunk) { chunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8')); return true },
+    text: () => chunks.join(''),
+  }
+}
+
+/** A stdin that claims a terminal and delivers nothing, as an unattended pty's does. */
+function silentTtyIn() {
+  return Object.assign(new EventEmitter(), {
+    isTTY: true,
+    isRaw: false,
+    /** @param {boolean} v */
+    setRawMode(v) { this.isRaw = v; return this },
+    resume() { return this },
+    pause() { return this },
+    isPaused() { return false },
+  })
+}
+
+/** Two launchable clients, so both commands reach their client picker. */
+const TWO_CLIENTS = [
+  { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
+  { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
+]
+
+test('generate: an allocated tty nobody answers starts the first client instead of waiting for a keypress', { timeout: 5000 }, async (t) => {
+  const { ctx } = await generateFixture(t)
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
+})
+
+test('fix: an allocated tty nobody answers starts the first client instead of waiting for a keypress', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = silentTtyIn()
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
+})
+
+/* ---------- the byte that is not a keypress (#2392) ---------- */
+
+// The deadline is lifted by the first keypress, and a pty whose input has
+// reached EOF (`script ... < /dev/null`) is sent a NUL byte that readline
+// decodes into one: lifting on it kept the picker on screen with nothing left
+// to end the run. These emit the keypress that pty actually delivered rather
+// than opening one - the delivery is simulated, the shape is measured. Under
+// `script -qec 'node ...' /dev/null < /dev/null` on node 22 exactly one event
+// arrives, `str` = `\0` with
+// `key = { sequence: '\0', name: '`', ctrl: true, meta: false, shift: false }`.
+// It has a `name`, which is why the guard reads the sequence. Both pickers arm
+// through one `armPickDeadline`, so these pin the same guard `hyp ask` pins
+// from the other side of the import.
+
+/** The keypress a pty at EOF delivers, as measured. `\0`, never the raw byte. */
+const NON_KEY_BYTE_PRESS = {
+  str: '\0',
+  key: { sequence: '\0', name: '`', ctrl: true, meta: false, shift: false },
+}
+
+/**
+ * A stdin that claims a terminal and delivers `events` once the prompt is
+ * listening. `resume()` is the hook: the TUI runtime calls it directly after
+ * it attaches its `keypress` listener, so a delivery scheduled there cannot
+ * race the listener it is meant for.
+ *
+ * @param {Array<{ after?: number, str?: string, key?: object }>} events
+ */
+function keyedTtyIn(events) {
+  const stdin = new EventEmitter()
+  let delivered = false
+  return Object.assign(stdin, {
+    isTTY: true,
+    isRaw: false,
+    /** @param {boolean} v */
+    setRawMode(v) { this.isRaw = v; return this },
+    resume() {
+      if (delivered) return this
+      delivered = true
+      for (const { after = 0, str, key } of events) {
+        setTimeout(() => stdin.emit('keypress', str, key), after)
+      }
+      return this
+    },
+    pause() { return this },
+    isPaused() { return false },
+  })
+}
+
+test('generate: a NUL byte off a pty at EOF does not lift the deadline', { timeout: 5000 }, async (t) => {
+  const { ctx } = await generateFixture(t)
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = keyedTtyIn([NON_KEY_BYTE_PRESS])
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
+})
+
+test('fix: a NUL byte off a pty at EOF does not lift the deadline', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx } = ctxWith()
+  const stdout = ttyOut()
+  ctx.stdout = stdout
+  ctx.stdin = keyedTtyIn([NON_KEY_BYTE_PRESS])
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(stdout.text(), /No answer at the client prompt - starting the first one\./)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'claude')
+})
+
+test('fix: a real keypress still lifts the deadline for good', { timeout: 5000 }, async (t) => {
+  stubFixServer(t)
+  const { ctx } = ctxWith()
+  const stdout = ttyOut()
+  // The NUL first, then down and - well past a 50ms deadline - enter: a reader
+  // who takes their time must not be cut off mid-decision (#2391), and the
+  // pick that lands has to be theirs rather than the fallback's first client.
+  // The lift listens with `on`, not `once`, so the byte it declines to act on
+  // does not spend the listener the keystroke behind it needs.
+  ctx.stdin = keyedTtyIn([
+    NON_KEY_BYTE_PRESS,
+    { key: { sequence: '\x1b[B', name: 'down' } },
+    { after: 400, str: '\r', key: { sequence: '\r', name: 'return' } },
+  ])
+  ctx.stdout = stdout
+  const { deps, launches } = fixDeps({ launchers: TWO_CLIENTS })
+  delete deps.select
+  deps.pickDeadlineMs = 50
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.doesNotMatch(stdout.text(), /No answer at the client prompt/)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launcher.client, 'codex', 'the deadline must not outlive a real keypress')
+})
+
+test('fix with nothing launchable exits 1 with a runnable attach hint, before fetching the page', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const { deps, launches } = fixDeps({ launchers: [] })
+  assert.equal(await runReportFix([REC], ctx, deps), 1)
+  assert.match(err.join(''), /no recorded client can be started here/)
+  assert.match(err.join(''), /hyp client attach claude/)
+  assert.equal(launches.length, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [`/v1/reports/_recommendations/${REC}`])
+})
+
+test('fix reports a spawn failure as exit 1', async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const { deps } = fixDeps()
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportFix([REC], ctx, deps), 1)
+  assert.match(err.join(''), /could not start claude: ENOENT/)
+})
+
 /* ---------- delete ---------- */
 
 test('delete refuses without --yes when stdin is not a TTY', async (t) => {
@@ -411,4 +1566,667 @@ test('delete with --yes issues the DELETE and confirms', async (t) => {
   assert.equal(calls[0].method, 'DELETE')
   assert.equal(calls[0].url.pathname, '/v1/reports/k/p/rpt-1')
   assert.match(out.join(''), /deleted k\/p\/rpt-1/)
+})
+
+/* ---------- the listing's stem, the hints, and the title (issue #1817) ---------- */
+
+// @ref LLP 0414#list-shows-ids [tests]: the stem the listing prints is a path `hyp report get` takes
+test('get takes the page stem the listing prints, resolving it to the published page', async (t) => {
+  const { calls } = stubServer(t, (method, url) => (
+    url.pathname === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md'
+      ? { status: 200, body: new TextEncoder().encode(PAGE) }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-batch-the-retries'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md',
+  ])
+  assert.equal(out.join(''), PAGE)
+})
+
+test('get takes the stem of an HTML-only page too, and an exact path still wins without a probe', async (t) => {
+  const { calls } = stubServer(t, (method, url) => (
+    url.pathname.endsWith('.html') ? { status: 200, body: new TextEncoder().encode('<h1>r</h1>') } : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-tenant-check'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-tenant-check',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-tenant-check.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-tenant-check.html',
+  ])
+  assert.equal(out.join(''), '<h1>r</h1>')
+})
+
+test('get does not probe page extensions for a path that names its own', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.png'], ctx), 1)
+  // An extension is one in whatever case it was typed, so the case an artifact
+  // is published under does not decide how many requests a miss costs.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.PNG'], ctx), 1)
+  // An extension is alphanumerics with at least one letter among them, so
+  // digits cost a miss no extra requests, before the letter ('.7z'), after
+  // it ('.mp3'), or among them ('.m4a'). One letter is the whole of the
+  // shortest extension: a digit run in front of it is what '.7z' adds, and a
+  // rule that asked for one would read '.c' as part of a name.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/archive.7z'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/audio.mp3'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/clip.m4a'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/tool.c'], ctx), 1)
+  // An extension runs as long as the alphanumerics do. 'report publish' takes
+  // a directory, so what an artifact is named is whatever was in it, and a
+  // rule that stopped counting would probe past a longer one.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/export.parquet'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.PNG',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/archive.7z',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/audio.mp3',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/clip.m4a',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/tool.c',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/export.parquet',
+  ])
+  assert.match(err.join(''), /HTTP 404: not_found/)
+})
+
+// A slug can carry a dot (a version number, a period label) without naming an
+// extension, so the probe cannot be gated on `path.extname`, which calls
+// everything after the last dot one (#1903).
+// @ref LLP 0414#list-shows-ids [tests]: a stem carrying a dot is still a path `hyp report get` takes
+test('get takes a page stem carrying a dot, which is not an extension', async (t) => {
+  const { calls } = stubServer(t, (method, url) => (
+    url.pathname === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive.md'
+      ? { status: 200, body: new TextEncoder().encode(PAGE) }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1-keepalive'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive.md',
+  ])
+  assert.equal(out.join(''), PAGE)
+})
+
+test('a stem published nowhere fails the same way with a dot in it as without', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026-W29'], ctx), 1)
+  // A dot-run of digits alone names no extension either, which is the half of
+  // the rule a dot-run broken by a '-' never reaches.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026'], ctx), 1)
+  // A digit run of one is a part of a name for the same reason a run of four
+  // is, and a stem that ends at its version number is where that lands. It is
+  // the half with teeth: read '.1' as an extension and the stem loses the
+  // probe that resolves it, so a page the listing prints 404s (#1903), where
+  // every other miss here only costs requests.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1'], ctx), 1)
+  // An extension runs to the end of the segment: a dot-run that is
+  // extension-shaped but carries on past it ('.1a' inside '1.1a-keepalive')
+  // names one no more than '.1-keepalive' does.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1a-keepalive'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.html',
+  ])
+  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 5)
+})
+
+test('get does not probe for a path that names a page extension either', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone.md'], ctx), 1)
+  // Both of them, so the extension the probe appends second is read as one
+  // too and never appended to itself.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone.html'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.html',
+  ])
+  assert.match(err.join(''), /HTTP 404: not_found/)
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: the repair a diagnostic names has to be a command that does what the sentence says
+test('the missing-page hint names a command that lists what the report carries', async (t) => {
+  stubServer(t, (method, url) => (
+    url.pathname === `/v1/reports/_recommendations/${REC}`
+      ? { status: 200, json: { recommendation: { id: REC, page: 'recommendation-gone' }, report: REPORT } }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 1)
+  const text = err.join('')
+  assert.match(text, /the report no longer carries 'recommendation-gone'/)
+  assert.match(text, /'hyp report list --kind usage-review --period 2026-W29'/)
+  assert.doesNotMatch(text, /hyp report get usage-review/, 'a report read lists nothing')
+  assert.doesNotMatch(text, /--org|--remote/, 'a default-target run names no target flags')
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: the hinted listing has to reach the target the failing run did, not the default one
+test('the missing-page hint carries the run\'s target flags, shellWord-quoted', async (t) => {
+  stubServer(t, (method, url) => (
+    url.pathname === `/v1/reports/_recommendations/${REC}`
+      ? { status: 200, json: { recommendation: { id: REC, page: 'recommendation-gone' }, report: REPORT } }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC, '--org', 'acme corp', '--remote', 'prod'], ctx), 1)
+  assert.match(err.join(''), /hyp report list --kind usage-review --period 2026-W29 --org 'acme corp' --remote prod/)
+})
+
+/**
+ * The missing-page hint for one resolve answer, with the run's own argv.
+ *
+ * @param {TestContext} t
+ * @param {{ kind: string, period: string }} report
+ * @param {string[]} [argv]
+ * @returns {Promise<string>}
+ */
+async function missingPageHint(t, report, argv = []) {
+  stubServer(t, (method, url) => (
+    url.pathname === `/v1/reports/_recommendations/${REC}`
+      ? { status: 200, json: { recommendation: { id: REC, page: 'recommendation-gone' }, report: { ...REPORT, ...report } } }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC, ...argv], ctx), 1)
+  return err.join('')
+}
+
+/** The hinted command, taken from between the prose quotes that close the line. */
+const hintedCommand = (/** @type {string} */ text) => (text.match(/does carry with '(hyp report list .*)'\n$/) ?? [])[1] ?? ''
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: a kind the server sent outside its own grammar still pastes as one command, and only that command
+test('the missing-page hint quotes a kind carrying a space and a quote as one shell word', async (t) => {
+  const text = await missingPageHint(t, { kind: "usage review'; echo pwn", period: '2026-W29' })
+  assert.equal(hintedCommand(text), "hyp report list --kind 'usage review'\\''; echo pwn' --period 2026-W29")
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: the period sits in the same position as the kind and takes the same treatment
+test('the missing-page hint quotes a period carrying a space and a quote as one shell word', async (t) => {
+  const text = await missingPageHint(t, { kind: 'usage-review', period: "2026-W29' rm -rf x" })
+  assert.equal(hintedCommand(text), "hyp report list --kind usage-review --period '2026-W29'\\'' rm -rf x'")
+})
+
+// @ref LLP 0225#escape-not-strip [tests]: a control character in a remote value stays escaped where a person reads it, and the escape is what the quoting wraps
+test('the missing-page hint keeps a control character in the kind escaped, as one shell word', async (t) => {
+  const escChar = String.fromCharCode(0x1b)
+  const text = await missingPageHint(t, { kind: `usage${escChar}[2Kreview`, period: '2026-W29' })
+  assert.equal(hintedCommand(text), "hyp report list --kind 'usage\\u001b[2Kreview' --period 2026-W29")
+  assert.ok(!text.includes(escChar), 'no raw escape byte reaches stderr')
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: quoting is a no-op on every value a conforming server can send, so the hint a real deployment reads is unchanged
+test('the missing-page hint is byte-identical for an in-grammar kind and period, target flags included', async (t) => {
+  assert.equal(
+    hintedCommand(await missingPageHint(t, { kind: 'usage-review', period: '2026-W29' })),
+    'hyp report list --kind usage-review --period 2026-W29'
+  )
+  assert.equal(
+    hintedCommand(await missingPageHint(t, { kind: 'usage-review', period: '2026.07.20' }, ['--org', 'acme corp', '--remote', 'prod'])),
+    "hyp report list --kind usage-review --period 2026.07.20 --org 'acme corp' --remote prod"
+  )
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: an out-of-grammar kind and the run's target flags are quoted by the same rule, on the same line
+test('a quoted kind and the run\'s target flags render side by side', async (t) => {
+  const text = await missingPageHint(t, { kind: "usage review'; echo pwn", period: '2026-W29' }, ['--org', 'acme corp', '--remote', 'prod'])
+  assert.equal(hintedCommand(text), "hyp report list --kind 'usage review'\\''; echo pwn' --period 2026-W29 --org 'acme corp' --remote prod")
+})
+
+test('a resolve answer carrying a report id but no kind or period is a malformed answer, not a missing page', async (t) => {
+  const { calls } = stubServer(t, () => ({
+    status: 200,
+    json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries' }, report: { id: 'rpt-b' } },
+  }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 1)
+  assert.equal(calls.length, 1, 'nothing is fetched from an undefined/undefined path')
+  assert.match(err.join(''), /answered without the recommendation's report/)
+  assert.doesNotMatch(err.join(''), /no longer carries/)
+})
+
+test('an HTML page takes its title from the <h1>, not from a \'# \' line inside a <pre>', async (t) => {
+  stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries' }, report: REPORT } }
+    if (p.endsWith('.md')) return { status: 404, json: { error: 'not_found' } }
+    return { status: 200, body: new TextEncoder().encode('<pre>\n# rm -rf /\n</pre>\n<h1>Batch the retries</h1>\n') }
+  })
+  const { ctx, out } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+  assert.doesNotMatch(launches[0].prompt, /rm -rf/)
+  assert.match(out.join(''), /Starting Claude Code on "Batch the retries"/)
+})
+
+test('fix: an answer the picker never offered is reported once, not re-asked forever', async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  // A prompt that keeps answering off-list is the only way `hit` misses,
+  // and the loop that re-asks on a miss has nothing to end it. The stub
+  // stops at a third ask so that a regression fails here: the spin is an
+  // async loop that never settles, and `node --test` cannot interrupt one,
+  // so an unbounded loop would wedge the run rather than time the test out.
+  let asks = 0
+  const { deps, launches, prompts } = fixDeps({
+    pick: async (/** @type {any} */ spec) => {
+      asks += 1
+      if (asks > 2) throw new Error('the off-list answer was re-asked')
+      return spec.title === 'Which report?' ? spec.options[0].value : 'hyprec-ffffffffffffffff'
+    },
+  })
+  assert.equal(await runReportFix([], ctx, deps), 1)
+  assert.equal(prompts.length, 2, 'the off-list answer is not re-asked')
+  assert.equal(launches.length, 0)
+  assert.match(err.join(''), /is not one of the recommendations offered/)
+})
+
+/* ---------- status: the tail of `get`, and `fix`'s closing instruction ---------- */
+
+/** A status event as the server records it. */
+const APPLIED = { state: 'applied', reason: 'Landed in hyparam/hypaware#912', links: ['https://github.com/hyparam/hypaware/pull/912'], by: 'email:a@b.c', at: '2026-10-03T18:21:07.000Z', via: 'cli' }
+const STARTED = { state: 'in_progress', by: 'email:a@b.c', at: '2026-10-01T09:00:00.000Z', via: 'dashboard' }
+
+/**
+ * A reports plane whose resolve route joins a status and history onto the
+ * recommendation, as a server with the status ledger does.
+ *
+ * @param {TestContext} t
+ * @param {{ md?: boolean }} [opts]
+ */
+function stubStatusServer(t, { md = true } = {}) {
+  return stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === `/v1/reports/_recommendations/${REC}`) {
+      return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', ...CITED, status: APPLIED, history: [STARTED, APPLIED], standalone: false }, report: REPORT } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') {
+      return md ? { status: 200, body: new TextEncoder().encode(PAGE) } : { status: 404, json: { error: 'not_found' } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.html') {
+      return { status: 200, body: new TextEncoder().encode('<h1>Batch the retries</h1>') }
+    }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+}
+
+// @ref LLP 0461#status-is-visible [tests]: the Status section follows the citations, current event first, then the history oldest first
+test('get <rec-id> ends with a Status section: the current event, then the history oldest first', async (t) => {
+  stubStatusServer(t)
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.ok(printed.startsWith(PAGE))
+  const citations = printed.indexOf('## Citations from the report record')
+  const status = printed.indexOf('## Status')
+  assert.ok(citations > 0 && status > citations, 'citations first, status after them')
+  assert.equal(printed.slice(status), [
+    '## Status',
+    '',
+    'State: applied',
+    'Reason: Landed in hyparam/hypaware#912',
+    'Link: https://github.com/hyparam/hypaware/pull/912',
+    'By: email:a@b.c (via cli)',
+    'At: 2026-10-03T18:21:07.000Z',
+    '',
+    'History, oldest first:',
+    '',
+    '- 2026-10-01T09:00:00.000Z  in_progress  by email:a@b.c  via dashboard',
+    '- 2026-10-03T18:21:07.000Z  applied  by email:a@b.c  via cli: Landed in hyparam/hypaware#912 https://github.com/hyparam/hypaware/pull/912',
+    '',
+  ].join('\n'))
+})
+
+test('get <rec-id> on an HTML-only page keeps the Status inside the one escaped <pre>', async (t) => {
+  stubStatusServer(t, { md: false })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.ok(printed.startsWith('<h1>Batch the retries</h1>\n<pre>'))
+  assert.match(printed, /## Status\n\nState: applied\n/)
+  assert.match(printed, /<\/pre>\n$/)
+  assert.doesNotMatch(printed.slice(printed.indexOf('<pre>') + 5), /<(?!\/pre>)/, 'nothing inside the pre opens a tag')
+})
+
+test('a reason with line breaks stays on its one Status line', async (t) => {
+  stubServer(t, (method, url) => {
+    if (url.pathname === `/v1/reports/_recommendations/${REC}`) {
+      return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', status: { ...APPLIED, reason: 'two\nlines\r\n- 2026 forged  event' }, history: [] }, report: REPORT } }
+    }
+    return { status: 200, body: new TextEncoder().encode(PAGE) }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  assert.match(out.join(''), /\nReason: two lines - 2026 forged event\n/)
+})
+
+// @ref LLP 0461#fix-asks-for-the-mark [tests]: the launched client is told how to record the outcome, against the same target
+test('fix ends its prompt with the mark instruction, carrying the run\'s target flags', async (t) => {
+  stubFixServer(t)
+  {
+    const { deps, launches } = fixDeps()
+    assert.equal(await runReportFix([REC], ctxWith().ctx, deps), 0)
+    assert.ok(launches[0].prompt.endsWith(
+      ` When the change is landed, run \`hyp report mark ${REC} applied --reason "<one line>" --link <PR url>\`; ` +
+      `if the recommendation should not be done, run \`hyp report mark ${REC} dismissed --reason "<why>"\`.`
+    ), launches[0].prompt)
+  }
+  {
+    const { deps, launches } = fixDeps()
+    assert.equal(await runReportFix([REC, '--org', 'acme corp', '--remote', 'prod'], ctxWith().ctx, deps), 0)
+    assert.match(launches[0].prompt, new RegExp(`run \`hyp report mark ${REC} applied --reason "<one line>" --link <PR url> --org 'acme corp' --remote prod\`;`))
+    assert.match(launches[0].prompt, new RegExp(`run \`hyp report mark ${REC} dismissed --reason "<why>" --org 'acme corp' --remote prod\`\\.$`))
+  }
+})
+
+/* ---------- mark ---------- */
+
+// @ref LLP 0461#mark [tests]: one PUT on the id with the state, reason, links and `via: cli`; the receipt is the server's record
+test('mark PUTs the status event with via cli and prints the new state', async (t) => {
+  const { calls } = stubServer(t, (method, url) => {
+    assert.equal(method, 'PUT')
+    assert.equal(url.pathname, `/v1/reports/_recommendations/${REC}/status`)
+    return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', title: 'Batch the retries', status: APPLIED, history: [STARTED, APPLIED], report: REPORT } } }
+  })
+  const { ctx, out } = ctxWith()
+  const code = await runReportMark([REC, 'applied', '--reason', 'Landed in hyparam/hypaware#912', '--link', 'https://github.com/hyparam/hypaware/pull/912', '--org', 'acme'], ctx)
+  assert.equal(code, 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].headers['content-type'], 'application/json')
+  assert.equal(calls[0].headers.authorization, 'Bearer tok')
+  assert.equal(calls[0].url.searchParams.get('org'), 'acme')
+  assert.deepEqual(JSON.parse(String(calls[0].body)), {
+    state: 'applied',
+    reason: 'Landed in hyparam/hypaware#912',
+    links: ['https://github.com/hyparam/hypaware/pull/912'],
+    via: 'cli',
+  })
+  assert.equal(out.join(''), `marked ${REC} [applied]\tBatch the retries\n  reason: Landed in hyparam/hypaware#912\n  link: https://github.com/hyparam/hypaware/pull/912\n`)
+})
+
+test('mark sends only the state when there is no reason or link; --link repeats', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendation: { id: REC, status: { state: 'in_progress' } } } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportMark([REC, 'in_progress'], ctx), 0)
+  assert.deepEqual(JSON.parse(String(calls[0].body)), { state: 'in_progress', via: 'cli' })
+  assert.equal(out.join(''), `marked ${REC} [in_progress]\n`)
+  assert.equal(await runReportMark([REC, 'open', '--link', 'https://a.example/1', '--link', 'http://b.example/2'], ctx), 0)
+  assert.deepEqual(JSON.parse(String(calls[1].body)).links, ['https://a.example/1', 'http://b.example/2'])
+})
+
+// @ref LLP 0461#reason-for-dismissed [tests]: a dismissal without a reason never reaches the server
+test('mark refuses dismissed without --reason, a blank one included, before any request', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: {} }))
+  for (const argv of [[REC, 'dismissed'], [REC, 'dismissed', '--reason', '  ']]) {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark(argv, ctx), 2)
+    assert.match(err.join(''), /dismissed needs --reason "<why>"/)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('mark refuses a state the server has not got, a malformed id, and a link that is not an http(s) URL', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: {} }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportMark([REC, 'done'], ctx), 2)
+  assert.match(err.join(''), /state expects open\|in_progress\|applied\|dismissed \(got done\)/)
+  assert.equal(await runReportMark(['rpt-b', 'applied'], ctx), 2)
+  assert.match(err.join(''), /'rpt-b' is not a recommendation id/)
+  assert.equal(await runReportMark([REC, 'applied', '--link', 'github.com/x/y/pull/1'], ctx), 2)
+  assert.match(err.join(''), /--link takes an absolute http\(s\) URL, got 'github.com\/x\/y\/pull\/1'/)
+  assert.equal(await runReportMark([REC], ctx), 2)
+  assert.match(err.join(''), /usage: hyp report mark <id> <open\|in_progress\|applied\|dismissed>/)
+  assert.equal(calls.length, 0)
+})
+
+test('mark takes a legacy rec- id and prints the hyprec- id the server answers with', async (t) => {
+  const legacy = 'rec-0123456789abcdef'
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendation: { id: REC, status: { state: 'applied' } } } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportMark([legacy, 'applied'], ctx), 0)
+  assert.equal(calls[0].url.pathname, `/v1/reports/_recommendations/${legacy}/status`)
+  assert.equal(out.join(''), `marked ${REC} [applied]\n`)
+})
+
+test('mark names both readings of a 404 and relays the server\'s validation errors', async (t) => {
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'unknown_recommendation' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark([REC, 'applied'], ctx), 1)
+    assert.match(err.join(''), new RegExp(`no recommendation '${REC}' in this org - list them with 'hyp report list'; if it is on that listing, 'prod' cannot record recommendation status - is the server up to date\\?`))
+  }
+  {
+    stubServer(t, () => ({ status: 400, json: { error: 'invalid_link', detail: 'links[0] is not absolute' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark([REC, 'applied', '--link', 'https://ok.example/'], ctx), 1)
+    assert.match(err.join(''), /HTTP 400: invalid_link - links\[0\] is not absolute/)
+  }
+})
+
+test('mark is a write: a surviving 401 names the missing publisher role', async (t) => {
+  stubServer(t, () => ({ status: 401, json: { error: 'unauthorized' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportMark([REC, 'applied'], ctx), 1)
+  assert.match(err.join(''), /HTTP 401/)
+})
+
+/* ---------- recommend ---------- */
+
+/** @param {string} [content] */
+async function tmpRecommendationFile(content = '# No python3 on the runner\n\n**Every job installs it. Pin it in the image.**\n') {
+  // The shared helper, so this page's call sites leave nothing behind:
+  // it binds node:test's module-level `after` to the test that is running.
+  const dir = temporaryDirectory('hyp-recommend-test-')
+  const file = path.join(dir, 'recommendation-no-python3.md')
+  await fs.writeFile(file, content)
+  return { dir, file, content }
+}
+
+// @ref LLP 0461#standalone [tests]: one Markdown page POSTs to the _recommendations route with the publish headers, and the receipt is the id and its read
+test('recommend POSTs the page as text/markdown with the content hash and prints the id and its read', async (t) => {
+  const { file, content } = await tmpRecommendationFile()
+  const { calls } = stubServer(t, (method, url) => {
+    assert.equal(method, 'POST')
+    assert.equal(url.pathname, '/v1/reports/_recommendations')
+    return {
+      status: 201,
+      json: {
+        recommendation: { id: REC, page: 'recommendation-no-python3', title: 'No python3 on the runner', standalone: true },
+        report: { id: 'rpt-s', kind: 'recommendation', period: '2026-10-03', files: 2, bytes: content.length },
+      },
+    }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', 'No python3', '--org', 'acme'], ctx), 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].headers['content-type'], 'text/markdown')
+  assert.equal(calls[0].headers['x-report-content-hash'], crypto.createHash('sha256').update(content).digest('hex'))
+  assert.equal(calls[0].url.searchParams.get('title'), 'No python3')
+  assert.equal(calls[0].url.searchParams.get('org'), 'acme')
+  assert.equal(String(calls[0].body), content)
+  assert.equal(out.join(''), `published ${REC} (recommendation/2026-10-03/rpt-s)\n  view: hyp report get ${REC} --org acme\n`)
+})
+
+test('recommend says already published on a 200 and sends no title param when none was given', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  const { calls } = stubServer(t, () => ({
+    status: 200,
+    json: { recommendation: { id: REC, page: 'recommendation-no-python3' }, report: { id: 'rpt-s', kind: 'recommendation', period: '2026-10-03' } },
+  }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportRecommend([file], ctx), 0)
+  assert.equal(calls[0].url.searchParams.has('title'), false)
+  assert.equal(out.join(''), `already published as ${REC} (recommendation/2026-10-03/rpt-s, same content) - nothing new uploaded\n  view: hyp report get ${REC}\n`)
+})
+
+test('recommend refuses a non-Markdown file, a missing file, and a page with no heading and no --title before any request', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
+  const { dir, file } = await tmpRecommendationFile('**A thesis with no title.**\n')
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([path.join(dir, 'page.html')], ctx), 2)
+    assert.match(err.join(''), /must be Markdown \(\.md or \.markdown\)/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([path.join(dir, 'missing.md')], ctx), 2)
+    assert.match(err.join(''), /no such file/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 2)
+    assert.match(err.join(''), /has no '# ' heading to take the title from - add one or pass --title <title>/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([], ctx), 2)
+    assert.match(err.join(''), /usage: hyp report recommend <file\.md>/)
+  }
+  assert.equal(calls.length, 0)
+  // --title stands in for the heading.
+  const { ctx } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', 'Given'], ctx), 0)
+  assert.equal(calls.length, 1)
+})
+
+test('recommend relays the server\'s refusal and keeps an id that is not one off the command line', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  {
+    stubServer(t, () => ({ status: 507, json: { error: 'report_quota_exceeded' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 1)
+    assert.match(err.join(''), /report quota is full \(HTTP 507\)/)
+  }
+  {
+    stubServer(t, () => ({ status: 201, json: { recommendation: { id: 'x\u001b[31m; rm -rf /' }, report: {} } }))
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 0)
+    const printed = out.join('')
+    assert.doesNotMatch(printed, /\u001b/)
+    assert.match(printed, /view: hyp report get <id>\n$/)
+  }
+})
+
+/* ---------- the flags' empty forms, and an older server ---------- */
+
+// An unset shell variable arrives as an empty argument, and the codec's array
+// coercion splits on commas and drops the empty parts, so `--status ''` and
+// `--link ''` reach the command carrying nothing. Neither may read as "the
+// flag was not given": one would list a different thing, the other would
+// record a mark without the link the caller asked to attach.
+test('list --status with an empty value still lists the flat form, unfiltered', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: { recommendations: FLAT_ROWS } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--status', ''], ctx), 0)
+  assert.equal(calls[0].url.pathname, '/v1/reports/_recommendations')
+  assert.equal(calls[0].url.searchParams.has('status'), false)
+  assert.match(out.join(''), /hyprec-0123456789abcdef\t\[in_progress\]/)
+})
+
+test('mark refuses a --link that carries no link instead of recording the mark without it', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, json: {} }))
+  for (const argv of [[REC, 'applied', '--link', ''], [REC, 'applied', '--link', ',']]) {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportMark(argv, ctx), 2)
+    assert.match(err.join(''), /--link takes an absolute http\(s\) URL, got an empty value/)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('recommend with an empty --title still refuses a page with no heading', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
+  const { file } = await tmpRecommendationFile('**A thesis with no title.**\n')
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', ''], ctx), 2)
+  assert.match(err.join(''), /has no '# ' heading to take the title from/)
+  assert.equal(calls.length, 0)
+})
+
+test('recommend sends no title param for an empty --title on a page that has a heading', async (t) => {
+  const { file } = await tmpRecommendationFile()
+  const { calls } = stubServer(t, () => ({ status: 201, json: { recommendation: { id: REC }, report: {} } }))
+  const { ctx } = ctxWith()
+  assert.equal(await runReportRecommend([file, '--title', ''], ctx), 0)
+  assert.equal(calls[0].url.searchParams.has('title'), false)
+})
+
+// `mark` already named both readings of a 404; the two other new routes
+// answered a bare `HTTP 404`, which names neither.
+test('the new routes name the stale-server reading of a 404', async (t) => {
+  {
+    stubServer(t, () => ({ status: 404 }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportList(['--recommendations'], ctx), 1)
+    assert.match(err.join(''), /'prod' cannot list recommendations on their own - is the server up to date\?/)
+  }
+  {
+    stubServer(t, () => ({ status: 404 }))
+    const { file } = await tmpRecommendationFile()
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file], ctx), 1)
+    assert.match(err.join(''), /'prod' cannot publish a standalone recommendation - is the server up to date\?/)
+  }
+  // A plain `list` asks for a route every server has, so its 404 keeps the
+  // generic relay rather than claiming the server is out of date.
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'no_such_org' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportList([], ctx), 1)
+    assert.match(err.join(''), /HTTP 404: no_such_org/)
+  }
+})
+
+// A server that answers 404 and names an error has the route: the error is
+// about the request (an unknown --org reaches the server unchecked), so the
+// stale-server reading must not shadow the one word a caller can act on.
+test('the new routes relay a 404 the server named instead of calling it stale', async (t) => {
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'no_such_org' } }))
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportList(['--recommendations', '--org', 'typpo'], ctx), 1)
+    assert.match(err.join(''), /^hyp report list: HTTP 404: no_such_org\n$/)
+  }
+  {
+    stubServer(t, () => ({ status: 404, json: { error: 'no_such_org', detail: 'typpo' } }))
+    const { file } = await tmpRecommendationFile()
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportRecommend([file, '--org', 'typpo'], ctx), 1)
+    assert.match(err.join(''), /^hyp report recommend: HTTP 404: no_such_org - typpo\n$/)
+  }
+})
+
+test('mark takes a 201 on the first status event as the success it is', async (t) => {
+  stubServer(t, () => ({ status: 201, json: { recommendation: { id: REC, status: { state: 'in_progress' } } } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportMark([REC, 'in_progress'], ctx), 0)
+  assert.equal(out.join(''), `marked ${REC} [in_progress]\n`)
+})
+
+test('a flat row the server sent without its report join reads as unknown, not undefined', async (t) => {
+  stubServer(t, () => ({ status: 200, json: { recommendations: [{ id: REC, title: 'Orphan' }] } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportList(['--recommendations'], ctx), 0)
+  assert.equal(out.join(''), `  ${REC}\t[open]\t\t?/?/?\tOrphan\n`)
+  assert.doesNotMatch(out.join(''), /undefined/)
 })

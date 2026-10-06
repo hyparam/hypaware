@@ -24,6 +24,33 @@ export function defaultSleep(ms) {
 }
 
 /**
+ * How long a stop waits for the daemon to actually be gone before it gives
+ * up and says so. The wait is on the process, not on the pid file: the daemon
+ * clears that file partway through its own shutdown, and the telemetry close
+ * whose ceiling is checked against this number runs after it, on the way out
+ * of `bin/hypaware.js`. Waiting on liveness is what keeps that close inside
+ * the window.
+ *
+ * Named rather than inline because the telemetry close inside that window has
+ * a derived ceiling of its own (`SHUTDOWN_BUDGET_MS`), and the two used to be
+ * only coincidentally compatible: three serial channel closes hung at once
+ * spent about 3.75s of this 5s (hyparam/hypaware#1153 item 1). The closes are
+ * concurrent now, so the telemetry ceiling is one budget, and a test pins the
+ * relationship so it stays a checked fact rather than a coincidence.
+ *
+ * It lives here rather than beside `requestDaemonStop`, its first caller,
+ * because it is the window of *a stop* and not of one transport: the same
+ * daemon doing the same shutdown work is on the other side of
+ * `launchctl bootout`, whose unload poll spends it too. `runtime.js`
+ * re-exports it, so every existing importer and the pin test still read it
+ * from there, and the platform modules can reach it without importing the
+ * kernel to do it.
+ *
+ * @ref LLP 0343#stop-window [implements]: the stop window is a named constant the telemetry ceiling is checked against
+ */
+export const DAEMON_STOP_TIMEOUT_MS = 5_000
+
+/**
  * Error raised when a service-manager operation (launchctl, systemctl)
  * fails. The platform modules subclass this so callers can still match
  * on the platform-specific name.

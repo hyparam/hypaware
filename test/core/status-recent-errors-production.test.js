@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
 
@@ -472,4 +473,340 @@ test('errors the processing daemon recorded are counted too', async () => {
   const diag = report.diagnostics.find((d) => d.kind === 'recent_errors')
   assert.ok(diag, 'a recent_errors diagnostic is raised')
   assert.ok(diag.message.includes('3 in the daemon log'), diag.message)
+})
+
+/**
+ * A `HYP_HOME` with one configured destination, a daemon snapshot recording
+ * its last success, and one outbox file per failed export.
+ *
+ * @param {{ failures: number[], success?: number | string, outbox?: boolean }} scenario
+ */
+async function seedDestination(scenario) {
+  const { hypHome, stateRoot } = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  // A destination that has never succeeded has no stamp at all, which is a
+  // different fixture from one whose stamp is unusable: both must warn, and
+  // only writing the row for the second tells them apart.
+  const lastSuccessAt = typeof scenario.success === 'number'
+    ? new Date(Date.now() - scenario.success * 60_000).toISOString()
+    : scenario.success
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', ...(lastSuccessAt === undefined ? {} : { lastSuccessAt }) }],
+  }))
+  if (scenario.outbox !== false) {
+    await writeOutbox(stateRoot, 'central', scenario.failures.map((minutes) => ({ agoMs: minutes * 60_000, error: 'fetch failed' })))
+  }
+  return { hypHome, stateRoot }
+}
+
+// A destination needs attention while it holds a failed export that no later
+// success has answered. One unresolved failure is enough, and no amount of
+// ageing turns one into a recovery. The four rows whose answer the threshold
+// rule got wrong are marked: it could not fire on a destination exporting
+// more slowly than the bar, so `never succeeded, two failures` printed
+// `HypAware · Healthy` while its only destination had never delivered
+// anything (issue #2337).
+// @ref LLP 0453#warning-rule [tests]: an unresolved failure warns; only a strictly later success clears it
+for (const scenario of [
+  // Was `false` under the threshold rule (one failure, no span).
+  { name: 'never succeeded, one failure', failures: [1], warns: true },
+  // Was `false`: two failures never reached the count of three. This is the
+  // blocker case - the only destination has never delivered anything.
+  { name: 'never succeeded, two failures', failures: [20, 1], warns: true },
+  // Was `false`: the whole burst had aged out of the 24-hour window. Ageing
+  // is not recovery, so the window no longer decides this.
+  { name: 'unresolved failure older than the window', failures: [1500], warns: true },
+  { name: 'never succeeded, sustained failures', failures: [20, 10, 1], warns: true },
+  { name: 'a later success clears every earlier failure', failures: [20, 10, 2], success: 1, warns: false },
+  // Was `false`: the streak restarted at the success and never rebuilt. Two
+  // failures stand after it, so two failures are unanswered.
+  { name: 'failures after a success still stand', failures: [40, 30, 20, 10, 1], success: 15, warns: true },
+  { name: 'a success stamp that does not parse is no recovery evidence', failures: [20, 10, 1], success: 'invalid', warns: true },
+  { name: 'a success stamp in the future is no recovery evidence', failures: [20, 10, 1], success: -60, warns: true },
+  // Symmetric with the row above: a stamp ahead of the clock is evidence
+  // about nothing, whichever side of the comparison it sits on.
+  { name: 'a failure stamp in the future does not warn', failures: [-60], warns: false },
+  { name: 'a configured destination with an empty outbox does not warn', failures: [], warns: false },
+  { name: 'a configured destination with no outbox at all does not warn', failures: [], outbox: false, warns: false },
+  { name: 'a past success and no failures does not warn', failures: [], success: 30, warns: false },
+]) {
+  test(`export warning: ${scenario.name}`, async (t) => {
+    const { hypHome } = await seedDestination(scenario)
+    t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    // The 24-hour window survives everywhere it was already doing a job: the
+    // history count still drops the failure from 25 hours ago, in the same
+    // run where that failure raises the warning.
+    assert.equal(
+      report.recentErrorCount,
+      scenario.outbox === false ? 0 : scenario.failures.filter((minutes) => minutes < 1440).length,
+      'recent_error_count keeps its 24-hour horizon',
+    )
+    assert.equal(report.diagnostics.some((d) => d.kind === 'recent_errors'), false)
+    const warning = report.diagnostics.find((d) => d.kind === 'sink_export_failing')
+    assert.equal(Boolean(warning), scenario.warns)
+    if (warning) {
+      // A success only answers failures older than itself, and only when it
+      // is usable at all: an unparseable or future stamp answers nothing.
+      const clearsOlderThan = typeof scenario.success === 'number' && scenario.success >= 0 ? scenario.success : Infinity
+      const unresolved = scenario.failures.filter((minutes) => minutes > 0 && minutes <= clearsOlderThan).length
+      assert.equal(warning.severity, 'warning')
+      assert.match(warning.message, new RegExp(`^central: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure .+ ago$`))
+      // A remote destination is not repaired by bouncing the local daemon.
+      assert.equal(warning.repair.some((r) => r.includes('daemon restart')), false)
+    }
+  })
+}
+
+// The boundary the one-line rule does not settle, pinned at the millisecond
+// rather than approached from a relative offset: the fixture reads the stamp
+// back out of the filename the sink driver wrote, so the two values are the
+// same instant by construction and not by arithmetic that could drift.
+//
+// A tie warns. At equal stamps nothing in the record says which came first,
+// and the conservative reading of "no later success" is the one that keeps
+// looking. One millisecond later, the success is strictly later and clears.
+// @ref LLP 0453#warning-rule [tests]: only a strictly later success clears a failure, so equal stamps warn
+test('export warning: a success sharing the failure millisecond warns, one millisecond later clears', async (t) => {
+  const { hypHome, stateRoot } = await seedDestination({ failures: [5] })
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const outbox = path.join(stateRoot, 'sinks', 'central', 'outbox')
+  const [batchFile] = await fs.readdir(outbox)
+  const stamp = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/.exec(batchFile)
+  assert.ok(stamp, `the fixture filename carries the batch stamp: ${batchFile}`)
+  const failedAtMs = Date.parse(stamp[1])
+
+  /** @param {number} ms */
+  const reportWithSuccessAt = async (ms) => {
+    await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+      sinks: [{ instance: 'central', lastSuccessAt: new Date(ms).toISOString() }],
+    }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    return report.diagnostics.some((d) => d.kind === 'sink_export_failing')
+  }
+
+  assert.equal(await reportWithSuccessAt(failedAtMs), true, 'an identical stamp is not a later success')
+  assert.equal(await reportWithSuccessAt(failedAtMs - 1), true, 'an earlier success is not a later success')
+  assert.equal(await reportWithSuccessAt(failedAtMs + 1), false, 'one millisecond later is a later success')
+})
+
+// Three properties that argue with each other, in one fixture:
+//
+//  - Recovery is per destination: `recovered` succeeding must not mask
+//    `failing`, which still holds three unanswered failures.
+//  - `removed` has a failing outbox and is not in `sinks[]`, so it is a
+//    destination this install no longer has, and nothing asks an operator to
+//    repair one they already deleted. Leaving `sinks[]` is also the only door
+//    out of a warning nothing else can clear, since no success is ever
+//    recorded for a destination that is never exercised again.
+//  - Its files are still history: all ten errors stay in
+//    `recent_error_count`, the three from `removed` included.
+// @ref LLP 0453#warning-rule [tests]: one destination's success clears only its own warning; an unconfigured destination raises none
+test('export recovery is per destination and dev telemetry cannot revive recovered warnings', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: {
+      recovered: { plugin: '@hypaware/central', config: {} },
+      failing: { plugin: '@hypaware/central', config: {} },
+    },
+  }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'recovered', lastSuccessAt: new Date().toISOString() }],
+  }))
+  for (const instance of ['recovered', 'failing', 'removed']) {
+    await writeOutbox(stateRoot, instance, [20, 10, 1].map((minutes) => ({ agoMs: minutes * 60_000, error: 'HTTP 504' })))
+  }
+  await fs.mkdir(path.join(stateRoot, 'dev-telemetry'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'dev-telemetry', 'logs-4242.jsonl'), JSON.stringify({
+    severityText: 'ERROR', timestamp: new Date().toISOString(), body: 'sink.export_batch.failed',
+  }) + '\n')
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.recentErrorCount, 10, 'all historical errors remain counted')
+  assert.equal(report.diagnostics.some((d) => d.kind === 'recent_errors'), false)
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1, warnings.map((w) => w.message).join(' | '))
+  assert.match(warnings[0].message, /^failing: 3 failed export attempts with no later success recorded/)
+})
+
+// Deleting the `sinks` key is a removal like emptying it or replacing the set,
+// so it must silence the destination too (issue #2361). It is the one spelling
+// that leaves `sinks[]` recovered from the prior daemon's `status.json`, which
+// the report still needs for the install's shape but must not read as a
+// destination there is anything left to repair.
+// @ref LLP 0453#warning-rule [tests]: a destination only the status file still names is not a configured destination, so it raises no warning
+test('export warning: a sink only a prior daemon status file names shows its shape and raises no warning', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // No `sinks` key at all: the operator deleted the destination from the config.
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'ghost', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  // One failure outside the 24-hour history window and one inside it, so a
+  // pass on `recentErrorCount` can only mean the in-window failure was
+  // actually counted, not that the window excluded everything on offer.
+  await writeOutbox(stateRoot, 'ghost', [
+    { agoMs: 90 * 24 * 60 * 60_000, error: 'fetch failed' },
+    { agoMs: 60_000, error: 'fetch failed' },
+  ])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['ghost'],
+    'the recovered row still renders the shape of the install',
+  )
+  assert.deepEqual(
+    report.diagnostics.filter((d) => d.kind === 'sink_export_failing').map((d) => d.message),
+    [],
+    'a destination the operator deleted raises no export warning',
+  )
+  // The files are still history: the in-window failure is counted even
+  // though the destination that produced it is not configured.
+  assert.equal(report.recentErrorCount, 1)
+})
+
+// A local config that fails to parse is not the operator naming a smaller
+// `sinks` set; it is a file `hyp status` could not read. Reading it the same
+// way as a deleted `sinks` key would silence a live export failure the
+// operator never asked to stop hearing about, the exact silent-suppression
+// issue #2337 built this warning against.
+// @ref LLP 0453#warning-rule [tests]: an unreadable local config is not a configured-set removal, so a destination it would have named still warns
+test('export warning: an unreadable local config still warns about a failing sink', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // Central names no sinks either, so `config.sinks` is empty for a reason
+  // that has nothing to do with the unreadable local file.
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), JSON.stringify({ version: 2, plugins: [] }))
+  await fs.writeFile(defaultConfigPath(hypHome), '{{{ not json')
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'central', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['central'],
+    'the recovered row still renders the shape of the install',
+  )
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1, 'an unreadable config must not suppress a live export failure')
+  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+})
+
+// A local `sinks` entry the central layer's merge drops as `invalid_merge`
+// (an unknown plugin, say) is a rejected local addition, not the operator
+// clearing the destination. It leaves `config.sinks` empty by the same path
+// as a deleted `sinks` key, so it must not be read as the same intent.
+// @ref LLP 0453#warning-rule [tests]: a sinks entry the layer merge dropped is not a configured-set removal, so the destination still warns
+test('export warning: a sinks entry the central layer merge dropped still warns', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), JSON.stringify({ version: 2, plugins: [] }))
+  // Names a plugin this install has no manifest for, so `resolveLayeredConfig`
+  // drops it rather than merging it in.
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: { central: { plugin: '@hypaware/does-not-exist', config: {} } },
+  }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'central', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['central'],
+    'the recovered row still renders the shape of the install',
+  )
+  assert.deepEqual(
+    report.layered?.drops,
+    [{ section: 'sinks', key: 'central', reason: 'invalid_merge', detail: 'sink_plugin_unknown' }],
+    'ground truth: the merge actually dropped the local entry',
+  )
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1, 'a merge-dropped entry must not suppress a live export failure')
+  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+})
+
+// A central layer that fails to parse is the third non-removal: it leaves
+// `config.sinks` empty the same way an unreadable local config or a
+// merge-dropped entry does, without the operator having removed the
+// destination the central layer itself names. Reading it as a removal would
+// silence a live export failure the same way the other two spellings would.
+// @ref LLP 0453#warning-rule [tests]: an unreadable central layer is not a configured-set removal, so a destination it would have named still warns
+test('export warning: an unreadable central layer still warns about a failing sink', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // Local config names no sinks either, so `config.sinks` is empty for a
+  // reason that has nothing to do with the unreadable central file.
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), '{{{ not json')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }))
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'central', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.sinks.map((s) => s.instance),
+    ['central'],
+    'the recovered row still renders the shape of the install',
+  )
+  const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
+  assert.equal(warnings.length, 1, 'an unreadable central layer must not suppress a live export failure')
+  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+})
+
+// A merge-dropped entry speaks only for the destination it names. Dropping
+// `brandnew` must not re-arm the warning for `deleted-ghost`, an unrelated
+// instance recovered only from the prior daemon's status file: it is outside
+// the configured set under every reading (issue #2361).
+// @ref LLP 0453#warning-rule [tests]: a dropped sinks entry speaks only for the destination it names, so an unrelated recovered row still raises no warning
+test('export warning: a merge-dropped entry does not re-arm the warning for an unrelated recovered sink', async (t) => {
+  const { hypHome, stateRoot } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await fs.mkdir(path.dirname(centralSeedPath(stateRoot)), { recursive: true })
+  await fs.writeFile(centralSeedPath(stateRoot), JSON.stringify({ version: 2, plugins: [] }))
+  // Names a plugin this install has no manifest for, so `resolveLayeredConfig`
+  // drops it rather than merging it in. The only configured sink is
+  // `brandnew`, so dropping it leaves `config.sinks` empty.
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2, plugins: [], sinks: { brandnew: { plugin: '@hypaware/does-not-exist', config: {} } },
+  }))
+  // The prior daemon's status file names a different instance entirely, one
+  // the current config never mentioned, dropped or not.
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'run', 'status.json'), JSON.stringify({
+    sinks: [{ instance: 'deleted-ghost', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+  await writeOutbox(stateRoot, 'deleted-ghost', [{ agoMs: 60_000, error: 'fetch failed' }])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.deepEqual(
+    report.layered?.drops,
+    [{ section: 'sinks', key: 'brandnew', reason: 'invalid_merge', detail: 'sink_plugin_unknown' }],
+    'ground truth: the merge actually dropped the local entry',
+  )
+  assert.deepEqual(
+    report.diagnostics.filter((d) => d.kind === 'sink_export_failing').map((d) => d.message),
+    [],
+    'a drop naming a different destination must not warn about this unrelated recovered row',
+  )
+  // The file is still history even though the row it belongs to is not read
+  // as configured.
+  assert.equal(report.recentErrorCount, 1)
 })

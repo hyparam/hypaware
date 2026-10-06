@@ -8,7 +8,8 @@
 **Revised:** 2026-06-15
 **Related:** LLP 0005, LLP 0006, LLP 0013, LLP 0015, LLP 0016, LLP 0021
 **Extended-by:** [LLP 0392](./0392-github-capture-projects-automatically.spec.md)
-(source-scoped projection capability and automatic GitHub projection)
+(source-scoped projection capability and automatic GitHub projection),
+LLP 0428 (precise evidence, bounded action derivation and explicit refresh)
 
 > `@hypaware/context-graph` materializes a node/edge **activity graph** from any
 > source that contributes a projection contract. The first is `ai_gateway_messages`

@@ -178,3 +178,62 @@ test('a central layer carrying only non-capture plugins records no pick answer',
   assert.equal(report.configExists, true, 'and configured enough to boot')
   assert.equal(report.configRecordsAnswer, false, 'but a sink plugin answers no pick question')
 })
+
+// The document the v1.36.0 grep migration's central-only lane forged as a
+// machine's whole local config (issue #1892): `version` plus a one-entry
+// `plugins` array holding exactly `{ name: '@hypaware/grep' }`. No composer
+// output ever matched it, so the readers classify it answer-less and the
+// returning gate takes the first-run path.
+// @ref LLP 0426#forged-shape [tests]: the byte-exact pre-fix migration write, beside a live central seed, is classified residue rather than a returning install's answer
+test('the forged grep-only document records no pick answer', async () => {
+  const hypHome = await makeHome()
+  await writeCentralSeed(hypHome, {
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://example.invalid', identity: {} } } },
+  })
+  await fs.writeFile(defaultConfigPath(hypHome),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/grep' }] }, null, 2) + '\n',
+    { mode: 0o600 })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.configExists, true, 'the file is there')
+  assert.equal(report.configValid, true, 'and it validates')
+  assert.equal(report.configRecordsAnswer, false, 'but the forged document is not an answer')
+})
+
+// Near misses stay answers: the carve-out matches only the exact document the
+// pre-fix lane wrote. Everything the product's own writers produce around
+// grep (the composer's query key, a decorated entry, a second entry, an
+// emptied list) records an answer exactly as before.
+// @ref LLP 0426#forged-shape [tests]: every key a product writer can add (composer query, entry decoration, a second entry, an emptied list) defeats the carve-out, so no genuinely picked config is re-opened
+test('anything but the exact forged document still records an answer', async () => {
+  const configs = [
+    { version: 2, plugins: [{ name: '@hypaware/grep' }], query: { cache: { retention: { default_days: 30 } } } },
+    { version: 2, plugins: [{ name: '@hypaware/grep', enabled: false }] },
+    { version: 2, plugins: [{ name: '@hypaware/grep' }], auto_update: false },
+    { version: 2, plugins: [{ name: '@hypaware/grep' }, { name: '@hypaware/ai-gateway' }] },
+    { version: 2, plugins: [] },
+  ]
+  for (const config of configs) {
+    const hypHome = await makeHome()
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify(config) + '\n')
+    const report = await collectHypAwareStatus({ env: env(hypHome) })
+    assert.equal(report.configRecordsAnswer, true, JSON.stringify(config))
+  }
+})
+
+// The near-twin with an entry key the shape parser drops: `parsePluginEntry`
+// never surfaces `note` to this reader, and the pick lane (which reads the
+// raw document) ignores parser-dropped keys when it asks the same question,
+// so both lanes give this document one classification.
+// @ref LLP 0426#consequences [tests]: an entry key the parser drops does not defeat the carve-out at either reader
+test('a parser-dropped entry key does not defeat the forged-document classification', async () => {
+  const hypHome = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/grep', note: 'mine' }] }, null, 2) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.configValid, true, 'the dropped key is not a shape error')
+  assert.equal(report.configRecordsAnswer, false, 'the near-twin classifies exactly as the forged document')
+})

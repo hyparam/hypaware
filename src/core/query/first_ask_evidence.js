@@ -1,0 +1,899 @@
+// @ts-check
+
+/**
+ * Evidence for the recommendation ask (LLP 0398).
+ *
+ * `hyp ask` asks one question: which skill would be the most useful to
+ * add first. HypAware answers the data half before the client starts. It
+ * finds the lines the person types again and again, pulls the commands
+ * their agent ran after each one and how one such session ended, writes
+ * that into a folder with instructions, and starts the client there. The
+ * client's job is only to pick the one candidate that is a task, and to
+ * write the skill from the steps the record shows.
+ *
+ * One signal, on purpose. An earlier version measured four (reopened
+ * sessions, a repeated line, a request that should go to a worker, a
+ * recurring mistake) and chose among them by a rule with floors. The
+ * rule needed five corrections on one machine, each for a false signal
+ * found by accident, and the skill it produced most often asked the
+ * person to change a habit. The repeated line produced the skill the
+ * person acted on, its steps matched the record, and the answer came
+ * back in under a minute. The other signals are not wrong; they are not
+ * the first thing to say.
+ *
+ * Every query excludes `conversation_source = 'claude_code'`, which is
+ * how the OTEL lane duplicates the transcript lane's rows on machines
+ * that attached after 1.31 (hypaware #1464). The label is not the OTEL
+ * lane's alone - the live gateway stamps it too, for any request whose
+ * User-Agent is `claude-cli/` - so on a machine with no transcript lane
+ * the exclusion costs real rows rather than duplicates. It is kept
+ * because the transcript sweep runs by default beside every Claude
+ * attach, and narrowed to be null-safe, since a row whose
+ * `conversation_source` is null is not a duplicate of anything.
+ *
+ * Every user-text query keeps only human turns: Codex guardian reviews,
+ * subagent relays, and injected preambles arrive as `role = 'user'`.
+ *
+ * @ref LLP 0398#in-process [implements]: HypAware gathers, the client reads; the model never writes SQL for this question
+ * @ref LLP 0398#one-signal [implements]: the lines the person types most, and what ran after them
+ *
+ * @import { OverviewQueryRunner } from '../../../src/core/query/types.js'
+ * @import { FirstAskCandidate, FirstAskEvidence } from '../../../src/core/query/types.js'
+ */
+
+import fsp from 'node:fs/promises'
+import path from 'node:path'
+
+import { compareStrings } from '../util/compare_strings.js'
+
+/** The suggested-prompt id whose launch is preceded by the gather. */
+export const RECOMMEND_PROMPT_ID = 'recommend'
+
+/** Days of history the evidence covers. */
+export const EVIDENCE_WINDOW_DAYS = 30
+
+/** The prompt the client is started with. Everything else is in `ASK.md`. */
+export const RECOMMEND_LAUNCH_PROMPT =
+  'From my HypAware history: what one skill would be the most useful to add first? The evidence is already gathered in this folder. Read ASK.md first and follow it exactly.'
+
+/**
+ * The same question for a client `hyp ask` cannot start: a desktop app the
+ * person pastes it into. No gather precedes it and the app opens in no
+ * folder of ours, so it names no evidence file and instead says how to look:
+ * the method the gather follows, done the slow way through `hyp query`.
+ *
+ * @ref LLP 0398#one-question [constrained-by]: the launch prompt names a folder only the gather creates, so the pasted form is a separate sentence that names none
+ */
+export const RECOMMEND_COLD_PROMPT =
+  'From my HypAware history: what one skill would be the most useful to add first? '
+  + `Look through my recorded sessions from the last ${EVIDENCE_WINDOW_DAYS} days with \`hyp query\` (the hypaware-query skill explains how) `
+  + 'for a task I ask for again and again that the agent works out from scratch each time. '
+  + 'Check the skills I already have so you do not suggest one that exists. '
+  + 'Recommend one skill, show one real example with its date, and offer to write it.'
+
+/**
+ * The gate. Below it the answer says how much was recorded and stops:
+ * a skill proposed from three sessions is a guess dressed as a finding.
+ */
+export const RECORD_FLOOR = Object.freeze({ sessions: 20, lineSessions: 5, lineDays: 3 })
+
+/** How many repeated lines the client is shown. */
+const CANDIDATES = 5
+
+/** Tool calls after the trigger line that count as its procedure. */
+const CALLS_AFTER = 30
+
+/**
+ * Sessions per candidate line whose procedure is read. Every row volume
+ * downstream follows from it: the sessions that typed a candidate line in
+ * 30 days are however many they are, and on a machine with 500 of them the
+ * call list came back 150,000 rows (hypaware #1701). Forty is enough to
+ * rank a procedure's commands by how many sessions ran them, and it is the
+ * recent forty: what the person does now is what a skill would automate.
+ *
+ * @ref LLP 0398#consequences [implements]: this is the ceiling the two session lists are bounded by
+ */
+const TRIGGER_SESSIONS = 40
+
+/**
+ * Sessions the two list statements may name in total, across every
+ * candidate line. The per-line cap alone is not a bound on the statement:
+ * five lines typed in five disjoint sets of sessions name
+ * `CANDIDATES * TRIGGER_SESSIONS` = 200, and the statement costs
+ * `O(sessions)` per scanned row (the anchor disjunction) and
+ * `O(sessions)` rows of sort buffer (the budget below), so both scale
+ * with the product rather than with 40.
+ *
+ * Measured through `executeQuerySql` over 500 sessions x 300 tool calls,
+ * the same 150,000-row shape as hypaware #1701, against the unbounded
+ * statement this replaces (150,000 rows, 15.8 s, 176 MB peak):
+ *
+ * ```
+ *  40 sessions   2,400 rows    3.7 s    25 MB
+ *  80 sessions   4,800 rows    8.8 s    55 MB
+ * 120 sessions   7,200 rows   12.8 s    79 MB
+ * 200 sessions  12,000 rows   27.5 s   122 MB
+ * ```
+ *
+ * At 200 the gather is slower than the unbounded statement it replaces
+ * and barely cheaper in memory, so the product is what has to be bounded.
+ * Eighty keeps a single candidate line at its full 40 and halves the cost
+ * of the worst case, and the sample stays fair by dividing the total
+ * between the lines rather than taking the newest 80 overall, which would
+ * read nothing for a line whose sessions are all older than another's.
+ */
+const TRIGGER_SESSIONS_TOTAL = 80
+
+/**
+ * The row budget either session list is given for each trigger it has a
+ * procedure to read. Twice the procedure window, because both statements
+ * read past what the window is: a session is anchored at its earliest
+ * trigger, and the ending is the first substantial reply after the window,
+ * so the replies inside it are read and dropped.
+ *
+ * Triggers, not sessions: a session that typed two candidate lines is
+ * anchored once but has two procedures inside its window, and one
+ * session's rows do not cover both of them plus the work between, so the
+ * later line's window falls off the end of the `limit` and its steps come
+ * back empty. The unit is free to choose because the sample is already
+ * sized in it: `sampleTriggers` bounds the sample at
+ * `TRIGGER_SESSIONS_TOTAL` trigger rows, so either statement's `limit`
+ * has the same ceiling of `TRIGGER_SESSIONS_TOTAL * ROWS_PER_TRIGGER` rows
+ * whichever unit it counts, and a sample whose triggers fall in distinct
+ * sessions, the ordinary one, reaches that ceiling either way. The anchor
+ * disjunction is one term a session still, so a multi-line session spends
+ * sort buffer alone, under a ceiling that was already paid for.
+ *
+ * The statement's `limit` is the sum of the budgets, not a ceiling applied
+ * to each session on its own. This engine cannot say the latter without a
+ * partitioned window function, which buffers its whole input and would
+ * undo the bound, while `order by ... limit` sorts in a buffer the limit
+ * itself sizes. So a session holding more than its share spends another's
+ * (hypaware #1717), and `sessionsWithCalls` counts the sessions whose
+ * calls actually came back rather than the sessions that were asked for.
+ * It is the same limitation that leaves the rows between a session's
+ * anchor and its later triggers bought rather than skipped: a window per
+ * trigger needs a row cap per partition, which is that function again.
+ */
+const ROWS_PER_TRIGGER = CALLS_AFTER * 2
+
+/**
+ * Where the skill goes when the caller names no client. Claude Code's
+ * tree, because it is the client this ask was measured on; a caller that
+ * knows which client is about to read the folder passes that client's
+ * `skillDir` / `agentDir` from its descriptor instead.
+ */
+const DEFAULT_CLIENT_DIRS = Object.freeze({ skillDir: '.claude/skills', agentDir: '.claude/agents' })
+
+const NOT_DUPLICATE_LANE = "(conversation_source is null or conversation_source <> 'claude_code')"
+
+const HUMAN_TURN = [
+  'coalesce(is_sidechain, false) = false',
+  "(user_type is null or user_type in ('external', 'user'))",
+  "content_text not like '<%'",
+  "content_text not like '[Request%'",
+  "content_text not like '# AGENTS.md instructions%'",
+  "content_text not like 'Another language model started%'",
+  "content_text not like '[$%'",
+  "content_text not like 'Base directory for this skill%'",
+  "content_text not like 'From my HypAware history%'",
+  "content_text not like 'Message Type:%'",
+].join(' and ')
+
+/**
+ * Leading words a person prefixes a request with and does not think of
+ * as part of it. Dropped from the key so "okay commit on appropriate
+ * branch" and "commit on appropriate branch" count as one line.
+ */
+const LEADING_FILLERS = 'okay|ok|now|please|can you|could you|yes|also|then|and|so|next'
+
+/** Characters of the normalized line that make the key. */
+const KEY_CHARS = 36
+
+/**
+ * The characters folded to a space before the key is cut: ASCII that is
+ * not a letter, a digit or a space, plus the General Punctuation block,
+ * so a curly quote, an en dash and an ellipsis fold the way their ASCII
+ * spellings do. Every other character is kept, so a request typed in
+ * Cyrillic, CJK or Arabic keys as itself rather than as the empty string
+ * the `line <> ''` exclusion drops (hypaware #1884).
+ *
+ * Named ranges rather than a letter class because the engine compiles a
+ * `regexp_replace` pattern with `new RegExp(pattern, 'g')` and no `u`
+ * flag (squirreling `src/expression/regexp.js`), where `\p{L}` is not a
+ * letter class at all: `\p` is an identity escape there, so the pattern
+ * matches the four literal characters `p{L}`. Whitespace above ASCII
+ * needs no range of its own, since the `\s+` fold that follows already
+ * matches it, save the C1 control U+0085 that JavaScript's `\s` omits.
+ *
+ * @ref LLP 0398#one-signal [implements]: what the fold erases is the decision; it keeps every script's letters, so what keys to nothing is punctuation, not a language
+ */
+const FOLD_TO_SPACE = '[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+'
+
+/**
+ * The half of a surrogate pair the cut can leave behind. `substr` here
+ * counts UTF-16 code units and the fold above keeps both halves of a
+ * pair, so an astral character sitting across `KEY_CHARS` is cut in two
+ * and its high half ends the key alone, which writing the key out as
+ * UTF-8 then renders as U+FFFD. Dropping the half is the repair: a key
+ * one character short groups the same typings, and the bound stays
+ * `KEY_CHARS` states. Anchored, because the cut is the only thing here
+ * that can split a pair.
+ *
+ * The reply excerpt in `sql.replies` and the tool-args slice in
+ * `sql.calls` take the same repair for the same reason: both cuts count
+ * code units too, and both reach `candidates.md` as UTF-8, the args by
+ * way of the head `commandHeads` builds from them. Anchored suffices for
+ * all three, because each cut starts at code unit 1 and so cannot orphan
+ * a low half at the front, and because a low half cannot already be
+ * sitting in the column: the cache encodes strings with `TextEncoder`,
+ * which writes any unpaired half as U+FFFD.
+ */
+const LONE_SURROGATE_TAIL = '[\\ud800-\\udbff]$'
+
+/**
+ * The key two typings are grouped by: case folded, leading fillers
+ * dropped, punctuation and whitespace runs folded to one space, the first
+ * `KEY_CHARS` characters, less a surrogate half the cut split off. One SQL
+ * expression used by both the statement that finds the candidates and the
+ * one that finds their sessions, since a candidate found by one key and
+ * looked up by another has no triggers.
+ *
+ * Normalized rather than exact because a person does not retype a request
+ * verbatim. On this machine the raw 42-character prefix split "commit on
+ * appropriate branch and make a PR" from its "okay ..." variant into 4
+ * sessions on 2 days and 3 on 2, each under the cut, where this key reads
+ * 7 sessions on 3 days. The client never sees the key: `candidates.md`
+ * heads each candidate with a typing as the person wrote it.
+ *
+ * @ref LLP 0398#one-signal [implements]: the same line typed again is judged after normalizing, not verbatim
+ */
+const TRIGGER_KEY = `trim(regexp_replace(substr(trim(regexp_replace(regexp_replace(regexp_replace(lower(content_text), '^((${LEADING_FILLERS})[,\\s]+)+', ''), '${FOLD_TO_SPACE}', ' '), '\\s+', ' ')), 1, ${KEY_CHARS}), '${LONE_SURROGATE_TAIL}', ''))`
+
+/**
+ * What counts as a typed line at all: one line of request length. A
+ * pasted block, a JSON or markdown fragment, or a quoted reply is not a
+ * request the person makes again. Tested on the raw text, because the key
+ * has already folded the newline and the leading bracket away, and on the
+ * trimmed text, because a pasted fragment arrives indented and an untrimmed
+ * opener guard reads a leading-space JSON line as a typed line.
+ */
+const TYPED_LINE = [
+  'length(content_text) between 12 and 160',
+  "content_text not like '%\n%'",
+  "trim(content_text) not like '{%'",
+  "trim(content_text) not like '\"%'",
+  "trim(content_text) not like '#%'",
+  "trim(content_text) not like '>%'",
+  "trim(content_text) not like '[%'",
+].join(' and ')
+
+/**
+ * What makes a key a request rather than a run of symbols: one letter or
+ * one decimal digit, in any script. A key of box-drawing rules, emoji,
+ * fullwidth punctuation, middle dots or U+0085 is not a line a person
+ * asks for again (hypaware #1894). Read on the key, not on the typing,
+ * so it sees what the fold left.
+ *
+ * In JavaScript because the engine cannot say this. A pattern there
+ * compiles with no `u` flag (squirreling `src/expression/regexp.js`), so
+ * `\p` is an identity escape and `\p{L}` matches the four literal
+ * characters `p{L}`, and the code-unit ranges that leaves interleave
+ * letters with symbols: fullwidth `！` beside fullwidth `ｃ` in one
+ * block, a middle dot beside the accented Latin letters in another. A
+ * range rule would therefore be an approximation whose omissions
+ * silently stop a script from producing candidates at all, which is the
+ * regression hypaware #1884 was filed to fix. Under `u` these two
+ * classes are exact over every script.
+ *
+ * Not global, so `lastIndex` carries nothing between calls.
+ *
+ * @ref LLP 0398#a-request [implements]: a key with no letter and no decimal digit is not a request, and what says so is a letter class the engine does not have
+ */
+const A_REQUEST = /[\p{L}\p{Nd}]/u
+
+/**
+ * First day of the window, `days` calendar days before `now`, as
+ * `YYYY-MM-DD` in UTC. Dates in the cache are UTC partition dates.
+ *
+ * @param {Date} now
+ * @param {number} [days]
+ * @returns {string}
+ */
+export function windowStart(now, days = EVIDENCE_WINDOW_DAYS) {
+  return new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10)
+}
+
+/** @param {string} s */
+function sqlString(s) {
+  return `'${s.replace(/'/g, "''")}'`
+}
+
+/**
+ * Epoch milliseconds as a literal this engine compares against a
+ * TIMESTAMP column. The `timestamp` keyword is not decoration: a bare
+ * string literal compared to a TIMESTAMP matches nothing at all and
+ * returns zero rows rather than an error.
+ *
+ * @param {number} ms
+ */
+function sqlTimestamp(ms) {
+  return `timestamp '${new Date(ms).toISOString()}'`
+}
+
+/**
+ * Whether a trigger instant can be both compared and written into SQL.
+ * `Number.isFinite` is not enough on its own: `instant` has a `bigint`
+ * branch, so a `message_created_at` that materializes as epoch
+ * microseconds or nanoseconds yields a finite number that
+ * `new Date(ms).toISOString()` rejects with a `RangeError`. Unguarded,
+ * that throw leaves the ask with no folder at all, where one unplaceable
+ * session should only ever cost that session its procedure.
+ *
+ * @param {number} at
+ */
+function placeable(at) {
+  return Number.isFinite(at) && Math.abs(at) <= 8.64e15
+}
+
+/**
+ * The window of each named session that either list statement reads: from
+ * the session's own trigger onwards, never the whole session.
+ *
+ * Both statements are read by `buildCandidates`, which keeps only rows at
+ * or after the trigger. Without this the statements return each session
+ * from its first row, so the budget is spent on the calls that ran before
+ * the line was typed and the procedure after it is what the `limit` drops.
+ * A candidate line is typically typed after the work rather than before
+ * it, so that is not an edge case: it is the ordinary one.
+ *
+ * The `session_id in (...)` is redundant against the disjunction and kept
+ * anyway, because `and` short-circuits: a row from an unnamed session is
+ * rejected by the set test and never walks the disjunction.
+ *
+ * @param {{ id: string, at: number, triggers: number }[]} anchors
+ */
+function afterTrigger(anchors) {
+  const ids = anchors.map((a) => sqlString(a.id)).join(', ')
+  const windows = anchors.map((a) => `(session_id = ${sqlString(a.id)} and message_created_at >= ${sqlTimestamp(a.at)})`).join(' or ')
+  return `session_id in (${ids}) and (${windows})`
+}
+
+/**
+ * The row budget a list statement is given: `ROWS_PER_TRIGGER` for every
+ * trigger the sample holds, not for every session it names.
+ *
+ * @param {{ triggers: number }[]} anchors
+ * @returns {number}
+ */
+function rowBudget(anchors) {
+  let triggers = 0
+  for (const a of anchors) triggers += a.triggers
+  return triggers * ROWS_PER_TRIGGER
+}
+
+/**
+ * The statements, keyed by step. All bounded: aggregates, or lists over a
+ * sampled set of sessions, each read from its trigger onwards and given a
+ * budget of `ROWS_PER_TRIGGER` rows for every trigger it holds.
+ *
+ * @param {string} from
+ * @returns {{
+ *   record: string,
+ *   lines: string,
+ *   triggers: (lines: string[]) => string,
+ *   calls: (anchors: { id: string, at: number, triggers: number }[]) => string,
+ *   replies: (anchors: { id: string, at: number, triggers: number }[]) => string,
+ * }}
+ */
+export function evidenceSql(from) {
+  const human = `role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN}`
+  return {
+    record: `select count(*) as session_days, count(distinct session_id) as sessions from (select session_id, date from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2) s`,
+    // `line <> ''` because a typing the fold erases entirely normalizes
+    // to nothing, and every such typing groups together: a rule of dashes
+    // and a row of ASCII punctuation both land on the empty key, pooling
+    // unrelated sessions into one candidate that then outranks the real
+    // ones. A request in a non-Latin script is not one of them, since the
+    // fold keeps its letters.
+    lines: `select ${TRIGGER_KEY} as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 and line <> '' order by sessions desc limit ${CANDIDATES + 3}`,
+    // The one statement here with no `limit`, because the `group by` is its
+    // ceiling and a `limit` would not be one (hypaware #1715): the engine
+    // builds every group before it yields a row, so a `limit` bounds only
+    // the array handed back, never the scan or the groups. The one form that
+    // sizes a buffer, `order by at desc limit`, is worse still: it holds
+    // every group's sort entry too, and takes the newest sessions overall,
+    // which is what `sampleTriggers` divides its total between the lines
+    // to avoid.
+    // @ref LLP 0398#consequences [constrained-by]: a row a session a candidate line is the bound; a LIMIT bounds only what comes back and would pick a different sample
+    triggers: (lines) => `select session_id, ${TRIGGER_KEY} as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} and ${TRIGGER_KEY} in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
+    // No `trim` around the strip, as in `sql.replies`: these args are
+    // serialized JSON, read only by `commandHeads`' captures, whose Bash
+    // branch splits the slice on whitespace. A trailing space can still
+    // reach a path or skill head, but it did so before the strip too,
+    // wherever the cut landed on one: trimming that is a separate tidy,
+    // not this repair.
+    calls: (anchors) => `select session_id, message_created_at as at, tool_name, regexp_replace(substr(cast(tool_args as varchar), 1, 160), '${LONE_SURROGATE_TAIL}', '') as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
+    // No `trim` around the strip, unlike the key: `buildCandidates` already
+    // puts this text through `oneLine`, so trimming here would only change
+    // excerpts the cut never split.
+    replies: (anchors) => `select session_id, message_created_at as at, regexp_replace(substr(content_text, 1, 500), '${LONE_SURROGATE_TAIL}', '') as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
+  }
+}
+
+/**
+ * Group tool calls by a short head, the way a reader would name them.
+ *
+ * @param {Record<string, unknown>[]} calls
+ * @returns {{ head: string, n: number, sessions: number }[]}
+ */
+export function commandHeads(calls) {
+  /** @type {Map<string, { n: number, sessions: Set<string> }>} */
+  const heads = new Map()
+  for (const r of calls) {
+    const tool = String(r.tool_name ?? '?')
+    const args = String(r.args ?? '')
+    let key = tool
+    if (tool === 'Bash' || tool === 'exec') {
+      // No match means `command` fell outside the 160-character slice the SQL
+      // takes, which happens whenever the call's JSON serializes a long
+      // `description` first. Falling back to the raw slice made the head a
+      // JSON fragment: it never matches STEP_HEAD, so the real step vanished
+      // from `steps`, and the fragment - the person's own description text -
+      // was printed verbatim under "Other activity". The tool name alone is
+      // the honest head for a call whose command was not read.
+      const m = /"command"\s*:\s*"((?:[^"\\]|\\.){0,160})/.exec(args)
+      if (m) {
+        const cmd = m[1].replace(/\\n/g, ' ').replace(/^cd\s+\S+\s*(&&|;|\|\|)?\s*/, '')
+        const words = cmd.split(/\s+/).filter(Boolean)
+        const take = ['hyp', 'gh', 'git', 'npm', 'node', 'curl'].includes(words[0] ?? '') ? 3 : 2
+        key = `${tool}: ${words.slice(0, take).join(' ')}`
+      }
+    } else if (['Read', 'Edit', 'Write', 'Grep', 'Glob'].includes(tool)) {
+      const m = /"(?:file_path|pattern|path)"\s*:\s*"([^"]{0,120})/.exec(args)
+      key = `${tool}: ${m ? path.basename(m[1]) : ''}`
+    } else if (tool === 'Skill') {
+      const m = /"skill"\s*:\s*"([^"]{0,60})/.exec(args)
+      key = `Skill: ${m ? m[1] : ''}`
+    }
+    const entry = heads.get(key) ?? { n: 0, sessions: new Set() }
+    entry.n += 1
+    entry.sessions.add(String(r.session_id ?? ''))
+    heads.set(key, entry)
+  }
+  return [...heads.entries()]
+    .map(([head, e]) => ({ head, n: e.n, sessions: e.sessions.size }))
+    .sort((a, b) => b.n - a.n)
+}
+
+/**
+ * The newest sessions that typed each candidate line. The trigger query
+ * returns one row per session that typed one, and every row of it becomes
+ * a session id in the two list statements, so this is what makes them
+ * bounded. Per line rather than over the whole set, or a candidate whose
+ * sessions are all older than another's gets none of its procedure read.
+ *
+ * Each line gets an equal share of `TRIGGER_SESSIONS_TOTAL`, capped at
+ * `perLine`: the per-line cap bounds one line, but the statements pay for
+ * the sum of every line, so the sum is what the share bounds. One line
+ * still gets its full `perLine`; five get a fifth of the total each.
+ *
+ * The sample keeps its newest-first order, so the page shows the recent
+ * record: the example is the oldest occurrence in the sample rather than
+ * the oldest ever, and the ending comes from the most recent session that
+ * finished with a substantial reply. A line under the cap is returned
+ * untouched, in the order it arrived.
+ *
+ * @param {Record<string, unknown>[]} triggers
+ * @param {number} [perLine]
+ * @returns {Record<string, unknown>[]}
+ */
+export function sampleTriggers(triggers, perLine = TRIGGER_SESSIONS) {
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const byLine = new Map()
+  for (const t of triggers) {
+    // Dropped here rather than downstream. The sort below subtracts two
+    // instants, so an unplaceable one makes the comparator return NaN,
+    // which is not an ordering: the row survives into the sample, takes a
+    // slot from a session that has a procedure to read, and is dropped by
+    // `sessionAnchors` afterwards.
+    if (!placeable(instant(t.at))) continue
+    const line = String(t.line ?? '')
+    const bucket = byLine.get(line)
+    if (bucket) bucket.push(t)
+    else byLine.set(line, [t])
+  }
+  const share = Math.min(perLine, Math.max(1, Math.floor(TRIGGER_SESSIONS_TOTAL / Math.max(1, byLine.size))))
+  /** @type {Record<string, unknown>[]} */
+  const out = []
+  for (const bucket of byLine.values()) {
+    if (bucket.length > share) bucket.sort((a, b) => instant(b.at) - instant(a.at))
+    const take = Math.min(share, bucket.length)
+    for (let i = 0; i < take; i += 1) out.push(bucket[i])
+  }
+  return out
+}
+
+/**
+ * One anchor per session in a sampled trigger list: the session's id, the
+ * earliest instant it typed any candidate line, and how many of them it
+ * typed. Earliest, because a session that typed two of them needs both
+ * procedures readable, and the statements read forward from the anchor.
+ * The count, because that is what the anchor costs to read: a session
+ * holding two triggers has two procedures inside one window, and the
+ * budget is spent per trigger.
+ *
+ * A session whose trigger instant does not parse is dropped rather than
+ * read unanchored. `buildCandidates` compares every call against it, and
+ * `NaN` compares false in both directions, so such a session contributes
+ * no procedure however many of its rows are fetched, and an unplaceable
+ * trigger of an anchored session is not counted for the same reason.
+ *
+ * @param {Record<string, unknown>[]} triggers
+ * @returns {{ id: string, at: number, triggers: number }[]}
+ */
+export function sessionAnchors(triggers) {
+  /** @type {Map<string, { at: number, triggers: number }>} */
+  const anchors = new Map()
+  for (const t of triggers) {
+    const id = String(t.session_id ?? '')
+    if (!id) continue
+    const at = instant(t.at)
+    if (!placeable(at)) continue
+    const seen = anchors.get(id)
+    if (seen === undefined) anchors.set(id, { at, triggers: 1 })
+    else {
+      seen.triggers += 1
+      if (at < seen.at) seen.at = at
+    }
+  }
+  return [...anchors].map(([id, a]) => ({ id, at: a.at, triggers: a.triggers }))
+}
+
+/** A command head that is a step of a procedure, not a read. */
+const STEP_HEAD = /^(Bash|exec): (git|gh|npm|node|hyp|make|pnpm|yarn|cargo|pytest|go|docker|curl) /
+
+/**
+ * Build the candidates from the raw rows. Pure, so it is testable
+ * without a cache.
+ *
+ * The triggers are sampled here too, not only by the caller that used the
+ * sample to fetch `calls` and `replies`, so every count on the page
+ * describes the same sessions the rows were read from whoever calls this.
+ * Sampling a sampled list is a no-op.
+ *
+ * @param {{
+ *   lines: Record<string, unknown>[],
+ *   triggers: Record<string, unknown>[],
+ *   calls: Record<string, unknown>[],
+ *   replies: Record<string, unknown>[],
+ * }} rows
+ * @returns {FirstAskCandidate[]}
+ */
+export function buildCandidates(rows) {
+  /**
+   * @param {Record<string, unknown>[]} list
+   * @returns {Map<string, Record<string, unknown>[]>}
+   */
+  const bySession = (list) => {
+    /** @type {Map<string, Record<string, unknown>[]>} */
+    const m = new Map()
+    for (const r of list) {
+      const k = String(r.session_id ?? '')
+      const bucket = m.get(k)
+      if (bucket) bucket.push(r)
+      else m.set(k, [r])
+    }
+    return m
+  }
+  const callsBy = bySession(rows.calls)
+  const repliesBy = bySession(rows.replies)
+  const triggers = sampleTriggers(rows.triggers)
+  /** @type {FirstAskCandidate[]} */
+  const out = []
+  for (const l of rows.lines) {
+    const line = String(l.line ?? '')
+    const hits = triggers.filter((t) => String(t.line ?? '') === line)
+    /** @type {Record<string, unknown>[]} */
+    const after = []
+    // Sessions whose procedure was actually read, which is not the same as
+    // the sessions sampled: the list statements share one row budget, so a
+    // long session can leave a later one with nothing. Counting the hits
+    // would print a denominator no step's numerator could ever reach.
+    let read = 0
+    /** @type {{ date: string, text: string } | undefined} */
+    let ending
+    for (const h of hits) {
+      const sid = String(h.session_id ?? '')
+      const at = instant(h.at)
+      const window = (callsBy.get(sid) ?? []).filter((c) => instant(c.at) >= at).slice(0, CALLS_AFTER)
+      if (window.length > 0) read += 1
+      after.push(...window)
+      if (!ending) {
+        const last = window.at(-1)
+        const end = last ? instant(last.at) : at
+        const reply = (repliesBy.get(sid) ?? []).find((r) => instant(r.at) > end)
+        if (reply) ending = { date: String(h.date ?? ''), text: oneLine(String(reply.text ?? '')) }
+      }
+    }
+    const heads = commandHeads(after)
+    const steps = heads.filter((h) => STEP_HEAD.test(h.head)).sort((a, b) => b.sessions - a.sessions).slice(0, 8)
+    // Every procedure command is a step or nothing. Excluding only the
+    // eight that were kept drops the ninth into 'Other activity', where
+    // ASK.md tells the client to read it as context rather than as a step
+    // of the procedure it is part of.
+    const other = heads.filter((h) => !STEP_HEAD.test(h.head)).slice(0, 5)
+    const first = hits.slice().sort((a, b) => compareStrings(String(a.date), String(b.date)))[0]
+    out.push({
+      line,
+      sessions: num(l.sessions),
+      days: num(l.days),
+      typed: num(l.typed),
+      example: first ? { date: String(first.date ?? ''), text: oneLine(String(first.example ?? '')) } : undefined,
+      sessionsWithCalls: read,
+      steps: steps.map((h) => ({ command: h.head.replace(/^(Bash|exec): /, ''), sessions: h.sessions })),
+      other: other.map((h) => ({ head: h.head, sessions: h.sessions })),
+      ending,
+    })
+  }
+  return out
+}
+
+/**
+ * Whether there is enough recorded to recommend from.
+ *
+ * @param {{ sessions: number }} record
+ * @param {FirstAskCandidate[]} candidates
+ * @returns {boolean}
+ */
+export function enoughRecorded(record, candidates) {
+  return record.sessions >= RECORD_FLOOR.sessions
+    && candidates.some((c) => c.sessions >= RECORD_FLOOR.lineSessions && c.days >= RECORD_FLOOR.lineDays)
+}
+
+/**
+ * `candidates.md`: the repeated lines, each with the steps that ran after
+ * it and how one such session ended. Written for a reader, so the client
+ * has nothing to join.
+ *
+ * @param {{ sessions: number, sessionDays: number }} record
+ * @param {FirstAskCandidate[]} candidates
+ * @param {boolean} enough
+ * @returns {string}
+ */
+export function renderCandidates(record, candidates, enough) {
+  const head = [
+    `# What you type again and again, last ${EVIDENCE_WINDOW_DAYS} days`,
+    '',
+    `Recorded: ${record.sessions} sessions over ${record.sessionDays} session-days.`,
+    '',
+  ]
+  if (!enough) return head.concat(['Nothing is typed often enough yet to recommend a skill.', '']).join('\n')
+  const body = candidates.map((c, i) => [
+    // A typing as the person wrote it, not the key: the key is case folded
+    // and cut, and the skill's description has to open with the phrase as
+    // they type it.
+    `## ${i + 1}. "${c.example?.text ?? c.line}"`,
+    `Typed ${c.typed} times in ${c.sessions} sessions on ${c.days} days.${c.example ? ` Example, ${c.example.date}: "${c.example.text}"` : ''}`,
+    '',
+    `Commands that ran in the ${CALLS_AFTER} tool calls after it (sessions that ran it, of the ${c.sessionsWithCalls} sampled sessions whose procedure was read):`,
+    ...(c.steps.length > 0 ? c.steps.map((s) => `- \`${s.command}\` (${s.sessions})`) : ['- (no standard commands)']),
+    `Other activity: ${c.other.map((o) => `${o.head} (${o.sessions})`).join('; ') || 'none'}`,
+    ...(c.ending ? ['', `How one ended (${c.ending.date}): "${c.ending.text}"`] : []),
+    '',
+  ].join('\n'))
+  return head.concat(body).join('\n')
+}
+
+/**
+ * The instructions the client reads. Written for a reader who will give
+ * the answer ten seconds.
+ *
+ * The skill's home comes from the descriptor of the client that is about
+ * to read this, not from a constant: `hyp ask` starts whichever attached
+ * client can be launched, and Codex reads a different tree
+ * (`.codex/skills`). Naming `.claude/skills` there sends the answer to a
+ * directory the reader never loads.
+ *
+ * @ref LLP 0398#always-a-skill [constrained-by]: the skill lands in the reading client's own tree, from its descriptor
+ * @ref LLP 0398#answer-shape [implements]: a colleague's voice, the skill, the offer, one line of sources
+ * @param {{ scope: string, windowDays?: number, client?: { skillDir: string } }} meta
+ * @returns {string}
+ */
+export function askInstructions(meta) {
+  const days = meta.windowDays ?? EVIDENCE_WINDOW_DAYS
+  const skillDir = (meta.client ?? DEFAULT_CLIENT_DIRS).skillDir
+  return `# What to do with this folder
+
+HypAware keeps your AI agents' sessions, logs, and telemetry in one queryable history. This folder holds what the person typed again and again over the last ${days} days for ${meta.scope}, and what their agent then did, so you can recommend the one skill worth adding first.
+
+## Files
+- \`candidates.md\`: the lines typed in the most sessions, each with the commands that ran after it and how one such session ended.
+- \`on_disk.txt\`: skills and agents already installed, with what each is for.
+
+## Rules
+- Pick the one candidate a skill would help most: a task done the same way each time that the agent currently works out from scratch. A line that is not a task (a check like "is claude working?", resuming a session, a one-word reply) is not a candidate.
+- If candidates.md says nothing is typed often enough, say how much was recorded and that there is not enough yet, and stop.
+- The skill goes in ~/${skillDir}/<name>/SKILL.md, under 25 lines. Its description opens with the phrase as the person types it. Its steps are the commands the file shows ran, in order, plus what the ending shows the person wanted reported.
+- If a skill on the subject already exists per on_disk.txt, change it rather than adding a second.
+- Run no queries and no commands. Read each file once. Standard commands need no testing.
+
+## Answer
+Write it the way you would tell a colleague what you found: short paragraphs, plain words, no headings, no bold, no em dashes, no file names or session ids in the text. Open with what you looked through and what stood out. Then what the skill does and the phrase that triggers it, and why this one. Then one real example with its date. Then "Here's the skill I'd add:", the path, and the SKILL.md in a fenced block. Then ask whether to add it, in one sentence. Then one line starting "Sources:" with the candidate number and figures you used. Under 120 words before the block.
+`
+}
+
+/**
+ * What is already installed for the client on this machine, so the
+ * answer can change an existing skill rather than add a second. Skills
+ * and agents are listed with the description their front matter
+ * declares. Hooks are not listed: they are not a change the ask
+ * proposes. Best-effort and bounded.
+ *
+ * The trees come from the descriptor of the client that will read this,
+ * for the same reason `askInstructions` takes the skill directory: a
+ * Codex run asked about `.claude/skills` is answering "does
+ * this skill already exist?" from a tree it does not load. A client with
+ * no agent directory gets no agents section rather than an empty one.
+ *
+ * @param {{ homeDir: string, client?: { skillDir: string, agentDir?: string }, readdir?: typeof fsp.readdir, readFile?: typeof fsp.readFile }} args
+ * @returns {Promise<string>}
+ */
+export async function onDiskListing({ homeDir, client = DEFAULT_CLIENT_DIRS, readdir = fsp.readdir, readFile = fsp.readFile }) {
+  const { skillDir, agentDir } = client
+  /** @param {string} dir */
+  const list = async (dir) => {
+    try {
+      // Sorted before the cap, or a home with more than 200 skills is
+      // listed from an arbitrary slice of directory order and the "does one
+      // already exist?" rule is answered from a different subset each run.
+      return (await readdir(dir)).filter((n) => !n.startsWith('.')).sort().slice(0, 200)
+    } catch {
+      return []
+    }
+  }
+  /** @param {string} file */
+  const description = async (file) => {
+    try {
+      return frontMatterDescription(await readFile(file, 'utf8'))
+    } catch {
+      return ''
+    }
+  }
+  const skillsDir = path.join(homeDir, skillDir)
+  const agentsDir = agentDir ? path.join(homeDir, agentDir) : undefined
+  /** @type {string[]} */
+  const skills = []
+  for (const name of await list(skillsDir)) {
+    const d = await description(path.join(skillsDir, name, 'SKILL.md'))
+    skills.push(d ? `${name}: ${d}` : name)
+  }
+  /** @type {string[]} */
+  const agents = []
+  if (agentsDir) {
+    for (const name of await list(agentsDir)) {
+      if (!name.endsWith('.md')) continue
+      const d = await description(path.join(agentsDir, name))
+      agents.push(d ? `${name.slice(0, -3)}: ${d}` : name.slice(0, -3))
+    }
+  }
+  let claudeMd = 'absent'
+  try {
+    await readFile(path.join(homeDir, '.claude', 'CLAUDE.md'), 'utf8')
+    claudeMd = 'present'
+  } catch {
+    // absent
+  }
+  return [
+    `## ~/${skillDir} (name: what it is for)`,
+    ...(skills.length > 0 ? skills : ['(none)']),
+    '',
+    ...(agentsDir
+      ? [`## ~/${agentDir} (name: what it is for)`, ...(agents.length > 0 ? agents : ['(none)']), '']
+      : []),
+    '## ~/.claude/CLAUDE.md',
+    claudeMd,
+    '',
+  ].join('\n')
+}
+
+/**
+ * The `description:` value of a Markdown file's front matter, one line,
+ * cut at 200 characters. Empty when there is no front matter or no
+ * description.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function frontMatterDescription(text) {
+  if (!text.startsWith('---')) return ''
+  const end = text.indexOf('\n---', 3)
+  const head = end >= 0 ? text.slice(3, end) : text.slice(3, 4000)
+  const m = /^description:\s*(.*)$/m.exec(head)
+  if (!m) return ''
+  let value = m[1].trim()
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1)
+  return oneLine(value).slice(0, 200)
+}
+
+/**
+ * Run the whole gather for one launch into `root`, which is emptied first
+ * and created user-only: the files quote the person's own typed lines.
+ * One folder, replaced on every ask; nothing reads it afterwards.
+ *
+ * @ref LLP 0398#run-directory [implements]: one directory, wiped and rewritten per ask, and the client starts inside it
+ * @param {{
+ *   runner: OverviewQueryRunner,
+ *   root: string,
+ *   homeDir: string,
+ *   now?: Date,
+ *   scope?: string,
+ *   windowDays?: number,
+ *   client?: { skillDir: string, agentDir?: string },
+ *   say?: (line: string) => void,
+ * }} args
+ * @returns {Promise<FirstAskEvidence>}
+ */
+export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new Date(), scope = 'this machine', windowDays = EVIDENCE_WINDOW_DAYS, client, say = () => {} }) {
+  const from = windowStart(now, windowDays)
+  const sql = evidenceSql(from)
+  say(`Looking through the last ${windowDays} days...`)
+  const recordRow = (await runner.run(sql.record)).rows[0] ?? {}
+  const record = { sessions: num(recordRow.sessions), sessionDays: num(recordRow.session_days) }
+  // Before the cut to `CANDIDATES`, so a real candidate takes the place
+  // of each dropped line up to the statement's three rows of headroom,
+  // and before the session statements, so a dropped line spends none of
+  // their row budget. This is also the whole of the fix to the record
+  // floor: `enoughRecorded` reads the candidates built from here.
+  const lines = (await runner.run(sql.lines)).rows.filter((l) => A_REQUEST.test(String(l.line ?? ''))).slice(0, CANDIDATES)
+  /** @type {FirstAskCandidate[]} */
+  let candidates = []
+  if (lines.length > 0) {
+    const triggers = sampleTriggers((await runner.run(sql.triggers(lines.map((l) => String(l.line ?? ''))))).rows)
+    const anchors = sessionAnchors(triggers)
+    const calls = anchors.length > 0 ? (await runner.run(sql.calls(anchors))).rows : []
+    const replies = anchors.length > 0 ? (await runner.run(sql.replies(anchors))).rows : []
+    candidates = buildCandidates({ lines, triggers, calls, replies })
+  }
+  const enough = enoughRecorded(record, candidates)
+  const files = [
+    { name: 'candidates.md', content: renderCandidates(record, candidates, enough) },
+    { name: 'on_disk.txt', content: await onDiskListing({ homeDir, ...(client ? { client } : {}) }) },
+    { name: 'ASK.md', content: askInstructions({ scope, windowDays, ...(client ? { client } : {}) }) },
+  ]
+  await fsp.rm(root, { recursive: true, force: true })
+  await fsp.mkdir(root, { recursive: true, mode: 0o700 })
+  for (const f of files) await fsp.writeFile(path.join(root, f.name), f.content, 'utf8')
+  return { dir: root, from, record, enough, candidates, files: files.map((f) => f.name) }
+}
+
+/** @param {unknown} v */
+function num(v) {
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * A `message_created_at` cell as comparable epoch milliseconds, however
+ * the engine materialized it. A TIMESTAMP column arrives from the parquet
+ * reader as a `Date`, and `String(date)` orders by weekday name before it
+ * orders by time ("Mon Sep 14" sorts before "Sun Sep 13"), so comparing
+ * the rendered strings selects the wrong tool calls for every session that
+ * crosses a day. `NaN` for a cell that is not a timestamp at all, which
+ * compares false in both directions: no procedure is better than one drawn
+ * from the wrong end of the session.
+ *
+ * @param {unknown} v
+ * @returns {number}
+ */
+function instant(v) {
+  if (v instanceof Date) return v.getTime()
+  if (typeof v === 'number') return v
+  if (typeof v === 'bigint') return Number(v)
+  return Date.parse(String(v ?? ''))
+}
+
+/** @param {string} s */
+function oneLine(s) {
+  return s.replace(/\s+/g, ' ').trim()
+}

@@ -32,10 +32,15 @@ import { VerbUsageError } from './verb_errors.js'
  * Enumerable is also what makes it copyable: unlike the `WeakSet`, which
  * nothing outside this file could add to, this mark can be lifted off any
  * projected command with `Object.getOwnPropertySymbols` and stamped onto
- * another object. That is accepted, not overlooked. The mark separates a
- * projection from a plugin command that happens to share the name, and the
- * only thing forging it buys a plugin is having its own command retracted
- * when that verb name is released. There is no privilege here to steal.
+ * another object. That was accepted on the premise that forging it buys
+ * nothing, and the premise was measured false (issue #1987): stamped onto
+ * a neighbour's record, reachable live through `ctx.commands.get`
+ * (LLP 0421 #shapes), it bought that command's deletion through a
+ * squatted verb's release, `hyp status` included. So the mark answers only
+ * *what* a command is, a projection rather than a plugin command sharing
+ * the name; *whose* projection it is, `retractCommand` settles by
+ * comparing the two registrars the kernel recorded, which no plugin write
+ * reaches (LLP 0427 #two-facts).
  */
 const VERB_PROJECTION = Symbol('hypaware.verbProjection')
 
@@ -51,10 +56,19 @@ const VERB_PROJECTION = Symbol('hypaware.verbProjection')
  *   own. `VerbRegistry.register` passes the name it validated and keyed by, so
  *   the command lands under the same string as the verb rather than under
  *   another read of an accessor free to answer differently.
+ * @param {Pick<VerbRegistration, 'operation' | 'render'>} [body] the two
+ *   functions to run, defaulting to the registration's own as read here.
+ *   `VerbRegistry.register` passes the pair it validated, for the reason it
+ *   passes the name: the registration is stored by reference and handed back
+ *   by `get()`/`getByTool()`/`list()`, so neither member can be what decides
+ *   whose code runs behind the command (issue #1983). A caller projecting a
+ *   verb with no registry behind it (`registerCoreCommands` pre-projecting
+ *   core's verbs so `hyp --help` renders before boot) still captures once,
+ *   here, rather than on every dispatch.
  * @returns {CommandRegistration}
  * @ref LLP 0034#verbs [implements]: one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
  */
-export function verbToCommand(verb, name = verb.name) {
+export function verbToCommand(verb, name = verb.name, body = { operation: verb.operation, render: verb.render }) {
   // One read each. The presence test and the value that lands in the command
   // were two reads of the same plugin property, so the registration built here
   // could carry a value nothing had tested, and a member that answered truthy
@@ -81,7 +95,7 @@ export function verbToCommand(verb, name = verb.name) {
     // all, which is what kept `graph neighbors` at one line of help.
     // @ref LLP 0214#d1 [implements]: verbs carry long help through the registration dispatch already renders
     ...(help !== undefined ? { help } : {}),
-    run: (argv, ctx) => runVerbCommand(verb, argv, ctx),
+    run: (argv, ctx) => runVerbCommand(verb, argv, ctx, body),
   }
   return markVerbProjection(command)
 }
@@ -101,9 +115,11 @@ function markVerbProjection(command) {
 }
 
 /**
- * Whether `command` is a CLI command this module projected from a verb,
- * and so the command a released verb name is entitled to retract. A
- * plugin's own command that merely shares the name is not.
+ * Whether `command` carries the mark of a CLI command this module projected
+ * from a verb. A plugin's own command that merely shares the name does not.
+ * Necessary for a released verb name to retract it, not sufficient: the mark
+ * is forgeable (see {@link VERB_PROJECTION}), so `retractCommand` also
+ * requires the recorded registrars to agree (LLP 0427 #two-facts).
  *
  * Total on a missing command, `null` included. The caller is
  * `VerbRegistry.unregister`, reading the command back out of a registry the
@@ -124,9 +140,13 @@ export function isVerbProjection(command) {
  * @param {VerbRegistration} verb
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {Pick<VerbRegistration, 'operation' | 'render'>} [body] the two
+ *   functions to run, defaulting to the registration's live members for a
+ *   caller that projected no body. Both are called **on** the registration, so
+ *   one written as a method of its own verb sees the `this` it saw before.
  * @returns {Promise<number>}
  */
-export async function runVerbCommand(verb, argv, ctx) {
+export async function runVerbCommand(verb, argv, ctx, body = verb) {
   if (argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write(usageForVerb(verb.name, verb.inputSchema) + '\n')
     return 0
@@ -176,7 +196,7 @@ export async function runVerbCommand(verb, argv, ctx) {
     result = remote.result
   } else {
     try {
-      result = await verb.operation(parsed.params, buildOperationContext(ctx, ctrl.controls.refresh))
+      result = await body.operation.call(verb, parsed.params, buildOperationContext(ctx, ctrl.controls.refresh))
     } catch (err) {
       ctx.stderr.write(`hyp ${verb.name}: ${err instanceof Error ? err.message : String(err)}\n`)
       // An operation refusing its own arguments exits like the codec's own
@@ -197,7 +217,7 @@ export async function runVerbCommand(verb, argv, ctx) {
   /** @type {VerbRenderResult} */
   let rendered
   try {
-    rendered = verb.render(result, ctrl.controls)
+    rendered = body.render.call(verb, result, ctrl.controls)
   } catch (err) {
     ctx.stderr.write(`hyp ${verb.name}: render failed: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

@@ -6,9 +6,10 @@ import { noteProductPipeline } from '../product_telemetry/client.js'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 
 /**
- * @import { DatasetRegistration, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, ExportProgress, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
  * @import { DriverOptions, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
@@ -71,11 +72,22 @@ export function createSinkDriver(opts) {
     /** @type {TickReport['sinks']} */
     const sinks = []
     for (const handle of handles) {
-      if (tickOpts.sinkInstance && handle.instanceName !== tickOpts.sinkInstance) continue
+      // The registry's key, read once and carried through the export below,
+      // so the batch id, the outbox path, the span and every metric name the
+      // instance by the name `instantiate` validated rather than by a
+      // property its owner can replace (issue #1976).
+      //
+      // Only the name is fixed here. `handle.config` on the `schedule` line
+      // below is the same kind of live property, still read off the handle
+      // and still ahead of the due check, so a tick can still be lost to one
+      // (issue #2059).
+      const instance = sinkInstanceName(handle)
+      if (tickOpts.sinkInstance && instance !== tickOpts.sinkInstance) continue
       const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
       const isDue = tickOpts.force === true || cronMatches(schedule, now)
       if (!isDue) continue
-      const report = await runSink(handle, schedule, now)
+      tickOpts.onProgress?.(instance)
+      const report = await runSink(handle, instance, schedule, now, tickOpts.onProgress)
       sinks.push(report)
     }
     return { sinks }
@@ -83,14 +95,15 @@ export function createSinkDriver(opts) {
 
   /**
    * @param {ExtendedSinkHandle} handle
+   * @param {string} instance The name the registry keyed `handle` under.
    * @param {string} schedule
    * @param {Date} now
+   * @param {TickOptions['onProgress']} onProgress
    * @returns {Promise<TickReport['sinks'][number]>}
    */
-  async function runSink(handle, schedule, now) {
-    const instance = handle.instanceName
+  async function runSink(handle, instance, schedule, now, onProgress) {
     const batchId = nextBatchId(now, instance)
-    const partitions = await discoverReadyPartitions(handle)
+    const partitions = await discoverReadyPartitions(handle, instance)
     return withSpan(
       'sink.export_batch',
       {
@@ -118,15 +131,15 @@ export function createSinkDriver(opts) {
           const format = handle.encoder?.format ?? 'native'
           const reported = await handle.sink.exportBatch(
             { batchId, partitions },
-            { format, schedule }
+            { format, schedule, ...(onProgress ? { onProgress: (progress) => onProgress(instance, readExportProgress(progress)) } : {}) }
           )
           result = readExportResult(reported, partitions)
         } catch (err) {
           const message = describeThrown(err)
           /** @type {ExportResult} */
           const failed = { status: 'failed', partitionsExported: 0, retryPartitions: partitions, error: message }
-          await persistOutbox(handle, batchId, partitions, message)
-          recordFailure(handle, batchId, partitions.length, message, span)
+          await persistOutbox(handle, instance, batchId, partitions, message)
+          recordFailure(handle, instance, batchId, partitions.length, message, span)
           return summarize(instance, failed)
         }
         const status = result.status
@@ -154,8 +167,8 @@ export function createSinkDriver(opts) {
         } else {
           const retryParts = result.retryPartitions ?? partitions
           const message = result.error ?? 'sink reported non-ok status'
-          await persistOutbox(handle, batchId, retryParts, message)
-          recordFailure(handle, batchId, retryParts.length, message, span)
+          await persistOutbox(handle, instance, batchId, retryParts, message)
+          recordFailure(handle, instance, batchId, retryParts.length, message, span)
           span.setAttribute('status', status === 'partial' ? 'degraded' : 'failed')
         }
         return summarize(instance, result)
@@ -166,9 +179,10 @@ export function createSinkDriver(opts) {
 
   /**
    * @param {ExtendedSinkHandle} handle
+   * @param {string} instance
    * @returns {Promise<QueryPartition[]>}
    */
-  async function discoverReadyPartitions(handle) {
+  async function discoverReadyPartitions(handle, instance) {
     const datasets = queryRegistry.listDatasets()
     /** @type {QueryPartition[]} */
     const all = []
@@ -237,7 +251,7 @@ export function createSinkDriver(opts) {
               // partitions the flushes above did commit go unexported for as
               // long as one sibling partition keeps failing.
               log.warn('sink.flush_partition_failed', {
-                [Attr.SINK_INSTANCE]: handle.instanceName,
+                [Attr.SINK_INSTANCE]: instance,
                 [Attr.DATASET]: datasetName,
                 tablePath,
                 message: describeThrown(err),
@@ -250,7 +264,7 @@ export function createSinkDriver(opts) {
         }
       } catch (err) {
         log.warn('sink.discover_partitions_failed', {
-          [Attr.SINK_INSTANCE]: handle.instanceName,
+          [Attr.SINK_INSTANCE]: instance,
           [Attr.DATASET]: datasetName,
           message: describeThrown(err),
         })
@@ -261,18 +275,19 @@ export function createSinkDriver(opts) {
 
   /**
    * @param {ExtendedSinkHandle} handle
+   * @param {string} instance
    * @param {string} batchId
    * @param {QueryPartition[]} partitions
    * @param {string} error
    */
-  async function persistOutbox(handle, batchId, partitions, error) {
+  async function persistOutbox(handle, instance, batchId, partitions, error) {
     try {
-      const dir = path.join(stateRoot, 'sinks', handle.instanceName, 'outbox')
+      const dir = path.join(stateRoot, 'sinks', instance, 'outbox')
       fs.mkdirSync(dir, { recursive: true })
       const filePath = path.join(dir, `${batchId}.json`)
       const payload = {
         batchId,
-        sinkInstance: handle.instanceName,
+        sinkInstance: instance,
         plugin: handle.plugin,
         recordedAt: new Date().toISOString(),
         error,
@@ -295,7 +310,7 @@ export function createSinkDriver(opts) {
       // while `hyp status` still reads healthy.
       const message = describeThrown(err)
       log.error('sink.outbox_write_failed', {
-        [Attr.SINK_INSTANCE]: handle.instanceName,
+        [Attr.SINK_INSTANCE]: instance,
         hyp_batch_id: batchId,
         message,
       })
@@ -304,24 +319,25 @@ export function createSinkDriver(opts) {
 
   /**
    * @param {ExtendedSinkHandle} handle
+   * @param {string} instance
    * @param {string} batchId
    * @param {number} partitionsCount
    * @param {string} message
    * @param {Span} span
    */
-  function recordFailure(handle, batchId, partitionsCount, message, span) {
+  function recordFailure(handle, instance, batchId, partitionsCount, message, span) {
     noteProductPipeline('export', { failures: 1 })
     instruments.sinkExportFailuresTotal.add(1, {
-      [Attr.SINK_INSTANCE]: handle.instanceName,
+      [Attr.SINK_INSTANCE]: instance,
       [Attr.PLUGIN]: handle.plugin,
     })
     instruments.sinkExportsTotal.add(1, {
-      [Attr.SINK_INSTANCE]: handle.instanceName,
+      [Attr.SINK_INSTANCE]: instance,
       [Attr.STATUS]: 'failed',
     })
     span.setAttribute(Attr.ERROR_KIND, 'sink_export_failed')
     log.error('sink.export_batch.failed', {
-      [Attr.SINK_INSTANCE]: handle.instanceName,
+      [Attr.SINK_INSTANCE]: instance,
       hyp_batch_id: batchId,
       partitions_count: partitionsCount,
       message,
@@ -371,6 +387,41 @@ function readExportResult(reported, partitions) {
     retryPartitions: Array.isArray(reported?.retryPartitions) ? reported.retryPartitions.slice() : partitions,
     error: typeof reported?.error === 'string' ? reported.error : undefined,
   }
+}
+
+/**
+ * One progress report from the plugin's object, read the way
+ * {@link readExportResult} reads its counts: a number or nothing.
+ *
+ * The same reason applies with one addition. `onProgress` is a plugin-facing
+ * callback on the kernel's export contract, so the numbers arrive from sink
+ * code the kernel does not own, and the caller is a spinner that renders them
+ * straight to the terminal. An absent, string, or `NaN` count is therefore not
+ * a wrong log field but `NaN rows sent | ETA ~NaNm` on the screen somebody is
+ * watching an upload on. A missing argument (`opts.onProgress()`) is the same
+ * case and must not reach the caller as the kernel's own start-of-destination
+ * signal, which is an absent progress object.
+ *
+ * @param {ExportProgress | null | undefined} reported
+ * @returns {ExportProgress}
+ */
+function readExportProgress(reported) {
+  return { rows: readCount(reported?.rows), bytes: readCount(reported?.bytes) }
+}
+
+/**
+ * A count from the plugin's object: a finite positive number, or nothing.
+ *
+ * Negative is screened with the rest. `rows` accumulates, so one negative
+ * report does not just render `-5,000/12,000 rows (-42%)`, it holds the
+ * running total below the real one for the rest of the destination and the
+ * finalizing branch never fires again.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+function readCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
 }
 
 /**

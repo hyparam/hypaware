@@ -146,8 +146,10 @@ per LLP 0102: delete `ENROLLMENT_PICKER_ENABLED`, the picker entry points
 in `src/core/commands/local_only.js` (`runLocalOnlyPicker`,
 `MAX_SHOWN_CANDIDATES`, the multiselect wiring - keep
 `listCapturedDirectories`, `CAPTURE_DATASET` and the durable hint, which
-survive as the skill's survey substrate), the captured-directory wait and
-`freshenCaptureEnumeration` in `remote_commands.js`, and the picker's
+survive as the skill's survey substrate; both were later removed as unused
+on 2026-09-24, because the shipped skill runs its own enumeration query),
+the captured-directory wait and `freshenCaptureEnumeration` in
+`remote_commands.js`, and the picker's
 unit-tested wiring. Update the LLP 0093 refs in the surviving hold code to
 point at 0101. Tests: deadline computation incl. the 4-hour floor and DST
 edges, hold ordering vs `enrollCentralSink` (the existing ordering

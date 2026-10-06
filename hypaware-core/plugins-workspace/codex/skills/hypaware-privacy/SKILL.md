@@ -1,14 +1,9 @@
 ---
 name: hypaware-privacy
-description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync" or "what will ship to the server". Covers this machine's local cache only, not rows already forwarded to a remote server.
+description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync", "what will ship to the server", or "what will sync to the cloud". Surveys this machine's local cache; rows already forwarded are out of scope except where a session purge deletes them.
 ---
 
 # HypAware privacy review: audit what was captured, decide what leaves
-
-<!-- @ref LLP 0100#skill [implements]: the six-step agent-assisted privacy review the deferred first sync directs the user to run (R3-R8) -->
-<!-- @ref LLP 0142#any-time [constrained-by]: the description advertises the audit itself, not the first-sync window; enrolled-ness gates behavior, not presence (LLP 0107#gating) -->
-<!-- @ref LLP 0142#local-cache-scope [constrained-by]: this machine's cache only; scanning an org server's rows is deliberately out of scope, not an oversight -->
-<!-- @ref LLP 0197#t2-premise-corrected [constrained-by]: the claude and codex copies of this skill are deliberately forked, not drifted. Step 1 resolves the session id by mechanisms only that host has, and the codex copy's version is separately tested (test/plugins/codex-privacy-skill-session-id.test.js). Mirror an edit to the other copy only where it is genuinely host-agnostic; test/plugins/skill-host-parity.test.js records the divergence. -->
 
 This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. The six steps run the same way whenever the user asks; only the stakes change.
 
@@ -25,6 +20,31 @@ This flow governs **HypAware's own surfaces only** - what the local cache holds 
 The review conversation will discuss the most sensitive content on the machine, so it must never itself become a captured, forwardable transcript. **Before surveying anything**, opt this Codex session out of capture and **verify it took effect**. On failure, say so plainly and continue **only** with the user's explicit consent.
 
 Prefer `hyp session ignore --json`, which resolves the id and verifies the opt-out in one tested implementation and refuses rather than guessing. It exits nonzero and prints no success when it cannot establish the right id, which is the answer this step needs. Only where it is unavailable, or cannot resolve the session, does the script below apply.
+
+Reading the receipt is not optional. The verb fails closed on the questions it can answer, but two of its **successes** are narrower than they look, and both are checked below.
+
+```bash
+hyp session ignore --json
+```
+
+**What the receipt does and does not say.** The verb addresses the gateway plus every recorder advertising `control_routes` in live daemon status, so `"status": "ok"` means every recorder it *addressed* took the write, which is not the same claim as "you are covered": a recorder missing from that snapshot is not addressed at all. Which recorder captures this session depends on Codex's `capture_mode`: with `gateway` configured Codex reaches HypAware through `base_url` and the gateway records this session live, while on the default `transcript` mode nothing reaches the gateway and this session's rollout under `~/.codex/sessions` is imported by the scheduled sweep instead. The **gateway** entry is still the one to read either way: its control route saves the id to the shared session-ignore store before it answers, and the sweep reloads that store at the start of every run, so a confirmed `gateway` entry is what covers the live lane and what the transcript import honors. Read the receipt rather than only the exit code:
+
+- exit `0` with `"status": "ok"`. `"status": "partial"` (exit 3) means an addressed recorder **refused and is still recording**.
+- `"session_id_source"` is `codex_env_rollout` (the thread `CODEX_THREAD_ID` states, with the session container read out of that thread's rollout) or `codex_rollout` (the container inferred off disk from a `cwd` match). Any other source means the verb resolved **a different session**: `claude_env` means it read `CLAUDE_CODE_SESSION_ID` and opted out a Claude session sharing this shell. It then confirms a real opt-out, `"status": "ok"` and all, for a session you are not in, while this one keeps being recorded. That write already happened, so undo it before you stop - `hyp session unignore "<the session_id it reported>"` - or the bystander session stays suppressed until explicitly unignored.
+- on `codex_rollout` the id is **inferred** off disk rather than stated by the client, and `"session_id_evidence"` names the rollout it came from. Report it as "inferred from `<rollout file>`", the same way the script below reports its own, and stop for the user's confirmation if they do not recognize the session.
+- `"recorders"` contains an entry for `gateway`, whose control route carries the durable write, which is why it is the entry to read in either capture mode. A list without one means the gateway was never addressed, and absence has two readings the receipt cannot tell apart: the gateway is listening and the verb could not name its endpoint, or it is not listening at all - a stopped daemon, or a gateway that bound no port, leaves nothing in the live snapshot, and with no `listen` pinned in the config there is nothing for the verb to fall back on. Those are two independent facts: a pinned `listen` is addressed even when nothing answers there, and that lands a `gateway` entry reporting `"status": "error"` on a `partial` receipt rather than an absent one, so a missing entry is never by itself evidence the daemon is stopped. A skipped **listening** gateway is the exact failure this step exists to prevent; a gateway that is not listening is capturing nothing over `base_url`, so there is nothing about this session for it to notify. The cross-check below settles which one you have. A `gateway not addressed:` line on **stderr** narrows the answer the same way from the other side.
+- every entry in `"recorders"` reports `"status": "ok"` with `"ignored": true`. Name them to the user rather than saying "the machine".
+- `"guarantee": "set_membership"` is the bound on all of it, spelled out below.
+
+**Stop on any of these** and tell the user the review session is still being recorded: `"status": "partial"`, a `"session_id_source"` other than `codex_env_rollout` or `codex_rollout`, no `gateway` entry in `"recorders"` while the cross-check below says the gateway is listening, or a nonzero exit the fallback does not cover. Only proceed if they explicitly accept that risk.
+
+**Cross-check a missing `gateway` entry before you stop on it.** The receipt reports who was addressed, which is one observation and cannot say which of the two readings above it is reporting. The daemon's own snapshot is the second one, and the stop is conditioned on it rather than dropped: it carries the gateway source's bound address, the very field the verb resolves the gateway by, where the `"recorders"` list carries only the outcome of that resolution. `hyp status --json` cannot answer this - it renders sources without their `details` - so read the snapshot itself:
+
+```bash
+hyp daemon status --json
+```
+
+Read `"running"` first, then the `"sources"` entry whose `"plugin"` is `"@hypaware/ai-gateway"` - or, on a snapshot that recorded no plugin for it, whose `"name"` is `"ai-gateway"`, which is the second way core itself finds that source, so a plugin-only lookup can miss a gateway that did bind. `"running": true` beside a gateway entry whose `"details"` carries a `"port"` is a gateway the live daemon bound: this session's traffic reaches it, it was skipped, and the stop above applies - say the review session is still being recorded. `"running": false`, or a running daemon whose gateway entry is missing or reports `"listening": false` with no `"port"`, is the other reading: tell the user the gateway is not listening, so nothing is capturing this session over `base_url`, and read the rest of the receipt as usual (every other entry in `"recorders"` still has to report `ok`). Keep that scoped to the gateway's own lane rather than reporting the session uncaptured outright: Codex's `capture_mode` defaults to `transcript`, where the rollout files under `~/.codex/sessions` are imported by the scheduled sweep and never reach the gateway at all. What that import honors is the shared session-ignore store under the state directory, which only the recorders that persist their set there write to; a recorder holding its set in memory for its own process answers `"status": "ok"` and leaves the sweep nothing to read. The receipt does not say which kind answered, so report the gateway as idle and name the recorders that confirmed, and leave the transcript lane as something this step has not settled rather than telling the user it is covered. The `"running"` half is not optional - a snapshot outlives the daemon that wrote it, so a `"port"` in a file no live process stands behind says nothing about now. Anything you cannot read that way - `hyp daemon status` exiting nonzero, which is what an unreadable snapshot does, or a shape you do not recognize - is not an observation, so treat it as the listening case and stop. A daemon that never wrote a snapshot is not that case: it exits `0` and prints a two-key payload, `"running": false` with `"state": "unknown"` and nothing else, so its missing `"sources"` key is the not-running answer above and not an unreadable shape.
 
 **Which id, exactly.** The gateway matches its opt-out set against the **session container**, not the thread: `codex/src/exchange-projector.js` keys the drop on `metadata.session_id`, falling back to the conversation id. Codex records each session as `~/.codex/sessions/**/rollout-<ts>-<uuid>.jsonl` whose first line is a `session_meta` record carrying `payload.session_id` (the container) alongside `payload.id` (the thread) and `payload.cwd`. **Read `payload.session_id`.** The two are the same uuid on a root thread, and they diverge on a subagent thread, which inherits the root's container but mints its own thread id, so an opt-out sent with the thread id names a token the drop never matches. Nothing downstream catches that: the control route treats the id as opaque and answers `ignored: true` for whatever it was handed, so the verification below would print `opt-out confirmed` over a session that is still being recorded. A rollout with no `session_id` predates the container, so stop there rather than substituting the thread id (issue #453).
 
@@ -160,7 +180,7 @@ If the session id cannot be resolved (the script refuses on ambiguity, staleness
 
 **What `opt-out confirmed` proves, exactly.** `ignored: true` means the id is in the gateway's drop set, and nothing more. The gateway never inspects traffic, so it cannot tell a live session container from a thread id or a finished session's id: it answers `ignored: true` for whatever it was handed. The drop happens later, in the client adapter, against the `session_id` it stamps on the row. Everything that makes this opt-out real therefore happened *before* the POST, in resolving `payload.session_id` above - the reply is a receipt for the write, not a verified drop. Report it to the user that way, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question.
 
-The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`codex fork <id>`; a plain `codex resume <id>` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point.
+The opt-out is saved locally and survives recorder and daemon restarts until explicitly removed with `hyp session unignore`. A fork (`claude --fork-session`, `codex fork`) creates a new session ID that needs its own exclusion; a plain resume reuses the ID. Transcript backfill honors the saved exclusion. Unignoring permits earlier transcript content to be imported again. Use `hyp session status` to check the current answer.
 
 ## Step 2 - Check that backfill has settled (before surveying)
 
@@ -175,7 +195,7 @@ Then run the enumeration query (Step 3) **twice, a short interval apart** (say ~
 
 ## Step 3 - Survey the captured directories, then sample content (R4 applies)
 
-Enumerate the distinct working directories this machine has captured (the LLP 0069 enumerate query over `ai_gateway_messages`):
+Enumerate the distinct working directories this machine has captured (an enumerate query over `ai_gateway_messages`):
 
 ```bash
 hyp query sql "SELECT cwd, repo_root, COUNT(*) AS rows, MAX(date) AS last_seen \
@@ -239,11 +259,12 @@ hyp privacy unset <dir> [class]   # remove markings (class-neutral by default; a
 
 `hyp privacy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
 
-**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp privacy purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive and cache-only (it never contacts the server); confirm each purge on its own.
+**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp privacy purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive. A directory or `--ignored` purge touches only the local cache; a `--session` purge also deletes that session on configured and signed-in remotes and enrolled servers unless you add `--local-only`. Confirm each purge on its own.
 
 ```bash
 hyp privacy purge <dir>              # delete cached rows for a directory subtree
-hyp privacy purge --session <id>     # delete all cached rows for one session (cheapest: session is the partition key)
+hyp privacy purge --session <id>     # delete one session here and on configured, signed-in and enrolled servers (cheapest: session is the partition key)
+hyp privacy purge --session <id> --local-only   # same, but skip the server-side delete
 hyp privacy purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
 ```
 
@@ -255,7 +276,7 @@ hyp privacy set <dir> ignore && hyp privacy purge <dir>
 
 ## After the review
 
-- Nothing you did contacts the server. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
+- Nothing you did sends captured data anywhere: markings stay on this machine, and a `--session` purge sends only the session id to configured, signed-in and enrolled servers so they delete that session there. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.

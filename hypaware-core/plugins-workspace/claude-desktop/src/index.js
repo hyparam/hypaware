@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { describeEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
+import { describeEphemeralBinPath, describeRepointedBinPath } from '../../../../src/core/cli/global_install.js'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
@@ -273,7 +273,10 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
   try {
     const hypBin = resolveHypBin(cmdCtx.env)
     const script = renderCredentialHelperScript({
-      nodeBin: process.execPath,
+      // Which copy is the override's call; how to run it is this one. A path
+      // node cannot load is exec'd as it stands rather than handed to an
+      // interpreter that would SyntaxError on it (issue #1811).
+      nodeBin: hypBin.nodeRunnable ? process.execPath : undefined,
       hypBin: hypBin.binPath,
       args: [...credential.helperCommandArgs],
       env: cmdCtx.env,
@@ -310,6 +313,46 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
       getLogger('plugin.claude-desktop').warn('client.install_helper.ephemeral_hyp_bin', {
         [Attr.PLUGIN]: PLUGIN_NAME,
         bin_path: hypBin.binPath,
+      })
+    } else if (hypBin.repointedFrom !== undefined) {
+      // The walk's other outcome, and the one nothing else reports: a pinned
+      // project dependency traded for some other copy. On stdout beside the
+      // path just reported, not on stderr, which here means the recorded path
+      // is going to stop existing.
+      cmdCtx.stdout.write(
+        describeRepointedBinPath(hypBin.binPath, hypBin.repointedFrom, 'the wrapper') + '\n',
+      )
+      // Recorded for the reason the ephemeral arm above records its own
+      // choice: the line is read once, the wrapper outlives the session, and
+      // a credential fetch that starts failing on a version the baked copy
+      // predates reports nothing on this machine.
+      getLogger('plugin.claude-desktop').warn('client.install_helper.repointed_hyp_bin', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        bin_path: hypBin.binPath,
+        repointed_from: hypBin.repointedFrom,
+      })
+    }
+    // Its own arm, not another branch of the chain above: how the wrapper runs
+    // the path is a different question from where the path came from, and an
+    // override is neither ephemeral nor repointed.
+    if (!hypBin.nodeRunnable) {
+      const named = hypBin.overrideVar !== undefined
+        ? `${hypBin.overrideVar} names ${hypBin.binPath}, which node cannot load`
+        : `${hypBin.binPath} is not a file node can load`
+      cmdCtx.stderr.write(
+        `claude-desktop install-helper: warning: ${named}, so the wrapper execs it `
+        + `directly rather than under ${process.execPath}. A pnpm, volta or asdf shim runs `
+        + "that way; if it needs 'node' on PATH to work, Desktop's minimal environment may "
+        + `not have one, so point ${hypBin.overrideVar ?? 'HYPAWARE_BIN'} at the CLI's own `
+        + "JavaScript entry (bin/hypaware.js) instead\n",
+      )
+      // Recorded for the reason the arms above record theirs: a shim that
+      // turns out to need a 'node' Desktop does not give it fails inside the
+      // app, long after this line was read.
+      getLogger('plugin.claude-desktop').warn('client.install_helper.non_node_hyp_bin', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        bin_path: hypBin.binPath,
+        override_var: hypBin.overrideVar,
       })
     }
     return 0

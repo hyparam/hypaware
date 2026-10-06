@@ -10,6 +10,11 @@
 @ref LLP 0469#seams: use the existing gateway capability and a narrowly scoped adapter
 @ref LLP 0468#acceptance: delivery requires current-commit independent and live evidence
 
+> Publication note: the manual procedure references below describe the pilot
+> baseline. LLP 0430 retired that procedure tier on current master; this PR
+> preserves the client recipe and automated smoke without restoring
+> `docs/ACCEPTANCE.md`. The pilot's actual live checks are reported in the PR.
+
 ## Change set {#change-set}
 
 Slug: `ollama-direct-capture`; integration: `integration/ollama-direct-capture`.

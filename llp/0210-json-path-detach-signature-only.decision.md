@@ -80,9 +80,7 @@ never-attached config passes untouched and unremarked. LLP 0163's "never
 discard a user value" is satisfied the strong way: the value is not moved at
 all. The cache purge applies D1's signature per cache row rather than
 inheriting a decision from the settings pass: the caches carry each provider
-entry forward wholesale, headers included (LLP 0167 verify item 3, and
-`docs/ACCEPTANCE.md`'s residue check greps these very files for the marker
-header), so a row whose marker header names its own key is ours and is purged
+entry forward wholesale, headers included (LLP 0167 verify item 3), so a row whose marker header names its own key is ours and is purged
 whenever it is seen, in any daemon state and on any rerun. A marker-less row
 is purged only when the same run deleted the matching settings entry, the one
 case where its provenance is proven; every other row is the user's and stays,

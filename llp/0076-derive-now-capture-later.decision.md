@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-06
 **Related:** LLP 0073, LLP 0074, LLP 0075, LLP 0023
+**Extended-by:** LLP 0428 (precise evidence, bounded action derivation and explicit refresh)
 
 > [Issue #229](https://github.com/hyparam/hypaware/issues/229)'s Direction
 > names two horizons: deterministic per-client derivation now, and "longer

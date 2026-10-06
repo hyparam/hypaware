@@ -47,12 +47,109 @@ const SKILL = path.resolve(
 
 const text = fs.readFileSync(SKILL, 'utf8')
 
-/** The first fenced bash block, which is Step 1's session-resolution script. */
+/**
+ * Step 1's session-resolution script, anchored on its shebang rather than on
+ * "the first fenced bash block": the verb Step 1 leads with now has a bash
+ * block of its own above this one, and every assertion here is about the
+ * script.
+ */
 const step1 = (() => {
-  const m = text.match(/```bash\n([\s\S]*?)```/)
-  assert.ok(m, 'the skill must still carry a fenced bash block')
+  const m = text.match(/```bash\n(#!\/usr\/bin\/env bash\n[\s\S]*?)```/)
+  assert.ok(m, 'the skill must still carry the fenced fallback script')
   return m[1]
 })()
+
+/** Step 1's prose, which is where the receipt readings and their stops live. */
+const prose = (() => {
+  const start = text.indexOf('## Step 1')
+  const end = text.indexOf('## Step 2')
+  assert.ok(start >= 0 && end > start, 'Step 1 must still be a section of its own')
+  return text.slice(start, end)
+})()
+
+/** The words Step 1 opens its stop list with. */
+const STOP_LIST_OPENER = '**Stop on any of these**'
+
+/** The words Step 1 opens the paragraph that frames every receipt reading with. */
+const RECEIPT_PREMISE_OPENER = '**What the receipt does and does not say.**'
+
+/**
+ * The claim Step 1 must never make, in whatever words: that the gateway is the
+ * recorder this session's capture runs through. `readCodexCaptureMode` returns
+ * `transcript` for anything but an explicit `gateway`, and in that mode the
+ * rollout sweep imports this session out of `~/.codex/sessions` while nothing
+ * reaches the gateway, so stating it flatly is false on a default install.
+ *
+ * Both guards below share it, because pinning a phrasing per paragraph is what
+ * let the claim back in: a reintroduction had only to pick a verb form neither
+ * literal spelled out (issue #2167). So the pattern names the claim's shape - a
+ * recorder, a present-tense relative clause or gerund, and this session - and
+ * tolerates case, an `is` auxiliary, and up to four characters of whitespace,
+ * markdown emphasis, code spans or, outside the verb slots, a comma between its
+ * words. That is a surface pin on those three forms, not a claim about every
+ * wording: other tenses (`that captured`), other auxiliaries (`that was
+ * capturing`), an adverb in any slot, emphasis splitting `this session`, and
+ * separator runs past four all pass, because reaching them costs true prose.
+ *
+ * The comma closes the non-restrictive form, `the recorder, which captures this
+ * session, is the gateway`. Its accepted cost is that a qualified true
+ * appositive is rejected with it - `one recorder, capturing this session only in
+ * gateway mode` - and has to be rewritten without the comma.
+ *
+ * The relative clause or gerund is mandatory, and that is what keeps the guard
+ * off true prose. It does not match the shipped two-mode framing, "Which
+ * recorder captures this session depends on Codex's `capture_mode`", where
+ * `recorder` is followed straight by the verb; nor any statement about what the
+ * gateway records, covers, or is the entry to read. What it rejects is the
+ * apposition, in either capture mode: Step 1 says which recorder captures a
+ * session by naming the mode that decides it, never by naming the gateway.
+ *
+ * @ref LLP 0429#default [tests]: absent or `transcript` selects file capture,
+ * so naming one recorder as this session's is false on a default install.
+ */
+const CAPTURING_RECORDER_CLAIM =
+  /recorder[\s*_`,]{1,4}(?:(?:that|which)[\s*_`]{1,4}(?:is[\s*_`]{1,4})?captur(?:es|ing)|capturing)[\s*_`,]{1,4}this session/i
+
+/**
+ * Strings measured against the pattern above: each is one of the three forms it
+ * holds, carrying a separator it does not reach (emphasis or a code span
+ * splitting `this session`, a comma inside a verb slot). They bound what the two
+ * guard messages may claim, which is the forms and not a separator axis, since
+ * naming an axis claims coverage these falsify (issue #2174). The bounds the pin
+ * does hold are on the pattern itself.
+ */
+const MEASURED_ESCAPES = [
+  'the recorder capturing this **session**',
+  'the recorder capturing this `session`',
+  'the recorder that, captures this session',
+  'the recorder that is, capturing this session',
+]
+
+/** The message the Step 1 stop guard reports, pinned by the test below. */
+const STOP_CLAIM_MESSAGE =
+  'and must not describe gateway as the recorder that captures, that is capturing, or capturing this session, anywhere in Step 1: on the default `transcript` capture_mode nothing reaches it. Those three present-tense forms are what this pin holds'
+
+/** The message the receipt premise guard reports, pinned by the test below. */
+const PREMISE_CLAIM_MESSAGE =
+  'the premise must not assert the gateway is the capturing recorder unconditionally, in the that/which-captures, that/which-is-capturing, or bare-gerund forms this pin holds'
+
+test('the guard messages name the forms the pin holds, not an axis its escapes falsify', () => {
+  for (const escape of MEASURED_ESCAPES) {
+    assert.doesNotMatch(
+      escape,
+      CAPTURING_RECORDER_CLAIM,
+      `the pin does not reach ${escape}, so no guard message may advertise the separator carrying it`
+    )
+  }
+
+  for (const message of [STOP_CLAIM_MESSAGE, PREMISE_CLAIM_MESSAGE]) {
+    assert.doesNotMatch(
+      message,
+      /emphasis|code span|\bcommas?\b/i,
+      `a guard message naming a separator axis claims coverage the escapes above falsify; the bounds the pin does hold are on the pattern itself: ${message}`
+    )
+  }
+})
 
 test('Step 1 sends the session container, never a thread id', () => {
   // The id that goes on the wire is read from `payload.session_id`.
@@ -114,19 +211,253 @@ test('Step 1 resolves the rollout by cwd and refuses rather than guessing', () =
   assert.ok(resolveEnd > 0 && curlAt > resolveEnd, 'resolution (and its refusals) must precede the curl')
 })
 
-test('Step 1 reports the id as inferred and names both ways the opt-out lapses', () => {
+test('Step 1 reports the id as inferred and names persistence and the fork boundary', () => {
   // The staleness window is a bound, not a proof, so an id off disk is always
   // labelled. (#452)
   assert.match(step1, /ID_SOURCE="INFERRED from \$ROLLOUT on disk"/)
 
-  // Issue #455: the ephemerality caveat names the fork as well as the restart,
-  // matching `EPHEMERAL_NOTE` in ai-gateway/src/session_command.js.
-  const prose = text.slice(text.indexOf('## Step 1'), text.indexOf('## Step 2'))
-  assert.match(prose, /gateway restart/)
+  assert.match(prose, /survives recorder and daemon restarts/)
   assert.match(prose, /codex fork/)
+  assert.match(prose, /until explicitly removed/)
+})
+
+/**
+ * The host-specific half of the receipt reading (issue #1633).
+ *
+ * `hyp session ignore --json` reports which session it resolved and which
+ * recorders it reached, and both answers can be a confirmed success about
+ * something other than this session. Which values are the RIGHT ones is the
+ * part that cannot be shared with the claude copy: `resolveSessionIdForCli`
+ * reports `codex_env_rollout` (thread stated in `CODEX_THREAD_ID`, container
+ * read from its rollout) or `codex_rollout` (container inferred from a `cwd`
+ * match) for a Codex session, and a `claude_env` here means the verb opted out
+ * a Claude session sharing this shell while this one kept being recorded.
+ * Codex reaches HypAware through `base_url` only in `gateway` capture mode;
+ * on the default `transcript` mode nothing reaches the gateway and a rollout
+ * sweep imports the session instead. `resolveRecorderTargetsForCli` still
+ * names `gateway` as the entry to read in either mode, because its control
+ * route writes the shared session-ignore store before it answers and the
+ * sweep reloads that same store at the start of every run. For a Claude
+ * session it is the telemetry listener.
+ *
+ * The checks are pinned inside the stop paragraph rather than anywhere in
+ * Step 1, because a reading the agent is not told to stop on is commentary.
+ * Issue #1627 records the claude guard's version of that gap: it asserts the
+ * recorder id appears in Step 1 and that a stop paragraph exists, never that
+ * the two meet, so a clause demoted to a receipt bullet still passes.
+ *
+ * @ref LLP 0066#readable [tests]: R10 - an answer that could not be
+ * established, or was established about another session, must not read as a
+ * completed check.
+ */
+test('Step 1 stops on a receipt that resolved another session or missed the gateway', () => {
+  const at = prose.indexOf(STOP_LIST_OPENER)
+  assert.ok(at >= 0, `Step 1 must gather its stops under "${STOP_LIST_OPENER}"`)
+  const rest = prose.slice(at)
+  const paraEnd = rest.search(/\n\s*\n/)
+  const stops = paraEnd < 0 ? rest : rest.slice(0, paraEnd)
+
+  assert.match(
+    stops,
+    /a `"session_id_source"` other than `codex_env_rollout` or `codex_rollout`/,
+    'the stop list must name the two sources a Codex session legitimately resolves by'
+  )
+  assert.match(
+    stops,
+    /no `gateway` entry in `"recorders"`/,
+    'and must stop when the gateway was never addressed'
+  )
+
+  // The stop list is a list of names; the bullets above it are what tell the
+  // agent what each name means. Both halves have to survive, or the stop is
+  // unreadable in one direction and unactionable in the other. Each pin
+  // therefore spans the clause carrying the meaning, not just the name it
+  // hangs on: an intact name over a reversed explanation ("any other source
+  // is fine", "a list without one is harmless") reads as an all-clear, and a
+  // stop list on its own does not catch it.
+  assert.match(
+    prose,
+    /- `"session_id_source"` is `codex_env_rollout`[\s\S]{0,400}means the verb resolved \*\*a different session\*\*[\s\S]{0,400}`hyp session unignore /,
+    'the session_id_source bullet must say a wrong source resolved a different session, and how to undo it'
+  )
+  // Issue #2162. `gateway` is not "the recorder that captures this session":
+  // `readCodexCaptureMode` returns `transcript` for anything but an explicit
+  // `gateway`, and in that mode the rollout sweep imports this session out of
+  // `~/.codex/sessions` while nothing reaches the gateway. So the pin spans the
+  // actionable clause, which holds in either capture mode, and rejects the
+  // apposition separately: an absence check alone passes on an emptied bullet,
+  // and the clause pin alone passes on a bullet that reasserts it.
+  assert.match(
+    prose,
+    /- `"recorders"` contains an entry for `gateway`[\s\S]{0,240}A list without one means the gateway was never addressed\b/,
+    'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
+  )
+  // The pin fires anywhere in Step 1, however the apposition is joined.
   assert.doesNotMatch(
     prose,
-    /a gateway restart drops it\.\s*(?:\n|$)/,
-    'the restart must not be presented as the only way the opt-out lapses'
+    CAPTURING_RECORDER_CLAIM,
+    STOP_CLAIM_MESSAGE
+  )
+})
+
+/**
+ * Issue #2148, the codex half of #1626. The stop above fires on ABSENCE, and
+ * absence has two causes the receipt cannot tell apart. The gateway is missing
+ * from `recorders` exactly when `resolveGatewayEndpointForCli` found no bound
+ * port in the live daemon snapshot and no `listen` pinned in the config, which
+ * is either a gateway that is listening somewhere the verb could not name or a
+ * gateway that is not listening at all - and the second is the ordinary reading
+ * (LLP 0256 #cli-posts-to-both: a recorder that is not running is not a
+ * failure, it is recording nothing). It is reachable in shipped code:
+ * `runMutation` exits 0 with `status: "ok"` and a `gateway not addressed:` line
+ * on stderr whenever another recorder resolves and the gateway does not, so an
+ * unconditional stop tells a user whose gateway is down - and whose Codex
+ * traffic is therefore reaching no recorder over `base_url` - that the review
+ * session is still being recorded.
+ *
+ * The answer is to condition the stop on a second observation, not to delete
+ * it, so both directions are pinned here: a listening gateway still stops the
+ * review, a gateway that bound nothing says plainly that nothing is capturing
+ * this session, and a cross-check that cannot be read fails closed.
+ *
+ * The second observation is the gateway's own bound address, which is the
+ * field the verb's recorder resolution reads (`gatewaySourceDetails` in
+ * `src/core/daemon/status.js`), not the `control_routes` advertisement it
+ * resolves the other recorders by. `hyp status --json` drops source `details`
+ * entirely, so it cannot answer this; the shapes named below are pinned
+ * against the real command in
+ * test/plugins/ai-gateway-session-both-recorders.test.js.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: only a running recorder that was
+ * skipped or refused is a failure.
+ */
+test('Step 1 stops on a missing gateway entry only while the gateway is listening', () => {
+  const at = prose.indexOf(STOP_LIST_OPENER)
+  assert.ok(at >= 0, `Step 1 must gather its stops under "${STOP_LIST_OPENER}"`)
+  const rest = prose.slice(at)
+  const paraEnd = rest.search(/\n\s*\n/)
+  const stops = paraEnd < 0 ? rest : rest.slice(0, paraEnd)
+
+  // The condition rides the list item itself, before the comma that ends it:
+  // an agent acting on the list must not be able to reach the stop without
+  // reading it.
+  const clause = 'no `gateway` entry in `"recorders"`'
+  assert.ok(stops.includes(clause), `"${clause}" must still be one of the stop conditions`)
+  assert.match(
+    stops,
+    new RegExp(clause.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[^,]{0,200}\\b(?:listening|live|running)\\b'),
+    'and it must carry its own liveness condition: absence alone is also what a gateway that is not listening looks like'
+  )
+
+  // The second observation, and both of its answers.
+  const opener = '**Cross-check a missing `gateway` entry'
+  const from = prose.indexOf(opener)
+  assert.ok(from >= 0, `Step 1 must settle the two readings, opening "${opener}"`)
+  const to = prose.indexOf('**Which id, exactly.**')
+  assert.ok(to > from, 'and must do it before it explains which id the opt-out names')
+  const crossCheck = prose.slice(from, to)
+
+  assert.match(crossCheck, /hyp daemon status --json/, 'the cross-check must name the command that answers it')
+  assert.ok(
+    crossCheck.includes('@hypaware/ai-gateway') && crossCheck.includes('"port"'),
+    'and the keys it reads: the gateway source entry and the address it bound'
+  )
+  assert.match(
+    crossCheck,
+    /"running": true[\s\S]{0,400}still being recorded/,
+    'a port the live daemon bound is a gateway that was skipped, so the stop must still fire on it'
+  )
+  assert.match(
+    crossCheck,
+    /gateway is not listening, so nothing is capturing this session/,
+    'and where nothing is listening the user must be told that, not told they are still being recorded'
+  )
+  assert.match(
+    crossCheck,
+    /nothing is capturing this session over `base_url`/,
+    'and that claim must be scoped to the gateway lane: on a default `transcript` capture_mode the rollout sweep still imports this session'
+  )
+  assert.match(
+    crossCheck,
+    /capture_mode` defaults to `transcript`/,
+    'so the skill must say why an idle gateway is not the same as an uncaptured session'
+  )
+  assert.match(
+    crossCheck,
+    /leave the transcript lane as something this step has not settled/,
+    'the receipt cannot tell a durable recorder from an in-memory one, so the step must not report the transcript lane covered'
+  )
+  assert.match(
+    crossCheck,
+    /`"name"` is `"ai-gateway"`/,
+    'and the lookup must carry core own name fallback, or a snapshot that recorded no plugin reads as not listening while a port is bound'
+  )
+  assert.match(
+    crossCheck,
+    /"running": false[\s\S]{0,160}"state": "unknown"[\s\S]{0,200}not an unreadable shape/,
+    'a daemon that never wrote a snapshot must be resolved explicitly: its missing `sources` key otherwise matches both the proceed clause and the fail-closed one'
+  )
+  assert.match(
+    crossCheck,
+    /"running": false/,
+    'a snapshot outlives its daemon, so a port in one must be read as live only beside a running process'
+  )
+  assert.match(
+    crossCheck,
+    /(?:cannot read|do not recognize|nonzero)[\s\S]{0,200}\bstop\b/,
+    'an observation that could not be made is not an answer, so it must fail closed'
+  )
+})
+
+/**
+ * The premise the receipt reading rests on (issue #2159).
+ *
+ * The paragraph an agent reads first frames every reading under it, so a false
+ * statement of fact there is not a wording nit. Codex's `capture_mode` defaults
+ * to `transcript` (`readCodexCaptureMode`, src/core/config/attach_policy.js),
+ * and in that mode no managed `base_url` block is written and the backfill
+ * provider registers the sweep that imports this session's rollout out of
+ * `~/.codex/sessions` (codex/src/backfill.js, gated on
+ * `capture_mode !== 'gateway'`). So the gateway is not the capturing recorder
+ * on a default install.
+ *
+ * The conclusion is pinned with it, because a premise pin alone passes over a
+ * paragraph corrected into saying nothing: a confirmed `gateway` entry still
+ * covers both lanes, since the control route saves the id to the shared
+ * session-ignore store before it answers (`ignoredSessions.add`,
+ * src/core/control/session_ignore.js) and the sweep reloads that store at the
+ * start of every run (`refreshSessionIgnores`).
+ *
+ * @ref LLP 0429#default [tests]: absent or `transcript` is file capture, so
+ * which recorder captures a Codex session is not one fixed answer.
+ * @ref LLP 0403#backfill [tests]: the durable store is what carries a confirmed
+ * opt-out across to the transcript lane.
+ */
+test('Step 1 frames the receipt for both capture modes, and still says what the gateway entry proves', () => {
+  const at = prose.indexOf(RECEIPT_PREMISE_OPENER)
+  assert.ok(at >= 0, `Step 1 must still frame the receipt under "${RECEIPT_PREMISE_OPENER}"`)
+  const rest = prose.slice(at)
+  const paraEnd = rest.search(/\n\s*\n/)
+  const premise = paraEnd < 0 ? rest : rest.slice(0, paraEnd)
+
+  assert.doesNotMatch(
+    premise,
+    CAPTURING_RECORDER_CLAIM,
+    PREMISE_CLAIM_MESSAGE
+  )
+
+  assert.match(
+    premise,
+    /`capture_mode`[\s\S]{0,400}default `transcript`[\s\S]{0,300}`~\/\.codex\/sessions`[\s\S]{0,200}sweep/,
+    'the premise must name capture_mode, say transcript is the default, and say the sweep imports the rollout there'
+  )
+
+  // Reversing this into "so the gateway entry does not matter" is the
+  // overcorrection, and it would leave the bullets and stop list below
+  // hanging on a recorder the paragraph no longer gives a reason to read.
+  assert.match(
+    premise,
+    /\*\*gateway\*\* entry is still the one to read[\s\S]{0,500}session-ignore store[\s\S]{0,300}sweep reloads/,
+    'the premise must still say why a confirmed gateway entry is what the readings below rest on'
   )
 })

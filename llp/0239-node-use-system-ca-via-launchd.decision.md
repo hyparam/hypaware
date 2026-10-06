@@ -9,7 +9,10 @@
 **Extended-by:** LLP 0262, LLP 0258 (accepted 2026-08-17; the OTEL attach
 delivers its environment through the settings `env` block, which reaches
 every session with no launchd write and no terminal restart, so this
-delivery mechanism is not used for the `claude` client)
+delivery mechanism is not used for the `claude` client; no bundled client
+attaches by proxy and no attach path installs this any more, and the unused
+install helper was removed on 2026-09-24, leaving only the inspect and
+remove path for older installs)
 
 > Proxy-mode attach sets `NODE_USE_SYSTEM_CA=1` with `launchctl setenv` and
 > installs a LaunchAgent that re-applies it at login, because the variable

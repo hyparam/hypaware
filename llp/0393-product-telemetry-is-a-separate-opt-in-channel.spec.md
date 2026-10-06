@@ -6,6 +6,10 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-08
 **Extends:** LLP 0021, LLP 0318
+**Extended-by:** LLP 0408 (automatic organization reporting for enrolled SaaS users)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0450 (adds report generate to the finite command vocabulary)
+**Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 
 ## Contract {#contract}
 
@@ -82,4 +86,6 @@ version attribution, canonicalization, nested/early dispatch, runtime arithmetic
 queue capacity/concurrent writers, restart retry, destination changes and errors.
 Benchmarks report measurements separately from targets (10 ms p95 queue append,
 1% idle CPU, 10 MiB pipeline memory). A 24-hour installed-daemon outage/idle soak
-and cross-version durable-spool acceptance remain manual release gates.
+and cross-version durable-spool behavior are not covered by automated tests.
+They were manual release gates until
+[LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md) retired them.

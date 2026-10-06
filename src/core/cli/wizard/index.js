@@ -13,9 +13,11 @@
  *   WizardOutputGuard,
  *   WizardPathway,
  *   WizardPickResult,
+ *   WizardSuggestSkillResult,
  *   WizardSyncNowResult,
  * } from '../../../../src/core/cli/wizard/types.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
+ * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 import { Attr, getLogger, withSpan } from '../../observability/index.js'
@@ -23,8 +25,10 @@ import { readObservabilityEnv } from '../../observability/env.js'
 import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
-import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { optedOutClientSourceIds, readClientSyncEntries } from '../../usage-policy/index.js'
+import { readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import { readClientSyncEntries } from '../../usage-policy/index.js'
+import { readCentralSinkOrigins } from '../../remote/gateway_seed.js'
+import { serverDisplayName } from '../../remote/builtin_remotes.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
   defaultConfirmSelectPromptFactory,
@@ -36,18 +40,21 @@ import {
 } from '../walkthrough.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
+import { ensureDurableBin } from '../global_install.js'
+import { platformIsSupported } from '../../daemon/platform.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { writeSuggestedPrompts } from './first_ask.js'
+import { anyClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
-import { runWizardSyncNow } from './sync_now.js'
-import { runWizardSyncScope } from './sync_scope.js'
-import { runWizardFolderAsk } from './folder_ask.js'
+import { heldStatement, runWizardSyncNow } from './sync_now.js'
+import { commitWizardSyncScope, runWizardSyncScope } from './sync_scope.js'
+import { commitWizardFolderAsk, runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
 import { guardWizardOutput } from './output_guard.js'
 import { wizardStepProgress } from './steps.js'
+import { offerWizardGithub, connectWizardGithub } from './github.js'
 
 /**
  * The `hyp init` wizard orchestrator: the fork -> join -> pick ->
@@ -76,7 +83,7 @@ import { wizardStepProgress } from './steps.js'
  * as they are.
  *
  * Attended runs can also step *back* (LLP 0191): escape at a question
- * lane returns to the lane before it (folders to sync, sync to pick, pick
+ * lane returns to the lane before it (folders to pick, pick
  * to the express gate - or to the fork when this pass showed no gate - and
  * the gate itself to the fork, the fork to a reconfigure run's gate), with
  * a completed join reused rather than re-run and confirmed picks
@@ -189,14 +196,25 @@ async function runGuardedInitWizard(opts, guard) {
   let pickSeed
   /** @type {WizardPickResult | undefined} */
   let picked
-  /** @type {string[]} */
-  let sourcesOptedOut = []
+  /** @type {string[] | undefined} */
+  let pendingSyncSources
+  /** @type {string | undefined} */
+  let pendingSyncServer
   /**
    * The standing new-folder answer this run left behind (LLP 0200), for
    * the finish log. Undefined on runs that never reach the lane.
    * @type {FolderAskMode | undefined}
    */
   let folderAsk
+  /**
+   * Each question lane's statement of its answer, held until the config is
+   * saved and then printed together. Running a lane replaces its statement
+   * and drops the ones after it, so a back never leaves a stale one behind.
+   * @ref LLP 0437#recap [implements]: the answers are stated once, at the commit point, not per lane
+   */
+  const recap = createRecap()
+  /** An express accept's new-folder answer, recorded once the recap is shown. */
+  let folderAskPending = false
   /**
    * Did this pass through the lanes accept the express gate (LLP 0201)?
    * Re-answered on every pass, so stepping back to the fork and forward
@@ -295,9 +313,19 @@ async function runGuardedInitWizard(opts, guard) {
     if (gateExit) return gateExit
   }
 
+  // The CLI the daemon will record is settled here, once, before the
+  // pathway question. Both pathways install the same daemon, and the team
+  // pathway installs it inside the login lane, whose exit code cannot carry
+  // a refusal past enrollment: resolved inside that lane, "no" became
+  // `daemon_incomplete` and the run went on to attach clients to a daemon
+  // that was never written. Resolved up front, a refusal ends the run
+  // before anything is written, and every later install receives the
+  // answer as an explicit entrypoint, so no lane asks twice.
+  // @ref LLP 0404#install-policy [implements]: setup settles the CLI before the fork, and a refusal ends the run before config, attach, or backfill
+  const daemonBin = await resolveWizardDaemonBin(opts, interactive)
+
   // The question lanes and their back edges (LLP 0191 #back-edges):
-  // escape steps one *screen* back - folders to sync (`continue atSync`,
-  // or past it to pick when the sync lane asked nothing), sync to pick
+  // escape steps one *screen* back - folders to the combined picker
   // (`continue atPick`), pick to the express gate (`continue atExpress`,
   // or straight to the fork when that pass has no gate to show),
   // the express gate to the fork (`continue atFork`), the fork to the
@@ -379,7 +407,7 @@ async function runGuardedInitWizard(opts, guard) {
             let disconnect
             try {
               disconnect = await confirm({
-                title: 'This machine syncs to your team server. Disconnect and go local-only?',
+                title: 'This machine syncs to the cloud. Disconnect and go local-only?',
                 options: [
                   { value: 'disconnect', label: 'Yes, disconnect' },
                   { value: 'stay', label: 'No, stay connected' },
@@ -408,7 +436,7 @@ async function runGuardedInitWizard(opts, guard) {
               // #consequences: a cancelled run still exits 130).
               // @ref LLP 0191#esc-back [implements]: ctrl+c cancels the run at the disconnect question rather than acting as a back-step
               if (joined) await narrateEnrolledAbort(opts)
-              opts.stderr.write('hyp setup: cancelled\n')
+              opts.stderr.write('Setup cancelled.\n')
               return { exitCode: 130, cancelled: true }
             }
             if (disconnect === 'disconnect') {
@@ -421,7 +449,7 @@ async function runGuardedInitWizard(opts, guard) {
               const leaveFn = opts.leave ?? (() => opts.ctx.commands.run('leave', []))
               const code = await leaveFn()
               if (code !== 0) {
-                opts.stderr.write('hyp setup: leaving the server failed - this machine is still connected. Retry, or continue without disconnecting.\n')
+                opts.stderr.write('hyp setup: leaving the cloud failed - this machine is still connected. Retry, or continue without disconnecting.\n')
                 continue
               }
               // Disconnected: the org's rows are no longer locked and the
@@ -446,7 +474,6 @@ async function runGuardedInitWizard(opts, guard) {
         // The join is a question lane too (a login is an interaction),
         // so it does not open on a dead surface either (LLP 0341).
         if (!(await guard.checkpoint())) return await cancelDeadOutput()
-        const joinProgress = wizardStepProgress('team', 'join')
         const joinFn = opts.join ?? runWizardJoin
         const join = await joinFn({
           stdout: opts.stdout,
@@ -455,7 +482,7 @@ async function runGuardedInitWizard(opts, guard) {
           env: opts.env,
           catalog,
           ctx: opts.ctx,
-          ...(joinProgress ? { progress: joinProgress } : {}),
+          ...(daemonBin !== undefined ? { binPath: daemonBin } : {}),
         })
         // Fail closed: every status but the two that completed a sign-in
         // returns to the fork, so a member added to `WizardJoinStatus`
@@ -511,24 +538,41 @@ async function runGuardedInitWizard(opts, guard) {
       // the pick lane's back edge then reaches the fork directly, exactly
       // as it did before the gate existed.
       let expressShown = false
+      // The one probe both of this pass's sharing claims rest on: the
+      // express accept row ("Record and sync everything") and the combined
+      // picker's own title and accept narration. A store the confirm
+      // cannot read is a store it cannot clear (`sync_scope.js` warns and
+      // writes nothing), and the export seam then withholds every row, so
+      // no screen on that machine may say "and sync" - not the gate the
+      // user decides on, and not the menu behind a decline, which is the
+      // only screen a Customize run sees. Read once per pass, and only
+      // where the answer can change a claim: an unenrolled run makes no
+      // sharing claim anywhere, so it never pays for the read.
+      // @ref LLP 0396#combined-selection [constrained-by]: a screen claims sharing only where confirming it can enable sharing
+      let syncWithheld = false
+      // Whether the pick lane is this pass's sharing choice, and so whether
+      // its title and its accept narration carry the sync claim. The sync
+      // lane reads it too: where that narration was made, it is the run's
+      // statement of what leaves the machine, and the lane behind it may not
+      // make it a second time.
+      let pickCollectAndSync = false
       // Every attended pass with default rows gets the gate, both
       // pathways: it is the wizard's only accept-or-customize screen, and
       // the lanes behind it are menus that never re-ask "defaults or
       // customize" (LLP 0201 #decline).
       // @ref LLP 0201#gate [implements]: the gate is asked on every attended pass whose seeding yields default rows
       if (interactive) {
+        syncWithheld = enrolled() && (await syncWithheldSafe({ opts }))
+        pickCollectAndSync = enrolled() && !syncWithheld
         // The tool names the accept row's summary sentence claims: the
         // pick lane's own default rows, computed once here, so
         // "everything" names exactly what the lane would record.
         // Resolution failure degrades to no gate.
-        const { labels: rows, optOutIds } = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
+        const rows = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
         // Nothing detected and nothing locked is nothing to accept, so
         // there is no gate to show; the pick lane opens its menu as it
         // always would (LLP 0201 #no-default-no-accept).
         if (rows.length > 0) {
-          // Only an enrolled run makes a sync claim at all, so only an
-          // enrolled run pays for the store read.
-          const syncWithheld = enrolled() && (await syncWithheldSafe({ opts, ids: optOutIds }))
           const expressFn = opts.express ?? runWizardExpressGate
           const choice = await expressFn({
             stdout: opts.stdout,
@@ -545,7 +589,7 @@ async function runGuardedInitWizard(opts, guard) {
           if (choice === 'back') continue atFork
           if (choice === 'cancelled') {
             if (joined) await narrateEnrolledAbort(opts)
-            opts.stderr.write('hyp setup: cancelled\n')
+            opts.stderr.write('Setup cancelled.\n')
             return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
           }
           expressShown = true
@@ -559,6 +603,8 @@ async function runGuardedInitWizard(opts, guard) {
       backFromPick = false
 
       atPick: while (true) {
+        pendingSyncSources = undefined
+        pendingSyncServer = undefined
         if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
@@ -568,14 +614,13 @@ async function runGuardedInitWizard(opts, guard) {
         // `--dry-run` / preset / `--from-file` output is byte-identical to
         // what it was before the breadcrumb existed (LLP 0131
         // #attended-only). `managed` is part of the itinerary: it adds the
-        // sync lane to a managed machine's local-pathway run (LLP 0188).
+        // folder lane to a managed machine's local-pathway run.
         // An express run answers no more questions, so it states no more
         // positions: a "Step 3 of 5" above a narration would count screens
         // nobody is answering.
         const step = (/** @type {'pick' | 'sync' | 'folders' | 'finale'} */ name) =>
           express ? undefined : wizardStepProgress(pathway, name, { managed: enrolled() })
         const pickProgress = step('pick')
-        const syncProgress = step('sync')
         const foldersProgress = step('folders')
 
         const pickFn = opts.pick ?? runWizardPick
@@ -585,6 +630,11 @@ async function runGuardedInitWizard(opts, guard) {
           ...(opts.stdin ? { stdin: opts.stdin } : {}),
           env: opts.env,
           ...(pickProgress ? { progress: pickProgress } : {}),
+          // The menu is the sharing choice on an enrolled run (LLP 0396),
+          // so it says so - except where the confirm behind it cannot
+          // clear an opt-out, which is the same condition that narrows
+          // the gate's accept row above.
+          ...(pickCollectAndSync ? { collectAndSync: true } : {}),
           ...(catalog ? { catalog } : {}),
           ...(opts.platform ? { platform: opts.platform } : {}),
           ...(locked ? { locked } : {}),
@@ -605,15 +655,15 @@ async function runGuardedInitWizard(opts, guard) {
           // The shared, run-once detector (never `opts.detect` directly), so
           // the pick lane's rows are the rows the express gate listed.
           ...(interactive ? { detect } : opts.detect ? { detect: opts.detect } : {}),
-          ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
           // Back-navigation is attended-only by construction (it takes a
           // keypress); the lane's first screen backs out to the fork.
           ...(interactive ? { allowBack: true } : {}),
           ...(express ? { autoAccept: true } : {}),
           ...(pickSeed ? { initialSelection: pickSeed } : {}),
-          // The write commits below, after the sync lane: the overwrite confirm
-          // is then the last question, and a cancel at the sync lane leaves the
-          // existing config untouched (LLP 0190 #commit-point).
+          ...(interactive ? { statement: recap.lane('pick') } : {}),
+          // The write commits below, after the sync lane, so a cancel at the
+          // sync lane leaves the existing config untouched (LLP 0190
+          // #commit-point).
           deferWrite: true,
         })
         // One screen back is the express gate when this pass showed one,
@@ -639,150 +689,96 @@ async function runGuardedInitWizard(opts, guard) {
         // lane, or a later pass through the fork - re-seeds with it.
         pickSeed = picked.sourcesPicked
 
-        // The sync-scope step (LLP 0188 #never-silent): on every enrolled run -
-        // the team pathway, or an already-enrolled machine on any pathway - ask
-        // which of the picked, non-locked sources stay local-only. Whether the
-        // run is enrolled is `enrolled()`, not `managed`: see its definition for
-        // the join whose org-config converge timed out, which is enrolled with
-        // no central layer yet. Default-sync means an
-        // untouched prompt opts nothing out. Non-interactive runs skip it
-        // (LLP 0131 #attended-only): default-sync is the correct scripted
-        // outcome, and `hyp policy client` is the standing control.
-        if (interactive && (pathway === 'team' || enrolled())) {
-          // The two enrolled-only questions, in order and with a back edge
-          // between them: which adapters ship (LLP 0188), then what happens
-          // in folders nobody has classified (LLP 0200). Separate lanes
-          // because they answer different axes; a back out of the folder
-          // question re-presents the sync lane, not the picker.
-          // @ref LLP 0200#wizard [implements]: the new-folder step follows the sync lane and backs into it
-          atSync: while (true) {
-            if (!(await guard.checkpoint())) return await cancelDeadOutput()
-            const syncFn = opts.syncScope ?? runWizardSyncScope
-            // The locked descriptors ride along so the lane can state the whole
-            // sync picture: org rows always sync and are shown read-only there.
-            // Through the same display filter the picker uses, though: a
-            // hidden row (LLP 0202) is locked on every enrolled machine,
-            // because the central layer owns the gateway that contributes it,
-            // and leading the sync gate with two fleet-labelled rows the
-            // picker never offered made the label look like it described the
-            // clients underneath it.
-            // The candidates go through the same filter: `picked.descriptors`
-            // is the non-locked slice of the picks, and a carried hidden row
-            // (LLP 0202 #carry-through) survives into it whenever that row is
-            // not locked - a join whose org config has not converged yet, say.
-            // Unfiltered it rendered as an editable checkbox for a row the
-            // picker deliberately never offered.
-            // @ref LLP 0276#sync-gate [implements]: the sync lane's rows, locked and candidate alike, go through `visiblePickerDescriptors`, so a hidden row stays off this screen too
-            const allLockedDescriptors = picked.lockedSources
-              .map((id) => catalog.pickerDescriptors.get(id))
-              .filter((d) => d !== undefined)
-            const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors, opts.platform)
-            const candidateDescriptors = visiblePickerDescriptors(picked.descriptors, opts.platform)
-            const visibleCandidateIds = new Set(candidateDescriptors.map((d) => d.id))
-            const syncScope = await syncFn({
-              stdout: opts.stdout,
-              stderr: opts.stderr,
-              ...(opts.stdin ? { stdin: opts.stdin } : {}),
-              env: opts.env,
-              candidates: candidateDescriptors,
-              locked: lockedDescriptors,
-              // What the display filter removed from each list. The lane
-              // never names them, but it must not tell the user nothing syncs
-              // while they stand: a locked row always syncs (LLP 0188
-              // #locked), and a picked row ships unless the policy store
-              // withholds it, so a hidden row dropped from either list may be
-              // capture that still leaves the machine.
-              // A count suffices for the locked list, whose rows sync
-              // whatever the store says. The picked list does not: whether a
-              // hidden pick ships is the store's answer about that source, so
-              // the lane gets the ids and asks (it still never prints them).
-              // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible row to name" from "nothing standing at all"
-              // @ref LLP 0289#ask-the-store [implements]: the hidden picks cross as ids, the hidden locked rows as a count
-              lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
-              candidatesHiddenIds: picked.descriptors
-                .filter((d) => !visibleCandidateIds.has(d.id))
-                .map((d) => d.id),
-              ...(syncProgress ? { progress: syncProgress } : {}),
-              ...(opts.prompt ? { prompt: opts.prompt } : {}),
-              ...(express ? { autoAccept: true } : {}),
-              // The pick lane is always behind this one.
-              allowBack: true,
-            })
-            if (syncScope.back) continue atPick
-            if (syncScope.cancelled) {
-              // Cancelling here leaves the store unwritten, so default-sync
-              // stands; on an enrolled run that must be said, not implied
-              // (LLP 0188).
-              if (joined) await narrateEnrolledAbort(opts)
-              return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
-            }
-            sourcesOptedOut = syncScope.optedOut
+        // A run with no sync lane still says where its capture goes, but
+        // only when it is true: a reconfigure carries forward sinks the
+        // picker does not compose (an s3 export, say), and those still
+        // send data off the machine.
+        if (interactive && !(pathway === 'team' || enrolled()) && sinksStayLocal(picked.config)) {
+          recap.lane('sync').write('✓ Everything stays on this machine\n')
+        }
 
-            if (!(await guard.checkpoint())) return await cancelDeadOutput()
-            const folderFn = opts.folderAsk ?? runWizardFolderAsk
-            const folders = await folderFn({
-              stdout: opts.stdout,
-              stderr: opts.stderr,
-              ...(opts.stdin ? { stdin: opts.stdin } : {}),
-              env: opts.env,
-              // The title names the tools whose sessions raise the question:
-              // this run's recorded rows, through the same display filter as
-              // the sync lane, so a hidden row (LLP 0202) stays unnamed here
-              // too - minus the candidates the answer one screen back just
-              // sent local-only. The question is about what happens to a new
-              // folder's rows on the way to the server, and an opted-out
-              // source has no such way: naming it would promise "syncs
-              // without asking" for a client the user just stopped syncing
-              // at all. Locked rows always sync (LLP 0188 #locked), so they
-              // are never filtered.
-              //
-              // A skipped lane answers nothing, so it can filter nothing:
-              // `optedOut` is `[]` on the unreadable-store path because the
-              // store could not be read, not because it withholds nothing
-              // (`sync_scope.js` warns and returns `{ skipped: true }`
-              // there). Naming every picked tool off that empty list would
-              // promise "syncs without asking" for rows the run just said
-              // it cannot account for, which is the same false promise the
-              // filter exists to prevent. With no list we can stand behind,
-              // the title takes its tool-free phrasing (LLP 0200 #wizard):
-              // the preference is machine-local and worth recording either
-              // way, so the question still runs, it just stops naming
-              // names it cannot check.
-              // @ref LLP 0200#wizard [implements]: the title names only rows the run can say still sync, so an unreadable store falls back to the tool-free phrasing
-              names: syncScope.skipped
-                ? []
-                : [
-                    ...lockedDescriptors,
-                    ...candidateDescriptors.filter((d) => !sourcesOptedOut.includes(d.id)),
-                  ].map((d) => d.label),
-              ...(foldersProgress ? { progress: foldersProgress } : {}),
-              ...(opts.confirm ? { confirm: opts.confirm } : {}),
-              ...(express ? { autoAccept: true } : {}),
-              // The sync lane is always behind this one.
-              allowBack: true,
-            })
-            // One screen back is the sync lane only when the sync lane was
-            // a screen. On a fully fleet-managed machine (nothing left to
-            // opt out) and on an unreadable store it states its outcome and
-            // asks nothing, so backing "into" it re-ran it and re-asked this
-            // question: escape became a redraw the user could never get out
-            // of. Past a lane that asked nothing, the last screen is the
-            // picker.
-            // @ref LLP 0191#back-edges [implements]: escape reaches the previous screen, skipping a lane that rendered a statement rather than a question
-            if (folders.back) {
-              if (syncScope.noQuestion) continue atPick
-              continue atSync
-            }
-            if (folders.cancelled) {
-              // Same shape as the sync lane's cancel: nothing new was
-              // written, and the enrolled consequence is narrated rather
-              // than left implied.
-              if (joined) await narrateEnrolledAbort(opts)
-              return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
-            }
-            folderAsk = folders.mode
-            break atSync
+        // @ref LLP 0396#combined-selection [implements]: apply the picker's sharing answer without another question
+        if (interactive && (pathway === 'team' || enrolled())) {
+          if (!(await guard.checkpoint())) return await cancelDeadOutput()
+          const syncFn = opts.syncScope ?? runWizardSyncScope
+          // The locked descriptors ride along so the lane can state the whole
+          // sync picture: org rows always sync. Both lists go through the
+          // display filter the picker uses: a hidden row (LLP 0202) is
+          // locked on every enrolled machine, and a carried hidden row
+          // (LLP 0202 #carry-through) can survive into `picked.descriptors`,
+          // but neither was ever offered, so neither is named.
+          // @ref LLP 0276#sync-gate [implements]: the sync lane's rows, locked and candidate alike, go through `visiblePickerDescriptors`, so a hidden row is never named
+          const allLockedDescriptors = picked.lockedSources
+            .map((id) => catalog.pickerDescriptors.get(id))
+            .filter((d) => d !== undefined)
+          const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors, opts.platform)
+          const candidateDescriptors = visiblePickerDescriptors(picked.descriptors, opts.platform)
+          const visibleCandidateIds = new Set(candidateDescriptors.map((d) => d.id))
+          const server = await syncServerName(opts, picked.configPath)
+          const syncScope = await syncFn({
+            stdout: opts.stdout,
+            stderr: opts.stderr,
+            statement: recap.lane('sync'),
+            ...(server ? { server } : {}),
+            env: opts.env,
+            candidates: candidateDescriptors,
+            locked: lockedDescriptors,
+            // What the display filter removed from each list. The lane
+            // never names them, but it must not tell the user nothing syncs
+            // while they stand: a locked row always syncs (LLP 0188
+            // #locked), and a picked row ships unless the policy store
+            // withholds it, so a hidden row dropped from either list may be
+            // capture that still leaves the machine.
+            // A count suffices for the locked list, whose rows sync
+            // whatever the store says. The picked list does not: whether a
+            // hidden pick ships is the store's answer about that source, so
+            // the lane gets the ids and asks (it still never prints them).
+            // @ref LLP 0276#no-candidates [implements]: the no-candidates line separates "no visible row to name" from "nothing standing at all"
+            // @ref LLP 0289#ask-the-store [implements]: the hidden picks cross as ids, the hidden locked rows as a count
+            lockedHidden: allLockedDescriptors.length - lockedDescriptors.length,
+            candidatesHiddenIds: picked.descriptors
+              .filter((d) => !visibleCandidateIds.has(d.id))
+              .map((d) => d.id),
+          })
+          pendingSyncSources = syncScope.pendingSources
+          pendingSyncServer = server
+
+          if (!(await guard.checkpoint())) return await cancelDeadOutput()
+          const folderFn = opts.folderAsk ?? runWizardFolderAsk
+          const folders = await folderFn({
+            stdout: opts.stdout,
+            stderr: opts.stderr,
+            statement: recap.lane('folders'),
+            deferWrite: true,
+            ...(opts.stdin ? { stdin: opts.stdin } : {}),
+            env: opts.env,
+            // The title names the tools whose sessions raise the question:
+            // this run's recorded rows, through the same display filter as
+            // the sync lane, so a hidden row (LLP 0202) stays unnamed here
+            // too. On an unreadable store the sync lane could not say what
+            // syncs, so the title takes its tool-free phrasing rather than
+            // promise "syncs without asking" for rows it cannot account for.
+            // @ref LLP 0200#wizard [implements]: the title names only rows the run can say still sync, so an unreadable store falls back to the tool-free phrasing
+            names: syncScope.skipped
+              ? []
+              : [...lockedDescriptors, ...candidateDescriptors].map((d) => d.label),
+            ...(foldersProgress ? { progress: foldersProgress } : {}),
+            ...(opts.confirm ? { confirm: opts.confirm } : {}),
+            ...(express ? { autoAccept: true } : {}),
+            // The picker is always behind this one.
+            allowBack: true,
+          })
+          // The sync lane asks nothing, so one screen back is the picker.
+          // @ref LLP 0191#back-edges [implements]: escape reaches the previous screen, skipping a lane that rendered a statement rather than a question
+          if (folders.back) continue atPick
+          if (folders.cancelled) {
+            // Nothing new was written, and the enrolled consequence is
+            // narrated rather than left implied.
+            if (joined) await narrateEnrolledAbort(opts)
+            return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
           }
+          folderAsk = folders.mode
+          folderAskPending = folders.pendingWrite === true
         }
         break atFork
       }
@@ -793,14 +789,13 @@ async function runGuardedInitWizard(opts, guard) {
   // lanes above, other than returning, assigns `picked` first.
   if (!picked) throw new Error('hyp setup: internal error: the pick lane did not run')
 
-  const finaleProgress = express ? undefined : wizardStepProgress(pathway, 'finale', { managed: enrolled() })
 
   // Every question lane has run; commit the composed config to disk before
   // the acting phases (configure and the finale both read/edit the file).
   // A refusal mirrors pick's old overwrite-refusal exit (1, not cancelled),
   // and on the team pathway narrates the enrolled state it leaves behind.
   // Scripted phase stubs (tests) return no `configPending` and skip this.
-  // @ref LLP 0190#commit-point [implements]: the overwrite confirm is the wizard's last question, after the sync lane
+  // @ref LLP 0190#commit-point [implements]: the config write lands after the last question, after the sync lane
   //
   // The one act that must never outrun the stream's death report: a
   // config the user never saw confirmed must not land because the run
@@ -808,15 +803,22 @@ async function runGuardedInitWizard(opts, guard) {
   // first, so a failure the stream has not delivered yet still counts
   // (LLP 0341 #absorb).
   // @ref LLP 0341#dead-surface [implements]: the commit point checks the surface before the config lands
+  // The recap is the statement of what is about to be saved, so it lands
+  // before the checkpoint that guards the save: a surface that dies while
+  // saying it cancels the run before anything is written.
+  recap.print(opts.stdout)
   if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
+  if (folderAskPending && folderAsk) {
+    await commitWizardFolderAsk({ env: opts.env, stderr: opts.stderr, mode: folderAsk })
+  }
+  const dryRun = opts.finale?.dryRun === true
   if (picked.configPending) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
       stderr: opts.stderr,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
       interactive,
       ...(opts.force !== undefined ? { force: opts.force } : {}),
-      ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
+      dryRun,
       configPath: picked.configPath,
       config: picked.config,
     })
@@ -825,7 +827,18 @@ async function runGuardedInitWizard(opts, guard) {
       return { exitCode: 1, ...(pathway ? { pathway } : {}) }
     }
     // Past this line a cancel is a cancel over a machine that changed.
-    landedConfigPath = picked.configPath
+    if (!dryRun) landedConfigPath = picked.configPath
+  }
+
+  // @ref LLP 0396#combined-selection [implements]: no opt-out is cleared until the selection questions and the config write succeed
+  if (pendingSyncSources) {
+    if (!(await guard.checkpoint())) return await cancelDeadOutput()
+    await commitWizardSyncScope({
+      env: opts.env,
+      stdout: opts.stdout,
+      sources: pendingSyncSources,
+      ...(pendingSyncServer ? { server: pendingSyncServer } : {}),
+    })
   }
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when
@@ -851,6 +864,7 @@ async function runGuardedInitWizard(opts, guard) {
       // finished down the local path (LLP 0191 #join-not-undone).
       joinedAlready: joined !== undefined,
       daemonIncomplete,
+      daemonBin,
       // The finale is one step made of several acts, and the backfill
       // consent question sits behind three of them (install, attach,
       // asset copy), each narrating first. The boundary above cannot
@@ -859,19 +873,25 @@ async function runGuardedInitWizard(opts, guard) {
       // once at the door.
       // @ref LLP 0341#dead-surface [implements]: the boundary reaches the one question the finale opens
       checkBoundary: () => guard.checkpoint(),
-      ...(finaleProgress ? { progress: finaleProgress } : {}),
+      // An express accept answered every remaining question, the history
+      // import included; only Customize asks it.
+      // @ref LLP 0201#finale-import [implements]: the accept skips the finale's import question too
+      ...(express ? { autoAccept: true } : {}),
+      clientLabels: new Map([...catalog.pickerDescriptors.values()].map((d) => [d.id, d.label])),
     })
   }
 
   const cancelled = finaleSummary?.cancelled === true
   if (cancelled) {
     try {
-      opts.stderr.write('hyp setup: cancelled\n')
+      opts.stderr.write('Setup cancelled.\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
   }
-  writeWalkthroughRunSummary({ stdout: opts.stdout, configPath: picked.configPath, finaleSummary })
+  // An attended run already said each of these as it happened; the summary
+  // is for a scripted run's log.
+  if (!interactive) writeWalkthroughRunSummary({ stdout: opts.stdout, configPath: picked.configPath, finaleSummary, dryRun })
 
   // End an attended setup on the user's own rows, not on a command they
   // still have to type. Attended and non-dry-run only: a scripted `--yes`
@@ -909,9 +929,7 @@ async function runGuardedInitWizard(opts, guard) {
   // them (LLP 0185 #warn-do-not-detach). That print is no longer on screen by
   // the time this run ends: the summary, then the first look's block, then
   // the narration below all follow it without a pause. Repeat it here, short,
-  // and only when this closing sequence actually wrote something, so the
-  // direct `runPickerWalkthrough` entry point (whose summary follows the
-  // finale with nothing in between) keeps its single print.
+  // and only when this closing sequence actually wrote something.
   //
   // `firstLookResult.wrote` is the whole condition, the team pathway included.
   // It is read rather than `firstLookRan` because a first look that wrote
@@ -944,12 +962,21 @@ async function runGuardedInitWizard(opts, guard) {
   // `offerFollows` mirrors the sync offer's own gate below, so the
   // narration goes quiet exactly when `hyp sync`'s plan is about to state
   // the same things and ask.
+  // With nothing recorded there is nothing to upload, so no offer. The
+  // narration then speaks instead: it is the only line on that path that
+  // names `hyp sync` and the privacy review (LLP 0100 R1).
+  // @ref LLP 0437#first-look [implements]: no upload offer when nothing is recorded
+  // @ref LLP 0100#requirements [implements]: R1 - a path that skips the offer keeps the narration's release verb and skill hint
+  const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
-  const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts, { offerFollows }) : null
+  const holdDeadline = joined
+    ? await narratePrivacyIfTeamPath(opts, { alreadySaid: offerFollows && !nothingRecorded })
+    : null
 
   // ...and then the offer to end the wait: `hyp sync` itself, whose plan
   // and confirm are the one question about the first sync. It sits ahead of
-  // the question list because it is an action, and the list is output.
+  // the skill offer because a yes there hands the terminal to a client, and
+  // nothing of setup's should follow that.
   // @ref LLP 0203#offer [implements]: the enrolled closing sequence runs the release's own prompt, once
   /** @type {WizardSyncNowResult | undefined} */
   let syncNow
@@ -957,7 +984,7 @@ async function runGuardedInitWizard(opts, guard) {
   // is already committed and its acts done, so the offer is skipped
   // rather than the run cancelled (LLP 0341 #dead-surface).
   if (holdDeadline !== null && interactive && !cancelled && opts.finale?.dryRun !== true
-    && (await guard.checkpoint())) {
+    && !nothingRecorded && (await guard.checkpoint())) {
     syncNow = await runWizardSyncNow({
       deadline: holdDeadline,
       stdout: opts.stdout,
@@ -969,22 +996,45 @@ async function runGuardedInitWizard(opts, guard) {
     })
   }
 
-  // The closing question list comes last, after whichever of the narration
-  // and the sync step this path ran, but it is
-  // output only: onboarding never starts Claude Code or Codex. `hyp init`
-  // may have been run from any directory, and that directory must not become
-  // an agent session without an explicit launch command from the user.
-  // @ref LLP 0198#onboarding-list [implements]: the wizard prints questions and never launches a client from its caller's cwd
-  /** @type {'listed' | 'listed-empty' | 'skipped'} */
-  let firstAskListed = 'skipped'
-  if (interactive && !cancelled && opts.finale?.dryRun !== true) {
-    const hasRows = firstLookHadRows(firstLookResult)
-    writeSuggestedPrompts({
-      stdout: opts.stdout,
-      footer: 'onboarding',
-      hasRows,
+  // @ref LLP 0411#offer [implements]: GitHub follows the upload offer and precedes the skill offer
+  const githubConfigured = (picked.config.plugins ?? [])
+    .some((plugin) => plugin.name === '@hypaware/github')
+  if (interactive && !cancelled && opts.finale?.dryRun !== true && !githubConfigured
+    && (await guard.checkpoint())) {
+    const answer = await offerWizardGithub({
+      stdout: opts.stdout, stderr: opts.stderr, stdin: opts.stdin, env: opts.env,
+      interactive: true,
+      ...opts.github,
     })
-    firstAskListed = hasRows === false ? 'listed-empty' : 'listed'
+    if (answer === 'yes' && (await guard.checkpoint())) {
+      const config = await connectWizardGithub({
+        stdout: opts.stdout, stderr: opts.stderr, ctx: opts.ctx, env: opts.env,
+        configPath: picked.configPath,
+        restartDaemon: finaleSummary?.daemonRestart.ok === true,
+      })
+      if (config) picked.config = config
+    }
+  }
+
+  // The closing offer comes last, after whichever of the narration and the
+  // sync step this path ran: suggest a new skill? A
+  // yes runs `hyp ask`, which starts the client in its own folder under
+  // `HYP_HOME`, never in the directory `hyp init` was run from; that is
+  // what lets setup make the offer instead of printing a question to type.
+  // @ref LLP 0398#setup-offer [implements]: setup offers to run the ask; a yes runs it as a child on this terminal
+  /** @type {WizardSuggestSkillResult | undefined} */
+  let suggestSkill
+  if (interactive && !cancelled && opts.finale?.dryRun !== true && (await guard.checkpoint())) {
+    suggestSkill = await runWizardSuggestSkill({
+      stdout: opts.stdout,
+      stderr: opts.stderr,
+      env: opts.env,
+      interactive: true,
+      hasRows: firstLookHadRows(firstLookResult),
+      ...(opts.stdin ? { stdin: opts.stdin } : {}),
+      ...(opts.suggestSkill ?? {}),
+      launchable: opts.suggestSkill?.launchable ?? await anyClientLaunchable(opts.env),
+    })
   }
 
   log.info('wizard.finish', {
@@ -992,17 +1042,15 @@ async function runGuardedInitWizard(opts, guard) {
     pathway: pathway ?? 'non-interactive',
     sources_picked: picked.sourcesPicked.length,
     locked_count: picked.lockedSources.length,
-    sources_opted_out: sourcesOptedOut.length,
     folder_ask: folderAsk ?? 'not-asked',
     express,
     cancelled,
-    // Which framing printed, not whether the step ran: `skipped` restates
-    // `pathway` and `cancelled` above it, while `listed-empty` is the one
-    // value nothing else on this line carries - the rate of installs
-    // finishing with an empty cache, which is backfill health read at the
-    // moment every install passes through.
+    // What the offer did: `no-rows` is the rate of installs finishing with
+    // an empty cache, which is backfill health read at the moment every
+    // install passes through; `launched` against `declined` is whether
+    // the offer is one people take.
     // @ref LLP 0198#empty-cache [implements]: the empty-cache framing is the measurement setup contributes
-    first_ask: firstAskListed,
+    suggest_skill: suggestSkill ? (suggestSkill.asked && suggestSkill.launched ? 'launched' : suggestSkill.reason) : 'skipped',
     // How often an enrolled install chooses not to wait is the measurement
     // that says whether the window is sized for the people in it.
     sync_now: syncNow ? (syncNow.asked && syncNow.released ? 'released' : syncNow.reason) : 'skipped',
@@ -1023,7 +1071,7 @@ async function runGuardedInitWizard(opts, guard) {
 }
 
 /**
- * Whether the first look found anything, as the first ask's `hasRows`.
+ * Whether the first look found anything, as the closing skill offer's `hasRows`.
  *
  * The two "did not show" reasons are not the same answer, and collapsing
  * them would be the bug:
@@ -1036,9 +1084,9 @@ async function runGuardedInitWizard(opts, guard) {
  *   launch against a cache that turns out to be full is fine, while
  *   suppressing one against a cache that was merely unreadable is not.
  *
- * A shown block with zero rows in both counted sections is an empty
- * cache: the dataset exists and holds nothing yet, which is exactly the
- * fresh-install case (LLP 0198#empty-cache).
+ * `empty` (or a shown block with zero rows in both counted sections) is
+ * an empty cache: the dataset exists and holds nothing yet, which is
+ * exactly the fresh-install case (LLP 0198#empty-cache).
  *
  * Takes the outcome half, not the whole {@link FirstLookResult}: this
  * question is answered from what the step found, and `wrote` (LLP 0230
@@ -1051,7 +1099,7 @@ async function runGuardedInitWizard(opts, guard) {
 export function firstLookHadRows(result) {
   if (!result) return undefined
   if (result.shown) return result.providerRows > 0 || result.dayRows > 0
-  if (result.reason === 'no-dataset') return false
+  if (result.reason === 'no-dataset' || result.reason === 'empty') return false
   if (result.reason === 'slow') return true
   return undefined
 }
@@ -1082,6 +1130,38 @@ function printJoinFailure(opts, join) {
 }
 
 /**
+ * The entrypoint every daemon install this run performs must record, or
+ * `undefined` when the run installs no daemon (dry run, `--no-daemon`, a
+ * platform with no installer). An explicit `--bin` is returned as given;
+ * anything else goes through the durable-CLI resolution (LLP 0404), which
+ * may install globally, keep a temporary tree on consent or `--force`, or
+ * throw `DurableBinRequiredError`.
+ *
+ * @param {RunInitWizardOptions} opts
+ * @param {boolean} interactive
+ * @returns {Promise<string | undefined>}
+ */
+async function resolveWizardDaemonBin(opts, interactive) {
+  const finale = opts.finale
+  if (!finale || finale.dryRun === true || finale.skipDaemon === true) return undefined
+  if (finale.binPath !== undefined) return finale.binPath
+  if (!platformIsSupported(/** @type {NodeJS.Platform} */ (opts.platform ?? process.platform))) return undefined
+  const { binPath: candidate = process.argv[1], ...seam } = opts.durableBin ?? {}
+  if (!candidate) return undefined
+  const durable = await ensureDurableBin({
+    ...seam,
+    binPath: candidate,
+    env: opts.env,
+    stdout: opts.stdout,
+    stderr: opts.stderr,
+    ...(opts.stdin ? { stdin: opts.stdin } : {}),
+    interactive,
+    force: opts.force,
+  })
+  return durable.binPath
+}
+
+/**
  * The wizard finale: the walkthrough's finale machinery plus the team
  * pathway's skips. When the machine joined in this run, `hyp status` is
  * consulted once so steps enrollment already performed are skipped rather
@@ -1095,13 +1175,16 @@ function printJoinFailure(opts, join) {
  *   picked: WizardPickResult,
  *   joinedAlready: boolean,
  *   daemonIncomplete: boolean,
+ *   daemonBin?: string,
  *   checkBoundary: () => Promise<boolean>,
- *   progress?: string,
+ *   autoAccept?: boolean,
+ *   clientLabels?: Map<string, string>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, checkBoundary, progress }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, autoAccept, clientLabels }) {
   const finaleActions = { ...(opts.finale ?? {}) }
+  if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
   let skipAttachClients
   if (joinedAlready) {
@@ -1158,12 +1241,14 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         stderr: opts.stderr,
         retentionDays: picked.retentionDays,
         interactive: !opts.picks,
+        force: opts.force,
         ...(opts.stdin ? { stdin: opts.stdin } : {}),
         ...(opts.backfill ? { backfill: opts.backfill } : {}),
         ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
         checkBoundary,
+        ...(autoAccept ? { autoAccept } : {}),
         ...(skipAttachClients ? { skipAttachClients } : {}),
-        ...(progress ? { progress } : {}),
+        ...(clientLabels ? { clientLabels } : {}),
       }),
     { component: 'wizard' }
   )
@@ -1181,20 +1266,20 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
  * runs off the same read rather than racing a second one against a marker
  * `hyp sync` may have cleared in between.
  *
- * `offerFollows` silences the narration: when the closing sync offer is
- * about to run (the ordinary attended close), `hyp sync`'s own plan states
- * the deadline, the backfill, the review hint, and asks, so a paragraph
- * here said everything twice in a row. Every path that ends without the
- * offer (aborts, non-interactive, dry runs) keeps the paragraph, because
- * there it is the only sighting of the deadline and the way out. The
- * deadline is still read and returned either way, since the offer runs
- * off it.
+ * `alreadySaid` silences the narration on the ordinary attended close: the
+ * sign-in stated the deadline, and when there is anything to upload
+ * `hyp sync`'s own plan states it again and asks, so a paragraph here said
+ * everything twice (the backfill statement is dropped on that path, LLP
+ * 0407 #dropped). Every path that ends without that close (aborts,
+ * non-interactive, dry runs) keeps the paragraph, because there it is the
+ * only sighting of the deadline and the way out. The deadline is still
+ * read and returned either way, since the offer runs off it.
  *
  * @param {Pick<RunInitWizardOptions, 'stdout' | 'env'>} opts
- * @param {{ offerFollows?: boolean }} [flags]
+ * @param {{ alreadySaid?: boolean }} [flags]
  * @returns {Promise<number | null>} the live deadline, or null when no hold applies
  */
-async function narratePrivacyIfTeamPath(opts, { offerFollows = false } = {}) {
+async function narratePrivacyIfTeamPath(opts, { alreadySaid = false } = {}) {
   /** @type {number|null} */
   let deadline = null
   try {
@@ -1204,16 +1289,8 @@ async function narratePrivacyIfTeamPath(opts, { offerFollows = false } = {}) {
     // Unreadable state dir: skip the narration rather than fail the run.
   }
   if (typeof deadline !== 'number') return null
-  if (offerFollows) return deadline
-  opts.stdout.write(
-    '\n' +
-    'Nothing has been uploaded yet - nothing leaves this machine before\n' +
-    `${formatFirstSyncDeadline(deadline)}. That first sync includes your imported history.\n` +
-    'To review or exclude anything before then, run the hypaware-privacy\n' +
-    'skill in Claude or Codex. `hyp status` shows the countdown.\n' +
-    'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
-    'before sending anything.\n'
-  )
+  if (alreadySaid) return deadline
+  opts.stdout.write(heldStatement(deadline))
   return deadline
 }
 
@@ -1236,8 +1313,8 @@ async function narrateEnrolledAbort(opts) {
   try {
     opts.stdout.write(
       '\n' +
-      'This machine is enrolled: its configured sources sync to your server by default.\n' +
-      "Keep any local-only with 'hyp privacy client <name> local-only'.\n"
+      'You are signed in, so what you record syncs to your team by default.\n' +
+      "To keep a client on this machine only: hyp privacy client <name> local-only\n"
     )
     await narratePrivacyIfTeamPath(opts)
   } catch {
@@ -1257,10 +1334,6 @@ async function narrateEnrolledAbort(opts) {
  * is the right failure; guessing at a list the user is about to accept is
  * not.
  *
- * `optOutIds` rides along for the accept row's sync claim: the same rows
- * by id, minus the locked ones, which always sync (LLP 0188 #locked) and
- * so can never be what makes the claim false.
- *
  * @ref LLP 0201#gate [implements]: the gate names the pick lane's rows, from one computation, or is not shown
  * @param {{
  *   opts: RunInitWizardOptions,
@@ -1269,7 +1342,7 @@ async function narrateEnrolledAbort(opts) {
  *   pickSeed: PickerSource[] | undefined,
  *   detect: (args: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>,
  * }} args
- * @returns {Promise<{ labels: string[], optOutIds: string[] }>}
+ * @returns {Promise<string[]>}
  */
 async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
   try {
@@ -1281,46 +1354,59 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
       ...(pickSeed ? { initialSelection: pickSeed } : {}),
       detect,
     }))
-    return {
-      labels: seeding.defaultRows.map((d) => d.label),
-      optOutIds: seeding.defaultRows.filter((d) => !seeding.lockedSet.has(d.id)).map((d) => d.id),
-    }
+    return seeding.defaultRows.map((d) => d.label)
   } catch {
-    return { labels: [], optOutIds: [] }
+    return []
   }
 }
 
 /**
- * Does the client-sync store already withhold one of the rows the express
- * gate is about to name?
+ * A corrupt store cannot fulfill the combined selection's sync promise: the
+ * confirm cannot clear an opt-out it cannot read (`sync_scope.js` warns and
+ * writes nothing), and the export seam then withholds every row until the
+ * file is repaired, org-managed rows included (`source_withhold.js` throws
+ * before it filters the central ids out). So the probe reads the store on
+ * every enrolled attended pass rather than only on the runs that have a
+ * non-locked row to name: a fully fleet-managed machine has no such row and
+ * is exactly the machine whose entire export the corrupt file stops. Nor
+ * only on the passes that show a gate, because the pick lane makes the same
+ * claim in its title on the passes that do not.
  *
- * The accept row promises "Record and sync everything", and an express
- * accept preserves standing opt-outs verbatim rather than clearing them
- * (`sync_scope.js`'s auto-accept arm returns `optedOutBefore`), so on a
- * reconfigure the unqualified promise is false. The retired sync gate
- * carried this distinction itself ("Sync all" against "Keep this"); with
- * that gate gone the express row is the only screen the user decides on,
- * so it has to read the store the sync lane reads.
+ * The entries are read and discarded: the question is whether the file
+ * parses, not what is in it, and `readClientSyncEntries` is the one reader
+ * that answers it the way the export seam and `hyp status` do.
  *
- * Fails toward the weaker claim: an unreadable or throwing store answers
- * "withheld", because a gate that cannot prove everything syncs must not
- * say it does. That is also the run where the sync lane skips itself with
- * a warning and writes nothing, leaving whatever the store holds standing.
- *
- * @ref LLP 0188#opt-out [constrained-by]: the standing opt-out the accept keeps is the store's, so the claim about it is read from the store
- * @param {{ opts: RunInitWizardOptions, ids: string[] }} args
+ * @ref LLP 0396#combined-selection [constrained-by]: the accept row claims sync only where the confirm can enable it
+ * @param {{ opts: RunInitWizardOptions }} args
  * @returns {Promise<boolean>}
  */
-async function syncWithheldSafe({ opts, ids }) {
-  if (ids.length === 0) return false
+async function syncWithheldSafe({ opts }) {
   try {
     const stateDir = readObservabilityEnv(opts.env).stateDir
-    const entries = await readClientSyncEntries({ stateDir })
-    if (!entries || entries.length === 0) return false
-    const optedOut = new Set(optedOutClientSourceIds(entries))
-    return ids.some((id) => optedOut.has(id))
+    await readClientSyncEntries({ stateDir })
+    return false
   } catch {
     return true
+  }
+}
+
+/**
+ * The server this machine syncs to, as the sync lane's line names it
+ * (LLP 0437 #server-name), read from the enrollment the join just wrote.
+ * Undefined when there is not exactly one, or the layer cannot be read:
+ * the line then names no server rather than guess.
+ *
+ * @param {Pick<RunInitWizardOptions, 'env'>} opts
+ * @param {string} configPath
+ * @returns {Promise<string | undefined>}
+ */
+async function syncServerName(opts, configPath) {
+  try {
+    const stateDir = readObservabilityEnv(opts.env).stateDir
+    const origins = await readCentralSinkOrigins({ stateDir, configPath })
+    return origins.length === 1 ? serverDisplayName(origins[0]) : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -1399,5 +1485,42 @@ async function collectStatusSafe(opts) {
     return await collectHypAwareStatus({ env: opts.env, runtime: statusRuntimeFrom(opts) })
   } catch {
     return undefined
+  }
+}
+
+/**
+ * Whether every sink in `config` writes to this machine's disk: a blob sink
+ * whose destination is local-fs. Anything else, including a sink type added
+ * later, counts as leaving the machine, so the "stays on this machine" line
+ * fails closed.
+ *
+ * @param {HypAwareV2Config | undefined} config
+ * @returns {boolean}
+ */
+function sinksStayLocal(config) {
+  return Object.values(config?.sinks ?? {}).every((sink) =>
+    'destination' in sink && sink.destination === '@hypaware/local-fs')
+}
+
+/**
+ * The question lanes' statements, collected in lane order. `lane(name)`
+ * starts that lane's statement over and discards every later lane's, since
+ * re-running a lane means the answers after it will be asked again.
+ */
+function createRecap() {
+  const order = /** @type {const} */ (['pick', 'sync', 'folders'])
+  /** @type {Record<typeof order[number], string>} */
+  const said = { pick: '', sync: '', folders: '' }
+  return {
+    /** @param {typeof order[number]} name */
+    lane(name) {
+      for (const key of order.slice(order.indexOf(name))) said[key] = ''
+      return { write: (/** @type {string} */ chunk) => { said[name] += chunk } }
+    },
+    /** @param {{ write(chunk: string): unknown }} stdout */
+    print(stdout) {
+      const lines = order.map((key) => said[key]).join('')
+      if (lines) stdout.write(lines)
+    },
   }
 }

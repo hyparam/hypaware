@@ -25,9 +25,10 @@ import { serveStdio } from '../../src/core/mcp/stdio.js'
  * @param {(message: any) => Promise<object | null>} handleMessage
  * @param {object[]} messages
  * @param {{ write: (chunk: string) => unknown }} [stdout]
+ * @param {(err: unknown) => void} [reporter] runs after each call is recorded, so a test can make onError raise
  * @returns {Promise<{ chunks: string[], errors: unknown[] }>}
  */
-async function drive(handleMessage, messages, stdout) {
+async function drive(handleMessage, messages, stdout, reporter) {
   /** @type {string[]} */
   const chunks = []
   /** @type {unknown[]} */
@@ -36,7 +37,10 @@ async function drive(handleMessage, messages, stdout) {
     server: { handleMessage },
     stdin: Readable.from(messages.map((m) => JSON.stringify(m) + '\n')),
     stdout: stdout ?? { write: (chunk) => chunks.push(chunk) },
-    onError: (err) => errors.push(err),
+    onError: (err) => {
+      errors.push(err)
+      if (reporter) reporter(err)
+    },
   })
   return { chunks, errors }
 }
@@ -82,7 +86,8 @@ test('the backstop line forms for every id off the wire that JSON can write down
   // Every id the backstop can use arrived through `JSON.parse`, which cannot
   // produce a BigInt, a cycle, a `toJSON`, or an `undefined`. Ids JSON-RPC does
   // not sanction still parse, so the backstop must survive them too. It is not
-  // total, though: see the depth case below for the one id it cannot answer.
+  // total, though: `writeResponse`'s own caveat records the one id it cannot
+  // answer, nested past the depth `JSON.stringify` will take.
   const ids = /** @type {any[]} */ ([0, -1, 1.5, '', 'x'.repeat(1000), null, [1, 2], { a: { b: 1 } }, true])
   for (const id of ids) {
     const { chunks } = await drive(
@@ -178,60 +183,6 @@ test('a stdout that throws on an honest write still reaches onError', async () =
   assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
 })
 
-/**
- * A depth `JSON.parse` takes and `JSON.stringify` will not, found by probing
- * rather than pinned. Where `JSON.stringify` gives up is a stack artifact, not
- * a language constant: measured here it is 4165 on Node 22 and 4459 on Node 24,
- * and it moves linearly with `--stack-size` (2100 at 500KB, 8500 at 2000KB), so
- * a hard number would make the test a bet on one box's stack and would fail red
- * on any runtime that stringifies deeper. The first failing power of two is
- * doubled so the transport's own call site is past the boundary too rather than
- * sitting on it, where a few frames of difference could decide the result.
- *
- * @returns {number} the depth to use, or 0 if nothing in range defeated stringify
- */
-function depthPastStringify() {
-  for (let depth = 1024; depth <= 1 << 20; depth *= 2) {
-    const nested = JSON.parse('['.repeat(depth) + ']'.repeat(depth))
-    try {
-      JSON.stringify(nested)
-    } catch (err) {
-      if (err instanceof RangeError) return depth * 2
-      throw err
-    }
-  }
-  return 0
-}
-
-test('an id too deep for JSON.stringify defeats the backstop, and says so rather than crashing', async () => {
-  // The limit of "serializable by construction". V8 parses deeper than it
-  // stringifies, so a structural id nested past a few thousand levels arrives
-  // intact and then raises a RangeError out of `JSON.stringify` - both out of
-  // the response that carries it and out of the backstop that would answer it.
-  // No line can correlate to an id that cannot be written down. Pinned so the
-  // gap is an executable statement rather than a claim that it cannot happen.
-  const depth = depthPastStringify()
-  assert.ok(depth > 0, 'no depth in range defeated JSON.stringify')
-  const line = '{"jsonrpc":"2.0","id":' + '['.repeat(depth) + ']'.repeat(depth) + ',"method":"ping"}'
-  const wire = JSON.parse(line)
-  assert.throws(() => JSON.stringify(wire.id), RangeError)
-
-  /** @type {string[]} */
-  const chunks = []
-  /** @type {unknown[]} */
-  const errors = []
-  await serveStdio({
-    server: { handleMessage: async (m) => ({ jsonrpc: '2.0', id: m.id, result: {} }) },
-    stdin: Readable.from([line + '\n']),
-    stdout: { write: (chunk) => chunks.push(chunk) },
-    onError: (err) => errors.push(err),
-  })
-  assert.deepEqual(chunks, [])
-  // Reported once and off-channel, not swallowed and not looped.
-  assert.equal(errors.length, 1)
-  assert.ok(errors[0] instanceof RangeError)
-})
-
 test('the backstop answers the id off the wire, not the one on the response', async () => {
   // The wire id came through `JSON.parse`; the response id is whatever the
   // handler built, and can be exactly the kind of value that made the write
@@ -282,4 +233,84 @@ test('a toJSON that throws a value String() cannot take still gets its line', as
   assert.equal(reply.error.code, -32603)
   assert.equal(typeof reply.error.message, 'string')
   assert.equal(errors.length, 1)
+})
+
+// The result of the `.catch` that calls `onError` is the chain the next line is
+// sequenced onto, and `chain.then(...)` skips its callback on a rejected chain,
+// so an `onError` that raises cost every later message on the session its
+// dispatch and its reply. These drive the real transport with the real coercion
+// both shipped `onError` bodies use, because the guard whose whole job is "one
+// bad line can't kill the session" must not be the thing that kills it.
+
+/**
+ * The body both `onError`s in the tree have: `src/core/commands/mcp.js` and
+ * `src/core/mcp/proxy.js` each build a log attribute this way.
+ *
+ * @param {unknown} err
+ */
+function bareIdiom(err) {
+  void (err instanceof Error ? err.message : String(err))
+}
+
+const reporterPoison = /** @type {[string, () => unknown][]} */ ([
+  // `String()` raises: no primitive conversion at all.
+  ['a value String() cannot take', () => Object.create(null)],
+  // `.message` raises: `instanceof Error` holds, so the idiom reads the getter.
+  ['an Error subclass whose message getter throws', () => new (class extends Error {
+    /** @returns {string} */
+    get message() { throw new Error('message getter blew up') }
+  })()],
+])
+
+for (const [label, poison] of reporterPoison) {
+  test(`later messages still get their replies when onError raises on ${label}`, async () => {
+    // `JSON.stringify` propagates whatever a `toJSON` threw verbatim, and
+    // `writeResponse` rethrows it, so the value reaches `onError` intact.
+    const thrown = poison()
+    const { chunks, errors } = await drive(
+      async (message) => message.id === 1
+        ? { jsonrpc: '2.0', id: 1, result: { toJSON() { throw thrown } } }
+        : { jsonrpc: '2.0', id: message.id, result: {} },
+      [
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { jsonrpc: '2.0', id: 2, method: 'ping' },
+        { jsonrpc: '2.0', id: 3, method: 'ping' },
+      ],
+      undefined,
+      bareIdiom,
+    )
+
+    // The whole point: ids 2 and 3 got no line at all before the fix.
+    assert.deepEqual(chunks.map((c) => JSON.parse(c).id), [1, 2, 3])
+    assert.equal(JSON.parse(chunks[0]).error.code, -32603)
+    assert.deepEqual(JSON.parse(chunks[1]).result, {})
+    assert.deepEqual(JSON.parse(chunks[2]).result, {})
+
+    // The reporter's own failure is not swallowed: it comes back through the
+    // same channel as a plain `Error`, which the bare idiom can read, so the
+    // operator hears that a report was lost rather than nothing at all.
+    assert.equal(errors.length, 2)
+    assert.equal(errors[0], thrown)
+    assert.ok(errors[1] instanceof Error)
+    assert.match(errors[1].message, /error report failed/)
+  })
+}
+
+test('an onError that raises on everything, its own notice included, still does not cost a later message its reply', async () => {
+  const { chunks, errors } = await drive(
+    async (message) => message.id === 1
+      ? { jsonrpc: '2.0', id: 1, result: 1n }
+      : { jsonrpc: '2.0', id: message.id, result: {} },
+    [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 2, method: 'ping' },
+    ],
+    undefined,
+    () => { throw new Error('onError blew up') },
+  )
+
+  assert.deepEqual(chunks.map((c) => JSON.parse(c).id), [1, 2])
+  // Both calls were made; both raised. A handler beyond reporting to is where
+  // the notice stops, not where the session does.
+  assert.equal(errors.length, 2)
 })

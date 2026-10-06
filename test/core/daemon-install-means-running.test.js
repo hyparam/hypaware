@@ -1,13 +1,21 @@
 // @ts-check
 
 import test from 'node:test'
+import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { installLaunchAgent } from '../../src/core/daemon/macos.js'
+import { installLaunchAgent, plistPathFor, uninstallLaunchAgent } from '../../src/core/daemon/macos.js'
 import { installSystemdUnit } from '../../src/core/daemon/linux.js'
+import { startServiceDaemon, stopServiceDaemon, restartServiceDaemon, serviceDaemonStatus, uninstallDaemon } from '../../src/core/daemon/install.js'
+import { defaultPlistDir } from '../../src/core/daemon/platform.js'
+import { DAEMON_STOP_TIMEOUT_MS } from '../../src/core/daemon/service_ops.js'
+import { runDaemonStop, runDaemonUninstall } from '../../src/core/commands/daemon.js'
+import { clearStalePidFile, pidFilePath, processIsAlive, processingStateRoot, writePidFile } from '../../src/core/daemon/pid.js'
+
+/** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 
 // Regression for #1036: `hyp daemon install` over a running daemon booted the
 // old instance out, bootstrapped the label back in, and then trusted
@@ -24,19 +32,43 @@ const RUNNING_PID = 4242
  * *loaded* (bootstrapped, `print` succeeds) and *running* (has a pid).
  * `spawnOnBootstrap: false` is the pended-spawn state from #1036.
  *
- * @param {{ loadedAtStart?: boolean, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean, kickstartStderr?: string }} [opts]
+ * `pidAtStart: 0` is the third state, and the only one that tells the two
+ * apart: launchd holding the label with nothing running under it, which is
+ * what a throttled respawn and a pended spawn both look like.
+ *
+ * `unloadAfterPrints` is the fact the teardown paths need and the install
+ * ones do not: `bootout` is asynchronous, so launchd can still be holding the
+ * job for several probes after the command has returned (#2329). `0`, the
+ * default, is the teardown that finished inside the call, which is what every
+ * install test here already assumed. A number is how many further `print`
+ * probes still see the job; `Infinity` is the job launchd never releases.
+ * `onUnloaded` fires the instant the fake lets go, which is where a test
+ * models what the completed teardown does to the daemon's pid files.
+ *
+ * @param {{ loadedAtStart?: boolean, pidAtStart?: number, spawnOnBootstrap?: boolean, spawnOnKickstart?: boolean, kickstartStderr?: string, unloadAfterPrints?: number, onUnloaded?: () => void, bootoutRejects?: string }} [opts]
  */
 function fakeLaunchd(opts) {
   const { loadedAtStart = false, spawnOnBootstrap = false, spawnOnKickstart = true, kickstartStderr } = opts ?? {}
+  const { unloadAfterPrints = 0, onUnloaded, bootoutRejects } = opts ?? {}
   /** @type {string[][]} */
   const calls = []
   let loaded = loadedAtStart
-  let pid = loadedAtStart ? RUNNING_PID : 0
+  let pid = opts?.pidAtStart ?? (loadedAtStart ? RUNNING_PID : 0)
+  let printsUntilReleased = 0
+  function release() {
+    loaded = false
+    pid = 0
+    onUnloaded?.()
+  }
   return {
     calls,
     /** @param {string[]} args */
     print(args) {
       calls.push(['print', ...args])
+      if (printsUntilReleased > 0) {
+        printsUntilReleased -= 1
+        if (printsUntilReleased === 0) release()
+      }
       if (!loaded) {
         return Promise.resolve({ exitCode: 113, stdout: '', stderr: 'Could not find service' })
       }
@@ -48,8 +80,12 @@ function fakeLaunchd(opts) {
     /** @param {string[]} args */
     bootout(args) {
       calls.push(['bootout', ...args])
-      loaded = false
-      pid = 0
+      if (bootoutRejects !== undefined) return Promise.reject(new Error(bootoutRejects))
+      // The teardown launchd has accepted but not finished: the job is still
+      // there for the next `unloadAfterPrints` probes, and the +1 is the probe
+      // that finally sees it gone.
+      if (unloadAfterPrints > 0) printsUntilReleased = unloadAfterPrints + 1
+      else release()
       return Promise.resolve(OK)
     },
     /** @param {string[]} args */
@@ -83,6 +119,7 @@ function fakeSystemd(opts) {
   /** @type {string[][]} */
   const calls = []
   let pid = 0
+  let stopped = false
   return {
     calls,
     daemonReload() { calls.push(['daemon-reload']); return Promise.resolve(OK) },
@@ -93,6 +130,7 @@ function fakeSystemd(opts) {
     /** @param {string} unit */
     start(unit) {
       calls.push(['start', unit])
+      stopped = false
       if (spawnOnStart) pid = RUNNING_PID
       if (startStderr !== undefined) {
         return Promise.resolve({ exitCode: 5, stdout: '', stderr: startStderr })
@@ -100,10 +138,11 @@ function fakeSystemd(opts) {
       return Promise.resolve(OK)
     },
     /** @param {string} unit */
-    stop(unit) { calls.push(['stop', unit]); pid = 0; return Promise.resolve(OK) },
+    stop(unit) { calls.push(['stop', unit]); pid = 0; stopped = true; return Promise.resolve(OK) },
     /** @param {string} unit */
     restart(unit) {
       calls.push(['restart', unit])
+      stopped = false
       if (spawnOnRestart) pid = RUNNING_PID
       return Promise.resolve(OK)
     },
@@ -112,7 +151,10 @@ function fakeSystemd(opts) {
     /** @param {string} unit */
     show(unit) {
       calls.push(['show', unit])
-      const state = pid > 0 ? 'active' : 'activating'
+      // A stopped unit stays `loaded` and goes `inactive`; a unit systemd is
+      // still bringing up reports `activating` with no MainPID, which is the
+      // `Restart=` gap a crash loop spends most of its time in.
+      const state = stopped ? 'inactive' : pid > 0 ? 'active' : 'activating'
       return Promise.resolve({
         exitCode: 0,
         stdout: `LoadState=loaded\nActiveState=${state}\nMainPID=${pid}\n`,
@@ -123,6 +165,172 @@ function fakeSystemd(opts) {
 }
 
 const tmpHome = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), `hyp-${tag}-`))
+
+for (const platform of ['darwin', 'linux']) {
+  test(`${platform}: stop preserves the installation and start/restart brings it back`, async (t) => {
+    const home = tmpHome('service-stop')
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+    const launchctl = fakeLaunchd()
+    const systemctl = fakeSystemd()
+    const adapter = platform === 'darwin' ? launchctl : systemctl
+    const options = platform === 'darwin'
+      ? { ...darwinOpts(home, launchctl), platform: /** @type {const} */ ('darwin') }
+      : { ...linuxOpts(home, systemctl), platform: /** @type {const} */ ('linux') }
+    const plan = platform === 'darwin'
+      ? await installLaunchAgent(options)
+      : await installSystemdUnit(options)
+    const content = fs.readFileSync(plan.targetPath, 'utf8')
+    for (const resume of [startServiceDaemon, restartServiceDaemon]) {
+      adapter.calls.length = 0
+      await stopServiceDaemon(options)
+      await stopServiceDaemon(options)
+      const stopped = await serviceDaemonStatus(options)
+      assert.equal(stopped.installed, true)
+      assert.equal(stopped.pid, undefined)
+      assert.equal(fs.readFileSync(plan.targetPath, 'utf8'), content)
+      assert.equal(count(adapter.calls, 'disable'), 0)
+      assert.equal(count(adapter.calls, 'kickstart'), 0)
+      assert.equal(count(adapter.calls, 'start'), 0)
+      await resume(options)
+      assert.equal((await serviceDaemonStatus(options)).pid, RUNNING_PID)
+    }
+  })
+}
+
+// What `hyp daemon stop` gates on: is the service manager supervising this
+// daemon right now. Neither "a unit is on disk" nor "a pid exists" answers it.
+// `Restart=always` / `KeepAlive` means a crashing daemon has no pid for the
+// whole throttle gap and is still coming back, so a stop routed past the
+// manager during that gap is a stop that does not happen - which is the bug
+// this PR exists to fix, reached from the other side.
+test('a unit systemd will respawn reads as supervised, a stopped one does not', async () => {
+  const home = tmpHome('supervised')
+  const systemctl = fakeSystemd()
+  const options = { ...linuxOpts(home, systemctl), platform: /** @type {const} */ ('linux') }
+  try {
+    await installSystemdUnit(options)
+    const running = await serviceDaemonStatus(options)
+    assert.equal(running.active, true)
+    assert.equal(running.pid, RUNNING_PID)
+
+    // The crash-loop gap: `ActiveState=activating`, no MainPID. A pid gate
+    // would send this stop to the control file and report `not running`.
+    systemctl.show = async (unit) => {
+      systemctl.calls.push(['show', unit])
+      return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=activating\nMainPID=0\n', stderr: '' }
+    }
+    const respawning = await serviceDaemonStatus(options)
+    assert.equal(respawning.pid, undefined, 'no pid during the RestartSec gap')
+    assert.equal(respawning.active, true, 'but systemd is still going to bring it back')
+
+    // And the stop this PR preserves: still `loaded`, so `hyp daemon start`
+    // and `restart` recover it, but no longer supervised, so a foreground
+    // `hyp daemon run` beside it is reached by the control file instead.
+    systemctl.show = async (unit) => {
+      systemctl.calls.push(['show', unit])
+      return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=inactive\nMainPID=0\n', stderr: '' }
+    }
+    const idle = await serviceDaemonStatus(options)
+    assert.equal(idle.installed, true)
+    assert.equal(idle.loaded, true, 'a stopped unit stays loaded, which is why loaded cannot be the gate')
+    assert.equal(idle.active, false)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// A refused bootout is told from an accepted one by what it left behind, not
+// by its exit code: the service is still loaded after the wait. Its stderr is
+// still what the operator needs, so it rides the failure.
+test('service stop surfaces manager failures', async () => {
+  const failed = { exitCode: 5, stdout: '', stderr: 'permission denied' }
+  const launchctl = fakeLaunchd({ loadedAtStart: true })
+  launchctl.bootout = async () => failed
+  await assert.rejects(
+    stopServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') }),
+    /permission denied/,
+  )
+  const systemctl = fakeSystemd()
+  systemctl.stop = async () => failed
+  await assert.rejects(stopServiceDaemon({ platform: 'linux', systemctl }), /permission denied/)
+})
+
+// #1036 again, reached the other way. `hyp daemon start` after a stop has to
+// bootstrap the label back in, and a label bootstrapped seconds after an
+// instance of it was booted out is exactly where launchd leaves the initial
+// spawn pended: bootstrap and kickstart both exit 0 with nothing running.
+// `hyp status` recommends this command after a stop, so `daemon: started`
+// over a dead machine is the same lie the installer stopped telling.
+test('macOS start proves a pid for the label it had to bootstrap', async () => {
+  const launchctl = fakeLaunchd({ spawnOnKickstart: false })
+  await assert.rejects(
+    startServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') }),
+    /never started it/,
+  )
+  assert.equal(count(launchctl.calls, 'bootstrap'), 1)
+  // The other arm is unchanged, and `pidAtStart: 0` is what makes that an
+  // assertion rather than a coincidence: this job is loaded with nothing
+  // running under it, so it would fail the pid proof if the proof reached it.
+  // It kickstarts, reports, and is believed, as it was before stop existed.
+  const loaded = fakeLaunchd({ loadedAtStart: true, pidAtStart: 0, spawnOnKickstart: false })
+  await startServiceDaemon({ ...darwinOpts('/unused', loaded), platform: /** @type {const} */ ('darwin') })
+  assert.equal(count(loaded.calls, 'bootstrap'), 0)
+  assert.equal(count(loaded.calls, 'print'), 1, 'no pid poll on the arm launchd was already holding')
+})
+
+// The other half of that pid gate, and the same race `hyp daemon stop` hit on
+// bootout: the plist a start bootstraps carries `RunAtLoad`, so launchd can
+// spawn the job before the kickstart lands and answer the kickstart with
+// `3: No such process`. `installLaunchAgent` has never read that exit code
+// (see 'a kickstart that errors over a job launchd did start'), and the arm
+// that just bootstrapped must not either, or `hyp daemon start` after a stop
+// exits 1 over a daemon that is running.
+test('macOS start after a stop is not failed by a kickstart that lost the race', async () => {
+  const launchctl = fakeLaunchd({
+    spawnOnBootstrap: true,
+    spawnOnKickstart: false,
+    kickstartStderr: 'Operation already in progress',
+  })
+  await startServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') })
+  assert.equal(count(launchctl.calls, 'bootstrap'), 1)
+  assert.equal(count(launchctl.calls, 'kickstart'), 1, 'forced the spawn without raising on its exit code')
+  assert.match((await launchctl.print(['gui/501/com.hyperparam.hypaware'])).stdout, /pid = 4242/)
+})
+
+// launchd answers a teardown it has not finished with `36: Operation now in
+// progress`, and one the job completed a moment before bootout ran with `3:
+// No such process`. Both are stops that worked, and the second is a race the
+// print above cannot close. Reading either as a failure would have made
+// `hyp daemon stop` exit 1 over its own happy path on a real Mac, which no
+// fake that returns 0 from bootout can show.
+test('macOS stop reads the unload, not bootout\'s exit code', async () => {
+  for (const booted of [
+    { exitCode: 36, stdout: '', stderr: 'Boot-out failed: 36: Operation now in progress' },
+    { exitCode: 3, stdout: '', stderr: 'Boot-out failed: 3: No such process' },
+  ]) {
+    const launchctl = fakeLaunchd({ loadedAtStart: true })
+    const real = launchctl.bootout
+    launchctl.bootout = async (args) => { await real(args); return booted }
+    await stopServiceDaemon({ ...darwinOpts('/unused', launchctl), platform: /** @type {const} */ ('darwin') })
+    assert.equal((await launchctl.print(['gui/501/com.hyperparam.hypaware'])).exitCode, 113)
+  }
+})
+
+test('macOS stop waits for asynchronous unload and rejects a stuck service', async () => {
+  const launchctl = fakeLaunchd({ loadedAtStart: true })
+  const options = darwinOpts('/unused', launchctl)
+  const { stopLaunchAgent } = await import('../../src/core/daemon/macos.js')
+  launchctl.bootout = async () => OK
+  await assert.rejects(stopLaunchAgent(options), /service did not unload/)
+  assert.ok(count(launchctl.calls, 'print') < 100, 'unload polling is bounded')
+  const print = launchctl.print
+  let remaining = 2
+  launchctl.print = async (args) => --remaining > 0
+    ? print(args)
+    : { exitCode: 113, stdout: '', stderr: 'Could not find service' }
+  await stopLaunchAgent(options)
+})
+
 /** @param {string[][]} calls @param {string} verb */
 const count = (calls, verb) => calls.filter((c) => c[0] === verb).length
 /** @param {string[][]} calls @param {string} verb */
@@ -412,4 +620,710 @@ test('a launchd reason that ends in a period does not double up the sentence bre
       return true
     },
   )
+})
+
+/**
+ * The context a `hyp daemon ...` command runs against a staged HOME with,
+ * capturing both streams.
+ *
+ * @param {string} home
+ */
+function stageCtx(home) {
+  let out = ''
+  let err = ''
+  const ctx = /** @type {CommandRunContext} */ (/** @type {any} */ ({
+    stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+    stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+  }))
+  return { ctx, stateRoot: path.join(home, '.hyp', 'hypaware'), out: () => out, err: () => err }
+}
+
+/**
+ * A systemd-installed daemon, the systemctl standing in for the service
+ * manager, and the context `hyp daemon stop` runs against them with.
+ *
+ * @param {string} home
+ */
+async function stageServiceDaemon(home) {
+  const systemctl = fakeSystemd()
+  const options = { ...linuxOpts(home, systemctl), platform: /** @type {const} */ ('linux') }
+  await installSystemdUnit(options)
+  return { systemctl, options, ...stageCtx(home) }
+}
+
+/**
+ * A pid file the daemon never got to clear, as a hard kill leaves it.
+ *
+ * @param {string} stateRoot
+ * @param {number} pid
+ */
+function stageAbandonedPidFile(stateRoot, pid) {
+  writePidFile(stateRoot, { pid, startedAt: new Date().toISOString(), runId: 'hard-kill', mode: 'foreground' })
+}
+
+// Issue #2266. A manager that had to hard-kill a wedged daemon gave it no
+// shutdown to run, so the pid file the daemon clears for itself on an orderly
+// stop is still on disk naming a process that is gone while `hyp daemon stop`
+// reports `daemon: stopped`. The control-file transport clears exactly that
+// file on a confirmed exit.
+//
+// The unit here is in the state such a kill leaves - no MainPID, still
+// `Restart=always` - which is also the throttle gap the gate must keep reading
+// as supervised rather than as "not running" (#2261), so the stop going
+// through systemctl is asserted alongside the file.
+test('a service stop clears the pid file a hard-killed daemon left behind', async () => {
+  const home = tmpHome('stale-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    hardKilled(staged.systemctl)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(count(staged.systemctl.calls, 'stop'), 1, 'the stop still went through the service manager')
+    assert.match(staged.out(), /daemon: stopped/)
+    const pidFile = pidFilePath(staged.stateRoot)
+    assert.ok(
+      !fs.existsSync(pidFile) || staged.out().includes(pidFile),
+      `the stale pid file was neither removed nor named: ${JSON.stringify(staged.out())}`,
+    )
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The property that makes the clear safe: the file goes only when the pid it
+// names is gone. Both managers return from the stop with the process already
+// gone, so the live pid this keeps a file for is somebody else's: a foreground
+// `hyp daemon run` that claimed it while the unit sat in its restart gap, or
+// one the OS has reissued. A stop that deleted it would blind every liveness
+// check to a process that is running.
+test('a service stop leaves the pid file of a daemon that is still alive', async (t) => {
+  const home = tmpHome('live-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    // A live pid that is not the runner's own: a regression that signalled or
+    // killed what the pid file names would otherwise take the suite with it,
+    // and read as a crash rather than as this assertion.
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+    t.after(() => live.kill('SIGKILL'))
+    assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+    stageAbandonedPidFile(staged.stateRoot, live.pid)
+    const before = fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8')
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8'), before, 'a live daemon keeps its pid file')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Put the unit in the state a hard kill leaves it in: still loaded, no MainPID.
+ *
+ * @param {ReturnType<typeof fakeSystemd>} systemctl
+ */
+function hardKilled(systemctl) {
+  systemctl.show = async (unit) => {
+    systemctl.calls.push(['show', unit])
+    return { exitCode: 0, stdout: 'LoadState=loaded\nActiveState=activating\nMainPID=0\n', stderr: '' }
+  }
+}
+
+// Issue #2288, the other half of #2266. The supervised processing child keeps
+// its own pid file below `processing/`, and a kill of the daemon's control
+// group strands that one too: the child never ran a shutdown either. Nothing
+// reads it today and the next processing boot overwrites it, so the stale file
+// misleads only a human reading the state dir - which is reason to reconcile
+// it on the same stop, not to leave a second dead pid on disk.
+test('a service stop clears the processing pid file a hard-killed daemon left behind', async () => {
+  const home = tmpHome('stale-processing-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    hardKilled(staged.systemctl)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(processingRoot, deadPid)
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(count(staged.systemctl.calls, 'stop'), 1, 'the stop still went through the service manager')
+    assert.match(staged.out(), /daemon: stopped/)
+    const pidFile = pidFilePath(processingRoot)
+    assert.ok(
+      !fs.existsSync(pidFile) || staged.out().includes(pidFile),
+      `the stale processing pid file was neither removed nor named: ${JSON.stringify(staged.out())}`,
+    )
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The same guard the gateway file gets, against a real spawned child rather
+// than a stubbed liveness function: what is under test is what the live OS
+// says about a running pid. Never `process.pid`, or a regression that deleted
+// the file would still pass while a stop that signalled it took the suite out.
+test('a service stop leaves a live processing pid file byte-identical', async (t) => {
+  const home = tmpHome('live-processing-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    hardKilled(staged.systemctl)
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+    t.after(() => live.kill('SIGKILL'))
+    assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(processingRoot, live.pid)
+    const before = fs.readFileSync(pidFilePath(processingRoot), 'utf8')
+
+    const code = await runDaemonStop([], staged.ctx, { service: staged.options })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(
+      fs.readFileSync(pidFilePath(processingRoot), 'utf8'),
+      before,
+      'a live processing daemon keeps its pid file',
+    )
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Run `fn` with `process.kill` raising `code` for `pid`, so the branch under
+ * test is reached whatever this host's process table happens to look like.
+ * Restored in a `finally` rather than in a `t.after`, because the stubbed
+ * region is synchronous: the real `process.kill` is back before any other
+ * test or hook can observe it.
+ *
+ * @param {number} pid
+ * @param {string} code
+ * @param {() => void} fn
+ */
+function withSignalError(pid, code, fn) {
+  const real = process.kill
+  process.kill = (target, signal) => {
+    if (target !== pid) return real.call(process, target, signal)
+    throw Object.assign(new Error(`kill ${code}`), { code, syscall: 'kill' })
+  }
+  try {
+    fn()
+  } finally {
+    process.kill = real
+  }
+}
+
+// Issue #2301. The safety of the stale clear turns on one branch of
+// `processIsAlive`: a pid the runner may not signal is a pid somebody still
+// holds, so reading `EPERM` as dead would unlink the pid file of a live,
+// reissued pid and blind every later liveness check to it. The reading has
+// been argued the other way in this codebase before (#2289).
+//
+// The signal is stubbed rather than probed, because the ambient case is not
+// available everywhere: in a container whose pid 1 is owned by the test uid
+// nothing the runner can name raises `EPERM`, and a test that only read the
+// real process table would pass there without reaching the branch.
+test('a pid file naming a pid the runner may not signal survives the stale clear', (t) => {
+  const home = tmpHome('eperm-pid')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const stateRoot = path.join(home, '.hyp', 'hypaware')
+  const unsignalable = 424242
+  stageAbandonedPidFile(stateRoot, unsignalable)
+  const before = fs.readFileSync(pidFilePath(stateRoot), 'utf8')
+
+  withSignalError(unsignalable, 'EPERM', () => {
+    assert.equal(processIsAlive(unsignalable), true, 'a pid we may not signal is one somebody holds')
+    clearStalePidFile(stateRoot)
+  })
+
+  assert.equal(fs.readFileSync(pidFilePath(stateRoot), 'utf8'), before, 'the clear left a live pid file alone')
+})
+
+// The other half of the same decision: `ESRCH` is the only reading that lets
+// a pid file go, so a catch that answered alive for every error would strand
+// every stale one.
+test('a pid file naming a pid nothing holds is what the stale clear removes', (t) => {
+  const home = tmpHome('esrch-pid')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const stateRoot = path.join(home, '.hyp', 'hypaware')
+  const gone = 424243
+  stageAbandonedPidFile(stateRoot, gone)
+
+  withSignalError(gone, 'ESRCH', () => {
+    assert.equal(processIsAlive(gone), false, 'a pid no process holds is dead')
+    clearStalePidFile(stateRoot)
+  })
+
+  assert.equal(fs.existsSync(pidFilePath(stateRoot)), false, 'the clear removed the stale pid file')
+})
+
+// The same property against the real signal table: pid 1 belongs to root and
+// the runner does not, so signal 0 to it is the unsignalable-but-live case
+// the OS itself produces. Signal 0 only, never a pid this suite could kill.
+// Skipped where the host does not offer the case, so the assertion can never
+// pass for the wrong reason.
+test('the OS agrees: a live pid this uid may not signal keeps its pid file', (t) => {
+  /** @type {unknown} */
+  let thrown
+  try {
+    process.kill(1, 0)
+  } catch (err) {
+    thrown = err
+  }
+  const code = thrown && /** @type {NodeJS.ErrnoException} */ (thrown).code
+  if (code !== 'EPERM') {
+    return t.skip(`kill(1, 0) ${thrown ? `raised ${String(code)}` : 'succeeded'} here, so pid 1 is not unsignalable`)
+  }
+
+  const home = tmpHome('eperm-pid1')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const stateRoot = path.join(home, '.hyp', 'hypaware')
+  assert.equal(processIsAlive(1), true, 'pid 1 is running, whether or not this uid may signal it')
+  stageAbandonedPidFile(stateRoot, 1)
+  const before = fs.readFileSync(pidFilePath(stateRoot), 'utf8')
+
+  clearStalePidFile(stateRoot)
+
+  assert.equal(fs.readFileSync(pidFilePath(stateRoot), 'utf8'), before, 'the clear left pid 1\'s file alone')
+})
+
+// Issue #2299. `hyp daemon uninstall` stranded the same two pid files a stop
+// does, and for a stronger reason: the teardown unlinks the plist / unit, so
+// nothing will ever rewrite them.
+
+/**
+ * `hyp daemon uninstall` against a staged install, with the service teardown
+ * stubbed through its deps seam so no real launchd or systemd domain is
+ * reached.
+ *
+ * @param {Awaited<ReturnType<typeof stageServiceDaemon>>} staged
+ */
+async function uninstallThroughSeam(staged) {
+  return await runDaemonUninstall([], staged.ctx, { uninstallDaemon: async function() {} })
+}
+
+test('an uninstall clears both stale pid files the torn-down daemon left behind', async () => {
+  const home = tmpHome('uninstall-stale-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingRoot, deadPid)
+
+    const code = await uninstallThroughSeam(staged)
+
+    assert.equal(code, 0, staged.err())
+    assert.match(staged.out(), /Daemon removed/)
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the stale gateway pid file outlived the uninstall')
+    assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the stale processing pid file outlived the uninstall')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The guard that makes the clear safe, against a real spawned child rather
+// than a stubbed liveness function. Never `process.pid`, which a regression
+// that signalled the file's pid would take out with the suite.
+test('an uninstall leaves the pid files of a live process byte-identical', async (t) => {
+  const home = tmpHome('uninstall-live-pid')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+    t.after(() => live.kill('SIGKILL'))
+    assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    stageAbandonedPidFile(staged.stateRoot, live.pid)
+    stageAbandonedPidFile(processingRoot, live.pid)
+    const gatewayBefore = fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8')
+    const processingBefore = fs.readFileSync(pidFilePath(processingRoot), 'utf8')
+
+    const code = await uninstallThroughSeam(staged)
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8'), gatewayBefore, 'a live gateway pid keeps its file')
+    assert.equal(fs.readFileSync(pidFilePath(processingRoot), 'utf8'), processingBefore, 'a live processing pid keeps its file')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The same property against the real signal table: pid 1 belongs to root and
+// the runner does not, so signal 0 to it is the unsignalable-but-live case the
+// OS itself produces. Skipped where the host does not offer it, so the
+// assertion can never pass for the wrong reason.
+test('the OS agrees: an uninstall keeps the file of a live pid this uid may not signal', async (t) => {
+  /** @type {unknown} */
+  let thrown
+  try {
+    process.kill(1, 0)
+  } catch (err) {
+    thrown = err
+  }
+  const code = thrown && /** @type {NodeJS.ErrnoException} */ (thrown).code
+  if (code !== 'EPERM') {
+    return t.skip(`kill(1, 0) ${thrown ? `raised ${String(code)}` : 'succeeded'} here, so pid 1 is not unsignalable`)
+  }
+
+  const home = tmpHome('uninstall-eperm-pid1')
+  try {
+    const staged = await stageServiceDaemon(home)
+    assert.equal(processIsAlive(1), true, 'pid 1 is running, whether or not this uid may signal it')
+    stageAbandonedPidFile(staged.stateRoot, 1)
+    const before = fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8')
+
+    assert.equal(await uninstallThroughSeam(staged), 0, staged.err())
+
+    assert.equal(fs.readFileSync(pidFilePath(staged.stateRoot), 'utf8'), before, 'the uninstall left pid 1\'s file alone')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// Best-effort, and each file on its own. The teardown the user asked for has
+// already happened, so a pid file that cannot be removed is no reason to call
+// a completed uninstall a failure, and no reason to skip the other root: the
+// shape #2300 records on the stop path.
+test('a gateway pid file that cannot be removed fails neither the uninstall nor the other root', async (t) => {
+  const home = tmpHome('uninstall-unremovable-pid')
+  const staged = await stageServiceDaemon(home)
+  const runDir = path.dirname(pidFilePath(staged.stateRoot))
+  t.after(() => {
+    fs.chmodSync(runDir, 0o755)
+    fs.rmSync(home, { recursive: true, force: true })
+  })
+  if (process.getuid?.() === 0) {
+    return t.skip('root ignores the directory mode, so the unlink cannot be made to fail')
+  }
+  const deadPid = 999999
+  const processingRoot = processingStateRoot(staged.stateRoot)
+  stageAbandonedPidFile(staged.stateRoot, deadPid)
+  stageAbandonedPidFile(processingRoot, deadPid)
+  // Readable but unlinkable: the unlink raises EACCES, the error
+  // `clearPidFile` rethrows rather than swallows.
+  fs.chmodSync(runDir, 0o555)
+
+  const code = await uninstallThroughSeam(staged)
+
+  assert.equal(code, 0, staged.err())
+  assert.match(staged.out(), /Daemon removed/)
+  assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), true, 'the fixture needs an unremovable file')
+  assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the second root was skipped by the first one failing')
+})
+
+// The order the clear sits in, which nothing else observes. Before the
+// teardown the plist / unit is still on disk, so the manager still holds
+// `KeepAlive` / `Restart=always` and a daemon inside its restart gap is about
+// to be brought back (#2261): the pid it then writes is the one an early
+// clear would have deleted out from under it. The deps seam is the only
+// vantage point that can see which ran first, so it is where the order is
+// pinned.
+test('the stale clear runs after the service teardown, never before it', async () => {
+  const home = tmpHome('uninstall-clear-after-teardown')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const processingRoot = processingStateRoot(staged.stateRoot)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingRoot, deadPid)
+    // Both roots, because the order is a property of each file rather than
+    // of the call: a clear split so one root goes early and the other late
+    // leaves that root exposed for the whole teardown while a single-file
+    // snapshot still reads as ordered.
+    /** @type {boolean | undefined} */
+    let gatewayWhenTornDown
+    /** @type {boolean | undefined} */
+    let processingWhenTornDown
+
+    const code = await runDaemonUninstall([], staged.ctx, {
+      uninstallDaemon: async function() {
+        // Sampled a turn of the loop in, so this is the teardown's
+        // completion and not its first synchronous instant. A caller that
+        // started the teardown without awaiting it would let the clear run
+        // inside this tick, which is the returned-before-the-service-is-gone
+        // shape #2329 records on darwin, and a snapshot taken on entry reads
+        // it as ordered.
+        await new Promise(function(resolve) { setImmediate(resolve) })
+        gatewayWhenTornDown = fs.existsSync(pidFilePath(staged.stateRoot))
+        processingWhenTornDown = fs.existsSync(pidFilePath(processingRoot))
+      },
+    })
+
+    assert.equal(code, 0, staged.err())
+    assert.equal(gatewayWhenTornDown, true, 'the gateway clear ran while the respawn policy was still installed')
+    assert.equal(processingWhenTornDown, true, 'the processing clear ran while the respawn policy was still installed')
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the gateway clear did not run after the teardown either')
+    assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the processing clear did not run after the teardown either')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The other side of that order. A teardown that threw left the plist / unit
+// on disk with its respawn policy intact, so the daemon the clear would read
+// as dead is one the manager is still about to bring back: the file stays,
+// and the command still reports the failure the operator has to act on.
+test('a teardown that failed clears nothing, because the respawn policy is still installed', async () => {
+  const home = tmpHome('uninstall-failed-teardown')
+  try {
+    const staged = await stageServiceDaemon(home)
+    const deadPid = 999999
+    assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+    stageAbandonedPidFile(staged.stateRoot, deadPid)
+    stageAbandonedPidFile(processingStateRoot(staged.stateRoot), deadPid)
+
+    const code = await runDaemonUninstall([], staged.ctx, {
+      // The failure the real teardown can actually reach: both managers
+      // swallow their stop and disable, so the throw that arrives here is
+      // `unlinkServiceFile` failing on something other than ENOENT, which
+      // is precisely the case that leaves the plist / unit on disk.
+      uninstallDaemon: async function() { throw new Error('could not remove the unit file') },
+    })
+
+    assert.equal(code, 1)
+    assert.match(staged.err(), /could not remove the unit file/)
+    assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), true, 'a failed teardown cleared the gateway pid file anyway')
+    assert.equal(fs.existsSync(pidFilePath(processingStateRoot(staged.stateRoot))), true, 'a failed teardown cleared the processing pid file anyway')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// Issue #2329. `launchctl bootout` is asynchronous, and the uninstall was the
+// one launchd path that fired it and returned anyway, so it could report a
+// removed daemon while launchd was still tearing the job down.
+//
+// Every one of these drives the injected `LaunchctlAdapter` and never a
+// launchd domain (LLP 0181), which is what lets darwin-only teardown code be
+// exercised at all from a Linux host.
+
+/**
+ * A plist on disk with no launchd state behind it: the only thing
+ * `uninstallLaunchAgent` checks before it acts.
+ *
+ * @param {string} home
+ */
+function stagePlist(home) {
+  const plistDir = defaultPlistDir(home)
+  fs.mkdirSync(plistDir, { recursive: true })
+  const plistPath = plistPathFor(plistDir)
+  fs.writeFileSync(plistPath, '<plist/>\n')
+  return plistPath
+}
+
+/**
+ * Uninstall options whose waits are recorded rather than spent. The recorded
+ * milliseconds are how the bound and the cadence of the poll are asserted
+ * without the test either taking that long or measuring the host's scheduler.
+ *
+ * @param {string} home
+ * @param {ReturnType<typeof fakeLaunchd>} launchctl
+ * @param {number[]} sleeps
+ */
+function uninstallOpts(home, launchctl, sleeps) {
+  return {
+    homeDir: home,
+    launchctl,
+    userDomain: 'gui/501',
+    sleep: async function(/** @type {number} */ ms) { sleeps.push(ms) },
+  }
+}
+
+test('an uninstall whose teardown finished inside the call unlinks straight away', async (t) => {
+  const home = tmpHome('uninstall-unloads-now')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.equal(count(lc.calls, 'bootout'), 1)
+  assert.equal(count(lc.calls, 'print'), 1, 'one probe was enough to see the job gone')
+  assert.deepEqual(sleeps, [], 'a teardown already finished costs the uninstall no wait at all')
+  assert.equal(fs.existsSync(plistPath), false, 'the plist outlived the uninstall')
+})
+
+test('an uninstall waits out a teardown launchd has not finished, and unlinks only after it', async (t) => {
+  const home = tmpHome('uninstall-unloads-late')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const plistPath = stagePlist(home)
+  /** @type {boolean | undefined} */
+  let plistWhenReleased
+  const lc = fakeLaunchd({
+    loadedAtStart: true,
+    unloadAfterPrints: 3,
+    onUnloaded() { plistWhenReleased = fs.existsSync(plistPath) },
+  })
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.equal(count(lc.calls, 'print'), 4, 'polled until the probe reported the job gone')
+  assert.equal(sleeps.length, 3, 'one interval between probes, and none after the last')
+  // The order the install path already keeps on the other side of the same
+  // race: it writes the new plist only once the old job is released. While
+  // the wait runs the service genuinely is still installed, and
+  // `hyp daemon status` reads that off this very file.
+  assert.equal(plistWhenReleased, true, 'the plist was unlinked before launchd had let the job go')
+  assert.equal(fs.existsSync(plistPath), false, 'the plist outlived the uninstall')
+})
+
+test('a job launchd never releases still loses its plist, and the uninstall says so', async (t) => {
+  const home = tmpHome('uninstall-never-unloads')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true, unloadAfterPrints: Infinity })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await assert.rejects(
+    () => uninstallLaunchAgent(uninstallOpts(home, lc, sleeps)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /did not unload/)
+      // What the operator has to act on: which service is still held, and
+      // that the removal half already happened.
+      assert.match(err.message, /gui\/501\/com\.hyperparam\.hypaware/)
+      assert.match(err.message, /removed/)
+      return true
+    },
+  )
+
+  // Unlink, and fail: refusing to unlink would leave the operator a service
+  // no command of theirs removes, and returning 0 is the bug.
+  assert.equal(fs.existsSync(plistPath), false, 'the plist survived a timed-out uninstall')
+  assert.ok(sleeps.length > 1 && sleeps.every((ms) => ms === sleeps[0]), 'a fixed poll cadence')
+  assert.equal(
+    sleeps.reduce((a, b) => a + b, 0),
+    DAEMON_STOP_TIMEOUT_MS,
+    'the wait is the stop window and no longer, so uninstall cannot hang',
+  )
+  assert.equal(count(lc.calls, 'print'), sleeps.length, 'one probe per interval, never a busy loop')
+})
+
+test('a bootout the adapter could not even run is tolerated: the probe is the verdict', async (t) => {
+  // The `.catch()` on the bootout predates this and stays. launchd answers a
+  // teardown it has already completed with `3: No such process`, and the
+  // adapter itself can fail to spawn; neither is a reason to abandon an
+  // uninstall. What decides it is whether the job is still there afterwards.
+  const home = tmpHome('uninstall-bootout-rejects')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ bootoutRejects: 'launchctl: could not spawn' })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.equal(count(lc.calls, 'bootout'), 1)
+  assert.equal(fs.existsSync(plistPath), false, 'the plist stayed because a bootout could not be run')
+  assert.deepEqual(sleeps, [], 'launchd was holding nothing, so there was nothing to wait out')
+})
+
+test('a probe the adapter could not run still removes the plist, and still fails', async (t) => {
+  // The other half of the bootout above: `runServiceCommand` rejects when the
+  // binary cannot be spawned, and the suite's own refusal to touch a real
+  // launchd rejects the same way. That is not an unload, so the uninstall
+  // still fails - but abandoning the removal would leave a plist launchd
+  // loads again at the next login, which is the one outcome this function
+  // documents it will never produce.
+  const home = tmpHome('uninstall-probe-rejects')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true })
+  const unspawnable = { ...lc, print() { return Promise.reject(new Error("failed to run 'launchctl print': spawn launchctl ENOENT")) } }
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  await assert.rejects(
+    () => uninstallLaunchAgent(uninstallOpts(home, /** @type {any} */ (unspawnable), sleeps)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /did not unload/)
+      assert.match(err.message, /spawn launchctl ENOENT/, 'the reason the unload went unconfirmed reaches the operator')
+      return true
+    },
+  )
+
+  assert.equal(fs.existsSync(plistPath), false, 'a probe that could not run cost the operator the removal')
+  assert.deepEqual(sleeps, [], 'the very first probe rejected, so nothing was ever waited out')
+})
+
+test('an uninstall with no plist on disk touches launchd not at all', async (t) => {
+  const home = tmpHome('uninstall-no-plist')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const lc = fakeLaunchd({ loadedAtStart: true })
+  /** @type {number[]} */
+  const sleeps = []
+
+  await uninstallLaunchAgent(uninstallOpts(home, lc, sleeps))
+
+  assert.deepEqual(lc.calls, [], 'nothing is installed here, so there is nothing to boot out or probe')
+})
+
+// #2329 reaching #2299, which is the consequence rather than the mechanism.
+// `clearStaleDaemonPidFiles` runs after the teardown and keeps the file of any
+// pid that is still alive, so a teardown that returned while launchd was still
+// killing the daemon left both files behind - and the plist is gone by then,
+// so nothing is ever coming back to reconcile them.
+test('an uninstall that waited out a late unload clears the pid files launchd stranded', async (t) => {
+  const home = tmpHome('uninstall-late-unload-pids')
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const staged = stageCtx(home)
+  const processingRoot = processingStateRoot(staged.stateRoot)
+  // The daemon as it is while launchd is still tearing it down: a live pid,
+  // and never the runner's own, which a regression that signalled what the
+  // pid file names would otherwise take out along with the suite.
+  const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+  t.after(() => live.kill('SIGKILL'))
+  assert.ok(live.pid, 'the fixture needs a spawned pid, never the runner\'s own')
+  const deadPid = 999999
+  assert.equal(processIsAlive(deadPid), false, 'the fixture needs a pid no process holds')
+  stageAbandonedPidFile(staged.stateRoot, live.pid)
+  stageAbandonedPidFile(processingRoot, live.pid)
+
+  const lc = fakeLaunchd({
+    loadedAtStart: true,
+    unloadAfterPrints: 3,
+    // launchd finishing what bootout started, with the SIGKILL its grace
+    // period ends in: the daemon and the processing child it supervises are
+    // both gone, and neither ran a shutdown, so the pid files they left name
+    // processes that no longer exist. Restaged rather than caused, because
+    // killing the child above would leave an unreaped pid that signal 0 still
+    // reports as alive.
+    onUnloaded() {
+      stageAbandonedPidFile(staged.stateRoot, deadPid)
+      stageAbandonedPidFile(processingRoot, deadPid)
+    },
+  })
+  const plistPath = stagePlist(home)
+  /** @type {number[]} */
+  const sleeps = []
+
+  const code = await runDaemonUninstall([], staged.ctx, {
+    uninstallDaemon: (o) => uninstallDaemon({
+      ...o,
+      ...uninstallOpts(home, lc, sleeps),
+      platform: /** @type {const} */ ('darwin'),
+    }),
+  })
+
+  assert.equal(code, 0, staged.err())
+  assert.match(staged.out(), /Daemon removed/)
+  assert.equal(fs.existsSync(pidFilePath(staged.stateRoot)), false, 'the gateway pid file was stranded by a teardown that returned early')
+  assert.equal(fs.existsSync(pidFilePath(processingRoot)), false, 'the processing pid file was stranded by a teardown that returned early')
+  assert.equal(fs.existsSync(plistPath), false, 'the plist outlived the uninstall')
+  assert.ok(sleeps.length > 0, 'the teardown returned without ever waiting on launchd')
 })

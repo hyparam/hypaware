@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 // A zone-less literal (`'2026-08-18T21:00:00'`) is *local* time, which is the
-// whole reason LLP 0272 made docs/ACCEPTANCE.md keep its trailing `Z`. The
+// whole reason LLP 0272 keeps the trailing `Z` on bounds. The
 // cases below name exact row sets, so the file pins the zone rather than
 // passing only on a UTC host. Set before the first Date is constructed.
 process.env.TZ = 'UTC'
@@ -370,7 +370,7 @@ function registryForBoth() {
 }
 
 // `HAVING` almost always holds an aggregate rather than a bare column, and
-// docs/ACCEPTANCE.md's own idiom is `max(message_created_at)`. A call whose
+// a common idiom is `max(message_created_at)`. A call whose
 // result carries the column's type compares a Date to a string exactly as the
 // bare column did, so the bound has to reach through it.
 // @ref LLP 0272#scope [tests]: a bound on a type-preserving call is a bound on the column under it

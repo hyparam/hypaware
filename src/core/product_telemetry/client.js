@@ -76,7 +76,7 @@ export async function withProductInvocation(
     return code
   }
   const client = createProductClient({ env })
-  // Collection is off by default, and a disabled client already discards every
+  // Collection is off on standalone installs, and a disabled client discards every
   // record. Entering the async context is not free - it costs each `await`
   // continuation in the process, and `daemon run` spends its whole life inside
   // this frame - so an off installation skips the boundary entirely.

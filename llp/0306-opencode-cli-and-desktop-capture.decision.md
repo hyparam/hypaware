@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-24
 **Related:** LLP 0011, LLP 0012, LLP 0015, LLP 0016, LLP 0035, LLP 0037, LLP 0045, LLP 0049, LLP 0050, LLP 0066, LLP 0103, LLP 0140, LLP 0252, LLP 0256, LLP 0257
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 ## Context {#context}
 
@@ -116,6 +117,9 @@ OTLP. A provider baseURL proxy and a hosted gateway are not part of this slice.
 - An OpenCode config home relocated only through a process-local override that
   the setup process cannot observe may not be pre-checked. This does not widen
   the picker probe schema.
-- Manual CLI/Desktop acceptance is still required for releases touching this
+- ~~Manual CLI/Desktop acceptance is still required for releases touching this
   adapter. It is not simulated by the hermetic smoke and is never run without
-  explicit authorization.
+  explicit authorization.~~
+  **Retired (2026-09-23)** by
+  [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md). The hermetic smoke still does not simulate real
+  CLI/Desktop behavior; only a run against the real clients can confirm it.

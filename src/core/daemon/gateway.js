@@ -12,7 +12,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { clearPidFile, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
-import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins, recordUnloadableManifests } from './boot_failure.js'
 import { openDaemonLog } from './logs.js'
 
 /**
@@ -244,9 +244,16 @@ export async function runGatewayDaemon(opts = {}) {
     writeStatusFile(stateRoot, status)
     log.info('gateway.stopping', { code })
     // Bound the complete stop, including a client that never ends its stream.
+    // The `process.exit` is the installed service's own ending, so it is
+    // withheld from a caller that does not own this process:
+    // `installSignalHandlers: false` already says so, and inside `node --test`
+    // that exit ends the worker mid-file, dropping every later test in it
+    // while the run still reports green (#1531). The SIGKILL the deadline
+    // exists for happens either way.
+    // @ref LLP 0038#lifecycle-and-operator-behavior [implements]: a stuck child or an open stream cannot strand the stop
     const deadline = setTimeout(() => {
       child?.kill('SIGKILL')
-      process.exit(code)
+      if (opts.installSignalHandlers !== false) process.exit(code)
     }, STOP_DEADLINE_MS)
     deadline.unref()
     if (child?.connected) child.send({ type: 'processing.stop' }, () => {})
@@ -254,8 +261,22 @@ export async function runGatewayDaemon(opts = {}) {
       ? new Promise(resolve => child?.once('exit', resolve))
       : Promise.resolve()
     try {
-      await boot?.runtime.sources.stop('ai-gateway')
-      await stoppedChild
+      try {
+        await boot?.runtime.sources.stop('ai-gateway')
+      } catch (error) {
+        // Onto the gateway's own log, so a stop that failed is counted by
+        // `recent_errors` rather than reaching only an unhandled rejection.
+        log.error('gateway.source_stop_failed', { message: error instanceof Error ? error.message : String(error) })
+        throw error
+      } finally {
+        // In a `finally`, never after the line above: the child holds the half
+        // of the daemon that captures, and the deadline the outer `finally` is
+        // about to clear is the only thing that guarantees it dies. A source
+        // stop that rejects past this wait leaves an unsupervised
+        // `processor.js` on the same `HYP_HOME`, behind a snapshot that reads
+        // `stopped` (#1531).
+        await stoppedChild
+      }
     } finally {
       clearTimeout(deadline)
       setGatewayProcessTransport(undefined)
@@ -288,12 +309,38 @@ export async function runGatewayDaemon(opts = {}) {
   try {
     boot = await bootKernel({ hypHome, configPath: opts.configPath, env, runId, mode: 'daemon', bootProfile: 'gateway', storage })
     gatewayFailedPlugins = recordFailedPlugins({ activations: boot.activations, unsatisfied: boot.unsatisfiedRequirements, log })
+    // Recorded here alone, and not aggregated from the child the way
+    // `failedPlugins` is, because this door is profile-independent: the
+    // manifest walk runs before `selectBootPlugins` and over the same
+    // `hypHome` in both processes, so the child could only report the identical
+    // set back (issue #1576). `refreshStatus` mutates `status` field by field
+    // and persists it, so the first tick carries this one.
+    const unloadable = recordUnloadableManifests({ unloadableManifests: boot.unloadableManifests, log })
+    if (unloadable.length > 0) status.unloadableManifests = unloadable
     const source = boot.runtime.sources.get('ai-gateway')
     if (!source && boot.config?.plugins?.some(plugin => plugin.name === '@hypaware/ai-gateway' && plugin.enabled !== false)) {
       throw new Error('configured gateway failed to activate')
     }
     if (source) {
-      const ctx = boot.runtime.activationContexts?.get(source.plugin)
+      // The plugin the kernel recorded as registering the source, never
+      // `source.plugin`: that is a live read of a property on a contribution
+      // the registry stores by reference, and it picks the context the source
+      // starts under, so a neighbour redefining it after registration hands the
+      // real gateway source its own config slice, paths, logger, capability
+      // handles and permission context (#1551).
+      //
+      // With no fallback to the claim when the registry recorded no owner. In
+      // this process there is nothing an unowned `ai-gateway` can be but a
+      // contribution that took the key out of band: `runGatewayDaemon` boots
+      // its own kernel, and every registration in it reaches the registry
+      // through a plugin's `ctx.sources` facade, which brackets the call so
+      // the owner is recorded. A contribution that got the key any other way
+      // wrote the `plugin` it carries, so falling back to it asks the one
+      // party who should not choose which context the gateway source starts
+      // under. Refusing costs a gateway that was already not the registered
+      // one, and says so.
+      const owner = boot.runtime.sources.ownerOf('ai-gateway')
+      const ctx = owner === undefined ? undefined : boot.runtime.activationContexts?.get(owner)
       if (!ctx) throw new Error('gateway activation context missing')
       // The key it was looked up by, never `source.name`: that is a live read
       // of a plugin property on a contribution the registry stores by

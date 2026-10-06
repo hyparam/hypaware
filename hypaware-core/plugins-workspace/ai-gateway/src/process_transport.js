@@ -1,5 +1,6 @@
 // @ts-check
 
+import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { Exchange, createRecorder } from './recorder.js'
 
 /**
@@ -151,7 +152,7 @@ export function createCaptureSender(opts) {
       const remote = /** @type {RemoteExchange} */ (exchange)
       if (remote.accepted) {
         // Opaque session IDs only. Refuse a too-large snapshot before copying it.
-        if (ignored.size > MAX_IGNORED_SESSIONS) remote.abandon()
+        if (sessionIgnoreLoadError(ignored) || ignored.size > MAX_IGNORED_SESSIONS) remote.abandon()
         else {
           const ids = []
           let size = 2048

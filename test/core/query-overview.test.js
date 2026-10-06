@@ -330,10 +330,9 @@ test('renderOverview: the caller names the heading (setup milestone vs standing 
   assert.ok(!out.includes('What HypAware has recorded'))
 })
 
-test('renderOverview: no rows renders the empty state with what to do next', () => {
+test('renderOverview: no rows renders the empty state', () => {
   const out = renderOverview({ providerRows: [], dailyRows: [] })
   assert.match(out, /Nothing recorded yet/)
-  assert.match(out, /hyp query overview/)
   assert.ok(!out.includes('provider  '))
 })
 

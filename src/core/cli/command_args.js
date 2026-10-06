@@ -8,6 +8,15 @@ import { parseCommandArgv } from './verb_codec.js'
  */
 
 /**
+ * The states a recommendation can be marked with, spelled as the server's
+ * recommendation-status RFC spells them. A copy so a typo is refused at the
+ * gate before bytes move; the server stays the owner of the vocabulary.
+ *
+ * @ref LLP 0461#states-are-the-servers [constrained-by]: the CLI repeats the server's states, it does not define them
+ */
+const RECOMMENDATION_STATES = ['open', 'in_progress', 'applied', 'dismissed']
+
+/**
  * One argument-validation contract for the core command set.
  *
  * Before this module a command either declared a schema and rejected
@@ -39,8 +48,8 @@ export const CORE_COMMAND_ARGS = {
     schema: { type: 'object', properties: {} },
   },
   'status': {
-    usage: 'hyp status [--json]',
-    schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
+    usage: 'hyp status [--verbose] [--json]',
+    schema: { type: 'object', properties: { json: { type: 'boolean', default: false }, verbose: { type: 'boolean', default: false } } },
   },
   'client status': {
     usage: 'hyp client status [client] [--json]',
@@ -54,18 +63,17 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'ask': {
-    usage: 'hyp ask ["question"] [--list]',
+    usage: 'hyp ask ["question"]',
     schema: {
       type: 'object',
       properties: {
         question: { type: 'string', greedy: true },
-        list: { type: 'boolean', default: false },
       },
       positional: ['question'],
     },
   },
-  'client history providers': {
-    usage: 'hyp client history providers [--json]',
+  'backfill list': {
+    usage: 'hyp backfill list [--json]',
     schema: { type: 'object', properties: { json: { type: 'boolean', default: false } } },
   },
   'daemon status': {
@@ -160,7 +168,7 @@ export const CORE_COMMAND_ARGS = {
   'remote login': {
     // `<name>` in the old line, but a bare `hyp remote login` signs in to
     // the default target (LLP 0062 #bare-remote), so the target is optional.
-    usage: 'hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--browser] [--no-browser] [--no-forward] [--no-daemon]',
+    usage: 'hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--browser] [--no-browser] [--no-forward] [--no-daemon] [--force]',
     schema: {
       type: 'object',
       properties: {
@@ -172,6 +180,7 @@ export const CORE_COMMAND_ARGS = {
         'no-browser': { type: 'boolean', default: false },
         'no-forward': { type: 'boolean', default: false },
         'no-daemon': { type: 'boolean', default: false },
+        force: { type: 'boolean', default: false },
       },
       positional: ['name'],
     },
@@ -194,15 +203,12 @@ export const CORE_COMMAND_ARGS = {
       positional: ['name'],
     },
   },
-  'report render': {
-    usage: 'hyp report render [<dir>] [--no-refresh-assets]',
+  'report generate': {
+    usage: 'hyp report generate [instructions]',
     schema: {
       type: 'object',
-      properties: {
-        dir: { type: 'string' },
-        'no-refresh-assets': { type: 'boolean', default: false },
-      },
-      positional: ['dir'],
+      properties: { instructions: { type: 'string' } },
+      positional: ['instructions'],
     },
   },
   'report publish': {
@@ -220,8 +226,21 @@ export const CORE_COMMAND_ARGS = {
       positional: ['source'],
     },
   },
+  'report recommend': {
+    usage: 'hyp report recommend <file.md> [--title <title>] [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string' },
+        title: { type: 'string' },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['source'],
+    },
+  },
   'report list': {
-    usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
+    usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -229,14 +248,35 @@ export const CORE_COMMAND_ARGS = {
         period: { type: 'string' },
         limit: { type: 'string' },
         before: { type: 'string' },
+        // The flat form: the recommendations themselves, across reports. A
+        // status filter implies it, since only that route joins status.
+        recommendations: { type: 'boolean', default: false },
+        status: { type: 'array', items: { type: 'string', enum: RECOMMENDATION_STATES } },
         org: { type: 'string' },
         json: { type: 'boolean', default: false },
         remote: { type: 'string' },
       },
     },
   },
+  'report mark': {
+    usage: 'hyp report mark <id> <open|in_progress|applied|dismissed> [--reason <text>] [--link <url>]... [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        state: { type: 'string', enum: RECOMMENDATION_STATES },
+        reason: { type: 'string' },
+        // Repeatable; the codec also splits one value on commas, so a URL
+        // that carries a literal comma must percent-encode it.
+        link: { type: 'array', items: { type: 'string' } },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id', 'state'],
+    },
+  },
   'report get': {
-    usage: 'hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]',
+    usage: 'hyp report get <kind> <period> <id> [path] | <rec-id> [--output <file>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -252,6 +292,23 @@ export const CORE_COMMAND_ARGS = {
         remote: { type: 'string' },
       },
       positional: ['kind', 'period', 'id', 'path'],
+    },
+  },
+  'report fix': {
+    usage: 'hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        // The picker's filters, the listing's own: they narrow which reports
+        // the recommendations are drawn from when no id is given.
+        kind: { type: 'string' },
+        period: { type: 'string' },
+        limit: { type: 'string' },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id'],
     },
   },
   'report delete': {

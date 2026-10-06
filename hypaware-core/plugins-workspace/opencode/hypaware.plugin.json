@@ -16,21 +16,20 @@
         "format": "managed_file",
         "settings_file": ".config/opencode/plugins/hypaware.js",
         "marker_text": "// HYPWARE_OPENCODE_PLUGIN v1"
-      },
-      "launch": { "bin": "opencode", "args": ["run", "{prompt}"], "label": "OpenCode" }
+      }
     },
     "picker": [
       {
         "name": "opencode",
         "label": "OpenCode",
-        "summary": "Records OpenCode conversations from CLI and Desktop using a local plugin, with bounded history recovery.",
+        "summary": "Records your OpenCode conversations (CLI and Desktop) and imports recent history. Setup adds a plugin file to OpenCode.",
         "detect": { "settings_file": ".config/opencode/opencode.json" },
         "compose": { "plugin": { "name": "@hypaware/opencode" } }
       }
     ],
     "sources": [{ "name": "opencode" }],
     "commands": [
-      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)" },
+      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)" },
       { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
       { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
     ],

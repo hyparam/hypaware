@@ -19,12 +19,14 @@ import {
 } from '../observability/index.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { createCommandRegistry } from '../registry/commands.js'
-import { createKernelRuntime } from '../runtime/activation.js'
+import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activation.js'
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { activatePlugins } from '../runtime/loader.js'
+import { reclaimPluginTempDirs } from '../runtime/paths.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { pluginScopedConfig } from '../config/plugin_scope.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
@@ -273,6 +275,14 @@ async function dispatchInternal(argv, opts) {
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
   const ownsKernel = !opts.kernel
+  /**
+   * Set only when a boot this dispatch owns wants the sink-materialization
+   * pass. The pass itself writes warnings to `stderr`, and a `stderr` whose
+   * `write` throws has to reach the teardown, so it runs inside the `try` below
+   * rather than in the boot branch ahead of it (issue #2473).
+   * @type {{ config: HypAwareV2Config | null, withheldByProfile: PluginName[] } | undefined}
+   */
+  let sinkPass
   if (opts.kernel) {
     kernel = opts.kernel
   } else {
@@ -285,6 +295,7 @@ async function dispatchInternal(argv, opts) {
       commandRegistry: registry,
       cacheRoot,
       workspaceDir: opts.workspaceDir,
+      tmpRoot: opts.tmpRoot,
       env,
     })
     kernel = boot.runtime
@@ -297,14 +308,26 @@ async function dispatchInternal(argv, opts) {
     if (failedPlugins.length) noteInvocation({ degraded: true })
     if (boot.config) activeConfig = boot.config
     noteInvocation({ adapters: productAdapters(activeConfig.plugins ?? []) })
-
     // Lifecycle/read-only commands boot with no plugins, so no sink can
     // ever materialize; skip the pass rather than emit a guaranteed
     // `sink_plugin_not_active` warning per configured sink. The daemon's
     // own materialization (src/core/daemon/runtime.js) is untouched, so a
     // sink that genuinely fails to materialize there still surfaces.
     if (bootProfileActivatesPlugins(bootProfile)) {
-      const sinkResult = await materializeSinks(kernel, boot.config, {
+      sinkPass = { config: boot.config, withheldByProfile: boot.withheldByProfile }
+    }
+  }
+
+  // One post-boot `try`, so every exit past this point releases what the boot
+  // acquired: its sources stay listening and its per-plugin scratch dirs stay on
+  // disk otherwise, which is what an uncaught throw between here and the command
+  // body used to leave behind (issue #2473). `teardownBootOwnedKernel` swallows
+  // its own failures, so running it on a throw cannot replace the exit code or
+  // mask the error that got here, and it still deletes only the temp dirs this
+  // boot's own activation contexts recorded.
+  try {
+    if (sinkPass) {
+      const sinkResult = await materializeSinks(kernel, sinkPass.config, {
         stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
         runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
       })
@@ -313,9 +336,9 @@ async function dispatchInternal(argv, opts) {
         // `all-available`) cannot activate an opt-in plugin the config does
         // name, so its sink failure says nothing about the config.
         const excluded = sinkPluginExcludedByBootProfile(err, {
-          config: boot.config,
+          config: sinkPass.config,
           activePlugins,
-          withheldByProfile: boot.withheldByProfile,
+          withheldByProfile: sinkPass.withheldByProfile,
         })
         if (excluded) continue
         noteInvocation({ degraded: true })
@@ -326,256 +349,292 @@ async function dispatchInternal(argv, opts) {
         if (hint) stderr.write(`  → ${hint}\n`)
       }
     }
-  }
 
-  if (argv.length === 0) {
-    // TTY + empty argv re-enters as `setup` so the walkthrough is the
-    // no-arg behavior. Pass the booted kernel + registry through so
-    // we don't pay the boot cost twice.
-    try {
+    if (argv.length === 0) {
+      // TTY + empty argv re-enters as `setup` so the walkthrough is the
+      // no-arg behavior. Pass the booted kernel + registry through so
+      // we don't pay the boot cost twice.
       return await runCommandByName('setup', [], { stdout, stderr, env, cwd, registry, kernel })
-    } finally {
-      if (ownsKernel) {
-        await stopBootStartedSources(kernel)
-      }
     }
-  }
 
-  const matched = registry.match(argv)
-  if (!matched) {
-    // No command owns this argv. Before failing, see whether the leading
-    // tokens name a *group*: a prefix shared by registered subcommands
-    // (e.g. `graph`, with `graph neighbors`/`graph project` registered)
-    // and synthesize group help for it. A group that registers an explicit
-    // bare command (`query`, `remote`, …) never reaches here: it matched
-    // above and renders its own help, so the explicit registration wins.
-    const group = resolveGroupHelp(registry, argv)
-    if (group) {
-      noteInvocation({ command: 'help', kind: group.unknownSub === undefined ? 'help' : 'unknown' })
-      if (group.unknownSub !== undefined) {
-        stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
-        stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
+    const matched = registry.match(argv)
+    if (!matched) {
+      // No command owns this argv. Before failing, see whether the leading
+      // tokens name a *group*: a prefix shared by registered subcommands
+      // (e.g. `graph`, with `graph neighbors`/`graph project` registered)
+      // and synthesize group help for it. A group that registers an explicit
+      // bare command (`query`, `remote`, …) never reaches here: it matched
+      // above and renders its own help, so the explicit registration wins.
+      const group = resolveGroupHelp(registry, argv)
+      if (group) {
+        noteInvocation({ command: 'help', kind: group.unknownSub === undefined ? 'help' : 'unknown' })
+        if (group.unknownSub !== undefined) {
+          stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
+          stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
+        } else {
+          // A plugin namespace has no bare command, so its header and
+          // paragraph (when it registered one) come from the group registry.
+          // @ref LLP 0214#d2 [implements]: a registered group description reaches synthesized group help
+          renderGroupHelp({
+            stdout,
+            group: group.prefix,
+            groupCommand: registry.getGroup?.(group.prefix),
+            children: group.children,
+          })
+        }
+        return group.unknownSub !== undefined ? 2 : 0
+      }
+      // Not a group either. Before the generic "unknown command", see whether
+      // the leading token exactly names a command declared by a plugin that is
+      // bundled/installed but whose commands never reached the registry: not
+      // selected by the effective config, or selected and not activated. If so
+      // the command is *unavailable*, not unknown: report which plugin provides
+      // it and what to do, instead of implying the feature does not exist. A
+      // genuine typo matches nothing here and still gets the generic message.
+      // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
+      const inactive = await findInactivePluginForCommand(helpDiscovery, argv, failedPlugins)
+      if (inactive) {
+        // One renderer for both miss paths (here and the group probe below), so
+        // the same condition cannot print two different repair lines depending
+        // on which path detected it. The repair branches on *why* the plugin is
+        // inactive: absent from plugins[] → add it; `enabled: false` → flip it;
+        // disabled by the organization (central) layer → it cannot be enabled
+        // locally at all, because the additive merge would drop a local entry
+        // whose name central already declares (collides_with_central).
+        // @ref LLP 0154#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
+        renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
       } else {
-        // A plugin namespace has no bare command, so its header and
-        // paragraph (when it registered one) come from the group registry.
-        // @ref LLP 0214#d2 [implements]: a registered group description reaches synthesized group help
-        renderGroupHelp({
-          stdout,
-          group: group.prefix,
-          groupCommand: registry.getGroup?.(group.prefix),
-          children: group.children,
-        })
+        stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
+        stderr.write(`run 'hyp --help' for the list of available commands\n`)
       }
-      if (ownsKernel) {
-        await stopBootStartedSources(kernel)
-      }
-      return group.unknownSub !== undefined ? 2 : 0
-    }
-    // Not a group either. Before the generic "unknown command", see whether
-    // the leading token exactly names a command declared by a plugin that is
-    // bundled/installed but whose commands never reached the registry: not
-    // selected by the effective config, or selected and not activated. If so
-    // the command is *unavailable*, not unknown: report which plugin provides
-    // it and what to do, instead of implying the feature does not exist. A
-    // genuine typo matches nothing here and still gets the generic message.
-    // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
-    const inactive = await findInactivePluginForCommand(helpDiscovery, argv, failedPlugins)
-    if (inactive) {
-      // One renderer for both miss paths (here and the group probe below), so
-      // the same condition cannot print two different repair lines depending
-      // on which path detected it. The repair branches on *why* the plugin is
-      // inactive: absent from plugins[] → add it; `enabled: false` → flip it;
-      // disabled by the organization (central) layer → it cannot be enabled
-      // locally at all, because the additive merge would drop a local entry
-      // whose name central already declares (collides_with_central).
-      // @ref LLP 0154#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
-      renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
-    } else {
-      stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
-      stderr.write(`run 'hyp --help' for the list of available commands\n`)
-    }
-    if (ownsKernel) {
-      await stopBootStartedSources(kernel)
-    }
-    return 2
-  }
-
-  // A core-owned group whose every subcommand is contributed by ONE plugin
-  // (`session`, filled entirely by @hypaware/ai-gateway) has no children at
-  // all when that plugin is inactive, and the group shell still matches. Its
-  // empty subcommand table, and its `expected one of:` with nothing after it,
-  // are the "unknown" answer LLP 0153 exists to prevent, and they contradict
-  // what top-level help promises ("run it anyway: hyp names the plugin that
-  // provides it").
-  const emptyGroup =
-    matched.command.group === true && listGroupChildren(registry, matched.command.name).length === 0
-
-  // A canonical task group (`client`, `query`, `privacy`) is core-owned, so it
-  // still matches when a deeper plugin command is inactive. Check that miss
-  // before running the group command or an unavailable plugin leaf would be
-  // misreported as an unknown subcommand. An empty group is probed on its own
-  // canonical tokens instead of argv, so `hyp session`, `hyp session --help`,
-  // and `hyp session zzz` all resolve to the same answer: no subcommand of an
-  // absent plugin can be reached by any spelling.
-  // @ref LLP 0153#unavailable-not-unknown [implements]: an empty core group reports the plugin that fills it, not an empty list
-  // @ref LLP 0248#aliases [implements]: canonical and legacy plugin paths preserve inactive-plugin repair
-  if (matched.command.group === true && (emptyGroup || (matched.rest.length > 0 && !isHelpFlag(matched.rest[0])))) {
-    const probe = emptyGroup ? matched.command.name.split(' ') : argv
-    const inactive = await findInactivePluginForCommand(helpDiscovery, probe, failedPlugins)
-    // A non-empty group already matched, so only a *deeper* command can be the
-    // unavailable one. `longestCommandPrefix` falls back to the flag-stripped
-    // invocation, which collapses `hyp query --json` to the bare group token
-    // and would match any inactive plugin contributing anything under `query`:
-    // that blames a plugin for what is really an unknown subcommand. Requiring
-    // the match to be deeper than the tokens the group consumed keeps the
-    // probe answering the question it was added for.
-    const groupDepth = argv.length - matched.rest.length
-    if (inactive && (emptyGroup || inactive.token.split(' ').length > groupDepth)) {
-      renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
-      if (ownsKernel) await stopBootStartedSources(kernel)
       return 2
     }
-  }
 
-  const devRunId = env.DEV_RUN_ID
-  noteInvocation({ command: matched.command.name, kind: isHelpFlag(matched.rest[0]) || matched.command.group ? 'help' : matched.command.name === 'version' ? 'version' : 'execution' })
-  const attrs = buildAttrs({
-    [Attr.COMPONENT]: 'cmd-dispatch',
-    [Attr.OPERATION]: 'command.run',
-    command_name: matched.command.name,
-    hyp_command: matched.command.name,
-    invoked_command: matched.invokedName,
-    argv_count: argv.length,
-    ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
-  })
+    // A core-owned group whose every subcommand is contributed by ONE plugin
+    // (`session`, filled entirely by @hypaware/ai-gateway) has no children at
+    // all when that plugin is inactive, and the group shell still matches. Its
+    // empty subcommand table, and its `expected one of:` with nothing after it,
+    // are the "unknown" answer LLP 0153 exists to prevent, and they contradict
+    // what top-level help promises ("run it anyway: hyp names the plugin that
+    // provides it").
+    const emptyGroup =
+      matched.command.group === true && listGroupChildren(registry, matched.command.name).length === 0
 
-  const tracer = getTracer('cmd-dispatch')
-  const instruments = getKernelInstruments()
-  /** @type {CommandRunContext} */
-  const cmdCtx = {
-    stdout,
-    stderr,
-    stdin,
-    env,
-    cwd,
-    config: activeConfig,
-    plugins: activePlugins,
-    failedPlugins,
-    capabilities: kernel.capabilities,
-    clients: kernel.clients,
-    query: kernel.query,
-    // In-process command dispatch seam. A thin `run(name, argv)` wrapper
-    // over the module-private `runCommandByName`, populated here the same
-    // way `skills`/`agents`/`backfills` are pulled off the kernel. Exposes
-    // only the ability to invoke a registered command by name (and get its
-    // exit code), never the mutable command registry itself.
-    // @ref LLP 0130#configure-command [implements]: the wizard's configure phase runs a picker row's configure_command in-process through this seam
-    commands: {
-      run: async (name, cmdArgv) => {
-        await activateSeamCommandPlugins({
-          name,
-          registry,
+    // A canonical task group (`client`, `query`, `privacy`) is core-owned, so it
+    // still matches when a deeper plugin command is inactive. Check that miss
+    // before running the group command or an unavailable plugin leaf would be
+    // misreported as an unknown subcommand. An empty group is probed on its own
+    // canonical tokens instead of argv, so `hyp session`, `hyp session --help`,
+    // and `hyp session zzz` all resolve to the same answer: no subcommand of an
+    // absent plugin can be reached by any spelling.
+    // @ref LLP 0153#unavailable-not-unknown [implements]: an empty core group reports the plugin that fills it, not an empty list
+    // @ref LLP 0248#aliases [implements]: canonical and legacy plugin paths preserve inactive-plugin repair
+    if (matched.command.group === true && (emptyGroup || (matched.rest.length > 0 && !isHelpFlag(matched.rest[0])))) {
+      const probe = emptyGroup ? matched.command.name.split(' ') : argv
+      const inactive = await findInactivePluginForCommand(helpDiscovery, probe, failedPlugins)
+      // A non-empty group already matched, so only a *deeper* command can be the
+      // unavailable one. `longestCommandPrefix` falls back to the flag-stripped
+      // invocation, which collapses `hyp query --json` to the bare group token
+      // and would match any inactive plugin contributing anything under `query`:
+      // that blames a plugin for what is really an unknown subcommand. Requiring
+      // the match to be deeper than the tokens the group consumed keeps the
+      // probe answering the question it was added for.
+      const groupDepth = argv.length - matched.rest.length
+      if (inactive && (emptyGroup || inactive.token.split(' ').length > groupDepth)) {
+        renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
+        return 2
+      }
+    }
+
+    const devRunId = env.DEV_RUN_ID
+    noteInvocation({ command: matched.command.name, kind: isHelpFlag(matched.rest[0]) || matched.command.group ? 'help' : matched.command.name === 'version' ? 'version' : 'execution' })
+    const attrs = buildAttrs({
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'command.run',
+      command_name: matched.command.name,
+      hyp_command: matched.command.name,
+      invoked_command: matched.invokedName,
+      argv_count: argv.length,
+      ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
+    })
+
+    const tracer = getTracer('cmd-dispatch')
+    const instruments = getKernelInstruments()
+    // Whose command body is about to run. Contributing a command is a plugin
+    // extension point, so a command body is a second context the same plugin
+    // reaches the registries through, and it gets the same per-plugin facades
+    // its `activate()` holds. A core command has no owner and keeps the
+    // kernel's registries: `hyp status`, `hyp sync`, `hyp sink maintain` and
+    // the wizard read every plugin's sources and sinks, and rendering that is
+    // core's job (LLP 0009 #core-rendered-status).
+    //
+    // Asked of the registry, not read off `matched.command.plugin`: that field
+    // is the plugin's own, may be omitted at registration, and `get()` hands
+    // the stored record back so it can be rewritten afterwards. The lookup is
+    // keyed on the name argv actually matched. A registry with no `ownerOf` (a
+    // host's own, injected) falls back to the declared field.
+    // @ref LLP 0420#split [implements]: a plugin-contributed command body gets its own facades; a core command keeps the raw registries
+    const commandOwner = typeof registry.ownerOf === 'function'
+      ? registry.ownerOf(matched.invokedName)
+      : matched.command.plugin
+    const ownerFacades = commandOwner ? pluginRegistryFacades(kernel, commandOwner) : undefined
+    // And whose code is about to run, asked of the registry for the reason the
+    // owner is: `matched.command.run` is a writable property of a record `get()`
+    // hands to the registering plugin, so it cannot decide which function
+    // executes under the owner resolved a few lines up (issue #1977). A registry
+    // with no `bodyOf` (a host's own, injected) falls back to the record, the
+    // same tolerance the owner lookup extends.
+    // @ref LLP 0421#private-body [implements]: dispatch runs the body the registry validated, not the one the stored record carries now
+    const commandBody = typeof registry.bodyOf === 'function' ? registry.bodyOf(matched.invokedName) : undefined
+    /** @type {CommandRunContext} */
+    const cmdCtx = {
+      stdout,
+      stderr,
+      stdin,
+      env,
+      cwd,
+      // Same owner, same rule: a plugin's command body reads the config through
+      // its own slice, so contributing a command stops being a way to read a
+      // neighbour's section and the inline credential in it (issue #1978). A
+      // core command keeps the whole config for the reason it keeps the raw
+      // registries. `runVerbCommand` passes this object straight on as the
+      // `config` a verb's `operation` receives, so a plugin's verb is narrowed
+      // by the same binding, with no second notion of ownership to keep honest.
+      // `activePlugins` carries the manifests the one widening reads: the owner
+      // keeps the section of a plugin providing a capability it declares in
+      // `requires.capabilities`, which is how `@hypaware/claude-desktop` still
+      // resolves the gateway's pinned `listen`.
+      // @ref LLP 0422#scope [implements]: the config member joins the split LLP 0420 left it out of
+      config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
+      plugins: activePlugins,
+      failedPlugins,
+      capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,
+      clients: kernel.clients,
+      query: kernel.query,
+      // In-process command dispatch seam. A thin `run(name, argv)` wrapper
+      // over the module-private `runCommandByName`, populated here the same
+      // way `skills`/`agents`/`backfills` are pulled off the kernel. Exposes
+      // only the ability to invoke a registered command by name (and get its
+      // exit code), never the mutable command registry itself.
+      // @ref LLP 0130#configure-command [implements]: the wizard's configure phase runs a picker row's configure_command in-process through this seam
+      commands: {
+        run: async (name, cmdArgv) => {
+          await activateSeamCommandPlugins({
+            name,
+            registry,
+            kernel,
+            discovery: helpDiscovery,
+            stateRoot: obsEnv.stateDir,
+            runId: devRunId ?? `cli-${process.pid}`,
+            activePlugins,
+            env,
+          })
+          return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
+        },
+      },
+      // Narrow in-process activation seam for a command body that cannot reach
+      // `kernel`/`activePlugins` through `CommandRunContext` otherwise: given
+      // plugin names a *fresh disk read* of the effective config already
+      // selects, make them (and their dependency closure) live in THIS
+      // process's kernel if a config write mid-process just enabled them.
+      // Backs the manual-attach enable prompt's accept path, which needs
+      // `ctx.capabilities`/`gateway.getClient(name)` to see an adapter this
+      // same invocation just wrote to config.
+      // @ref LLP 0174#prompt [implements]: resolves the "CommandRunContext has
+      // no kernel handle" crux by generalizing the LLP 0139 dispatch-miss seam
+      // instead of adding a second activation mechanism
+      activatePluginClosure: (names) =>
+        activatePluginDependencyClosure({
+          seedNames: names,
           kernel,
           discovery: helpDiscovery,
           stateRoot: obsEnv.stateDir,
           runId: devRunId ?? `cli-${process.pid}`,
           activePlugins,
-        })
-        return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
-      },
-    },
-    // Narrow in-process activation seam for a command body that cannot reach
-    // `kernel`/`activePlugins` through `CommandRunContext` otherwise: given
-    // plugin names a *fresh disk read* of the effective config already
-    // selects, make them (and their dependency closure) live in THIS
-    // process's kernel if a config write mid-process just enabled them.
-    // Backs the manual-attach enable prompt's accept path, which needs
-    // `ctx.capabilities`/`gateway.getClient(name)` to see an adapter this
-    // same invocation just wrote to config.
-    // @ref LLP 0174#prompt [implements]: resolves the "CommandRunContext has
-    // no kernel handle" crux by generalizing the LLP 0139 dispatch-miss seam
-    // instead of adding a second activation mechanism
-    activatePluginClosure: (names) =>
-      activatePluginDependencyClosure({
-        seedNames: names,
-        kernel,
-        discovery: helpDiscovery,
-        stateRoot: obsEnv.stateDir,
-        runId: devRunId ?? `cli-${process.pid}`,
-        activePlugins,
-      }),
-    verbs: kernel.verbs,
-    storage: kernel.storage,
-    skills: kernel.skills,
-    agents: kernel.agents,
-    sources: kernel.sources,
-    sinks: kernel.sinks,
-    initPresets: kernel.initPresets,
-    backfills: kernel.backfills,
-    backfillMaterializers: kernel.backfillMaterializers,
-  }
+          env,
+        }),
+      // Same owner, same rule again: registering a verb is a plugin extension
+      // point, so a plugin's command body reaches the verb table through the
+      // facade its `activate()` holds and can neither release a verb it does not
+      // own nor write on a neighbour's registration (issue #1983). A core
+      // command keeps the raw registry for the reason it keeps the rest: `hyp
+      // mcp` assembles its tool list from every active plugin's verbs, and that
+      // is core's job.
+      // @ref LLP 0423#facade [implements]: the verbs member joins the LLP 0420 split, by the owner the split already resolved
+      verbs: ownerFacades ? ownerFacades.verbs : kernel.verbs,
+      storage: kernel.storage,
+      skills: kernel.skills,
+      agents: kernel.agents,
+      sources: ownerFacades ? ownerFacades.sources : kernel.sources,
+      sinks: ownerFacades ? ownerFacades.sinks : kernel.sinks,
+      initPresets: kernel.initPresets,
+      backfills: kernel.backfills,
+      backfillMaterializers: kernel.backfillMaterializers,
+    }
 
-  return context.with(ROOT_CONTEXT, () =>
-    tracer.startActiveSpan(
-      'command.run',
-      { attributes: attrs, root: true },
-      async (span) => {
-        const start = performance.now()
-        let exitCode = 1
-        try {
-          // Core owns `--help` for every registered command: a leading
-          // help flag renders registry-backed help (group table when the
-          // command has subcommands, usage otherwise) instead of running
-          // the command, so each command body stays help-free.
-          // @ref LLP 0009#central-help-interception [implements]: help renders inside command.run so it stays in command analytics
-          if (isHelpFlag(matched.rest[0])) {
-            const children = listGroupChildren(registry, matched.command.name)
-            if (children.length > 0) {
-              renderGroupHelp({ stdout, group: matched.command.name, groupCommand: matched.command, children })
+    return await context.with(ROOT_CONTEXT, () =>
+      tracer.startActiveSpan(
+        'command.run',
+        { attributes: attrs, root: true },
+        async (span) => {
+          const start = performance.now()
+          let exitCode = 1
+          try {
+            // Core owns `--help` for every registered command: a leading
+            // help flag renders registry-backed help (group table when the
+            // command has subcommands, usage otherwise) instead of running
+            // the command, so each command body stays help-free.
+            // @ref LLP 0009#central-help-interception [implements]: help renders inside command.run so it stays in command analytics
+            if (isHelpFlag(matched.rest[0])) {
+              const children = listGroupChildren(registry, matched.command.name)
+              if (children.length > 0) {
+                renderGroupHelp({ stdout, group: matched.command.name, groupCommand: matched.command, children })
+              } else {
+                renderCommandHelp({ stdout, command: matched.command })
+              }
+              exitCode = 0
             } else {
-              renderCommandHelp({ stdout, command: matched.command })
+              // Called on the stored record, so a body written as a method of
+              // its own registration still sees the `this` it saw before.
+              exitCode = await (commandBody ?? matched.command.run).call(matched.command, matched.rest, cmdCtx)
             }
-            exitCode = 0
-          } else {
-            exitCode = await matched.command.run(matched.rest, cmdCtx)
+            if (typeof exitCode !== 'number' || !Number.isFinite(exitCode)) {
+              exitCode = 0
+            }
+          } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error))
+            span.recordException(err)
+            span.setAttribute('error_kind', 'unhandled_exception')
+            stderr.write(`hyp ${matched.command.name}: ${err.message}\n`)
+            exitCode = 1
+          } finally {
+            if (!isHelpFlag(matched.rest[0])) noteCommandTransition(matched.command.name, matched.rest, exitCode)
+            if (matched.command.group && matched.rest.length > 0 && !isHelpFlag(matched.rest[0]) && exitCode !== 0) noteInvocation({ kind: 'unknown' })
+            const duration = performance.now() - start
+            const finalStatus = exitCode === 0 ? 'ok' : 'failed'
+            span.setAttribute('status', finalStatus)
+            span.setAttribute('exit_code', exitCode)
+            span.setStatus(
+              finalStatus === 'ok'
+                ? { code: SpanStatusCode.OK }
+                : { code: SpanStatusCode.ERROR, message: `exit ${exitCode}` }
+            )
+            span.end()
+            instruments.commandRunsTotal.add(1, {
+              command: matched.command.name,
+              exit_code: String(exitCode),
+            })
+            instruments.commandDurationMs.record(duration, {
+              command: matched.command.name,
+            })
           }
-          if (typeof exitCode !== 'number' || !Number.isFinite(exitCode)) {
-            exitCode = 0
-          }
-        } catch (error) {
-          const err = error instanceof Error ? error : new Error(String(error))
-          span.recordException(err)
-          span.setAttribute('error_kind', 'unhandled_exception')
-          stderr.write(`hyp ${matched.command.name}: ${err.message}\n`)
-          exitCode = 1
-        } finally {
-          if (!isHelpFlag(matched.rest[0])) noteCommandTransition(matched.command.name, matched.rest, exitCode)
-          if (matched.command.group && matched.rest.length > 0 && !isHelpFlag(matched.rest[0]) && exitCode !== 0) noteInvocation({ kind: 'unknown' })
-          if (ownsKernel) {
-            await stopBootStartedSources(kernel)
-          }
-          const duration = performance.now() - start
-          const finalStatus = exitCode === 0 ? 'ok' : 'failed'
-          span.setAttribute('status', finalStatus)
-          span.setAttribute('exit_code', exitCode)
-          span.setStatus(
-            finalStatus === 'ok'
-              ? { code: SpanStatusCode.OK }
-              : { code: SpanStatusCode.ERROR, message: `exit ${exitCode}` }
-          )
-          span.end()
-          instruments.commandRunsTotal.add(1, {
-            command: matched.command.name,
-            exit_code: String(exitCode),
-          })
-          instruments.commandDurationMs.record(duration, {
-            command: matched.command.name,
-          })
+          return exitCode
         }
-        return exitCode
-      }
+      )
     )
-  )
+  } finally {
+    if (ownsKernel) await teardownBootOwnedKernel(kernel)
+  }
 }
 
 /**
@@ -692,24 +751,45 @@ export function decideBootProfile(argv, registry) {
 }
 
 /**
- * Some plugins currently start listeners during activation. For a
- * one-shot CLI command, any source that was started only because this
- * dispatch booted the kernel must be closed before returning or the
- * Node process will stay alive after printing its result.
+ * Release what this dispatch's own kernel boot acquired, in the order it has
+ * to come off: the listeners some plugins start during activation, then the
+ * per-boot scratch directories activation created.
+ *
+ * Sources first, because a one-shot CLI command whose source is still
+ * listening keeps the Node process alive after it has printed its result.
+ * The temp dirs after, because that is where `encodePartition` stages a sink's
+ * in-flight blob (`src/core/sinks/encoder.js`, read by `@hypaware/local-fs`
+ * and `@hypaware/s3`): every call site runs once the command body has
+ * resolved, so an export the body drove has already written its destination
+ * file and taken its last byte out of the scratch dir (issue #2465).
  *
  * Injected kernels belong to callers and are intentionally not cleaned
  * up here; smokes and daemon internals manage their own source
- * lifecycles.
+ * lifecycles and the temp dirs of their own boots.
  *
  * @param {ReturnType<typeof createKernelRuntime>} kernel
  */
-async function stopBootStartedSources(kernel) {
+async function teardownBootOwnedKernel(kernel) {
   try {
     await kernel.sources.stopAll()
   } catch {
     // Source cleanup is best-effort; command result rendering has
     // already completed, and individual source stop failures are not
     // actionable from the dispatcher layer.
+  }
+  try {
+    // The activation contexts are the only record of where this boot's temp dirs
+    // landed: `createPluginPaths` resolves `tempBase` from `tmpRoot ?? os.tmpdir()`,
+    // so re-deriving the paths here would be guessing at a root the kernel
+    // already holds. A plugin whose `activate()` threw is in the map too, and its
+    // dirs were created before the throw, so it gets reclaimed as well.
+    await reclaimPluginTempDirs(
+      Array.from(kernel.activationContexts.values(), (ctx) => ctx.paths.tempDir)
+    )
+  } catch {
+    // Same best-effort contract as source cleanup above: teardown runs after
+    // the command result is already computed, so a scratch dir we cannot
+    // resolve or remove is a leak, not something the dispatcher can act on.
   }
 }
 
@@ -844,7 +924,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   renderJourneyHelpSection(stdout, 'Getting started:', rows, 'getting-started', ['setup', 'status'])
   renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'query', 'report'])
   renderJourneyHelpSection(stdout, 'Control capture and movement:', rows, 'capture-movement', [
-    'client', 'privacy', 'session', 'join', 'leave', 'sync',
+    'client', 'backfill', 'privacy', 'session', 'join', 'leave', 'sync',
   ])
   const preferredAdditional = [
     'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'graph',
@@ -1011,6 +1091,7 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
     configPath,
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
+    migrateGrep: true,
   })
   const selection = selectBootPlugins({
     discovered: bundled,
@@ -1050,10 +1131,11 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
  *   stateRoot: string,
  *   runId: string,
  *   activePlugins: ActivePlugin[],
+ *   env: NodeJS.ProcessEnv,
  * }} args
  * @returns {Promise<void>}
  */
-async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins }) {
+async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins, env }) {
   try {
     if (typeof name !== 'string' || name.length === 0 || name.startsWith('-')) return
     if (registry.match([name])) return
@@ -1080,6 +1162,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
       stateRoot,
       runId,
       activePlugins,
+      env,
     })
     // Parity with the pre-generalization guard: if the owner itself never
     // made it into `activated` (unresolvable, or resolvable but its own
@@ -1139,6 +1222,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
  *   runId: string,
  *   activePlugins: ActivePlugin[],
  *   selection?: Awaited<ReturnType<typeof computeBootSelection>>,
+ *   env: NodeJS.ProcessEnv,
  * }} args
  * @returns {Promise<{ activated: string[], failed: string[] }>}
  * @ref LLP 0174#prompt [implements]: the manual-attach accept path's
@@ -1153,6 +1237,7 @@ export async function activatePluginDependencyClosure({
   runId,
   activePlugins,
   selection,
+  env,
 }) {
   const activeNames = new Set(activePlugins.map((p) => p.name))
   const seeds = seedNames.filter((n) => typeof n === 'string' && n.length > 0 && !activeNames.has(n))
@@ -1223,7 +1308,7 @@ export async function activatePluginDependencyClosure({
       }))
     if (entries.length === 0) return { activated: [], failed: seeds }
 
-    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel })
+    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel, env })
     /** @type {string[]} */
     const activated = []
     for (const r of result.results) {
@@ -1377,21 +1462,6 @@ function renderInactivePluginError({ stderr, inactive, discovery, env }) {
       `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(discovery.configPath, env)}\n`
     )
   }
-}
-
-/**
- * Does `manifest` declare a command whose first word is `token`?
- *
- * @param {PluginManifest} manifest
- * @param {string} token
- * @returns {boolean}
- */
-function declaresCommandHead(manifest, token) {
-  for (const cmd of manifest.contributes?.commands ?? []) {
-    if (!cmd || typeof cmd.name !== 'string') continue
-    if (cmd.name.split(' ')[0] === token) return true
-  }
-  return false
 }
 
 /**

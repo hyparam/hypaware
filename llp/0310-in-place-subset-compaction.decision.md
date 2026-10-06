@@ -20,6 +20,9 @@ early returns must not take its only reclaimer with them)
 a directory inside the partition, because the cursor that names it is rejected
 as unreadable when it resolves anywhere else)
 
+**Extended-by:** LLP 0417#cache-reclamation (explicit session purges force a
+fresh generation so the retired history can be reclaimed after its grace).
+
 > Routine compaction dueness on a source-table generation is served by an
 > in-place subset rewrite: icebird's files-scoped `icebergRewrite` merges only
 > the fragmented partition tuples, committed as a `replace` snapshot into the

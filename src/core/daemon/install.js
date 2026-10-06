@@ -3,7 +3,7 @@
 import process from 'node:process'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { ensureDurableBinForNpx, isNpxBinPath } from '../cli/global_install.js'
+import { ensureDurableBin, writeCliPathGuidance } from '../cli/global_install.js'
 
 import {
   LAUNCH_LABEL,
@@ -151,39 +151,25 @@ function withDaemonOp(op, platform, label, fn, okFields) {
 }
 
 /**
- * The single choke point that keeps a daemon from ever being pinned to
- * an ephemeral npx bin. When `npx hypaware` installs the daemon, the
- * resolved binPath points into npm's `~/.npm/_npx/<hash>/...` cache,
- * which vanishes the moment npx exits, leaving the host recorded but
- * with no `hyp` control surface (status/policy/detach/uninstall all
- * impossible). Every non-dry-run install funnels through `installDaemon`
- * (walkthrough finale, `hyp daemon install`, and the join/enroll lane),
- * so upgrading to a durable global bin here makes "a daemon is never
- * installed against an `_npx` bin" a single invariant instead of a
- * per-call-site obligation only the walkthrough remembered to honor.
- *
- * Escape hatches survive: an explicit `--bin` sets `binExplicit`, and
- * dry-run never reaches here (it renders through `planDaemonInstall`).
- *
+ * Every daemon installation resolves its CLI before writing a service unit.
+ * Explicit --bin remains an intentional entrypoint override.
  * @param {DaemonInstallOptions} options
  * @returns {Promise<{ binPath: string, globalInstall: DurableBinResult }>}
  */
 async function resolveDurableBinPath(options) {
   const seam = options.durableBin ?? {}
   const env = seam.env ?? process.env
-  if (options.binExplicit || !isNpxBinPath(options.binPath, env)) {
-    return {
+  const stderr = seam.stderr ?? process.stderr
+  const durable = options.binExplicit
+    ? { binPath: options.binPath, installed: false, skipped: true }
+    : await ensureDurableBin({
+      ...seam,
       binPath: options.binPath,
-      globalInstall: { binPath: options.binPath, installed: false, skipped: true },
-    }
-  }
-  const durable = await ensureDurableBinForNpx({
-    binPath: options.binPath,
-    env,
-    stdout: seam.stdout ?? process.stdout,
-    stderr: seam.stderr ?? process.stderr,
-    ...(seam.runner ? { runner: seam.runner } : {}),
-  })
+      force: options.force,
+      env,
+      stdout: seam.stdout ?? process.stdout,
+      stderr,
+    })
   return { binPath: durable.binPath, globalInstall: durable }
 }
 
@@ -218,6 +204,8 @@ export async function installDaemon(options) {
       const plan = platform === 'darwin'
         ? await macos.installLaunchAgent(withBin)
         : await linux.installSystemdUnit(withBin)
+      writeCliPathGuidance(binPath, merged.durableBin?.env ?? process.env,
+        merged.durableBin?.stderr ?? process.stderr)
       return Object.assign(plan, { globalInstall })
     },
     (plan) => ({
@@ -270,6 +258,24 @@ export async function startServiceDaemon(options) {
 }
 
 /**
+ * Stop the installed service while preserving its installation.
+ * @param {DaemonServiceOptions} options
+ * @returns {Promise<void>}
+ */
+export async function stopServiceDaemon(options) {
+  const platform = options.platform ?? process.platform
+  if (!platformIsSupported(platform)) {
+    throw new DaemonInstallError(`unsupported platform: ${platform}`)
+  }
+  await withDaemonOp(
+    'stop',
+    platform,
+    options.label ?? defaultLabelFor(platform),
+    () => platform === 'darwin' ? macos.stopLaunchAgent(options) : linux.stopSystemdUnit(options),
+  )
+}
+
+/**
  * Restart the installed service.
  *
  * @param {DaemonServiceOptions} options
@@ -303,7 +309,7 @@ export async function restartServiceDaemon(options) {
  * @param {NodeJS.Platform} platform
  * @param {DaemonServiceOptions} options
  * @param {string} label
- * @returns {Promise<{ loaded: boolean, pid?: number }>}
+ * @returns {Promise<{ loaded: boolean, active?: boolean, pid?: number }>}
  */
 async function serviceRuntimeStatus(platform, options, label) {
   try {
@@ -331,7 +337,7 @@ async function serviceRuntimeStatus(platform, options, label) {
  * `daemon.run` span; this one tracks the installer-facing query).
  *
  * @param {DaemonServiceOptions} options
- * @returns {Promise<{ installed: boolean, loaded: boolean, pid?: number, platform: NodeJS.Platform }>}
+ * @returns {Promise<{ installed: boolean, loaded: boolean, active?: boolean, pid?: number, platform: NodeJS.Platform }>}
  */
 export async function serviceDaemonStatus(options) {
   const platform = options.platform ?? process.platform
@@ -360,7 +366,7 @@ export async function serviceDaemonStatus(options) {
       // throw escapes callers that only ever branch on `installed`.
       const runtime = installed
         ? await serviceRuntimeStatus(platform, options, label)
-        : { loaded: false, pid: undefined }
+        : { loaded: false, active: undefined, pid: undefined }
       log.info('daemon.status', {
         hyp_platform: platform,
         service_label: label,
@@ -368,7 +374,7 @@ export async function serviceDaemonStatus(options) {
         loaded: runtime.loaded,
         exit_status: 'ok',
       })
-      return { installed, loaded: runtime.loaded, pid: runtime.pid, platform }
+      return { installed, loaded: runtime.loaded, active: runtime.active, pid: runtime.pid, platform }
     },
     { component: 'daemon' },
   )

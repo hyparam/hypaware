@@ -12,9 +12,7 @@ import { snappyCompressor } from 'hysnappy'
  * through icebird's `writeParquet` takes a `codec` but no
  * `compressors` at all: cache ingest FLUSH (`partition.js` ->
  * `appendRowsToTable`), and `stream_append.js`'s own `legacyAppend`
- * fallback for a table it cannot stream into. The grep sidecar build
- * (`search/index_worker_thread.js`) is hypgrep's `createIndex`, which
- * constructs its own `ParquetWriter` inside the library. So the fast
+ * fallback for a table it cannot stream into. So the fast
  * codec reaching "the cache" is the streamed compaction REWRITE, not
  * every byte the cache writes.
  *

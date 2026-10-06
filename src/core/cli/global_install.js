@@ -1,10 +1,11 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync, realpathSync, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { isTty } from './stdio.js'
 import { fileURLToPath } from 'node:url'
 
 /**
@@ -34,57 +35,104 @@ export class GlobalInstallError extends Error {
   }
 }
 
+/** A declined or unavailable durable install must stop setup before attach. */
+export class DurableBinRequiredError extends GlobalInstallError {}
+
 /**
- * When `npx hypaware` installs the daemon directly, `process.argv[1]`
- * points into npm's `_npx` cache. Install the same package globally
- * first and use that durable binary for launchd/systemd.
- *
- * Explicit `--bin` callers already supplied their stable entrypoint,
- * so this helper should only be called for default daemon installs.
+ * Resolve the CLI before persisting a service. Headless runs try the global
+ * install; an interactive run offers it first. Falling back to the existing
+ * tree needs explicit consent or --force.
  *
  * @param {{
  *   binPath: string,
  *   env: NodeJS.ProcessEnv,
- *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
- *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   stdout: { write(chunk: string): unknown },
+ *   stderr: { write(chunk: string): unknown },
+ *   stdin?: NodeJS.ReadableStream,
+ *   interactive?: boolean,
+ *   force?: boolean,
+ *   confirm?: (question: string) => Promise<boolean>,
  *   runner?: CommandRunner,
  * }} opts
  * @returns {Promise<DurableBinResult>}
  */
-export async function ensureDurableBinForNpx(opts) {
+// @ref LLP 0404#install-policy [implements]: a fragile daemon path needs consent or force
+export async function ensureDurableBin(opts) {
   const binPath = path.resolve(opts.binPath)
-  if (!isNpxBinPath(binPath, opts.env)) {
+  if (!isEphemeralBinPath(binPath, opts.env)) {
     return { binPath, installed: false, skipped: true }
   }
 
   const pkg = await readPackageIdentity()
-  const packageSpec = `${pkg.name}@${pkg.version}`
+  // @ref LLP 0405#command [implements]: let npm resolve the unversioned package
+  const packageSpec = pkg.name
   const run = opts.runner ?? runCommand
+  const interactive = opts.interactive ?? isTty(opts.stdin ?? process.stdin)
+  const confirm = async (/** @type {string} */ question, defaultYes = false) => {
+    if (opts.confirm) return opts.confirm(question)
+    const { askYesNo } = await import('./confirm.js')
+    return askYesNo(opts, question, { defaultYes })
+  }
+  let failure = ''
+  const kind = isNpxBinPath(binPath, opts.env) ? 'npx' : 'node_modules install'
+  opts.stderr.write(`warning: ${binPath} is ${describeEphemeralBinPath(binPath,
+    'background capture and management commands can stop', opts.env)}.\n`)
 
-  opts.stdout.write(`npx detected: installing durable CLI with npm install -g ${packageSpec}\n`)
-  const install = await run('npm', ['install', '-g', packageSpec], {
-    env: opts.env,
-    cwd: PACKAGE_ROOT,
-  })
-  if (install.exitCode !== 0) {
-    const detail = compactCommandError(install)
-    throw new GlobalInstallError(
-      `npx detected, but npm install -g ${packageSpec} failed${detail ? `: ${detail}` : ''}. ` +
-      `Run 'npm install -g ${packageSpec}' manually, then rerun 'hyp setup', or pass ` +
-      `'--bin <stable-hypaware.js>' to use an explicit daemon binary.`
-    )
+  if (!interactive || await confirm(`Install a global CLI with npm install -g ${packageSpec}? [Y/n]: `, true)) {
+    opts.stdout.write(`${kind} detected: installing durable CLI with npm install -g ${packageSpec}\n`)
+    try {
+      const install = await run('npm', ['install', '-g', packageSpec], {
+        env: opts.env,
+        cwd: PACKAGE_ROOT,
+      })
+      if (install.exitCode !== 0) {
+        const detail = compactCommandError(install)
+        throw new GlobalInstallError(`npm install -g ${packageSpec} failed${detail ? `: ${detail}` : ''}`)
+      }
+      const prefix = await globalPrefix(run, opts.env)
+      const globalBin = globalHypawareBin(prefix, process.platform)
+      opts.stdout.write(`global CLI: ${globalBin}\n`)
+      return { binPath: globalBin, installed: true, skipped: false, packageSpec, globalPrefix: prefix }
+    } catch (err) {
+      if (!(err instanceof GlobalInstallError)) throw err
+      failure = err.message
+      opts.stderr.write(`warning: ${err.message}\n`)
+    }
   }
 
-  const prefix = await globalPrefix(run, opts.env)
-  const globalBin = globalHypawareBin(prefix, process.platform)
-  opts.stdout.write(`global CLI: ${globalBin}\n`)
-  return {
-    binPath: globalBin,
-    installed: true,
-    skipped: false,
-    packageSpec,
-    globalPrefix: prefix,
+  if (opts.force || (interactive && await confirm(
+    'Continue with this installation anyway? Removing its directory can break capture and CLI commands. [y/N]: '
+  ))) {
+    opts.stderr.write(`warning: continuing with ${binPath}; keep this installation directory to retain background capture.\n`)
+    return { binPath, installed: false, skipped: true }
   }
+  throw new DurableBinRequiredError(
+    (failure ? `${failure}. ` : '') +
+    `A durable CLI is required. Run 'npm install -g ${packageSpec}' and retry setup, ` +
+    'or pass --force to allow the existing installation despite the warning.'
+  )
+}
+
+/**
+ * npm injects temporary .bin directories into PATH, so only a `hyp` found
+ * outside them is still there after this command exits. Any such `hyp`
+ * keeps this quiet: which copy it is stays the user's business. This is
+ * advice only: never change the user's shell configuration.
+ * @param {string} binPath
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ write(chunk: string): unknown }} stderr
+ */
+// @ref LLP 0404#shell-availability [implements]: print a repair and an absolute command without editing the shell
+export function writeCliPathGuidance(binPath, env, stderr) {
+  if (findInstalledHypawareBin(env, process.platform, undefined, 'hyp')) return
+  const quote = (/** @type {string} */ value) => "'" + value.replaceAll("'", "'\\''") + "'"
+  stderr.write('warning: hyp is not on your shell PATH.\n')
+  if (!isEphemeralBinPath(binPath, env) && path.basename(binPath) === 'hypaware') {
+    stderr.write(`For sh/bash/zsh, add this line to your shell configuration: export PATH=${quote(path.dirname(binPath))}:"$PATH"\n`)
+  } else {
+    stderr.write("To make hyp available outside this directory, run: npm install -g hypaware\n")
+  }
+  stderr.write(`Manage this installation now with: ${quote(process.execPath)} ${quote(binPath)} status\n`)
 }
 
 /**
@@ -126,48 +174,89 @@ export function isNpxBinPath(binPath, env = process.env) {
  * A manifest that cannot be read answers "durable", so the fail direction is a
  * missed ephemeral path - today's behaviour - and never a warning on a machine
  * with nothing wrong with it. For the entrypoint callers that is the whole
- * story, since nothing can be running out of a tree that is not there. It is
- * weaker for `markerRecordsEphemeralHookBin`, which asks about a path recorded
- * some time ago: delete the whole project and the manifest goes with it, so the
- * recorded command reads durable again and the re-attach that would rewrite it
- * fast-paths at "already attached". `_npx` keeps answering off the path shape
- * alone and survives its own prune; this one does not survive an `rm -rf` of
- * the project root. Closing that would mean calling a recorded path stale for
- * merely not resolving, which is the case that function deliberately leaves
- * alone (a CLI moves for ordinary reasons), so it is a known edge and not an
- * oversight. A global root some other package manager does
- * write a manifest beside (pnpm's `global/<n>` and yarn's `config/yarn/global`
- * are the two) reads as ephemeral. What that costs is the `$PATH` walk each
- * caller already runs: coming back empty it records what it was handed,
- * exactly as before, and pays one warning, which for that reason names no
- * tree it cannot prove ({@link describeEphemeralBinPath}, issue #1625); finding
- * something it records the first durable `hypaware` on `$PATH`, which is the
- * copy a bare `hyp` runs anyway. Neither answer is a path that is not there,
- * which is the only outcome this predicate exists to prevent.
+ * story, since nothing can be running out of a tree that is not there.
+ * {@link isEphemeralRecordedBinPath} is the form for a path written down some
+ * time ago, where a tree that is not there is the whole point. A global root
+ * some other package manager does write a manifest beside (pnpm's `global/<n>`
+ * and yarn's `config/yarn/global` are the two) reads as ephemeral. What that
+ * costs is the `$PATH` walk each caller already runs: coming back empty it
+ * records what it was handed, exactly as before, and pays one warning, which
+ * for that reason names no tree it cannot prove
+ * ({@link describeEphemeralBinPath}, issue #1625); finding something it records
+ * the first durable `hypaware` on `$PATH`, which is the copy a bare `hyp` runs
+ * anyway. Neither answer is a path that is not there, which is the only outcome
+ * this predicate exists to prevent.
  *
  * @param {string} binPath
  * @param {NodeJS.ProcessEnv} env
  * @returns {boolean}
  */
 export function isEphemeralBinPath(binPath, env = process.env) {
+  return isEphemeralTreePath(binPath, env, false)
+}
+
+/**
+ * The same verdict for a path written down earlier rather than one this
+ * process is running from, with one arm the live test cannot have: a recorded
+ * path whose outermost `node_modules` is gone is ephemeral. The manifest that
+ * proves the tree was a project's is deleted with the project, so without it a
+ * deleted checkout reads durable again on exactly the machine whose recorded
+ * command is certainly dead (issue #1624).
+ *
+ * The vanished tree decides, never the vanished bin. A recorded path carrying
+ * no `node_modules` at all is left as it was however little of it is still on
+ * disk: a CLI moves for ordinary reasons, and "gone" cannot tell those apart
+ * from a deletion. Those reasons also leave the old install where it is (a node
+ * version switch and a prefix change only stop resolving one), so the global
+ * roots they move between keep their `node_modules` and go on reading durable.
+ * A manifest that cannot be read still answers durable here too, so this arm
+ * turns only on one confirmed absent, never merely unreadable.
+ *
+ * @ref LLP 0434#rule [implements]: a recorded CLI path whose dependency tree is gone is drift
+ * @param {string} binPath
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+export function isEphemeralRecordedBinPath(binPath, env = process.env) {
+  return isEphemeralTreePath(binPath, env, true)
+}
+
+/**
+ * @param {string} binPath
+ * @param {NodeJS.ProcessEnv} env
+ * @param {boolean} vanishedTreeIsEphemeral whether a `node_modules` no longer
+ *   on disk answers "ephemeral" rather than falling back to "durable"
+ * @returns {boolean}
+ */
+function isEphemeralTreePath(binPath, env, vanishedTreeIsEphemeral) {
   if (isNpxBinPath(binPath, env)) return true
   let dir = path.resolve(binPath)
   /** @type {string | undefined} */
-  let projectRoot
+  let tree
   for (;;) {
     const parent = path.dirname(dir)
     if (parent === dir) break
     // Whole segment, the same rigour as the `_npx` test above: a directory
     // named `node_modules_old` is a directory, not a dependency tree. Climbing
     // upwards, the last match found is the outermost one.
-    if (path.basename(dir) === 'node_modules') projectRoot = parent
+    if (path.basename(dir) === 'node_modules') tree = dir
     dir = parent
   }
-  if (projectRoot === undefined) return false
+  if (tree === undefined) return false
   try {
-    return statSync(path.join(projectRoot, 'package.json')).isFile()
-  } catch {
-    return false
+    return statSync(path.join(path.dirname(tree), 'package.json')).isFile()
+  } catch (err) {
+    // Absent, not unreadable. `existsSync` collapses every error to `false`,
+    // so without this an intact tree whose root is merely unreadable (a
+    // checkout under macOS TCC, a stalled network mount) would read ephemeral.
+    // LLP 0434#rule licenses this arm only for a confirmed-gone tree; an
+    // unreadable tree is not known-gone, since a denied-search directory
+    // returns EACCES for any child stat, never ENOENT. The residual cost LLP
+    // 0434#cost leaves open: a tree truly deleted under an unreadable ancestor
+    // still reads durable here.
+    if (!vanishedTreeIsEphemeral) return false
+    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') return false
+    return !existsSync(tree)
   }
 }
 
@@ -205,9 +294,73 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
 }
 
 /**
+ * The other half of that verdict, for the case where the `$PATH` walk did find
+ * something: the path recorded is not the copy that ran the command.
+ *
+ * Recording the entrypoint instead is the defect the walk exists to fix, so the
+ * swap is right and stays. What it is not is free: {@link findInstalledHypawareBin}
+ * compares no versions, so a team that pinned `hypaware` as a project
+ * dependency silently gets whatever older global copy is installed, flagged
+ * durable, and a subcommand that copy predates then fails at exit 0 - the same
+ * silence, one step along. Hence a notice naming both copies and the override
+ * that settles it, which is the only thing the operator can do about it.
+ *
+ * One function because both callers (`@hypaware/claude`'s managed hook,
+ * `@hypaware/claude-desktop`'s credential wrapper) are wording one verdict,
+ * for the same reason {@link describeEphemeralBinPath} words the other one.
+ *
+ * @param {string} binPath the durable copy that was recorded
+ * @param {string} entryPath the entrypoint that ran the command
+ * @param {string} subject what did the recording, as a noun phrase: it is
+ *   spliced in front of "records ...", so "the managed hook", not "hook"
+ * @returns {string}
+ */
+export function describeRepointedBinPath(binPath, entryPath, subject) {
+  return `${subject} records ${binPath}, not the ${entryPath} that ran this command, `
+    + 'because that copy sits in a tree that gets removed; the two can be different versions. '
+    + 'Set HYPAWARE_BIN to pin the copy you mean'
+}
+
+/**
+ * Whether two spellings name one file, for a caller deciding whether the walk
+ * actually moved.
+ *
+ * The two sides arrive spelled differently on purpose: the walk answers with
+ * `$PATH`'s own spelling, which for a global install is usually a symlink into
+ * the package tree, while the entrypoint reaches these callers resolved. A
+ * plain string compare therefore reads one install as two copies, and the
+ * install it reads that way is exactly the one that gets here: a pnpm or yarn
+ * global root carries the manifest that makes {@link isEphemeralBinPath} send
+ * it down the walk in the first place (issue #1625). Reported as a swap, that
+ * operator is told their one CLI may be two versions of itself.
+ *
+ * For the verdict only. Which spelling gets recorded stays the caller's
+ * decision, and stays the durable name rather than the versioned directory it
+ * currently points at.
+ *
+ * A spelling that will not resolve (gone, or the stat refused) falls back to
+ * itself, which is the conservative answer here: two names the filesystem
+ * cannot confirm are one file stay reported as the swap they look like.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function isSameBinFile(a, b) {
+  const real = (/** @type {string} */ p) => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  return real(a) === real(b)
+}
+
+/**
  * The absolute path of an already-installed HypAware CLI, or `undefined`.
  *
- * The read-only counterpart to `ensureDurableBinForNpx`, for a caller that must
+ * The read-only counterpart to `ensureDurableBin`, for a caller that must
  * record a CLI path on disk but cannot spend an `npm install -g` to get one: it
  * finds only what is already there, so it stays synchronous and total.
  *
@@ -231,9 +384,7 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
  *
  * It answers "where is an installed `hypaware`", not "where is *this*
  * `hypaware`": the first accepted executable of that name wins and no version
- * is compared, which is the one place it parts company with
- * `ensureDurableBinForNpx` and its deliberate `name@version` pin. Telling the
- * difference means resolving the candidate's own `package.json` across every
+ * is compared. Telling the difference means resolving the candidate's own `package.json` across every
  * install layout (npm, pnpm, yarn, and volta/nvm/asdf shims) or spawning it
  * for `--version`, and each buys the check by giving up either correctness on
  * a layout nobody enumerated or the synchronous, total contract above. So skew
@@ -250,9 +401,10 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
  * @param {NodeJS.Platform} [platform]
  * @param {(candidate: string) => boolean} [accept] extra test a candidate must
  *   pass; a rejection resumes the walk at the next `$PATH` entry
+ * @param {'hypaware' | 'hyp'} [command] which published alias to resolve
  * @returns {string | undefined}
  */
-export function findInstalledHypawareBin(env = process.env, platform = process.platform, accept) {
+export function findInstalledHypawareBin(env = process.env, platform = process.platform, accept, command = 'hypaware') {
   const exts = platform === 'win32'
     ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
     : ['']
@@ -274,7 +426,7 @@ export function findInstalledHypawareBin(env = process.env, platform = process.p
     // install's own script lives under one by construction.
     if (isNpxBinPath(dir, env) || dir.split(path.sep).includes('node_modules')) continue
     for (const ext of exts) {
-      const candidate = path.resolve(dir, 'hypaware' + ext)
+      const candidate = path.resolve(dir, command + ext)
       try {
         // `X_OK` alone is true for a directory, because directories are
         // searchable. A caller that records the answer would pin itself to
@@ -347,8 +499,8 @@ function runCommand(cmd, args, opts) {
     })
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8') })
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8') })
+    child.stdout.on('data', (chunk) => { stdout = (stdout + chunk.toString('utf8')).slice(-16384) })
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString('utf8')).slice(-16384) })
     child.on('error', (err) => {
       resolve({ exitCode: 1, stdout, stderr: err.message })
     })

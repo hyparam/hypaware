@@ -1,8 +1,17 @@
 {
   "name": "hypaware",
-  "version": "1.34.0",
+  "version": "1.40.0",
   "type": "module",
   "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
+  "license": "MIT",
+  "homepage": "https://hypaware.ai/?utm_source=npm&utm_medium=package",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hyparam/hypaware.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hyparam/hypaware/issues"
+  },
   "bin": {
     "hypaware": "./bin/hypaware.js",
     "hyp": "./bin/hypaware.js"
@@ -64,6 +73,7 @@
     "bin/",
     "src/",
     "hypaware-core/",
+    "packages/pi-extension/",
     "types/",
     "hypaware-plugin-kernel-types.d.ts"
   ],
@@ -80,34 +90,26 @@
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1128.0",
-    "@aws-sdk/credential-provider-ini": "3.973.15",
-    "hyparquet": "1.30.0",
-    "hyparquet-compressors": "1.1.1",
-    "hypgrep": "0.5.2",
+    "@aws-sdk/client-s3": "3.1142.0",
+    "@aws-sdk/credential-provider-ini": "3.973.17",
+    "hyparquet": "1.31.2",
+    "hyparquet-compressors": "1.1.2",
     "hysnappy": "1.1.1",
-    "icebird": "0.8.28",
-    "marked": "18.0.12",
-    "squirreling": "0.16.5"
+    "icebird": "0.8.33",
+    "marked": "18.0.14",
+    "squirreling": "0.16.8"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.16.9",
+    "hyparquet-writer": "0.16.10",
     "hypvector": "0.2.2"
   },
   "overrides": {
-    "hyparquet-writer@0.16.9": {
-      "hyparquet": "1.30.0"
-    },
-    "icebird": {
-      "hyparquet": "1.30.0"
-    },
-    "hypgrep": {
-      "hyparquet": "1.30.0",
-      "hyparquet-writer": "0.16.9"
+    "hyparquet-writer@0.16.10": {
+      "hyparquet": "1.31.2"
     }
   },
   "devDependencies": {
-    "@types/node": "26.5.0",
+    "@types/node": "26.6.3",
     "typescript": "7.0.2"
   }
 }

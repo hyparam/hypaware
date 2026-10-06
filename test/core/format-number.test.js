@@ -98,7 +98,13 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
  * this file holds this array to the set of shipped modules that import
  * `groupThousands`, and a third importer reds until it is named here.
  */
-const COUNT_RENDERERS = ['src/core/commands/sync.js', 'src/core/query/overview.js']
+const COUNT_RENDERERS = [
+  'hypaware-core/smoke/flows/cache_lifecycle_maintenance.js',
+  'src/core/cli/walkthrough.js',
+  'src/core/commands/query.js',
+  'src/core/commands/sync.js',
+  'src/core/query/overview.js',
+]
 
 /**
  * Every route from these modules to the host's own formatting.
@@ -442,15 +448,14 @@ test('the surfaces that render counts still route the digits through the one gro
  * to be free to name the thing it forbids, and here the needle sits in code
  * (the regex, and the cases that pin it) where blanking cannot reach it.
  * Everything else is in scope, not just `src/`: the bundled plugins, `bin/`,
- * the smoke flows, `scripts/`, and also `x/` and `benchmarks/`, which the
- * published `files` list does not carry. Wider than what ships, deliberately.
+ * the smoke flows, `scripts/`, and also `benchmarks/`, which the published
+ * `files` list does not carry. Wider than what ships, deliberately.
  * A count rendered by a plugin command reads the machine exactly as hard as one
  * rendered by `hyp sync`, scoping this to core would have exempted most of the
  * tree a new command can land in, and the alternative to "everything but
  * `test/`" is a second list of directories to keep in step with the first. The
- * price is that a throwaway repro under `x/` is held to the same rule as a
- * command, which is a sentence in a scratch file rather than a block on
- * anything a user sees.
+ * price is that a throwaway repro is held to the same rule as a command, which
+ * is a sentence in a scratch file rather than a block on anything a user sees.
  *
  * @type {{ rel: string, lines: string[] }[] | null}
  */

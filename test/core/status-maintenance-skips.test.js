@@ -399,7 +399,7 @@ test('hyp status names the frozen partitions, and says so without calling the in
     assert.ok(diagnostic, 'a frozen partition raises a diagnostic an operator scanning status will see')
     assert.equal(diagnostic.severity, 'warning')
     assert.match(diagnostic.message, /3 partitions fragmented|leaving 3 partitions fragmented/)
-    assert.ok(diagnostic.repair.includes('hyp query maintain --force'))
+    assert.deepEqual(diagnostic.repair, ['hyp query maintain --dry-run'])
     // The daemon is running and capture works: this is a thing to know
     // about, not an outage.
     assert.equal(report.overall, 'healthy')
@@ -515,6 +515,74 @@ test('a status.json carrying only reasons this build does not recognize renders 
     const text = stdout.text()
     assert.doesNotMatch(text, /\(\)/, 'no bare parenthetical in the rendered text')
     assert.doesNotMatch(text, /5 of 0 partitions/, 'visited must never render smaller than skipped')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The warning gate fires on a recorded `compaction_attempt_failed` directly,
+// but the sentence it renders interpolates `skippedTotal`, and a foreign
+// `status.json` can record a total smaller than the reasons it also records.
+// With the two floored independently, `skippedTotal: 0` beside
+// `compaction_attempt_failed: 2` rendered "cache maintenance is leaving 0
+// partitions fragmented (2 compaction_attempt_failed)", and the attention
+// line "Cache maintenance left 0 partitions fragmented": a warning asserting
+// nothing is fragmented (issue #2360). The total is floored at the reasons it
+// reports, so every surface reading the snapshot states a count its own
+// breakdown accounts for.
+// @ref LLP 0228#last-tick-only [tests]: the count a foreign status file renders never contradicts the reason breakdown beside it
+test('a status.json recording fewer skips than reasons renders a count its own breakdown accounts for', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const tickAt = new Date(Date.now() - 5 * 60_000).toISOString()
+  /**
+   * @param {Record<string, number>} reasons
+   * @param {number} skippedTotal
+   */
+  const collect = async (reasons, skippedTotal) => {
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [],
+      sinks: [],
+      maintenance: { tickAt, partitionsVisited: 2, skippedTotal, reasons, partitions: [] },
+    }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    return { report, text: stdout.text() }
+  }
+
+  try {
+    const failedOnly = await collect({ compaction_ineffective: 0, compaction_attempt_failed: 2 }, 0)
+    const diagnostic = failedOnly.report.diagnostics.find((d) => d.kind === 'maintenance_partitions_skipped')
+    assert.ok(diagnostic, 'a recorded failed attempt still raises the diagnostic')
+    assert.match(
+      diagnostic.message,
+      /leaving 2 partitions fragmented \(2 compaction_attempt_failed\)/,
+      `the count must account for the reasons printed beside it, got: ${diagnostic.message}`
+    )
+    assert.doesNotMatch(failedOnly.text, /0 partitions fragmented/, 'no surface warns that nothing is fragmented')
+    assert.equal(failedOnly.report.maintenance?.skippedTotal, 2)
+
+    // Mixed, and short by two: the count has to cover both reasons, not just
+    // the failed one.
+    const mixed = await collect({ compaction_ineffective: 2, compaction_attempt_failed: 2 }, 2)
+    const mixedDiagnostic = mixed.report.diagnostics.find((d) => d.kind === 'maintenance_partitions_skipped')
+    assert.ok(mixedDiagnostic, 'a mixed snapshot with a failed attempt raises the diagnostic')
+    assert.match(
+      mixedDiagnostic.message,
+      /leaving 4 partitions fragmented \(2 compaction_ineffective, 2 compaction_attempt_failed\)/,
+      `the count must cover every reason, got: ${mixedDiagnostic.message}`
+    )
+    assert.match(mixed.text, /4 of 4 partitions left fragmented/)
+
+    // The suppression the gate's direct test closed: a recorded total at or
+    // below the ineffective count, with a failed attempt beside it, still
+    // warns.
+    const suppressed = await collect({ compaction_ineffective: 2, compaction_attempt_failed: 1 }, 2)
+    assert.ok(
+      suppressed.report.diagnostics.some((d) => d.kind === 'maintenance_partitions_skipped'),
+      'a recorded failed attempt must never be suppressed by the total beside it'
+    )
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
@@ -648,6 +716,31 @@ test('the daemon maintenance tick persists what it left fragmented into status.j
       await handle.stop()
       await handle.done
     }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0454#warning-policy [tests]: ineffective compaction remains discoverable without an attention warning
+test('ineffective-only maintenance is verbose detail, not a warning', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  try {
+    writeDaemonStatus(stateRoot, {
+      tickAt: new Date().toISOString(),
+      partitionsVisited: 2,
+      skippedTotal: 1,
+      reasons: { compaction_ineffective: 1, compaction_attempt_failed: 0 },
+      partitions: [{ dataset: 'logs', partition: 'all', reason: 'compaction_ineffective', dataFiles: 20 }],
+    })
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.diagnostics.some((d) => d.kind === 'maintenance_partitions_skipped'), false)
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    assert.match(stdout.text(), /maintenance:/)
+    assert.match(stdout.text(), /compaction_ineffective/)
+    assert.doesNotMatch(stdout.text(), /hyp query maintain --force/)
+    const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
+    assert.equal(json.maintenance?.skipped_total, 1)
+  } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })

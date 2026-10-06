@@ -57,7 +57,7 @@ test('renderConfigSummary: a local install reads as set up, not fleet-managed', 
   const text = stdout.text()
 
   assert.match(text, /HypAware is already configured\./)
-  assert.doesNotMatch(text, /managed by your fleet/)
+  assert.doesNotMatch(text, /set by your team/)
   assert.doesNotMatch(text, /locked here/)
   assert.match(text, /Collecting:\s+Claude\n/)
   assert.doesNotMatch(text, /Saving to:/)
@@ -76,9 +76,9 @@ test('renderConfigSummary: a fleet-managed install marks each client synced vs l
   const report = makeReport({
     layered: /** @type {any} */ ({ hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }),
     clients: [
-      { name: 'claude', plugin: '@hypaware/claude', configured: true, attachable: true, attached: true },
-      { name: 'codex', plugin: '@hypaware/codex', configured: true, attachable: true, attached: true },
-      { name: 'openclaw', plugin: '@hypaware/openclaw', configured: true, attachable: true, attached: false },
+      { name: 'claude', plugin: '@hypaware/claude', configured: true, recording: true, attachable: true, attached: true },
+      { name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attachable: true, attached: true },
+      { name: 'openclaw', plugin: '@hypaware/openclaw', configured: true, recording: true, attachable: true, attached: false },
     ],
     clientSync: { syncing: ['claude', 'codex'], localOnly: ['openclaw'] },
     sinks: [{ instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
@@ -87,7 +87,7 @@ test('renderConfigSummary: a fleet-managed install marks each client synced vs l
   const text = stdout.text()
 
   assert.match(text, /HypAware is already configured\./)
-  assert.doesNotMatch(text, /managed by your fleet/)
+  assert.doesNotMatch(text, /set by your team/)
   assert.doesNotMatch(text, /locked here/)
   assert.match(text, /Collecting:\s+Claude \(synced\), Codex \(synced\), OpenClaw \(local only\)/)
   assert.doesNotMatch(text, /Saving to:/)
@@ -124,9 +124,10 @@ test('hyp init on a configured install fronts the picker with the summary menu',
 })
 
 // First run (no config): the gate falls through to the wizard's pathway
-// fork, whose bare-enter default is quit - `hyp init` on a fresh machine
-// never writes anything by accident (LLP 0129 #fork).
-test('hyp init first run presents the pathway fork; a bare enter quits untouched', async () => {
+// fork. A stdin that cannot answer quits there, so `hyp init` on a fresh
+// machine with nobody at the terminal never writes anything (LLP 0410
+// #eof-quits).
+test('hyp init first run presents the pathway fork; a spent stdin quits untouched', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-first-run-fork-'))
 
   const stdout = /** @type {any} */ (makeBuf())
@@ -136,7 +137,7 @@ test('hyp init first run presents the pathway fork; a bare enter quits untouched
   const code = await dispatch(['init'], {
     stdout,
     stderr,
-    stdin: /** @type {any} */ (Readable.from(['\n'])),
+    stdin: /** @type {any} */ (Readable.from([])),
     env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HYP_NO_TUI: '1' },
   })
 
@@ -144,8 +145,8 @@ test('hyp init first run presents the pathway fork; a bare enter quits untouched
   // The first-run screen explains the product, then asks (LLP 0211).
   assert.match(stdout.text(), /HypAware records the sessions, logs, and telemetry/)
   assert.match(stdout.text(), /How do you want to collect agent logs\?/)
-  assert.match(stdout.text(), /1\) Collect shared agent logs/)
-  assert.match(stdout.text(), /2\) Collect agent logs locally/)
+  assert.match(stdout.text(), /1\) Sync to the cloud/)
+  assert.match(stdout.text(), /2\) Local only/)
   // Quit left no config behind.
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })

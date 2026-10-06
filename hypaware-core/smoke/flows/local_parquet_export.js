@@ -167,12 +167,12 @@ export async function run({ harness, expect }) {
   expect.that(
     'stdout: hyp sync reported the good instance as exported',
     forceOut,
-    (v) => typeof v === 'string' && /good: exported/.test(v),
+    (v) => typeof v === 'string' && /^✓ Exported to .*\/sink-good$/m.test(v),
   )
   expect.that(
     'stdout: hyp sync reported the broken instance as partial (failed mkdir)',
     forceOut,
-    (v) => typeof v === 'string' && /broken: (partial|failed)/.test(v),
+    (v) => typeof v === 'string' && /^(Partly exported to .*\/sink-broken|Could not send to .*\/sink-broken)/m.test(v),
   )
 
   // ----- Inspect the Parquet artifact written by `good` -----

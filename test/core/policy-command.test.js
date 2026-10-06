@@ -202,7 +202,11 @@ test('hyp policy set <path> ignore also names the marking as machine-local', asy
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy set', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.equal(res.stdout, `marked ${root} as ignore (machine-local policy store)\n`)
+    assert.equal(
+      res.stdout,
+      `marked ${root} as ignore (machine-local policy store)\n` +
+        'To delete what was already recorded in ignored folders on this machine, run `hyp privacy purge --ignored`.\n'
+    )
   })
 })
 
@@ -251,15 +255,12 @@ test('hyp policy set requires a path (bare class token alone is ambiguous, so it
 
 /* -------------------------------- policy show --------------------------------- */
 
-test('hyp policy show [path] --json is byte-compatible with hyp ignore --check --json for a machine-local mark', async () => {
+test('hyp policy show [path] --json reports the stable machine-readable fields for a machine-local mark', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'ignore' }] })
 
-    const legacy = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
     const next = await run('policy show', [root, '--json'], { cwd: root, hypHome })
     assert.equal(next.code, 0)
-    assert.equal(legacy.code, 0)
-    assert.deepEqual(JSON.parse(next.stdout), JSON.parse(legacy.stdout))
 
     const parsed = JSON.parse(next.stdout)
     assert.equal(parsed.class, 'ignore')
@@ -311,10 +312,8 @@ test('hyp policy show --json keeps the stored vocabulary and the store path (unc
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
 
-    const legacy = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
     const next = await run('policy show', [root, '--json'], { cwd: root, hypHome })
     assert.equal(next.code, 0)
-    assert.equal(next.stdout, legacy.stdout, 'byte-compatible with the --check --json shape')
 
     const parsed = JSON.parse(next.stdout)
     assert.equal(parsed.class, 'full', 'the JSON keeps emitting the resolver vocabulary')
@@ -795,15 +794,141 @@ test('hyp policy client refuses to opt out a central-configured source (LLP 0188
 
     const res = await run('policy client', ['claude', 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 1)
-    assert.match(res.stderr, /managed by your fleet and always syncs/)
+    assert.match(res.stderr, /set by your team and always syncs/)
     assert.equal(await readClientSyncEntries({ stateDir }), null, 'nothing was written')
 
     const show = await run('policy client', ['claude'], { cwd: root, hypHome })
-    assert.match(show.stdout, /claude: sync \(managed by your fleet\)/)
+    assert.match(show.stdout, /claude: sync \(set by your team\)/)
 
     // A non-central source on the same machine still opts out fine.
     const other = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
     assert.equal(other.code, 0, other.stderr)
+  })
+})
+
+/**
+ * Enroll the sandbox machine: a central config layer whose `@hypaware/central`
+ * sinks target `urls`, which is what `hyp privacy client` reads to name where
+ * this machine's rows go. `plugins` are the extra central-layer plugin
+ * declarations that make a client org-managed (LLP 0188 #locked).
+ *
+ * @param {string} hypHome
+ * @param {{ urls?: string[], plugins?: string[] }} [layer]
+ */
+function enrollMachine(hypHome, layer = {}) {
+  const seedPath = centralSeedPath(stateDirOf(hypHome))
+  mkdirSync(path.dirname(seedPath), { recursive: true })
+  /** @type {Record<string, unknown>} */
+  const sinks = {}
+  for (const [i, url] of (layer.urls ?? []).entries()) {
+    sinks[`forward${i}`] = { plugin: '@hypaware/central', config: { url, identity: {} } }
+  }
+  writeFileSync(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }, ...(layer.plugins ?? []).map((name) => ({ name }))],
+    sinks,
+  }))
+}
+
+// Issue #2211: every destination-bearing line of this verb said "the cloud" on
+// a machine that may be enrolled at a server the hosted product has never heard
+// of (LLP 0134 #custom-url-deferred). Both write lanes are checked from one
+// enrollment, and the sweep for /cloud/i is what catches a second vocabulary
+// surviving in one line while the other is fixed.
+test('hyp privacy client names the self-hosted server its rows go to, never "the cloud"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hyp.acme.dev'], plugins: ['@hypaware/claude'] })
+
+    // The locked refusal: the source the org set always syncs - to the org's
+    // own server, which is the only place this machine forwards.
+    const locked = await run('policy client', ['claude', 'local-only'], { cwd: root, hypHome })
+    assert.equal(locked.code, 1)
+    assert.equal(locked.stderr, "error: 'claude' is set by your team and always syncs to hyp.acme.dev\n")
+
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    // The receipt itself, pinned as a whole line: a bare substring match
+    // would pass on "sync to hyp.acme.dev and the cloud".
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to hyp\.acme\.dev$/m)
+
+    const printed = [locked.stdout, locked.stderr, out.stdout, res.stdout].join('')
+    assert.equal(/cloud/i.test(printed), false,
+      'a destination-bearing line still says "the cloud": ' + JSON.stringify(printed))
+  })
+})
+
+// The hosted default keeps its product name, under either of its hosts, and
+// two origins that are the same server are named once (the dedupe): a machine
+// enrolled under the previous host must not read "HypAware Cloud and
+// HypAware Cloud".
+test('hyp privacy client names a built-in enrollment HypAware Cloud, once, under either host', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://api.hypaware.ai'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to HypAware Cloud$/m)
+  })
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hypaware.hyperparam.app', 'https://api.hypaware.ai'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to HypAware Cloud$/m)
+  })
+})
+
+// Several destinations all receive the rows, so the receipt names all of
+// them: naming the first alone would under-disclose.
+test('hyp privacy client names every server the machine forwards to', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['https://hyp.acme.dev', 'https://hyp.beta.dev:8443'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to hyp\.acme\.dev and hyp\.beta\.dev:8443$/m)
+  })
+})
+
+// The unnameable cases get one spelling, the same one the classification
+// prompt uses: a machine with no central layer, and a layer whose sink URL
+// does not parse (whose raw value must never reach the copy).
+test('hyp privacy client falls back to "your HypAware server" when nothing nameable is configured', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    assert.match(out.stdout, /^ {2}this machine is not connected to a HypAware server; /m)
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to your HypAware server$/m)
+    assert.equal(/cloud/i.test(out.stdout + res.stdout), false, out.stdout + res.stdout)
+  })
+  await withSandbox(async ({ root, hypHome }) => {
+    enrollMachine(hypHome, { urls: ['not a url'] })
+    await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    const res = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
+    assert.match(res.stdout, /^ {2}future openclaw rows sync to your HypAware server$/m)
+    assert.doesNotMatch(res.stdout, /not a url/)
+  })
+})
+
+// Issue #2223: a central layer on disk that does not parse resolves to the
+// same `centralConfig: null` an absent one does, and `readCentralEnrollment`'s
+// `unreadable` record is what keeps an enrollment nobody can read from being
+// reported as no enrollment at all.
+test('hyp privacy client says an unreadable central layer cannot be read, not "not connected"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const stateDir = stateDirOf(hypHome)
+    const seedPath = centralSeedPath(stateDir)
+    mkdirSync(path.dirname(seedPath), { recursive: true })
+    writeFileSync(seedPath, '{ this is not json')
+
+    const out = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })
+    assert.equal(out.code, 0, out.stderr)
+    assert.match(out.stdout, /^openclaw: local-only$/m, 'the opt-out is still written')
+    assert.deepEqual(await readClientSyncEntries({ stateDir }), [{ source: 'openclaw', class: 'local-only' }])
+    assert.doesNotMatch(out.stdout, /not connected to a HypAware server/)
+    assert.match(out.stdout, new RegExp('^ {2}this machine\'s central config layer \\(' + escapeRe(seedPath) + '\\) cannot be read', 'm'))
   })
 })
 

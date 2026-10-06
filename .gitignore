@@ -22,3 +22,7 @@ collectivus/
 # `git add -A` used to be enough to commit one. `test/core/repo-scratch-hygiene.test.js`
 # holds the other half of this: no `.log` is tracked.
 *.log
+
+# Local LLP review transcripts written by the llp-review skill. Working notes,
+# never committed.
+notes-archive/

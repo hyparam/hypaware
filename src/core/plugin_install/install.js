@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import path from 'node:path'
 
 import {
   Attr,
@@ -9,13 +10,14 @@ import {
   SpanStatusCode,
   withSpan,
 } from '../observability/index.js'
+import { isWithinDir } from '../runtime/contribution_names.js'
 
 import { fetchPlugin } from './fetch.js'
 import { provenanceFromUrl, redactRawSource } from './git_source.js'
 import {
   emptyLock,
   getEntry,
-  listEntries,
+  partitionEntries,
   readLock,
   removeEntry as removeLockEntry,
   upsertEntry,
@@ -367,7 +369,13 @@ export async function removePlugin({ name, stateDir }) {
     async (span) => {
       const lock = await safeReadLock(stateDir)
       const entry = getEntry(lock, name)
-      if (!entry) {
+      // Whether the lock has a row for this name, not whether the row parsed
+      // into anything useful: `plugin-lock.json` is hand-editable, and a row
+      // whose value is not an object is still a row saying this plugin is
+      // installed. Answering "not installed" left it unremovable, and it is
+      // exactly the row `hyp status` names with `hyp plugin remove` as the
+      // repair (issue #1958).
+      if (!Object.hasOwn(lock.plugins, name)) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: 'plugin_not_installed' })
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'plugin_not_installed')
@@ -377,8 +385,21 @@ export async function removePlugin({ name, stateDir }) {
           message: `plugin not installed: ${name}`,
         }
       }
-      const installDir = entry.install_dir ?? pluginInstallDir(stateDir, name)
-      await fs.rm(installDir, { recursive: true, force: true })
+      // Same fallback as before for an entry that carries no directory, widened
+      // to an entry that is not an object to read one off at all.
+      const installDir = typeof entry?.install_dir === 'string' && entry.install_dir.length > 0
+        ? entry.install_dir
+        : pluginInstallDir(stateDir, name)
+      // Neither source is guaranteed to name a directory under the plugins
+      // root: both are hand-editable text, and a row keyed `../../victim`
+      // makes the fallback join resolve two levels above it. `hyp status`
+      // prints this very command as the repair for such a row, so still clear
+      // the row, and delete only a directory strictly beneath the root
+      // (issue #1967).
+      const pluginsRoot = pluginInstallDir(stateDir, '')
+      if (isWithinDir(installDir, pluginsRoot) && path.resolve(installDir) !== path.resolve(pluginsRoot)) {
+        await fs.rm(installDir, { recursive: true, force: true })
+      }
       const nextLock = removeLockEntry(lock, name)
       await writeLock(stateDir, nextLock)
       // Zero the gauge so a downstream consumer doesn't show a
@@ -404,13 +425,18 @@ export async function loadLock(stateDir) {
 }
 
 /**
- * List installed plugins in stable name order.
+ * List installed plugins in stable name order, split into the rows a caller
+ * may dereference and the keys of the rows it may not. Returning every lock
+ * value raw made `hyp plugin list` and `hyp plugin outdated` read `.name` and
+ * `.update` off a hand-edited `null`, exiting 1 and listing nothing at all,
+ * the healthy entries included (issue #1966).
+ *
  * @param {string} stateDir
- * @returns {Promise<PluginLockEntry[]>}
+ * @returns {Promise<{ entries: PluginLockEntry[], unusable: PluginName[] }>}
  */
 export async function listInstalledPlugins(stateDir) {
   const lock = await safeReadLock(stateDir)
-  return listEntries(lock)
+  return partitionEntries(lock)
 }
 
 /** @param {string} stateDir */

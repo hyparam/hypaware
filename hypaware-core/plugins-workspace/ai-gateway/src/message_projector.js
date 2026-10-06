@@ -774,6 +774,11 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
 
   for (let i = 0; i < projection.messages.length; i++) {
     const message = projection.messages[i]
+    // @ref LLP 0416#ordering: incremental producers supply a stable session position
+    const messageIndex = message.message_index === undefined ? i : message.message_index
+    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > 2147483647) {
+      throw new RangeError('message_index must be a nonnegative INT32')
+    }
     const role = stringValue(message.role)
     if (!role) continue
     const content = normalizeContent(message.content)
@@ -819,7 +824,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       sessionId,
       conversationId,
       conversationStarted,
-      messageIndex: i,
+      messageIndex,
       tsStart,
       projection,
       identity,
@@ -1425,7 +1430,9 @@ function buildStatus(block, isLastPart, role, finishReason) {
   /** @type {Record<string, unknown>} */
   const status = {}
   const b = isPlainObject(block) ? block : undefined
-  if (b && (b.type === 'tool_result' || b.type === 'web_search_tool_result')) {
+  // Explicit null means the producer cannot establish the outcome. Keep
+  // the legacy missing-field convention for providers that imply success.
+  if (b && b.is_error !== null && (b.type === 'tool_result' || b.type === 'web_search_tool_result')) {
     status.tool_status = b.is_error === true ? 'error' : 'success'
   }
   if (isLastPart && role === 'assistant' && finishReason) status.finish_reason = finishReason

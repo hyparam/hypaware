@@ -60,7 +60,7 @@ test('leave when not connected is a friendly no-op', async () => {
   const { stdout, opts } = await makeDispatchOpts()
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
 })
 
 test('leave after join removes the seed and reports the server', async () => {
@@ -187,7 +187,8 @@ test('leave never edits the local layer, and says so when a local central sink e
   const localPath = path.join(home, 'hypaware-config.json')
   const localConfig = {
     version: 2,
-    plugins: [{ name: '@hypaware/central' }],
+    // An upgraded config isolates leave from the separately tested migration.
+    plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/grep' }],
     sinks: {
       central: {
         plugin: '@hypaware/central',
@@ -201,7 +202,7 @@ test('leave never edits the local layer, and says so when a local central sink e
   // the hand-authored sink instead of leaving the user mystified.
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
   assert.match(stdout.text(), /local config defines a '@hypaware\/central' sink \('central'\)/)
   assert.match(stdout.text(), /never edits the local layer/)
 
@@ -249,7 +250,7 @@ test('leave is idempotent: a second leave is the not-connected no-op', async () 
   )
   assert.equal(await dispatch(['leave'], opts), 0)
   assert.equal(await dispatch(['leave'], opts), 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
 })
 
 test('leave tears down a central layer whose active-slot pointer does not resolve (#623)', async () => {
@@ -277,7 +278,7 @@ test('leave tears down a central layer whose active-slot pointer does not resolv
 
     const code = await dispatch(['leave'], opts)
     assert.equal(code, 0, `${name}: ${stdout.text()}`)
-    assert.doesNotMatch(stdout.text(), /not connected to a central server/, name)
+    assert.doesNotMatch(stdout.text(), /not connected to the cloud/, name)
     assert.match(stdout.text(), /removed the central config layer/, name)
     await assert.rejects(fs.lstat(path.join(controlDir, 'active')), /ENOENT/, name)
     await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')), /ENOENT/, name)
@@ -334,7 +335,7 @@ test('leave still tears down when only a stale attach marker survives a prior pa
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
-  assert.doesNotMatch(stdout.text(), /not connected to a central server/)
+  assert.doesNotMatch(stdout.text(), /not connected to the cloud/)
   // The stranded attach is reversed on the re-run, marker and all.
   const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
   assert.equal('_hypaware' in settings, false)
@@ -568,6 +569,17 @@ test('leave help exits 0 and rejects unknown arguments', async () => {
     assert.equal(await dispatch(['leave', '--help'], opts), 0)
     assert.match(stdout.text(), /usage: hyp leave/)
     assert.match(stdout.text(), /Keeps query sessions/)
+  }
+  {
+    // A help flag that is not the first token misses dispatch's registry
+    // render and reaches `runLeave`'s own help block, so that copy states the
+    // enrollment premise in the same server vocabulary the registered help
+    // uses; a self-hosted reader must not be told they left "the cloud"
+    // (#2222).
+    const { stdout, opts } = await makeDispatchOpts()
+    assert.equal(await dispatch(['leave', 'x', '--help'], opts), 0)
+    assert.match(stdout.text(), /a HypAware server/)
+    assert.doesNotMatch(stdout.text(), /\bcloud\b/)
   }
   {
     const { stderr, opts } = await makeDispatchOpts()

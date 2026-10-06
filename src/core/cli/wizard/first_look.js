@@ -242,20 +242,28 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
 
         span.setAttribute('provider_rows', rows.providerRows.length)
         span.setAttribute('day_rows', rows.dailyRows.length)
+        // Nothing recorded is said once, by setup's closing line; an empty
+        // block here would say it first. A withholding notice is still news.
+        // @ref LLP 0437#first-look [implements]: an empty first look prints nothing
+        const withheld = runner.sawWithholding?.() ?? false
+        if (!expired && !withheld && rows.providerRows.length === 0 && rows.dailyRows.length === 0) {
+          span.setAttribute('status', 'skipped')
+          span.setAttribute('skip_reason', 'empty')
+          return { shown: false, reason: /** @type {const} */ ('empty') }
+        }
         if (expired) {
           span.setAttribute('partial', true)
           span.setAttribute('budget_ms', budgetMs)
           span.setAttribute('missing_sections', missingSections(rows).join(','))
         }
-        // `footer: false` because the closing line below is this run's single
-        // pointer: setup should teach one command, not two dim lines naming
-        // the same one.
+        // `footer: false` because the block ends on its last section: the
+        // first look prints no pointer line at all, dim or otherwise.
         stdout.write(renderOverview({
           ...rows,
           title: FIRST_LOOK_TITLE,
           color,
           footer: false,
-          withheld: runner.sawWithholding?.() ?? false,
+          withheld,
         }))
         if (expired) {
           // Name the missing sections as *unfinished*, not as empty. "no
@@ -274,11 +282,6 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
               : '\nStopped here to keep setup moving.\n'
           )
         }
-        // The block is re-runnable, and the full one is *bigger* than what
-        // setup just printed: naming the two sections it adds is what stops
-        // the trim from reading as all there is. One durable entry point,
-        // stated as an upgrade rather than a repeat.
-        stdout.write(`\nSee more anytime: hyp query overview (adds repos and tools; --sql shows the queries)\n`)
         return {
           shown: true,
           providerRows: rows.providerRows.length,

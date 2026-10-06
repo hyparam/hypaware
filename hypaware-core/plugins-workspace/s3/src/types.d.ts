@@ -124,9 +124,26 @@ export interface S3CommandsHandle {
     Metadata?: Record<string, string>
     IfNoneMatch?: string
   }): Promise<{ ETag?: string; VersionId?: string }>
-  getObject(input: { Bucket: string; Key: string }): Promise<{
-    Body: NodeJS.ReadableStream | Uint8Array | string | null | undefined
+  getObject(input: { Bucket: string; Key: string; Range?: string }): Promise<{
+    /**
+     * A Node stream is what the bundled factory produces. A WHATWG
+     * `ReadableStream` is admitted alongside it because this handle is an
+     * injectable public seam and `@aws-sdk/client-s3` carries a fetch-based
+     * request handler whose Body is one; the provider adapts it with
+     * `Readable.fromWeb`. A shape outside this union is refused, never read
+     * as an object of zero bytes.
+     *
+     * A `string` is not in the union. Bytes are what a blob store deals in,
+     * and a string has no byte meaning until someone names an encoding this
+     * handle has no field to state, so the provider would be guessing:
+     * UTF-8 re-encodes every byte above 0x7F, latin1 truncates every code
+     * point above U+00FF, and neither failure raises anything. A handle
+     * holding a string decodes it under the encoding it knows and returns a
+     * `Uint8Array`; a string reaching the provider is refused as unusable.
+     */
+    Body: NodeJS.ReadableStream | ReadableStream | Uint8Array | null | undefined
     ContentLength?: number
+    ContentRange?: string
     ETag?: string
   }>
   listObjects(input: {

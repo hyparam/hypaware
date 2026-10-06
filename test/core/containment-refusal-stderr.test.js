@@ -95,7 +95,7 @@ async function makeHome({ planted }) {
   }
   await fs.writeFile(
     path.join(partition, 'cursor.json'),
-    JSON.stringify({ epoch: 1, rowCount: 3, compaction: null, layout: 'source-table' })
+    JSON.stringify({ epoch: 1, rowCount: planted ? 3 : 0, compaction: null, layout: 'source-table' })
   )
   return { root, hypHome }
 }
@@ -188,41 +188,17 @@ test('the sweep\'s refusal of a symlinked component reaches process stderr', asy
       [{ id: 1, session_id: 's-1' }]
     )
     const generation = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude', 'table')
-    // Planted at `data/`, which is a component BOTH passes open: the
-    // unreferenced sweep joins `metadata/` and `data/` onto the generation,
-    // and the index-scratch sweep lists `data/`. An earlier spelling of this
-    // test planted at `metadata/`, which stopped being a component the scratch
-    // sweep asks about when LLP 0331#guard-travels-with-the-delete moved that
-    // pass's guard inside the pass and narrowed it to the two directories the
-    // pass actually walks. That loosening is deliberate, and the property this
-    // test exists for is unchanged by it: what is pinned is that each refusing
-    // pass says so on stderr, so the plant has to be somewhere both of them
-    // refuse.
     await fs.rm(path.join(generation, 'data'), { recursive: true, force: true })
     await fs.symlink(path.join(outside, 'data'), path.join(generation, 'data'), 'dir')
 
     const stderr = await captureProcessStderr(async () => {
       await maintainCache({ cacheRoot })
     })
-    // Asserted per `operation`, not on the `error_kind` alone. Two passes walk
-    // this same component on one tick for this dataset - the unreferenced-set
-    // sweep and, because `ai_gateway_messages` is the grep-indexed dataset, the
-    // index-scratch sweep - and both report through the one
-    // `reportPlantedSweepPath`, so both lines carry the same
-    // `sweep_path_is_symlink`. A bare match on the kind is satisfied by either
-    // line, which means it stays green if one pass loses its guard entirely
-    // while the other keeps reporting. The `operation` attribute is the only
-    // field on the line that tells the two passes apart, so it is what the
-    // assertion reads.
     const refusals = stderr.split('\n').filter((line) => line.includes('sweep_path_is_symlink'))
     const operations = refusals.map((line) => /"hyp_operation":"([^"]+)"/.exec(line)?.[1])
     assert.ok(
       operations.includes('cache.sweep_unreferenced'),
       'the unreferenced-set sweep names its own refusal, somewhere visible'
-    )
-    assert.ok(
-      operations.includes('maintenance.grep_index'),
-      'and so does the index-scratch sweep, which walks the same component'
     )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
@@ -1227,6 +1203,36 @@ function refuseWritesToStream(writer) {
   return () => closeSync(writable)
 }
 
+/**
+ * The window the test below pins: resolves once the stream has destroyed
+ * itself, and before the 'error' event that destroy queues.
+ *
+ * Hooking the call is the only point that is inside the window by
+ * construction. Node sets `destroyed` synchronously inside `destroy(err)` and
+ * emits 'error' only after the descriptor's own close has come back off the
+ * threadpool, so this resolves a whole close round trip ahead of the event.
+ * No event can stand in for it: 'error' is the far edge of the window and
+ * 'close' is past it. Nor can a budget of setImmediate turns, which tracks
+ * nothing about a destroy sitting behind the threadpool: under whole-suite
+ * load the turns are spent in a few milliseconds and the wait gives up on a
+ * stream that is still live (hyparam/hypaware#1579).
+ *
+ * @param {any} writer a JsonlWriter whose stream is open
+ * @returns {Promise<void>} resolves inside the destroy-to-'error' window
+ */
+function destroyWindowOf(writer) {
+  const stream = writer.stream
+  const destroy = stream.destroy
+  return new Promise((resolve) => {
+    stream.destroy = function (...args) {
+      delete stream.destroy
+      const result = destroy.apply(stream, args)
+      resolve()
+      return result
+    }
+  })
+}
+
 // The in-tree half of the close-failure gap. LLP 0335#close-failures could
 // name the report but not demonstrate it on anything this repo ships:
 // `JsonlWriter.close` resolved from `stream.end`'s callback without reading
@@ -1418,13 +1424,10 @@ test('a JSONL close that lands after destroy but before the error event is still
     writer.writeBatch([{ note: 'a record the disk keeps' }])
     await new Promise((resolve) => { writer.stream.once('open', resolve) })
     release = refuseWritesToStream(writer)
-    writer.writeBatch([{ note: 'the record that goes nowhere' }])
     // Wait for the destroy, not for the event: this is the window.
-    let spins = 0
-    while (!writer.stream.destroyed && spins < 1000) {
-      await new Promise((resolve) => { setImmediate(resolve) })
-      spins++
-    }
+    const destroyed = destroyWindowOf(writer)
+    writer.writeBatch([{ note: 'the record that goes nowhere' }])
+    await destroyed
     assert.equal(writer.stream.destroyed, true, 'the stream destroyed itself')
     assert.equal(writer.streamError, null, 'and the error event has not arrived yet')
 

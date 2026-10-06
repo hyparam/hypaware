@@ -80,8 +80,8 @@ function visibleCoreCommands() {
     .sort()
 }
 
-/** @param {string[]} argv */
-async function run(argv) {
+/** @param {string[]} argv @param {NodeJS.ProcessEnv} [env] */
+async function run(argv, env = {}) {
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
   const kernel = createKernelRuntime({ commandRegistry: registry })
@@ -90,7 +90,7 @@ async function run(argv) {
   const code = await dispatch(argv, {
     stdout,
     stderr,
-    env: { ...process.env, HYP_HOME, NO_COLOR: '1' },
+    env: { ...process.env, HYP_HOME, NO_COLOR: '1', ...env },
     registry,
     kernel,
   })
@@ -229,5 +229,43 @@ test('every specced command registers its spec usage line', () => {
     const registered = byName.get(name)
     assert.ok(registered, `'${name}' has an argument spec but is not registered`)
     assert.equal(registered.usage, spec.usage, `'${name}' registers a usage line the spec does not own`)
+  }
+})
+
+for (const verb of ['attach', 'detach']) {
+  for (const args of [['--client', 'codex'], ['--client=codex']]) {
+    test(`${verb} rejects removed client spelling ${args.join(' ')}`, async () => {
+      const result = await run([verb, ...args])
+      assert.equal(result.code, 2)
+      assert.equal(result.stdout, '')
+      assert.match(result.stderr, /unknown argument: --client/)
+    })
+  }
+}
+
+test('config validate selects the positional file and rejects retired or invented flags', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-validate-argv-'))
+  const file = path.join(root, 'valid config.json')
+  const envFile = path.join(root, 'invalid.json')
+  fs.writeFileSync(file, JSON.stringify({ version: 2, plugins: [] }))
+  fs.writeFileSync(envFile, '{invalid')
+  fs.copyFileSync(file, path.join(root, 'hypaware-config.json'))
+  try {
+    const selected = await run(['config', 'validate', file], { HYP_HOME: root, HYP_CONFIG: envFile })
+    assert.equal(selected.code, 0, selected.stderr)
+    assert.ok(selected.stdout.includes(file), selected.stdout)
+    const fromEnv = await run(['config', 'validate'], { HYP_HOME: root, HYP_CONFIG: envFile })
+    assert.equal(fromEnv.code, 1)
+    assert.match(fromEnv.stderr, /not valid JSON/)
+    const fromHome = await run(['config', 'validate'], { HYP_HOME: root, HYP_CONFIG: '' })
+    assert.equal(fromHome.code, 0, fromHome.stderr)
+    assert.ok(fromHome.stdout.includes(path.join(root, 'hypaware-config.json')))
+    for (const args of [['--path', file], [`--path=${file}`], ['--file', file], [file, file]]) {
+      const result = await run(['config', 'validate', ...args])
+      assert.equal(result.code, 2)
+      assert.equal(result.stdout, '')
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
   }
 })

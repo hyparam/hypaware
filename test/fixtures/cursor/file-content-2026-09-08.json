@@ -1,0 +1,87 @@
+{
+  "source": {
+    "client": "headless CLI",
+    "version": "2026.09.08-6caf4ff",
+    "date": "2026-09-10",
+    "kind": "real-client probe, sanitized"
+  },
+  "hooks": [
+    {
+      "hook_event_name": "sessionStart",
+      "conversation_id": "probe-file-session",
+      "generation_id": "probe-file-session",
+      "session_id": "probe-file-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "preToolUse",
+      "conversation_id": "probe-file-session",
+      "generation_id": "probe-file-session",
+      "session_id": "probe-file-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-file-tool",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/notes.txt"
+      },
+      "model": "default"
+    },
+    {
+      "content": "The probe value is MARIGOLD-42.\n",
+      "file_path": "/probe/workspace/notes.txt",
+      "hook_event_name": "beforeReadFile",
+      "conversation_id": "probe-file-session",
+      "generation_id": "probe-file-session",
+      "session_id": "probe-file-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-file-session",
+      "generation_id": "probe-file-session",
+      "session_id": "probe-file-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-file-tool",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/notes.txt"
+      },
+      "tool_output": "{\"file_path\":\"/probe/workspace/notes.txt\",\"content_length\":32}",
+      "duration": 218.689,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "sessionEnd",
+      "conversation_id": "probe-file-session",
+      "generation_id": "probe-file-session",
+      "session_id": "probe-file-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "duration_ms": 8602,
+      "reason": "completed",
+      "final_status": "completed",
+      "model": "default"
+    }
+  ]
+}

@@ -15,6 +15,56 @@ import { classifyAwsError } from './errors.js'
 export const BLOB_STORE_KIND = 's3'
 
 /**
+ * A usable ranged response states the offsets it actually delivered, as
+ * `bytes start-end/total` (RFC 7233 also allows `*` for an unknown total).
+ * The 416 unsatisfiable form states no offsets, so it does not qualify.
+ * Anything else cannot be checked against what was asked for.
+ */
+const RANGED_RESPONSE = /^bytes (\d+)-(\d+)\/(\d+|\*)$/
+
+/** The three request forms LLP 0452#range-contract admits. */
+const REQUESTED_RANGE = /^bytes=(\d*)-(\d*)$/
+
+/**
+ * Report how a ranged response contradicts the range that was asked for, or
+ * undefined when it does not.
+ *
+ * Self-consistency is not enough on its own. A store that mishandles a suffix
+ * range answers `bytes=-3` with the FIRST three bytes under `bytes 0-2/16`:
+ * well formed, agreeing with its own ContentLength, and wrong. Suffix ranges
+ * are how a Parquet footer is read (LLP 0452#why), so that is the likely
+ * defect, not an exotic one, and this provider is the only place holding both
+ * the request and the response.
+ *
+ * Only a definite contradiction is reported. A request form this does not
+ * model, or a total the response left unknown, yields undefined rather than a
+ * rejection, so no response that is accepted today and actually correct starts
+ * failing. Short reads stay with the consumer, as does a range narrower than
+ * the one asked for.
+ *
+ * @param {string} range the `input.range` that was sent
+ * @param {number} start first byte the response states it delivered
+ * @param {number} end last byte the response states it delivered
+ * @param {number | undefined} total complete length, when the response stated one
+ * @returns {string | undefined}
+ */
+function contradictsRequest(range, start, end, total) {
+  const asked = REQUESTED_RANGE.exec(range)
+  if (asked === null) return undefined
+  const first = asked[1] === '' ? undefined : Number(asked[1])
+  const last = asked[2] === '' ? undefined : Number(asked[2])
+  if (first === undefined) {
+    if (last === undefined) return undefined
+    if (end - start + 1 > last) return `delivers more than the ${last} bytes the suffix asked for`
+    if (total !== undefined && end !== total - 1) return 'is a suffix that does not end at the object end'
+    return undefined
+  }
+  if (start !== first) return `starts at ${start}, not the requested ${first}`
+  if (last !== undefined && end > last) return `ends at ${end}, past the requested ${last}`
+  return undefined
+}
+
+/**
  * Construct an S3-backed `BlobStore`. The factory is injectable so the
  * smoke and unit tests can supply a fake S3 client without spinning up
  * the AWS SDK. Production builds wire `defaultS3BlobStoreClientFactory`.
@@ -112,18 +162,94 @@ export function createS3BlobStore({ bucket, prefix, client }) {
      */
     async getObject(input) {
       const Key = composeKey(input.key)
+      /** @type {Awaited<ReturnType<S3CommandsHandle['getObject']>>} */
+      let result
       try {
-        const result = await client.getObject({ Bucket: bucket, Key })
-        if (!result || result.Body === null || result.Body === undefined) return null
-        return {
-          body: toReadable(result.Body),
-          contentLength: result.ContentLength,
-          etag: result.ETag,
-        }
+        // @ref LLP 0452#range-contract [implements]: preserve the byte range through the same credential and prefix path as whole reads
+        result = await client.getObject({ Bucket: bucket, Key, ...(input.range !== undefined ? { Range: input.range } : {}) })
       } catch (err) {
         if (isNotFound(err)) return null
         throw tagS3Error(err, classifyAwsError(err),
           `s3 blob-store: getObject failed for '${input.key}'`, input.key)
+      }
+      if (!result || result.Body === null || result.Body === undefined) return null
+      // `S3CommandsHandle` is an injectable seam, and a handle may report an
+      // absent header as null or '' rather than undefined. Reduce all three
+      // to one sentinel before anything branches on it.
+      const contentRange = typeof result.ContentRange === 'string' && result.ContentRange !== ''
+        ? result.ContentRange
+        : undefined
+      // Passing a whole object back as though it were the requested slice
+      // would hand a Parquet reader the wrong bytes at the right offsets,
+      // which reads as a decode error at best and as wrong query results at
+      // worst. So a ranged read accepts only a response that states the
+      // slice it delivered: a well-formed Content-Range whose span agrees
+      // with ContentLength. Presence alone is not enough, on either half. A
+      // header the consumer cannot parse leaves it unable to run the offset
+      // check the contract assigns it, a header whose stated total does not
+      // exceed the last byte it delivered describes an object that cannot
+      // exist (RFC 7233 requires last-byte-pos below complete-length), and a
+      // header contradicted by the declared body length is not describing
+      // this body at all. Finally the stated offsets are checked against the
+      // ones asked for, because a store can be self-consistent and still
+      // wrong: mishandle a suffix range and `bytes=-3` comes back as
+      // `bytes 0-2/16`, the first three bytes of a Parquet footer read under
+      // a header with nothing visibly amiss. Counting the delivered body
+      // stays with the consumer; this never reads the body.
+      // @ref LLP 0452#range-contract [implements]: honor the range or fail, checked against both the response's own account of itself and the request
+      if (input.range !== undefined) {
+        const stated = contentRange === undefined ? null : RANGED_RESPONSE.exec(contentRange)
+        const start = Number(stated?.[1])
+        const end = Number(stated?.[2])
+        const span = stated === null ? undefined : end - start + 1
+        // '*' is a total the store declined to state. Unknown is not wrong,
+        // so it leaves both the check below and the suffix end-at-EOF check
+        // with nothing to compare against.
+        const total = stated === null || stated[3] === '*' ? undefined : Number(stated[3])
+        // ContentLength comes off the same injectable seam, where a handle
+        // forwarding a raw content-length header yields the string '16'
+        // rather than a number. A typeof test would skip the cross-check for
+        // every such value and hand the whole object back as the slice, so
+        // reduce anything the store did declare to one number, the way the
+        // sentinel above reduces ContentRange. Only an undeclared length
+        // skips the check; a value that will not coerce becomes NaN and
+        // fails closed.
+        const declared = result.ContentLength === undefined ? undefined : Number(result.ContentLength)
+        /** @type {string | undefined} */
+        let detail
+        if (contentRange === undefined) {
+          detail = 'response carried no Content-Range'
+        } else if (stated === null) {
+          detail = `response carried an unusable Content-Range '${contentRange}'`
+        } else if (!(/** @type {number} */ (span) >= 1)) {
+          detail = `response carried a reversed Content-Range '${contentRange}'`
+        } else if (total !== undefined && end >= total) {
+          detail = `response carried an impossible Content-Range '${contentRange}'`
+        } else if (declared !== undefined && declared !== span) {
+          detail = `response declared ContentLength ${result.ContentLength} against Content-Range '${contentRange}'`
+        } else {
+          const contradiction = contradictsRequest(input.range, start, end, total)
+          if (contradiction !== undefined) {
+            detail = `response Content-Range '${contentRange}' ${contradiction}`
+          }
+        }
+        if (detail !== undefined) {
+          releaseBody(result.Body)
+          throw tagS3Error(undefined, 'blob_range_not_honored',
+            `s3 blob-store: byte range '${input.range}' was not honored for '${input.key}' (${detail})`,
+            input.key)
+        }
+      }
+      return {
+        body: toReadable(result.Body, input.key),
+        contentLength: result.ContentLength,
+        // Only a ranged read can carry a contentRange, and only one the
+        // guard above validated. LLP 0452#range-contract makes an absent
+        // contentRange mean "whole object", so forwarding a header a store
+        // volunteered on a read that asked for no range would tell the
+        // consumer the opposite of the truth, unchecked.
+        ...(input.range !== undefined && contentRange !== undefined ? { contentRange } : {}),
+        etag: result.ETag,
       }
     },
 
@@ -262,10 +388,11 @@ export async function defaultS3BlobStoreClientFactory(opts) {
     async getObject(input) {
       const result = await client.send(new GetObjectCommand(input))
       return {
-        Body: /** @type {NodeJS.ReadableStream | Uint8Array | string | null | undefined} */ (
+        Body: /** @type {NodeJS.ReadableStream | Uint8Array | null | undefined} */ (
           /** @type {unknown} */ (result.Body)
         ),
         ContentLength: result.ContentLength,
+        ContentRange: result.ContentRange,
         ETag: result.ETag,
       }
     },
@@ -345,16 +472,88 @@ async function materializeBody(body) {
 }
 
 /**
- * @param {NodeJS.ReadableStream | Uint8Array | string} body
+ * Present a response body as a Node readable, or refuse it.
+ *
+ * A WHATWG `ReadableStream` is outside the union `S3CommandsHandle`
+ * declares, but the handle is an injectable public seam and
+ * `@aws-sdk/client-s3` carries a fetch-based request handler whose Body is
+ * one, so it is adapted rather than refused: `Readable.fromWeb` is core,
+ * adds no dependency, and streams instead of buffering.
+ *
+ * A `string` is refused rather than decoded, and is the one shape
+ * withdrawn from the union. Reading it means guessing an encoding the
+ * handle has no field to state, and both guesses corrupt a real payload
+ * without raising: UTF-8 re-encodes every byte above 0x7F, latin1
+ * truncates every code point above U+00FF. A handle holding a string knows
+ * the encoding this code cannot, so it decodes and hands over a
+ * `Uint8Array`.
+ *
+ * Anything else throws too. An empty stream is the worst available reading
+ * of "this shape is unknown", because it is byte-for-byte what a genuinely
+ * empty object looks like: a caller reading a Parquet footer cannot tell a
+ * body that never arrived from one that is not there, and the symptom is a
+ * wrong query answer with no exception to trace it to.
+ *
+ * @param {NodeJS.ReadableStream | ReadableStream | Uint8Array} body
+ * @param {string} key
  * @returns {NodeJS.ReadableStream}
  */
-function toReadable(body) {
+function toReadable(body, key) {
   if (body && typeof (/** @type {any} */ (body)).pipe === 'function') {
     return /** @type {NodeJS.ReadableStream} */ (body)
   }
   if (body instanceof Uint8Array) return Readable.from([body])
-  if (typeof body === 'string') return Readable.from([Buffer.from(body)])
-  return Readable.from([])
+  /** @type {unknown} */
+  let refusal
+  if (body && typeof (/** @type {any} */ (body)).getReader === 'function') {
+    try {
+      return Readable.fromWeb(/** @type {any} */ (body))
+    } catch (err) {
+      // A callable `getReader` that is not a real `ReadableStream`, or one
+      // already locked: fall through to the refusal below, so the caller gets
+      // the same typed error as any other unusable shape rather than an
+      // untagged TypeError. `releaseBody` runs and closes the first case. It
+      // cannot close a locked stream: `cancel()` rejects on one, and only
+      // whoever holds the reader can release it, so that body stays open
+      // until the handle drops it. Which of the two happened is knowable
+      // only from the adapter's own error, and a refusal reporting shape
+      // `ReadableStream` otherwise reads as a bug here, that shape being the
+      // one the union says is adapted. So the reason is carried into both
+      // the cause and the message: the cause for a debugger, the message
+      // because that is all a consumer forwards (format-iceberg's
+      // `describeError` returns `err.message` and nothing else).
+      refusal = err
+    }
+  }
+  releaseBody(body)
+  const shape = typeof body === 'object'
+    ? (/** @type {any} */ (body).constructor?.name || 'object')
+    : typeof body
+  const why = refusal instanceof Error ? `: ${refusal.message}` : ''
+  throw tagS3Error(refusal, 'blob_body_unusable',
+    `s3 blob-store: getObject for '${key}' returned a body of an unusable shape (${shape})${why}`,
+    key)
+}
+
+/**
+ * Release a body this code will not read, so the connection behind it is not
+ * held open. A Node stream releases through `destroy()`; a WHATWG
+ * `ReadableStream` has no `destroy` and releases through `cancel()`, so a
+ * destroy-only release quietly left one of those open. The caller is on its
+ * way to throwing the error that matters, so the `cancel()` promise is
+ * neither awaited nor allowed to surface, and nothing here throws.
+ *
+ * @param {unknown} body
+ */
+function releaseBody(body) {
+  if (!body || typeof body !== 'object') return
+  const handle = /** @type {{ destroy?: () => void, cancel?: () => unknown }} */ (body)
+  try {
+    if (typeof handle.destroy === 'function') handle.destroy()
+    else if (typeof handle.cancel === 'function') Promise.resolve(handle.cancel()).catch(() => {})
+  } catch {
+    // A body that will not release is not worth losing the original error over.
+  }
 }
 
 /**

@@ -14,7 +14,7 @@ const COMPARISON_OPS = new Set(['=', '==', '!=', '<>', '<', '>', '<=', '>='])
  * positions carry it. `undefined` means every argument does. A bound written
  * on such a call is a bound on the column underneath it, and it fails the
  * same silent way a bare column did: `having max(message_created_at) >= '...'`
- * is the idiom `docs/ACCEPTANCE.md` itself uses, and `HAVING` almost always
+ * is a common idiom, and `HAVING` almost always
  * holds an aggregate rather than a bare reference.
  *
  * Positions matter. `min_by(value, key)` takes only `value`'s type, so typing
@@ -390,7 +390,7 @@ function relationColumns(relation, registry, ctes) {
   if (ctes.has(key)) return ctes.get(key)
   // `?.columns` rather than a bare deref: a registration that hands the kernel
   // a malformed schema must not turn every query touching it into a TypeError,
-  // the same way `hyp client history import` reads it.
+  // the same way `hyp backfill` reads it.
   const columns = registry.getDataset(relation.table)?.schema?.columns
   if (!columns) return undefined
   return columns.map((column) => ({ name: column.name, isTimestamp: column.type === 'TIMESTAMP' }))

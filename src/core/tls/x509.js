@@ -169,8 +169,6 @@ function x509Time(date) {
 // Object identifiers
 // ---------------------------------------------------------------------------
 
-const OID_COMMON_NAME = '2.5.4.3'
-const OID_ORGANIZATION = '2.5.4.10'
 const OID_ECDSA_SHA256 = '1.2.840.10045.4.3.2'
 const OID_BASIC_CONSTRAINTS = '2.5.29.19'
 const OID_KEY_USAGE = '2.5.29.15'

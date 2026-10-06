@@ -1,6 +1,5 @@
 // @ts-check
 
-import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import {
@@ -12,24 +11,24 @@ import {
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import {
   defaultOpenclawAgentsDir,
-  readOpenclawSessionHeader,
-  readOpenclawSessionMessages,
+  listOpenclawSessions,
+  readOpenclawSession,
   SESSION_FILE_NAME,
 } from './session_file.js'
-import { compareStrings, isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
+import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillPlan, BackfillPlanContext, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { OpenclawSessionHeader, OpenclawSessionMessage } from './types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { OpenclawSessionHeader, OpenclawSessionMessage } from '../../../../hypaware-core/plugins-workspace/openclaw/src/types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 /**
  * `@hypaware/openclaw` backfill provider.
  *
- * Imports local OpenClaw history into `ai_gateway_messages` by reading the
- * session JSONL OpenClaw writes under
- * `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`, through the one
+ * Imports local OpenClaw history into `ai_gateway_messages` from SQLite
+ * session windows and legacy `agents/<agentId>/sessions/<sessionId>.jsonl`,
+ * through the one
  * LLP 0158 reader (`session_file.js`) the settlement enricher also uses (R9:
  * neither consumer may hold its own parse).
  *
@@ -176,26 +175,19 @@ export function createOpenclawBackfillProvider(opts) {
     // metadata, tunable via `backfill.sweep_cron` (R7), defaulting to
     // every 5 minutes when the config key is absent.
     sweep: { cron: resolveSweepCron(config) },
-    /**
-     * @param {BackfillPlanContext} _ctx
-     * @returns {Promise<BackfillPlan | undefined>}
-     */
-    async plan(_ctx) {
-      const files = await listSessionFiles(agentsDir)
-      return {
-        estimated_items: files.length,
-        sources: files.map((file) => file.filePath),
-      }
-    },
     async *run(ctx) {
-      yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config })
+      try { yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config }) }
+      catch (error) {
+        ctx.log.warn('openclaw.backfill.storage_unavailable', { component: COMPONENT, operation: 'backfill.scan', agents_dir: agentsDir, status: 'error', error_kind: 'storage_unavailable', error: errMessage(error) })
+        throw error
+      }
     },
   }
 }
 
 /**
- * Scan every session file under `agents/*<slash>sessions/*.jsonl`, project each
- * one, and yield a single `ai_gateway.projected_exchange` item per session.
+ * Scan native SQLite sessions and legacy JSONL, project each session,
+ * and yield a single `ai_gateway.projected_exchange` item per session.
  *
  * One item per session, not one per message record: the materializer allocates
  * a fresh conversation state per `materialize()` call, so splitting a session
@@ -241,16 +233,36 @@ async function* runOpenclawBackfill(args) {
   let sessionsIgnored = 0
   let messagesProjected = 0
   let recordsExcluded = 0
+  let sessionsFailed = 0
+  /** @type {unknown} */
+  let firstFailure
 
-  for (const { agentId, filePath } of await listSessionFiles(agentsDir, quiesceBeforeMs)) {
+  for await (const source of listOpenclawSessions(agentsDir)) {
+    const { agentId, path: filePath } = source
     if (ctx.signal?.aborted) break
+    if (source.mtimeMs > quiesceBeforeMs) continue
     filesSeen += 1
 
-    // The LLP 0158 reader answers `undefined` for a missing, empty, or
-    // non-header first line: "this file establishes nothing," which is a
-    // session that is simply not gated, never a throw.
-    const header = readOpenclawSessionHeader(filePath)
-    const sessionId = header?.sessionId ?? sessionIdFromPath(filePath)
+    // Preserve the early directory-policy gate before reading hot payloads.
+    // SQLite failures are explicit; an empty window has no messages yet.
+    let session
+    try {
+      session = await readOpenclawSession(source, { quietBeforeMs: quiesceBeforeMs, includeMessages: header => !header?.cwd || resolver.resolve(header.cwd).class !== 'ignore' })
+    } catch (error) {
+      // @ref LLP 0444#failure-policy [constrained-by]: the run still fails
+      // visibly, but only once every READABLE session has been yielded.
+      // Discovery is ordered, so throwing here would permanently strand
+      // every session sorted after the broken one - and the privacy drop
+      // this policy authorises at flush is paid for by exactly that
+      // recovery import, which must therefore still happen.
+      sessionsFailed += 1
+      firstFailure ??= error
+      log.warn('openclaw.backfill.session_read_failed', { component: COMPONENT, operation: 'backfill.scan', source_path: filePath, session_id: source.sessionId, status: 'error', error_kind: 'session_read_failed', error: errMessage(error) })
+      continue
+    }
+    if (!session) continue
+    const { header, messages: records } = session
+    const sessionId = header?.sessionId ?? source.sessionId ?? sessionIdFromPath(filePath)
 
     // @ref LLP 0161#backfill-provider [implements]: a usable `cwd` is resolved
     // once per FILE and an `ignore` verdict skips the whole file. The cwd is
@@ -289,22 +301,6 @@ async function* runOpenclawBackfill(args) {
           ...(policy.governedBy ? { governed_by: policy.governedBy } : {}),
         },
       }
-      continue
-    }
-
-    /** @type {OpenclawSessionMessage[]} */
-    let records
-    try {
-      records = await readOpenclawSessionMessages(filePath)
-    } catch (err) {
-      log.warn('openclaw.backfill.session_read_failed', {
-        component: COMPONENT,
-        operation: 'backfill.scan',
-        source_path: filePath,
-        status: 'error',
-        error_kind: 'session_read_failed',
-        error: errMessage(err),
-      })
       continue
     }
 
@@ -373,8 +369,11 @@ async function* runOpenclawBackfill(args) {
     sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,
     records_excluded: recordsExcluded,
-    status: 'ok',
+    sessions_failed: sessionsFailed,
+    status: sessionsFailed > 0 ? 'error' : 'ok',
+    ...(sessionsFailed > 0 ? { error_kind: 'session_read_failed' } : {}),
   })
+  if (firstFailure !== undefined) throw firstFailure
 }
 
 /**
@@ -769,68 +768,6 @@ function setNumber(target, key, source, aliases) {
 }
 
 /**
- * Every `agents/<agentId>/sessions/*.jsonl` under `agentsDir`, rotated names
- * included ({@link SESSION_FILE_NAME}), sorted so a run is deterministic. A
- * missing or unreadable directory at any level is an empty
- * result, never a throw: a machine with no OpenClaw install must scan to zero
- * sessions, not fail the whole `hyp backfill` run.
- *
- * `quiesceBeforeMs` (LLP 0172#45-the-quiesce-window, LLP 0170#decision),
- * when given, excludes any file whose `mtimeMs` is more recent than it: a
- * session still inside the quiesce window is skipped for THIS run, not
- * permanently, so a later run (once the file's mtime has aged past the
- * cutoff, or the daemon sweep's next tick) picks it back up.
- *
- * The parameter is optional for exactly one caller: `plan()`, which counts and
- * names what is there rather than importing it, so a window that hides files
- * from an estimate would only misreport. Every `run()` applies the window,
- * whichever surface drives it - `hyp backfill --client openclaw`, the
- * onboarding finale, and the daemon sweep all enter through the same `run()`,
- * and `runOpenclawBackfill` computes the cutoff once per run before this is
- * ever called. There is no "non-sweep, unfiltered" import path.
- *
- * @param {string} agentsDir
- * @param {number} [quiesceBeforeMs] Exclusive upper bound on `mtimeMs`.
- * @returns {Promise<Array<{ agentId: string, filePath: string }>>}
- */
-async function listSessionFiles(agentsDir, quiesceBeforeMs) {
-  /** @type {Array<{ agentId: string, filePath: string }>} */
-  const out = []
-  for (const agentId of await readDirNames(agentsDir, 'dir')) {
-    const sessionsDir = path.join(agentsDir, agentId, 'sessions')
-    for (const name of await readDirNames(sessionsDir, 'file')) {
-      if (!SESSION_FILE_NAME.test(name)) continue
-      const filePath = path.join(sessionsDir, name)
-      if (quiesceBeforeMs !== undefined && !(await isOutsideQuiesceWindow(filePath, quiesceBeforeMs))) continue
-      out.push({ agentId, filePath })
-    }
-  }
-  out.sort((a, b) => compareStrings(a.filePath, b.filePath))
-  return out
-}
-
-/**
- * Whether `filePath`'s mtime is old enough to clear the quiesce window: its
- * `mtimeMs` is at or before `quiesceBeforeMs`. A file that fails to stat
- * (removed between the directory read and this call) is treated as still
- * inside the window and excluded, the same fail-closed direction the
- * usage-policy gate above already takes for an unresolvable input: a
- * vanished file is not evidence a session has settled.
- *
- * @param {string} filePath
- * @param {number} quiesceBeforeMs
- * @returns {Promise<boolean>}
- */
-async function isOutsideQuiesceWindow(filePath, quiesceBeforeMs) {
-  try {
-    const stat = await fs.stat(filePath)
-    return stat.mtimeMs <= quiesceBeforeMs
-  } catch {
-    return false
-  }
-}
-
-/**
  * `quiesceMs` resolved from the plugin's own validated `config` slice, or
  * {@link DEFAULT_QUIESCE_MS} when `config.backfill.quiesce_ms` is absent
  * (no `config` supplied, no `backfill` block, or no `quiesce_ms` key).
@@ -864,22 +801,6 @@ function resolveSweepCron(config) {
   const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
   const sweepCron = backfill?.sweep_cron
   return typeof sweepCron === 'string' ? sweepCron : DEFAULT_SWEEP_CRON
-}
-
-/**
- * @param {string} dir
- * @param {'dir' | 'file'} kind
- * @returns {Promise<string[]>}
- */
-async function readDirNames(dir, kind) {
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true })
-    return entries
-      .filter((entry) => (kind === 'dir' ? entry.isDirectory() : entry.isFile()))
-      .map((entry) => entry.name)
-  } catch {
-    return []
-  }
 }
 
 /**

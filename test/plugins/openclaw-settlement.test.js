@@ -607,3 +607,186 @@ test('an empty batch is returned untouched', async () => {
   const out = await enricher({ agentsDir }).settle([], NO_CTX)
   assert.deepEqual(out, [])
 })
+
+// The gateway's settle selection (LLP 0441) now also hands this enricher a
+// row it never used to see: an in-batch successor of a fallback row, already
+// carrying native identity and a non-null cwd, selected purely so the
+// claude-side relink can reach it. This enricher's drop gate reads the
+// SESSION HEADER's cwd, not the row's own, and its identity upgrade falls
+// through to the ordinal/time fallback for a row with no match_key - a
+// native row never has one - so without a guard such a row would be
+// dropped by an unrelated header verdict and could have its already-correct
+// identity overwritten by an ordinal match. The fallback predecessor must be
+// governed exactly as it always was.
+// @ref LLP 0441#no-new-drop-authority [tests]: a row this pass was handed
+// only for the relink comes back untouched - no header-cwd drop, no
+// ordinal/time rename - while a genuine fallback row still settles and
+// drops exactly as before.
+test('a native successor of a fallback row is returned untouched, not dropped or ordinal-renamed', async () => {
+  const agentsDir = writeSessionFile(realisticSessionRecords())
+  const wire = realisticWireMessages()
+
+  // The predecessor: a genuine gateway_fallback row, content-matching the
+  // session file's first message so the group binds to this file.
+  const predecessor = fallbackRow({
+    role: wire[0].role,
+    content: wire[0].content,
+    messageIndex: 0,
+    ts: wire[0].ts,
+  })
+
+  // The successor: already native (its own message_id, part_id and cwd),
+  // carries no openclaw.match_key (a native row never does), and its
+  // previous_message_id names the predecessor's pre-settlement fallback id -
+  // exactly the shape the widened selection now hands this enricher.
+  // message_index/role/timestamp are deliberately aligned with the file's
+  // own msg-0004 so the ordinal/time fallback WOULD match and rename it if
+  // this pass did not skip it first.
+  const successor = {
+    session_id: HASH_SESSION_ID,
+    client_name: 'openclaw',
+    conversation_source: 'openclaw',
+    message_id: 'native-real-id-777',
+    part_id: 'native-real-id-777#0',
+    message_index: 3,
+    part_index: 0,
+    role: 'assistant',
+    message_created_at: iso(T0 + 4_000),
+    cwd: SESSION_CWD,
+    attributes: {},
+    previous_message_id: [/** @type {any} */ (predecessor).message_id],
+  }
+
+  const rows = [predecessor, successor]
+  const out = await enricher({ agentsDir, verdict: 'ignore' }).settle(rows, NO_CTX)
+
+  // Pre-existing fallback-row behavior is unchanged: content-matched, then
+  // dropped by the session's ignore-classed header cwd.
+  assert.equal(out[0], USAGE_POLICY_DROP)
+
+  // The native successor is untouched: same object, not dropped, not
+  // ordinal-renamed onto the file's msg-0004.
+  assert.equal(out[1], successor)
+  assert.notEqual(out[1], USAGE_POLICY_DROP)
+  assert.equal(/** @type {any} */ (out[1]).message_id, 'native-real-id-777')
+  assert.equal(/** @type {any} */ (out[1]).part_id, 'native-real-id-777#0')
+  assert.equal(/** @type {any} */ (out[1]).cwd, SESSION_CWD)
+})
+
+// The discriminator above must be the gateway's `identity_source ===
+// 'gateway_fallback'` marker, not "has a cwd" and not "has no match_key" -
+// and the shape that tells them apart is one the OpenClaw backfill route
+// actually produces. `backfill.js` stamps `exchange.cwd = header.cwd` on
+// every synthesized fallback row, while `openclaw.match_key` is stamped
+// only by the LIVE projector, so a backfilled row carries a non-null cwd
+// and no match_key at once. Read the guard as "has a cwd" and this row is
+// skipped forever, never upgraded to native identity - the LLP 0159 route
+// agreement breaks and the turn double-imports. Read it as "has no
+// match_key" and it is skipped for the same wrong reason, which is the
+// exact mistake the guard's own comment warns against. Neither reading is
+// the marker: this row is still gateway_fallback identity and must still
+// run through the ordinal/time fallback and still be governed by the
+// session header's cwd, exactly like a live fallback row with no cwd at
+// all.
+// @ref LLP 0441#no-new-drop-authority [tests]: the discriminator is the
+// gateway_fallback marker, not "has a cwd" or "has no match_key" - a
+// backfill fallback row has both and must still settle and still drop
+test('a backfill fallback row (cwd already set, no match_key) still settles by ordinal fallback and still drops under an ignored header', async () => {
+  const agentsDir = writeSessionFile(realisticSessionRecords())
+  const wire = realisticWireMessages()
+
+  // Binds the session group to this file by content; unrelated to the row
+  // under test other than sharing its session.
+  const anchor = fallbackRow({ role: wire[0].role, content: wire[0].content, messageIndex: 0, ts: wire[0].ts })
+
+  // The shape `backfill.js` produces: gateway_fallback identity, the header
+  // cwd already stamped (not null), and no `openclaw.match_key` at all -
+  // only the live projector stamps that key. Position, role and timestamp
+  // are aligned with the file's own msg-0004, so the ordinal/time fallback
+  // WOULD match and rename it, which is how this test proves the row was
+  // not skipped.
+  const backfillRow = {
+    session_id: HASH_SESSION_ID,
+    client_name: 'openclaw',
+    conversation_source: 'openclaw',
+    message_id: 'backfillhash30',
+    part_id: 'backfillhash30#0',
+    message_index: 3,
+    part_index: 0,
+    role: 'assistant',
+    message_created_at: iso(T0 + 4_000),
+    cwd: SESSION_CWD,
+    attributes: { gateway: { identity_source: 'gateway_fallback' } },
+  }
+
+  const okLogger = recordingLogger()
+  const settledOut = await enricher({ agentsDir, verdict: 'full', logger: okLogger }).settle(
+    [anchor, backfillRow], NO_CTX
+  )
+  assert.equal(
+    /** @type {any} */ (settledOut[1]).message_id, 'msg-0004',
+    'identity upgrades via the ordinal/time fallback, not left at its fallback hash'
+  )
+  assert.equal(/** @type {any} */ (settledOut[1]).session_id, NATIVE_SESSION_ID)
+  const okSummary = okLogger.events.find((e) => e.event === 'plugin.openclaw.settlement')
+  assert.equal(okSummary?.fields.ordinal_matches, 1, 'the ordinal pass ran for this row, it was not skipped')
+
+  const dropLogger = recordingLogger()
+  const droppedOut = await enricher({ agentsDir, verdict: 'ignore', logger: dropLogger }).settle(
+    [anchor, backfillRow], NO_CTX
+  )
+  assert.equal(
+    droppedOut[1], USAGE_POLICY_DROP,
+    'still governed by the header cwd policy, not exempted for already carrying one'
+  )
+})
+
+// The existing test above runs under a resolver verdict of `ignore`, so
+// with the guard removed the header-cwd DROP fires first and its
+// `out[1] === successor` assertion already fails there - the later
+// message_id/part_id assertions below it are never reached. A regression
+// that kept the drop-skip but lost the ordinal-rename skip would still pass
+// that test. This companion pins the rename half directly: verdict 'full'
+// takes the drop out of the picture, so only the guard's other effect -
+// declining the ordinal/time match - is what keeps the successor's own
+// identity. By hand, an unguarded ordinal match on this row's position
+// renames message_id `native-real-id-777` -> `msg-0004`, part_id ->
+// `msg-0004#0`, and (worse) session_id `a1b2c3d4e5f60011` ->
+// `sess-native-0001` - a partition-key move (LLP 0030), not just an id
+// collision.
+// @ref LLP 0441#no-new-drop-authority [tests]: under a verdict that never
+// drops, the native successor's own identity, its partition key included,
+// still survives the pass untouched
+test('a native successor of a fallback row keeps its own identity when nothing would drop it', async () => {
+  const agentsDir = writeSessionFile(realisticSessionRecords())
+  const wire = realisticWireMessages()
+
+  const predecessor = fallbackRow({
+    role: wire[0].role,
+    content: wire[0].content,
+    messageIndex: 0,
+    ts: wire[0].ts,
+  })
+
+  const successor = {
+    session_id: HASH_SESSION_ID,
+    client_name: 'openclaw',
+    conversation_source: 'openclaw',
+    message_id: 'native-real-id-777',
+    part_id: 'native-real-id-777#0',
+    message_index: 3,
+    part_index: 0,
+    role: 'assistant',
+    message_created_at: iso(T0 + 4_000),
+    cwd: SESSION_CWD,
+    attributes: {},
+    previous_message_id: [/** @type {any} */ (predecessor).message_id],
+  }
+
+  const out = await enricher({ agentsDir, verdict: 'full' }).settle([predecessor, successor], NO_CTX)
+
+  assert.equal(out[1], successor, 'the same object, not a settled copy')
+  assert.equal(/** @type {any} */ (out[1]).message_id, 'native-real-id-777')
+  assert.equal(/** @type {any} */ (out[1]).part_id, 'native-real-id-777#0')
+  assert.equal(/** @type {any} */ (out[1]).session_id, HASH_SESSION_ID)
+})

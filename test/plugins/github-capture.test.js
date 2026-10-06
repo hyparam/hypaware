@@ -187,21 +187,26 @@ test('only-filter restricts to the named repo within the configured selection', 
   assert.equal(rows[0].repo, 'o/a')
 })
 
-test('only-filter never expands beyond the active inventory', async () => {
+test('explicit backfill imports a repository outside the active inventory once', async () => {
   const calls = []
   const client = fakeClient({
     calls,
     repos: { 'o/outside': { issues: [{ number: 1 }] } },
   })
-  const { rows, result } = await capture({
+  const { rows, result, cursors } = await capture({
     config: cfg(),
     client,
     observedRepos: ['o/observed'],
     only: ['o/outside'],
   })
-  assert.equal(result.repos, 0)
-  assert.equal(rows.length, 0)
-  assert.ok(!calls.some((call) => call.includes('o/outside')))
+  assert.equal(result.repos, 1)
+  assert.equal(rows.length, 1)
+  assert.ok(calls.some((call) => call.includes('o/outside')))
+  assert.equal(cursors.repos['o/outside'].one_time_import, undefined)
+  calls.length = 0
+  const polled = await captureRepos({ config: cfg(), client, cursors, mode: 'poll', log: silentLog, observedRepos: [], append: async () => assert.fail('completed import must not poll') })
+  assert.equal(polled.repos, 0)
+  assert.deepEqual(calls, [])
 })
 
 test('a failed append does not advance past rows that never landed', async () => {
@@ -640,7 +645,7 @@ test('a 304 pulls phase does not retire an older sidecar fallback by publishing 
   assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [10], 'and the listing tick publishes the dedicated set')
 })
 
-test('page and task continuations survive the cursor sidecar round trip', (t) => {
+test('page and task continuations survive the cursor sidecar round trip', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursors-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
   const state = {
@@ -663,7 +668,7 @@ test('page and task continuations survive the cursor sidecar round trip', (t) =>
     },
   }
 
-  writeCursors(stateDir, state)
+  await writeCursors(stateDir, state)
   assert.deepEqual(readCursors(stateDir), state)
 })
 
@@ -808,7 +813,7 @@ test('a second tick over unchanged upstream state appends nothing', async (t) =>
         observedRepos: ['o/r'],
       })
     } finally {
-      writeCursors(stateDir, cursors)
+      await writeCursors(stateDir, cursors)
     }
   }
 
@@ -916,10 +921,10 @@ test('new activity does not drag the already-captured boundary rows back in', as
   assert.deepEqual(third, [], 'and the new boundary is carried in turn')
 })
 
-test('staged phase watermarks survive the cursor sidecar round trip', (t) => {
+test('staged phase watermarks survive the cursor sidecar round trip', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-staged-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
-  writeCursors(stateDir, /** @type {any} */ ({
+  await writeCursors(stateDir, /** @type {any} */ ({
     schema_version: 1,
     repos: {
       'o/r': {
@@ -945,7 +950,7 @@ test('a refused continuation clears the poisoned work so the next tick captures 
   // A hand-tampered sidecar: the persisted continuation addresses an origin the
   // client refuses. A live `Link` header cannot get here any more, because the
   // client pins `next` on the response that carried it.
-  writeCursors(stateDir, /** @type {any} */ ({
+  await writeCursors(stateDir, /** @type {any} */ ({
     schema_version: 1,
     repos: {
       'o/r': {
@@ -980,7 +985,7 @@ test('a refused continuation clears the poisoned work so the next tick captures 
       mode: 'poll',
       observedRepos: ['o/r'],
     })
-    writeCursors(stateDir, cursors)
+    await writeCursors(stateDir, cursors)
     return { rows, result }
   }
 
@@ -1367,7 +1372,7 @@ test("the gate's cross-page guard survives a phase the request budget splits acr
     'the guard is staged on the work descriptor, not left in memory',
   )
 
-  writeCursors(stateDir, cursors)
+  await writeCursors(stateDir, cursors)
   const resumed = readCursors(stateDir)
   assert.deepEqual(
     resumed.repos['o/r'].work?.gate_emitted,

@@ -1,7 +1,8 @@
+import type { dispatch } from '../../../../src/core/cli/dispatch.js'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
-import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
-import type { OverviewQueryRunner } from '../../query/types.d.ts'
+import type { CollectStatusOptions, DurableBinUpgradeSeam, HypAwareStatusReport } from '../../daemon/types.d.ts'
+import type { FirstAskEvidence, OverviewQueryRunner } from '../../query/types.d.ts'
 import type { LoginOutcomeReason } from '../../remote/types.d.ts'
 import type { ClientDescriptor, PickerDescriptor, PluginCatalog } from '../../types.d.ts'
 import type { FolderAskMode } from '../../usage-policy/types.d.ts'
@@ -64,17 +65,26 @@ export type SeedOrigin = 'selection' | 'config' | 'detected'
 export type WizardStepName = 'join' | 'pick' | 'sync' | 'folders' | 'finale'
 
 /**
- * The sync-scope step (LLP 0188 #never-silent, LLP 0190 #sync-gate): after
- * the picker on every enrolled run, a defaults gate stating what will sync,
- * then - on request - a multiselect over the non-locked picked sources
- * where checked means "syncs" and unchecked keeps a source local-only.
- * Locked (org-configured) sources never appear: they always sync
- * (LLP 0188 #locked).
+ * Apply the combined collection and sharing choice after the picker
+ * (LLP 0396 #combined-selection). The lane states what syncs and returns
+ * pending sources for the post-config commit; it never prompts.
  */
 export interface RunWizardSyncScopeOptions {
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0437 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
+  /**
+   * The server the machine syncs to, as the line names it: "HypAware Cloud"
+   * or a host (LLP 0437 #server-name). Absent when the wizard could not tell,
+   * and the line then says "the cloud".
+   */
+  server?: string
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stdin?: NodeJS.ReadableStream
   env: NodeJS.ProcessEnv
   /**
    * The picked, locked-filtered descriptors (the pick result's
@@ -85,9 +95,7 @@ export interface RunWizardSyncScopeOptions {
   /**
    * The org's locked (central-layer) descriptors, already display-filtered
    * (LLP 0276 #sync-gate). Always-sync (LLP 0188 #locked) and never
-   * editable here, but listed - on the gate and as checked, disabled menu
-   * rows - so "these will sync" states the whole picture, not only the
-   * editable slice (LLP 0190 #sync-gate).
+   * editable, but counted and named as the team's on the lane's line.
    */
   locked?: PickerDescriptor[]
   /**
@@ -113,42 +121,13 @@ export interface RunWizardSyncScopeOptions {
    * its count already decides its sentence.
    */
   candidatesHiddenIds?: string[]
-  /** The step's position line, rendered on the prompt like the pick lane's. */
-  progress?: string
-  /**
-   * Offer back-navigation out of the lane (LLP 0191): escape at the menu
-   * returns `back: true` to the orchestrator (which re-runs the pick
-   * lane).
-   */
-  allowBack?: boolean
-  /** Prompt seam (tests); defaults to the walkthrough prompt factory. */
-  prompt?: AsyncPickPrompt
-  /**
-   * Take the stated default without stopping at it (LLP 0201 #narrate):
-   * the express gate already answered this lane, so it narrates the sync
-   * split the menu would have shown and proceeds.
-   */
-  autoAccept?: boolean
 }
 
 export interface WizardSyncScopeResult {
-  /** The user cancelled at the prompt; the wizard exits 130. */
-  cancelled?: boolean
-  /** The user stepped back out of the lane (LLP 0191); nothing written. */
-  back?: true
-  /** Candidate source ids the user opted out (kept local-only). */
-  optedOut: string[]
+  /** Selected source ids to enable after the config commits; never a store snapshot. */
+  pendingSources?: string[]
   /** The step was skipped (corrupt store) rather than answered. */
   skipped?: boolean
-  /**
-   * The lane reached its outcome without presenting a prompt: everything
-   * picked was fleet-locked, or the store was unreadable. It is then a
-   * statement rather than a screen, so the lane after it steps back *past*
-   * it (LLP 0191 #back-edges: escape reaches the last screen the user could
-   * answer, and a lane that asked nothing is not one). Not set on the
-   * express path, which asks nothing anywhere and never backs.
-   */
-  noQuestion?: true
 }
 
 /**
@@ -158,6 +137,19 @@ export interface WizardSyncScopeResult {
  * time I work somewhere new" - which is why it is its own step.
  */
 export interface RunWizardFolderAskOptions {
+  /**
+   * On an auto-accepted run, state the answer but leave it unwritten: the
+   * caller records it with `commitWizardFolderAsk` once the statement has
+   * been shown. An answer the user gave on screen is recorded at once.
+   */
+  deferWrite?: boolean
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0437 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
@@ -239,6 +231,8 @@ export interface WizardFolderAskResult {
   back?: true
   /** The answer could not be written; the previous mode stands. */
   skipped?: boolean
+  /** `deferWrite` held the answer back; the caller records `mode`. */
+  pendingWrite?: true
 }
 
 export interface RunWizardForkOptions {
@@ -463,13 +457,11 @@ export interface RunWizardJoinOptions {
    */
   resolveLayered?: () => Promise<LayeredProvenance>
   /**
-   * The lane's position line (LLP 0135 #progress), e.g.
-   * `Step 1 of 3 · Join your team`. The join lane owns no prompt spec, so
-   * it prints the line itself where its narration would go, and prints that
-   * plain sentence only when there is no position line. Absent on runs with
-   * no committed pathway, which print the plain sentence instead.
+   * The entrypoint the orchestrator settled for the daemon before the fork
+   * (LLP 0404), forwarded to the login lane's install as an explicit
+   * `--bin` so enrollment neither asks again nor records a different CLI.
    */
-  progress?: string
+  binPath?: string
 }
 
 /**
@@ -481,6 +473,15 @@ export interface RunWizardJoinOptions {
  * prompting, matching today's `interactive = !opts.picks` split.
  */
 export interface RunWizardPickOptions {
+  /**
+   * Where the lane's statement of its answer goes. Defaults to stdout. The
+   * wizard collects it instead and prints every lane's statement together
+   * when the config is saved, so a back never leaves a stale one on screen
+   * (LLP 0437 #recap).
+   */
+  statement?: { write(chunk: string): unknown }
+  /** Checked sources are collected locally and synced remotely. */
+  collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
@@ -488,7 +489,7 @@ export interface RunWizardPickOptions {
   /**
    * The plugin catalog (T2). Picker rows come from
    * `catalog.pickerDescriptors`; when omitted the phase loads the bundled
-   * catalog itself, matching `runPickerWalkthrough`'s self-loading shape.
+   * catalog itself.
    */
   catalog?: Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors' | 'composeWith'>
   /**
@@ -500,7 +501,7 @@ export interface RunWizardPickOptions {
   /**
    * Central-layer-locked source ids from the join phase (LLP 0129
    * #join-before-picker). Each renders checked and disabled with the
-   * `· managed by your fleet` label suffix, and is filtered out of the
+   * `· set by your team` label suffix, and is filtered out of the
    * returned `sourcesPicked` so composition never re-adds a source the
    * central layer already owns.
    */
@@ -561,8 +562,6 @@ export interface RunWizardPickOptions {
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
   /** Overwrite an existing local config non-interactively (`--force`). */
   force?: boolean
-  /** Interactive overwrite confirm, consulted only when a config exists. */
-  confirmOverwrite?: (targetPath: string) => Promise<boolean>
   /**
    * Skip the overwrite guard and the config write, returning the composed
    * config with `configPending` set. The wizard orchestrator sets this and
@@ -581,7 +580,7 @@ export interface RunWizardPickOptions {
  */
 export type FirstLookOutcome =
   | { shown: true; providerRows: number; dayRows: number; partial?: true }
-  | { shown: false; reason: 'no-dataset' | 'error' | 'slow' }
+  | { shown: false; reason: 'no-dataset' | 'error' | 'slow' | 'empty' }
 
 /**
  * The outcome plus whether the step wrote anything to stdout, which is a
@@ -618,32 +617,15 @@ export interface FirstAskLauncher {
  */
 export type FirstAskResult =
   | { launched: true; client: string; promptId: string; exitCode?: number }
-  | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'error' }
+  | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'no-evidence' | 'error' }
 
 /**
- * The closing "send now" offer's outcome (LLP 0203).
- *
- * `released` is read back from the hold marker, never inferred from the
- * child's exit code: `hyp sync` exits 0 both when it sends and when the
- * user reads its destination list and answers no. `sync-declined` is that
- * second case, and it is the only decline there is: the wizard puts no
- * question of its own ahead of the child's (LLP 0203 #no-new-consent).
- * `child-failed` is the still-held run whose child exited non-zero, which a
- * decline never does: it never reached its plan, so it is not a decline and
- * must not be counted as one.
- *
- * `no-destinations` is the one non-zero exit that is named rather than left
- * to `child-failed`: `hyp sync` found no sink to send to, which is not a run
- * that broke. It is told apart by the child's exit code
- * (`SYNC_HELD_NO_DESTINATIONS_EXIT`) together with the notice it prints on
- * that branch (`SYNC_HELD_NO_DESTINATIONS_NOTICE`), never by the marker,
- * which says only that nothing sent. Both halves are required: 3 is a small
- * integer any process can return, and this arm restates the explanation as
- * setup's closing statement.
+ * The closing sync outcome. The marker distinguishes release from decline;
+ * sync's return code distinguishes no destinations from a failed command.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
-  | { asked: true; released: false; reason: 'sync-declined' | 'child-failed' | 'no-destinations' | 'spawn-failed' }
+  | { asked: true; released: false; reason: 'sync-declined' | 'sync-failed' | 'no-destinations' }
   | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSyncNow`. */
@@ -663,8 +645,45 @@ export interface RunWizardSyncNowOptions {
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */
-  spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
+  dispatchFn?: typeof dispatch
   readDeadline?: () => Promise<number | null>
+}
+
+/**
+ * What the closing skill offer did. `launched` means `hyp ask` ran to a
+ * clean exit; the child's own output says what it started. Every other
+ * arm ended on the line that names the verb.
+ */
+export type WizardSuggestSkillResult =
+  | { asked: true; launched: true }
+  | { asked: true; launched: false; reason: 'declined' | 'spawn-failed' | 'child-failed' }
+  | { asked: false; reason: 'no-rows' | 'no-launcher' | 'not-interactive' | 'error' }
+
+/** Options for `runWizardSuggestSkill`. */
+export interface RunWizardSuggestSkillOptions {
+  stdout: { write(chunk: string): unknown }
+  stderr?: { write(chunk: string): unknown }
+  env: NodeJS.ProcessEnv
+  /** False on a piped or scripted run: never prompt, never launch. */
+  interactive?: boolean
+  /**
+   * Whether the first look found rows. `false` replaces the offer with the
+   * empty-history note (LLP 0198#empty-cache); `undefined` means the caller
+   * could not tell, which never withholds the offer.
+   */
+  hasRows?: boolean
+  /**
+   * Whether any client `hyp ask` could start is on `$PATH`. `false` drops
+   * the offer and every mention of the verb (LLP 0398#setup-offer);
+   * `undefined` means the caller could not tell, which never withholds it.
+   */
+  launchable?: boolean
+  stdin?: NodeJS.ReadableStream
+  /** Real stream for the TUI, when `stdout` above is a buffer. */
+  stdoutStream?: NodeJS.WritableStream
+  /** Test seams; production callers pass none of these. */
+  confirm?: AsyncConfirmSelectPrompt
+  spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
 }
 
 /** Options for `runWizardFirstAsk`. */
@@ -678,14 +697,23 @@ export interface RunWizardFirstAskOptions {
   /** False on a piped run: print the list, never prompt. */
   interactive?: boolean
   /**
-   * Whether the cache holds anything the suggested questions could be
+   * Whether the cache holds anything the question could be
    * answered from. `false` suppresses the launch entirely
    * (LLP 0198#empty-cache); `undefined` means the caller could not tell,
    * which never withholds the offer.
    */
   hasRows?: boolean
-  /** Working directory the client is started in; defaults to the caller's. */
   stdin?: NodeJS.ReadableStream
+  /**
+   * Gathers the recommendation ask's evidence into a run directory and
+   * returns it (LLP 0398). Called with the client that is about to read the
+   * folder, so the instructions can name that client's own skill tree
+   * rather than Claude Code's. Absent, failing, or returning `undefined`, the
+   * question does not launch at all: a client started on the bare question
+   * answers it the cold way, which is the failure the gather exists to
+   * remove, so the run reports `no-evidence` and exits non-zero.
+   */
+  prepareEvidence?: (client: string) => Promise<FirstAskEvidence | undefined>
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */
@@ -731,6 +759,15 @@ export interface WizardOutputGuard {
   detach(): void
 }
 
+export interface RunWizardGithubOptions {
+  stdout: WizardOutputSink
+  stderr: WizardOutputSink
+  stdin?: NodeJS.ReadableStream
+  env: NodeJS.ProcessEnv
+  interactive: boolean
+  confirm?: AsyncConfirmSelectPrompt
+}
+
 /**
  * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
  * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
@@ -760,6 +797,12 @@ export interface RunInitWizardOptions {
   agents?: { list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[] }
   backfill?: PickerBackfillRunner
   finale?: PickerFinaleActions
+  /**
+   * Seam for the durable-CLI resolution the orchestrator runs before the
+   * fork (LLP 0404): the candidate entrypoint (default `process.argv[1]`)
+   * plus the npm runner and confirmation prompt tests replace.
+   */
+  durableBin?: DurableBinUpgradeSeam & { binPath?: string }
   /** Pre-baked picks: the non-interactive short-circuit. */
   picks?: PickerPicks
   exportOrigin?: PickerExportOrigin
@@ -798,6 +841,13 @@ export interface RunInitWizardOptions {
    * step runs only on an enrolled run with a live hold.
    */
   syncNow?: Partial<RunWizardSyncNowOptions>
+  /**
+   * Overrides for the closing skill offer (tests): the confirm seam and
+   * the spawn seam. Production callers pass none.
+   */
+  suggestSkill?: Partial<RunWizardSuggestSkillOptions>
+  /** GitHub offer seam for tests. Login uses ctx.commands.run. */
+  github?: Pick<RunWizardGithubOptions, 'confirm'>
   /** Phase overrides (tests). */
   gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
   fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>
@@ -827,7 +877,6 @@ export interface RunInitWizardOptions {
    */
   leave?: () => Promise<number>
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
-  confirmOverwrite?: (targetPath: string) => Promise<boolean>
   backfillConsentPrompt?: AsyncBackfillConsentPrompt
 }
 

@@ -88,6 +88,21 @@ function fixtureSource(name, plugin) {
 }
 
 /**
+ * Register `contribution` the way a real boot does: through the registrar
+ * bracket the activation context wraps `register` in, so the kernel records the
+ * registering plugin. The boot walk picks the activation context from that
+ * record and refuses a source it never saw registered (issue #1944), so a
+ * fixture registering straight on the registry no longer models a daemon boot.
+ *
+ * @param {ReturnType<typeof createSourceRegistry>} registry
+ * @param {string} plugin
+ * @param {any} contribution
+ */
+function registerAs(registry, plugin, contribution) {
+  registry.registeringAs(/** @type {any} */ (plugin), () => registry.register(contribution))
+}
+
+/**
  * The two contributions the substitution needs: a hostile one registered under
  * a name that sorts first, and the honest neighbour whose name it claims.
  */
@@ -98,8 +113,8 @@ function stageSubstitution() {
   // `list()` orders by the keys the registry validated, so the hostile
   // contribution is walked first whatever its `name` answers, and the honest
   // source is still unstarted when the substitution is attempted.
-  registry.register(hostile.contribution)
-  registry.register(honest.contribution)
+  registerAs(registry, HOSTILE, hostile.contribution)
+  registerAs(registry, HONEST, honest.contribution)
   let nameReads = 0
   beHostile(/** @type {any} */ (hostile.contribution), {
     get name() {
@@ -200,8 +215,8 @@ test('an honest source starts exactly as it did before the guard', async () => {
   const registry = createSourceRegistry()
   const second = fixtureSource('zzz-second', HONEST)
   const first = fixtureSource('aaa-first', HOSTILE)
-  registry.register(second.contribution)
-  registry.register(first.contribution)
+  registerAs(registry, HONEST, second.contribution)
+  registerAs(registry, HOSTILE, first.contribution)
   const firstCtx = { marker: 'first-activation' }
   const secondCtx = { marker: 'second-activation' }
   const log = makeLog()

@@ -9,9 +9,10 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { diagnoseV1Config } from '../../src/core/config/validate.js'
 
 // `status.json` is not the only file whose bytes reach `hyp status`'s text
-// surface. Two more do:
+// surface. Three more do:
 //
 //   - `config-control/state.json` and the per-slot etag sidecar. An etag is
 //     authored by whatever server the install joined, and the state file is
@@ -20,10 +21,13 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 //   - a client's own settings file, by way of the attach probe's `error`: a
 //     settings file that is not valid JSON surfaces as `JSON.parse`'s
 //     message, which quotes an excerpt of the file verbatim.
+//   - the local config file, by way of a diagnostic's `message` and `repair`:
+//     a config that does not parse surfaces the same `JSON.parse` excerpt, and
+//     a repair command names config-supplied values.
 //
-// Both are display-only on this surface and both were interpolated raw, so
-// each was a way for a file the operator never chose to trust to repaint the
-// screen or forge a plausible extra status line.
+// All three are display-only on this surface and all three were interpolated
+// raw, so each was a way for a file the operator never chose to trust to
+// repaint the screen or forge a plausible extra status line.
 //
 // @ref LLP 0225#decision [tests]: the render a person reads is cleaned, whichever file the string came from; --json is not
 
@@ -168,6 +172,7 @@ test('a hostile client probe error cannot drive the terminal from hyp status', a
     name: 'codex',
     plugin: '@hypaware/codex',
     configured: false,
+    recording: false,
     attachable: true,
     attached: false,
     // What `JSON.parse` says about a settings file whose bytes are hostile:
@@ -199,7 +204,7 @@ test('an unbounded client probe error is clamped', async () => {
   const report = await collectHypAwareStatus({ env: env(hypHome) })
   const long = 'b'.repeat(5000)
   report.clients = report.clients.filter((c) => c.name !== 'codex')
-  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, attachable: true, attached: false, error: long })
+  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, recording: false, attachable: true, attached: false, error: long })
 
   const stdout = makeBuf()
   renderStatusText({
@@ -234,7 +239,7 @@ test('hyp status --json still reports the etag and probe error the files hold', 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
   const probeError = `Unexpected token '${ERASE_LINE}'`
   report.clients = report.clients.filter((c) => c.name !== 'codex')
-  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, attachable: true, attached: false, error: probeError })
+  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, recording: false, attachable: true, attached: false, error: probeError })
 
   const payload = renderStatusJson({
     report,
@@ -311,4 +316,249 @@ test('a long rollback etag is clamped in the --json message but whole in the --j
   assert.ok(!diag.message.includes(long), 'the assembled sentence does not carry the whole etag')
   assert.ok(diag.message.includes('a'.repeat(117) + '...'), 'it is clamped at a label width, and marked truncated')
   assert.equal(payload.remote_config?.last_rollback?.etag, long, 'the values beside it are not clamped')
+})
+
+// The verbose diagnostics block printed both of a diagnostic's strings raw
+// while the Attention line above it cleaned the same message (issue #2430).
+test('a hostile local config cannot drive the terminal through the verbose diagnostics block', async () => {
+  const hypHome = await makeHome()
+  // A bare token first, so the parse error is the spelling that quotes the
+  // input back rather than one that only reports a position.
+  await fs.writeFile(defaultConfigPath(hypHome), `x${ERASE_LINE}\n  overall:  healthy`)
+
+  const { report, text } = await render(hypHome)
+  const diag = report.diagnostics.find((d) => d.kind === 'config_unreadable')
+  assert.ok(diag, 'the unparseable config is diagnosed')
+  assert.ok(CONTROL_EXCEPT_NEWLINE.test(diag.message), 'whose message quotes the raw bytes back')
+
+  assert.match(text, /\[ERROR\] config_unreadable: config is not valid JSON/, 'the verbose block still reports it')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('  overall:  healthy')).length,
+    0,
+    'the embedded newline cannot forge a second overall line',
+  )
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    payload.diagnostics.find((d) => d.kind === 'config_unreadable')?.message,
+    diag.message,
+    '--json still carries the message byte-exact',
+  )
+})
+
+// Every repair line of that block, not just the first: the Attention line above
+// prints only `repair[0]`, so the rest reach a terminal here alone. Planted
+// rather than driven from a lock file because the render is what is under test.
+test('a hostile repair string cannot drive the terminal from the verbose diagnostics block', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const repair = [
+    `hyp plugin update @acme/p${ERASE_LINE}\n        repair: hyp plugin remove everything`,
+    `hyp plugin doctor /tmp/p${ZERO_WIDTH}`,
+  ]
+  report.diagnostics.push({
+    severity: 'error',
+    kind: 'config_invalid',
+    message: `[plugin_unknown] /plugins/0/name: unknown plugin '@acme/p${ERASE_LINE}'`,
+    repair,
+  })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.ok(!text.includes(ZERO_WIDTH), 'and no zero-width run does either')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('        repair: ')).length,
+    2,
+    'two repair entries stay two lines, whatever they carry',
+  )
+  assert.match(text, /repair: hyp plugin update @acme\/p/, 'the printable part of the first still names the command')
+  assert.match(text, /repair: hyp plugin doctor \/tmp\/p/, 'and of the second')
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.deepEqual(
+    payload.diagnostics.find((d) => d.kind === 'config_invalid')?.repair,
+    repair,
+    '--json still carries the repair commands byte-exact',
+  )
+})
+
+// The fourth file, found reviewing the fix for the first three: `kind` is only
+// nearly a closed set. `V1DiagnosticKind` spells one of its entries
+// `gateway_missing_${string}_upstream`, and the `${string}` is a plugin
+// manifest's `contributes.client.required_upstreams[0]` - `validateManifest`
+// accepts the `contributes` block opaquely and `plugin_catalog` copies the
+// array in without filtering, so an installed plugin's own manifest reaches
+// this line. Driven through `diagnoseV1Config` first so the planted diagnostic
+// below is the one the collector would really build, not a shape invented here.
+test('a hostile diagnostic kind cannot drive the terminal from the verbose diagnostics block', async () => {
+  const upstream = `openai${ERASE_LINE}\n  overall:  healthy`
+  const built = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway', enabled: true, config: { upstreams: [] } },
+        { name: '@acme/evil', enabled: true },
+      ],
+    },
+    {
+      clientDescriptors: new Map([
+        ['evilclient', { plugin: '@acme/evil', name: 'evilclient', skillDir: 'skills', requiredUpstreams: [upstream] }],
+      ]),
+    },
+  ).find((d) => CONTROL_EXCEPT_NEWLINE.test(d.kind))
+  assert.ok(built, 'a manifest-supplied upstream name reaches the diagnostic kind')
+
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  report.diagnostics.push({
+    severity: 'warning',
+    kind: built.kind,
+    message: built.message,
+    repair: built.repair,
+  })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('  overall:  healthy')).length,
+    1,
+    'the embedded newline cannot forge a second overall line',
+  )
+  assert.match(text, /\[WARN \] gateway_missing_openai/, 'the printable part of the kind still names the condition')
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    payload.diagnostics.at(-1)?.kind,
+    built.kind,
+    '--json still carries the kind byte-exact',
+  )
+})
+
+// The fifth file: the client-action marker store. `buildClientActionsReport`
+// keys `kind` on a marker store and `requestKey` on a marker name or a
+// configured plugin, and lifts `reason`, `last_attempt` and `at` out of marker
+// JSON behind a `typeof === 'string'` guard, so a marker file this build did not
+// write supplied every string on the row. The Attention line cleaned three of
+// the five and the verbose block none, and `at` and `lastAttempt` reach a
+// terminal here alone. Planted rather than written as markers because the render
+// is what is under test.
+test('a hostile client-action marker cannot drive the terminal from the verbose client-actions block', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  // An erase-line sequence and a newline carrying a complete extra row: on the
+  // raw render each one forged a `[done]` action the operator never had.
+  const FORGED_ROW = '    - attach trusted  [done]'
+  const forge = (/** @type {string} */ value) => `${value}${ERASE_LINE}\n${FORGED_ROW}`
+  report.clientActions = {
+    actions: [
+      { kind: forge('attach'), requestKey: 'pending-key', state: 'pending' },
+      { kind: 'backfill', requestKey: forge('@acme/p'), state: 'pending' },
+      {
+        kind: 'backfill',
+        requestKey: '@acme/q',
+        state: 'failed',
+        reason: forge('import rejected'),
+        lastAttempt: forge('2026-01-01T00:00:00.000Z'),
+        attempts: 3,
+      },
+      { kind: 'attach', requestKey: 'codex', state: 'done', rows: 7, at: forge('2026-01-02T00:00:00.000Z') },
+      { kind: 'attach', requestKey: forge('refused-key'), state: 'refused', reason: forge('settings not writable') },
+    ],
+  }
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.match(text, /client actions:/, 'the block is rendered at all')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  // Counted inside the block rather than over the whole render: other sections
+  // write rows with the same prefix, and an ambient home can populate them.
+  const block = text.split('\n  client actions:\n')[1].split('\n\n')[0]
+  assert.equal(
+    block.split('\n').filter((line) => line.startsWith('    - ')).length,
+    5,
+    'five planted actions stay five rows, whatever their fields carry',
+  )
+  assert.equal(
+    block.split('\n').filter((line) => line.startsWith(FORGED_ROW)).length,
+    0,
+    'and no embedded newline forges a sixth',
+  )
+  // Every one of the five keeps its printable part, so a row still identifies
+  // its action rather than rendering blank.
+  assert.match(block, /^ {4}- attach\[2K.*pending-key {2}\[pending\]$/m, 'a hostile kind collapses into its own row, which still carries the key and the state')
+  assert.match(block, /- backfill @acme\/p/, 'the printable part of a hostile key still names the plugin')
+  assert.match(block, /\[failed\] {2}\(import rejected/, 'the reason still reads')
+  assert.match(block, /last attempt 2026-01-01T00:00:00\.000Z/, 'the last-attempt timestamp still reads')
+  assert.match(block, /at 2026-01-02T00:00:00\.000Z/, 'the done timestamp still reads')
+  assert.match(block, /run 'hyp client attach refused-key/, "and the refused state's repair hint still names the key")
+
+  // `--json` is the identifier contract: all five stay byte-exact, key order
+  // included, which is why the cleaning happens at the text interpolation.
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    JSON.stringify(payload.client_actions),
+    JSON.stringify([
+      { kind: forge('attach'), request_key: 'pending-key', state: 'pending' },
+      { kind: 'backfill', request_key: forge('@acme/p'), state: 'pending' },
+      {
+        kind: 'backfill',
+        request_key: '@acme/q',
+        state: 'failed',
+        reason: forge('import rejected'),
+        last_attempt: forge('2026-01-01T00:00:00.000Z'),
+        attempts: 3,
+      },
+      { kind: 'attach', request_key: 'codex', state: 'done', rows: 7, at: forge('2026-01-02T00:00:00.000Z') },
+      { kind: 'attach', request_key: forge('refused-key'), state: 'refused', reason: forge('settings not writable') },
+    ]),
+    '--json still carries every planted byte raw',
+  )
 })

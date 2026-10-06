@@ -6,6 +6,7 @@
 **Author:** Claude
 **Date:** 2026-07-29
 **Related:** LLP 0030, LLP 0049, LLP 0050, LLP 0066, LLP 0083, LLP 0141
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > The Codex live projector derived a turn's thread, session and parent thread
 > from request headers, three of whose names Codex has never emitted, while the
@@ -195,8 +196,7 @@ rollout tree, keyed on the rollout's session id.
   that needs the `x-openai-subagent` decision above.
 - The Codex-source facts here are a snapshot of an upstream HypAware does not
   control. The mitigation is `lineage_source` and `lineage_conflict`
-  ([#lineage-conflict](#lineage-conflict)) plus the acceptance check in
-  [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md), not a pinned literal.
+  ([#lineage-conflict](#lineage-conflict)), not a pinned literal.
 
 ## References
 

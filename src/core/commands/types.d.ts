@@ -65,14 +65,6 @@ export interface BackfillProviderResult {
   sessions_seen: number
   status: 'ok' | 'failed'
   error?: string
-}
-
-// A distinct working directory the user has captured Claude/Codex exchanges
-// in, read from the local cache (LLP 0069 #enumerate). `repoRoot` is `null`
-// for Codex directories (no repo-root stamping) or plain non-repo cwds.
-export interface CapturedDirectory {
-  cwd: string
-  repoRoot: string | null
-  rows: number
-  lastSeen: string | null
+  /** Which step produced `error`, for the run's `provider_finish` span. */
+  error_kind?: string
 }

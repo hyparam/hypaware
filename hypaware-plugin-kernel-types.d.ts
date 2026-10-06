@@ -215,6 +215,13 @@ export interface PluginClientManifest {
    * captured. Declared here rather than in a core table for the same
    * reason as `attach_probe`: the path is the client's business, and
    * core must be able to read it without importing plugin code.
+   *
+   * An mtime alone only nominates: when it would report a gap, core reads
+   * the tail of the newest files to confirm a real turn is behind the
+   * write, and that read understands Claude Code's JSONL records
+   * (`type`, `isMeta`). A client whose trail is shaped differently gets
+   * the mtime pass and a confirmation read that will not recognise its
+   * turns, so declare one here only alongside that record shape.
    */
   activity_probe?: PluginActivityProbeManifest
   /**
@@ -239,8 +246,10 @@ export interface PluginClientManifest {
 }
 
 /**
- * A client-written directory core may stat (never parse) to answer
- * "when was this client last active?". Same home-relative contract as
+ * A client-written directory core reads to answer "when was this client
+ * last active?": every matching file's mtime, and, only when those mtimes
+ * would report a capture gap, the tail of the newest few (see
+ * `activity_probe` above). Same home-relative contract as
  * `attach_probe.settings_file`: relative to `$HOME`, first segment
  * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
  */
@@ -833,6 +842,15 @@ export interface PluginConfigInstance {
    * maps to its canonical git source.
    */
   source?: string
+  /**
+   * Whether HypAware records the client this plugin contributes
+   * (`contributes.client`). Absent means recording. `hyp client detach`
+   * writes `false` to the local entry and `hyp client attach` removes it;
+   * the backfill runner, the attach-on-join reconciler, `hyp setup`, and
+   * `hyp status` all read it. Ignored for a plugin that contributes no
+   * client.
+   */
+  recording?: boolean
 }
 
 /**
@@ -1060,6 +1078,12 @@ export interface CommandRunContext {
   stdin?: NodeJS.ReadStream
   env: NodeJS.ProcessEnv
   cwd: string
+  /**
+   * The whole effective config, not the plugin's slice `activate()`
+   * receives (LLP 0420 #split). A plugin-owned command body therefore
+   * reads every section, a neighbour's inline credentials included;
+   * narrowing it is issue #1978.
+   */
   config: HypAwareV2Config
   plugins: ActivePlugin[]
   /**
@@ -1078,6 +1102,10 @@ export interface CommandRunContext {
    * (LLP 0219 #incomplete-activation-prunes-nothing).
    */
   failedPlugins?: string[]
+  /**
+   * Capability registry. Per-plugin for a plugin-contributed command, raw
+   * for a core one: see `sinks` below for the rule and why it exists.
+   */
   capabilities: CapabilityRegistry
   /** Kernel-owned client lifecycle registry. Present on current hosts. */
   clients?: ClientRegistry
@@ -1143,15 +1171,33 @@ export interface CommandRunContext {
    */
   agents: AgentRegistry
   /**
-   * Source registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-source breakdown and harvest source picks.
+   * Source registry. Per-plugin for a plugin-contributed command, raw for a
+   * core one: see `sinks` below for the rule and why it exists. `hyp status`
+   * and the wizard's pick phase are core, so they still enumerate every
+   * plugin's sources to render the breakdown and harvest source picks.
    */
   sources: SourceRegistry
   /**
-   * Sink registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-sink breakdown and harvest sink picks.
+   * Sink registry. Which registry depends on who owns the command:
+   *
+   * - A command a **plugin** contributed gets that plugin's own
+   *   `ctx.sinks` facade, the one its `activate()` holds. Registering a
+   *   command is a plugin extension point, so the body of one is a second
+   *   context the same plugin reaches the kernel through, and it is
+   *   bracketed the way the first one is: a neighbour's configured instance
+   *   answers with no `config`, no live `exportBatch`, no `reader()`, no
+   *   writable `sink`, and `closeAll()` closes only this plugin's own.
+   * - A **core** command gets the kernel's registry unchanged. `hyp status`
+   *   and the wizard render every plugin's sinks, `hyp sink maintain`
+   *   drives them, and that is core's job.
+   *
+   * The owner is the plugin the registry recorded as registering the
+   * command, not `CommandRegistration.plugin`, which the plugin writes.
+   * The split scopes the command as registered: the stored record stays
+   * mutable through `get()`, and rewriting its `run` sidesteps the split
+   * (issue #1977).
+   *
+   * @see LLP 0420 #split
    */
   sinks: SinkRegistry
   /**
@@ -1357,11 +1403,19 @@ export interface PutObjectResult {
 
 export interface GetObjectInput {
   key: string
+  /** Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive. */
+  range?: string
 }
 
 export interface GetObjectResult {
+  /** Caller owns the stream: consume it or destroy() it. A provider may hold
+   * an open file handle or socket until one of those happens, and a range
+   * reader makes many such reads per object. */
   body: NodeJS.ReadableStream
+  /** Length of the returned body, which may be only a range. */
   contentLength?: number
+  /** HTTP Content-Range when range was honored. Absent means a whole object. */
+  contentRange?: string
   etag?: string
 }
 
@@ -1529,6 +1583,13 @@ export interface ExportBatch {
 export interface ExportOptions {
   format: string
   schedule: string
+  /** Incremental payload counts, reported only after a chunk or blob is acknowledged. */
+  onProgress?: (progress: ExportProgress) => void
+}
+
+export interface ExportProgress {
+  rows: number
+  bytes: number
 }
 
 export interface ExportResult {
@@ -1719,6 +1780,9 @@ export interface ReadRowsOptions {
  * long as those helpers keep their contract.
  */
 export interface QueryStorageService {
+  /** Reconcile a complete scoped snapshot, including removals, in the local cache. */
+  reconcileRows?(dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[], scope: { where: Record<string, string>; key: string }): Promise<number>
+
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string
   appendRows(tablePath: string, columns: ColumnSpec[], rows: Record<string, unknown>[]): Promise<void>
@@ -2385,6 +2449,12 @@ export interface AiGatewayProjectedExchange {
 export interface AiGatewayProjectedMessage {
   role: string
   content: string | JsonObject[]
+  /**
+   * Optional zero-based position in the session for incremental producers.
+   * Must be a nonnegative INT32. Omission preserves the exchange-array index.
+   * Positions must agree across replay, filtering and live/recovery batches.
+   */
+  message_index?: number
   message_id?: string
   previous_message_id?: string[]
   message_created_at?: string
@@ -2790,11 +2860,11 @@ export interface InitPresetContribution {
 }
 
 // =============================================================================
-// Backfill (first-class client history import)
+// Backfill (first-class `hyp backfill`)
 // =============================================================================
 
 /**
- * Plugin-registered backfill providers. Each provider plans and yields
+ * Plugin-registered backfill providers. Each provider scans and yields
  * `BackfillItem` envelopes (and optional `BackfillEvent` lifecycle
  * signals) for one or more datasets. Core owns the runner, telemetry
  * envelope, dry-run behavior, and dataset materialization; providers
@@ -2815,12 +2885,6 @@ export interface BackfillContribution {
   datasets: string[]
   /** Short human-readable description for `hyp backfill list`. */
   summary?: string
-  /**
-   * Optional planning hook. Called by `hyp backfill plan` to surface
-   * what would be scanned without committing to writes. Returning
-   * `undefined` means the provider has no planning information.
-   */
-  plan?(ctx: BackfillPlanContext): Promise<BackfillPlan | undefined>
   /**
    * Stream `BackfillItem` envelopes (one per scanned record) and
    * optional `BackfillEvent` lifecycle signals. The runner consumes
@@ -2845,7 +2909,7 @@ export interface BackfillContribution {
   sweep?: { cron: string }
 }
 
-export interface BackfillPlanContext {
+export interface BackfillRunContext {
   env: NodeJS.ProcessEnv
   cacheRoot: string
   /** Effective lower bound for record timestamps (ISO string). */
@@ -2888,9 +2952,14 @@ export interface BackfillPlanContext {
    * while the shared-tree gate keeps its own fail-open rules.
    */
   isPluginConfigured?: (plugin: PluginName) => boolean
-}
-
-export interface BackfillRunContext extends BackfillPlanContext {
+  /**
+   * Whether a plugin's client is detached (`recording: false`, LLP 0466),
+   * read fresh by the runner. `isPluginConfigured` already answers false for
+   * a detached plugin; this is the narrower question a shared-tree provider
+   * asks about its own client, whose unclaimed sessions otherwise fail open.
+   * Absent means nothing is detached.
+   */
+  isPluginDetached?: (plugin: PluginName) => boolean
   storage: QueryStorageService
   /** True only for a daemon-scheduled provider pass. */
   sweep?: boolean
@@ -2933,6 +3002,9 @@ export interface BackfillRunContext extends BackfillPlanContext {
  * and asks the registered materializer to produce canonical rows.
  */
 export interface BackfillItem {
+  /** Authoritative local snapshot. Empty rows retract this exact scope; dry-run never writes. */
+  reconcile?: { where: Record<string, string>; key: string }
+
   type?: 'item'
   /** Target dataset (must match the materializer's `dataset`). */
   dataset: string
@@ -2959,15 +3031,6 @@ export interface BackfillEvent {
   event: string
   /** Optional structured attributes. */
   attributes?: Record<string, unknown>
-}
-
-export interface BackfillPlan {
-  /** Provider-supplied estimate of records that would be scanned. */
-  estimated_items?: number
-  /** Free-form scan-location descriptors (e.g. file paths). */
-  sources?: string[]
-  /** Optional human-readable notes (`hyp backfill plan` surfaces these). */
-  notes?: string[]
 }
 
 /**

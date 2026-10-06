@@ -1,0 +1,192 @@
+{
+  "source": {
+    "client": "headless CLI",
+    "version": "2026.09.08-6caf4ff",
+    "date": "2026-09-10",
+    "kind": "real-client probe, sanitized",
+    "note": "Thought events omitted. No prompt, response or stop hook arrived. Tool output contains metadata, not file contents."
+  },
+  "hooks": [
+    {
+      "hook_event_name": "sessionStart",
+      "conversation_id": "probe-headless-session",
+      "generation_id": "probe-headless-session",
+      "session_id": "probe-headless-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "model": "default"
+    },
+    {
+      "hook_event_name": "preToolUse",
+      "conversation_id": "probe-headless-session",
+      "generation_id": "probe-headless-session",
+      "session_id": "probe-headless-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-tool-call\nprobe-tool-suffix",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/notes.txt"
+      },
+      "model": "default"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-headless-session",
+      "generation_id": "probe-headless-session",
+      "session_id": "probe-headless-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "tool_use_id": "probe-tool-call\nprobe-tool-suffix",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/notes.txt"
+      },
+      "tool_output": "{\"file_path\":\"/probe/workspace/notes.txt\",\"content_length\":32}",
+      "model": "default"
+    },
+    {
+      "hook_event_name": "sessionEnd",
+      "conversation_id": "probe-headless-session",
+      "generation_id": "probe-headless-session",
+      "session_id": "probe-headless-session",
+      "cursor_version": "2026.09.08-6caf4ff",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": null,
+      "duration_ms": 14840,
+      "model": "default"
+    }
+  ],
+  "stream": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "apiKeySource": "login",
+      "cwd": "/probe/workspace",
+      "session_id": "probe-headless-session",
+      "model": "Auto",
+      "permissionMode": "default"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Controlled capture probe. Read only notes.txt in this workspace using one file-read tool. Report the value in that file. Do not read any other file, run network tools, or modify files."
+          }
+        ]
+      },
+      "session_id": "probe-headless-session"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reading only `notes.txt` now."
+          }
+        ]
+      },
+      "session_id": "probe-headless-session",
+      "model_call_id": "probe-model-call",
+      "timestamp_ms": 1789076985239
+    },
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "probe-tool-call\nprobe-tool-suffix",
+      "tool_call": {
+        "readToolCall": {
+          "args": {
+            "path": "/probe/workspace/notes.txt"
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-tool-call\nprobe-tool-suffix",
+        "startedAtMs": "1789076985261"
+      },
+      "model_call_id": "probe-model-call",
+      "session_id": "probe-headless-session",
+      "timestamp_ms": 1789076985239
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "probe-tool-call\nprobe-tool-suffix",
+      "tool_call": {
+        "readToolCall": {
+          "args": {
+            "path": "/probe/workspace/notes.txt"
+          },
+          "result": {
+            "success": {
+              "content": "The probe value is MARIGOLD-42.\n",
+              "isEmpty": false,
+              "exceededLimit": false,
+              "totalLines": 2,
+              "fileSize": 32,
+              "path": "/probe/workspace/notes.txt",
+              "readRange": {
+                "startLine": 1,
+                "endLine": 2
+              },
+              "relatedCursorRulePaths": [],
+              "relatedCursorRules": []
+            }
+          }
+        },
+        "hookAdditionalContexts": [],
+        "toolCallId": "probe-tool-call\nprobe-tool-suffix",
+        "startedAtMs": "1789076985261",
+        "completedAtMs": "1789076985725"
+      },
+      "model_call_id": "probe-model-call",
+      "session_id": "probe-headless-session",
+      "timestamp_ms": 1789076985702
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "MARIGOLD-42"
+          }
+        ]
+      },
+      "session_id": "probe-headless-session"
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "duration_ms": 13419,
+      "duration_api_ms": 13419,
+      "is_error": false,
+      "result": "Reading only `notes.txt` now.MARIGOLD-42",
+      "session_id": "probe-headless-session",
+      "request_id": "probe-request",
+      "usage": {
+        "inputTokens": 20579,
+        "outputTokens": 114,
+        "cacheReadTokens": 15360,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}

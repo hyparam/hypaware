@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0005, LLP 0006, LLP 0012
+**Extended-by:** LLP 0420 (#the-activation-context: the per-plugin facade rule holds for `CommandRunContext` too, so a plugin-contributed command body reaches the registries through the same facades its `activate()` holds)
 
 > How a plugin is activated and what the kernel hands it. Decomposed from
 > `hypaware-design.md` (Activation, Sources).

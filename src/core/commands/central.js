@@ -15,7 +15,8 @@ import {
   readClientActionStatus,
   readInstalledAssets,
 } from '../config/action_reconciler.js'
-import { originOf, readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
+import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
+import { sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
@@ -46,7 +47,7 @@ import { isTty, readAllStdin } from '../cli/stdio.js'
 export async function runJoin(argv, ctx) {
   const parsed = parseJoinArgs(argv)
   if (parsed.help) {
-    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]\n')
+    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]\n')
     ctx.stdout.write('  token sources (pick one): positional argument, --token-file, or stdin\n')
     return 0
   }
@@ -108,6 +109,7 @@ export async function runJoin(argv, ctx) {
   const validation = await validateConfig(seed, {
     knownPlugins: catalogCtx.knownPlugins,
     knownDatasets: catalogCtx.knownDatasets,
+    unloadablePlugins: catalogCtx.unloadablePlugins,
   })
   if (!validation.ok) {
     for (const err of validation.errors) {
@@ -168,14 +170,13 @@ export async function runJoin(argv, ctx) {
         return 0
       }
 
-      const installArgv = parsed.binPath !== undefined ? ['--bin', parsed.binPath] : []
-      const code = await runDaemonInstall(installArgv, ctx)
+      const code = await runDaemonInstall(daemonInstallArgv(parsed), ctx)
       if (code !== 0) {
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'daemon_install_failed')
         return code
       }
-      ctx.stdout.write('✓ Joined - the daemon will pull its configuration from the server\n')
+      ctx.stdout.write(`✓ Joined - the daemon will pull its configuration from ${serverDisplayName(/** @type {string} */ (parsed.url))}\n`)
       return 0
     },
     { component: 'join' }
@@ -193,17 +194,15 @@ export async function runJoin(argv, ctx) {
  * server-owned org), not something the human typed, so provenance, not who
  * ran the command, picks the layer.
  *
- * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean }} args `compact` passes through to the daemon install's one-line report
+ * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean, binPath?: string, force?: boolean }} args `compact` passes through to the daemon install's one-line report; `binPath` and `force` are the caller's CLI decision, forwarded to it verbatim
  * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
  * @ref LLP 0063#d2 [implements]: provision join's exact sink block (minus the bootstrap token) into the central-seed layer, then seed the login-minted identity into it
  * @ref LLP 0063#d5 [implements]: an enrolling login finishes with join's daemon install (join parity); --no-daemon prints the finish-by-hand command
  */
-export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false }) {
+export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false, binPath, force }) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const stateRoot = obsEnv.stateDir
   const localPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
-  const targetOrigin = originOf(url)
-
   // D4 re-check just before the write: if a central sink targeting a different
   // origin appeared since login's pre-auth gate (a concurrent first login to
   // another server), abort rather than provision a second enrollment. This is
@@ -220,13 +219,13 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact =
   if (unreadable) {
     throw new Error(`the central config layer (${unreadable.configPath}) cannot be read, so this machine's enrollment cannot be verified: ${unreadable.message}`)
   }
-  const elsewhere = connectedOrigins.find((o) => o !== targetOrigin)
+  const elsewhere = connectedOrigins.find((o) => !sameServer(o, url))
   if (elsewhere) return { provisioned: false, connectedElsewhere: elsewhere, daemonCode: 0 }
 
   // Only actually write the seed when no same-origin central sink exists yet
   // (a same-origin sink present means a racing same-server login already
   // provisioned it; fall through to identity-seeding it, which is idempotent).
-  if (targetOrigin === null || !connectedOrigins.includes(targetOrigin)) {
+  if (!connectedOrigins.some((o) => sameServer(o, url))) {
     // `identity: {}` (not absent): the central plugin's own validator requires
     // an identity object (`central.identity is required`), but bootstrap_token
     // is optional, the login-minted gateway seeded into identity.json is the
@@ -271,8 +270,23 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact =
   }
 
   if (noDaemon) return { provisioned: true, daemonCode: 0 }
-  const daemonCode = await runDaemonInstall([], ctx, { compact })
+  const daemonCode = await runDaemonInstall(daemonInstallArgv({ binPath, force }), ctx, { compact })
   return { provisioned: true, daemonCode }
+}
+
+/**
+ * The enrollment lanes are wrappers over `hyp daemon install` (LLP 0025), so
+ * the two decisions about the CLI it records travel as its own flags: an
+ * explicit entrypoint, and `--force` for keeping a temporary one (LLP 0404).
+ *
+ * @param {{ binPath?: string, force?: boolean }} opts
+ * @returns {string[]}
+ */
+function daemonInstallArgv({ binPath, force }) {
+  return [
+    ...(binPath !== undefined ? ['--bin', binPath] : []),
+    ...(force ? ['--force'] : []),
+  ]
 }
 
 /**
@@ -308,7 +322,7 @@ async function rollbackCentralSeed(stateRoot) {
 
 /**
  * @param {string[]} argv
- * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }}
+ * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean, force?: boolean }}
  */
 function parseJoinArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -319,12 +333,13 @@ function parseJoinArgs(argv) {
       'token-file': { type: 'string' },
       bin: { type: 'string' },
       'no-daemon': { type: 'boolean', default: false },
+      force: { type: 'boolean', default: false },
     },
     positional: ['url', 'token'],
   })
   if ('help' in parsed) return { help: true }
   if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean }} */ (parsed.params)
+  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean, force: boolean }} */ (parsed.params)
   if (p.url === undefined) return { error: 'missing <url> (see hyp join --help)' }
   // '-' as the token positional means "read from stdin", same as
   // omitting it on a piped invocation.
@@ -332,7 +347,7 @@ function parseJoinArgs(argv) {
   if (token !== undefined && p['token-file'] !== undefined) {
     return { error: 'pass the token either as an argument or via --token-file, not both' }
   }
-  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'] }
+  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'], force: p.force }
 }
 
 /**
@@ -378,9 +393,10 @@ export async function runLeave(argv, ctx) {
   const parsedArgv = parseCommandArgv(argv, { type: 'object', properties: {} })
   if ('help' in parsedArgv) {
     ctx.stdout.write('usage: hyp leave\n')
-    ctx.stdout.write('  disconnect this machine from its central server: stop forwarding and\n')
-    ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
-    ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
+    ctx.stdout.write('  disconnect this machine from a HypAware server: stop forwarding\n')
+    ctx.stdout.write('  and config pull, undo org-driven client attaches, and remove the\n')
+    ctx.stdout.write('  forward credential. Keeps query sessions, the local config, and the\n')
+    ctx.stdout.write('  daemon service.\n')
     return 0
   }
   if (!parsedArgv.ok) {
@@ -410,7 +426,7 @@ export async function runLeave(argv, ctx) {
   // lands here with work to do and finishes it - the marker is its own
   // "unfinished teardown" signal, no separate bookkeeping needed.
   if (centralLayerPath === null && unresolvableCentralLayer === null && attachedNames.length === 0) {
-    ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
+    ctx.stdout.write('hyp leave: this machine is not connected to the cloud - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
     // and leave never edits the local layer (#111 doctrine), but a user
     // running `leave` to stop forwarding deserves to know where it lives.
@@ -431,7 +447,7 @@ export async function runLeave(argv, ctx) {
     },
     async (span) => {
       let failures = 0
-      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the central server'}\n`)
+      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the cloud'}\n`)
 
       // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
       // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes

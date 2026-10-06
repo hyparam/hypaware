@@ -8,6 +8,7 @@
 **Related:** LLP 0222 (settles *whose* converter turns a WHERE into a parquet
 filter; this one settles what the WHERE holds by the time that converter sees
 it), LLP 0015, LLP 0098
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
 
 > Before a parsed statement reaches the engine or the pushdown converter, the
 > kernel gives every bare string literal sitting opposite a `TIMESTAMP` column
@@ -46,11 +47,13 @@ returned; this under-returns to exactly zero.
 
 ### Why zero rows is worse than an error {#why-silent}
 
-`docs/ACCEPTANCE.md` bounds six release-gate steps on `message_created_at`.
-Run against this defect, `claude_otel_shape_check` step 6, whose whole job is
-to prove captured rows landed with their columns filled, reports "no rows" on
-a healthy capture path. The written procedure then reads as a capture failure,
-and the reader debugs code that is fine. The defect cost real diagnosis time
+The manual release procedures (since retired by
+[LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md)) bounded
+six release-gate steps on `message_created_at`. Run against this defect,
+`claude_otel_shape_check` step 6, whose whole job was to prove captured rows
+landed with their columns filled, reported "no rows" on a healthy capture path.
+The written procedure then read as a capture failure,
+and the reader debugged code that was fine. The defect cost real diagnosis time
 during OTEL attach validation before the rows were found intact by re-querying
 with `order by message_created_at desc limit n`.
 
@@ -108,9 +111,9 @@ timestamp literal means.
   argument, so a bound written on the call is a bound on the column underneath:
   `having max(ts) >= '...'` types exactly as `ts >= '...'` does. This is not a
   corner: `HAVING` almost always holds an aggregate rather than a bare
-  reference, and `max(message_created_at)` is the idiom `docs/ACCEPTANCE.md`
-  itself uses, so leaving it out would have left the release gate reading a
-  healthy capture as empty. Argument *positions* are declared per function
+  reference, and `max(message_created_at)` is the idiom the release procedures
+  themselves used, so leaving it out would have left the release gate reading
+  a healthy capture as empty. Argument *positions* are declared per function
   (`min_by(value, key)` takes only `value`'s type, `date_trunc(unit, date)`
   only `date`'s), because typing a literal from the wrong argument returns
   wrong rows. Calls that change the type (`epoch`, `extract`, `date_diff`,
@@ -150,7 +153,7 @@ reintroduce the silent empty result through the front door.
 
 - `since`-style queries work as written, in both spellings, and a bare string
   bound now prunes row groups exactly as its typed twin does.
-- `docs/ACCEPTANCE.md` keeps the trailing `Z`. The old text stripped it
+- The release procedures kept the trailing `Z`. Their old text stripped it
   (`SINCE_SQL=${SINCE%Z}`) with a note that the zone-less form "compares
   cleanly", which was never true; worse, `new Date('...T21:00:00')` without a
   zone is *local* time, so on any non-UTC host the zone-less form silently

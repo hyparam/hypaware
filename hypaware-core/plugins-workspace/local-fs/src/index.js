@@ -96,10 +96,10 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
   return {
     /**
      * @param {ExportBatch} batch
-     * @param {ExportOptions} _opts
+     * @param {ExportOptions} [opts]
      * @returns {Promise<ExportResult>}
      */
-    async exportBatch(batch, _opts) {
+    async exportBatch(batch, opts) {
       let bytesWritten = 0
       let exported = 0
       /** @type {QueryPartition[]} */
@@ -150,6 +150,7 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
           // (idempotent overwrite): the blob sink's server-ledger stand-in.
           const filename = withSeqRangeFilename(blob.filename, reader.sinceSeq, reader.lastAfter.seq)
           const destPath = await writeBlob(baseDir, partition, filename, blob.bytes)
+          opts?.onProgress?.({ rows: reader.rowCount, bytes: blob.bytesWritten ?? 0 })
           // Durable now: advance the watermark to this blob's last row.
           if (wmKey) {
             await watermarks.write(wmKey, {

@@ -275,8 +275,8 @@ test('scheduled runs receive plugin window_days and the sweep marker', async () 
 // The narrowing is not Claude-specific: OpenClaw's Lane B transcript sweep is
 // clipped by the same `window_days` an operator may have set only to bound the
 // join-time import, so a session older than that window is never recovered by
-// the scheduled lane. docs/CLI_REFERENCE.md and the `openclaw_capture`
-// procedure in docs/ACCEPTANCE.md disclose that; this row keeps it true.
+// the scheduled lane. docs/CLI_REFERENCE.md discloses that; this row keeps it
+// true.
 // @ref LLP 0359#sweep-context [tests]: a positive `backfill.window_days` narrows that provider's sweep, whichever plugin owns it
 test('an OpenClaw window_days narrows its Lane B sweep, not only the join-time import', async () => {
   /** @type {any} */

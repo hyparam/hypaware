@@ -159,6 +159,24 @@ test('a command registry that predates unregister degrades, never throws', () =>
   assert.ok(legacy.get('demo verb'))
 })
 
+test('a command registry answering an ownerOf it never fills still gets its projection back', () => {
+  // The registrar agreement retraction requires (LLP 0427 #two-facts) reads
+  // two ledgers the kernel fills inside `registeringAs` brackets. A registry
+  // carrying `ownerOf` but no bracket fills neither, so its answer is
+  // `undefined` for a projection the verb registry does record a plugin for,
+  // and enforcing agreement there would refuse every legitimate release and
+  // leave the CLI command behind for good.
+  /** @type {any} */
+  const bracketless = createCommandRegistry()
+  delete bracketless.registeringAs
+  const verbs = createVerbRegistry({ commandRegistry: bracketless })
+  verbs.registeringAs(/** @type {any} */ ('@fixture/p'), () => { verbs.register(makeVerb()) })
+  assert.equal(verbs.ownerOf('demo verb'), '@fixture/p')
+  assert.equal(bracketless.ownerOf('demo verb'), undefined, 'the bracketless registry recorded a registrar after all')
+  verbs.unregister('demo verb')
+  assert.equal(bracketless.get('demo verb'), undefined, 'the plugin\'s own projection was left behind')
+})
+
 test('a command registry whose get() answers null degrades, never throws', () => {
   // The projection test reads a property off whatever `get` returned, so an
   // injected registry answering `null` where the contract says `undefined`

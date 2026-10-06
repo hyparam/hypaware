@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI, Plugins
 **Author:** Brendan / Claude
 **Date:** 2026-08-06
-**Extended-by:** LLP 0203 (#first-ask: the enrolled closing sequence gains a sync offer ahead of the ask)
+**Extended-by:** LLP 0203 (#first-ask: the enrolled closing sequence gains a sync offer ahead of the ask), LLP 0398 (#first-ask: the list collapses to one question whose evidence is gathered before the launch; #onboarding-list: that question starts the client in a HypAware-owned run directory, and setup offers to run it instead of printing it), LLP 0456 (#path-probe: an RFC asking for the selection rule when the probe leaves more than one launchable client and the run cannot prompt), LLP 0460 (#real-launch: an RFC asking what exit code the no-argument ask reports when the chosen client fails to spawn)
 **Related:** LLP 0135 (#first-look, #privacy, #finale: the closing sequence this appends to), LLP 0130 (#picker-block: manifest-contributed picker rows, the pattern the launch spec follows), LLP 0180 (client derivation from `contributes.client`), LLP 0107 (#gating: the skills that make these questions answerable ride attach), LLP 0011 (#no-architectural-names: the user asks in their own words)
 
 > Extends the closing sequence of [LLP 0135](./0135-install-experience-overhaul.design.md).
@@ -73,8 +73,9 @@ deadline would make the deadline the afterthought.
 
 <a id="frame"></a>**The `hyp ask` menu is drawn as its own screen.** The
 prompt is framed in a border (`box`, `cli/tui/types.d.ts`). The frame
-distinguishes the explicit command's interactive menu from its plain `--list`
-output. Onboarding itself prints no framed or interactive menu.
+distinguishes the explicit command's interactive menu from its plain printed
+output (the `--list` flag that once printed the list is gone, LLP 0398
+#one-question). Onboarding itself prints no framed or interactive menu.
 
 The border is dim and the content inside keeps the emphasis it already had:
 the frame's job is separation, not competition with the bold title or the
@@ -119,10 +120,38 @@ and Claude Desktop is detectable, pickable, attachable, and cannot be
 started on a question at all - it is a GUI app with no prompt argument.
 
 The explicit `hyp ask` command therefore probes `$PATH` directly for the launch binary of
-each *attached* client, and offers only what both is attached and resolves.
-The two conditions are both required: an unattached client is one HypAware
-is not recording, so opening it would produce a session the user did not
-consent to capture, and an attached client with no binary cannot be started.
+each *recorded* client, and offers only what both is recorded and resolves.
+The two conditions are both required: opening a client HypAware is not
+recording would produce a session the user did not consent to capture,
+and a recorded client with no binary cannot be started. An attach marker
+is the ordinary evidence of recording, but not the only one: a capture
+mode that writes no marker leaves none to find, so a configured client
+whose attach reads *not applicable* is recorded too
+([LLP 0429 #status](./0429-codex-capture-leaves-inference.spec.md#status)).
+Reading a missing marker there as detachment would withhold the offer
+from a client that is recording perfectly well.
+
+When nothing is both recorded and resolvable, `hyp ask` refuses the same
+way with or without a question: one error on stderr and exit `1`. The
+error names the repair for whichever condition is missing, because the two
+are repaired differently. A launch binary that resolves for a client
+HypAware is not recording is repaired by an attach, so the error names a
+runnable `hyp client attach` command. No launch binary on `$PATH` is not:
+attaching Codex on a machine that has only Codex Desktop succeeds and still
+leaves nothing to start, so the error names the binaries it looked for and
+no attach. That machine is the third case, a recorded client with no CLI:
+the desktop app cannot be started on a prompt, but it can be asked by hand,
+so the refusal also hands over the prompt to paste into it (the framed
+question, or the cold form of the skill question, LLP 0398 #one-question).
+It does so only when a recorded client has the `hypaware-query` skill on
+disk, since both prompts tell the app to use it: a recorded OpenCode or Pi,
+or a Codex whose skills were never installed, gets the refusal alone.
+The explanation goes to stderr and the prompt alone to stdout, so a pipe to
+the clipboard takes exactly what to paste, and the exit stays `1` because
+nothing was started. The bare ask checks this ahead of the empty cache, since "come back once you
+have history" would send the reader to the same refusal later, and it does
+not print the question: the question cannot be asked by hand, so printing
+it without a client to start offers nothing to act on.
 
 <a id="split"></a>**Core owns the questions; the manifest owns the
 launch.** The prompts are questions about HypAware's own datasets -
@@ -135,6 +164,14 @@ every other client fact already lives: `contributes.client`, as a
 applied to a new field). A future adapter becomes launchable by declaring
 `launch`, with no edit to core - the same rule [LLP 0180](./0180-finale-attaches-openclaw.decision.md)
 established for the finale's client list.
+
+Declaring one is a claim that the client can follow the prompts, not only
+that it takes one. Claude Code and Codex declare a block. OpenCode and Pi
+do not, though both have a prompt argument: neither is shipped the HypAware
+skills the prompts name (`hypaware-query` for a typed question), and the
+modes that take a prompt (`opencode run`, `pi -p`) answer once and exit,
+so the recommendation's offer to write the skill has no turn to be accepted
+in. They are recorded and not launchable until both hold.
 
 The launch block is `{ bin, args }`, where exactly one `args` element
 must contain the `{prompt}` placeholder. The validation is not ceremony:
@@ -177,10 +214,10 @@ Two consequences the trim must not get wrong:
   holds only the partial result, and the plan has to have travelled on
   it. Without this the trim would make setup claim repos and tools "did
   not finish" on every single run.
-- **The pointer line states an upgrade, not a repeat.** "See more
-  anytime: `hyp query overview` (adds repos and tools)" - because a
-  trimmed block under a line that says "see this again" teaches the user
-  that what they just saw is all there is.
+- **No pointer line.** The block ends on its last section. `hyp query
+  overview` is documented in the CLI reference and named when the block
+  has nothing to show; a trailer under every first look was one more
+  line between the user and setup's closing question.
 
 The trim only pays off because the planner charges for the sections it
 will actually run: `rowsAffordable` divides the budget by the requested
@@ -239,9 +276,9 @@ copy-paste failure this decision exists to remove, merely deferred by one
 screen. `hyp ask` renders the same list against the same probe and starts
 the chosen client, and `hyp ask "<question>"` skips the menu entirely,
 which is the shape a user reaches for once they know what they want.
-Every other closing surface already names a durable entry point (the
-first look prints "See this again anytime: hyp query overview"); this is
-the one for the questions.
+Every closing surface has its durable entry point (the first look's is
+`hyp query overview`, documented in the CLI reference rather than
+printed); this is the one for the questions.
 
 ## Consequences {#consequences}
 

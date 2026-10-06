@@ -9,7 +9,7 @@ import { parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { BUILTIN_REMOTES, effectiveDefaultRemote } from '../remote/builtin_remotes.js'
+import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -29,7 +29,6 @@ import { enrollCentralSink } from '../commands/central.js'
 import { DURABLE_HINT } from '../commands/local_only.js'
 import { withSpinner } from './spinner.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
-import { originOf } from '../remote/gateway_seed.js'
 import { readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
@@ -413,7 +412,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs, and `binPath` is the CLI that lane already resolved for the daemon (LLP 0404)
  * @returns {Promise<number>}
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
@@ -435,7 +434,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps]
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string }} [deps]
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0179#outcome [implements]: the login lane returns { exitCode, reason }; runRemoteLogin is the adapter that keeps the CLI contract a number
  */
@@ -486,6 +485,9 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // --no-daemon provisions the sink but leaves the service install by hand.
   const noForward = gate.params['no-forward'] === true
   const noDaemon = gate.params['no-daemon'] === true
+  // `--force` is `hyp daemon install`'s own flag, forwarded: keep a temporary
+  // CLI when a global one cannot be established (LLP 0404).
+  const force = gate.params.force === true
 
   const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
   const stdinPiped = !!stdin && !stdin.isTTY
@@ -509,7 +511,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // as a static token. A piped token *without* a browser-mode flag already took
   // the static path above (`useStatic`), so nothing is swallowed silently there;
   // only an explicit `--no-browser` ignores a pipe, by design.
-  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact: deps.compact === true }, ctx, {
+  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, force, compact: deps.compact === true, binPath: deps.binPath }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
     enroll: deps.enroll ?? enrollCentralSink,
@@ -645,12 +647,12 @@ async function persistStaticToken(name, token, ctx) {
  * from one command, unless `--no-forward` declines it.
  *
  * @param {string} name
- * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, compact?: boolean }} opts
+ * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, force?: boolean, compact?: boolean, binPath?: string }} opts
  * @param {CommandRunContext} ctx
  * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
  * @returns {Promise<LoginOutcome>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact = false }, ctx, { login, seed, enroll, waitForAttach }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, force, compact = false, binPath }, ctx, { login, seed, enroll, waitForAttach }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
@@ -701,7 +703,9 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return { exitCode: 2, reason: 'connected_elsewhere' }
   }
   const connectedOrigins = enrollment.origins
-  const alreadyEnrolled = targetOrigin !== null && connectedOrigins.includes(targetOrigin)
+  // Same server, not same origin: a machine enrolled under a host the built-in
+  // target has since moved away from is enrolled to this server (BUILTIN_ORIGIN_ALIASES).
+  const alreadyEnrolled = connectedOrigins.some((origin) => sameServer(origin, entry.url))
   if (!alreadyEnrolled && connectedOrigins.length > 0) {
     ctx.stderr.write(`hyp remote login: this machine is connected to ${connectedOrigins[0]}\n`)
     ctx.stderr.write("  disconnect first ('hyp leave'), then log in to the new server\n")
@@ -712,27 +716,31 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // sign-in is the accepting act. Phrased conditionally because the client
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
+  // @ref LLP 0407#dropped [constrained-by]: the notice names two consequences in plain words; the org-config clause is left out by decision
   // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
-  // placement, its conditional phrasing, and all three consequences D3
-  // enumerates, and drops only the line breaks: one line, still before the
-  // browser. The hedge is not shortenable - the client still cannot know
-  // pre-auth whether a gateway will be minted, so a flat "signing in forwards
-  // your logs" is false against a forwarding-off org. Neither is the org-config
-  // clause: applying org config is what attaches clients and backfills the
-  // history already on disk, and no reader infers that from "forwards captured
-  // logs". This notice is the whole consent surface, so a consequence dropped
-  // here is one the user is never told before they authenticate.
+  // placement, and its conditional phrasing, and drops only the line breaks:
+  // one line, still before the browser. The hedge is not shortenable - the
+  // client still cannot know pre-auth whether a gateway will be minted, so a
+  // flat "signing in sends your logs" is false against a forwarding-off org.
+  // The notice names two consequences in plain words: logs go to the target's
+  // server (HypAware Cloud or its host, as serverDisplayName names it; the
+  // compact sign-in line uses the same name, the wide one keeps the target
+  // key), and a background service is installed. D3's third consequence
+  // (org config that can attach clients and backfill local history) is left
+  // out on purpose: it confused new users more than it informed them, and the
+  // wizard's later steps show what gets recorded before anything is written.
   // The '--no-forward' sentence is the one thing left out: the wizard's lane
   // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
   // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward) {
+    const destination = serverDisplayName(entry.url)
     if (compact) {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config (which can attach clients and backfill existing local history), and installs a background service (Ctrl-C to cancel)\n')
+      ctx.stderr.write(`If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to ${destination} and a background service is installed. Ctrl-C to cancel.\n`)
     } else {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
-      ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
-      ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
-      ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team:\n')
+      ctx.stderr.write(`  your recorded sessions are sent to ${destination} and a background\n`)
+      ctx.stderr.write('  service is installed.\n')
+      ctx.stderr.write("  Re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
     }
   }
 
@@ -779,7 +787,12 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
     return { exitCode: 1, reason: 'store_failed' }
   }
-  ctx.stdout.write(compact ? `✓ Signed in to '${name}' as org '${session.org}'\n` : `logged in to '${name}' as org '${session.org}'\n`)
+  // The compact lane is the wizard's, whose lines name the server the way the
+  // recap does; the wide lane keeps the target name `hyp remote list` maps.
+  // @ref LLP 0437#server-name [implements]: the wizard's sign-in line reads as HypAware Cloud or the host, never the target key
+  ctx.stdout.write(compact
+    ? `✓ Signed in to ${serverDisplayName(entry.url)} as org '${session.org}'\n`
+    : `logged in to '${name}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it
@@ -843,7 +856,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
     let result
     try {
-      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon, compact })
+      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon, compact, binPath, force })
     } catch (err) {
       ctx.stderr.write(`hyp remote login: signed in, but enrollment failed: ${err instanceof Error ? err.message : String(err)}\n`)
       return { exitCode: 1, reason: 'enroll_failed' }
@@ -860,15 +873,15 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // the fact you need to act on (which server to `hyp leave`) and a label
     // would not do. Those still print bare origins, and deliberately so.
     //
-    // Pair the name with its lookup: `name` can come from
+    // The wide lane pairs the name with its lookup: `name` can come from
     // `effectiveDefaultRemote` on a bare login, so it is not always something
-    // the user typed, and no other line in this login recovers the URL.
+    // the user typed, and no other line in that lane recovers the URL. The
+    // compact lane (the wizard's join) says nothing here: the wizard's recap
+    // states what syncs, naming the server as "HypAware Cloud" or its host,
+    // a moment later (LLP 0437 #recap, #server-name).
     // Revisit if the server root ever becomes a real landing page.
-    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target and pairs it with its lookup
-    // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name or the lookup here and the compact privacy block below has neither
-    if (compact) {
-      ctx.stdout.write(`✓ Forwarding to the '${name}' server (run 'hyp remote list' to see its URL)\n`)
-    } else {
+    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL
+    if (!compact) {
       ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
       ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
     }
@@ -878,20 +891,22 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // install itself goes, so the message stays true in all three. Absent only
     // when the best-effort marker write above failed (LLP 0100 R1's message
     // rides the hold, never invents one that was not actually written).
-    // Compact prints the deadline alone. The wizard that asked for it states
-    // the rest of R1 (the backfill statement, the skill hint, the release verb)
-    // in its closing privacy narration, which every path through it reaches -
-    // the ordinary close and `narrateEnrolledAbort` alike - so the full block
-    // here would say everything twice on the same run.
+    // Compact prints the deadline alone; the rest of R1 lands after it. On the
+    // ordinary attended close `hyp sync`'s own plan carries the skill hint and
+    // the release verb, and the wizard's narration stands down for it
+    // (`offerFollows`). On every path that skips the offer (aborts,
+    // non-interactive, dry runs, and `narrateEnrolledAbort`) the wizard's
+    // closing privacy narration carries them instead. Either way the full
+    // block here would say everything twice on the same run.
     // The line states the deadline and the fact the hold guarantees, and
     // nothing about being prompted: the send-now offer (LLP 0203) runs only on
     // an attended, uncancelled, non-dry close, and at the deadline itself the
     // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
     // would be false on exactly the paths where it would matter.
-    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the backfill statement, the skill hint, and the release verb
-    // @ref LLP 0387#adjacency [implements]: compact meets R1a as a pair - the forwarding line directly above carries the server name and the 'hyp remote list' lookup for both lines
+    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the skill hint and the release verb land after it, from `hyp sync`'s plan on the attended close and from the wizard's narration on every path that skips the offer
+    // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
     if (holdDeadline !== null && compact) {
-      ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)
+      ctx.stderr.write(`✓ Nothing uploads until you say so, or ${formatFirstSyncDeadline(holdDeadline)} at the latest\n`)
     } else if (holdDeadline !== null) {
       ctx.stderr.write(firstSyncHoldMessage(holdDeadline, name))
     }
@@ -928,10 +943,12 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     const attached = compact
       ? await withSpinner({ stdout: ctx.stdout, env: ctx.env, label: 'Attaching clients...' }, wait)
       : await wait()
-    if (attached.length > 0) {
-      ctx.stdout.write(compact ? `✓ Capturing ${attached.join(', ')}\n` : `capturing ${attached.join(', ')}\n`)
-    } else {
-      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
+    // Compact reports nothing: the wizard's recap says what is recorded,
+    // and its finish step attaches the clients itself.
+    if (!compact) {
+      ctx.stdout.write(attached.length > 0
+        ? `capturing ${attached.join(', ')}\n`
+        : "no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
     if (!compact) ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
@@ -1211,7 +1228,10 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   // say a positional token lands in shell history and process listings - which
   // on a CI runner means `ps` and any `set -x` trace.
   ctx.stderr.write(`  setup:    printf '%s' "$HYP_CI_TOKEN" | hyp join ${joinTarget} --no-daemon\n`)
-  ctx.stderr.write('            hyp daemon run --foreground &\n')
+  // Exit 75 is the staged restart a foreground daemon cannot do for itself
+  // (LLP 0017), so the recipe relaunches on it and keeps any other exit code.
+  // @ref LLP 0017#staged-restart-for-config-replacement [constrained-by]: the invoker of a foreground daemon loops on 75
+  ctx.stderr.write('            ( rc=75; while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done; exit "$rc" ) &\n')
   ctx.stderr.write('  teardown: hyp sync --yes\n')
   return 0
 }

@@ -7,11 +7,8 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
-  ENV_AGENT_LABEL,
   ENV_VAR_NAME,
-  buildEnvAgentPlist,
   envAgentPlistPath,
-  installLaunchdEnv,
   isLaunchdEnvSet,
   removeLaunchdEnv,
 } from '../../src/core/daemon/launchd_env.js'
@@ -38,44 +35,12 @@ async function tempHome() {
   return await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-launchd-env-'))
 }
 
-test('install sets the variable now and persists the login-time agent', async (t) => {
-  const homeDir = await tempHome()
-  t.after(() => fsp.rm(homeDir, { recursive: true, force: true }))
-  const { calls, run } = recordingRunner({ exitCode: 0 })
-
-  const result = await installLaunchdEnv({ homeDir, run })
-
-  assert.equal(result.set, true)
-  assert.deepEqual(calls, [
-    { cmd: 'launchctl', args: ['setenv', ENV_VAR_NAME, '1'] },
-  ])
-  const plist = await fsp.readFile(result.plistPath, 'utf8')
-  assert.match(plist, new RegExp(ENV_AGENT_LABEL))
-  assert.match(plist, /RunAtLoad/)
-  assert.match(plist, new RegExp(`<string>${ENV_VAR_NAME}</string>`))
-  // No KeepAlive: the agent runs once per login and exits.
-  assert.doesNotMatch(plist, /KeepAlive/)
-})
-
-// A setenv that failed must not leave a plist promising the variable at the
-// next login: the on-disk agent would then claim a state the session never had.
-test('a failed setenv writes no plist', async (t) => {
-  const homeDir = await tempHome()
-  t.after(() => fsp.rm(homeDir, { recursive: true, force: true }))
-  const { run } = recordingRunner({ exitCode: 1, stderr: 'nope' })
-
-  const result = await installLaunchdEnv({ homeDir, run })
-
-  assert.equal(result.set, false)
-  assert.match(result.detail ?? '', /nope/)
-  await assert.rejects(fsp.stat(envAgentPlistPath(homeDir)), /ENOENT/)
-})
-
 test('remove unsets the variable and deletes the plist, idempotently', async (t) => {
   const homeDir = await tempHome()
   t.after(() => fsp.rm(homeDir, { recursive: true, force: true }))
-  const install = recordingRunner({ exitCode: 0 })
-  await installLaunchdEnv({ homeDir, run: install.run })
+  const plistPath = envAgentPlistPath(homeDir)
+  await fsp.mkdir(path.dirname(plistPath), { recursive: true })
+  await fsp.writeFile(plistPath, 'legacy launch agent')
 
   const { calls, run } = recordingRunner({ exitCode: 0 })
   const removal = await removeLaunchdEnv({ homeDir, run })
@@ -97,12 +62,4 @@ test('isLaunchdEnvSet requires the exact value', async () => {
 
   const unset = recordingRunner({ exitCode: 0, stdout: '\n' })
   assert.equal(await isLaunchdEnvSet({ run: unset.run }), false)
-})
-
-test('the plist XML parses as a well-formed property list shape', () => {
-  const xml = buildEnvAgentPlist()
-  assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-8"\?>/)
-  assert.match(xml, /<plist version="1\.0">/)
-  assert.match(xml, /<\/plist>\n$/)
-  assert.match(xml, /\/bin\/launchctl/)
 })

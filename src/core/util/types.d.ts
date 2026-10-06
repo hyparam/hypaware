@@ -14,7 +14,7 @@ export interface AtomicWriteOptions {
    * per-write `mkdir` syscall on hot paths
    */
   mkdir?: boolean
-  /** fsync the temp file before the rename */
+  /** fsync the temp file, then the published directory and ancestors */
   fsync?: boolean
   /**
    * reject with `ConcurrentEditError` unless the target's mtime still

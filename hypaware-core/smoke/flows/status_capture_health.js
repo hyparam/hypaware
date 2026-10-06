@@ -25,11 +25,15 @@ import { writeStatusFile } from '../../../src/core/daemon/status.js'
  * 2. With transcripts running hours past the last event, `--json` carries
  *    `capture_health[0].state === 'gap'`, a `capture_gap` diagnostic with an
  *    `error` severity and a repair hint appears, and `overall` degrades; the
- *    text surface shows the `[capture gap]` tag.
- * 3. With no otel attach marker the line is absent and the `capture_health`
+ *    text surface explains that telemetry may be interrupted.
+ * 3. With the newest conversation record older than the last event and only a
+ *    metadata write after it, no `capture_gap` fires however far the file's
+ *    mtime has moved: the mtime is the suspicion, the transcript's own
+ *    records are the finding (issue #2290).
+ * 4. With no otel attach marker the line is absent and the `capture_health`
  *    array is empty - no noise on a machine the question does not apply to.
  *
- * Everything status reads is a file: the attach marker and transcript mtimes
+ * Everything status reads is a file: the attach marker, the transcript trail
  * under a fake $HOME, and the listener detail under the daemon's status.json
  * (no daemon runs; the comparison must survive its daemon, which is exactly
  * the down-daemon gap it exists to catch).
@@ -63,6 +67,7 @@ export async function run({ harness, expect }) {
   process.env.HOME = fakeHome
 
   const HOUR = 3_600_000
+  const MIN = 60_000
   const now = Date.now()
 
   try {
@@ -140,9 +145,8 @@ export async function run({ harness, expect }) {
     // comparison.
     const transcript = path.join(fakeHome, '.claude', 'projects', '-tmp-proj', 'aaaa-session.jsonl')
     await fs.mkdir(path.dirname(transcript), { recursive: true })
-    await fs.writeFile(transcript, '{}\n')
     const transcriptMtime = new Date(now - 30_000)
-    await fs.utimes(transcript, transcriptMtime, transcriptMtime)
+    await writeTranscript(transcript, [assistantRecord(transcriptMtime)], transcriptMtime)
 
     /* ---------- Case 1: events in lockstep -> line, no gap, healthy ---------- */
 
@@ -159,9 +163,9 @@ export async function run({ harness, expect }) {
     expect.that('healthy: hyp status exited 0', okExit, (v) => v === 0)
     const okText = okStdout.text()
     expect.that(
-      'healthy: capture-health line renders',
+      'healthy: configured client and sharing policy render',
       okText,
-      (v) => v.includes('capture health:') && /- claude {2}last event .*, last transcript activity /.test(v)
+      (v) => /claude\s+Attached \(otel\)\s+Local only/.test(v)
     )
     expect.that(
       'healthy: no capture-gap tag',
@@ -169,9 +173,9 @@ export async function run({ harness, expect }) {
       (v) => !v.includes('[capture gap]')
     )
     expect.that(
-      'healthy: overall stays healthy',
+      'healthy: no telemetry interruption warning',
       okText,
-      (v) => v.includes('overall:  healthy')
+      (v) => !v.includes('Telemetry may be interrupted')
     )
 
     /* ---------- Case 2: transcripts hours past the last event -> degraded ---------- */
@@ -240,17 +244,71 @@ export async function run({ harness, expect }) {
     expect.that('gap text: hyp status exited 0', gapTextExit, (v) => v === 0)
     const gapText = gapTextStdout.text()
     expect.that(
-      'gap text: the line carries the capture-gap tag',
+      'gap text: client warns telemetry may be interrupted',
       gapText,
-      (v) => /- claude {2}last event .*, last transcript activity .* {2}\[capture gap\]/.test(v)
+      (v) => /claude\s+Telemetry may be interrupted/.test(v)
     )
     expect.that(
-      'gap text: diagnostics name capture_gap',
+      'gap text: attention includes both activity ages',
       gapText,
-      (v) => v.includes('capture_gap')
+      (v) => /claude: transcripts active .*; last telemetry /.test(v)
     )
 
-    /* ---------- Case 3: no otel attach -> no line, no noise ---------- */
+    /* ---------- Case 3: a metadata-only write is not activity ---------- */
+    // The shape of issue #2290: telemetry arrived twenty minutes ago, the
+    // conversation went idle an hour before that, and the only thing written
+    // since is a local slash command's own output. The mtime says twenty
+    // minutes of uncaptured work; the records say none happened.
+    const idleTurn = new Date(now - 80 * MIN)
+    await writeTranscript(transcript, [
+      assistantRecord(idleTurn),
+      {
+        type: 'system',
+        subtype: 'local_command',
+        level: 'info',
+        sessionId: 'sess',
+        uuid: 'cmd-1',
+        content: '<local-command-stdout>auto-mode-setup: ready</local-command-stdout>',
+        timestamp: new Date(now - 19 * MIN).toISOString(),
+      },
+    ], new Date(now - 30_000))
+    writeListenerStatus(harness.stateDir, new Date(now - 21 * MIN).toISOString())
+
+    const metaStdout = makeBuf()
+    const metaExit = await dispatch(['status', '--json'], {
+      stdout: metaStdout,
+      stderr: makeBuf(),
+      kernel,
+      registry,
+      env: smokeEnv({ harness, hypConfig: configPath }),
+    })
+    expect.that('metadata-only json: hyp status --json exited 0', metaExit, (v) => v === 0)
+    /** @type {any} */
+    let metaJson
+    try {
+      metaJson = JSON.parse(metaStdout.text())
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      expect.that(`metadata-only json: parseable (${message})`, false, (v) => v === true)
+    }
+    expect.that(
+      'metadata-only json: capture_health stays ok and quotes the confirmed turn',
+      metaJson?.capture_health,
+      (v) => Array.isArray(v) && v.length === 1 && v[0].state === 'ok' && v[0].gap_seconds === 0 &&
+        v[0].last_transcript_activity_at === idleTurn.toISOString()
+    )
+    expect.that(
+      'metadata-only json: no capture_gap diagnostic',
+      (metaJson?.diagnostics ?? []).map((/** @type {any} */ d) => d.kind),
+      (v) => Array.isArray(v) && !v.includes('capture_gap')
+    )
+    expect.that(
+      'metadata-only json: overall stays healthy',
+      metaJson?.overall,
+      (v) => v === 'healthy'
+    )
+
+    /* ---------- Case 4: no otel attach -> no line, no noise ---------- */
 
     await fs.rm(path.join(fakeHome, '.claude', 'settings.json'), { force: true })
 
@@ -391,4 +449,32 @@ function makeBuf() {
       return chunks.join('')
     },
   }
+}
+
+/**
+ * One conversation record: a turn that should have produced telemetry, which
+ * is what the capture-gap comparison is about. A transcript's mtime moves for
+ * metadata too, so a trail that is meant to read as active has to say so in
+ * its own records (issue #2290).
+ *
+ * @param {Date} at
+ */
+function assistantRecord(at) {
+  return {
+    type: 'assistant',
+    sessionId: 'sess',
+    uuid: `a-${at.getTime()}`,
+    message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    timestamp: at.toISOString(),
+  }
+}
+
+/**
+ * @param {string} filePath
+ * @param {unknown[]} records
+ * @param {Date} mtime
+ */
+async function writeTranscript(filePath, records, mtime) {
+  await fs.writeFile(filePath, records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
+  await fs.utimes(filePath, mtime, mtime)
 }

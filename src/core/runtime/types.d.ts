@@ -121,6 +121,19 @@ export interface BootKernelResult {
    */
   unsatisfiedRequirements: UnsatisfiedRequirement[]
   /**
+   * The plugin directories this boot found a manifest in but could not load
+   * one from, with the rejection `loadManifest` recorded. `unavailablePlugins`
+   * below folds these into the same flat list, as the directory alone, which
+   * is all the prune needs; a caller that must *say* why a directory
+   * contributed nothing needs the reason too, and the daemon's status snapshot
+   * is one (issue #1576).
+   *
+   * Directory-shaped on purpose and for the whole of its life: a manifest that
+   * did not parse has no plugin name, so no reader may put a `rootDir` where a
+   * plugin name belongs.
+   */
+  unloadableManifests: FailedManifest[]
+  /**
    * Everything this boot did not get, in one list: plugins whose `activate()`
    * threw, plugins the dep graph eliminated for an unsatisfied `requires`,
    * plugins the boot profile withheld although the config enabled them, and
@@ -152,8 +165,8 @@ export interface DiscoverBundledResult {
   failed: FailedManifest[]
   /** Loadable but excluded from V1 default surface. */
   excluded: LoadedManifest[]
-  /** Directories with manifests not in the allowlist or excluded set. */
-  unknownDirs: string[]
+  /** Manifests that parsed under a name in neither the allowlist nor the excluded set. */
+  unknown: LoadedManifest[]
 }
 
 export interface DiscoverInstalledResult {
@@ -161,8 +174,16 @@ export interface DiscoverInstalledResult {
   loaded: LoadedManifest[]
   /** Lock entries whose `install_dir` manifest failed to load. */
   failed: FailedManifest[]
-  /** All lock entries that were considered (loaded + failed). */
+  /** All well-formed lock entries that were considered (loaded + failed). */
   lockEntries: PluginLockEntry[]
+  /**
+   * Lock entries the loader could not use at all: not an object, or no
+   * usable `install_dir` to load a manifest from. Named by lock key, which
+   * is the only identity such an entry still has, and kept out of `failed`
+   * because a `FailedManifest` is a directory plus a reason and these carry
+   * no directory.
+   */
+  malformed: PluginName[]
 }
 
 // --- activation ---

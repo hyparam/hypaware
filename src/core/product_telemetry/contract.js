@@ -10,11 +10,6 @@ export const PRODUCT_DATASETS = Object.freeze([
   'product_events',
   'product_metrics'
 ])
-export const RESERVED_DATASETS = new Set([
-  ...PRODUCT_DATASETS,
-  'product_installations',
-  'product_daily'
-])
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -32,6 +27,8 @@ const ADAPTERS = [
 ]
 export const COMMANDS = Object.freeze([
   'ask',
+  'backfill',
+  'backfill list',
   'cache maintain',
   'cache refresh',
   'cache status',
@@ -49,9 +46,6 @@ export const COMMANDS = Object.freeze([
   'client claude-desktop status',
   'client claude-desktop verify',
   'client detach',
-  'client history import',
-  'client history plan',
-  'client history providers',
   'client skills',
   'client skills install',
   'client status',
@@ -80,6 +74,9 @@ export const COMMANDS = Object.freeze([
   'gascity list',
   'github',
   'github backfill',
+  'github login',
+  'github logout',
+  'github status',
   'github sync',
   'graph compact',
   'graph project',
@@ -121,10 +118,13 @@ export const COMMANDS = Object.freeze([
   'remote remove',
   'report',
   'report delete',
+  'report fix',
+  'report generate',
   'report get',
   'report list',
+  'report mark',
   'report publish',
-  'report render',
+  'report recommend',
   'session',
   'session ignore',
   'session status',

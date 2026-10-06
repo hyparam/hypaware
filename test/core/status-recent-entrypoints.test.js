@@ -122,6 +122,34 @@ test('a daemon with no gateway source, or an older daemon, yields an empty list'
   )
 })
 
+// This read finds the gateway source through `gatewaySourceRawDetails`, so it
+// inherits that lookup's name rung: a snapshot whose `plugin` degraded to the
+// empty string still resolves (status-gateway-fallback.test.js records why the
+// daemon writes one). Without the name rung a gateway that is capturing
+// normally reports no recent clients at all, with no error anywhere (issue
+// #2164). The decoy ahead of the target keeps list position from standing in
+// for the name match.
+test('recent entrypoints are still lifted when the snapshot degraded the gateway plugin', () => {
+  const out = recentEntrypointsFromSources(/** @type {any} */ ([
+    { name: 'otel', plugin: '@hypaware/otel', state: 'started', details: { port: 4318 } },
+    {
+      name: 'ai-gateway',
+      plugin: '',
+      state: 'started',
+      details: {
+        host: '127.0.0.1',
+        port: 18521,
+        recent_entrypoints: [
+          { entrypoint: 'Codex Desktop', client_name: 'codex', last_seen: '2026-07-30T11:00:00.000Z', rows: 6 },
+        ],
+      },
+    },
+  ]))
+  assert.deepEqual(out, [
+    { entrypoint: 'Codex Desktop', clientName: 'codex', lastSeen: '2026-07-30T11:00:00.000Z', rows: 6 },
+  ])
+})
+
 test('hyp status surfaces Codex Desktop traffic from status.json, with no cache read', async () => {
   const { hypHome, stateRoot } = await makeHome()
   try {
@@ -335,7 +363,9 @@ test('a rendered recent-clients block cannot be forged by a hostile entrypoint',
   // than a line of its own.
   const block = text.slice(text.indexOf('  recent clients:')).split(LF)
   assert.match(block[1], /^ {4}- \S.* {2}\(claude\) {2}last seen just now, 1 row$/)
-  assert.match(block[2], /^ {2}cache:/, 'the next line is the real one, not a forged one')
+  assert.equal(block[2], '', 'a blank line separates the next section')
+  assert.equal(block[3], '  storage:', 'the next section is the real one, not a forged one')
+  assert.match(block[4], /^ {4}cache:/)
 })
 
 // `sanitizeLabel` bounds a label's bytes; nothing bounded how many of them

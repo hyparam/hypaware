@@ -1,15 +1,15 @@
 // @ts-check
 
-import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 
-import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
+import { Attr, withSpan } from '../observability/index.js'
+import { loadConfigFile } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
+import { isEntryRecording } from '../config/client_recording.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
-import { GlobalInstallError } from './global_install.js'
+import { DurableBinRequiredError, GlobalInstallError } from './global_install.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
 import { ServiceOpError } from '../daemon/service_ops.js'
@@ -22,6 +22,8 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { queuedLineAsker } from './line_asker.js'
 import { withSpinner } from './spinner.js'
+import { joinNames } from './wizard/express.js'
+import { groupThousands } from '../util/format_number.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -50,10 +52,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  *   PickerBackfillRunner,
  *   PickerSource,
  *   PickerExport,
- *   PickerPicks,
  *   PickerFinaleActions,
- *   PickerWalkthroughResult,
- *   RunPickerWalkthroughOptions,
  *   FinaleSummary,
  *   WalkthroughOptions,
  * } from '../../../src/core/cli/types.js'
@@ -153,7 +152,7 @@ function legacyNumberedPromptFactory(opts) {
       const defaulted = () =>
         question.enterKeepsChecked ? question.options.filter((o) => o.checked).map((o) => o.value) : []
       // Only a question that opted in re-asks, and then only once. Every
-      // other caller (the pick menus, `runPickerWalkthrough`) asks exactly
+      // other caller (the pick menus) asks exactly
       // as many times as it did before: once.
       const attempts = 1 + (question.enterKeepsChecked ? MAX_MALFORMED_REASKS : 0)
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -222,68 +221,6 @@ function legacyNumberedPromptFactory(opts) {
       // historical empty selection, because that is their enter too.
       // @ref LLP 0190#sync-gate [implements]: the spent budget lands on the stated default, not on an empty selection
       return defaulted()
-    } finally {
-      rl.close()
-    }
-  }
-}
-
-/**
- * Build the interactive "overwrite existing config?" confirm. Defaults
- * to **yes**: this lands at the end of an attended run, after every
- * question was answered, so a bare Enter has to complete the run the
- * user just walked - an enter that silently threw those answers away
- * read as the wizard failing. It is safe as a yes because nothing is
- * destroyed either way: the caller backs the file up before replacing
- * it, and the carried-over list below names what the rewrite keeps.
- *
- * The question says the file is *rewritten from the picks*, not merely
- * "overwritten": the write is a whole-file regeneration, and a user whose
- * mental model is "I am adjusting checkboxes" needs to know that before
- * the y/N. It also names what survives the regeneration, so the answer is
- * a decision about the picks rather than a bet on how much is lost.
- *
- * That is three facts, and as one paragraph they arrived as a wall of text
- * with the actual question buried at the end of it. So it is laid out
- * instead: the path on its own line, the consequence and the carried-over
- * list indented under it, and `Continue?` alone on the last line where a
- * reader's eye lands. Same facts, same order, scannable.
- *
- * A stdin that ends without a line (a terminal that dropped, a scripted
- * run whose input runs out before the commit point) is read through
- * `queuedLineAsker` rather than `rl.question`, whose promise is left
- * permanently unsettled at EOF. The unanswerable question falls to the
- * default it prints, which is the same answer a bare Enter gives, so the
- * on-screen `[Y/n]` stays the whole contract: EOF completes the run the
- * same way that Enter does, and the backup is taken either way.
- *
- * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
- * @returns {(targetPath: string) => Promise<boolean>}
- * @ref LLP 0183#say-so [implements]: the overwrite confirm states that the config is regenerated and what is carried over
- * @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default instead of waiting on an answer that can never come
- */
-export function defaultOverwriteConfirmFactory(opts) {
-  const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
-  const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
-  return async function (targetPath) {
-    const rl = readline.createInterface({ input, output, terminal: false })
-    const askLine = queuedLineAsker(rl, input, output)
-    try {
-      const answer = await askLine(
-        '\n' +
-        `This config will be rewritten from your picks:\n` +
-        `  ${targetPath}\n` +
-        '\n' +
-        '  Carried over: retention window, export destinations, hand-edited\n' +
-        '  settings, and plugins the picker does not manage. A backup is kept.\n' +
-        '\n' +
-        'Continue? [Y/n]: '
-      )
-      // Only an explicit no declines; a bare enter (and any stray answer)
-      // proceeds, matching the stated default. `null` is EOF, read as that
-      // same empty line so one parse serves both: the answer a spent stdin
-      // takes cannot drift from the default the printed question advertises.
-      return !/^n(o)?$/i.test((answer ?? '').trim())
     } finally {
       rl.close()
     }
@@ -468,7 +405,7 @@ function tuiBackfillConsentPromptFactory(opts) {
     const choice = await select({
       title: backfillConsentTitle(providers, retentionDays),
       options: [
-        { value: 'yes', label: 'Yes - import it now', summary: 'Reads local transcripts into the query cache.' },
+        { value: 'yes', label: 'Yes - import it now', summary: 'Includes your existing conversation history.' },
         { value: 'no', label: 'No - skip for now', summary: 'You can import later with hyp backfill.' },
       ],
       default: 'yes',
@@ -551,303 +488,9 @@ export function backfillConsentTitle(providers, retentionDays) {
 const PICKER_DISPLAY_ORDER = ['claude', 'claude-desktop', 'codex', 'opencode', 'raw-anthropic', 'raw-openai', 'otel']
 
 /**
- * Phase 5 export options.
- *
- * @type {{ value: PickerExport, label: string, summary: string }[]}
- */
-const PICKER_EXPORTS = [
-  {
-    value: 'keep-local',
-    label: 'keep local query cache only',
-    summary: 'Stores recent rows locally for hyp query; nothing is exported elsewhere.',
-  },
-  {
-    value: 'local-parquet',
-    label: 'export local Parquet files',
-    summary: 'Writes scheduled Parquet exports under HYP_HOME/exports for external tools.',
-  },
-  {
-    value: 'configure-later',
-    label: 'configure later',
-    summary: 'Writes capture config now and leaves export sinks for a later config edit.',
-  },
-]
-
-
-/**
- * Drive the Phase 5 first-run picker walkthrough.
- *
- * The picker offers a
- * fixed set of user-facing source labels (Claude Code / Codex / raw
- * Anthropic / raw OpenAI / OTEL) and a fixed set of export labels
- * (`keep-local` / `local-parquet` / `configure-later`). These are
- * translated into a v2 config via {@link composePickerConfig}.
- *
- * When `opts.finale` is provided, the walkthrough also runs the
- * post-write actions described by the bead:
- *   - daemon install (dry-run or real)
- *   - attach for each picked client
- *   - skill install for each picked client
- *   - daemon restart (skipped in dry-run)
- *
- * Spans: `walkthrough.start`, `walkthrough.pick` (logs),
- * `walkthrough.write_config`, `daemon.install`, `client.attach`,
- * `skills.install`, `walkthrough.finish`.
- *
- * Superseded as `hyp init`'s entry point by `runInitWizard`
- * (LLP 0135 #orchestration), which drives the same pick/write/finale
- * machinery through the wizard's pick phase. Kept as the direct
- * programmatic surface existing tests and smokes exercise.
- *
- * @param {RunPickerWalkthroughOptions} opts
- * @returns {Promise<PickerWalkthroughResult>}
- * @ref LLP 0011#interactive-walkthrough [implements]: the pre-wizard walkthrough shape; hyp init now fronts it with runInitWizard
- */
-export async function runPickerWalkthrough(opts) {
-  const { capabilities, stdout, env } = opts
-  const log = getLogger('walkthrough')
-
-  // Autodetect installed client tools so the picker can pre-check them.
-  // Interactive only: when `picks` are supplied (`--yes` / `--dry-run` /
-  // presets) the selection is explicit and must stay deterministic, so
-  // detection is skipped entirely. Best-effort: a detector failure
-  // leaves the set empty rather than blocking onboarding.
-  // @ref LLP 0011#autodetect-vs-default [implements]: detection only seeds the initial checkbox; never forces a source on
-  const interactive = !opts.picks
-  /** @type {Set<PickerSource>} */
-  let detected = new Set()
-  if (interactive) {
-    const detect = opts.detect ?? defaultPickerDetect
-    try {
-      detected = await detect({ env })
-    } catch {
-      detected = new Set()
-    }
-  }
-
-  // The picker table is manifest-sourced now: each plugin declares its
-  // rows in `contributes.picker` (`@ref LLP 0130#picker-block`), replacing
-  // the retired hardcoded PICKER_SOURCES list. Both the interactive prompt
-  // options and `composePickerConfig`'s fold read from these descriptors.
-  const { descriptors: pickerDescriptors, composeWith } = await loadPickerCatalog()
-  const descriptorList = [...pickerDescriptors.values()]
-
-  await withSpan(
-    'walkthrough.start',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.start',
-      sources_available: descriptorList.length,
-      exports_available: PICKER_EXPORTS.length,
-      sources_detected: detected.size,
-      detected_sources: [...detected].join(','),
-      status: 'ok',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-
-  /** @type {PickerPicks} */
-  let picks
-  // Provenance of the export choice, for telemetry. Export is no longer
-  // asked interactively (local-parquet is the out-of-the-box default),
-  // so the origin is `user` only when an explicit `--export` flag was
-  // threaded in on the pre-baked path; otherwise the pick was defaulted.
-  let exportOrigin = 'default'
-  if (opts.picks) {
-    picks = opts.picks
-    exportOrigin = opts.exportOrigin ?? 'default'
-  } else {
-    const ask = opts.prompt ?? defaultPromptFactory(opts)
-
-    stdout.write('HypAware records the sessions, logs, and telemetry from your AI agents into one queryable history.\n\n')
-
-    try {
-      const sourceRaw = await ask({
-        pickType: 'sources',
-        title: 'What do you want to collect?',
-        // Hidden and platform-gated rows are absent from the menu but still
-        // pickable via `--source` (which takes the `opts.picks` path above and
-        // never reaches this prompt). A hidden row carries no probe, so nothing
-        // is silently unchecked by leaving it out. A platform-gated row may
-        // well be detected, and is withheld anyway: the gate answers a question
-        // about the integration that no probe about this machine can overturn
-        // (`@ref LLP 0368#platform-gate`).
-        options: visiblePickerDescriptors(descriptorList, opts.platform).map((d) => ({
-          value: d.id,
-          label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
-          ...(d.summary ? { summary: d.summary } : {}),
-          ...(detected.has(/** @type {PickerSource} */ (d.id)) ? { checked: true } : {}),
-        })),
-      })
-      const sources = /** @type {PickerSource[]} */ (
-        sourceRaw.filter((v) => descriptorList.some((d) => d.id === v))
-      )
-
-      // Export destination is not asked interactively. A local query
-      // cache is always kept; on top of it we default to scheduled local
-      // Parquet exports so `npx hypaware` produces durable files out of
-      // the box. Other destinations (keep-local only, configure-later,
-      // S3, …) remain available via `hyp init --export <choice>` and by
-      // editing the written config later.
-      const exportChoice = /** @type {PickerExport} */ ('local-parquet')
-
-      // Retention is not asked either (LLP 0137): this legacy surface has
-      // no pathway fork, so it takes the flat default. The wizard applies
-      // the pathway-aware defaults; `--retention-days` overrides via picks.
-      picks = { sources, exportChoice, retentionDays: DEFAULT_RETENTION_DAYS }
-    } catch (err) {
-      if (isPromptCancelledError(err)) {
-        return await cancelledResult(opts)
-      }
-      throw err
-    }
-  }
-
-  for (const value of picks.sources) {
-    log.info('walkthrough.pick', {
-      [Attr.COMPONENT]: 'walkthrough',
-      pick_type: 'sources',
-      pick_value: value,
-    })
-  }
-  log.info('walkthrough.pick', {
-    [Attr.COMPONENT]: 'walkthrough',
-    pick_type: 'exports',
-    pick_value: picks.exportChoice,
-    pick_origin: exportOrigin,
-  })
-
-  const hypHome = resolveHypHome(env)
-  const config = composePickerConfig({
-    sources: picks.sources,
-    descriptors: pickerDescriptors,
-    exportChoice: picks.exportChoice,
-    retentionDays: picks.retentionDays,
-    hypHome,
-    composeWith,
-  })
-
-  const obsEnv = readObservabilityEnv(env)
-  const configPath = env.HYP_CONFIG
-    ? path.resolve(env.HYP_CONFIG)
-    : defaultConfigPath(obsEnv.hypHome)
-
-  // Guard against clobbering an existing local config (the non-destructive
-  // half of #111). Interactive runs prompt for confirmation;
-  // non-interactive runs require `--force`. Either path backs up the
-  // existing file before replacing it.
-  // @ref LLP 0031#local-layer-writers [implements]: init overwrite safety on the walkthrough write path
-  const overwriteConfirm = interactive
-    ? (opts.confirmOverwrite ?? defaultOverwriteConfirmFactory({ stdin: opts.stdin, stdout }))
-    : undefined
-  const guard = await prepareLocalConfigWrite({
-    targetPath: configPath,
-    force: opts.force,
-    ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
-  })
-  if (!guard.proceed) {
-    opts.stderr.write(`hyp setup: ${guard.message}\n`)
-    return overwriteAbortedResult({ opts, configPath, config, picks })
-  }
-  if (guard.backupPath) {
-    stdout.write(`Backed up existing config to ${guard.backupPath}\n`)
-  }
-
-  await withSpan(
-    'walkthrough.write_config',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.write_config',
-      config_path: configPath,
-      plugin_count: config.plugins?.length ?? 0,
-      ...(guard.backupPath ? { config_backed_up: true } : {}),
-      status: 'ok',
-    },
-    async () => {
-      await fs.mkdir(path.dirname(configPath), { recursive: true })
-      await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
-    },
-    { component: 'walkthrough' }
-  )
-
-  // @ref LLP 0180#decision [implements]: client-ness is read from the picked
-  // rows' manifest client contributions, not a name list copied per call site
-  const clientsPicked = derivePickedClients(
-    picks.sources,
-    pickerDescriptors,
-    await buildWalkthroughClientDescriptorMap()
-  )
-
-  /** @type {FinaleSummary | undefined} */
-  let finaleSummary
-  if (opts.finale) {
-    finaleSummary = await runPickerFinale({
-      finale: opts.finale,
-      clientsPicked,
-      capabilities,
-      ...(opts.clients ? { clients: opts.clients } : {}),
-      sources: opts.sources,
-      skills: opts.skills,
-      agents: opts.agents,
-      ...(opts.failedPlugins ? { failedPlugins: opts.failedPlugins } : {}),
-      config,
-      configPath,
-      env,
-      stdout,
-      stderr: opts.stderr,
-      retentionDays: picks.retentionDays,
-      // Interactive mode is the absence of pre-baked picks: only then do
-      // we prompt for backfill consent. `--yes` / `--dry-run` carry picks
-      // and backfill runs automatically.
-      interactive: !opts.picks,
-      ...(opts.stdin ? { stdin: opts.stdin } : {}),
-      ...(opts.backfill ? { backfill: opts.backfill } : {}),
-      ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
-    })
-  }
-
-  const cancelled = finaleSummary?.cancelled === true
-  const exitCode = cancelled ? WALKTHROUGH_CANCEL_EXIT_CODE : 0
-
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      sources_picked: picks.sources.length,
-      export_picked: picks.exportChoice,
-      clients_picked: clientsPicked.length,
-      retention_days: picks.retentionDays,
-      config_path: configPath,
-      ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
-      status: cancelled ? 'cancelled' : 'ok',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-
-  if (cancelled) writeCancelledNotice(opts.stderr)
-
-  writeWalkthroughRunSummary({ stdout, configPath, finaleSummary })
-
-  return {
-    exitCode,
-    configPath,
-    config,
-    sourcesPicked: picks.sources,
-    exportPicked: picks.exportChoice,
-    clientsPicked,
-    retentionDays: picks.retentionDays,
-    ...(finaleSummary ? { finale: finaleSummary } : {}),
-  }
-}
-
-/**
  * Print the closing run summary: the written config path plus one line
  * per finale action that ran (daemon target, attaches, skills/agents
- * counts). Shared by `runPickerWalkthrough` and the wizard orchestrator so
- * both entry points end a run identically.
+ * counts), used by the wizard orchestrator.
  *
  * No "next: hyp query sql ..." hint: it named the `logs` dataset, which
  * only exists when `@hypaware/otel` is configured, so most installs ended
@@ -858,11 +501,12 @@ export async function runPickerWalkthrough(opts) {
  *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   configPath: string,
  *   finaleSummary?: FinaleSummary | undefined,
+ *   dryRun?: boolean,
  * }} args
  */
-export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }) {
+export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary, dryRun }) {
   stdout.write('\n')
-  stdout.write(`✓ Wrote ${configPath}\n`)
+  stdout.write(dryRun ? `(dry-run) Would write ${configPath}\n` : `✓ Wrote ${configPath}\n`)
   if (finaleSummary?.daemonInstall && !finaleSummary.daemonInstall.skipped) {
     const tag = finaleSummary.daemonInstall.dryRun ? '(dry-run) ' : ''
     if (finaleSummary.daemonInstall.targetPath) {
@@ -875,6 +519,10 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
     }
   }
   for (const a of finaleSummary?.attach ?? []) {
+    if (a.notRecording) {
+      stdout.write(`attach: ${a.client} not recording (detached); run 'hyp client attach ${a.client}' to record it\n`)
+      continue
+    }
     if (a.skipped) {
       stdout.write(`attach: ${a.client} already attached\n`)
       continue
@@ -1275,6 +923,23 @@ function carryForwardExistingConfig(composed, existing, descriptors, composeWith
 }
 
 /**
+ * The picked clients whose plugin entry says `recording: false` (LLP 0466).
+ *
+ * @param {string[]} clients
+ * @param {HypAwareV2Config} config
+ * @returns {Promise<Set<string>>}
+ */
+async function detachedClients(clients, config) {
+  const off = new Set((config.plugins ?? []).filter((entry) => !isEntryRecording(entry)).map((entry) => entry.name))
+  if (off.size === 0 || clients.length === 0) return new Set()
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  return new Set(clients.filter((client) => {
+    const plugin = descriptors.get(client)?.plugin
+    return plugin !== undefined && off.has(plugin)
+  }))
+}
+
+/**
  * Merge one composed plugin instance with the entry of the same name
  * already in the config: the user's keys win, except the gateway's
  * pick-derived `upstreams`.
@@ -1588,8 +1253,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  * #dead-surface), threaded in because the finale is one *step* but
  * several acts, and the backfill consent question sits behind three of
  * them. A caller that has a consent surface to lose passes it; the
- * standalone picker walkthrough has no guard and passes nothing, which
- * leaves the question exactly as it was.
+ * direct finale caller may omit it.
  *
  * @param {{
  *   finale: PickerFinaleActions,
@@ -1607,12 +1271,14 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   retentionDays: number,
  *   interactive: boolean,
+ *   force?: boolean,
  *   stdin?: NodeJS.ReadableStream,
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   skipAttachClients?: Set<string>,
- *   progress?: string,
+ *   clientLabels?: Map<string, string>,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   daemonService?: {
  *     restartServiceDaemon: typeof restartServiceDaemonFn,
@@ -1630,13 +1296,9 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
-  // Like the join lane, the finale is one step made of several actions
-  // (install, attach, assets, backfill consent, restart), so it states its
-  // position once where the lane starts rather than per action. Only the
-  // wizard sets this; `runPickerWalkthrough` and non-interactive runs leave
-  // it unset and the line is not printed.
-  // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
-  if (args.progress) stdout.write(`${args.progress}\n`)
+  // Each act is reported in one line, by the names the user picked from
+  // (LLP 0437 #finish).
+  const label = (/** @type {string} */ client) => args.clientLabels?.get(client) ?? client
   // `?? ''`, not os.homedir(): '' is the "no home, stay inert" sentinel this
   // whole finale keys on - the materialize/prune guards, the attach probe,
   // and the conditional homeDir spreads below all read it as "write
@@ -1712,7 +1374,8 @@ export async function runPickerFinale(args) {
           // walkthrough only signals whether binPath came from an
           // explicit --bin and reads the result back off the plan.
           binExplicit: finale.binPath !== undefined,
-          durableBin: { env, stdout, stderr },
+          force: args.force,
+          durableBin: { env, stdout, stderr, stdin: args.stdin, interactive: args.interactive },
           ...(homeDir ? { homeDir } : {}),
         }
         if (dryRun) {
@@ -1761,6 +1424,8 @@ export async function runPickerFinale(args) {
       },
       { component: 'walkthrough' }
     ).catch((err) => {
+      // @ref LLP 0404#install-policy [implements]: no attach after refusing a fragile daemon path
+      if (err instanceof DurableBinRequiredError) throw err
       const diagnosed = err instanceof ServiceOpError || err instanceof GlobalInstallError
       if (!diagnosed && !(err instanceof installMod.DaemonInstallError)) throw err
       installFailed = true
@@ -1813,7 +1478,16 @@ export async function runPickerFinale(args) {
         ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
       })
     }
+    // A client the user detached stays detached through a reconfigure: the
+    // carried-forward plugin entry keeps its `recording: false`, and only an
+    // explicit `hyp client attach` turns it back on.
+    // @ref LLP 0466#reattach-paths [implements]: setup never silently re-attaches a detached client
+    const notRecording = await detachedClients(clientsPicked, config)
     for (const client of clientsPicked) {
+      if (notRecording.has(client)) {
+        summary.attach.push({ client, dryRun, ok: true, skipped: true, notRecording: true })
+        continue
+      }
       if (args.skipAttachClients?.has(client)) {
         summary.attach.push({ client, dryRun, ok: true, skipped: true })
         continue
@@ -1843,14 +1517,30 @@ export async function runPickerFinale(args) {
       // way the reconciler's attach action calls it.
       const attachEndpoint = adapter.requiresEndpoint === false ? undefined : endpoint
       try {
+        // The adapter's own report names files and capture modes; the
+        // finale says the one thing the user acts on instead. A dry run
+        // keeps the report: the files it would touch are what it is for.
+        let report = ''
         await adapter.attach({
           ...(attachEndpoint ? { endpoint: attachEndpoint } : {}),
           config: {},
-          stdout,
+          stdout: dryRun ? stdout : { write: (/** @type {string} */ chunk) => { report += chunk; return true } },
           stderr,
           dryRun,
         })
-        summary.attach.push({ client, dryRun, ok: true })
+        if (dryRun) {
+          summary.attach.push({ client, dryRun, ok: true })
+        } else {
+          const outcome = attachReportOutcome(report)
+          summary.attach.push({ client, dryRun, ok: outcome.applied })
+          const name = label(client)
+          if (outcome.applied) {
+            stdout.write(outcome.restart
+              ? `✓ ${name} attached\n`
+              : `✓ ${name} attached (restart open ${name} sessions to start recording)\n`)
+          }
+          for (const line of outcome.kept) stdout.write(`${line}\n`)
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         stderr.write(`attach ${client} failed: ${message}\n`)
@@ -1862,8 +1552,11 @@ export async function runPickerFinale(args) {
   const descriptorMap = clientsPicked.length > 0 && (skills || agents)
     ? await buildWalkthroughClientDescriptorMap()
     : new Map()
+  // Skills and agents are part of the attach wiring a detach removed.
+  const notRecordingAssets = await detachedClients(clientsPicked, config)
+  const assetClients = clientsPicked.filter((client) => !notRecordingAssets.has(client))
 
-  if (clientsPicked.length > 0 && (skills || agents)) {
+  if (assetClients.length > 0 && (skills || agents)) {
     // Span name kept from when skills and agents were two steps: this is now
     // the one client-asset materialization, and it is what the release smoke
     // battery asserts on.
@@ -1879,11 +1572,10 @@ export async function runPickerFinale(args) {
         status: 'ok',
       },
       async (span) => {
-        const framed = framedStream(stdout)
         // No `stdout` here on purpose: the materializer's per-copy line is the
         // right output for `hyp skills install`, where the copies are the
         // command's subject, but in the finale a dozen path lines bury the one
-        // fact the step reports. The counts go out instead; the paths stay
+        // fact the step reports. One line goes out instead; the paths stay
         // available in the run summary and the span.
         //
         // Withholding the stream is exactly why the removals have to come back
@@ -1894,7 +1586,7 @@ export async function runPickerFinale(args) {
         // @ref LLP 0219#automatic-not-gated [implements]: the finale counts its
         //   removals out loud rather than reporting them down a stream it withholds
         const { installed, pruned } = await materializeClientAssets({
-          clients: clientsPicked,
+          clients: assetClients,
           descriptors: descriptorMap,
           homeDir,
           stateRoot: clientAssetStateRoot(env, homeDir),
@@ -1906,7 +1598,7 @@ export async function runPickerFinale(args) {
           dryRun,
           stderr,
         })
-        for (const line of clientAssetCountLines(installed, pruned, dryRun)) framed.write(`${line}\n`)
+        for (const line of clientAssetLines(installed, pruned, dryRun, label)) stdout.write(`${line}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
@@ -1917,8 +1609,7 @@ export async function runPickerFinale(args) {
           if (item.kind === 'skill') summary.skillsInstalled.push(entry)
           else summary.agentsInstalled.push(entry)
         }
-        // Trailing blank line so the next step (backfill prompt) stands apart.
-        if (framed.wrote()) stdout.write('\n')
+
         if (span && typeof span.setAttribute === 'function') {
           span.setAttribute('installed_count', installed.length)
         }
@@ -1936,6 +1627,7 @@ export async function runPickerFinale(args) {
     ...(args.backfill ? { backfill: args.backfill } : {}),
     ...(args.backfillConsentPrompt ? { backfillConsentPrompt: args.backfillConsentPrompt } : {}),
     ...(args.checkBoundary ? { checkBoundary: args.checkBoundary } : {}),
+    ...(args.autoAccept ? { autoAccept: true } : {}),
     clientsPicked,
     interactive: args.interactive,
     dryRun,
@@ -1946,6 +1638,7 @@ export async function runPickerFinale(args) {
     stderr,
     env,
     summary,
+    label,
   })
 
   // Re-running the picker regenerates the config from the picks alone, so a
@@ -2127,8 +1820,6 @@ function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
  * hosts with no central layer (LLP 0185 #status-backstop).
  *
  * Only a caller that printed something substantial in between calls this.
- * `runPickerWalkthrough` writes a short run summary and stops, so it keeps the
- * single finale print and never repeats it onto the same screen.
  *
  * @ref LLP 0230#repeat-at-the-end [implements]: the repeat belongs to the caller whose own output buried the first print
  * @param {{
@@ -2166,6 +1857,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   checkBoundary?: () => Promise<boolean>,
+ *   autoAccept?: boolean,
  *   clientsPicked: string[],
  *   interactive: boolean,
  *   dryRun: boolean,
@@ -2176,11 +1868,13 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   env: NodeJS.ProcessEnv,
  *   summary: FinaleSummary,
+ *   label?: (client: string) => string,
  * }} args
  * @returns {Promise<void>}
  */
 async function runFinaleBackfill(args) {
   const { backfill, clientsPicked, interactive, dryRun, retentionDays, until, stdout, stderr, env, summary } = args
+  const label = args.label ?? ((/** @type {string} */ client) => client)
   if (!backfill) return
   const available = new Set(backfill.available)
   const providers = clientsPicked.filter((c) => available.has(c))
@@ -2200,7 +1894,9 @@ async function runFinaleBackfill(args) {
   // places: a decline was read and answered, while this one was never
   // asked and its own "skipped" line goes to the stream that just died.
   let surfaceDead = false
-  if (interactive && asked.length > 0) {
+  // An express accept already said yes to the import (LLP 0201 #finale-import), so
+  // it runs as a scripted run's does, with no question to open.
+  if (interactive && !args.autoAccept && asked.length > 0) {
     // The last consent question in the run, and the only one inside the
     // finale: the install, the attach, and the asset copy above it have
     // each narrated first, so the surface can die between the caller's
@@ -2239,6 +1935,7 @@ async function runFinaleBackfill(args) {
       providers: providers.join(','),
       dry_run: dryRun,
       interactive,
+      auto_accept: args.autoAccept === true,
       consent,
       consent_cancelled: cancelled,
       consent_surface_dead: surfaceDead,
@@ -2252,13 +1949,13 @@ async function runFinaleBackfill(args) {
       // takes the sweep-backed providers down with it; a decline skips
       // only what was actually asked.
       if (cancelled) {
-        stdout.write('backfill: skipped (cancelled)\n')
+        stdout.write('Import skipped.\n')
         return
       }
       // The one thing that outlives a run whose surface died inside the
       // finale: the import did not happen, and it names the one command
       // that does it rather than the whole wizard, which would re-run the
-      // install, the attach and the overwrite confirm to redo one import.
+      // install and the attach to redo one import.
       // Said on stderr because stdout is the stream that just went, so
       // the decline's own line would be written into nothing - and
       // "declined" is not what happened anyway. It names `asked` rather
@@ -2267,7 +1964,7 @@ async function runFinaleBackfill(args) {
       // would claim more than was skipped.
       //
       // Guarded, like the two cancel notices it is modelled on
-      // (`writeCancelledNotice` below, the wizard's post-finale cancel):
+      // (the wizard's post-finale cancel):
       // a terminal that took stdout with it can have taken stderr too,
       // and this arm's whole contract is to warn and let the finale
       // finish - a warning that cannot be written must not cost the run
@@ -2278,7 +1975,7 @@ async function runFinaleBackfill(args) {
         try {
           stderr.write(
             `hyp setup: output closed - the local history import for ${asked.join(', ')} was skipped; ` +
-            `run 'hyp client history import ${asked.join(' ')}' to import it\n`
+            `run 'hyp backfill ${asked.join(' ')}' to import it\n`
           )
         } catch {
           // best-effort: whatever took stdout may have taken stderr too
@@ -2310,14 +2007,26 @@ async function runFinaleBackfill(args) {
           // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
           const entry = await withSpinner(
-            { stdout, env, label: `${startTag}backfill ${provider}: importing local history…` },
+            {
+              stdout,
+              env,
+              label: `${startTag}Importing ${label(provider)} history…`,
+            },
             () => backfill.run({ provider, dryRun, retentionDays, until })
           )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
-          // The counts matter when something was imported or went wrong;
-          // a clean zero is one short line, not a scan report.
-          stdout.write(`${tag}backfill ${entry.provider}: ${describeBackfillResult(entry)}\n`)
+          // Only an import that wrote rows or failed is news; a zero means
+          // there was nothing to do, and the scan counts go to the span.
+          // @ref LLP 0437#finish [implements]: an import reports only what it imported or a failure
+          if (!entry.ok) {
+            stdout.write(`${tag}${label(provider)} import ${describeBackfillResult(entry)}\n`)
+          } else if (entry.rowsWritten > 0) {
+            const rows = entry.rowsWritten === 1 ? 'row' : 'rows'
+            stdout.write(entry.dryRun
+              ? `(dry-run) would import ${groupThousands(entry.rowsWritten)} ${rows} of ${label(provider)} history\n`
+              : `✓ Imported ${groupThousands(entry.rowsWritten)} ${rows} of ${label(provider)} history\n`)
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           // Guarded for the same reason the dead-surface notice above is,
@@ -2414,19 +2123,6 @@ export async function defaultPickerDetect(opts) {
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   const detected = await detectPickerSources(catalog, opts.env)
   return /** @type {Set<PickerSource>} */ (detected)
-}
-
-/**
- * Load the manifest-sourced picker descriptors (`@ref LLP 0130#picker-block`)
- * from the bundled plugin catalog, in `PICKER_DISPLAY_ORDER`. This is the
- * replacement for the retired hardcoded `PICKER_SOURCES` table: the picker
- * prompt options and `composePickerConfig`'s fold both read from it.
- * Discovery failure yields an empty map rather than blocking init.
- *
- * @returns {Promise<Map<string, PickerDescriptor>>}
- */
-export async function loadPickerDescriptors() {
-  return (await loadPickerCatalog()).descriptors
 }
 
 /**
@@ -2596,58 +2292,40 @@ export async function buildWalkthroughClientDescriptorMap() {
 }
 
 /**
- * One line per client naming how many skills and agents landed there, plus one
- * naming how many retired ones were taken off the machine, in the order the
- * copies were made.
+ * One line naming the clients that got skills (and agents), and one per
+ * client naming how many retired ones were taken off the machine. The
+ * install counts are left out: they describe our packaging, not anything
+ * the user chose. The removals keep their count, since the materializer's
+ * own stream is withheld here and a deletion must still be said.
  *
- * Counted per client rather than summed across them, because the sum is the
- * one number that is true of nobody: six skills copied to two clients is
- * twelve copies, and neither client got twelve. Names are left out entirely -
- * the user picked these clients a screen ago and did not choose the assets,
- * so the roster is not a decision they are being shown for review.
- *
- * The removals get a count and not the paths, unlike everywhere else, for that
- * same reason: this is a step summary in a wizard, and it is the *fact* of a
- * deletion the user needs at this moment, not a roster. What was removed stays
- * on the span and in `client_assets.pruned`.
- *
+ * @ref LLP 0219#automatic-not-gated [implements]: the finale counts its removals out loud rather than reporting them down a stream it withholds
  * @param {ClientAssetInstall[]} installed
  * @param {ClientAssetRemoval[]} pruned
  * @param {boolean} dryRun
+ * @param {(client: string) => string} label
  * @returns {string[]}
  */
-function clientAssetCountLines(installed, pruned, dryRun) {
-  /** @type {Map<string, { skills: number, agents: number, removedSkills: number, removedAgents: number }>} */
-  const byClient = new Map()
-  /** @param {string} client */
-  const counts = (client) => {
-    let entry = byClient.get(client)
-    if (!entry) byClient.set(client, (entry = { skills: 0, agents: 0, removedSkills: 0, removedAgents: 0 }))
-    return entry
+function clientAssetLines(installed, pruned, dryRun, label) {
+  /** @type {string[]} */
+  const lines = []
+  if (installed.length > 0) {
+    const clients = [...new Set(installed.map((i) => label(i.client)))]
+    const what = installed.some((i) => i.kind === 'agent') ? 'skills and agents' : 'skills'
+    lines.push(`${dryRun ? '(dry-run) would install' : '✓ Installed'} ${what} for ${joinNames(clients)}`)
   }
-  for (const item of installed) {
-    const entry = counts(item.client)
+  /** @type {Map<string, { skills: number, agents: number }>} */
+  const removed = new Map()
+  for (const item of pruned) {
+    let entry = removed.get(item.client)
+    if (!entry) removed.set(item.client, (entry = { skills: 0, agents: 0 }))
     if (item.kind === 'skill') entry.skills += 1
     else entry.agents += 1
   }
-  for (const item of pruned) {
-    const entry = counts(item.client)
-    if (item.kind === 'skill') entry.removedSkills += 1
-    else entry.removedAgents += 1
-  }
-  const installVerb = dryRun ? '(dry-run) would install' : 'installed'
-  const removeVerb = dryRun ? '(dry-run) would remove' : 'removed'
-  /** @type {string[]} */
-  const lines = []
-  for (const [client, entry] of byClient) {
-    const landed = []
-    if (entry.skills > 0) landed.push(plural(entry.skills, 'skill'))
-    if (entry.agents > 0) landed.push(plural(entry.agents, 'agent'))
-    if (landed.length > 0) lines.push(`${installVerb} ${landed.join(' and ')} for ${client}`)
+  for (const [client, entry] of removed) {
     const gone = []
-    if (entry.removedSkills > 0) gone.push(plural(entry.removedSkills, 'retired skill'))
-    if (entry.removedAgents > 0) gone.push(plural(entry.removedAgents, 'retired agent'))
-    if (gone.length > 0) lines.push(`${removeVerb} ${gone.join(' and ')} for ${client}`)
+    if (entry.skills > 0) gone.push(plural(entry.skills, 'retired skill'))
+    if (entry.agents > 0) gone.push(plural(entry.agents, 'retired agent'))
+    lines.push(`${dryRun ? '(dry-run) would remove' : 'Removed'} ${gone.join(' and ')} for ${label(client)}`)
   }
   return lines
 }
@@ -2662,119 +2340,31 @@ function plural(count, noun) {
 }
 
 /**
- * Wrap a finale stream so the first write is preceded by a blank line,
- * separating this step's output from the previous step's. A step that turns
- * out to print nothing (no assets matched the picked clients) leaves no empty
- * gap behind, which a plain leading `write('\n')` would.
+ * What the finale keeps from an adapter's attach report, which it otherwise
+ * withholds. The adapter contract returns nothing, so the report is the only
+ * signal: a line opening with `!` at column 0 says the attach did not apply,
+ * an indented `!` line is a warning on one that did, and a line opening with
+ * `restart` is the adapter's own next step, which replaces the finale's
+ * generic one. Those lines are kept verbatim; the rest (paths, settings
+ * values) stays withheld.
  *
- * @param {{ write(chunk: string): unknown }} stdout
- * @returns {{ write(chunk: string): unknown, wrote(): boolean }}
+ * @param {string} report
+ * @returns {{ applied: boolean, restart: boolean, kept: string[] }}
  */
-function framedStream(stdout) {
-  let wrote = false
-  return {
-    write(chunk) {
-      if (!wrote) {
-        stdout.write('\n')
-        wrote = true
-      }
-      return stdout.write(chunk)
-    },
-    wrote() { return wrote },
+export function attachReportOutcome(report) {
+  let applied = true
+  let restart = false
+  /** @type {string[]} */
+  const kept = []
+  for (const line of report.split('\n')) {
+    const text = line.trim()
+    if (text.startsWith('!')) {
+      if (line.startsWith('!')) applied = false
+      kept.push(line)
+    } else if (/^restart\b/i.test(text)) {
+      restart = true
+      kept.push(line)
+    }
   }
-}
-
-/**
- * Result returned when the overwrite guard refuses (non-interactive,
- * `--force` absent) or the user declines the interactive prompt. No
- * config is written; exit code 1 surfaces the refusal to the caller.
- *
- * @param {{
- *   opts: RunPickerWalkthroughOptions,
- *   configPath: string,
- *   config: HypAwareV2Config,
- *   picks: PickerPicks,
- * }} args
- * @returns {Promise<PickerWalkthroughResult>}
- */
-async function overwriteAbortedResult({ opts, configPath, config, picks }) {
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      config_path: configPath,
-      exit_code: 1,
-      status: 'aborted',
-      hyp_reason: 'config_exists',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-  return {
-    exitCode: 1,
-    configPath,
-    config,
-    sourcesPicked: picks.sources,
-    exportPicked: picks.exportChoice,
-    clientsPicked: [],
-    retentionDays: picks.retentionDays,
-  }
-}
-
-/**
- * Build the canonical cancel result returned by {@link runPickerWalkthrough}
- * when the user cancels via escape / ctrl+c. Writes a one-line cancel
- * notice to stderr so the dispatcher does not eat it silently, and
- * surfaces {@link WALKTHROUGH_CANCEL_EXIT_CODE} (130, matching SIGINT
- * convention) as the exit code. The returned object satisfies the
- * required shape of {@link PickerWalkthroughResult} but contains no
- * config (callers that key off `exitCode` already short-circuit on
- * non-zero values).
- *
- * @param {RunPickerWalkthroughOptions} opts
- * @returns {Promise<PickerWalkthroughResult>}
- */
-async function cancelledResult(opts) {
-  await withSpan(
-    'walkthrough.finish',
-    {
-      [Attr.COMPONENT]: 'walkthrough',
-      [Attr.OPERATION]: 'walkthrough.finish',
-      sources_picked: 0,
-      export_picked: '',
-      clients_picked: 0,
-      retention_days: DEFAULT_RETENTION_DAYS,
-      config_path: '',
-      exit_code: WALKTHROUGH_CANCEL_EXIT_CODE,
-      status: 'cancelled',
-    },
-    async () => {},
-    { component: 'walkthrough' }
-  )
-  writeCancelledNotice(opts.stderr)
-  return {
-    exitCode: WALKTHROUGH_CANCEL_EXIT_CODE,
-    configPath: '',
-    config: /** @type {HypAwareV2Config} */ ({
-      version: 2,
-      plugins: [],
-      query: { cache: { retention: { default_days: DEFAULT_RETENTION_DAYS } } },
-    }),
-    sourcesPicked: [],
-    exportPicked: 'keep-local',
-    clientsPicked: [],
-    retentionDays: DEFAULT_RETENTION_DAYS,
-  }
-}
-
-/**
- * @param {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
- */
-function writeCancelledNotice(stderr) {
-  try {
-    stderr.write('hyp setup: cancelled\n')
-  } catch {
-    // best-effort: stderr might be closed during cleanup
-  }
+  return { applied, restart, kept }
 }

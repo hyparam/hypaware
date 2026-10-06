@@ -12,6 +12,10 @@
 `pullChangedSince` recognizes a boundary pull by its number and the other three
 passes by their event id, so an item updated twice inside one second never has
 its second snapshot captured)
+**Extended-by:** [LLP 0438](./0438-github-backlog-verdict-is-durable.decision.md)
+(#cadence's "work remaining" is made durable: the tick that sizes it records
+the verdict in the cursor sidecar, so a daemon restart keeps the backlog
+cadence and a retirement by another process gives the poll interval back)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#budget's deliberate new backfill is recorded there as re-appending rows,
 with the committed-row dedup alternative refused)

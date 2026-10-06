@@ -87,13 +87,6 @@ test('a successful ignore receipt does not claim a drop, for an id live traffic 
 
     // What it may claim - the write - it must claim plainly.
     assert.match(out, /in the gateway drop set/, 'report the membership that IS established')
-
-    // And it must state the bound, next to the success, where a caller reading
-    // "ignored" as done would see it.
-    assert.match(out, /what this proves/, 'the receipt names what it is a receipt for')
-    assert.match(out, /never inspects traffic/, 'why the gateway cannot say more')
-    assert.match(out, /suppresses nothing/, 'the failure this receipt cannot rule out')
-    assert.match(out, /the caller/, 'and where the guarantee actually comes from (R13)')
   })
 })
 
@@ -131,16 +124,55 @@ test('the unignore receipt reports the removal, not a resumption it cannot verif
   })
 })
 
-test('the reader carries the same qualifier, so writer and reader cannot drift', async () => {
-  // `status` answers the same `Set.has` question, so a confirmed `ignored`
-  // there rests on the identical bound. One shared constant, as with the
-  // ephemerality caveat: two statements of one contract drift apart.
-  const set = new Set(['sess-live'])
+test('a confirmed ignore says earlier rows remain and names the purge for this session', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
-    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-live' } })
-    assert.equal(await runSessionStatus([], ctx.ctx), 0)
-    assert.match(ctx.stdout(), /what this proves/)
-    assert.match(ctx.stdout(), /never inspects traffic/)
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['sess-purge-hint'], ctx.ctx), 0)
+    const out = ctx.stdout()
+    assert.match(out, /To delete what this session already recorded/)
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint`/, 'the exact command, with the real id')
+    assert.match(out, /also deletes copies on configured remotes/, 'the remote reach of a session purge is not hidden')
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint --local-only`/)
+  })
+})
+
+test('the --json ignore receipt carries the purge command an agent can run', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(["it's odd", '--json'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.deepEqual(out.purge, {
+      earlier_rows: 'retained',
+      command: "hyp privacy purge --session 'it'\\''s odd'",
+      command_deletes_remote: true,
+      local_only_command: "hyp privacy purge --session 'it'\\''s odd' --local-only",
+    })
+  })
+})
+
+test('a dash-led session id binds to --session with = so the purge command parses', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['--json', '--', '--opaque-id'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.purge.command, 'hyp privacy purge --session=--opaque-id')
+    assert.equal(out.purge.local_only_command, 'hyp privacy purge --session=--opaque-id --local-only')
+  })
+})
+
+test('the unignore receipt carries no purge hint', async () => {
+  const set = new Set(['sess-purge-hint'])
+  await withControlServer(set, async (base) => {
+    const human = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint'], human.ctx), 0)
+    assert.doesNotMatch(human.stdout(), /privacy purge/)
+    set.add('sess-purge-hint')
+    const json = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint', '--json'], json.ctx), 0)
+    assert.equal(JSON.parse(json.stdout()).purge, undefined)
   })
 })
 
@@ -326,6 +358,27 @@ for (const rel of SKILLS) {
   })
 }
 
+// @ref LLP 0403#contract [tests]: both hosts describe durable opt-out and forks.
+for (const rel of SKILLS) {
+  test(`${rel} names persistence and the fork boundary`, () => {
+    const step1 = privacyStep1(rel)
+    const at = step1.indexOf('The opt-out is saved locally')
+    assert.ok(at >= 0, 'Step 1 must state that exclusions are saved')
+    const para = step1.slice(at).split(/\n\s*\n/)[0]
+    assert.match(para, /survives recorder and daemon restarts/)
+    assert.match(para, /until explicitly removed/)
+    assert.match(para, rel.startsWith('claude/') ? /claude --fork-session/ : /codex fork/)
+    assert.match(para, /Transcript backfill honors the saved exclusion/)
+    assert.doesNotMatch(step1, /restart.{0,40}drops it/i)
+  })
+}
+
+/** The words the claude copy's Step 1 opens its stop list with, bolded as it writes them. */
+const CLAUDE_STOP_LIST_OPENER = '**Stop on any of these**'
+
+/** The words the claude copy's Step 1 opens the two-clients-state-an-id refusal with. */
+const CLAUDE_AMBIGUITY_OPENER = '**If the verb refuses because more than one client states an id**'
+
 /**
  * The receipt tells the agent to stop unless the recorder that captures THIS
  * session appears in `recorders`, which only works if the skill names the id
@@ -343,24 +396,398 @@ for (const rel of SKILLS) {
  */
 test('the claude privacy skill names the recorder id the listener reports', () => {
   const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  // The check has to be a stop condition, not an observation: the whole bug
+  // this skill's Step 1 was rewritten for is an `ok` over a recorder that was
+  // never addressed (issue #1615).
+  const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
+  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
+  const rest = step1.slice(at)
+  const end = rest.search(/\n\s*\n/)
+  const stopList = end < 0 ? rest : rest.slice(0, end)
+
+  // Scoped to the stop list itself. Step 1 names `claude-telemetry` twice more,
+  // in the receipt bullet above the list and in the stated-id re-run below it,
+  // so a Step-1-wide `includes` is satisfied by either bystander and an edit
+  // demoting the recorder check to commentary passes it (issue #1627).
+  //
+  // It pins the clause rather than the bare id for the same reason one level
+  // down: an aside inside this paragraph names the id too ("for reference,
+  // `"recorders"` usually lists `claude-telemetry`"), so a bare `includes`
+  // survives deleting the stop it is supposed to be guarding. The phrase is
+  // built from the imported id, which is what keeps skill and source pinned
+  // together.
+  const missingEntryClause = `no \`${CLAUDE_TELEMETRY_SOURCE}\` entry`
   assert.ok(
-    step1.includes(CLAUDE_TELEMETRY_SOURCE),
-    `Step 1 must name the listener's own recorder id (${CLAUDE_TELEMETRY_SOURCE}) for its coverage check to be actionable`
-  )
-  // And the check has to be a stop condition, not an observation: the whole
-  // bug this skill's Step 1 was rewritten for is an `ok` over a recorder that
-  // was never addressed (issue #1615).
-  assert.match(
-    step1,
-    /\*\*Stop on any of these\*\*/,
-    'the receipt readings must be framed as stop conditions, not as commentary'
+    stopList.includes(missingEntryClause),
+    `"${missingEntryClause}" must be one of the stop conditions, not an aside that only mentions the id`
   )
   assert.match(
-    step1,
+    stopList,
     /a `"session_id_source"` other than `claude_env`/,
     'an id resolved off disk for another session must be one of them'
   )
+  // And the one documented exception to that stop, or Step 1 routes the
+  // ambiguous case to a re-run whose receipt trips the stop it just set: the
+  // re-run states the id, so it reports `argument` by construction.
+  assert.match(
+    stopList,
+    /\bexception\b[\s\S]*`argument`/,
+    'the stated-id re-run reports `argument`, so the stop must carry it as the exception'
+  )
 })
+
+/**
+ * Issue #1626: the stop above fires on ABSENCE, and absence has two causes the
+ * receipt cannot tell apart. A recorder missing from `recorders` was not
+ * addressed, which is either a running listener the verb did not reach or a
+ * listener that is not running at all - and the second is the ordinary reading
+ * (LLP 0256 #cli-posts-to-both: a listener that is not running is not a
+ * failure, it is recording nothing). It is reachable in shipped code: an
+ * `@hypaware/ai-gateway` with no `recordProjectedExchange` leaves the listener
+ * unregistered (`claude.telemetry.capability_too_old`), so an unconditional
+ * stop tells a user whose machine is capturing nothing that the review session
+ * is still being recorded.
+ *
+ * The answer is to condition the stop on a second observation, not to delete
+ * it, so both directions are pinned here: a live listener still stops the
+ * review, no live listener says plainly that nothing is capturing, and a
+ * cross-check that cannot be read fails closed.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: only a running recorder that was
+ * skipped or refused is a failure.
+ */
+test('the claude privacy skill stops on a missing claude-telemetry entry only while that listener is live', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
+  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
+  const rest = step1.slice(at)
+  const end = rest.search(/\n\s*\n/)
+  const stopList = end < 0 ? rest : rest.slice(0, end)
+
+  // The condition rides the list item itself, before the comma that ends it:
+  // an agent acting on the list must not be able to reach the stop without
+  // reading it. The clause carries no regex metacharacter, so it is its own
+  // pattern.
+  const clause = `no \`${CLAUDE_TELEMETRY_SOURCE}\` entry in \`"recorders"\``
+  assert.ok(stopList.includes(clause), `"${clause}" must still be one of the stop conditions`)
+  assert.match(
+    stopList,
+    new RegExp(clause + '[^,]{0,200}\\b(?:live|running)\\b'),
+    'and it must carry its own liveness condition: absence alone is also what a listener that is not running looks like'
+  )
+
+  // The second observation, and both of its answers.
+  const opener = `**Cross-check a missing \`${CLAUDE_TELEMETRY_SOURCE}\` entry`
+  const from = step1.indexOf(opener)
+  assert.ok(from >= 0, `Step 1 must settle the two readings, opening "${opener}"`)
+  const to = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
+  assert.ok(to > from, 'and must do it before it routes the ambiguous id')
+  const crossCheck = step1.slice(from, to)
+
+  assert.match(crossCheck, /hyp status --json/, 'the cross-check must name the command that answers it')
+  // The keys that command really carries, proven against the collector and
+  // renderer in test/plugins/ai-gateway-session-both-recorders.test.js.
+  assert.ok(
+    crossCheck.includes('capture_health') && crossCheck.includes('listener_started_at'),
+    'and the keys it reads: capture_health.listener_started_at'
+  )
+  assert.match(
+    crossCheck,
+    /non-null[\s\S]{0,400}still being recorded/,
+    'a listener the daemon started is one that was skipped, so the stop must still fire on it'
+  )
+  assert.match(
+    crossCheck,
+    /listener is not running, so nothing is capturing this session/,
+    'and where nothing is running the user must be told that, not told they are still being recorded'
+  )
+  assert.match(
+    crossCheck,
+    /(?:cannot read|do not recognise|nonzero)[\s\S]{0,200}\bstop\b/,
+    'an observation that could not be made is not an answer, so it must fail closed'
+  )
+  assert.match(
+    crossCheck,
+    /daemon[\s\S]{0,200}"error"/,
+    'listener_started_at and control_routes come from one status.json read, so a daemon object carrying an error must read as the live case, not as "not running"'
+  )
+  assert.match(
+    crossCheck,
+    /"error"[\s\S]{0,40}"running":\s*false|"running":\s*false[\s\S]{0,40}"error"/,
+    'a daemon reporting "running": false beside an "error" is down, however unreadably, so the gate must name that shape as safe to read as "not running", not just gate on any bare daemon.error'
+  )
+})
+
+/**
+ * Where Step 1 sends the one id-resolution refusal that happens with
+ * `CLAUDE_CODE_SESSION_ID` set: a second client stating an id too, so the verb
+ * will not guess. The answer is the same verb with the id stated, which still
+ * addresses every recorder; the shell block below reaches the gateway alone, so
+ * rerouting this refusal there reports an opt-out of the machine over a live
+ * telemetry listener - the `ok`-over-a-skipped-recorder failure Step 1 exists
+ * to prevent.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: the re-run belongs here because it
+ * reaches both recorders where the script reaches one.
+ */
+test('the claude privacy skill answers an ambiguous id with the stated-id re-run, not the fallback', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  const at = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
+  assert.ok(at >= 0, `Step 1 must still route the ambiguous case, opening "${CLAUDE_AMBIGUITY_OPENER}"`)
+  const rest = step1.slice(at)
+  const open = rest.indexOf('```')
+  const close = rest.indexOf('```', open + 3)
+  assert.ok(open > 0 && close > open, 'and must still answer it with a command block')
+  // Every paragraph after the fence down to the one that licenses the
+  // fallback, not just to the fence (issue #1627) and not just the first
+  // paragraph past it (issue #1685): a reroute reads as naturally one
+  // paragraph further on as it does in the next sentence after the answer.
+  //
+  // `command not found` is the boundary because it is the one condition this
+  // file licenses the fallback on, so the paragraph carrying it is the one
+  // whose subject is that route: it may name the destination and say when to
+  // take it, and a rewording of it ("a stop, not a reason to drop to the
+  // script below") stays green. Everything above it is still answering the
+  // ambiguous id, so a pointer to that destination there is a reroute
+  // whichever paragraph carries it.
+  //
+  // The condition, rather than a paragraph count, is what keeps that paragraph
+  // editable: reflow it, or split it after the condition, and both halves still
+  // sit at or below the condition, where a count would red the half that kept
+  // the word `fallback`. Split it the other way round and the half left holding
+  // "sends you to the fallback" above the condition reds - correctly, by this
+  // slice's own rule, because that is a pointer to the fallback written above
+  // the sentence that licenses it.
+  //
+  // Keying on content rather than on a count has its own residual, measured:
+  // this reads the FIRST `command not found` below the answer, so a reroute
+  // that names the condition on its way past ("treat it like `command not
+  // found` and drop to the script below") moves the boundary above itself and
+  // escapes. That is the one narrowing here that is silent: the phrase going
+  // missing entirely reds on the assertion just below, and the phrase landing
+  // in the first paragraph after the fence reds on `follows`. It is no wider
+  // than what the paragraph count it replaces already let through.
+  //
+  // That `follows` red has two causes, so it names both: the receipt and the
+  // condition merged into one paragraph, and the receipt paragraph mentioning
+  // the phrase in passing without rerouting anything. Only the first is the
+  // receipt losing its own paragraph, so a message naming only that one sends
+  // an editor who did the second looking for a blank line that is still there.
+  //
+  // The search is unbounded the other way too: move the condition down into the
+  // fallback paragraph and the slice widens over it, then reds on that
+  // paragraph's own `script` as though the routing prose had named it. That
+  // direction is loud rather than silent, but the message misdescribes it.
+  // Bounding the search to where the routing prose ends fixes the diagnosis and
+  // closes the narrowing with it, and is a change to the slice mechanism rather
+  // than to what issue #1685 asked for (issue #1731).
+  const afterFence = rest.slice(close + 3)
+  const licensed = afterFence.indexOf('command not found')
+  assert.ok(licensed > 0, 'Step 1 must still license the fallback on `command not found`, below the answer')
+  const PARAGRAPH = /\n\s*\n/g
+  let follows = 0
+  for (let m = PARAGRAPH.exec(afterFence); m && m.index < licensed; m = PARAGRAPH.exec(afterFence)) follows = m.index
+  assert.ok(follows > 0, 'and the first `command not found` below the answer must sit below the receipt in a paragraph of its own: this one is in the first paragraph after the answer, either because the blank line below the receipt is gone or because the receipt paragraph names the phrase in passing')
+  const routing = rest.slice(0, close + 3 + follows)
+  const trailing = afterFence.slice(0, follows)
+  // The one sentence this slice is licensed to write about the fallback, in the
+  // one form it is written in. Both predicates below drop it before matching,
+  // or they disagree about where it may sit: the name check exempts it and the
+  // position check would red it for its own `below`, so restating the refusal
+  // after the answer would fail on the sentence the file requires.
+  const LICENSED_REFUSAL = /do \*{0,2}not\*{0,2} drop to the script below/g
+  // The forward directions both position rules below read. One vocabulary in
+  // one place: written out twice, the two rules drift apart.
+  const FORWARD = '\\bbelow\\b|\\bbeneath\\b|\\bfurther down\\b|\\b(?:end of|later in) th(?:is|e) step\\b'
+
+  // Scoped to that block. Both `hyp session ignore` and the fallback are named
+  // throughout Step 1, so a Step-1-wide match says nothing about where THIS
+  // refusal is sent: a reroute that names the re-run in a later aside passes it.
+  assert.match(
+    routing,
+    /hyp session ignore --json "\$CLAUDE_CODE_SESSION_ID"/,
+    'the answer is the verb again with the id stated, which still reaches every recorder'
+  )
+  // The emphasis is optional because this copy bolds the refusal already
+  // (`do **not** drop`), and an unbolded rewrite is the same sentence.
+  assert.match(
+    routing,
+    /do \*{0,2}not\*{0,2} drop to the script below/,
+    'and the gateway-only script must be refused in words, not left standing as the other option'
+  )
+  // The refusal is licensed to name the script, to refuse it. Any other pointer
+  // to it in this block is a reroute whichever sentence carries it, so every
+  // instance of the licensed phrase is dropped before the block is held to
+  // that: restating the refusal is stronger prose, not a second route.
+  //
+  // The destination is pinned, not the sentence: a reroute has to name where it
+  // sends the reader, and this file names that one destination four ways
+  // (`script`, `fall back` / `fallback`, `shell block`, `control route` /
+  // `post to`), while a bare forward reference ("state the id as below") names
+  // a direction and no destination.
+  // Enumerating sentences instead let a reroute worded any other way through
+  // (issue #1686). Every inflection of the verb and every run of spaces,
+  // hyphens or newlines between the two words is carried, so the guard does not
+  // turn on which form of the file's own verb an editor reached for, nor on
+  // where a reflow happened to break the line.
+  //
+  // Only the licensed phrase verbatim is stripped, so what this enforces is
+  // narrower than "no reroute": the block may name that destination once, in
+  // the refusal, and naming it a second time reds even to argue against it.
+  // That is deliberate, and it reaches the bare verb too: `fall back` reds here
+  // with no destination attached, so even "there is nothing to fall back on"
+  // trips it. The reasons not to drop are already written in the paragraphs on
+  // either side of this slice, which is where this file already puts them (the
+  // paragraph after the slice carries "a stop, not a reason to fall back"), so
+  // rationale that trips this belongs there rather than being a reason to
+  // loosen it.
+  //
+  // `control route` and `post to` come from the sentence that introduces the
+  // destination this refusal refuses ("The script below posts to the gateway
+  // control route directly"). They are what closes "POST to the control route
+  // directly", which names no direction for the positional rule below to catch
+  // (issue #1724). They are not clean names for it, though: this file uses
+  // both of the verb as well ("every recorder advertising the control route",
+  // "it already posted to the gateway"), so accurate prose about the verb reds
+  // here too. That is an accepted cost with the same answer as the one above:
+  // it belongs in the paragraphs on either side of this slice.
+  //
+  // `shell block` deliberately stays narrow. Bare `block` was measured and
+  // rejected: it buys nothing the positional rule below does not already
+  // catch, because "run the bash block below" and "the block below is your
+  // answer" both point forward and red without it, while it costs a false red
+  // on the answer fence's own noun ("Run the block above", a backward
+  // reference to the block this step wants run). What it would add is one
+  // wording of an opener-side reroute, "use the bash block further down", and
+  // only that wording: the same sentence saying "recipe" passes either way, so
+  // it closes a slice of an open class rather than the class.
+  assert.doesNotMatch(
+    routing.replace(LICENSED_REFUSAL, ''),
+    /\bscripts?\b|\b(?:fall(?:s|ing|en)?|fell)[\s-]*backs?\b|\bshell[\s-]*blocks?\b|\bcontrol[\s_-]*routes?\b|\bpost(?:s|ed|ing)?[\s-]+to\b/i,
+    'nothing else in this block may name the gateway-only script, or reach for the verb that means it, whatever sentence carries it: this file uses `control route` and `post to` of the licensed verb as well, so accurate prose about what the re-run reaches reds here too and belongs in the paragraphs either side of this slice'
+  )
+  assert.doesNotMatch(
+    routing,
+    /_hypaware\/ignore\/session|curl /,
+    'an ambiguous id must not be answered with a gateway-only POST'
+  )
+  // Structural: no paragraph between the answer fence and the licensing
+  // condition may point forward.
+  // This one turns on direction rather than on the destination's name, so it
+  // reaches the reroute shape that needs no noun at all, which is the shape the
+  // name list above cannot have (issue #1724). Position is what makes that
+  // affordable: before the fence a forward reference resolves to the fence
+  // itself, which is why "state the id as below" is ordinary prose on the
+  // opener line and why #1686 measured a slice-wide `\bbelow\b` as a false red.
+  // After the fence the answer has been given and its receipt read, and the
+  // nearest thing down the page is the gateway-only fallback the opener just
+  // refused.
+  //
+  // This is a rule about position, not a deduction from it: the fallback is not
+  // the only thing below. Step 1's own receipt list points past it ("the bound
+  // on all of it, spelled out below" reaches the guarantee paragraph), and
+  // Steps 2-6 are below as well, so a legitimate forward reference from this
+  // paragraph reds too. That cost is real and it is bounded to what sits
+  // above the licensing condition: material that has to point forward belongs
+  // at or below that paragraph, outside the slice, which is where this file
+  // already keeps that material ("One nonzero exit, and only that one, sends
+  // you to the fallback").
+  //
+  // Backward references stay legal, which is what keeps this paragraph's own
+  // "Read that receipt exactly as above" green: the gateway-only route lies
+  // below the slice, so nothing above it is that destination.
+  //
+  // What the three still do NOT catch, measured, because a green here is
+  // narrower than "no reroute": a forward pointer worded without any of these
+  // four directions ("the last recipe in this section is your answer", "see the
+  // next code fence"), and a forward pointer in the opener paragraph that names
+  // no block ("if that refuses too, keep reading further down", "use the recipe
+  // further down"), which this predicate does not read and the block rule below
+  // does not name. Reading the opener with a bare direction is what #1686
+  // measured as a false red, so that half of the residual is deliberate. Both
+  // survive displacement into a paragraph of their own, and so does a reroute
+  // written below the licensing condition, where the file's own introduction
+  // of the destination makes naming it legitimate again.
+  assert.doesNotMatch(
+    trailing.replace(LICENSED_REFUSAL, ''),
+    new RegExp(FORWARD, 'i'),
+    'no paragraph between the answer and the condition that licenses the fallback may point further down the page, where the nearest thing is the fallback this refusal refused: a forward reference belongs at or below that paragraph, outside this slice'
+  )
+  // The same directions, gated on a block noun standing next to one, over the
+  // whole slice. The rule above reads the trailing paragraphs only, so the
+  // opener paragraph gets no direction check at all, and #1686 measured a bare
+  // direction there as a false red ("state the id as below" is ordinary prose
+  // on that line). The noun is what makes the opener affordable, and it is what
+  // reds "run the bash block below" and "the block below is your answer"
+  // wherever in the slice they are written, which is what issue #1724 asked for
+  // and neither other rule gives: this file's own name for the fallback fence
+  // is `shell block`, so a bare `block` is not on the name list, and the rule
+  // above never reads the opener.
+  //
+  // Direction keeps this off that noun's honest uses and adjacency keeps it off
+  // sentences that merely mention both. Measured green: "Run the block above"
+  // (backward), "a block of ids is not supported" (no direction), and "the
+  // command block above is the one to run, and the bound is spelled out below"
+  // (both, too far apart to read as one pointer). That is the narrow form bare
+  // `block` was rejected for not being.
+  assert.doesNotMatch(
+    routing.replace(LICENSED_REFUSAL, ''),
+    new RegExp(`\\bblocks?\\b[^.\\n]{0,20}(?:${FORWARD})|(?:${FORWARD})[^.\\n]{0,20}\\bblocks?\\b`, 'i'),
+    'no part of this block may point forward to a block: the fence this step wants run is above it, so a block further down the page is the gateway-only fallback'
+  )
+})
+
+/** The words both copies open their stop list with. */
+const STOP_LIST_OPENER = '**Stop on any of these**'
+
+/**
+ * The one receipt reading whose substance is host-agnostic, so it is pinned
+ * over both copies rather than per copy: `runMutation` reports `partial`
+ * (exit 3) when a recorder it addressed refused, and the recorder that refused
+ * is the one still recording, whichever client the session belongs to. Which
+ * sources and which recorder are right do differ by host, and are pinned in
+ * each copy's own suite.
+ *
+ * Looped because the per-copy guard is what let this drift: the check #1620
+ * added names `claude_env` and `claude-telemetry`, so it could only ever have
+ * run on one copy, and the codex copy carried no stop at all (issue #1633).
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: partial is not swallowed, so the
+ * surface reading the receipt must not swallow it either.
+ */
+const PARTIAL_RECEIPT_BULLET =
+  /- exit `0` with `"status": "ok"`\. `"status": "partial"` \(exit 3\) means an addressed recorder \*\*refused and is still recording\*\*\./
+
+for (const rel of SKILLS) {
+  test(`${rel} stops on a partial receipt, where an addressed recorder kept recording`, () => {
+    const step1 = privacyStep1(rel)
+
+    assert.match(
+      step1,
+      PARTIAL_RECEIPT_BULLET,
+      'Step 1 must say what `partial` means: a recorder refused and is still recording'
+    )
+
+    // Scoped to the stop paragraph itself. Explaining `partial` in a bullet
+    // while leaving it out of the list the agent acts on is the shape that
+    // ships a documented-but-unenforced stop, so the whole-of-Step-1 match
+    // above cannot stand in for this one.
+    const at = step1.indexOf(STOP_LIST_OPENER)
+    assert.ok(at >= 0, `Step 1 must gather its stops under "${STOP_LIST_OPENER}"`)
+    const rest = step1.slice(at)
+    const end = rest.search(/\n\s*\n/)
+    const stops = end < 0 ? rest : rest.slice(0, end)
+    assert.match(stops, /`"status": "partial"`/, '`partial` must be one of the stops, not only an explanation')
+    assert.match(
+      stops,
+      /the review session is still being recorded/,
+      'and the stop must say what the user is being told'
+    )
+  })
+}
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */

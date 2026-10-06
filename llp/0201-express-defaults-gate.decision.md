@@ -13,6 +13,9 @@
 > remaining question; no asks the real questions, linearly, with no further
 > accept-or-customize screens.
 
+**Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
+**Extended-by:** LLP 0411 (GitHub collection requires a separate opt-in even on express setup).
+
 ## Context {#context}
 
 [LLP 0190](./0190-wizard-defaults-gate.decision.md) gave the pick and sync
@@ -91,6 +94,13 @@ happens on a solo machine too. The new-folder policy that rides with an
 enrolled accept is deliberately not in the row copy - it is stated by the
 accept narration (#narrate) - so the row stays one readable sentence
 about the tools.
+
+<a id="finale-import"></a>**The accept also answers the finale's history import.** "Skips
+every remaining question" reaches past the lanes: the finale's "Import the
+... history already on this machine?" is not asked on an express run, and
+the import runs as it does on a scripted one. Only Customize asks it. The
+import is local and bounded by the retention window, and each import that
+writes rows says so in the finish step.
 
 <a id="decline"></a>**Declining asks the real questions, linearly.** The
 per-lane defaults gates ([LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate),

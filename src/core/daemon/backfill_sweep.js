@@ -28,8 +28,9 @@ const SWEEP_OPERATION = 'backfill.sweep'
  * `already_running` at it. Nothing recovers that short of a daemon restart, so
  * the wait carries a bound.
  *
- * Six times the tightest cadence any shipped contribution sweeps on (every
- * five minutes), so a slow cold scan that outruns its own interval is not what
+ * Comfortably clear of the tightest cadence any shipped contribution sweeps
+ * on (Codex, every minute; every other shipped sweep is every five), so a
+ * slow cold scan that outruns its own interval is not what
  * this clips: in practice only a run with no settlement left in it reaches the
  * bound. The run cannot be cancelled, so an abandoned provider keeps its
  * `inFlight` entry until its promise really settles, the same rule
@@ -375,7 +376,7 @@ export function createBackfillSweepDriver(opts) {
   /**
    * @param {BackfillSweepProviderIdentity} identity
    * @param {string} devRunId
-   * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }} result
+   * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, errorKind?: string }} result
    */
   function logSettled(identity, devRunId, result) {
     log.info('backfill.sweep_finished', {
@@ -385,7 +386,7 @@ export function createBackfillSweepDriver(opts) {
       [Attr.DEV_RUN_ID]: devRunId,
       provider: identity.name,
       status: result.ok ? 'ok' : 'failed',
-      ...(result.ok ? {} : { [Attr.ERROR_KIND]: 'provider_run_failed' }),
+      ...(result.ok ? {} : { [Attr.ERROR_KIND]: result.errorKind ?? 'provider_run_failed' }),
       items_seen: result.scanned,
       rows_written: result.rowsWritten,
       rows_skipped: result.skipped,

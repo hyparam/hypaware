@@ -1,9 +1,61 @@
-# Search and query recorded activity
+[← All documentation](README.md)
 
-[Documentation](README.md) / Querying
+---
 
-Use this guide after [setup](CLI.md). Start with local activity, then select a
-remote explicitly when you need data from other machines or your team.
+# Explore and query recordings
+
+After [setup](CLI.md), use your AI agent to explore your recordings. You can
+start a question with `hyp ask` or ask the client you already have open to use
+HypAware. Search and SQL commands are also available below. To generate or share
+a report, see [reports](REPORTS.md).
+
+Queries use this machine's recordings by default. To search recordings in
+HypAware Cloud, including other machines and your team, tell your agent to use
+`--remote` on its query commands. This uses your default remote target;
+`--remote <target>` selects another. See [remote access](TEAM_SETUP.md#manage-remote-access)
+to configure a target and sign in.
+
+## Contents
+
+- [Explore recordings with your agent](#explore-recordings-with-your-agent)
+- [See what is available](#see-what-is-available)
+- [Find a conversation](#find-a-conversation)
+- [Summarize a known period](#summarize-a-known-period)
+- [Save complete results](#save-complete-results)
+- [Query a remote target](#query-a-remote-target)
+- [Follow relationships in the activity graph](#follow-relationships-in-the-activity-graph)
+- [Connect an MCP client](#connect-an-mcp-client)
+- [Vector search and graph enrichment](#vector-search-and-graph-enrichment)
+
+## Explore recordings with your agent
+
+Choose either option below.
+
+### Ask your client directly
+
+In an existing client session, ask it to use HypAware:
+
+> Use HypAware to find the session where we fixed the authentication bug.
+
+You can also ask it to search remote logs:
+
+> Use HypAware to search my remote logs for the session where we fixed the authentication bug.
+
+HypAware's skills are installed automatically during setup and attach for
+supported clients. They let your agent search recorded sessions and query the
+logs. If the skills are missing, see [client skills](CLIENTS.md#install-client-skills).
+
+### Use hyp ask
+
+From your terminal, ask a question about your recordings:
+
+```sh
+hyp ask "Use HypAware to search my remote logs for sessions about connection refused this week."
+```
+
+`hyp ask` opens a recorded AI client (Claude Code or Codex) and asks it to look
+up the answer in HypAware. If both are configured and available, you can choose
+which one to use.
 
 ## See what is available
 
@@ -24,6 +76,14 @@ sessions, messages, or API requests. Other datasets depend on enabled sources;
 inspect their schema before writing SQL.
 
 ## Find a conversation
+
+The bundled `@hypaware/grep` plugin searches recorded messages. Standard capture
+setups enable it; an explicit `enabled: false` entry keeps it disabled. An
+existing configuration gains it automatically on startup. When the migration
+can save the change it backs the config up first, leaving a timestamped
+`.bak-` copy beside `hypaware-config.json`; otherwise search still works for
+that process, and a read-only config logs a warning that the change could not
+be saved.
 
 ```sh
 hyp query grep "connection refused" --limit 20
@@ -99,7 +159,7 @@ Local-only rows can be withheld depending on the querying session's privacy
 class. `--include-local-only` explicitly includes them in local results, so use
 it only where the output can remain private. See [privacy controls](PRIVACY.md).
 
-## Query a team server
+## Query a remote target
 
 ```sh
 hyp remote list
@@ -111,14 +171,14 @@ hyp query sql "select date, count(distinct session_id) as sessions
 ```
 
 Replace `team` with a configured target. A bare `--remote` uses the default.
-[Team sign-in](TEAM_SETUP.md) normally configures remote access;
-`hyp remote login --no-forward` signs in for queries without enrolling this
-machine for forwarding.
+For target configuration and query-only sign-in, see
+[remote access](TEAM_SETUP.md#manage-remote-access).
 
 `hyp cache status`, `hyp query schema`, and `hyp query overview` describe local
-state. They are not a remote inventory. A server can have different datasets,
-retention, and permissions; query it directly to establish what is available.
-The server enforces visibility and rejects `--include-local-only`.
+state. They are not a remote inventory. A remote can have different
+datasets, retention, and permissions; query it directly to establish what
+is available. The remote enforces visibility and rejects
+`--include-local-only`.
 
 ## Follow relationships in the activity graph
 
@@ -127,7 +187,7 @@ walking relationships:
 
 ```sh
 hyp graph project
-hyp query graph neighbors src/core/cli/dispatch.js --type File --direction in --depth 2 --limit 25
+hyp query graph neighbors src/app.js --type File --direction in --depth 2 --limit 25
 ```
 
 Replace the example file with one from your recorded work. A seed can be a node
@@ -138,18 +198,9 @@ Use the graph for questions such as which sessions touched a file or ran a
 skill. A `Session` node's natural key is the `session_id` to use in the SQL
 examples above. The `node` and `edge` datasets are also queryable with SQL.
 Remote graph traversal uses `--remote`; projecting the local graph does not
-refresh the server's graph.
+refresh the remote's graph.
 
-## Ask an assistant or connect MCP
-
-```sh
-hyp ask --list
-hyp ask "Which sessions mentioned connection refused this week on this machine?"
-hyp client skills install --client codex
-```
-
-`hyp ask` launches an attached, executable AI client. Skill installation adds
-the registered HypAware skills to the chosen supported client.
+## Connect an MCP client
 
 For an MCP client, configure a **stdio** server with executable `hyp` and
 arguments `mcp`, `serve`. For a remote proxy, add `--remote`, `team` to those
@@ -157,27 +208,14 @@ arguments. The host must be able to find the installed binary and use the
 intended `HYP_HOME`. MCP configuration file syntax belongs to your MCP client;
 `hyp mcp serve` itself speaks protocol on stdout, not an interactive shell.
 
-## Turn findings into a report
+## Vector search and graph enrichment
 
-The report renderer builds HTML from a local Markdown report tree. For a small
-report, create `./usage-reports/weekly-usage.md` with your findings, query scope,
-and tables, then run:
+With `@hypaware/vector-search` enabled, use `hyp vector status` to inspect
+indexes and `hyp query vector search` for similarity search. See the
+[vector search reference](CLI_REFERENCE.md#hyp-query-vector-search) for query
+syntax and index selection.
 
-```sh
-hyp report render ./usage-reports
-```
-
-Open `./usage-reports/index.html`. The renderer rebuilds `html/`, so edit
-the source Markdown instead of generated HTML. It renders findings you write;
-it does not run SQL or invent a report from an empty directory.
-
-To share a reviewed Markdown report with your organization:
-
-```sh
-hyp report publish ./usage-reports/weekly-usage.md --kind usage-review --period 2026-W36 --remote team
-hyp report list --kind usage-review --limit 10 --remote team
-```
-
-Publishing uploads the file and requires a write-capable credential. Review
-the report for private content first. See the [report command reference](CLI_REFERENCE.md#render-and-manage-reports)
-for bundles, downloads, and organization-wide deletion.
+The optional graph-enrichment plugin adds further relationships to the activity
+graph. Use `hyp enrichment status` to inspect its state, then consult the
+[enrichment reference](CLI_REFERENCE.md#enrich-the-activity-graph) for proposal,
+curation, and backfill operations.

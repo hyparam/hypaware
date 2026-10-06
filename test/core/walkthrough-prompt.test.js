@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -10,7 +11,6 @@ import { PassThrough } from 'node:stream'
 import {
   WALKTHROUGH_CANCEL_EXIT_CODE,
   defaultPromptFactory,
-  runPickerWalkthrough,
 } from '../../src/core/cli/walkthrough.js'
 import { isPromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
@@ -22,13 +22,16 @@ test('picker prompt prints context under source options and defaults export to l
   const stdout = answerDrivenOutput(input, ['5\n'])
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
     // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
     platform: 'darwin',
+    // Stub detection: a host with a detected client pre-checks its row,
+    // which swaps the prompt line the answer hook waits for.
+    detect: async () => new Set(),
     env: {
       HOME: tmp,
       HYP_HOME: path.join(tmp, '.hyp'),
@@ -43,7 +46,7 @@ test('picker prompt prints context under source options and defaults export to l
   assert.equal(result.exportPicked, 'local-parquet')
 
   const text = stdout.text()
-  assert.match(text, /5\) OpenTelemetry\n     Records logs, traces, and metrics your tools send over local OTLP HTTP/)
+  assert.match(text, /5\) OpenTelemetry\n     Records logs, traces, and metrics from tools that support OpenTelemetry/)
   assert.doesNotMatch(text, /Anthropic API/)
   assert.doesNotMatch(text, /OpenAI API/)
   // The export question is no longer rendered.
@@ -68,7 +71,7 @@ function syncMenuQuestion(/** @type {Record<string, unknown>} */ extra = {}) {
     pickType: 'clients',
     title: 'Choose what syncs. Unchecked sources stay on this machine.',
     options: [
-      { value: 'claude', label: 'capture claude · managed by your fleet', checked: true, disabled: true },
+      { value: 'claude', label: 'capture claude · set by your team', checked: true, disabled: true },
       { value: 'openclaw', label: 'capture openclaw', checked: true },
       { value: 'hermes', label: 'capture hermes' },
     ],
@@ -106,7 +109,7 @@ async function askLegacy(question, answer) {
 test('enterKeepsChecked: the fallback renders the checked state and a bare enter keeps it', async () => {
   const { picked, text } = await askLegacy(syncMenuQuestion({ enterKeepsChecked: true }), '\n')
 
-  assert.match(text, /1\) \[x\] capture claude · managed by your fleet \(locked\)/)
+  assert.match(text, /1\) \[x\] capture claude · set by your team \(locked\)/)
   assert.match(text, /2\) \[x\] capture openclaw/)
   assert.match(text, /3\) \[ \] capture hermes/)
   assert.match(text, /select \(e\.g\. 1,3, "all", "none", enter keeps \[x\], or b to go back\): /)
@@ -292,11 +295,14 @@ test('a dropped terminal at the source picker cancels the run instead of install
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const result = await runPickerWalkthrough({
-    capabilities: /** @type {any} */ ({}),
+  const result = await runWizardPick({
+
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
+    // Stub detection: a detected client pre-checks its row, and enter
+    // (or EOF) then keeps it instead of cancelling.
+    detect: async () => new Set(),
     env: { HOME: tmp, HYP_HOME: path.join(tmp, '.hyp') },
   })
 

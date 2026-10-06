@@ -1,11 +1,15 @@
 // @ts-check
 
 import path from 'node:path'
+import fs from 'node:fs/promises'
 
 import { scopeGovernance } from '../usage-policy/matcher.js'
-import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
-import { deleteMatchingRows, scanRowsFromTable, tableExists } from './iceberg/store.js'
+import { discoverCachePartitions, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
+import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
+import { queueCacheCleanup, isUncommittedCacheGeneration } from './purge-cleanup.js'
+import { sessionGraphNodeId } from './session-purges.js'
+import { Attr, getLogger } from '../observability/index.js'
 
 /**
  * @import { PurgeSummary, PurgeTarget } from '../../../src/core/cache/types.js'
@@ -14,8 +18,8 @@ import { resolveIcebergDir } from './storage.js'
 /**
  * Delete already-cached rows from the local query cache, cache-only: purge
  * never contacts a sink or the remote and never deletes exported copies
- * (LLP 0104 boundary, server-side deletion is out of scope, LLP 0069
- * §non-goals). The deletion mechanism is Iceberg position-deletes
+ * (LLP 0104's local primitive; LLP 0417 orchestrates server deletion
+ * separately). The deletion mechanism is Iceberg position-deletes
  * ({@link deleteMatchingRows}), which preserve surviving rows' `part_id`
  * identity and every sink's `_hyp_ingest_seq` watermark (see that function).
  *
@@ -43,15 +47,22 @@ import { resolveIcebergDir } from './storage.js'
  * be `stat`ed at all, and only the first of those is a verdict the filesystem
  * actually gave (LLP 0104 §spellings).
  *
+ * A partition whose mutation guard another process holds is recorded in
+ * `partitionsSkipped` and the run continues; the caller owes the operator that
+ * list and a failure, because those partitions may still hold matching rows.
+ * A later non-busy failure still aborts the run, and carries out with it both
+ * the skips recorded so far ({@link purgeSkipsFrom}) and the cleanup jobs
+ * admitted so far ({@link purgeCleanupFrom}).
+ *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
- * @param {{ cacheRoot: string, target: PurgeTarget, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
+ * @param {{ cacheRoot: string, target: PurgeTarget, onCleanupQueued?: (id: string) => Promise<void>, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
  *   `deps` injects the filesystem seam the subtree spelling predicate consults.
  *   No production caller passes it; it exists because whether two spellings of
  *   one name are one directory is a property of the *volume*, and a test host
  *   has only the one it is running on.
  * @returns {Promise<PurgeSummary>}
  */
-export async function purgeCache({ cacheRoot, target, deps }) {
+export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
   /** @type {Set<string>} */
   const purgedCwds = new Set()
   /** @type {{ rows: number, cwds: Set<string> }} */
@@ -61,24 +72,124 @@ export async function purgeCache({ cacheRoot, target, deps }) {
   const partitions = await discoverCachePartitions(cacheRoot)
   let rowsDeleted = 0
   let partitionsAffected = 0
+  const cacheCleanup = new Set()
+  /** @type {{ partition: string, error: string }[]} */
+  const partitionsSkipped = []
 
   for (const part of partitions) {
-    const tableDir = resolveIcebergDir(part.path)
-    if (!tableExists(tableDir)) continue
-    const result = await deleteMatchingRows(tableDir, predicate, { columns })
-    if (result.rowsDeleted === 0) continue
-    rowsDeleted += result.rowsDeleted
-    partitionsAffected++
-    await refreshCursorRowCount(part.path, tableDir)
+    await withPartitionMutationLock(part.path, async () => {
+      const tableDir = resolveIcebergDir(part.path)
+      // Retired epochs can still be read by a reader holding an older
+      // generation. Session purges cover them under the partition lock too.
+      // Physical files and historical snapshots require separate reclamation.
+      const tables = new Set([tableDir])
+      if (target.kind === 'session') {
+        for (const entry of await fs.readdir(part.path, { withFileTypes: true })) {
+          if (entry.isDirectory() && /^(?:epoch=\d+|table(?:-[a-zA-Z0-9-]+)?)$/.test(entry.name)) tables.add(path.join(part.path, entry.name))
+        }
+      }
+      let queued = false
+      // `queueCacheCleanup` requires a managed generation (a `table*` or
+      // `epoch=N` child) to admit into; a legacy partition's live table is
+      // the partition directory itself (`tableDir === part.path`), which has
+      // no such child and would throw, aborting this partition's delete. Skip
+      // admission for it rather than the delete: the row is still
+      // position-deleted, only the physical cleanup job is skipped, and
+      // unmanaged legacy tables are already documented as not certified erased.
+      const beforeDelete = target.kind === 'session' && tableDir !== part.path ? async () => {
+        if (queued) return
+        const id = await queueCacheCleanup(cacheRoot, part.path)
+        cacheCleanup.add(id)
+        await onCleanupQueued?.(id)
+        queued = true
+      } : undefined
+      let affected = false
+      for (const current of tables) {
+        if (current !== tableDir && await isUncommittedCacheGeneration(current)) continue
+        let names
+        try { names = await fs.readdir(path.join(current, 'metadata')) } catch (error) {
+          if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' && current === tableDir && part.rowCount === 0) continue
+          throw error
+        }
+        if (!names.some(name => name.endsWith('.metadata.json'))) {
+          if (current !== tableDir || part.rowCount > 0) throw new Error('Purge found a published generation without table metadata')
+          continue
+        }
+        const result = await deleteMatchingRows(current, predicate, { columns, beforeDelete })
+        if (result.rowsDeleted === 0) continue
+        rowsDeleted += result.rowsDeleted
+        affected = true
+        if (current === tableDir) await refreshCursorRowCount(part.path, tableDir)
+      }
+      if (affected) partitionsAffected++
+    }).catch(error => {
+      // A guard held elsewhere is later work, not a failed run: nothing was
+      // mutated under it, so that partition keeps its rows for a rerun. The
+      // guard refuses on sight (LLP 0417 #cache-mutation-guard: no polling, no
+      // waiter queue) and a daemon compaction holds one for as long as its
+      // rewrite takes, so rethrowing abandoned every partition behind this one
+      // in discovery order. Carrying on is what the flush path already does
+      // with its tables (LLP 0333 #every-table-before-failure). Any other
+      // failure still aborts the run.
+      if (!isPartitionMutationBusy(error)) {
+        // The skip list and the cleanup ids are returned on completion alone,
+        // so this throw is about to discard their only copy. Carry both out on
+        // the error: those partitions may still hold matching rows, and the
+        // cleanup jobs admitted before the abort are durable and still run.
+        if (error instanceof Error) {
+          const carried = /** @type {{ partitionsSkipped?: { partition: string, error: string }[], cacheCleanup?: string[] }} */ (error)
+          carried.partitionsSkipped = partitionsSkipped
+          carried.cacheCleanup = [...cacheCleanup]
+        }
+        throw error
+      }
+      partitionsSkipped.push({ partition: part.path, error: error.message })
+      // The dataset, never the partition path: a log is dev telemetry (LLP 0080
+      // #telemetry), and the path reaches the operator on the command's stderr.
+      getLogger('cache').warn('purge.partition_skipped', {
+        [Attr.COMPONENT]: 'cache-purge',
+        [Attr.OPERATION]: 'purge.partition',
+        [Attr.DATASET]: part.dataset,
+        [Attr.ERROR_KIND]: PARTITION_MUTATION_BUSY_ERROR_KIND,
+        status: 'skipped',
+      })
+    })
   }
 
   return {
     rowsDeleted,
     partitionsAffected,
+    ...(target.kind === 'session' ? { cacheCleanup: [...cacheCleanup] } : {}),
     purgedCwds: [...purgedCwds],
     retainedAliasRows: retainedAliases.rows,
     retainedAliasCwds: [...retainedAliases.cwds],
+    partitionsSkipped,
   }
+}
+
+/**
+ * The busy-partition skips a {@link purgeCache} run had already recorded when
+ * a non-busy failure aborted it, empty for any other thrown value.
+ *
+ * @param {unknown} error
+ * @returns {{ partition: string, error: string }[]}
+ */
+export function purgeSkipsFrom(error) {
+  const skipped = /** @type {{ partitionsSkipped?: unknown } | null | undefined} */ (error)?.partitionsSkipped
+  return Array.isArray(skipped) ? skipped : []
+}
+
+/**
+ * The cache cleanup jobs a {@link purgeCache} run had already admitted when a
+ * non-busy failure aborted it, empty for any other thrown value. Their
+ * journals are durable, so the aborted run still owes the operator this list.
+ *
+ * @param {unknown} error
+ * @returns {string[]}
+ */
+export function purgeCleanupFrom(error) {
+  const cleanup = /** @type {{ cacheCleanup?: unknown } | null | undefined} */ (error)?.cacheCleanup
+  return Array.isArray(cleanup) ? cleanup : []
 }
 
 /**
@@ -148,10 +259,12 @@ function buildPredicate(target, purgedCwds, retainedAliases, deps) {
       }
     }
     case 'session': {
+      const nodeId = sessionGraphNodeId(target.id)
       return {
-        columns: ['session_id', 'cwd'],
+        columns: ['session_id', 'cwd', 'org', 'node_id', 'src_id', 'dst_id'],
         predicate: (row) => {
-          if (row.session_id == null || String(row.session_id) !== target.id) return false
+          if (row.session_id !== target.id && row.node_id !== nodeId && row.src_id !== nodeId && row.dst_id !== nodeId) return false
+          if (target.org !== undefined && (row.org ?? '') !== target.org) return false
           noteCwd(row)
           return true
         },

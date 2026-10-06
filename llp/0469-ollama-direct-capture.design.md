@@ -9,6 +9,11 @@
 
 @ref LLP 0468#requirements: implements the accepted direct local text API capture request
 
+> Publication note: the manual procedure references below describe the pilot
+> baseline. LLP 0430 retired that procedure tier on current master; this PR
+> preserves the client recipe and automated smoke without restoring
+> `docs/ACCEPTANCE.md`. The pilot's actual live checks are reported in the PR.
+
 ## Existing seams and alternatives {#seams}
 
 At base `95ae33ee5d894feed272ea5f1fece33ed5b0392e`, ai-gateway `api.js`

@@ -1,8 +1,8 @@
 // @ts-check
 
-import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
+import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportMark, runReportPublish, runReportRecommend } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -91,7 +91,7 @@ export function registerCoreCommands(registry) {
 /**
  * Descriptions for the core groups that exist only as a shared prefix. A
  * group whose bare command `makeGroupCommand` built speaks for itself; these
- * three have no bare command, so without a registered description their
+ * groups have no bare command, so without a registered description their
  * `--help` opens on a naked `usage:` line and a table, and the reader is
  * never told what the group is for.
  *
@@ -113,15 +113,6 @@ const CORE_COMMAND_GROUPS = [
     ].join('\n'),
   },
   {
-    name: 'client history',
-    summary: 'Import past sessions from AI clients on this machine',
-    help: [
-      'Backfill reads history a client wrote before HypAware was capturing,',
-      'from the transcript files the client keeps on disk. Start with plan,',
-      'which reports what each provider would scan without writing a row.',
-    ].join('\n'),
-  },
-  {
     name: 'dev plugin',
     summary: 'Scaffold and diagnose plugins under development',
   },
@@ -140,7 +131,7 @@ function buildCoreCommands(registry) {
       bootProfile: 'none',
       summary: 'Inspect and control optional product telemetry',
       usage: coreUsage('telemetry'),
-      help: 'Off by default. Local mode retains a bounded preview queue. Organization mode uses the existing enrolled gateway. Vendor sharing and standalone registration are unavailable. Preview prints the exact next queued payload. Off removes pending copies, not records already accepted remotely.',
+      help: 'Off by default on a standalone install; automatic for an enrolled organization unless a preference is saved. Local mode retains a bounded preview queue. Organization mode uses the existing enrolled gateway. Vendor sharing and standalone registration are unavailable. Preview prints the exact next queued payload. Off removes pending copies, not records already accepted remotely.',
       run: runTelemetry,
     },
     {
@@ -151,11 +142,10 @@ function buildCoreCommands(registry) {
       summary: 'Check capture, clients, storage, and health',
       usage: coreUsage('status'),
       help: [
-        'The entry point for "is it working?". Reports the config path, daemon',
-        'state, active plugins, sources, sinks, per-client attach state, cache',
-        'location/retention/size, recent error count, and any pending first-sync',
-        'deadline. When something is wrong it adds a diagnostics section whose',
-        'repair: lines are commands you can run directly.',
+        'Check daemon health, storage, and each configured client\'s sharing policy.',
+        'Problems and next steps appear under Attention. Sync describes policy,',
+        'not confirmation that data was delivered.',
+        '--verbose includes plugins, paths, proxy trust, maintenance, and setup history.',
         '',
         '--json prints the stable machine shape; prefer it for scripting.',
       ].join('\n'),
@@ -166,7 +156,7 @@ function buildCoreCommands(registry) {
       name: 'client',
       category: 'capture-movement',
       audience: 'everyday',
-      summary: 'Manage AI clients and history',
+      summary: 'Manage AI clients',
     }),
     makeGroupCommand({
       registry,
@@ -242,26 +232,29 @@ function buildCoreCommands(registry) {
       usage: 'hyp cache maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
       run: runQueryMaintain,
     },
+    // @ref LLP 0447#surface [implements]: backfill is the sole import spelling
     {
-      name: 'client history import',
-      aliases: ['backfill'],
+      name: 'backfill',
+      category: 'capture-movement',
+      audience: 'everyday',
       summary: 'Import client history from backfill providers',
-      usage: 'hyp client history import [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
+      usage: 'hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
+      help: [
+        'Backfill reads session history a client kept on disk but the live',
+        'capture lane never saw: sessions from before HypAware attached, or',
+        'that ran outside the proxy. Start with list, which names every',
+        'registered provider, then run one with --dry-run: it scans and',
+        'projects exactly as an import would, reports what it found, and',
+        'writes no row.',
+      ].join('\n'),
       run: runBackfill,
     },
     {
-      name: 'client history providers',
-      aliases: ['backfill list'],
+      name: 'backfill list',
+      aliases: ['client history providers'],
       summary: 'List registered backfill providers',
-      usage: coreUsage('client history providers'),
+      usage: coreUsage('backfill list'),
       run: runBackfillList,
-    },
-    {
-      name: 'client history plan',
-      aliases: ['backfill plan'],
-      summary: 'Show what each backfill provider would scan without writing rows',
-      usage: 'hyp client history plan [provider...] [--retention-days <n>] [--json]',
-      run: runBackfillPlan,
     },
     makeGroupCommand({
       registry,
@@ -332,7 +325,7 @@ function buildCoreCommands(registry) {
     {
       name: 'config validate',
       summary: 'Load and cross-validate the active config file',
-      usage: 'hyp config validate [--path <file>]',
+      usage: 'hyp config validate [file]',
       run: runConfigValidate,
     },
     {
@@ -344,9 +337,12 @@ function buildCoreCommands(registry) {
       summary: 'Install, reconfigure, or maintain HypAware',
       usage: 'hyp setup [preset] [flags]',
       help: [
-        'With no arguments, runs the interactive walkthrough: pick which clients',
-        'and sources to capture, an export strategy, and a retention window, then',
-        'write the config, install the daemon, and attach the selected clients.',
+        'On a terminal, runs the walkthrough: choose local or cloud collection',
+        'and which clients to record, then write config, install the daemon,',
+        'and attach clients. Export and retention use pathway defaults.',
+        'Without a terminal, prints a guide for an agent to ask the person',
+        'and run unattended setup. The guide prints on stdout and exits 0.',
+        '  --guide                print that guide even on a terminal; use alone',
         '',
         'Pass a preset name to skip the walkthrough. Passing any flag below also',
         'skips it: the non-interactive path is chosen by the presence of a flag,',
@@ -356,7 +352,7 @@ function buildCoreCommands(registry) {
         '  --yes, -y              accept the defaults (captures claude + otel',
         '                         when no --source and no --client is given)',
         '  --client <name>        client to capture: claude, claude-desktop, codex,',
-        '                         opencode (repeatable)',
+        '                         cursor, opencode, pi (repeatable)',
         '  --source <name>        source to capture (repeatable)',
         '  --export <choice>      keep-local | local-parquet | configure-later',
         '  --retention-days <n>   how long to keep cached rows',
@@ -364,7 +360,8 @@ function buildCoreCommands(registry) {
         '                         skipping the picker entirely',
         '  --no-daemon            write the config but do not install the daemon',
         '  --dry-run              report what would be written, write nothing',
-        '  --force                replace an existing config (backed up first)',
+        '  --force                replace an existing config (backed up first);',
+        '                         allow a temporary CLI if global installation fails',
         '  --bin <path>           hyp binary to record in the daemon unit',
       ].join('\n'),
       run: runInit,
@@ -376,18 +373,23 @@ function buildCoreCommands(registry) {
       summary: 'Ask an AI client about recorded activity',
       usage: coreUsage('ask'),
       help: [
-        'With no argument, offers a short list of questions worth asking of what',
-        'HypAware has recorded, and starts an attached client on the one you',
-        'pick: the client takes over the terminal and opens on that question.',
+        'With no argument, asks the one question worth asking first: which skill',
+        'would be the most useful to add. HypAware looks through the last 30 days',
+        'itself for what you type again and again and what your agent then ran,',
+        'writes that evidence into $HYP_HOME/ask (one folder, rewritten each',
+        'time), and starts a recorded client in that folder so the session',
+        'stays out of whatever repo you ran it from. The client answers with',
+        'one skill and offers to write it.',
         '',
-        'With a question, skips the menu and starts straight on it:',
+        'With a question, skips all of that and starts straight on it:',
         '  hyp ask "which sessions touched the auth module last week"',
         '',
-        '  --list   print the suggested questions and exit, launching nothing',
-        '',
-        'Only clients that are attached (hyp status) and whose CLI is on your',
-        'PATH can be started. Claude Desktop has no prompt argument, so it is',
-        'never offered here.',
+        'Only clients HypAware is recording (hyp status) and whose CLI is on',
+        'your PATH can be started: recording means attached, or configured with',
+        'no attach marker to write, as codex is in its transcript mode. Claude',
+        'Desktop has no prompt argument, and only Claude Code and Codex are',
+        'shipped the skills the questions rely on, so no other recorded client',
+        'is started here. The refusal names yours when that is why it stopped.',
       ].join('\n'),
       run: runAsk,
     },
@@ -395,9 +397,9 @@ function buildCoreCommands(registry) {
       name: 'join',
       category: 'capture-movement',
       audience: 'everyday',
-      summary: 'Connect this machine to a central server',
-      usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]',
-      help: 'Token sources (pick one): positional argument, --token-file, or stdin.\nA bare argv token lands in shell history; scripts should prefer\n--token-file or stdin.',
+      summary: 'Connect this machine to a HypAware server',
+      usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]',
+      help: 'Token sources (pick one): positional argument, --token-file, or stdin.\nA bare argv token lands in shell history; scripts should prefer\n--token-file or stdin.\n--force allows the existing CLI path if global installation fails.',
       run: runJoin,
     },
     {
@@ -406,7 +408,7 @@ function buildCoreCommands(registry) {
       audience: 'everyday',
       summary: 'Disconnect central management, keep local history',
       usage: 'hyp leave',
-      help: 'Disconnects this machine from its central server: stops forwarding and\nconfig pull, undoes org-driven client attaches, and removes the forward\ncredential. Keeps query sessions, the local config, and the daemon service.',
+      help: 'Disconnects this machine from a HypAware server: stops forwarding\nand config pull, undoes org-driven client attaches, and removes the\nforward credential. Keeps query sessions, the local config, and the\ndaemon service.',
       run: runLeave,
     },
     {
@@ -415,7 +417,7 @@ function buildCoreCommands(registry) {
       category: 'capture-movement',
       audience: 'everyday',
       summary: 'Attach an AI client to HypAware capture',
-      usage: 'hyp client attach [client] [--client <name>] [--dry-run] [--json]',
+      usage: 'hyp client attach [client] [--dry-run] [--json]',
       help: [
         'Configures an AI client for HypAware capture by writing managed settings',
         'into that client\'s own config file. Claude Code exports OTEL telemetry',
@@ -425,7 +427,7 @@ function buildCoreCommands(registry) {
         '',
         'hyp client attach codex covers Codex Desktop as well as the Codex CLI - both',
         'read the ~/.codex/config.toml this writes and both write the',
-        '~/.codex/sessions history hyp client history import codex imports. HypAware never',
+        '~/.codex/sessions history hyp backfill codex imports. HypAware never',
         'parses the opaque ~/Library/Application Support/Codex app container,',
         'and loses no Desktop history by not doing so. Claude Desktop also needs',
         'no attach: selecting it in hyp init enables a scheduled import of its',
@@ -451,7 +453,7 @@ function buildCoreCommands(registry) {
       category: 'capture-movement',
       audience: 'everyday',
       summary: 'Detach an AI client from HypAware capture',
-      usage: 'hyp client detach [client] [--client <name>] [--dry-run] [--purge] [--json]',
+      usage: 'hyp client detach [client] [--dry-run] [--purge] [--json]',
       help: [
         'Removes the HypAware-managed settings hyp client attach wrote, leaving the',
         'client\'s own configuration otherwise intact. hyp unattach is an alias.',
@@ -471,38 +473,16 @@ function buildCoreCommands(registry) {
       name: 'privacy ignore',
       aliases: ['ignore'],
       summary: 'Exclude a folder subtree from recording or forwarding',
-      usage: 'hyp privacy ignore [path] [--check] [--json] [--local-only | --private | --sync]',
-      help: [
-        'Writes a .hypignore so HypAware never records this folder subtree.',
-        'With --local-only, keeps recording locally but withholds the subtree',
-        'from forwarding (machine-local, never written into the repo). With',
-        '--private, marks the subtree ignore in the same machine-local store',
-        'instead of writing a dotfile - never recorded, and never a repo',
-        'breadcrumb. With --sync, marks the subtree as explicitly synced (the',
-        'implicit default made durable, so it is not asked about again). With',
-        '--check, reports the current status - class and governing source -',
-        'without writing anything.',
-        '',
-        'The --local-only/--private/--sync/--check controls also have explicit',
-        'forms under hyp privacy set/show. Bare hyp privacy ignore [path]',
-        '(the .hypignore dotfile author) is not deprecated.',
-      ].join('\n'),
+      usage: 'hyp privacy ignore [path]',
+      help: 'Writes a .hypignore so HypAware never records this folder subtree.\nUse hyp privacy set/show/unset for machine-local policy.',
       run: runIgnore,
     },
     {
       name: 'privacy unignore',
       aliases: ['unignore'],
       summary: 'Resume recording for a previously ignored folder',
-      usage: 'hyp privacy unignore [path] [--local-only | --private | --sync]',
-      help: [
-        'Removes the governing .hypignore. With --local-only, --private, or',
-        '--sync, removes machine-local entries of that class instead',
-        '(symmetric with the matching hyp privacy ignore flag).',
-        '',
-        'The --local-only/--private/--sync controls also have an explicit',
-        'form under hyp privacy unset. Bare hyp privacy unignore [path]',
-        '(the .hypignore remover) is not deprecated.',
-      ].join('\n'),
+      usage: 'hyp privacy unignore [path]',
+      help: 'Removes the governing .hypignore.\nUse hyp privacy unset to remove machine-local markings.',
       run: runUnignore,
     },
     makeGroupCommand({
@@ -559,12 +539,12 @@ function buildCoreCommands(registry) {
       summary: 'Keep a client local-only, or return it to the sync-by-default',
       usage: 'hyp privacy client [<name>] [sync|local-only] [--json]',
       help: [
-        'On a machine connected to a server, every configured client syncs by',
-        'default. `privacy client <name> local-only` keeps that client\'s rows on',
-        'this machine; `privacy client <name> sync` removes the opt-out for future',
-        'rows. It then names `hyp sync --history <name>` when you deliberately',
-        'want to upload retained history too. Clients',
-        'your fleet config carries always sync and cannot be opted out. With no',
+        'On a machine connected to a HypAware server, every configured client',
+        'syncs by default. `privacy client <name> local-only` keeps that',
+        'client\'s rows on this machine; `privacy client <name> sync` removes',
+        'the opt-out for future rows. It then names `hyp sync --history <name>`',
+        'when you deliberately want to upload retained history too. Clients',
+        'set by your team always sync and cannot be opted out. With no',
         'arguments, lists the opted-out clients.',
       ].join('\n'),
       run: runPolicyClient,
@@ -575,11 +555,12 @@ function buildCoreCommands(registry) {
       summary: 'Let new folders sync (default), or be asked once about each',
       usage: 'hyp privacy folders [ask|sync] [--json]',
       help: [
-        'On a machine connected to a server, folders you have not marked sync',
-        'without asking. `privacy folders ask` turns on the per-folder question:',
-        'a session opened somewhere new asks once how to handle it. `privacy',
-        'folders sync` returns to the default. With no argument, reports the',
-        'current setting; `hyp setup` asks for it in its own step.',
+        'On a machine connected to a HypAware server, folders you have not',
+        'marked sync without asking. `privacy folders ask` turns on the',
+        'per-folder question: a session opened somewhere new asks once how to',
+        'handle it. `privacy folders sync` returns to the default. With no',
+        'argument, reports the current setting; `hyp setup` asks for it in its',
+        'own step.',
         '',
         'This gates the question only. Folders you already marked keep their class,',
         'and .hypignore files are unaffected, in either setting.',
@@ -589,11 +570,17 @@ function buildCoreCommands(registry) {
     {
       name: 'privacy purge',
       aliases: ['purge'],
-      summary: 'Delete already-cached rows from the local cache (destructive)',
-      usage: 'hyp privacy purge <path> | --session <id> | --ignored | --all [--yes] [--json]',
+      summary: 'Delete recorded rows; session purges include configured servers',
+      usage: 'hyp privacy purge <path> | --session <id> [--remote <target> | --local-only] | --ignored | --all [--yes] [--json]',
       help: [
-        'Permanently deletes recorded rows from THIS machine\'s local cache.',
-        'Never contacts a sink or the remote and never deletes exported copies.',
+        'Position-deletes recorded rows from this machine\'s local cache.',
+        'Session purges also exclude future recording and drain pending spool rows.',
+        'Session purges automatically include configured and signed-in remotes and enrolled servers.',
+        '--remote <target> limits the remote scope to one server; --local-only skips servers.',
+        'Remote deletion requires the session owner or an organization admin.',
+        'Physical files remain until compaction; copies in derived reports are not covered.',
+        'Remote failures return a nonzero exit status; retry to finish incomplete purges.',
+        'Non-session targets only purge locally.',
         'Exactly one target is required:',
         '  <path>          rows whose cwd equals or descends from the path',
         '  --session <id>  one session\'s rows',
@@ -621,7 +608,8 @@ function buildCoreCommands(registry) {
       name: 'client skills install',
       aliases: ['skills install'],
       summary: 'Install registered skills and subagents into AI client directories',
-      usage: 'hyp client skills install [--client <name>]',
+      usage: 'hyp client skills install [--client <name>] [--attached]',
+      help: 'Use --attached to install only for clients with a current HypAware attach marker.',
       run: runSkillsInstall,
     },
     makeGroupCommand({
@@ -636,7 +624,8 @@ function buildCoreCommands(registry) {
       name: 'daemon install',
       bootProfile: 'none',
       summary: 'Install the persistent user service (launchd / systemd)',
-      usage: 'hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]',
+      usage: 'hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json]]',
+      help: '--force allows the existing CLI path if global installation fails; removing that directory can break capture.',
       run: runDaemonInstall,
     },
     {
@@ -655,7 +644,7 @@ function buildCoreCommands(registry) {
       name: 'daemon run',
       bootProfile: 'none',
       summary: 'Run the HypAware daemon in the foreground',
-      usage: 'hyp daemon run --foreground [--config <path>]',
+      usage: 'hyp daemon run [--config <path>]',
       run: runDaemonRun,
     },
     {
@@ -752,7 +741,8 @@ function buildCoreCommands(registry) {
         '--org <name> to select an org, --no-browser to print the URL,',
         '--host <label> to override the forwarding host label (default: hostname),',
         '--no-forward to sign in for queries only (no organization enrollment),',
-        '--no-daemon to provision the sink without installing the service.',
+        '--no-daemon to provision the sink without installing the service,',
+        '--force to allow the existing CLI path if global installation fails.',
       ].join('\n'),
       run: runRemoteLogin,
     },
@@ -785,44 +775,51 @@ function buildCoreCommands(registry) {
       name: 'report',
       category: 'explore-share',
       audience: 'everyday',
-      summary: 'Render and manage reports',
+      summary: 'Generate and manage reports',
       help:
-        "'render' is a LOCAL build step: it turns a reports tree's Markdown into\n" +
-        'a static HTML site and takes no --remote and no credential.\n' +
-        '\n' +
-        'The rest talk to the server. Reports are server-hosted (there is no\n' +
-        'local reports plane), so publish/list/get/delete each take --remote\n' +
-        '<target> and default to the default remote target, the same resolution\n' +
-        'as bare --remote on queries. Reads use your login session; publish and\n' +
-        'delete need the publisher role (or an operator-minted publish token\n' +
-        "stored via 'hyp remote login <target> --token-file <path>').",
+        "'generate' starts a recorded AI client with the report skill in the\n" +
+        "current directory. Optional instructions set its period and focus.\n\n" +
+        'The rest talk to the remote. Reports are hosted there (there is no\n' +
+        'local reports plane), so publish/recommend/list/get/fix/mark/delete each\n' +
+        'take --remote <target> and default to the default remote target, the same\n' +
+        'resolution as bare --remote on queries. Reads use your login session;\n' +
+        'publish, recommend, mark and delete need the publisher role (or an\n' +
+        "operator-minted publish token stored via 'hyp remote login <target>\n" +
+        "--token-file <path>').",
     }),
     {
-      // @ref LLP 0196#mechanics-as-code [implements]: local, credential-free build step in the report group; see runReportRender for why it lives here
-      name: 'report render',
-      summary: 'Build the static HTML site for a local reports tree (no server involved)',
-      usage: coreUsage('report render'),
+      name: 'report generate',
+      summary: 'Start a recorded AI client to generate a local report',
+      usage: coreUsage('report generate'),
       help: [
-        'Renders every top-level <slug>.md (plus its optional <slug>/ section',
-        'directory) into html/<slug>/, and refreshes the shared assets. <dir>',
-        'defaults to ~/hypaware-reports.',
-        '',
-        'html/ is wiped and rebuilt every run, so a deleted or renamed report',
-        'never leaves stale HTML behind. Report .md sources are never modified,',
-        'and assets/theme.css is yours: it is copied into each page but never',
-        'overwritten. Pass --no-refresh-assets to leave the other assets alone',
-        'too.',
+        'Starts a recorded client with the hypaware-report skill in the current',
+        'working directory. Recorded means attached, or configured with no attach',
+        'marker to write, as codex is in its transcript mode. Optional quoted',
+        'instructions can specify the reporting period and focus; the skill',
+        'defaults to the previous calendar month. Publishing requires an explicit',
+        'request. If more than one recorded client has the skill, asks which on a',
+        'terminal; otherwise starts one without asking. The client takes over the',
+        'terminal with its normal permissions and is recorded under the current',
+        'directory\'s own usage class. This is not session isolation: excerpts it',
+        'reads out of local-only history are quoted into a transcript that syncs',
+        'if this directory does. No remote login is required.',
       ].join('\n'),
-      run: runReportRender,
+      run: runReportGenerate,
     },
     {
       name: 'report publish',
-      summary: "Publish a report (single .html/.md file, or a folder bundle) to the org's reports plane",
+      summary: "Publish Markdown report sources for the remote to render and share with the org",
       usage: coreUsage('report publish'),
       help: [
-        'A file publishes a single document; a folder publishes a bundle (its',
-        'root must contain report.html or report.md, built with the system',
-        "tar as --format=ustar). kind names the report family (e.g.",
+        'Upload a .md/.markdown file, or a folder containing report.md plus',
+        'usage.md, work.md, health.md, and recommendation-<slug>.md pages',
+        '(the legacy change-<slug>.md spelling is also accepted). A slug is',
+        'lowercase and matches [a-z0-9][a-z0-9-]*. Folders must contain only',
+        'supported Markdown files. HTML, raw HTML inside Markdown, images,',
+        'and client assets are not accepted. Put HTML examples in code',
+        'fences. The remote renders the report for the team; no local',
+        'rendering step is needed. Folder uploads use system tar',
+        "with --format=ustar. kind names the report family (e.g.",
         "usage-review); period is the covered slice (e.g. 2026-W29).",
         '--org applies only with the operator admin token, which must name',
         'its org explicitly.',
@@ -830,16 +827,81 @@ function buildCoreCommands(registry) {
       run: runReportPublish,
     },
     {
+      name: 'report recommend',
+      summary: 'Publish one recommendation page on its own, with no report around it',
+      usage: coreUsage('report recommend'),
+      help: [
+        'Upload a single recommendation page (.md/.markdown), written like a',
+        "recommendation-<slug>.md page inside a report: the first '# ' heading is",
+        'the title (--title overrides it) and the bold paragraph under it the',
+        "thesis. The remote wraps it in a report of kind 'recommendation' whose",
+        'period is the publish date, mints its hyprec- id, and renders it; the',
+        "receipt prints the id and the 'hyp report get <id>' that reads it.",
+        'Repeat uploads of the same content answer with the existing id. Needs',
+        'the publisher role, like publish.',
+      ].join('\n'),
+      run: runReportRecommend,
+    },
+    {
       name: 'report list',
-      summary: "List the org's published reports (newest first)",
+      summary: "List the org's published reports (newest first), with their recommendations",
       usage: coreUsage('report list'),
+      help: [
+        'Under each report, one line per recommendation: id, [state], page, and',
+        'title. The state is open, in_progress, applied, or dismissed; a',
+        "recommendation nobody has marked is open. --recommendations lists the",
+        'recommendations themselves, flat across reports (a standalone one says',
+        "'standalone' where its report would be); --status <state,...> filters",
+        "them and implies --recommendations. --json prints the remote's records whole.",
+      ].join('\n'),
       run: runReportList,
     },
     {
       name: 'report get',
       summary: "Fetch a report's entry document (or one artifact) to stdout or --output",
       usage: coreUsage('report get'),
+      help: [
+        "Given a recommendation id instead (hyprec-0123456789abcdef, as 'hyp report",
+        "list' prints under each report), fetches that recommendation's page",
+        'with the evidence it cites and the queries the report ran to reach it',
+        'appended. This is the read to make when asked to fix a recommendation',
+        'by id from inside an AI client session.',
+      ].join('\n'),
       run: runReportGet,
+    },
+    {
+      name: 'report fix',
+      summary: "Start a recorded AI client on one of a report's recommendations, here",
+      usage: coreUsage('report fix'),
+      help: [
+        "The id is a recommendation's, as 'hyp report list' prints under each",
+        'report (hyprec-0123456789abcdef). HypAware checks the recommendation still',
+        'exists and starts a recorded client in the current directory with',
+        "instructions to read it through 'hyp report get <id>' and make the",
+        'change here; nothing is written to disk. Recorded means attached, or',
+        'configured with no attach marker to write, as codex is in its transcript',
+        'mode. With no id on a terminal, pick a report (newest first), then one',
+        'of its recommendations (--kind, --period and --limit narrow which',
+        'reports). If more than one recorded client could be started, it asks',
+        'which on a terminal; an id given off a terminal starts one without',
+        'asking. The client takes over the terminal; nothing is pre-authorised.',
+      ].join('\n'),
+      run: runReportFix,
+    },
+    {
+      name: 'report mark',
+      summary: 'Record what became of a recommendation: open, in_progress, applied, or dismissed',
+      usage: coreUsage('report mark'),
+      help: [
+        "The id is a recommendation's, as 'hyp report list' prints. The state is",
+        "the remote's vocabulary; any state may follow any other, so marking one",
+        'open again is the same verb. --reason is required for dismissed and',
+        'is what the next reader sees in place of the change; --link (repeatable)',
+        'takes absolute http(s) URLs, the pull request that landed it most of all.',
+        "'hyp report get <id>' shows the current state and the history. Needs the",
+        'publisher role, like publish.',
+      ].join('\n'),
+      run: runReportMark,
     },
     {
       name: 'report delete',

@@ -90,7 +90,7 @@ export async function run({ harness, expect }) {
     (v) =>
       v.includes('<string>daemon</string>') &&
       v.includes('<string>run</string>') &&
-      v.includes('<string>--foreground</string>')
+      !v.includes('<string>--foreground</string>')
   )
   expect.that(
     'macos: plist content includes --config <path> sequence',
@@ -162,10 +162,10 @@ export async function run({ harness, expect }) {
     (v) => v.includes(binPath)
   )
   expect.that(
-    'linux: unit ExecStart calls `daemon run --foreground --config <path>`',
+    'linux: unit ExecStart calls `daemon run --config <path>`',
     linuxContent,
     (v) =>
-      /^ExecStart=.* daemon run --foreground --config /m.test(v) &&
+      /^ExecStart=.* daemon run --config /m.test(v) &&
       v.includes(configPath)
   )
   expect.that(

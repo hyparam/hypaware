@@ -11,9 +11,12 @@ import { pathToFileURL } from 'node:url'
 import { collect, executeSql } from 'squirreling'
 
 import { readCursorSync } from '../../src/core/cache/partition.js'
+import { reconcileRowsInTable } from '../../src/core/cache/iceberg/store.js'
+import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
 import { createLocalIcebergIO } from '../../src/core/cache/iceberg/resolver.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { DEFAULT_SPOOL_BYTES_THRESHOLD, SPOOL_DIR } from '../../src/core/cache/spool.js'
+import { withLogRecords } from '../helpers/log_records.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -507,4 +510,190 @@ test('readSpooledRows streams a large spool file rather than reading it whole (b
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
+})
+
+// @ref LLP 0449#reconciliation [tests]: real legacy/spooled rows, isolation and failure atomicity.
+test('snapshot reconciliation drains legacy spool, isolates sessions, rolls back failed replacement and respects purge', async t => {
+  const cacheRoot = await makeTmpDir('reconcile')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  assert.ok(storage.reconcileRows)
+  /** @type {ColumnSpec[]} */
+  const columns = ['client_name', 'session_id', 'part_id', 'content_text'].map(name => ({ name, type: 'STRING', nullable: false }))
+  const scope = { where: { client_name: 'hermes', session_id: 'hermes-s' }, key: 'part_id' }
+  const original = { ...scope.where, part_id: 'p1', content_text: 'old' }
+  const other = { ...original, session_id: 'hermes-other', part_id: 'p2', content_text: 'keep' }
+  const fresh = { ...original, content_text: 'new' }
+  await storage.appendRowsToPartition('messages', ['hermes'], columns, [original, other])
+  const spoolPath = storage.cacheTablePath('messages', ['backfill'])
+  await storage.appendRows(spoolPath, columns, [original])
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 1)
+  await storage.flushAll({ force: true })
+  const read = async () => {
+    const rows = []
+    for (const part of await storage.discoverCachePartitions()) for await (const row of storage.readRows(part.path)) rows.push(row)
+    return rows
+  }
+  assert.deepEqual((await read()).map(row => row.content_text).sort(), ['keep', 'new'])
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 0)
+  const canonical = path.join(cacheRoot, 'datasets/messages/source=hermes')
+  // A committed table can outlive a failed first cursor publication.
+  await fs.rm(path.join(canonical, 'cursor.json'))
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 0)
+  assert.equal(readCursorSync(canonical).rowCount, 1)
+  assert.deepEqual((await read()).map(row => row.content_text).sort(), ['keep', 'new'])
+  const reconcile = storage.reconcileRows
+  await assert.rejects(() => reconcile('messages', columns, [other], scope), /outside/)
+  const table = path.join(cacheRoot, 'datasets/messages/source=hermes/table')
+  // An invalid append fails after the transaction staged deletes, before publish.
+  await assert.rejects(() => reconcileRowsInTable(table, columns, [{ ...fresh, content_text: 'bad' }], scope,
+    async () => /** @type {any} */ ('invalid int64')))
+  assert.deepEqual((await read()).map(row => row.content_text).sort(), ['keep', 'new'])
+  await storage.reconcileRows('messages', columns, [], scope)
+  assert.deepEqual((await read()).map(row => row.content_text), ['keep'])
+  createSessionPurgeStore(cacheRoot).add('hermes-s')
+  assert.equal(await storage.reconcileRows('messages', columns, [fresh], scope), 0)
+  assert.deepEqual((await read()).map(row => row.content_text), ['keep'])
+})
+
+// @ref LLP 0449#reconciliation [tests]: a reconciled snapshot carries the dataset's current columns.
+test('snapshot reconciliation evolves the table schema for a column the dataset gained', async t => {
+  const cacheRoot = await makeTmpDir('reconcile-evolve')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  /** @type {CachePartitioningDeclaration} */
+  const declaration = {
+    source: { columns: ['client_name'], fallback: 'unknown' },
+    iceberg: { fields: [{ column: 'session_id', transform: 'identity', required: true, sortOnly: true }] },
+  }
+  const storage = createQueryStorageService({ cacheRoot, getDeclaration: () => declaration })
+  /** @param {string[]} names @returns {ColumnSpec[]} */
+  const cols = names => names.map(name => ({ name, type: 'STRING', nullable: true }))
+  const base = ['client_name', 'session_id', 'part_id', 'content_text']
+  const scope = { where: { client_name: 'hermes', session_id: 'hermes-s' }, key: 'part_id' }
+  const row = { client_name: 'hermes', session_id: 'hermes-s', part_id: 'p1', content_text: 'old' }
+  assert.ok(storage.reconcileRows)
+  await storage.reconcileRows('messages', cols(base), [row], scope)
+  // The dataset gains a nullable column; the snapshot writer must widen the
+  // table in place rather than silently drop the value it cannot store.
+  await storage.reconcileRows('messages', cols([...base, 'extra']), [{ ...row, content_text: 'new', extra: 'kept' }], scope)
+  const rows = []
+  for (const part of await storage.discoverCachePartitions()) {
+    for await (const read of storage.readRows(part.path)) rows.push(read)
+  }
+  assert.deepEqual(rows.map(r => r.content_text), ['new'])
+  assert.deepEqual(rows.map(r => r.extra), ['kept'])
+})
+
+/** @type {CachePartitioningDeclaration} */
+const GATEWAY_PARTITIONING = {
+  source: { columns: ['client_name', 'conversation_source', 'provider'], fallback: 'unknown' },
+  iceberg: { fields: [{ column: 'session_id', transform: 'identity', required: true, sortOnly: true }] },
+}
+
+/** @type {ColumnSpec[]} */
+const SNAPSHOT_COLUMNS = ['client_name', 'session_id', 'part_id', 'content_text']
+  .map(name => ({ name, type: 'STRING', nullable: false }))
+
+const SNAPSHOT_SCOPE = { where: { client_name: 'hermes', session_id: 'hermes-s' }, key: 'part_id' }
+
+// @ref LLP 0449#reconciliation [tests]: the retirement sweep touches every
+// partition, so a cursor only another client's partition can be damaged by
+// must not stop this scope committing or retiring what it can reach.
+test('snapshot reconciliation commits and retires past a corrupt cursor the scope cannot reach', async t => {
+  const cacheRoot = await makeTmpDir('reconcile-foreign-cursor')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot, getDeclaration: () => GATEWAY_PARTITIONING })
+  const reconcile = storage.reconcileRows
+  assert.ok(reconcile)
+  const read = async () => {
+    const rows = []
+    for (const part of await storage.discoverCachePartitions()) {
+      for await (const row of storage.readRows(part.path)) rows.push(row.content_text)
+    }
+    return rows.sort()
+  }
+  const stale = { ...SNAPSHOT_SCOPE.where, part_id: 'p1', content_text: 'stale' }
+  // A legacy poll partition: no `source=` segment, so the scope's rows can
+  // live here and the sweep still has to retire them.
+  await storage.appendRowsToPartition('messages', ['backfill'], SNAPSHOT_COLUMNS, [stale])
+  // Another client's canonical partition, born the way every one is: through
+  // the spool, routed by the same declaration this scope resolves through.
+  await storage.appendRows(storage.cacheTablePath('messages', ['live']), SNAPSHOT_COLUMNS,
+    [{ client_name: 'claude', session_id: 'claude-s', part_id: 'c1', content_text: 'claude' }])
+  await storage.flushAll({ force: true })
+  const foreign = path.join(cacheRoot, 'datasets/messages/source=claude')
+  const foreignCursor = path.join(foreign, 'cursor.json')
+  const repaired = await fs.readFile(foreignCursor, 'utf8')
+  await fs.writeFile(foreignCursor, '{ this is not a cursor')
+
+  const { result, records } = await withLogRecords(() => reconcile('messages', SNAPSHOT_COLUMNS,
+    [{ ...stale, content_text: 'new' }], SNAPSHOT_SCOPE))
+  assert.equal(result, 1, 'the scope still commits its snapshot')
+  // The operator is told which partition went unswept, beside the cursor
+  // read's own refusal naming why it could not be read.
+  const skip = records.find(record => record.body === 'cache.retirement_skipped')
+  assert(skip, 'the skipped partition is recorded, not passed over in silence')
+  assert.equal(skip.attributes.partition_dir, foreign)
+  assert.equal(skip.attributes.error_kind, 'cursor_unreadable')
+  assert.equal(skip.attributes.status, 'degraded')
+  assert.equal(records.find(r => r.body === 'cache.snapshot_reconciled')?.attributes.retirement_skipped, 1)
+  // The damaged partition is left exactly as the operator has to find it.
+  assert.equal(await fs.readFile(foreignCursor, 'utf8'), '{ this is not a cursor')
+  assert.deepEqual(await read(), ['new'],
+    'the stale legacy copy is retired and the unreadable partition reads as empty')
+  await fs.writeFile(foreignCursor, repaired)
+  assert.deepEqual(await read(), ['claude', 'new'],
+    'repairing the cursor brings the other client back with its rows intact')
+})
+
+// @ref LLP 0449#reconciliation [tests]: the converse of the skip above. A
+// partition whose rows could match the scope is unverifiable while its cursor
+// is, so the whole reconcile fails closed rather than leave a duplicate.
+test('snapshot reconciliation still refuses a corrupt cursor on a partition that could hold the scope', async t => {
+  const cacheRoot = await makeTmpDir('reconcile-reachable-cursor')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot, getDeclaration: () => GATEWAY_PARTITIONING })
+  const reconcile = storage.reconcileRows
+  assert.ok(reconcile)
+  const stale = { ...SNAPSHOT_SCOPE.where, part_id: 'p1', content_text: 'stale' }
+  await storage.appendRowsToPartition('messages', ['backfill'], SNAPSHOT_COLUMNS, [stale])
+  await fs.writeFile(path.join(cacheRoot, 'datasets/messages/backfill/cursor.json'), '{ this is not a cursor')
+
+  await assert.rejects(() => reconcile('messages', SNAPSHOT_COLUMNS,
+    [{ ...stale, content_text: 'new' }], SNAPSHOT_SCOPE), /cursor\.json/)
+  assert.equal(fsSync.existsSync(path.join(cacheRoot, 'datasets/messages/source=hermes')), false,
+    'nothing is published while a partition that could hold the scope cannot be verified')
+})
+
+// @ref LLP 0449#reconciliation [tests]: the skip reads a `source=` segment as
+// the value the row resolved to, and `migrateLegacyPartitions` writes that
+// segment from `resolveClientName` whatever the dataset declares. A chain
+// leading with anything else makes the two disagree, so it proves nothing.
+test('snapshot reconciliation refuses a corrupt cursor when the declared chain does not lead with client_name', async t => {
+  const cacheRoot = await makeTmpDir('reconcile-unaligned-chain')
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  /** @type {CachePartitioningDeclaration} */
+  const unaligned = {
+    source: { columns: ['provider', 'client_name'], fallback: 'unknown' },
+    iceberg: { fields: [{ column: 'session_id', transform: 'identity', required: true, sortOnly: true }] },
+  }
+  const storage = createQueryStorageService({ cacheRoot, getDeclaration: () => unaligned })
+  const reconcile = storage.reconcileRows
+  assert.ok(reconcile)
+  /** @type {ColumnSpec[]} */
+  const columns = [...SNAPSHOT_COLUMNS, { name: 'provider', type: 'STRING', nullable: false }]
+  // The scope pins the chain's first column, so pinning alone lets this through.
+  const scope = { where: { ...SNAPSHOT_SCOPE.where, provider: 'openai' }, key: 'part_id' }
+  const stale = { ...scope.where, part_id: 'p1', content_text: 'stale' }
+  // A migrated partition, labelled the way `migrateLegacyPartitions` labels
+  // one: by `resolveClientName`, which reads `client_name`, not `provider`.
+  // The scope resolves to `source=openai`, so the labels differ while the rows
+  // match, and only a chain leading with `client_name` could rule that out.
+  await storage.appendRowsToPartition('messages', ['source=hermes'], columns, [stale])
+  await fs.writeFile(path.join(cacheRoot, 'datasets/messages/source=hermes/cursor.json'), '{ this is not a cursor')
+
+  await assert.rejects(() => reconcile('messages', columns,
+    [{ ...stale, content_text: 'new' }], scope), /cursor\.json/)
+  assert.equal(fsSync.existsSync(path.join(cacheRoot, 'datasets/messages/source=openai')), false,
+    'nothing is published while a partition the scope could reach cannot be verified')
 })

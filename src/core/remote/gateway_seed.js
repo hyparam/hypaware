@@ -7,6 +7,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { centralLayerResolutionFailure } from '../config/apply.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { originOf, sameServer } from './builtin_remotes.js'
 
 /**
  * Bridge from a login-minted gateway credential to the `central` forward
@@ -22,7 +23,9 @@ import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
  * a server-pushed sink block seeds the same file a locally-configured one
  * does.
  *
+ * @import { HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CentralEnrollment, LoginGatewayCredential, SeededGateway } from '../../../src/core/remote/types.js'
+ * @import { LoadConfigResult } from '../../../src/core/config/types.js'
  * @import { PersistedIdentity } from '../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
 
@@ -51,8 +54,7 @@ const CENTRAL_PLUGIN = '@hypaware/central'
  */
 export async function seedLoginGateway({ stateDir, configPath, targetUrl, gateway }) {
   const log = getLogger('remote')
-  const origin = originOf(targetUrl)
-  if (!origin) return []
+  if (!originOf(targetUrl)) return []
   const { effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
   const sinks = effective?.sinks ?? {}
 
@@ -63,7 +65,9 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
     if (!entry || /** @type {any} */ (entry).plugin !== CENTRAL_PLUGIN) continue
     const config = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
     const centralUrl = typeof config.url === 'string' ? config.url : ''
-    if (originOf(centralUrl) !== origin) continue
+    // Same server, not same origin: a sink saved under a host the built-in
+    // target has since moved away from is this server's sink and is re-seeded.
+    if (!sameServer(centralUrl, targetUrl)) continue
     const persistedPath = typeof config.identity?.persisted_path === 'string'
       ? config.identity.persisted_path
       : path.join(stateDir, 'plugins', CENTRAL_PLUGIN, 'identity.json')
@@ -137,18 +141,57 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
  */
 export async function readCentralEnrollment({ stateDir, configPath }) {
   const { centralConfig, centralLoaded } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
-  const unreadable = centralLoaded && centralLoaded.ok === false
-    ? { configPath: centralLoaded.configPath, errorKind: centralLoaded.errorKind, message: centralLoaded.message }
-    : centralLoaded === null ? centralLayerResolutionFailure({ stateRoot: stateDir }) : null
-  const sinks = centralConfig?.sinks ?? {}
+  return { origins: centralSinkOrigins(centralConfig), unreadable: centralLayerUnreadable({ stateDir, centralLoaded }) }
+}
+
+/**
+ * {@link readCentralEnrollment}'s unreadable half, over a resolution the
+ * caller already has: a command that resolved the layered config for its own
+ * reasons answers "could the layer be read" from that same `centralLoaded`,
+ * rather than a second read that can disagree with the first. See
+ * {@link readCentralEnrollment} for why every load failure counts as
+ * unreadable and why a null `centralLoaded` is re-checked against the control
+ * directory instead of read as an absence.
+ *
+ * @param {{ stateDir: string, centralLoaded: LoadConfigResult | null }} args
+ * @returns {CentralEnrollment['unreadable']}
+ */
+export function centralLayerUnreadable({ stateDir, centralLoaded }) {
+  if (centralLoaded && centralLoaded.ok === false) {
+    return { configPath: centralLoaded.configPath, errorKind: centralLoaded.errorKind, message: centralLoaded.message }
+  }
+  return centralLoaded === null ? centralLayerResolutionFailure({ stateRoot: stateDir }) : null
+}
+
+/**
+ * The origins the `@hypaware/central` sinks in `config` target, deduplicated
+ * and in configuration order. A caller that has already resolved the layered
+ * config and only needs to *name* where rows go takes this directly, so naming
+ * a destination costs no second read of the layer and cannot disagree with the
+ * enrollment answer the same command computed. {@link readForwardSinkOrigins}
+ * forgoes both of those on purpose: it wants a wider layer than the caller
+ * already resolved, so it pays a read of its own, and an enrollment change
+ * landing between the two reads can leave one command's copy naming a set
+ * that existed at no single instant.
+ *
+ * Which config to hand it is the caller's decision, and the two answers differ:
+ * {@link readCentralEnrollment} passes the **central** layer alone, because a
+ * hand-authored central sink in the user's own local layer is not an
+ * enrollment, while {@link readForwardSinkOrigins} passes the **effective**
+ * config, because that sink still forwards.
+ *
+ * @param {HypAwareV2Config | null | undefined} config
+ * @returns {string[]}
+ */
+export function centralSinkOrigins(config) {
   const origins = new Set()
-  for (const entry of Object.values(sinks)) {
+  for (const entry of Object.values(config?.sinks ?? {})) {
     if (!entry || /** @type {any} */ (entry).plugin !== CENTRAL_PLUGIN) continue
-    const config = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
-    const origin = typeof config.url === 'string' ? originOf(config.url) : null
+    const sinkConfig = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
+    const origin = typeof sinkConfig.url === 'string' ? originOf(sinkConfig.url) : null
     if (origin) origins.add(origin)
   }
-  return { origins: [...origins], unreadable }
+  return [...origins]
 }
 
 /**
@@ -165,6 +208,28 @@ export async function readCentralEnrollment({ stateDir, configPath }) {
 export async function readCentralSinkOrigins({ stateDir, configPath }) {
   const { origins } = await readCentralEnrollment({ stateDir, configPath })
   return origins
+}
+
+/**
+ * Every origin an `@hypaware/central` sink targets in the **effective**
+ * (central + local) config the daemon boots: where this machine actually
+ * forwards. `mergeConfigLayers` unions a hand-authored local sink in under
+ * its own instance name and the plugin honors that block's own
+ * `identity.persisted_path`, so it ships to its own server.
+ *
+ * For *naming* destinations only. Enrollment stays the central layer alone
+ * ({@link readCentralEnrollment}, LLP 0063 D4), because counting a local sink
+ * as connected would reject a login with `hyp leave` advice that cannot clear
+ * it. Disclosure carries no such duty, and a surface that named the enrolling
+ * layer alone would offer "never send them to A" on a folder B keeps
+ * receiving (#2208).
+ *
+ * @param {{ stateDir: string, configPath: string | null }} args
+ * @returns {Promise<string[]>}
+ */
+export async function readForwardSinkOrigins({ stateDir, configPath }) {
+  const { effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
+  return centralSinkOrigins(effective)
 }
 
 /**
@@ -261,20 +326,5 @@ function writePersistedIdentity(filePath, identity) {
     fs.chmodSync(filePath, 0o600)
   } catch {
     // best effort: rename already replaced the file
-  }
-}
-
-/**
- * The URL's origin, or `null` when unparseable (an unparseable sink URL
- * simply never matches; the sink's own validation reports it).
- *
- * @param {string} url
- * @returns {string | null}
- */
-export function originOf(url) {
-  try {
-    return new URL(url).origin
-  } catch {
-    return null
   }
 }

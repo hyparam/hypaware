@@ -45,7 +45,7 @@ export const ORG_CONFIG_WAIT_MS = 60000
  *   the status says `'daemon_incomplete'` so the wizard can name the one
  *   thing that is missing instead of the sign-in that is not.
  *
- * @ref LLP 0134#login-lane [implements]: the fork's shared-collection row ("Collect shared agent logs") wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
+ * @ref LLP 0134#login-lane [implements]: the fork's shared-collection row ("Sync to the cloud") wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
  *
  * @param {RunWizardJoinOptions} opts
  * @returns {Promise<WizardJoinResult>}
@@ -81,15 +81,10 @@ export async function runWizardJoin(opts) {
  * @returns {Promise<WizardJoinResult>}
  */
 async function runJoinFlow(opts, span) {
-  // The join lane owns no prompt spec of its own - it narrates, then hands
-  // off to the login lane, which may prompt (org selection) inside. So its
-  // position line is written here, once, where the narration would go: the
-  // whole lane is one step however many prompts happen inside it.
-  // @ref LLP 0135#progress [implements]: the join lane counts once, and prints its position where it starts
-  // The position line already names the lane; the plain sentence is only
-  // for a run that has no position line to print.
-  if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
-  else opts.stdout.write('Joining your team...\n')
+  // A plain heading, not a step count: it stays on screen, and a count only
+  // helps on a live menu, where it goes with the menu.
+  // @ref LLP 0437#headings [implements]: permanent lines carry headings, live menus carry the step count
+  opts.stdout.write('Joining your team\n')
 
   const runLogin = opts.runLogin ?? (() => defaultRunLogin(opts))
   const login = await runLogin()
@@ -218,7 +213,12 @@ export async function defaultRunLogin(opts, login = remoteLogin) {
   const teed = /** @type {CommandRunContext} */ ({ ...ctx, stdout: opts.stdout, stderr: capture.stream })
   // Compact: one line per event. The wizard's later screens carry the
   // privacy block's other sentences, so the lane prints the deadline alone.
-  const { exitCode, reason } = await login([], teed, { compact: true })
+  // The daemon's entrypoint was settled before the fork (LLP 0404); the
+  // lane's install records it rather than resolving one of its own.
+  const { exitCode, reason } = await login([], teed, {
+    compact: true,
+    ...(opts.binPath !== undefined ? { binPath: opts.binPath } : {}),
+  })
   return { exitCode, reason, stderr: capture.text() }
 }
 

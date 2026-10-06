@@ -133,6 +133,9 @@ test('instantiate table-format sink wires blobStore + encoder + config into crea
   assert.equal(handle.kind, 'table-format')
   assert.equal(handle.writer, '@hypaware/format-iceberg')
   assert.equal(handle.destination, '@hypaware/local-fs')
+  // The owner record comes off `args.plugin` for this shape too, so the
+  // `owners` map and the labels have one source across both (issue #1562).
+  assert.equal(registry.ownerOf('iceberg-test'), '@hypaware/format-iceberg')
   assert.equal(handle.tableFormat, 'iceberg')
   assert.deepEqual(handle.supports, ['queryable'])
 

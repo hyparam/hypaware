@@ -242,6 +242,23 @@ export interface TranscriptFileState {
   chain: Promise<void>
 }
 
+/**
+ * One home dir's entry in the Desktop 3p root cache: the dirs the last
+ * sweep found, when it ran, and the sessions a forced re-sweep of that
+ * same list has already been spent on (`createDesktop3pDirsCache`).
+ */
+export interface Desktop3pDirsEntry {
+  atMs: number
+  /**
+   * Whether this sweep replaced a different dir list: a container in
+   * motion, whose miss keeps its forced walk in reserve. False for a
+   * first sweep, which replaced no list.
+   */
+  moved: boolean
+  dirs: string[]
+  swept: Set<string>
+}
+
 export interface ClaudeAttachOptions {
   /**
    * Gateway listener port. Written into `env.ANTHROPIC_BASE_URL` in
@@ -346,3 +363,26 @@ export interface ClaudeAttachChanged {
 }
 
 export type ClaudeAttachResult = ClaudeAttachChanged | { changed: false }
+
+/**
+ * Where one row ended a settle pass that rewrote its `message_id`, keyed in
+ * that pass by the id the row started with. Read only to repair the rows that
+ * were chained to the old id (LLP 0440); nothing is stored.
+ */
+export interface SettledIdRewrite {
+  /** The native transcript uuid the identity upgrade gave the row. */
+  id: string
+  /**
+   * The agent thread the row ended the pass in. A successor in the same thread
+   * follows the rename; one in a different thread has lost this predecessor
+   * and splices past it to `previous`.
+   */
+  agent: string | undefined
+  /**
+   * The row's projection-time `previous_message_id`, exactly as the column
+   * held it (an array by construction, unknown here because the row is an
+   * untyped cache record). What a successor inherits when this row turned out
+   * to belong to another thread.
+   */
+  previous: unknown
+}

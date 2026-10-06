@@ -3,6 +3,8 @@
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { cacheCleanupId, readCacheCleanup, finishCacheCleanup, sweepEvictedCacheCleanups, CACHE_PURGE_GRACE_MS, isUncommittedCacheGeneration } from './purge-cleanup.js'
 
 import { parquetReadObjects } from 'hyparquet'
 import {
@@ -25,8 +27,7 @@ import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFiles, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { partitionSpecForDeclaration, partitionSpecMigrationDue, sortColumnsForDeclaration } from '../iceberg/partition-spec.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
-import { buildSidecarsForTable, sweepIndexScratch } from '../search/sidecar_build.js'
-import { GREP_DATASET, sidecarPathFor } from '../search/searchable_columns.js'
+import { sidecarPathFor } from '../search/searchable_columns.js'
 import { isPlainObject } from '../util/json_util.js'
 
 /**
@@ -179,27 +180,6 @@ export function inPlaceRoundCap(cfg) {
 const METADATA_VERSIONS_KEPT = 20
 
 /**
- * The most of one maintenance tick's budget the grep sidecar build may
- * spend on any one partition. Indexing is seconds of CPU per file and the
- * pass runs inside the per-partition loop, so without a share of its own it
- * would spend the tick's whole remaining tail on the first grep partition
- * and starve every partition behind it. LLP 0199's neediest-first walk puts
- * the busiest partition first, which is exactly the one with the most to
- * index, so the tail is what it would take.
- *
- * The deadline this makes is ABSOLUTE and measured from the tick's start
- * (`startMs + budgetMs * share`), not from each partition's own arrival, so
- * it is one window near the front of the tick rather than an allowance
- * handed out per partition. A grep partition the walk reaches after that
- * window has closed still indexes its first missing file (the
- * always-attempt-one guarantee in `buildSidecarsForTable`) and defers the
- * rest to a later tick; the loop's own budget break above is what bounds
- * the total. Reading this as a per-partition allowance would be reading a
- * larger bound than the code holds, in the safe direction.
- */
-const GREP_INDEX_TICK_SHARE = 0.25
-
-/**
  * @param {Partial<MaintenanceConfig> | undefined} config
  * @returns {MaintenanceConfig}
  */
@@ -336,117 +316,6 @@ export async function maintainCache(opts) {
       report.errorMessage = err instanceof Error ? err.message : String(err)
       totalFailed++
     }
-    // The grep sidecar build. Compaction is where a generation's files are
-    // minted, so a rewrite that just committed always leaves work here, but
-    // gating on that alone strands a partition already at the compaction
-    // floor: it never rewrites, so its files never get indexed, every grep
-    // brute-scans them forever, and `hyp query status` advises a compaction
-    // that will not run (hyparam/hypaware#984 review). Coverage is the
-    // honest gate instead, and it is cheap: one `readdir` of the live data
-    // directory, the same cost profile as the file counters beside it, and
-    // it reads zero-work whenever every file already has its sidecar. A
-    // committed data file never changes its rows, so indexing one the
-    // compactor has not touched is as valid as indexing one it just wrote;
-    // what compaction buys is that the index is built once over merged
-    // files rather than repeatedly over the fragments it will replace,
-    // which is a cost argument, not a correctness one.
-    //
-    // Isolated from the partition's own verdict: an index that cannot be
-    // built costs speed, never the tick, and never correctness (the scan
-    // tier serves whatever has no sidecar). Bounded by the tick's own
-    // deadline for the same reason the walk above is, and resumable across
-    // ticks because sidecar existence is the marker.
-    // @ref LLP 0264#lifecycle [constrained-by]: sidecar existence is the idempotency marker and an unindexed file is brute-scanned; both are what let this run on coverage
-    // @ref LLP 0302#build-site [implements]: the build pass runs on missing coverage under the tick budget, not only behind a committed compaction
-    if (!opts.dryRun && !report.failed && part.dataset === GREP_DATASET) {
-      try {
-        const cursorAfter = readCursorSync(part.path)
-        const liveDir = path.join(part.path, generationLayout(cursorAfter).liveDir)
-        // Before the coverage gate, and outside it. A build killed between
-        // its write and its rename leaves the sidecar unpublished, so the
-        // NEXT tick rebuilds it and coverage goes complete again - inside
-        // the sweep's own grace window, and therefore before the abandoned
-        // scratch is old enough to reclaim. Behind the gate the sweep would
-        // then never run again for that generation and the leak would last
-        // its whole life, which is the opposite of what the grace window is
-        // for. Costs one `readdir` of a directory `countIndexCoverage` reads
-        // anyway.
-        // @ref LLP 0304#scratch-sweep-site [implements]: the sweep is not gated on missing coverage, because a republished sidecar is what hides the scratch
-        //
-        // Behind the same path discipline as the unreferenced sweep: this
-        // pass also lists `<generation>/data` and unlinks by path. It needs
-        // the guard more, not less, because `liveDir` here is resolved
-        // through the LENIENT reader: a cursor the gate rejected still
-        // yields a default generation name at this line, so the cursor gate
-        // upstream is not standing in front of it.
-        //
-        // The check is no longer written here. It lives inside
-        // {@link sweepIndexScratch}, which is the code that unlinks, so a
-        // second caller cannot acquire the deletion without the guard that
-        // bounds it - and so the components asked about are the two the pass
-        // actually walks rather than the three this call site happened to
-        // name.
-        // @ref LLP 0331#guard-travels-with-the-delete [constrained-by]: the containment property belongs to the pass that deletes, not to whoever calls it.
-        sweepIndexScratch(liveDir)
-        const coverage = countIndexCoverage(liveDir)
-        if (coverage.indexed < coverage.indexable) {
-          await withSpan(
-            'maintenance.grep_index',
-            {
-              [Attr.COMPONENT]: 'cache',
-              [Attr.OPERATION]: 'maintenance.grep_index',
-              [Attr.DATASET]: part.dataset,
-              status: 'ok',
-            },
-            async (span) => {
-              // A SHARE of the tick, never its tail. Handing the pass the
-              // tick's own deadline let it run until the tick was spent,
-              // and the partition walk is neediest-first, so the busiest
-              // grep partition comes first, arrives at a freshly compacted
-              // generation with zero coverage, and spends the rest of the
-              // tick indexing it. Every partition behind it - the other
-              // sources, and logs/traces/metrics - then got no snapshot
-              // expiry and no compaction, that tick and every tick after,
-              // because the busy partition keeps taking writes. Nothing
-              // else in the loop has that shape: compaction is gated on a
-              // due verdict, so a healthy partition costs nearly nothing.
-              //
-              // A fraction bounds the damage without stalling coverage:
-              // the pass still always attempts its first missing file (see
-              // `buildSidecarsForTable`), so a partition indexes at least
-              // one file per tick even on an already-spent budget, and an
-              // absent `budgetMs` is `Infinity`, which makes the deadline
-              // unreachable rather than needing a second shape.
-              // @ref LLP 0199#neediest-first [constrained-by]: the walk postpones the healthiest partitions, so per-partition work appended to the loop must not be able to consume the tick
-              // @ref LLP 0303#build-share [implements]: a share of the tick per partition, never its tail
-              const built = await buildSidecarsForTable({
-                tableDir: liveDir,
-                deadlineMs: startMs + budgetMs * GREP_INDEX_TICK_SHARE,
-              })
-              report.sidecarsBuilt = built.built
-              // `failed` only: `quarantined` counts files SKIPPED without a
-              // build, so folding them in made a partition holding one
-              // poisoned file report a fresh failure on every later tick
-              // when nothing was attempted at all.
-              report.sidecarsFailed = built.failed
-              report.sidecarsQuarantined = built.quarantined
-              report.sidecarsDeferred = built.deferred
-              span.setAttribute('sidecars_built', built.built)
-              span.setAttribute('sidecars_present', built.present)
-              span.setAttribute('sidecars_failed', built.failed)
-              span.setAttribute('sidecars_quarantined', built.quarantined)
-              span.setAttribute('sidecars_deferred', built.deferred)
-            },
-            { component: 'cache' }
-          )
-        }
-      } catch (err) {
-        // Index absence is served by the scan tier, so a build-pass throw
-        // is a warning on the report, never a failed partition.
-        report.sidecarsFailed = (report.sidecarsFailed ?? 0) + 1
-        report.sidecarError = err instanceof Error ? err.message : String(err)
-      }
-    }
     reports.push(report)
     if (!report.failed) maintained++
     totalSnapshotsExpired += report.snapshotsExpired
@@ -456,6 +325,9 @@ export async function maintainCache(opts) {
 
   if (!opts.dryRun) {
     await cleanRetiredEpochs(opts.cacheRoot)
+    // Walking `datasets/` cannot reach a journal whose partition retention
+    // removed, so the journal store is enumerated directly once a tick.
+    await sweepEvictedCacheCleanups(opts.cacheRoot)
   }
 
   return {
@@ -570,6 +442,9 @@ function generationLayout(cursor) {
 async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter) {
   const layout = generationLayout(cursor)
   const liveDir = path.join(r.path, layout.liveDir)
+  const cleanup = await readCacheCleanup(opts.cacheRoot, cacheCleanupId(opts.cacheRoot, r.path))
+  // @ref LLP 0417#cache-reclamation [implements]: a durable purge outranks layout convergence
+  const purgeRewrite = cleanup?.generations.includes(layout.liveDir) ?? false
   // Not a bare return: a table whose metadata directory holds nothing but a
   // staged name is the one shape where `tableExists` answers no (a staging
   // name is not the `*.metadata.json` it looks for) AND there is still
@@ -637,7 +512,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // A due re-partition outranks the baseline gate and the recorded
     // verdict: both say "a rewrite would reproduce this layout", which is
     // exactly what the migration exists to change.
-    const compactionDue = opts.force || repartitionDue ||
+    const compactionDue = opts.force || purgeRewrite || repartitionDue ||
       ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg, liveStats, layout.kind))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
@@ -700,7 +575,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // the sorted layout every night. An explicit --force still rewrites.
       // A due re-partition also outranks the recognition: a foreign sorted
       // replace under the OLD spec is still on the old spec.
-      if (!opts.force && !repartitionDue && foreignSortedReplace(tableInfo, cursor)) {
+      if (!opts.force && !purgeRewrite && !repartitionDue && foreignSortedReplace(tableInfo, cursor)) {
         // The counter proves a rebaseline happened at all, but it carries
         // only the dataset; tagging the enclosing maintenance.partition span
         // names the partition, so a trace query finds which day re-baselined
@@ -779,11 +654,31 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // A due re-partition must not merge in place: an in-place commit
             // keeps the table's recorded spec, which is the thing being
             // migrated away from (LLP 0311#migration).
-            if (!opts.force && !hasResettle && !repartitionDue && lockedLayout.kind === 'source-table') {
+            if (!opts.force && !purgeRewrite && !hasResettle && !repartitionDue && lockedLayout.kind === 'source-table') {
               const inPlace = await compactLiveFilesInPlace(r.path, lockedLiveDir, lockedCursor, cfg, settle)
               if (inPlace !== 'settle-required') return inPlace
             }
             const lockedTableInfo = await loadCompactionTableInfo(lockedLiveDir)
+            if (purgeRewrite) {
+              const latestCleanup = await readCacheCleanup(opts.cacheRoot, cacheCleanupId(opts.cacheRoot, r.path))
+              if (!latestCleanup?.generations.includes(lockedLayout.liveDir)) return null
+              if (!lockedTableInfo?.metadata) throw new Error('cache cleanup metadata unavailable')
+              assertUnpinnedCleanup(lockedTableInfo.metadata)
+              // A fresh source-table generation also handles an empty legacy
+              // epoch and retries without appending to a crashed partial output.
+              const nextName = `table-${Date.now()}-${randomUUID()}`
+              const cleanupLayout = { ...lockedLayout, commitEmpty: true, nextDirName: () => nextName,
+                cursorAfter: (nextDir, rows, outcome) => ({ ...lockedCursor,
+                  ...lockedLayout.cursorAfter(nextDir, rows, outcome), layout: /** @type {const} */ ('source-table'), tableDir: nextDir }) }
+              const rewritten = await compactGeneration(r.path, cleanupLayout, cfg, null, lockedTableInfo, undefined, false)
+              // Flush the atomic cursor publication before the old generation
+              // can become eligible for physical reclamation on a later tick.
+              const cursorFile = await fsPromises.open(path.join(r.path, 'cursor.json'), 'r')
+              try { await cursorFile.sync() } finally { await cursorFile.close() }
+              const directory = await fsPromises.open(r.path, 'r')
+              try { await directory.sync() } finally { await directory.close() }
+              return rewritten
+            }
             // Re-derive dueness from the metadata read under the lock, for
             // the same reason the cursor is re-read above: the pre-lock
             // check can be stale. `hyp query maintain` and the daemon tick
@@ -1022,15 +917,6 @@ export async function cacheStatus({ cacheRoot }) {
       status.layout = 'source-table'
     } else {
       status.layout = cursor.epoch > 0 || cursor.rowCount > 0 ? 'epoch' : undefined
-    }
-    // Grep-index coverage, for the one dataset that carries sidecars: how
-    // many of the partition's data files a search serves through an index
-    // rather than a brute scan. Reported so "grep is slow on deep history"
-    // is diagnosable from `hyp query status` instead of from tracing.
-    if (part.dataset === GREP_DATASET) {
-      const coverage = countIndexCoverage(liveDir)
-      status.indexedFileCount = coverage.indexed
-      status.indexableFileCount = coverage.indexable
     }
     statusPartitions.push(status)
   }
@@ -1368,9 +1254,10 @@ export function estimateRowBytes(row) {
  * @param {SettleContext | null} [settle]
  * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} [tableInfo]  metadata bundle loaded by the caller; null falls back to schema inference
  * @param {ReturnType<typeof repartitionTargetLayout>} [targetLayout]  re-partition migration only: write the new generation under this layout instead of carrying the recorded one
+ * @param {boolean} [deduplicate] Purge rewrites preserve all surviving rows without a table-sized ID set.
  * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFilesBefore: number, dataFiles: number, bytesWritten?: number } | null>}
  */
-async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, targetLayout) {
+async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, targetLayout, deduplicate = true) {
   const oldDir = path.join(partitionDir, layout.liveDir)
   if (!tableExists(oldDir)) return null
 
@@ -1440,8 +1327,8 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   // the new generation.
   const emit = async (/** @type {Record<string, unknown>} */ row) => {
     const rowId = row._hyp_cache_row_id
-    if (typeof rowId === 'string' && seen.has(rowId)) return false
-    if (typeof rowId === 'string') seen.add(rowId)
+    if (deduplicate && typeof rowId === 'string' && seen.has(rowId)) return false
+    if (deduplicate && typeof rowId === 'string') seen.add(rowId)
     if (emittedPartIds) {
       const key = rowPartId(row)
       if (key !== undefined) emittedPartIds.add(key)
@@ -1563,6 +1450,12 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
     dataFiles: newDataFiles,
     bytesWritten: streamed?.bytesWritten ?? 0,
   }
+}
+
+/** @param {TableMetadata} metadata */
+function assertUnpinnedCleanup(metadata) {
+  if (Object.keys(metadata.refs ?? {}).some(name => name !== 'main')) throw new Error('cache cleanup blocked by snapshot references')
+  if (metadata.statistics?.length || metadata['partition-statistics']?.length) throw new Error('cache cleanup blocked by statistics sidefiles')
 }
 
 /* ----- In-place subset compaction (LLP 0310) -----
@@ -1763,10 +1656,12 @@ function selectInPlaceVictims(liveFiles, cfg) {
  * Do the victim files hold a committed gateway fallback row that the
  * dataset's settle hook can upgrade RIGHT NOW? A cheap `attributes` scan
  * finds candidate files; only those get a full read, and their fallback
- * rows are offered to the settle hook in memory. Following
- * {@link resettleFallbackRows}' convention, an upgraded row comes back as
- * a new object; a hook that returns every row unchanged has no twin to
- * collapse, so the caller merges in place and the rows survive verbatim.
+ * rows are offered to the settle hook in memory. A hook that returns a new
+ * object did something worth a rewrite; one that returns every row
+ * unchanged has nothing to settle, so the caller merges in place and the
+ * rows survive verbatim. Routing, not drop authority: a fresh object that
+ * is only a relink costs one whole-generation rewrite, and
+ * {@link resettleFallbackRows} still keeps the row.
  * Nothing here is committed: the hook's real run happens inside the
  * whole-generation rewrite this answer routes to.
  *
@@ -2257,11 +2152,16 @@ async function resettleFallbackRows(fallbackRows, settle, emittedPartIds) {
   const survivors = []
   for (let i = 0; i < upgraded.length; i++) {
     const row = upgraded[i]
-    const wasUpgraded = row !== fallbackRows[i]
+    const committed = fallbackRows[i]
     const key = rowPartId(row)
     // Only an UPGRADED row may collapse: its native part_id now matches a
     // twin already emitted (or an earlier survivor in this buffer). A row
-    // whose identity is unchanged is never dropped.
+    // whose identity is unchanged is never dropped, and identity here is the
+    // part identity, not the object: the settle pass hands back a fresh
+    // object for work that leaves identity alone (a relinked predecessor, a
+    // late-resolved cwd, a spawned_by stamp), and such a row has no native
+    // twin to collapse onto. The object compare is a cheap first cut only.
+    const wasUpgraded = row !== committed && key !== rowPartId(committed)
     if (wasUpgraded && key !== undefined && emittedPartIds.has(key)) continue
     if (key !== undefined) emittedPartIds.add(key)
     survivors.push(row)
@@ -2738,7 +2638,7 @@ async function cleanRetiredEpochs(cacheRoot) {
   } catch {
     return
   }
-  await walkForRetired(root)
+  await walkForRetired(root, cacheRoot)
 }
 
 /**
@@ -2760,8 +2660,9 @@ async function cleanRetiredEpochs(cacheRoot) {
  * compaction's freshly created (not-yet-committed) dir safe.
  *
  * @param {string} dir
+ * @param {string} cacheRoot
  */
-async function walkForRetired(dir) {
+async function walkForRetired(dir, cacheRoot) {
   /** @type {Dirent[]} */
   let entries
   try {
@@ -2775,6 +2676,11 @@ async function walkForRetired(dir) {
   // real one. The orphan branch below only runs when liveDirName is known.
   const cursor = tryReadCursorSync(dir)
   const liveDirName = cursor ? liveGenerationDir(cursor) : null
+  // A corrupt journal fails this partition closed without stopping siblings.
+  let cleanup
+  if (path.resolve(dir) !== path.resolve(datasetsRoot(cacheRoot))) {
+    try { cleanup = await readCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, dir)) } catch { return }
+  }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
@@ -2783,6 +2689,46 @@ async function walkForRetired(dir) {
       if (entry.name === liveDirName) continue
 
       const retiredMarker = path.join(full, '.retired')
+      if (cleanup?.generations.includes(entry.name)) {
+        // Purge retirement never falls through to the shorter orphan grace.
+        // Missing/corrupt cursors, pins and unreadable metadata block removal.
+        if (!liveDirName || Date.now() - cleanup.requestedAt < CACHE_PURGE_GRACE_MS) continue
+        try {
+          await withPartitionMutationLock(dir, async () => {
+            const latestCursor = tryReadCursorSync(dir)
+            const latestJob = await readCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, dir))
+            if (!latestCursor || liveGenerationDir(latestCursor) === entry.name || !latestJob ||
+              Date.now() - latestJob.requestedAt < CACHE_PURGE_GRACE_MS) return
+            let retiredAt
+            try { retiredAt = Date.parse(await fsPromises.readFile(retiredMarker, 'utf8')) } catch (error) {
+              if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
+              if (await isUncommittedCacheGeneration(full)) {
+                // Never published: no reader opened it, and the lock held
+                // here excludes its writer, so its last write is its mtime.
+                retiredAt = (await fsPromises.stat(full)).mtimeMs
+              } else {
+                // Published, but a crash between the cursor swap and the
+                // marker write (see `compactGeneration`) lost the retirement
+                // time. The directory's own mtime predates the swap by an
+                // unbounded amount, and the cursor is rewritten by every
+                // append, so neither bounds it. Record now as the retirement
+                // instead: an upper bound by construction that later appends
+                // cannot move, so the grace runs from here on the next ticks.
+                await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
+                return
+              }
+            }
+            if (!Number.isFinite(retiredAt) || Date.now() - retiredAt < CACHE_PURGE_GRACE_MS) return
+            if (!await isUncommittedCacheGeneration(full)) {
+              const { resolver, lister } = await createLocalIcebergIO()
+              const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(full), resolver, lister })
+              assertUnpinnedCleanup(metadata)
+            }
+            await fsPromises.rm(full, { recursive: true, force: true })
+          })
+        } catch { /* Retain the journal and directory for the next tick. */ }
+        continue
+      }
       let removed = false
       try {
         const content = await fsPromises.readFile(retiredMarker, 'utf8')
@@ -2808,8 +2754,20 @@ async function walkForRetired(dir) {
         }
       }
     } else {
-      await walkForRetired(full)
+      await walkForRetired(full, cacheRoot)
     }
+  }
+
+  // A journal none of whose generations are still here is finished work, so
+  // `.purge-cleanup` tracks outstanding cleanups rather than every partition
+  // ever purged. The gate reads the listing already in hand: an unfinished
+  // journal costs no extra syscall, and because that listing predates this
+  // pass's removals, the tick that reclaims the last generation still leaves
+  // the journal for a status check to certify against.
+  // @ref LLP 0417#cache-reclamation [implements]: a finished journal is dropped one sweep after its last generation goes
+  if (cleanup && !entries.some(entry => cleanup.generations.includes(entry.name))) {
+    try { await withPartitionMutationLock(dir, () => finishCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, dir))) }
+    catch { /* A busy partition or a failed unlink retries on the next tick. */ }
   }
 }
 
@@ -2859,41 +2817,6 @@ function countDataFiles(tableDir) {
       .length
   } catch {
     return 0
-  }
-}
-
-/**
- * How many of the table's data files have a grep sidecar beside them, and
- * how many could. A pure directory scan (no metadata load), matching the
- * cost profile of the other status counters. The pairing rule is not
- * restated here: `sidecarPathFor` owns the naming contract the build pass
- * publishes under and the grep service probes, so a second copy of it would
- * let this counter drift into reporting coverage that does not exist.
- *
- * The denominator is measured here rather than taken from `countDataFiles`,
- * which counts position-delete files too (icebird writes them into the same
- * `data/` directory as `<uuid>-deletes.parquet`). No sidecar is ever built
- * beside a delete file, so borrowing that count would make any partition
- * purged since its last compaction report permanently incomplete coverage,
- * and advise a compaction that cannot close the gap.
- *
- * @param {string} tableDir
- * @returns {{ indexed: number, indexable: number }}
- */
-function countIndexCoverage(tableDir) {
-  const dataDir = path.join(tableDir, 'data')
-  const coverage = { indexed: 0, indexable: 0 }
-  try {
-    const names = new Set(fs.readdirSync(dataDir))
-    for (const name of names) {
-      if (!name.endsWith('.parquet')) continue
-      if (name.endsWith('.index.parquet') || name.endsWith('-deletes.parquet')) continue
-      coverage.indexable += 1
-      if (names.has(sidecarPathFor(name))) coverage.indexed += 1
-    }
-    return coverage
-  } catch {
-    return { indexed: 0, indexable: 0 }
   }
 }
 

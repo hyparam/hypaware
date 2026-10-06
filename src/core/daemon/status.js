@@ -10,8 +10,9 @@ import { readConfigControlStatus, resolveCentralLayerPath } from '../config/appl
 import { readClientActionStatus } from '../config/action_reconciler.js'
 import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../config/client_detach_disk.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
-import { readAttachPolicy } from '../config/attach_policy.js'
+import { readAttachPolicy, readCodexCaptureMode } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
+import { isEntryRecording } from '../config/client_recording.js'
 import {
   isOtlpHeadersOverride,
   otlpOverrideSignal,
@@ -22,13 +23,16 @@ import { discoverSpoolTables, QUERY_FLUSH_FAILURE_COOLDOWN_MS, readFlushFailure 
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
-import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { discoverInstalledPlugins, unloadableInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
+import { centralLayerUnreadable } from '../remote/gateway_seed.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
-import { isEphemeralBinPath } from '../cli/global_install.js'
+import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
@@ -44,7 +48,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -72,6 +76,7 @@ import {
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
@@ -500,13 +505,9 @@ const MAX_RECENT_ENTRYPOINTS = 32
  * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: hyp status answers from status.json, with no dataset registry and no cache read
  */
 export function recentEntrypointsFromSources(sources) {
-  const list = Array.isArray(sources) ? sources : []
-  const source =
-    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
-    list.find((s) => s && s.name === 'ai-gateway')
-  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
-  if (!rawDetails) return []
-  const raw = /** @type {Record<string, unknown>} */ (rawDetails).recent_entrypoints
+  const details = gatewaySourceRawDetails(sources)
+  if (!details) return []
+  const raw = details.recent_entrypoints
   if (!Array.isArray(raw)) return []
   /** @type {RecentEntrypoint[]} */
   const out = []
@@ -705,8 +706,10 @@ export function maintenanceSkipsFromStatus(status) {
   const rawReasons = isPlainObject(raw.reasons) ? raw.reasons : {}
   /** @type {Record<MaintenanceSkipReason, number>} */
   const reasons = { compaction_ineffective: 0, compaction_attempt_failed: 0 }
+  let reasonsTotal = 0
   for (const reason of MAINTENANCE_SKIP_REASONS) {
     reasons[reason] = nonNegativeInt(rawReasons[reason]) ?? 0
+    reasonsTotal += reasons[reason]
   }
 
   /** @type {MaintenanceSkippedPartition[]} */
@@ -734,19 +737,20 @@ export function maintenanceSkipsFromStatus(status) {
     })
   }
 
-  const recordedTotal = nonNegativeInt(raw.skippedTotal)
-    ?? MAINTENANCE_SKIP_REASONS.reduce((sum, reason) => sum + reasons[reason], 0)
+  // Floored at both the capped list and the reasons it reports: a total below
+  // either renders a sentence no tick could produce, "2 partitions" above
+  // three lines of them, or "0 partitions fragmented (2
+  // compaction_attempt_failed)" (issue #2360). A snapshot this build wrote
+  // has the total at exactly the reason sum, so both floors are no-ops there.
+  const skippedTotal = Math.max(nonNegativeInt(raw.skippedTotal) ?? 0, reasonsTotal, partitions.length)
   return {
     tickAt,
-    // Floored at the skipped total (and the named list, which the total
-    // itself is already floored at below): "visited" can never be smaller
-    // than "skipped", or the render says "5 of 0 partitions" for a snapshot
-    // no tick could have produced. A file this build did not write can claim
+    // Floored at the skipped total: "visited" can never be smaller than
+    // "skipped", or the render says "5 of 0 partitions" for a snapshot no
+    // tick could have produced. A file this build did not write can claim
     // whatever it wants here, so the floor is enforced rather than trusted.
-    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, recordedTotal, partitions.length),
-    // The list is capped, so the count leads; but a count smaller than the
-    // list would render "2 partitions" above three lines of them.
-    skippedTotal: Math.max(recordedTotal, partitions.length),
+    partitionsVisited: Math.max(nonNegativeInt(raw.partitionsVisited) ?? 0, skippedTotal),
+    skippedTotal,
     reasons,
     partitions,
   }
@@ -1056,6 +1060,20 @@ export function daemonHeartbeatAgeMs(status, nowMs) {
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
+ * Whether an otherwise-probe-declaring client writes no marker in its current
+ * configuration, so its attach state is "n/a" rather than "not attached".
+ * Codex is the only such client: `capture_mode: "gateway"` writes the managed
+ * provider block, and the default `transcript` mode removes it.
+ *
+ * @param {string} clientName
+ * @param {HypAwareV2Config | null | undefined} config
+ * @returns {boolean}
+ */
+function attachWritesNoMarker(clientName, config) {
+  return clientName === 'codex' && readCodexCaptureMode(config?.plugins) === 'transcript'
+}
+
+/**
  * Collect everything `hyp status` shows. Reads config from disk,
  * probes daemon install + runtime state, walks the kernel runtime
  * for source/sink contributions when available, and probes client
@@ -1103,6 +1121,12 @@ export async function collectHypAwareStatus(opts = {}) {
     discovered: manifests.bundled,
     installed: manifests.installed,
   })
+  // The second question the catalog cannot answer: which config entries name a
+  // plugin this machine has installed but whose manifest the kernel rejected.
+  // They are absent from the catalog exactly as a typo is, and only this tells
+  // the validator which of the two it is looking at (issue #1936).
+  const unloadableInstalled = unloadableInstalledPlugins(manifests.installed)
+  const unloadablePlugins = new Set(unloadableInstalled.keys())
 
   // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
@@ -1110,10 +1134,18 @@ export async function collectHypAwareStatus(opts = {}) {
     local: localConfig,
     validate: (cfg) => collectConfigErrors(cfg, {
       ...(catalog ? { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets } : {}),
+      unloadablePlugins,
     }),
   })
   const config = (centralConfig || localConfig) ? merged.effective : null
   const centralPluginNames = new Set((centralConfig?.plugins ?? []).map((p) => p.name))
+  // A second fact about the same names, not a filter over them:
+  // `mergeConfigLayers` drops a colliding local entry by name whatever its
+  // enablement, so narrowing `centralPluginNames` would make status disagree
+  // with the merge it reports.
+  const centralDisabledPluginNames = new Set(
+    (centralConfig?.plugins ?? []).filter((p) => p.enabled === false).map((p) => p.name)
+  )
   const centralSinkNames = new Set(Object.keys(centralConfig?.sinks ?? {}))
   /** @type {HypAwareStatusReport['layered']} */
   const layered = hasCentral
@@ -1180,6 +1212,17 @@ export async function collectHypAwareStatus(opts = {}) {
   // `config_unreadable` / `config_local_unreadable` own the run.
   const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
 
+  // Same fact, central layer: a central file the host could not parse is not
+  // the operator removing anything either, so it must not be read as intent
+  // any more than a local parse failure is.
+  const centralLayerParseFailed = !!centralLoaded && !centralLoaded.ok && centralLoaded.errorKind !== 'config_missing'
+
+  // Whether the central layer can be read at all, widest definition: every
+  // load failure counts, `config_missing` included, and a null `centralLoaded`
+  // is re-checked against the control directory instead of read as an
+  // absence. See `centralLayerUnreadable`'s own doc for why.
+  const centralUnreadable = centralLayerUnreadable({ stateDir: stateRoot, centralLoaded })
+
   // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
   // concern); a local entry that lost the merge shows in `layered.drops`,
@@ -1191,6 +1234,7 @@ export async function collectHypAwareStatus(opts = {}) {
       const result = await validateConfig(config, {
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
+        unloadablePlugins,
       })
       validationErrors = result.errors
     } catch (err) {
@@ -1213,7 +1257,9 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'config_missing',
-        message: `no config found - neither a central layer nor ${configPath}`,
+        message: centralUnreadable === null
+          ? `no config found - neither a central layer nor ${configPath}`
+          : `no config found - ${configPath}`,
         repair: ['hyp setup', 'hyp setup --from-file <config.json>', 'hyp join <url> <token>'],
       })
     } else {
@@ -1235,15 +1281,57 @@ export async function collectHypAwareStatus(opts = {}) {
         repair: ['hyp setup --from-file <config.json> --force'],
       })
     }
+    // A per-entry repair wins over the by-kind one where the entry has
+    // something the kind cannot know - the install directory of a plugin whose
+    // manifest would not load.
+    const pluginRepairs = pluginRepairsByPointer(config, unloadableInstalled)
     for (const err of validationErrors) {
       diagnostics.push({
         severity: 'error',
         kind: 'config_invalid',
         message: `[${err.errorKind}] ${err.pointer || '<root>'}: ${err.message}`,
-        repair: repairForConfigError(err.errorKind),
+        repair: pluginRepairs.get(err.pointer) ?? repairForConfigError(err.errorKind),
         pointer: err.pointer,
       })
     }
+  }
+
+  // The same fact for the other layer, and why it needs a line of its own:
+  // `centralConfig` is null both for a layer that is absent and for one that
+  // is there and will not parse, so without this the report asserts
+  // `layered: null` - no central layer at all - and nothing names the file
+  // (issue #2423). An unreadable layer is not an absent one - the same
+  // distinction LLP 0226 #unreadable-is-not-absent draws for a client asset -
+  // and `hyp remote login` is what writes this very layer, so a host that
+  // cannot read it has a layer all the same. `centralLayerUnreadable` covers
+  // every way that can happen, not only a file that fails to parse: an
+  // active-slot pointer naming a slot file that is gone, an active pointer
+  // replaced by something other than a symlink, or a control directory this
+  // process cannot even list.
+  //
+  // A warning on the local layer's precedent: the host runs on whichever layer
+  // did load, so this is loud without being an outage signal, and staying out
+  // of `degradingKinds` leaves `overall` as it was. Whether an unreadable org
+  // layer *should* degrade the verdict is a separate question.
+  //
+  // `hyp remote login` is deliberately not a repair: its D4 gate reads the
+  // same `centralLayerUnreadable` predicate and refuses while the layer is
+  // unreadable, so it would be advice that cannot run on the one host that
+  // sees this line. `hyp leave` can run here on purpose (#623), which is why
+  // it leads the re-enrollment route, and the permission line covers the
+  // control directory this process could not list, where `hyp join`'s own
+  // seed write would fail too.
+  if (centralUnreadable) {
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'config_central_unreadable',
+      message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
+      repair: [
+        'hyp join <url> <token>',
+        'hyp leave, then hyp remote login',
+        'check the ownership and permissions of the config-control directory',
+      ],
+    })
   }
 
   // An installed plugin in a bundled name is code that never runs: boot
@@ -1257,6 +1345,26 @@ export async function collectHypAwareStatus(opts = {}) {
       kind: 'installed_plugin_shadowed',
       message: `installed plugin ${name} is shadowed by the bundled copy of the same name; the installed code never runs`,
       repair: [`hyp plugin remove ${name}`],
+    })
+  }
+
+  // A lock entry the loader cannot use at all: hand-edited to drop its
+  // `install_dir`, or no longer an object. Boot skips it, so this is the only
+  // surface that can name it (issue #1958). Read off the lock like the shadow
+  // above, so it holds with no daemon running, and an error rather than a
+  // warning for the reason the sibling manifest diagnostic is one: whatever
+  // that entry installed is capturing nothing. The lock path rides in the
+  // message because the repair cannot reach a non-object entry, which `hyp
+  // plugin remove` reads as not installed; for the reported shape (an object
+  // missing `install_dir`) `removePlugin` falls back to the conventional
+  // install directory and clears the row.
+  for (const name of manifests.installed.malformed) {
+    const label = sanitizeLabel(name, MAX_ACTIVATION_MESSAGE_CHARS) ?? '<unnamed>'
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_lock_entry_invalid',
+      message: `plugin-lock.json entry '${label}' has no usable install_dir, so nothing it installed is running: ${pluginLockPath(stateRoot)}`,
+      repair: [`hyp plugin remove ${label}`],
     })
   }
 
@@ -1415,7 +1523,33 @@ export async function collectHypAwareStatus(opts = {}) {
     // means "not loaded, or could not be asked". Only a probe that answered can
     // support the claim below, and a live process alongside an unloaded unit is
     // capturing anyway: both of those keep the note this has always been.
-    const capturingNothing = daemon.error === undefined && !daemon.running
+    //
+    // A stop the operator asked for lands on these same facts on macOS, and
+    // only there: `hyp daemon stop` boots the LaunchAgent out, because
+    // launchd's KeepAlive respawns a job that is merely killed, and the plist
+    // stays on disk. `systemctl --user stop` leaves its unit loaded, so Linux
+    // reaches the still-loaded block below instead. What tells a deliberate
+    // stop from a load that failed is the signal that block already uses: the
+    // daemon's own last snapshot. `shutdown()` persists `state: 'stopped'` as
+    // its final write whatever asked for the stop, and a process that died
+    // cannot. Read as a record of how the run ended, not as a claim about now.
+    //
+    // 0383 settled that signal for the shape where the probe reports the unit
+    // *loaded*, which is the block below. Reusing it here, where the probe
+    // reports the opposite, is an extension of it rather than an application:
+    // it is the borrowed signal, but a wider claim, and it carries a cost 0383
+    // never had to weigh (a `stopped` snapshot is unbounded in age, and a clean
+    // shutdown writes one, so a LaunchAgent that fails to load after a reboot
+    // is warned about rather than raised). That trade is recorded in the 0300
+    // amendment, which is where this PR's stop design lives and is still Draft.
+    // @ref LLP 0383#the-signal-is-the-daemons-last-state [constrained-by]: the crash-versus-stopped signal this borrows, settled there for the loaded shape
+    // @ref LLP 0300#posix-keeps-signals [implements]: the stop that creates this shape on macOS, and the accepted cost of reading it this way
+    // Platform-gated, because the shape is only ambiguous on one of them.
+    // On Linux a stop never lands here at all, so a snapshot that ends in a
+    // stop is no evidence about *this* pair of facts and reading it as such
+    // would mask the failed load (#1387) the block exists for.
+    const stoppedOnPurpose = platform === 'darwin' && daemon.state === 'stopped'
+    const capturingNothing = daemon.error === undefined && !daemon.running && !stoppedOnPurpose
     diagnostics.push({
       severity: capturingNothing ? 'error' : 'warning',
       kind: 'daemon_loaded_no_pid',
@@ -1432,16 +1566,22 @@ export async function collectHypAwareStatus(opts = {}) {
       // `systemctl --user restart` / `launchctl kickstart`, and exits 1. Only a
       // re-install runs the load step that is missing, which is why
       // `daemon_binary_missing` already points there.
-      repair: [capturingNothing ? 'hyp daemon install' : 'hyp daemon restart'],
+      // A service the operator stopped needs neither: `hyp daemon start`
+      // bootstraps the preserved plist back in and kickstarts it, which is
+      // the one step missing and the exact reverse of what stopped it.
+      repair: [capturingNothing ? 'hyp daemon install' : stoppedOnPurpose ? 'hyp daemon start' : 'hyp daemon restart'],
     })
   }
 
   // The complement of the block above, and the state the live facts alone
   // cannot read: the service manager still holds the unit and nothing runs
   // under it. `loaded` is a bootstrap fact on both platforms, independent of
-  // active/inactive, and `hyp daemon stop` rides the control file without ever
-  // calling the service manager, so a stop the operator asked for lands on
-  // exactly these three facts too (issue #1391).
+  // active/inactive, and a stop the operator asked for lands on exactly these
+  // three facts too (issue #1391) - by `systemctl --user stop`, which leaves
+  // its unit loaded, or by the control file for a daemon with no service
+  // behind it. (macOS is the exception in both directions: `hyp daemon stop`
+  // boots the LaunchAgent out, so a macOS stop lands in the block above, and
+  // this one is left describing a fault.)
   //
   // What tells them apart is the daemon's own last snapshot: `shutdown()`
   // persists `state: 'stopped'` as its final write whatever asked for the
@@ -1681,8 +1821,25 @@ export async function collectHypAwareStatus(opts = {}) {
         // The reason is the resolver's own and names what is missing, so the
         // repair is the config edit that supplies it or withdraws the request.
         // Only a restart re-resolves: the daemon reads `requires` at boot.
+        //
+        // Which layer can make either edit is the whole question, because the
+        // merge drops a local `plugins[]` entry whose name collides with a
+        // central one - whichever of the two names it is. Withdrawing the
+        // request edits the eliminated plugin's entry, so "remove '<name>'"
+        // is inert for a central-owned plugin (issue #1598); supplying the
+        // dependency edits the *dependency's* entry, so "enable what the
+        // reason names" is inert when that name is the central-owned one
+        // (issue #1826). A dependency named differently from the eliminated
+        // plugin cannot collide with *its* entry, which says nothing about a
+        // central entry of the dependency's own name.
         repair: [
-          `enable what the reason names, or remove '${name}', in ${configPath}`,
+          requiresUnsatisfiedConfigRepair({
+            plugin: name,
+            dependency: requiredPluginFromMessage(reason),
+            centralPluginNames,
+            centralDisabledPluginNames,
+            configPath,
+          }),
           'hyp daemon restart  # requires are resolved at boot',
         ],
       })
@@ -1695,14 +1852,70 @@ export async function collectHypAwareStatus(opts = {}) {
         + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
         + reason
         + runningTail,
-      // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
-      // plus the install lock, so the plugin that just failed is either missing
-      // from the output entirely (a bundled adapter, the likeliest subject) or
-      // sits under "Installed plugins" with nothing marking it as broken. The
-      // reason above is clamped to a sentence and the commonest real one is a
-      // module-resolution error longer than that, so the first repair is the
-      // record that kept it whole.
+      // Not `hyp plugin list`, which since issue #1570 does name a plugin that
+      // came up short - but for its own CLI boot: `ctx.failedPlugins` is that
+      // process's `unavailablePlugins`, while this diagnostic is raised only
+      // off a live daemon's snapshot. The two part company where it costs
+      // most: the daemon boots under launchd/systemd with its own
+      // environment, so a plugin that fails only there activates normally in
+      // this process, and the listing would print it active while this line
+      // says it failed. (A plugin the gateway's storage proxy defeats would
+      // diverge the same way, if one called a withheld method at activate.)
+      // That is consistent with `runPluginList` closing its own section by
+      // sending the operator back here rather than the reverse. What the
+      // listing supplies that this message does not is the version and which
+      // copy boot selected; what it never supplies is the reason, the thing
+      // the operator is missing. That reason is clamped to a sentence here
+      // and the commonest real one is a module-resolution error longer than
+      // that, so the first repair is the record that kept it whole. A
+      // listing would in any case be a read that changes nothing
+      // (LLP 0139#repair-must-be-runnable, as generalised by LLP 0195).
       repair: [activationLogGrep, 'hyp daemon restart'],
+    })
+  }
+
+  // ----- plugin directories whose manifest would not load (issue #1576) -----
+  // The third door into `unavailablePlugins`, and the one no surface could
+  // name: a manifest that is corrupt, unparseable, or fails schema validation
+  // leaves a directory that contributes nothing and has no plugin name, so the
+  // block above cannot carry it (its `name` is a plugin name and every reader
+  // treats it as one) and `hyp plugin list` deliberately will not invent one
+  // (issue #1570). Read off the snapshot on the same terms as every borrowed
+  // list here: only a live daemon's own file, and only entries that are
+  // objects (LLP 0164#status-reads-it-from-the-status-file).
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  const unloadableManifests = snapshotIsLive && Array.isArray(daemonStatusFile?.unloadableManifests)
+    ? daemonStatusFile.unloadableManifests.filter((entry) => !!entry && typeof entry === 'object')
+    : []
+  // One log file, not the pair `activationLogGrep` names: only the gateway
+  // process records this door, because the manifest walk runs before any
+  // plugin is selected and so sees the same set in both processes.
+  const manifestLogGrep = unloadableManifests.length === 0 ? ''
+    : `grep -s plugin_manifest_unloadable ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`
+  for (const entry of unloadableManifests) {
+    const rootDir = sanitizeLabel(entry.rootDir, MAX_ACTIVATION_MESSAGE_CHARS)
+    if (rootDir === undefined) continue
+    const reason = sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'
+    // An error, for the same reason the sibling above is one: whatever was in
+    // that directory is capturing nothing, and a machine that silently stopped
+    // capturing is the outage this surface exists to name.
+    //
+    // No "what is left of it" tail, unlike the sibling: that one has to read
+    // the claim back because a plugin can activate in one of the daemon's two
+    // processes and fail in the other. Here the kernel never got as far as a
+    // plugin in either process, so nothing from this directory can be running.
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_manifest_unloadable',
+      // The directory, never a name, and said as a directory: a manifest that
+      // did not parse has no plugin name, and there is no honest way to guess
+      // one from a path.
+      message: `plugin directory '${rootDir}' has no loadable manifest, so nothing in it is running: ${reason}`,
+      // The reason is clamped to a sentence above, so the first repair is the
+      // record that kept it whole - the same shape the activation diagnostic
+      // uses, and for the same reason (LLP 0139#repair-must-be-runnable). A
+      // restart is second because manifests are read once, at boot.
+      repair: [manifestLogGrep, 'hyp daemon restart  # manifests are read at boot'],
     })
   }
 
@@ -1723,7 +1936,13 @@ export async function collectHypAwareStatus(opts = {}) {
   // hourly walk, and `hyp status` reads no cache, so answering this any other
   // way would mean firing a second maintenance walk from a status command.
   const maintenance = maintenanceSkipsFromStatus(daemonStatusFile)
-  if (maintenance && maintenance.skippedTotal > 0) {
+  // A recorded failed attempt is tested directly rather than inferred from
+  // the difference between the counts: the snapshot's floor makes the
+  // difference agree, but the gate must not depend on that, or narrowing the
+  // floor would silently suppress a real failure.
+  // @ref LLP 0454#warning-policy [implements]: ineffective rewrites alone are verbose detail, not actionable failures
+  if (maintenance && (maintenance.reasons.compaction_attempt_failed > 0 ||
+    maintenance.skippedTotal > maintenance.reasons.compaction_ineffective)) {
     const one = maintenance.skippedTotal === 1
     const breakdown = describeMaintenanceSkipReasons(maintenance.reasons)
     // Warning, never an error: the daemon is running, capture works, and
@@ -1736,7 +1955,6 @@ export async function collectHypAwareStatus(opts = {}) {
       message: `cache maintenance is leaving ${maintenance.skippedTotal} partition${one ? '' : 's'} fragmented (${breakdown}), as of its tick at ${maintenance.tickAt}`,
       repair: [
         'hyp query maintain --dry-run',
-        'hyp query maintain --force',
       ],
     })
   }
@@ -1749,9 +1967,29 @@ export async function collectHypAwareStatus(opts = {}) {
   // detail on a running install.
   /** @type {Map<string, { plugin: string, kind: string }>} */
   const handleByInstance = new Map()
+  // Cleared by the status-file fallback below, the one branch whose rows no
+  // config entry and no live handle backs - but only when an empty
+  // configured sink set is the operator's own removal. An unreadable local
+  // or central config (`localConfigUnreadable`, `centralLayerParseFailed`) and
+  // a `sinks` entry the central layer merge dropped (`merged.drops`, reason
+  // `invalid_merge`) also leave `config.sinks` empty without the operator
+  // having removed anything, so none of these is read as intent here; reading
+  // any of them as intent would silently drop a live export-failure warning
+  // instead of fixing the over-warning issue #2361 set out to fix. A
+  // merge-dropped entry only speaks for the destination it names, so it is
+  // matched by key against the recovered rows below rather than treated as
+  // a global flag; an unreadable layer speaks for all of them, since nothing
+  // is known about which instances it named.
+  const sinkKeysDroppedByMerge = new Set(merged.drops.filter((d) => d.section === 'sinks').map((d) => d.key))
+  let sinksAreConfigured = true
   if (opts.runtime?.sinks) {
+    // The registry's key, not the handle's own `instanceName`: nothing on
+    // this path catches, so an owner's accessor on the name took `hyp status`
+    // down whole (issue #1976). `plugin` and `kind` below are the same kind
+    // of live property, still read off the handle, so that outage is narrowed
+    // here and not yet closed (issue #2059).
     for (const handle of opts.runtime.sinks.listHandles()) {
-      handleByInstance.set(handle.instanceName, { plugin: handle.plugin, kind: handle.kind })
+      handleByInstance.set(sinkInstanceName(handle), { plugin: handle.plugin, kind: handle.kind })
     }
   }
   if (config?.sinks) {
@@ -1782,8 +2020,23 @@ export async function collectHypAwareStatus(opts = {}) {
     // only that it read an object, so a `sinks` of `5` throws out of the
     // collector at the spread and a `sinks` of `"ab"` spreads into one blank
     // row per character. Same guard as the sources list above.
-    sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
-      .filter((s) => !!s && typeof s === 'object'))
+    //
+    // Shape is not configuration either: deleting the whole `sinks` key is the
+    // one removal that lands here instead of the config branch, so reading
+    // these rows as configured asks an operator to repair a destination they
+    // deleted (issue #2361). But an unreadable local or central config, or a
+    // merge-dropped `sinks` entry, land here too without being a removal, so
+    // only clear the gate when none of those explains the empty `config.sinks`.
+    // The merge-drop half is scoped to the recovered rows it actually names:
+    // a dropped entry speaks only for the destination it named, not for every
+    // row this fallback recovers, so only a recovered instance whose key was
+    // dropped re-arms the gate. The unreadable-layer checks stay unscoped,
+    // since an unreadable layer leaves no record of which instances it named.
+    const recovered = (Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
+      .filter((s) => !!s && typeof s === 'object')
+    sinksAreConfigured = localConfigUnreadable || centralLayerParseFailed
+      || recovered.some((s) => sinkKeysDroppedByMerge.has(s.instance))
+    sinks.push(...recovered)
   }
 
   // ----- client attach -----
@@ -1870,9 +2123,18 @@ export async function collectHypAwareStatus(opts = {}) {
       // satisfies the one check that does look. A repair line that sends the
       // user to a command which affirms the broken config is worse than no
       // repair line, so point at the file and the two required keys instead.
+      //
+      // Which file is the question the eliminated-plugin repair above answers
+      // (issue #1598): upstreams are the gateway plugin's own config slice, so
+      // they live in whichever layer owns its `plugins[]` entry. When that is
+      // the central layer the local entry carrying them is dropped at merge,
+      // and an edit to it is exactly the inert repair this @ref forbids.
       // @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so the inert validate command gives way to the edit that fixes it
       repair: [
-        `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
+        centralPluginNames.has(GATEWAY_PLUGIN_NAME)
+          ? `add the missing 'name' / 'base_url' to each upstream in the central config's '${GATEWAY_PLUGIN_NAME}' entry`
+            + ` - a local entry for it is dropped at merge, so editing ${configPath} changes nothing`
+          : `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
         `hyp daemon restart  # the daemon reads the file only at boot`,
       ],
     })
@@ -1884,6 +2146,12 @@ export async function collectHypAwareStatus(opts = {}) {
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
+    // One state per client: recording, or not. A detached client
+    // (`recording: false`) is a choice, not a fault, so nothing below warns
+    // about it; only a client that should be recording and whose wiring is
+    // gone does.
+    // @ref LLP 0466#status [implements]: status reads the same switch the runner and reconciler read
+    const recording = configured && isEntryRecording(config?.plugins?.find((entry) => entry.name === descriptor.plugin))
     // Attach state is only a real state for a client that declares an
     // `attach_probe`. Without one there is no settings-file write to read back,
     // `action_attach.desired()` skips the descriptor for exactly that reason
@@ -1896,15 +2164,28 @@ export async function collectHypAwareStatus(opts = {}) {
     // `client_attach_missing` diagnostic just below now follows the same gate:
     // LLP 0358 made Desktop's probe-less transcript lane complete without any
     // setup marker.
+    //
+    // Codex reaches the same gate by a second route: its probe reads the
+    // managed provider block, and in the default `transcript` mode attach
+    // *removes* that block and writes no marker. The probe is declared but
+    // can never be satisfied, so without this the warning below would stand
+    // forever with a repair that does nothing.
+    //
+    // The probe still runs, though. It is the only thing that finds a marker
+    // a previous mode left behind, which is what
+    // `client_attached_not_configured` reads: suppressing the read would
+    // strand that marker silently. Only the *verdict* narrows.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less client is unattachable, not unattached
-    const attachable = !!descriptor.attachProbe
-    const probe = attachable
+    // @ref LLP 0429#status [implements]: a probe whose marker this capture mode can never write is n/a, not missing
+    const probe = descriptor.attachProbe
       ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
       : { attached: false }
+    const attachable = !!descriptor.attachProbe && !attachWritesNoMarker(clientName, config)
     clients.push({
       name: clientName,
       plugin: descriptor.plugin,
       configured,
+      recording,
       attachable,
       attached: probe.attached,
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
@@ -1922,7 +2203,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // attach-missing warning would point at work capture does not need.
     // @ref LLP 0358#transcript-primary [implements]: Desktop capture health is
     //   independent of the optional managed-profile experiment
-    if (configured && attachable && !probe.attached) {
+    if (recording && attachable && !probe.attached) {
       // The repair is `hyp client attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
       // declares `contributes.client` for probe/status plumbing but no
@@ -2148,7 +2429,7 @@ export async function collectHypAwareStatus(opts = {}) {
           ],
         })
       }
-      const lastTranscriptActivityAt =
+      let lastTranscriptActivityAt =
         (await probeClientActivityFromDescriptor({ descriptor, homeDir, env })) ?? null
       const attachedAt = probe.attachedAt ?? null
       // Live daemon only, deliberately. A dead daemon's snapshot still carries
@@ -2158,12 +2439,54 @@ export async function collectHypAwareStatus(opts = {}) {
       const listenerStartedAt = daemon.running && typeof listenerDetails?.listener_started_at === 'string'
         ? listenerDetails.listener_started_at
         : null
-      const verdict = assessCaptureHealth({
+      let verdict = assessCaptureHealth({
         lastEventAt,
         lastTranscriptActivityAt,
         attachedAt,
         listenerStartedAt,
       })
+      /** @type {'ok' | 'gap' | 'unknown'} */
+      let state = verdict.state
+      // The mtime pass above is a suspicion, not the finding: a transcript is
+      // rewritten for plenty of reasons that produce no conversation and so
+      // owe no telemetry, and mtime cannot tell those from a turn that went
+      // uncaptured. The bounded read that can is spent only here, on the path
+      // that would otherwise print "not being captured" and send the user off
+      // to restart their daemon.
+      // @ref LLP 0257#status-and-health [implements]: S17 compares the last event against last *transcript activity*; mtime only nominates a candidate, transcript content confirms it
+      if (verdict.state === 'gap') {
+        const baselineMs = captureBaselineMs(lastEventAt, attachedAt, listenerStartedAt)
+        const confirmed = await confirmClientActivityFromDescriptor({
+          descriptor,
+          homeDir,
+          env,
+          sinceMs: baselineMs ?? 0,
+        })
+        // A bounded read that ran out of budget knows neither way, and this
+        // collector does not get to pick the convenient one: `unknown` is the
+        // third answer, so an unconfirmed suspicion neither accuses the
+        // capture path nor certifies it. A confirmed turn still reads `gap`
+        // even when the read was partial - the finding is positive, and only
+        // its severity could be understated by a newer turn gone unseen.
+        if (confirmed.activityAt !== undefined) {
+          lastTranscriptActivityAt = confirmed.activityAt
+          verdict = assessCaptureHealth({
+            lastEventAt,
+            lastTranscriptActivityAt,
+            attachedAt,
+            listenerStartedAt,
+          })
+          state = verdict.state === 'gap' ? 'gap' : confirmed.certain ? 'ok' : 'unknown'
+        } else if (confirmed.certain) {
+          // Every post-baseline write was read, and none of it was a turn.
+          verdict = { state: 'ok', gapMs: 0 }
+          state = 'ok'
+        } else {
+          // `gapMs` stays the filesystem's suspicion, which is all it ever
+          // was: `state` is what says the suspicion went unconfirmed.
+          state = 'unknown'
+        }
+      }
       captureHealth.push({
         client: clientName,
         plugin: descriptor.plugin,
@@ -2173,9 +2496,9 @@ export async function collectHypAwareStatus(opts = {}) {
         attachedAt,
         listenerStartedAt,
         gapMs: verdict.gapMs,
-        state: verdict.state,
+        state,
       })
-      if (verdict.state === 'gap' && verdict.severity !== undefined) {
+      if (state === 'gap' && verdict.severity !== undefined) {
         // Escalates to a degrading `error` past CAPTURE_GAP_ERROR_MS, unlike
         // the attach diagnostics above: a not-yet-attached install is merely
         // unfinished, but an attached one silently losing sessions is the
@@ -2438,17 +2761,24 @@ export async function collectHypAwareStatus(opts = {}) {
   // structurally zero on an ordinary machine (issue #1182), which is the one
   // answer a monitoring field must never give when it has not looked.
   // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
-  const recentErrors = await countRecentErrors(stateRoot)
+  // Not simply the configured set: an unreadable layer, or a recovered row
+  // whose `sinks` key the central merge dropped, leaves the gate armed over
+  // the status-file fallback's recovered rows.
+  // @ref LLP 0453#warning-rule [implements]: a destination outside the configured set does not warn, however the removal was spelled
+  const recentErrors = await countRecentErrors(
+    stateRoot,
+    sinksAreConfigured ? sinks : [],
+    daemonStatusFile?.sinks,
+  )
   const recentErrorCount = recentErrors.total
-  if (recentErrorCount > 0) {
+  diagnostics.push(...recentErrors.sinkDiagnostics)
+  if (recentErrors.warningCount > 0) {
     diagnostics.push({
       severity: 'warning',
       kind: 'recent_errors',
-      // The breakdown is the pointer: "in the daemon log" and "failed sink
-      // export batches" are different places to look and different repairs,
-      // and a bare total sends the operator to the wrong one. It is prose
-      // only - no new report field is minted for it (LLP 0349#one-number).
-      message: `${recentErrorCount} error${recentErrorCount === 1 ? '' : 's'} recorded in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
+      // Export attempts have their own recovery-aware diagnostic. The history
+      // count still includes them, but cannot make them actionable again.
+      message: `${recentErrors.warningCount} error${recentErrors.warningCount === 1 ? '' : 's'} needing attention in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
       repair: ['hyp daemon restart'],
     })
   }
@@ -2740,11 +3070,26 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     // will ever appear and `pending` would be permanent (#544). Same shape as
     // the `readAttachPolicy` sharing above: status must not derive a target the
     // reconciler would never name.
+    //
+    // Codex does NOT reach this gate, even in transcript mode. The marker
+    // `attachWritesNoMarker` speaks about is the client's own settings block;
+    // the marker THIS surface reads is the reconciler's action record, and a
+    // transcript attach earns one: `desired()` gates only on `attachProbe`
+    // (which codex declares), `perform()` removes the managed provider block
+    // and returns `status: ok`, so the `done` marker lands. `pending` is
+    // transient here, exactly as for every other client. Calling it `n/a`
+    // would report "the reconciler is a no-op" over precisely the migration
+    // this release performs, recreating - inverted - the status/reconciler
+    // disagreement the paragraph above exists to forbid.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less attach target is n/a, never pending
     const inert = !descriptor.attachProbe
     const raw = entry.config?.attach
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
-    if (hasBlock) {
+    // A detached client is one the reconciler skips (LLP 0466), so its attach
+    // action is suppressed, never pending.
+    if (!isEntryRecording(entry)) {
+      declaredAttach.set(clientName, { onJoin: false, inert })
+    } else if (hasBlock) {
       const onJoin = readAttachPolicy(entry).onJoin !== false
       declaredAttach.set(clientName, { onJoin, inert })
     } else if (hasCentral) {
@@ -3025,17 +3370,20 @@ function markerHasRetiredHookField(markerObj) {
  * and this marker is current in every other key (port, mode, schema token,
  * asset set), so the repair short-circuits and changes nothing (issue #1607).
  *
- * The predicate is `isEphemeralBinPath`, the same one the adapter decides
- * with when it bakes the command. Anything narrower here reopens #1607 one
- * tree over: the adapter warns that a project-local hook command will stop
- * capturing and names a re-attach as the repair, and a marker current in every
- * other key short-circuits that re-attach, so the operator does as they are
- * told and nothing changes. A recorded path that merely no longer resolves is
- * still left alone: a CLI moves for ordinary reasons (a node version switch, a
- * prefix change) and "gone from disk" cannot tell that apart from a deleted
- * tree, whereas both of these are package-manager-owned and
- * deletion-scheduled by construction, whether or not they are still there
- * today.
+ * The predicate is `isEphemeralRecordedBinPath`, the recorded-path form of the
+ * one the adapter decides with when it bakes the command. Anything narrower
+ * here reopens #1607 one tree over: the adapter warns that a project-local hook
+ * command will stop capturing and names a re-attach as the repair, and a marker
+ * current in every other key short-circuits that re-attach, so the operator
+ * does as they are told and nothing changes. The recorded form adds the end
+ * state of that same drift: a dependency tree deleted outright still has to
+ * read stale, or the one machine whose hook is certainly dead is the one the
+ * repair cannot reach (LLP 0434, issue #1624). A recorded path that merely no
+ * longer resolves is still left alone: a CLI moves for ordinary reasons (a node
+ * version switch, a prefix change) and "gone from disk" cannot tell that apart
+ * from a deletion, so what carries the verdict is the tree, which is
+ * package-manager-owned and deletion-scheduled by construction whether or not
+ * it is still there today.
  *
  * With no CLI installed anywhere the re-attach writes the same path again,
  * because it is the only entrypoint there is, and takes the adapter's existing
@@ -3061,7 +3409,7 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
   for (const entry of entries) {
     if (!isPlainObject(entry)) continue
     const bin = hookCommandBin(entry.command)
-    // Absolute, or no claim. `isEphemeralBinPath` resolves whatever it is
+    // Absolute, or no claim. The predicate below resolves whatever it is
     // handed, so a relative token - a hand-edited `node hypaware.js ...`, an
     // empty quoted command - would be judged against the directory `hyp`
     // happened to run in, and one marker would read stale from inside a
@@ -3072,7 +3420,7 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
     asked ??= new Set()
     if (asked.has(bin)) continue
     asked.add(bin)
-    if (isEphemeralBinPath(bin, env)) return true
+    if (isEphemeralRecordedBinPath(bin, env)) return true
   }
   return false
 }
@@ -3263,46 +3611,299 @@ export async function probeClientActivityFromDescriptor({ descriptor, homeDir, e
   } catch {
     return undefined
   }
-  const newest = await newestMtimeMs(dirPath, probe.file_suffix, MAX_ACTIVITY_PROBE_DEPTH)
+  /** @type {number | undefined} */
+  let newest
+  await eachActivityFile(dirPath, probe.file_suffix, MAX_ACTIVITY_PROBE_DEPTH, (_full, mtimeMs) => {
+    if (newest === undefined || mtimeMs > newest) newest = mtimeMs
+  })
   return newest === undefined ? undefined : new Date(newest).toISOString()
 }
 
 /**
- * Newest mtime (epoch ms) of any matching regular file under `dir`, walked
- * to `depth` levels. Symlinks are not followed and every fs error skips the
+ * Walk the activity tree, handing every matching regular file's path and
+ * mtime to `visit`. Symlinks are not followed and every fs error skips the
  * entry: a probe that cannot read a corner of the tree still answers from
  * the rest of it.
+ *
+ * Returns whether the whole tree was actually walked. Everything skipped is
+ * still skipped, but the confirmation read may not call a tree it could not
+ * see healthy, so a skip that could have hidden a record has to be reported
+ * rather than swallowed: a directory that would not list, a file that would
+ * not stat, a symlink left unfollowed, a level past `depth`, an entry whose
+ * kind readdir did not report. Only two skips are not gaps in the walk, and
+ * both are named rather than left to fall through. A missing entry holds no
+ * records at all, and neither does a fifo, a socket, or a device node that
+ * happens to match the suffix. Missing is a steady-state answer, though, not
+ * one that survives the gap between this walk and the confirmation's: a file
+ * rotated away in between reads as covered.
  *
  * @param {string} dir
  * @param {string | undefined} suffix
  * @param {number} depth
- * @returns {Promise<number | undefined>}
+ * @param {(full: string, mtimeMs: number) => void} visit
+ * @returns {Promise<boolean>}
  */
-async function newestMtimeMs(dir, suffix, depth) {
+async function eachActivityFile(dir, suffix, depth, visit) {
   /** @type {Dirent[]} */
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })
-  } catch {
-    return undefined
+  } catch (err) {
+    return isMissingEntryError(err)
   }
-  /** @type {number | undefined} */
-  let newest
+  let complete = true
   for (const entry of entries) {
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
-      if (depth <= 1) continue
-      const nested = await newestMtimeMs(full, suffix, depth - 1)
-      if (nested !== undefined && (newest === undefined || nested > newest)) newest = nested
+      if (depth <= 1) {
+        complete = false
+        continue
+      }
+      if (!(await eachActivityFile(full, suffix, depth - 1, visit))) complete = false
     } else if (entry.isFile()) {
       if (suffix !== undefined && !entry.name.endsWith(suffix)) continue
       try {
         const stat = await fsp.stat(full)
-        if (newest === undefined || stat.mtimeMs > newest) newest = stat.mtimeMs
-      } catch { /* raced deletion or unreadable file: skip */ }
+        visit(full, stat.mtimeMs)
+      } catch (err) {
+        // Raced deletion or unreadable file: skip, but say so.
+        if (!isMissingEntryError(err)) complete = false
+      }
+    } else if (!holdsNoRecords(entry)) {
+      // Everything this walk did not classify and handle above. A symlink is
+      // deliberately not followed, but it can point at a whole tree of
+      // records, so an unfollowed one is a corner this did not look at, the
+      // same as a directory it could not list. So is an entry whose kind
+      // readdir never reported: `UV_DIRENT_UNKNOWN`, which libuv yields
+      // wherever the filesystem omits `d_type` (NFS in many configurations,
+      // XFS made with `ftype=0`, several FUSE filesystems). There every
+      // predicate above answers false, and a real transcript sitting in that
+      // subtree is invisible to this walk. The condition is written as the
+      // negative of the kinds that are genuinely covered, not as a list of
+      // the kinds that are not, so an entry nobody anticipated - a dirent
+      // kind added after this was written included - reports the tree
+      // unwalked instead of silently reading as fully covered.
+      complete = false
     }
   }
-  return newest
+  return complete
+}
+
+/**
+ * Is this entry one the walk can skip without leaving a corner unlooked-at?
+ * A named pipe, a socket, or a device node holds no transcript records
+ * however it is named, so passing one over costs the walk nothing. Every
+ * other kind has to be either handled or reported.
+ *
+ * @param {Dirent} entry
+ * @returns {boolean}
+ */
+function holdsNoRecords(entry) {
+  return entry.isFIFO() || entry.isSocket() || entry.isBlockDevice() || entry.isCharacterDevice()
+}
+
+/**
+ * Did this fs error mean the entry simply is not there? A missing file or
+ * directory holds no records, which is an answer; anything else (a directory
+ * that cannot be listed, a file that cannot be stat'd) is the walk failing to
+ * look, which is not.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isMissingEntryError(err) {
+  return isPlainObject(err) && err.code === 'ENOENT'
+}
+
+/**
+ * How many transcript files the confirmation read may open, newest mtime
+ * first, and how many bytes it may read from the end of each. The product is
+ * the whole budget: two megabytes read and parsed at the very worst, once,
+ * and only on the path that would otherwise print a capture gap.
+ *
+ * Sixteen files covers a sitting's worth of concurrently-written sessions (a
+ * main transcript plus its subagents). 128 KiB per tail is sized off real
+ * transcripts: over 320 of them the newest conversation record sits within
+ * 17 KiB of the end in 99 cases out of 100 and within 40 KiB in the worst
+ * one, and all but a thousandth of records are under 53 KiB. The window
+ * clears both by better than 3x, and a tail that still defeats it answers
+ * `unknown` rather than guessing.
+ */
+const MAX_CONFIRM_FILES = 16
+const MAX_CONFIRM_TAIL_BYTES = 128 * 1024
+
+/**
+ * Confirm a suspected capture gap against transcript content: the newest
+ * *conversation* record in the tails of the files whose mtime is newer than
+ * the capture baseline.
+ *
+ * The mtime probe above nominates; this decides. A transcript file is
+ * rewritten for plenty of reasons that produce no conversation and so owe no
+ * telemetry, and every one of them moves the mtime: a metadata record, a
+ * local slash command, an informational notice, a plain touch. Only a `user`
+ * or `assistant` record that is not injected metadata (`isMeta`) establishes
+ * a turn that should have produced telemetry.
+ *
+ * Bounded twice over, because `hyp status` is run often: at most
+ * `MAX_CONFIRM_FILES` files are opened, newest mtime first, and at most
+ * `MAX_CONFIRM_TAIL_BYTES` are read from the end of each. Files older than
+ * the baseline are never opened at all (a record cannot postdate its file's
+ * mtime), and the walk stops early once no remaining candidate's mtime could
+ * beat the activity already found.
+ *
+ * The answer is deliberately three-valued. `certain: false` means the budget
+ * ran out before the question was settled - a tail that never reached back
+ * past the baseline, an unreadable file, more candidates than the file cap -
+ * and the caller must turn that into neither a gap nor a clean bill of
+ * health.
+ *
+ * @ref LLP 0257#status-and-health [implements]: "last transcript activity" is a conversation record, not a filesystem timestamp
+ * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv, sinceMs: number }} args
+ * @returns {Promise<{ activityAt?: string, certain: boolean }>}
+ */
+export async function confirmClientActivityFromDescriptor({ descriptor, homeDir, env, sinceMs }) {
+  const probe = descriptor.activityProbe
+  if (!probe || !homeDir) return { certain: false }
+  /** @type {string} */
+  let dirPath
+  try {
+    dirPath = resolveClientSettingsPath(descriptor.name, probe.dir, env, homeDir, {
+      field: 'activity_probe.dir',
+    })
+  } catch {
+    return { certain: false }
+  }
+  /** @type {{ full: string, mtimeMs: number }[]} */
+  const candidates = []
+  let dropped = false
+  const walked = await eachActivityFile(dirPath, probe.file_suffix, MAX_ACTIVITY_PROBE_DEPTH, (full, mtimeMs) => {
+    if (mtimeMs <= sinceMs) return
+    if (candidates.length < MAX_CONFIRM_FILES) {
+      candidates.push({ full, mtimeMs })
+    } else {
+      // Bounded insertion rather than collect-then-sort: the candidate set is
+      // whatever the tree holds, and a status probe must not size a list by
+      // it. Newest wins, and anything evicted marks the answer uncertain.
+      dropped = true
+      let weakest = 0
+      for (let i = 1; i < candidates.length; i++) {
+        if (candidates[i].mtimeMs < candidates[weakest].mtimeMs) weakest = i
+      }
+      if (mtimeMs > candidates[weakest].mtimeMs) candidates[weakest] = { full, mtimeMs }
+    }
+  })
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  /** @type {number | undefined} */
+  let activityMs
+  // A corner of the tree that could not be listed or stat'd may hold the
+  // very turn this is looking for, so a walk that skipped one cannot end in a
+  // clean bill of health any more than an unreadable file can.
+  let certain = !dropped && walked
+  for (const candidate of candidates) {
+    if (activityMs !== undefined && candidate.mtimeMs <= activityMs) break
+    const found = await confirmActivityInFile(candidate.full, sinceMs)
+    if (!found.certain) certain = false
+    if (found.activityMs !== undefined && (activityMs === undefined || found.activityMs > activityMs)) {
+      activityMs = found.activityMs
+    }
+  }
+  return activityMs === undefined
+    ? { certain }
+    : { activityAt: new Date(activityMs).toISOString(), certain }
+}
+
+/**
+ * Newest conversation record in one transcript file's bounded tail.
+ *
+ * Scanned backwards, so the first conversation record found is the newest and
+ * the read stops there. `certain` is false only when the tail could still be
+ * hiding one: the read was truncated and never reached back past `sinceMs`,
+ * the file could not be opened at all, it gave back fewer bytes than its own
+ * size promised, or a line above the newest turn would not parse. A truncated
+ * tail whose oldest timestamp already predates the baseline has seen
+ * everything that could matter, and a fully-read tail from byte zero has seen
+ * the whole file.
+ *
+ * @param {string} file
+ * @param {number} sinceMs
+ * @returns {Promise<{ activityMs?: number, certain: boolean }>}
+ */
+async function confirmActivityInFile(file, sinceMs) {
+  /** @type {FileHandle | undefined} */
+  let handle
+  try {
+    handle = await fsp.open(file, 'r')
+    const size = (await handle.stat()).size
+    // One byte earlier than the tail, as `readFileTail` does: a boundary that
+    // happens to land on a record edge is otherwise indistinguishable from a
+    // mid-record cut, and the discard below would eat a whole valid line.
+    const offset = size > MAX_CONFIRM_TAIL_BYTES ? size - MAX_CONFIRM_TAIL_BYTES : 0
+    const start = offset > 0 ? offset - 1 : 0
+    const length = size - start
+    if (length <= 0) return { certain: true }
+    const buf = Buffer.allocUnsafe(length)
+    // Filled to the end, not to whatever one read returned: a short read
+    // drops the *newest* records, which is the half that decides this.
+    let filled = 0
+    while (filled < length) {
+      const { bytesRead } = await handle.read(buf, filled, length - filled, start + filled)
+      if (bytesRead <= 0) break
+      filled += bytesRead
+    }
+    if (filled < length) return { certain: false }
+    const lines = buf.toString('utf8').split('\n')
+    // The first line of a truncated read starts mid-record (mid-codepoint,
+    // even), so it is never parsed rather than parsed and misread.
+    if (start > 0) lines.shift()
+    /** @type {number | undefined} */
+    let oldestSeenMs
+    // A line that will not parse, or a turn that will not date, is content
+    // this did not read - and the newest record of a live transcript is the
+    // one most likely to be half-written when status runs. Skipping it is
+    // right; counting the skip as "no turn here" is not.
+    let unread = false
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      if (!line) continue
+      /** @type {unknown} */
+      let row
+      try { row = JSON.parse(line) } catch { unread = true; continue }
+      if (!isPlainObject(row)) { unread = true; continue }
+      const ms = parseIsoMs(row.timestamp)
+      if (ms === undefined) {
+        if (isConversationRecord(row)) unread = true
+        continue
+      }
+      oldestSeenMs = ms
+      if (isConversationRecord(row)) return { activityMs: ms, certain: !unread }
+    }
+    if (unread) return { certain: false }
+    if (start === 0) return { certain: true }
+    return { certain: oldestSeenMs !== undefined && oldestSeenMs <= sinceMs }
+  } catch {
+    return { certain: false }
+  } finally {
+    await handle?.close().catch(() => {})
+  }
+}
+
+/**
+ * Does this transcript record establish a turn that should have produced
+ * telemetry?
+ *
+ * Only the two conversational types do. Claude Code writes plenty else into
+ * the same file - `system` (a local slash command's output arrives as
+ * `subtype: 'local_command'`), `attachment`, `file-history-snapshot`,
+ * `queue-operation`, mode and title records - and none of it is a turn.
+ * `isMeta` is the same story one level in: an expanded command or skill body
+ * injected into the context, not something the user said.
+ *
+ * @param {Record<string, unknown>} row
+ * @returns {boolean}
+ */
+function isConversationRecord(row) {
+  if (row.isMeta === true) return false
+  return row.type === 'user' || row.type === 'assistant'
 }
 
 /**
@@ -3356,13 +3957,8 @@ export const CAPTURE_GAP_ERROR_MS = 2 * 3_600_000
 export function assessCaptureHealth({ lastEventAt, lastTranscriptActivityAt, attachedAt, listenerStartedAt }) {
   const transcriptMs = parseIsoMs(lastTranscriptActivityAt)
   if (transcriptMs === undefined) return { state: 'ok', gapMs: 0 }
-  const eventMs = parseIsoMs(lastEventAt)
-  const attachedMs = parseIsoMs(attachedAt)
-  const listenerMs = parseIsoMs(listenerStartedAt)
-  if (eventMs === undefined && attachedMs === undefined && listenerMs === undefined) {
-    return { state: 'ok', gapMs: 0 }
-  }
-  const baseline = Math.max(eventMs ?? -Infinity, attachedMs ?? -Infinity, listenerMs ?? -Infinity)
+  const baseline = captureBaselineMs(lastEventAt, attachedAt, listenerStartedAt)
+  if (baseline === undefined) return { state: 'ok', gapMs: 0 }
   const gapMs = Math.max(0, transcriptMs - baseline)
   if (gapMs <= CAPTURE_GAP_WARNING_MS) return { state: 'ok', gapMs }
   return {
@@ -3388,7 +3984,27 @@ export function formatGapDuration(gapMs) {
   return `${Math.floor(hours / 24)}d`
 }
 
-/** @param {string | null | undefined} value @returns {number | undefined} */
+/**
+ * The moment capture was supposed to be running from: the newest of the last
+ * event seen, the attach, and the running listener's start. `undefined` when
+ * none of the three is readable, which is the no-baseline case a gap claim
+ * cannot be made from. Shared so the gap verdict and the confirmation read
+ * that second-guesses it measure from the same instant.
+ *
+ * @param {string | null | undefined} lastEventAt
+ * @param {string | null | undefined} attachedAt
+ * @param {string | null | undefined} listenerStartedAt
+ * @returns {number | undefined}
+ */
+function captureBaselineMs(lastEventAt, attachedAt, listenerStartedAt) {
+  const eventMs = parseIsoMs(lastEventAt)
+  const attachedMs = parseIsoMs(attachedAt)
+  const listenerMs = parseIsoMs(listenerStartedAt)
+  if (eventMs === undefined && attachedMs === undefined && listenerMs === undefined) return undefined
+  return Math.max(eventMs ?? -Infinity, attachedMs ?? -Infinity, listenerMs ?? -Infinity)
+}
+
+/** @param {unknown} value @returns {number | undefined} */
 function parseIsoMs(value) {
   if (typeof value !== 'string') return undefined
   const ms = Date.parse(value)
@@ -3410,19 +4026,25 @@ async function buildStatusCatalog({ stateDir }) {
 
 /**
  * The one discovery pass behind {@link buildStatusCatalog}, exposed so the
- * collector can also ask the manifests a question the catalog cannot answer:
- * which installed plugins are shadowed by a bundled name. The catalog is
- * first-writer-wins, so a shadowed installed manifest leaves no trace in it.
- * Each discovery failure degrades to empty, never throws.
+ * collector can also ask the manifests questions the catalog cannot answer:
+ * which installed plugins are shadowed by a bundled name, and which are in
+ * the lock but contributed no manifest. The catalog is built from manifests
+ * that loaded, so neither leaves a trace in it. Each discovery failure
+ * degrades to empty, never throws.
+ *
+ * The installed side is returned whole rather than narrowed to `loaded`: the
+ * lock entries are what say a plugin is installed, and the collector needs
+ * them to tell an unloadable install from a name this machine never had
+ * (issue #1936).
  *
  * @param {{ stateDir: string }} args
- * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }>}
+ * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: DiscoverInstalledResult }>}
  */
 async function discoverStatusManifests({ stateDir }) {
   /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
   let bundled = { loaded: [], excluded: [] }
-  /** @type {{ loaded: LoadedManifest[] }} */
-  let installed = { loaded: [] }
+  /** @type {DiscoverInstalledResult} */
+  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [] }
   try {
     bundled = await discoverBundledPlugins()
   } catch { /* bundled discovery failure is non-fatal */ }
@@ -3580,28 +4202,51 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * set one failed export is counted once here and once there. That directory
  * exists only when that variable is set, which is why this counter used to
  * read zero on every real machine and why the overlap cannot reach one. The
- * diagnostic names both halves of the breakdown, so a developer who does set
- * it can see where the doubled total came from.
+ * history count retains that overlap. Export ERROR records do not also feed
+ * the generic warning: the outbox and last-success stamp decide that warning.
  *
  * @param {string} stateRoot
+ * @param {SinkSnapshot[]} configuredSinks
+ * @param {unknown} snapshotSinks
  * @param {number} [nowMs]
- * @returns {Promise<{ total: number, breakdown: string[] }>}
+ * @returns {Promise<{ total: number, warningCount: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[] }>}
  */
-async function countRecentErrors(stateRoot, nowMs = Date.now()) {
+async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
+  // Config-derived sink rows omit runtime stamps, so the last success comes
+  // from the already-loaded daemon snapshot, read after the daemon has exited
+  // as happily as while it runs: a success is a historical fact, not a
+  // liveness claim, and the daemon carries the stamp across its own restarts
+  // (`recoverSinkSnapshots` in `runtime.js`). A stamp that does not parse, or
+  // that sits in the future, is no evidence of recovery and leaves the
+  // destination at "never succeeded" rather than quietly clearing a failure.
+  const lastSuccess = new Map(configuredSinks.map((s) => [s.instance, -Infinity]))
+  if (Array.isArray(snapshotSinks)) {
+    for (const sink of snapshotSinks) {
+      if (!sink || typeof sink !== 'object' || !lastSuccess.has(sink.instance)) continue
+      const at = typeof sink.lastSuccessAt === 'string' ? Date.parse(sink.lastSuccessAt) : NaN
+      if (Number.isFinite(at) && at <= nowMs) {
+        lastSuccess.set(sink.instance, Math.max(lastSuccess.get(sink.instance) ?? -Infinity, at))
+      }
+    }
+  }
   const [gatewayLog, processingLog, sinkOutbox, devTelemetry] = await Promise.all([
     countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
     countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs),
-    countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs),
+    countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs, nowMs, lastSuccess),
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
   const daemonLog = gatewayLog + processingLog
   /** @type {string[]} */
   const breakdown = []
   if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)
-  if (sinkOutbox > 0) breakdown.push(`${sinkOutbox} failed sink export batch${sinkOutbox === 1 ? '' : 'es'}`)
-  if (devTelemetry > 0) breakdown.push(`${devTelemetry} in dev telemetry`)
-  return { total: daemonLog + sinkOutbox + devTelemetry, breakdown }
+  if (devTelemetry.warningCount > 0) breakdown.push(`${devTelemetry.warningCount} in dev telemetry`)
+  return {
+    total: daemonLog + sinkOutbox.total + devTelemetry.total,
+    warningCount: daemonLog + devTelemetry.warningCount,
+    breakdown,
+    sinkDiagnostics: sinkOutbox.diagnostics,
+  }
 }
 
 /**
@@ -3702,25 +4347,50 @@ async function countDaemonLogErrors(logPath, sinceMs) {
  * telemetry: the driver's own `sink.export_batch.failed` goes to the OTel
  * logger, which has no exporter configured on an ordinary machine.
  *
- * Nothing drains these files, so the directory is a growing ledger and the
- * window is what makes a count off it mean "now". Costs one directory listing
- * per configured sink and opens no file: the batch id carries its own
- * timestamp. The collector already walks the whole cache tree with a `stat`
- * per file (`measureCacheStats`), so this sits well inside its budget.
+ * One listing answers two questions on two horizons. The history count keeps
+ * the shared 24-hour window, because `recent_error_count` reports what this
+ * install has recorded lately. The warning is a recovery question rather than
+ * a recency one, and waiting is not a recovery, so it takes no window at all:
+ * a failure that has aged out of the count still warns while nothing has
+ * succeeded since. Bounding it by the window instead meant a destination
+ * exporting more slowly than the bar could never reach it, so an install
+ * whose only destination had never once succeeded printed "Healthy"
+ * (issue #2337).
+ *
+ * "Later" is strict, so a success sharing a failure's millisecond leaves the
+ * warning standing: at equal stamps nothing says which came first, and the
+ * conservative reading is the one that keeps looking. A stamp in the future
+ * is evidence about nothing and is skipped on both sides, so a clock that ran
+ * ahead cannot invent a warning and one that was set back cannot clear one.
+ *
+ * Nothing drains these files, so the directory is a growing ledger. Costs one
+ * directory listing per configured sink and opens no file: the batch id
+ * carries its own timestamp, and both answers accumulate in the same pass
+ * with no sort and nothing retained per failure. The collector already walks
+ * the whole cache tree with a `stat` per file (`measureCacheStats`), so this
+ * sits well inside its budget.
+ *
+ * An outbox with no entry in `lastSuccess` belongs to a destination this
+ * install no longer has, since the map is keyed by the configured sinks alone.
+ * Its files still count as history, but nothing asks an operator to repair a
+ * destination they have removed.
  *
  * @param {string} sinksDir
  * @param {number} sinceMs
- * @returns {Promise<number>}
+ * @param {number} nowMs
+ * @param {Map<string, number>} lastSuccess
+ * @returns {Promise<{ total: number, diagnostics: StatusDiagnostic[] }>}
  */
-async function countSinkOutboxBatches(sinksDir, sinceMs) {
+// @ref LLP 0453#warning-rule [implements]: a destination warns while it holds an export failure with no later success, however old
+async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
+  const result = { total: 0, diagnostics: /** @type {StatusDiagnostic[]} */ ([]) }
   /** @type {Dirent[]} */
   let instances
   try {
     instances = await fsp.readdir(sinksDir, { withFileTypes: true })
   } catch {
-    return 0
+    return result
   }
-  let count = 0
   for (const instance of instances) {
     if (!instance.isDirectory()) continue
     /** @type {string[]} */
@@ -3730,20 +4400,36 @@ async function countSinkOutboxBatches(sinksDir, sinceMs) {
     } catch {
       continue
     }
+    // `-Infinity` when the destination has never succeeded, so `at < success`
+    // is the one recovery test, and `undefined` when it is not configured.
+    const success = lastSuccess.get(instance.name)
+    let unresolved = 0
+    let last = -Infinity
     for (const file of files) {
       const match = OUTBOX_BATCH_TIMESTAMP.exec(file)
       if (!match) continue
       const at = Date.parse(match[1])
-      if (!Number.isFinite(at) || at < sinceMs) continue
-      count += 1
+      if (!Number.isFinite(at)) continue
+      if (at >= sinceMs) result.total += 1
+      if (success === undefined || at > nowMs || at < success) continue
+      unresolved += 1
+      last = Math.max(last, at)
+    }
+    if (unresolved > 0) {
+      result.diagnostics.push({
+        severity: 'warning',
+        kind: 'sink_export_failing',
+        message: `${sanitizeLabel(instance.name) ?? 'unknown'}: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
+        repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(path.join(sinksDir, instance.name, 'outbox'), 512)}`],
+      })
     }
   }
-  return count
+  return result
 }
 
 /**
  * Walk the dev telemetry directory and count log entries whose `severityText`
- * is `ERROR`. Returns 0 when the directory does not exist, which on an
+ * is `ERROR`. Returns zero counts when the directory does not exist, which on an
  * ordinary install is always: this is the developer's store, kept as one
  * input among three rather than removed, because under `HYP_DEV_TELEMETRY=1`
  * it holds every `getLogger` error, and all but one of them reach no other
@@ -3754,18 +4440,17 @@ async function countSinkOutboxBatches(sinksDir, sinceMs) {
  *
  * @param {string} telemetryDir
  * @param {number} sinceMs
- * @returns {Promise<number>}
+ * @returns {Promise<{ total: number, warningCount: number }>}
  */
 async function countDevTelemetryErrors(telemetryDir, sinceMs) {
+  const result = { total: 0, warningCount: 0 }
   /** @type {string[]} */
   let entries
   try {
     entries = await fsp.readdir(telemetryDir)
-  } catch (err) {
-    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return 0
-    return 0
+  } catch {
+    return result
   }
-  let count = 0
   for (const entry of entries) {
     if (!entry.startsWith('logs-') || !entry.endsWith('.jsonl')) continue
     const raw = await readFileTail(path.join(telemetryDir, entry), DEV_TELEMETRY_TAIL_BYTES)
@@ -3776,13 +4461,95 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
         if (!parsed || typeof parsed !== 'object') continue
         if (/** @type {any} */ (parsed).severityText !== 'ERROR') continue
         if (!recordedWithinWindow(/** @type {any} */ (parsed).timestamp, sinceMs)) continue
-        count += 1
+        result.total += 1
+        if (parsed.body !== 'sink.export_batch.failed') result.warningCount += 1
       } catch {
         // skip malformed lines silently
       }
     }
   }
-  return count
+  return result
+}
+
+/**
+ * The config edit that repairs a `plugin_requires_unsatisfied` diagnostic,
+ * routed to the layer that can actually make it.
+ *
+ * `mergeConfigLayers` drops a local `plugins[]` entry whose name collides
+ * with a central one, so each half of the edit belongs to whoever owns the
+ * name that half touches: withdrawing the request touches the eliminated
+ * plugin's entry, supplying the dependency touches the dependency's. A half
+ * whose name the central layer owns gives way to a step that does change
+ * something, and the local file is named as the place that would not.
+ *
+ * A central name carrying `enabled: false` is central-owned by that same rule,
+ * so the local enable stays inert - but installing the dependency here repairs
+ * nothing either when it is already installed and the central layer is what
+ * withholds it, so that sub-case names the central enable as well.
+ *
+ * `dependency` is `undefined` for every reason that names no missing plugin
+ * (a version mismatch, a capability require), and those keep the original
+ * wording: the reason still names what is missing and the local file is still
+ * where the operator's own entry lives.
+ *
+ * @param {object} args
+ * @param {string} args.plugin The plugin the resolver eliminated.
+ * @param {string | undefined} args.dependency The missing plugin its reason named.
+ * @param {Set<string>} args.centralPluginNames Names the central layer owns.
+ * @param {Set<string>} args.centralDisabledPluginNames The subset of those the central layer withholds (`enabled: false`).
+ * @param {string} args.configPath The local config file.
+ * @returns {string}
+ * @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so an edit the next merge discards is not one
+ */
+function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginNames, centralDisabledPluginNames, configPath }) {
+  const pluginIsCentral = centralPluginNames.has(plugin)
+  if (dependency === undefined || !centralPluginNames.has(dependency)) {
+    return pluginIsCentral
+      ? `enable what the reason names in ${configPath}`
+        + ` - '${plugin}' is enabled by the central config, so removing it from the local file changes nothing`
+      : `enable what the reason names, or remove '${plugin}', in ${configPath}`
+  }
+  // The dependency is central-owned, so a local entry adding it is dropped at
+  // merge. What still changes something: installing it here (the central layer
+  // already asks for it), or the fleet edit that stops asking.
+  return pluginIsCentral
+    ? `install '${dependency}' on this host, or enable it in the central config`
+      + ` - the central config names both '${plugin}' and '${dependency}', so no edit to ${configPath} survives the merge`
+    : centralDisabledPluginNames.has(dependency)
+      ? `remove '${plugin}' from ${configPath}, or enable '${dependency}' in the central config and install it on this host`
+        + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
+      : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
+        + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
+}
+
+/**
+ * Per-entry repairs for the config errors that have one, keyed by the
+ * validator's own pointer so no message is parsed and no index is re-derived.
+ * Today that is `plugin_installed_unloadable`: the validator can say the
+ * install is the fault but not where it lives, so the directory is filled in
+ * here from the same discovery pass that classified the name.
+ *
+ * `hyp plugin doctor` first because it prints the rejection the operator is
+ * missing, then `hyp plugin update`, which re-fetches from the source the
+ * lock recorded. Neither touches the config: the config entry is the one
+ * thing about this install that is right (issue #1936).
+ *
+ * @param {HypAwareV2Config | null} config the merged config the pointers index
+ * @param {Map<string, string>} unloadable plugin name -> install directory
+ * @returns {Map<string, string[]>} pointer -> repair
+ * @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair is a command that runs, so the directory is filled in rather than left a placeholder
+ */
+function pluginRepairsByPointer(config, unloadable) {
+  /** @type {Map<string, string[]>} */
+  const out = new Map()
+  if (unloadable.size === 0 || !config?.plugins) return out
+  for (let i = 0; i < config.plugins.length; i += 1) {
+    const name = config.plugins[i].name
+    const dir = sanitizeLabel(unloadable.get(name), MAX_ACTIVATION_MESSAGE_CHARS)
+    if (dir === undefined) continue
+    out.set(`/plugins/${i}/name`, [`hyp plugin doctor ${dir}`, `hyp plugin update ${name}`])
+  }
+  return out
 }
 
 /**

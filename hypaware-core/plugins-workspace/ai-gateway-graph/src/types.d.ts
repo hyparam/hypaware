@@ -22,6 +22,8 @@ export interface ContractRule {
   columns?: string[]
   where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
+  /** Optional bounded fan-out; engine prefers this over toRow. */
+  toRows?(row: Record<string, unknown>): GraphRow[]
 }
 
 /**

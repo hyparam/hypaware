@@ -9,6 +9,7 @@
 hypaware-server LLP 0129, LLP 0178, LLP 0184 (out of tree, the server half)
 **Supersedes:** LLP 0264#verb (the registration-collision rule only; the
 mirror decision and the shared column allowlist stand unchanged)
+**Extended-by:** [LLP 0413](./0413-local-grep-direct-scans.rfc.md) (local scan-only plugin ownership; shared server contracts retained)
 
 ## Context {#context}
 

@@ -1092,18 +1092,6 @@ test('a session file with no readable header still projects, ungated', async () 
   }
 })
 
-test('plan() reports the session files a run would scan without projecting them', async () => {
-  const env = await stageEnv()
-  try {
-    const filePath = await writeSession(env, { header: { cwd: '/work/repo' }, records: [ASSISTANT_RECORD] })
-    const plan = await provider(env).plan?.(/** @type {any} */ ({ env: {}, cacheRoot: '', log: captureLog().log }))
-    assert.equal(plan?.estimated_items, 1)
-    assert.deepEqual(plan?.sources, [filePath])
-  } finally {
-    await env.cleanup()
-  }
-})
-
 test('reruns are deterministic: the same session yields byte-identical row identity', async () => {
   const env = await stageEnv()
   try {

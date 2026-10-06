@@ -64,6 +64,7 @@ export type ConfigValidationErrorKind =
   | 'capability_ambiguous'
   | 'config_section_invalid'
   | 'plugin_unknown'
+  | 'plugin_installed_unloadable'
   | 'duplicate_plugin'
 
 export type ConfigValidationError = ValidationError & { errorKind: ConfigValidationErrorKind }
@@ -146,6 +147,14 @@ export interface ValidateContext {
   knownPlugins?: Map<PluginName, PluginMetadata>
   knownDatasets?: Set<string>
   configRegistry?: ConfigRegistry
+  /**
+   * Plugin names the install lock carries whose `install_dir` manifest was
+   * rejected, so they reach `knownPlugins` from neither the bundled nor the
+   * installed side. Without it such a plugin is indistinguishable from a name
+   * nothing on the machine matches, and both read as `plugin_unknown` ("is
+   * not installed"). Omitting it keeps that older, single reading.
+   */
+  unloadablePlugins?: Set<PluginName>
 }
 
 export interface ValidateResult {
@@ -891,3 +900,37 @@ export interface GatewayProxyEnableResult {
 }
 
 export type { ConfigStageResult, ConfigApplyErrorKind }
+
+/**
+ * The per-client recording switch as read fresh from disk
+ * (`readRecordingStateFromDisk`, LLP 0466).
+ */
+export interface RecordingState {
+  /** Plugins whose client is switched off (`recording: false`). */
+  detached: Set<string>
+  /** Plugins the central (org) layer names; their local entry is inert. */
+  central: Set<string>
+}
+
+/**
+ * Outcome of flipping one client's recording switch in the local layer.
+ *
+ * - `changed`: the local entry now says what was asked.
+ * - `unchanged`: it already did.
+ * - `no_entry`: no local entry for the plugin (nothing enabled to switch).
+ * - `central_managed`: the org's central layer names the plugin; detach refuses.
+ * - `failed`: the local file could not be read or written.
+ */
+export interface ClientRecordingWriteResult {
+  status: 'changed' | 'unchanged' | 'no_entry' | 'central_managed' | 'failed'
+  configPath: string
+  backupPath?: string
+  message?: string
+}
+
+/** A `plugins[]` entry read raw from a config layer, before shape parsing. */
+export interface RawPluginEntry {
+  name?: unknown
+  enabled?: unknown
+  recording?: unknown
+}

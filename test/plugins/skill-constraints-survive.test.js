@@ -51,6 +51,10 @@ const { constraints } = JSON.parse(
  * trains people to loosen patterns during exactly the refactor the guard exists for.
  * What must hold is that a constraint is still stated somewhere a reader reaches.
  *
+ * Not just one level deep, either: a skill's reference files can themselves sit in a
+ * subdirectory, such as `hypaware-report`'s `references/` tree, so each skill directory
+ * is walked recursively rather than read as a flat file listing.
+ *
  * Deliberately newline-agnostic too: skill prose is hard-wrapped at ~90 columns, so a
  * constraint routinely straddles a line break, and matching raw text would make every
  * multi-word pattern hostage to where the wrap falls.
@@ -63,11 +67,27 @@ function hostCorpus(skillsDir) {
   const texts = []
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
-    for (const file of fs.readdirSync(path.join(dir, entry.name))) {
-      if (file.endsWith('.md')) texts.push(fs.readFileSync(path.join(dir, entry.name, file), 'utf8'))
-    }
+    texts.push(...readMarkdownFilesRecursive(path.join(dir, entry.name)))
   }
   return texts.join('\n\n').replace(/\s+/g, ' ')
+}
+
+/**
+ * Contents of every `.md` file under `dir`, recursing into subdirectories such as a
+ * skill's `references/` tree.
+ *
+ * @param {string} dir
+ * @returns {string[]}
+ */
+function readMarkdownFilesRecursive(dir) {
+  /** @type {string[]} */
+  const texts = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) texts.push(...readMarkdownFilesRecursive(full))
+    else if (entry.name.endsWith('.md')) texts.push(fs.readFileSync(full, 'utf8'))
+  }
+  return texts
 }
 
 const corpora = Object.fromEntries(

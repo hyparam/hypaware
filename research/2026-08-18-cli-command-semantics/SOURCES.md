@@ -2,14 +2,14 @@
 
 All sources are local repository primary sources, accessed 2026-08-18. Source
 dates are the checkout state on that date; individual files do not carry a
-publication date. Exact command-level citations are also recorded in WP1-WP4.
+publication date.
 
 | Source | Claims supported | Strength and limits |
 |---|---|---|
 | `src/core/cli/core_commands.js` | Complete core registration names, usage strings, aliases, group help, proposed starting inventory | Authoritative registration surface; help can lag runner details |
 | `src/core/cli/dispatch.js` | Boot profiles, config-active plugin availability, pre-activation help, inactive-plugin repairs, longest-prefix dispatch, one-shot source cleanup | Authoritative dispatch behavior |
 | `src/core/registry/commands.js` and `verbs.js` | Alias indexing, hidden filtering, group metadata, typed verb projection | Authoritative registry mechanics |
-| `src/core/commands/init.js` and `src/core/cli/walkthrough.js` | Setup modes, config writes, daemon/client/assets/backfill finale | Authoritative implementation; wizard has many UI branches summarized in WP1 |
+| `src/core/commands/init.js` and `src/core/cli/walkthrough.js` | Setup modes, config writes, daemon/client/assets/backfill finale | Authoritative implementation; wizard has many UI branches |
 | `src/core/commands/status.js` and `src/core/daemon/status.js` | Overall status inputs, stable JSON, client state projection opportunity | Authoritative collector and renderer |
 | `src/core/commands/ask.js` | Question picker/list/launch behavior and client eligibility | Authoritative runner |
 | `src/core/commands/clients.js` | Attach/detach, ignore/unignore, skills, proxy trust, interactive enablement | Authoritative but large; cross-checked against LLPs and focused tests |

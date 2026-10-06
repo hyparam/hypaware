@@ -461,6 +461,128 @@ test('a project-local hook command is drift, so the warning names a repair that 
   })
 })
 
+test('a hook command whose dependency tree has been deleted is drift', async () => {
+  await withTempHome(async (home) => {
+    // Issue #1624: the end state the repair lane above exists for. The manifest
+    // that proves a `node_modules` belongs to a project goes out with the
+    // project, so once the checkout is deleted the recorded command reads
+    // durable again and the re-attach that would rewrite it fast-paths at
+    // "already attached" - the one machine where the hook is certainly dead is
+    // the one that could not be repaired. The tree is built and then removed so
+    // the marker records a path that really was a project's `node_modules`.
+    const projectRoot = path.join(home, 'repo')
+    const projectBin = path.join(projectRoot, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+    mkdirSync(path.dirname(projectBin), { recursive: true })
+    writeFileSync(path.join(projectRoot, 'package.json'), '{}\n')
+    writeFileSync(projectBin, '#!/usr/bin/env node\n')
+    rmSync(projectRoot, { recursive: true, force: true })
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 4,
+          managed: {
+            env: {},
+            hook_entries: [{ event: 'SessionStart', command: `${projectBin} claude-hook classify-cwd` }],
+          },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout, stderr } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0, stderr.text())
+    assert.equal(attachCalls.length, 1, 'a deleted dependency tree must re-attach, not no-op')
+    assert.doesNotMatch(stdout.text(), /already attached/)
+  })
+})
+
+test('a recorded command that merely no longer resolves is not drift', async () => {
+  await withTempHome(async (home) => {
+    // The fence on the rule above. A CLI moves for ordinary reasons - a node
+    // version switch, a prefix change - and "gone from disk" on its own says
+    // nothing about whose tree it was, so a recorded path carrying no
+    // dependency tree at all keeps its no-op exit however little of it is
+    // left. Only a vanished `node_modules` is drift, because only that one
+    // names a tree a package manager deletes on a schedule of its own.
+    const movedBin = path.join(home, 'opt', 'hypaware-1.2.3', 'bin', 'hypaware')
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 4,
+          managed: {
+            env: {},
+            hook_entries: [{ event: 'SessionStart', command: `${movedBin} claude-hook classify-cwd` }],
+          },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0)
+    assert.deepEqual(attachCalls, [], 'a path that merely does not resolve is not drift')
+    assert.match(stdout.text(), /already attached/)
+  })
+})
+
+test('a global root that outlives a node version switch is not drift', async () => {
+  await withTempHome(async (home) => {
+    // The other half of the fence, on the tree the new arm actually inspects.
+    // A node version switch leaves the old install exactly where it is and
+    // only stops resolving it on `$PATH`, so its `lib/node_modules` is still
+    // there and the manifest test still answers durable, which is the answer
+    // it gave before this arm existed.
+    const globalRoot = path.join(home, '.nvm', 'versions', 'node', 'v20.11.0', 'lib', 'node_modules', 'hypaware')
+    mkdirSync(path.join(globalRoot, 'bin'), { recursive: true })
+    writeFileSync(path.join(globalRoot, 'package.json'), '{}\n')
+    const durableBin = path.join(globalRoot, 'bin', 'hypaware.js')
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 4,
+          managed: {
+            env: {},
+            hook_entries: [{ event: 'SessionStart', command: `${durableBin} claude-hook classify-cwd` }],
+          },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0)
+    assert.deepEqual(attachCalls, [], 'an inactive but intact global install is not drift')
+    assert.match(stdout.text(), /already attached/)
+  })
+})
+
 test('a schema-2 marker re-attaches into the scalar-safe backup format', async () => {
   await withTempHome(async (home) => {
     mkdirSync(path.join(home, '.claude'), { recursive: true })

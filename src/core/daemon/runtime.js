@@ -23,6 +23,7 @@ import { attachHandler } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
 import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
@@ -33,13 +34,16 @@ import {
 } from './control.js'
 import {
   clearPidFile,
+  clearStalePidFile,
   pidFilePath,
   processIsAlive,
+  processingStateRoot,
   readPidFile,
   writePidFile,
 } from './pid.js'
+import { DAEMON_STOP_TIMEOUT_MS } from './service_ops.js'
 import { openDaemonLog } from './logs.js'
-import { readSourceIdentity, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { readSourceIdentity, readStatusFile, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import {
   detectSupervisor,
   readSelfPackageIdentity,
@@ -273,8 +277,17 @@ export async function runDaemon(opts = {}) {
     sources: [],
     sinks: [],
   }
-  /** @type {Map<string, SinkSnapshot>} */
-  const sinkSnapshots = new Map()
+  // Not a fresh map: `hyp status` warns while a destination holds an export
+  // failure no later success has answered (LLP 0453), so a boot that started
+  // every destination at "never succeeded" would re-raise a warning on one
+  // that had already recovered, and nothing could clear it afterwards.
+  // @ref LLP 0453#warning-rule [implements]: historical success survives daemon exit, so the warning is defined against a stable point
+  const sinkSnapshots = recoverSinkSnapshots(runtimeStateRoot)
+  // The first write below lands before any plugin activates, so leaving the
+  // literal's empty list makes the boot erase what it has just recovered
+  // (issue #2359). Copied, so the written rows never alias the map the tick
+  // mutates in place.
+  status.sinks = [...sinkSnapshots.values()].map((row) => ({ ...row }))
   /** @type {NodeJS.Timeout | null} */
   let tickHandle = null
   /** @type {((reason: 'signal'|'manual'|'restart'|'control') => Promise<number>) | null} */
@@ -686,7 +699,17 @@ export async function runDaemon(opts = {}) {
     config: boot.config ?? undefined,
   })
 
-  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
+  // The destinations this boot's effective config still names. Their recovered
+  // stamps survive a boot that registered nothing for them (plugin missing,
+  // activation failed, sink unmaterialized), which otherwise leaves the
+  // destination reading as never-succeeded and warning until a success that
+  // cannot happen while it stays unregistered (issue #2359). Scoped to the
+  // configured set, so rows cannot accumulate across boots and a destination
+  // the operator removed still loses its row.
+  // @ref LLP 0453#warning-rule [implements]: the daemon carries the stamp across its own restarts, and a destination outside the configured set keeps nothing
+  const configuredSinkInstances = new Set(Object.keys(boot.config?.sinks ?? {}))
+
+  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
   persist()
   // Derive the boot health event from the SAME aggregate written to
   // status.json: a degraded boot (any source failed to start) must not log
@@ -867,7 +890,7 @@ export async function runDaemon(opts = {}) {
       const message = err instanceof Error ? err.message : String(err)
       fileLog.error('daemon.tick_failed', { message })
     })
-    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
+    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
     await refreshSourceStatus()
     persist()
 
@@ -883,6 +906,7 @@ export async function runDaemon(opts = {}) {
       void runSelfUpdatePass({
         stateRoot,
         env,
+        configPath: boot.configPath ?? opts.configPath,
         autoUpdate: autoUpdateEnabled,
         runningVersion,
         // A restart exit is only an update when something relaunches us;
@@ -1066,6 +1090,12 @@ export async function runDaemon(opts = {}) {
           const err = error instanceof Error ? error : new Error(String(error))
           span.recordException(err)
           span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
+          // The bag stamped `status: 'ok'` at open and the exporters flatten
+          // attributes, not status codes, so a tick that threw exported an
+          // attribute calling itself a success beside its own ERROR code
+          // (hyparam/hypaware#2363). `withSpan` writes this line for the
+          // spans it owns; this tick owns its own, so it writes it here.
+          span.setAttribute('status', 'failed')
           span.setAttribute('error_kind', attrs.error_kind ?? 'unhandled_exception')
           throw err
         } finally {
@@ -1348,16 +1378,22 @@ export async function runDaemon(opts = {}) {
         // based on a diff of loaded config is still deferred.
         for (const snap of status.sources) {
           if (snap.state !== 'started') continue
-          // The empty string is what a row carries when the boot walk could
-          // not read a plugin off the contribution, and it is no more a
-          // context key here than it is in `startConfiguredSources`: a source
-          // that would not say whose it is does not get reloaded under
-          // whatever that key holds, nor handed that key's config slice below.
-          if (snap.plugin === '') continue
-          const ctx = boot.runtime.activationContexts.get(snap.plugin)
+          // The registrar the kernel recorded, not `snap.plugin`: the row's
+          // plugin is a label, and it degrades to what the contribution
+          // claimed about itself when the kernel recorded no registrar. A
+          // source that took its key out of band chose that label, and it is
+          // no more a context key here than in `startConfiguredSources`
+          // (issue #1944). A source whose registrar the kernel never saw does
+          // not get reloaded under whatever that key holds, nor handed that
+          // key's config slice below.
+          const owner = typeof boot.runtime.sources.ownerOf === 'function'
+            ? boot.runtime.sources.ownerOf(snap.name)
+            : snap.plugin
+          if (typeof owner !== 'string' || owner === '') continue
+          const ctx = boot.runtime.activationContexts.get(owner)
           if (!ctx) continue
           ctx.config = /** @type {JsonObject} */ (
-            configByName.get(snap.plugin) ?? {}
+            configByName.get(owner) ?? {}
           )
           try {
             await boot.runtime.sources.reload(snap.name, ctx)
@@ -1653,14 +1689,31 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
       })
       continue
     }
-    // The empty string is what an unreadable `plugin` degrades to, and no
-    // manifest can carry it as a name (`validateManifest` requires a non-empty
-    // one), so it is not asked of the context map as though it were one: a
-    // contribution that would not say which plugin it belongs to must not be
-    // handed whatever that key happens to hold.
-    const ctx = plugin === '' ? undefined : runtime.activationContexts.get(plugin)
+    // The plugin the kernel recorded as registering this source, with no
+    // fallback to `identity.plugin` when a registry that records registrars
+    // recorded none. `identity.plugin` is the right label for a row and the
+    // wrong key for this lookup: it degrades to the contribution's own claim,
+    // and this daemon boots its own kernel, where every registration reaches
+    // the registry through a plugin's `ctx.sources` facade and is bracketed. A
+    // source nobody is recorded as having registered took its key out of band
+    // and wrote the `plugin` it carries, so falling back to it asks the one
+    // party who should not choose which context, config slice, paths and
+    // capability handles the source starts under (issue #1944, the same
+    // refusal `runGatewayDaemon` makes for #1551).
+    //
+    // A registry with no `ownerOf` at all is read as before, the way the
+    // facade calls one with no `registeringAs` as before: a host driving its
+    // own registry through `hypaware/integration` records no registrar for
+    // anything, so there is no binding to defeat. The empty string is not asked
+    // of the context map either: no manifest can carry it as a name.
+    const owner = typeof runtime.sources.ownerOf === 'function'
+      ? runtime.sources.ownerOf(name)
+      : plugin
+    const ctx = typeof owner === 'string' && owner !== '' ? runtime.activationContexts.get(owner) : undefined
     if (!ctx) {
-      const message = `no activation context recorded for plugin '${plugin}'`
+      const message = owner === undefined
+        ? `no registering plugin recorded for source '${name}'`
+        : `no activation context recorded for plugin '${owner}'`
       fileLog.error('daemon.source_start_failed', {
         source: name,
         plugin,
@@ -1785,48 +1838,93 @@ async function safeStatus(runtime, name, fileLog) {
 }
 
 /**
- * Build a snapshot row per registered sink instance. The kernel sink
- * driver doesn't surface failure / next-tick fields, so those stay
- * `undefined`.
+ * The boot's starting sink snapshots: the `lastSuccessAt` stamps the previous
+ * daemon left in `status.json`, and nothing else. `lastTickAt` is deliberately
+ * dropped, since it is what says *this* daemon has ticked. Best effort, because
+ * a boot is not the place to fail on a state file: an absent, truncated or
+ * hostile snapshot yields no stamps, and a row without a parseable one is
+ * skipped, so a garbled file can lose recovery evidence but never invent it.
+ * `readStatusFile` validates only that it read an object, hence the row guards.
+ * A row for an instance this boot does not register is kept only while the
+ * effective config still names the destination: `collectSinkSnapshots` emits
+ * those alongside the live handles, and drops the rest.
  *
- * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot> }} args
- * @returns {SinkSnapshot[]}
+ * @param {string} stateRoot
+ * @returns {Map<string, SinkSnapshot>}
  */
-function collectSinkSnapshots({ runtime, sinkSnapshots }) {
-  /** @type {SinkSnapshot[]} */
-  const out = []
-  for (const handle of runtime.sinks.listHandles()) {
-    const existing = sinkSnapshots.get(handle.instanceName) ?? {
-      instance: handle.instanceName,
-      plugin: handle.plugin,
-      kind: handle.kind,
-    }
-    existing.plugin = handle.plugin
-    existing.kind = handle.kind
-    sinkSnapshots.set(handle.instanceName, existing)
-    out.push({ ...existing })
+function recoverSinkSnapshots(stateRoot) {
+  /** @type {Map<string, SinkSnapshot>} */
+  const out = new Map()
+  /** @type {DaemonStatus | null} */
+  let prior = null
+  try {
+    prior = readStatusFile(stateRoot)
+  } catch {
+    return out
+  }
+  if (!prior || !Array.isArray(prior.sinks)) return out
+  for (const row of prior.sinks) {
+    if (!row || typeof row !== 'object') continue
+    if (typeof row.instance !== 'string' || row.instance === '') continue
+    if (typeof row.lastSuccessAt !== 'string' || !Number.isFinite(Date.parse(row.lastSuccessAt))) continue
+    out.set(row.instance, { instance: row.instance, plugin: '', kind: '', lastSuccessAt: row.lastSuccessAt })
   }
   return out
 }
 
 /**
- * How long `requestDaemonStop` waits for the signalled daemon to exit before
- * it gives up and reports `timed_out`. The wait is on the process, not on the
- * pid file: the daemon clears that file partway through its own shutdown, and
- * the telemetry close whose ceiling is checked against this number runs after
- * it, on the way out of `bin/hypaware.js`. Waiting on liveness is what keeps
- * that close inside the window.
+ * Build a snapshot row per registered sink instance, then one more per
+ * `retain` instance that registered nothing but has a recovered row. The
+ * kernel sink driver doesn't surface failure / next-tick fields, so those stay
+ * `undefined`.
  *
- * Named rather than inline because the telemetry close inside that window has
- * a derived ceiling of its own (`SHUTDOWN_BUDGET_MS`), and the two used to be
- * only coincidentally compatible: three serial channel closes hung at once
- * spent about 3.75s of this 5s (hyparam/hypaware#1153 item 1). The closes are
- * concurrent now, so the telemetry ceiling is one budget, and a test pins the
- * relationship so it stays a checked fact rather than a coincidence.
+ * `retain` keeps a recorded success from dying with the boot that did not
+ * register its destination (issue #2359): omitted, the live handles alone are
+ * emitted and every recovered stamp they do not account for is erased, so the
+ * daemon passes its configured sink instances.
  *
- * @ref LLP 0343#stop-window [implements]: the stop window is a named constant the telemetry ceiling is checked against
+ * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot>, retain?: Set<string> }} args
+ * @returns {SinkSnapshot[]}
  */
-export const DAEMON_STOP_TIMEOUT_MS = 5_000
+function collectSinkSnapshots({ runtime, sinkSnapshots, retain }) {
+  /** @type {SinkSnapshot[]} */
+  const out = []
+  /** @type {Set<string>} */
+  const live = new Set()
+  for (const handle of runtime.sinks.listHandles()) {
+    // The registry's key, not the handle's own `instanceName`: this runs on
+    // every tick and outside the tick's `.catch`, so an owner's accessor on
+    // the name stopped the daemon's `status.sinks` write once a minute
+    // (issue #1976). `plugin` and `kind` below are the same kind of live
+    // property, still read off the handle, so that outage is narrowed here
+    // and not yet closed (issue #2059).
+    const instance = sinkInstanceName(handle)
+    live.add(instance)
+    const existing = sinkSnapshots.get(instance) ?? {
+      instance,
+      plugin: handle.plugin,
+      kind: handle.kind,
+    }
+    existing.plugin = handle.plugin
+    existing.kind = handle.kind
+    sinkSnapshots.set(instance, existing)
+    out.push({ ...existing })
+  }
+  // Only an instance `recoverSinkSnapshots` found a usable stamp for has a row
+  // to carry, so a configured destination that never succeeded stays that way.
+  for (const instance of retain ?? []) {
+    if (live.has(instance)) continue
+    const existing = sinkSnapshots.get(instance)
+    if (existing) out.push({ ...existing })
+  }
+  return out
+}
+
+// The stop window lives in `service_ops.js` so the launchd unload poll can
+// spend the same one without importing the kernel. Re-exported because every
+// caller, and the test that pins it against the telemetry ceiling, reads it
+// from here.
+export { DAEMON_STOP_TIMEOUT_MS }
 
 /**
  * `hyp daemon stop` helper. Reads the PID file, requests an orderly stop,
@@ -1854,6 +1952,11 @@ export async function requestDaemonStop({
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
     if (entry) clearPidFile(stateRoot)
+    // A gateway that is already gone is what a hard kill leaves behind, so
+    // this is the arm of #2288 that actually accumulates: the child it
+    // supervised went with it and its pid file below `processing/` is
+    // stranded, on the same guard as every other clear here.
+    clearStalePidFile(processingStateRoot(stateRoot))
     return 'not_running'
   }
   if (platform === 'win32') {
@@ -1865,6 +1968,7 @@ export async function requestDaemonStop({
       const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
       if (code === 'ESRCH') {
         clearPidFile(stateRoot)
+        clearStalePidFile(processingStateRoot(stateRoot))
         return 'not_running'
       }
       throw err
@@ -1874,6 +1978,11 @@ export async function requestDaemonStop({
   while (Date.now() < deadline) {
     if (!processIsAlive(entry.pid)) {
       clearPidFile(stateRoot)
+      // The supervised processing child dies with the gateway that spawned it
+      // and leaves its own pid file below `processing/` behind whenever it got
+      // no shutdown to run (#2288). Reconciled rather than deleted: that pid
+      // may be one a restarted child is still holding.
+      clearStalePidFile(processingStateRoot(stateRoot))
       return 'stopped'
     }
     await sleep(pollIntervalMs)
@@ -1887,7 +1996,9 @@ function sleep(ms) {
 }
 
 export {
+  collectSinkSnapshots,
   pidFilePath,
+  recoverSinkSnapshots,
   statusFilePath,
   resolveClientActionSeam,
   startConfiguredSources,

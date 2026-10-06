@@ -9,6 +9,7 @@ one non-blocking background queue because their materializer and spool state is 
 **Systems:** Plugins, Gateway, Config, Sources
 **Generated-by:** neutral
 **Related:** LLP 0167, LLP 0171, LLP 0168, LLP 0169, LLP 0170
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 
 > Technical design for the one deliverable set LLP 0171 specifies: the
 > reworked `@hypaware/openclaw` attach/detach module (Lane A), the daemon-side
@@ -135,7 +136,7 @@ through `attachCtx.stdout`/`attachCtx.json`). It exports
    its OpenAI client does not. Writing the wrong shape for either
    produces a schema-valid but non-functional entry, so this exact split
    is the one place in the module worth a dedicated unit test rather than
-   trusting the acceptance run alone.
+   trusting a manual run alone.
 4. Writes the merged config back (existing `models` keys the file already
    had, if any that aren't `providers.anthropic`/`.openai`, are preserved;
    nothing outside these two keys under `models.providers` is touched, R1).
@@ -725,14 +726,18 @@ touched by this change set:
   policy resolver (`createUsagePolicyResolver`, `localOnlyListPath`) exactly
   as before Lane A/B existed in their current shape.
 
-## 8. Acceptance and onboarding rewrites {#acceptance-onboarding}
+## 8. Manual procedure and onboarding rewrites {#acceptance-onboarding}
 
-### 8.1 `docs/ACCEPTANCE.md`'s `openclaw_capture` (R11 of LLP 0171)
+### 8.1 The manual OpenClaw capture procedure (R11 of LLP 0171)
 
-The current procedure (lines 173 onward) requires linking and enabling the
+> **Retired (2026-09-23)** by [LLP 0430](0430-manual-acceptance-procedures-are-retired.decision.md).
+> The repo no longer keeps written manual procedures. This section records the rewrite it
+> specified.
+
+The old procedure required linking and enabling the
 steering plugin from the checkout under test
 (`openclaw plugins install --link ./openclaw-steering-plugin --force`), and
-its "what it proves" language names "live proxy capture through the
+its "what it proves" language named "live proxy capture through the
 steering plugin's shadow providers." Both go. The rewrite:
 
 - **Setup** drops the steering-plugin link/enable steps entirely; adds
@@ -755,7 +760,7 @@ steering plugin's shadow providers." Both go. The rewrite:
   the restart-required behavior) on an OpenClaw binary at or above the
   2026.4.24 floor the old procedure already required, since those verified
   facts were established against 2026.3.13 and R11 asks for re-confirmation
-  at the floor version the acceptance run actually gates on.
+  at the floor version the manual run actually gates on.
 - Drops the version-gate language specific to `before_model_resolve` and
   `hooks.allowConversationAccess` (2026.4.21/2026.4.23 features the steering
   plugin depended on): Lane A depends on no OpenClaw hook API at all, only
@@ -766,7 +771,7 @@ steering plugin's shadow providers." Both go. The rewrite:
 
 ```
 @ref LLP 0171#requirements [implements]: R11 (formerly R12 of LLP 0157,
-"replaced" per 0171's carried-over note), the acceptance rewrite: attach-flow
+"replaced" per 0171's carried-over note), the procedure rewrite: attach-flow
 steps, a sweep step, a zero-duplicate assertion, and re-confirmation of the
 verified facts on the floor version.
 ```
@@ -792,17 +797,16 @@ under `hypaware-core/smoke/flows`. This is a real, pre-existing gap, flagged
 during review of PR #552, and Lane B makes it more consequential: the sweep
 path (4.4/4.5) has no hermetic-smoke coverage today, so a regression in
 `listSessionFiles`'s new `quiesceBeforeMs` filter, or in the sweep driver's
-`cronMatches` wiring, would only surface in the manual acceptance run (8.1),
+`cronMatches` wiring, would only surface in the manual run (8.1),
 not in PR-level smoke confidence. This design does not build that fixture
 (out of scope for a design document), but names the gap for the
 Impl-designer rung: a `backfill_openclaw_fixture` helper, writing a
 minimal OpenClaw v3 session JSONL (nested `message` envelope, matching PR
 #552's fixed reader) under a temp `agents/<id>/sessions/` tree with a
 controllable mtime, would let a hermetic smoke exercise the quiesce filter
-and the sweep-then-dedupe path deterministically, the same tier distinction
-`/work/hypaware/CLAUDE.md`'s Smoke Test Model section draws between
-hermetic smokes (PR confidence) and the acceptance smoke (release gate,
-8.1). Whether to build it in this change set or a follow-on is a scoping
+and the sweep-then-dedupe path deterministically, the PR-confidence role
+`CLAUDE.md`'s Smoke Test Model section gives hermetic
+smokes. Whether to build it in this change set or a follow-on is a scoping
 call for the plan, not this design; the design only establishes that Lane
 B's correctness currently rests entirely on 8.1's human-run procedure.
 
@@ -816,9 +820,9 @@ existing mechanism or a directly-cited decision. Two items are worth a
 human's attention regardless, both already flagged in the requirements
 rather than newly discovered here:
 
-- **R11's acceptance rewrite (section 8.1) requires a human run before the
+- ~~**R11's acceptance rewrite (section 8.1) requires a human run before the
   adapter ships.** This design specifies what that run must cover; it does
-  not and cannot perform the run itself.
+  not and cannot perform the run itself.~~ Retired with R11.
 - **The hermetic smoke gap (section 9)** is a real coverage hole this
   design chooses not to close, on the grounds that building a new smoke
   fixture is implementation work for a later rung, not a design decision.
@@ -836,4 +840,4 @@ rather than newly discovered here:
   json_path retirement, reversed here), LLP 0144 (shadow-provider-per-shape
   rationale, carried over as Lane A's rationale)
 - LLP 0044, LLP 0045 (attach/detach design)
-- `docs/ACCEPTANCE.md`, issue #543 (PR #552), issue #544 (PR #553)
+- Issue #543 (PR #552), issue #544 (PR #553)

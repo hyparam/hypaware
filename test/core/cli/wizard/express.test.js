@@ -7,11 +7,9 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { narrateAcceptedGate, runWizardExpressGate } from '../../../../src/core/cli/wizard/express.js'
-import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { runWizardFolderAsk } from '../../../../src/core/cli/wizard/folder_ask.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { readFolderAskMode, writeFolderAskMode } from '../../../../src/core/usage-policy/folder_ask.js'
-import { readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 import { WIZARD_STEP_LABELS, wizardItinerary } from '../../../../src/core/cli/wizard/steps.js'
 
@@ -44,11 +42,6 @@ function capturingConfirm(answer) {
     return answer
   }
   return { confirm, state }
-}
-
-/** @param {string} id */
-function descriptor(id) {
-  return /** @type {any} */ ({ plugin: `@hypaware/${id}`, id, label: `capture ${id}`, summary: `${id} rows` })
 }
 
 const ROWS = ['Claude Code', 'Codex']
@@ -90,7 +83,7 @@ test('the accept row names the tools in its own summary; nothing rides the items
   // @ref LLP 0201#decline [tests]: the decline row names every question the decline opens
   assert.equal(
     state.question.options[1].summary,
-    'Choose what to record, what syncs, and how new folders are handled.'
+    'Choose what to record and sync, and how new folders are handled.'
   )
   // No position line: the gate is what decides how many questions remain,
   // so it can no more state a total than the fork can (LLP 0135 #progress).
@@ -116,7 +109,7 @@ test('the gate claims a server only when told it has one', async () => {
   assert.equal(state.question.options[1].summary, 'Choose what to record.')
 })
 
-test('the sync claim drops when the store already withholds one of the named rows', async () => {
+test('the sync claim drops when the confirm behind it cannot enable sharing', async () => {
   const { env } = await makeHome()
   const { confirm, state } = capturingConfirm('defaults')
 
@@ -124,12 +117,14 @@ test('the sync claim drops when the store already withholds one of the named row
     stdout: makeBuf(), stderr: makeBuf(), env, enrolled: true, syncWithheld: true, rows: ROWS, confirm,
   }))
 
-  // An express accept preserves standing opt-outs verbatim rather than
-  // clearing them, so on that reconfigure "and sync everything" is a
-  // promise the accept does not keep. The retired sync gate carried this
-  // distinction itself ("Sync all" against "Keep this"); with that gate
-  // gone this row is the only screen the user decides on.
-  // @ref LLP 0201#gate [tests]: the accept row claims sync only when accepting would in fact sync everything it names
+  // An accept clears the standing opt-outs for the rows it names
+  // (LLP 0396 #combined-selection), so the promise holds wherever the
+  // clearing can happen. `syncWithheld` is the one machine where it
+  // cannot: an unreadable policy store, which the confirm may not
+  // overwrite and which makes the export seam withhold every row. This
+  // row is the only screen an express run decides on, so it is where the
+  // promise has to narrow.
+  // @ref LLP 0396#combined-selection [tests]: the accept row claims sync only when confirming it would in fact enable sync for everything it names
   assert.equal(state.question.options[0].label, 'Record everything')
   // Only the claim narrows. The disclosure is unconditional, and the
   // decline row still opens both menus.
@@ -139,7 +134,7 @@ test('the sync claim drops when the store already withholds one of the named row
   )
   assert.equal(
     state.question.options[1].summary,
-    'Choose what to record, what syncs, and how new folders are handled.'
+    'Choose what to record and sync, and how new folders are handled.'
   )
 })
 
@@ -160,7 +155,7 @@ test('the enrolled decline gloss names every lane a decline opens', async () => 
   // The enrolled itinerary is join, pick, sync, folders, finale; the lanes
   // a decline opens are the questions between the join and the finale.
   const opened = wizardItinerary('team').filter((step) => step !== 'join' && step !== 'finale')
-  assert.deepEqual(opened, ['pick', 'sync', 'folders'], 'a decline opens three questions')
+  assert.deepEqual(opened, ['pick', 'folders'], 'a decline opens two questions')
 
   // The other run this gloss is shown on. An enrolled machine that
   // reconfigures down the local pathway is `enrolled` at the gate
@@ -175,18 +170,12 @@ test('the enrolled decline gloss names every lane a decline opens', async () => 
 
   // One clause per lane, in the order the lanes open.
   const gloss = state.question.options[1].summary
-  const clauses = gloss.replace(/\.$/, '').replace(/^Choose /, '').split(/, and | and |, /)
-  assert.deepEqual(clauses, ['what to record', 'what syncs', 'how new folders are handled'])
+  const clauses = gloss.replace(/\.$/, '').replace(/^Choose /, '').split(', and ')
+  assert.deepEqual(clauses, ['what to record and sync', 'how new folders are handled'])
   assert.equal(clauses.length, opened.length, 'the row names as many questions as the decline opens')
 
-  // Two of the three are the counted lanes' own labels verbatim, so a
-  // rename there fails here. The pick lane is the exception on purpose:
-  // its label says "collect" and this row says "record", because the row
-  // above it says "Record and sync everything" and one screen should not
-  // use two verbs for the same thing.
   const subject = (/** @type {any} */ step) => WIZARD_STEP_LABELS[step].replace(/^Choose /, '')
-  assert.equal(clauses[1], subject('sync'))
-  assert.equal(clauses[2], subject('folders'))
+  assert.equal(clauses[1], subject('folders'))
 })
 
 test('declining opens the menus; back and cancel are their own answers', async () => {
@@ -210,31 +199,6 @@ test('declining opens the menus; back and cancel are their own answers', async (
 // The lanes' half of the bargain: auto-accepting skips the prompt, never
 // the statement (LLP 0201 #narrate).
 
-test('the sync lane auto-accepts by narrating the same split and writing the same store', async () => {
-  const { env, stateDir } = await makeHome()
-  await writeClientSyncEntries({ stateDir, entries: [{ source: 'openclaw', class: 'local-only' }] })
-  const stdout = makeBuf()
-
-  const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout, stderr: makeBuf(), env,
-    candidates: [descriptor('openclaw'), descriptor('hermes')],
-    locked: [descriptor('claude')],
-    autoAccept: true,
-    confirm: async () => { throw new Error('the express path must not prompt') },
-    prompt: async () => { throw new Error('the express path must not prompt') },
-  }))
-
-  assert.deepEqual(result, { optedOut: ['openclaw'] }, 'a standing opt-out survives the fast path')
-  const out = stdout.text()
-  assert.match(out, /These will sync to your server:/)
-  assert.match(out, /capture claude · managed by your fleet/)
-  assert.match(out, /capture hermes/)
-  assert.match(out, /Staying local-only:/)
-  assert.deepEqual(await readClientSyncEntries({ stateDir }), [
-    { source: 'openclaw', class: 'local-only' },
-  ])
-})
-
 test('the new-folder lane auto-accepts to the default and records it', async () => {
   const { env, stateDir } = await makeHome()
   const stdout = makeBuf()
@@ -247,8 +211,8 @@ test('the new-folder lane auto-accepts to the default and records it', async () 
 
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
-  // No names threaded here, so the title takes the tool-free fallback.
-  assert.match(stdout.text(), /When starting a session in a new project,/)
+  // Never silent: the accepted answer is stated as its one recap line.
+  assert.equal(stdout.text(), '✓ New folders sync automatically (change with `hyp privacy folders ask`)\n')
 })
 
 test('the new-folder lane auto-accepts the standing answer, not the constant', async () => {
@@ -262,17 +226,15 @@ test('the new-folder lane auto-accepts the standing answer, not the constant', a
     confirm: async () => { throw new Error('the express path must not prompt') },
   }))
 
-  // The sibling of the sync lane's "a standing opt-out survives the fast
-  // path" above: both lanes sit behind one keypress, and both must
-  // round-trip their own store rather than reset it (LLP 0200 #wizard).
+  // The lane sits behind one keypress and must round-trip its own store
+  // rather than reset it (LLP 0200 #wizard).
   // Hardcoding the default here overwrote a deliberate 'ask' with the
   // less protective 'sync' and then announced the new value as though the
   // user had answered it.
   // @ref LLP 0200#wizard [tests]: an express accept round-trips the standing preference instead of resetting it
   assert.deepEqual(result, { mode: 'ask' }, 'a standing preference survives the fast path')
   assert.equal(await readFolderAskMode({ stateDir }), 'ask')
-  assert.match(stdout.text(), /you are asked the first time/)
-  assert.doesNotMatch(stdout.text(), /it syncs automatically/)
+  assert.equal(stdout.text(), '✓ New folders ask first (change with `hyp privacy folders sync`)\n')
 })
 
 test('narrateAcceptedGate prints the gate title and its items verbatim, led by a blank line', () => {

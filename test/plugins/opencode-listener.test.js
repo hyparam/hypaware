@@ -8,6 +8,7 @@ import net from 'node:net'
 import path from 'node:path'
 import test from 'node:test'
 
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { createStartOpenCodeSource } from '../../hypaware-core/plugins-workspace/opencode/src/listener.js'
 
 function makeStorage() {
@@ -77,14 +78,20 @@ function snapshot(id, directory, entrypoint = 'cli') {
   }
 }
 
-async function startListener() {
+async function startListener(damagedExclusions = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-opencode-listener-'))
   const policyPath = path.join(root, 'usage-policy', 'local-only.json')
   const storage = makeStorage()
   /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
   const logs = []
   const sink = (/** @type {string} */ event, /** @type {Record<string, unknown>} */ fields) => logs.push({ event, fields })
-  const ignoredSessions = new Set()
+  const ignoredSessions = new SessionIgnoreSet(root)
+  if (damagedExclusions) {
+    ignoredSessions.add('private')
+    const marker = path.join(ignoredSessions.directory, (await fs.readdir(ignoredSessions.directory))[0])
+    await fs.writeFile(marker, 'broken json')
+    assert.throws(() => ignoredSessions.refresh())
+  }
   const start = createStartOpenCodeSource({ localOnlyListPath: policyPath, ignoredSessions })
   const source = await start(/** @type {any} */ ({
     config: { listen_port: 0 },
@@ -689,4 +696,20 @@ test('a rejected snapshot body is drained only up to a cap, while a small one st
   } finally {
     await listener.cleanup()
   }
+})
+
+
+test('invalid exclusions disable OpenCode capture while its listener remains available', async () => {
+  const env = await startListener(true)
+  try {
+    for (const id of ['private', 'other', undefined]) {
+      const body = /** @type {any} */ (snapshot('private', env.root))
+      body.session.id = id
+      const res = await env.post(body)
+      assert.equal(res.status, 202)
+      assert.equal(/** @type {any} */ (await res.json()).status, 'skipped')
+    }
+    assert.deepEqual(env.storage.appended, [])
+    assert.match((await env.source.status?.())?.lastError ?? '', /capture is disabled/)
+  } finally { await env.cleanup() }
 })

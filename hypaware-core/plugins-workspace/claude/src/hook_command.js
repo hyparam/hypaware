@@ -1,5 +1,7 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
+
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -64,6 +66,12 @@ export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
     return 0
   }
 
+  // @ref LLP 0399#coexistence: inherited hooks are not Claude activity and
+  // must not write Claude context or run its body-spool maintenance. Below the
+  // help branch, which the binary's own skip also spares, so `--help` still
+  // answers in a Cursor environment.
+  if (ctx.env.CURSOR_VERSION) return 0
+
   // The recording half is already internally fault-tolerant, but it is wrapped
   // here too so the invariant holds structurally: whatever it does, the hook
   // exits 0 and the sweep below still runs.
@@ -113,6 +121,7 @@ async function recordSessionContext(argv, ctx, deps) {
     return
   }
 
+  if (typeof event.cursor_version === 'string') return
   const sessionId = str(event.session_id)
   const cwd = str(event.new_cwd) ?? str(event.cwd)
   if (!sessionId || !cwd) return
@@ -128,6 +137,23 @@ async function recordSessionContext(argv, ctx, deps) {
     await appendSessionContext(stateFile, /** @type {any} */ (minimal))
   } catch {
     /* hook MUST never throw back into Claude: a write failure records nothing */
+  }
+
+  // @ref LLP 0403#hook-identity [implements]: hook stdin names the exact
+  // conversation; Claude's environment file passes it to subsequent Bash tools.
+  const envFile = str(ctx.env.CLAUDE_ENV_FILE)
+  if (event.hook_event_name === 'SessionStart' && envFile && path.isAbsolute(envFile)) {
+    try {
+      if (!sessionId.trim() || sessionId.includes('\0') || !sessionId.isWellFormed()
+          || Buffer.byteLength(sessionId) > 64 * 1024) {
+        throw new Error('invalid session identity')
+      }
+      // Preserve an unterminated line from another hook and quote shell data.
+      const quoted = "'" + sessionId.replaceAll("'", "'\\''") + "'"
+      await fs.appendFile(envFile, `\nexport CLAUDE_CODE_SESSION_ID=${quoted}\n`, { mode: 0o600 })
+    } catch {
+      ctx.stderr.write('hyp claude-hook: could not export the session ID; automatic session opt-out may be unavailable\n')
+    }
   }
 
   // Enriched record SECOND: run the (slower) git subprocesses, then append the

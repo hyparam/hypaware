@@ -290,11 +290,11 @@ export async function run({ harness, expect }) {
 
   /** @param {{ kernel: any, registry: any }} lifetime @param {string} dir */
   async function markLocalOnly(lifetime, dir) {
-    const result = await dispatchText(['privacy', 'ignore', '--local-only', dir], lifetime)
-    expect.that('privacy ignore --local-only: exited 0', result.code, (value) => value === 0)
-    expect.that('privacy ignore --local-only: no stderr', result.stderr, (value) => value === '')
+    const result = await dispatchText(['privacy', 'set', dir, 'local-only'], lifetime)
+    expect.that('privacy set local-only: exited 0', result.code, (value) => value === 0)
+    expect.that('privacy set local-only: no stderr', result.stderr, (value) => value === '')
     expect.that(
-      'privacy ignore --local-only: confirms the marked directory',
+      'privacy set local-only: confirms the marked directory',
       result.stdout,
       (value) => value.includes(dir) && value.includes('local-only')
     )

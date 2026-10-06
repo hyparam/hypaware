@@ -1,17 +1,22 @@
 {
   "hypaware-privacy": {
-    "claudeOnly": 31,
-    "codexOnly": 88,
-    "hash": "dc25aaad98682fb1"
+    "claudeOnly": 26,
+    "codexOnly": 95,
+    "hash": "89a57ccf7e0aca45"
   },
   "hypaware-query": {
-    "claudeOnly": 2,
+    "claudeOnly": 0,
     "codexOnly": 3,
-    "hash": "51b0dc6be60deee9"
+    "hash": "992def97167d4984"
   },
   "hypaware-reference": {
     "claudeOnly": 0,
     "codexOnly": 0,
     "hash": "d8156bae0c4243d3"
+  },
+  "hypaware-report": {
+    "claudeOnly": 6,
+    "codexOnly": 8,
+    "hash": "b2731b19375b7c49"
   }
 }

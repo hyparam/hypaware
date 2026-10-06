@@ -21,7 +21,7 @@ import { argvToParams } from '../../src/core/cli/verb_codec.js'
 import { CORE_VERBS } from '../../src/core/cli/core_verbs.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
-import { queryGrepVerb } from '../../src/core/search/grep_verb.js'
+import { queryGrepVerb } from '../../hypaware-core/plugins-workspace/grep/src/grep_verb.js'
 import { GrepQueryError } from '../../src/core/search/matcher.js'
 import { VerbUsageError } from '../../src/core/cli/verb_errors.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
@@ -108,8 +108,8 @@ test('the tool schema is wire-compatible with the server grep_search', () => {
   assert.match(queryGrepVerb.summary, /zero hits is not evidence/)
 })
 
-test('CORE_VERBS registers the grep verb beside sql', () => {
-  assert.ok(CORE_VERBS.some((v) => v.tool === 'grep_search'))
+test('core leaves grep_search available for the host or an active plugin', () => {
+  assert.ok(!CORE_VERBS.some((v) => v.tool === 'grep_search'))
   assert.ok(CORE_VERBS.some((v) => v.tool === 'query_sql'))
 })
 
@@ -242,6 +242,16 @@ test('an interrupted walk reports the interruption, not an empty machine', async
   )
   assert.match(stopped.stderr ?? '', /stopped before covering every file/)
   assert.doesNotMatch(stopped.stderr ?? '', /nothing is recorded on this machine/)
+})
+
+test('the incomplete-walk notice tells the caller how to retry and keeps JSON stdout clean', () => {
+  const rendered = queryGrepVerb.render(
+    { hits: [], truncated: false, exhausted: false },
+    /** @type {any} */ ({ format: 'json', json: false, maxCell: 200, maxBytes: 32768 })
+  )
+  assert.match(rendered.stderr ?? '', /stopped before covering every file; results may be incomplete/)
+  assert.match(rendered.stderr ?? '', /Narrow with --from\/--to or --session-id and retry/)
+  assert.doesNotThrow(() => JSON.parse(rendered.stdout))
 })
 
 test('a truncated AND interrupted search prints both notices, not the louder one', () => {
@@ -627,7 +637,7 @@ const NO_LOCAL_LOAD_PROBE = `
     { search: async () => ({ hits: [], truncated: false, exhausted: true }) },
   )
   assert.ok(
-    !loaded.some((url) => url.endsWith('/search/grep_service.js')),
+    !loaded.some((url) => url.endsWith('/grep/src/grep_service.js')),
     'grep_service.js was loaded on the injected path: the dynamic import escaped buildLocalBackend',
   )
 `
@@ -649,7 +659,7 @@ test('an injecting host never loads the local search stack', (t) => {
     // matrix legs are well past it.
     return t.skip('node:module registerHooks is unavailable on this runtime')
   }
-  const verbModule = new URL('../../src/core/search/grep_verb.js', import.meta.url).href
+  const verbModule = new URL('../../hypaware-core/plugins-workspace/grep/src/grep_verb.js', import.meta.url).href
   const run = spawnSync(process.execPath, ['--input-type=module', '--eval', NO_LOCAL_LOAD_PROBE], {
     encoding: 'utf8',
     // A wedged child (a loader inherited through NODE_OPTIONS, a future

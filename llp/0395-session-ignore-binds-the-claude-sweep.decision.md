@@ -8,6 +8,7 @@
 **Related:** LLP 0049, LLP 0066, LLP 0067, LLP 0256, LLP 0306, LLP 0358,
 LLP 0359
 **Tracker:** hyparam/hypaware#1606
+**Extended-by:** LLP 0403 (persistent session exclusions and Claude hook identity).
 
 > `@hypaware/claude` holds one ignored-session set per activation. The
 > telemetry listener's control route writes it and the transcript backfill
