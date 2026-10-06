@@ -2366,12 +2366,12 @@ test('save leaves a draft folder in place when a file appeared during the move, 
   const original = fs.copyFile
   let planted = false
   t.after(() => { fs.copyFile = original })
-  fs.copyFile = /** @type {any} */ (async (/** @type {any[]} */ ...args) => {
+  fs.copyFile = /** @type {any} */ (async (/** @type {string} */ src, /** @type {string} */ dest, /** @type {number | undefined} */ mode) => {
     if (!planted) {
       planted = true
       await fs.writeFile(path.join(draft, 'late-notes.txt'), 'x')
     }
-    return original(...args)
+    return original(src, dest, mode)
   })
   assert.equal(await runReportSave([draft], ctx), 0)
   assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
