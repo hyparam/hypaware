@@ -1228,7 +1228,10 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   // say a positional token lands in shell history and process listings - which
   // on a CI runner means `ps` and any `set -x` trace.
   ctx.stderr.write(`  setup:    printf '%s' "$HYP_CI_TOKEN" | hyp join ${joinTarget} --no-daemon\n`)
-  ctx.stderr.write('            hyp daemon run &\n')
+  // Exit 75 is the staged restart a foreground daemon cannot do for itself
+  // (LLP 0017), so the recipe relaunches on it and keeps any other exit code.
+  // @ref LLP 0017#staged-restart-for-config-replacement [constrained-by]: the invoker of a foreground daemon loops on 75
+  ctx.stderr.write('            ( rc=75; while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done; exit "$rc" ) &\n')
   ctx.stderr.write('  teardown: hyp sync --yes\n')
   return 0
 }
