@@ -24,8 +24,9 @@ test('Ollama is bundled for explicit activation with only a gateway capability r
   assert.deepEqual(entry.manifest.contributes ?? {}, {})
 })
 
-test('explicit config activates Ollama after gateway; omitting the capability fails clearly', async () => {
+test('explicit config activates Ollama after gateway; omitting the capability fails clearly', async (t) => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ollama-activation-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   const configPath = path.join(hypHome, 'hypaware-config.json')
   await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, plugins: [{ name: '@hypaware/ai-gateway' }, { name: '@hypaware/ollama' }] }))
   const boot = await bootKernel({ hypHome, configPath, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath } })
