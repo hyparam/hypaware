@@ -203,11 +203,37 @@ async function runClientLifecycle(action, argv, ctx) {
   // A client with no settings to write (Claude Desktop: its lane is the
   // Claude transcript import) registers no adapter, so attach for it is the
   // recording switch alone.
+  // `attach all` resumes them here too, since `detach all` switched them off
+  // and the adapter loop below never reaches them.
   // @ref LLP 0466#switch [implements]: attach turns recording back on, adapter or not
-  if (parsed.client !== 'all') {
+  let switchOnlyFailed = false
+  if (parsed.client === 'all') {
+    for (const [name, descriptor] of await buildClientDescriptorMap(ctx)) {
+      if (descriptor.attachProbe || ctx.clients?.getClient(name)) continue
+      const resumed = await resumeRecording({ name, descriptor, ctx, parsed })
+      if (resumed === 'central_managed') switchOnlyFailed = true
+      if (parsed.json && (resumed === 'changed' || resumed === 'central_managed')) {
+        ctx.stdout.write(JSON.stringify(resumed === 'changed'
+          ? { status: 'ok', action: 'attach', client: name, dry_run: parsed.dryRun === true, changed: true, recording: true }
+          : { status: 'failed', action: 'attach', client: name, dry_run: parsed.dryRun === true, error_kind: 'central_managed' }) + '\n')
+      }
+    }
+  } else {
     const descriptor = (await buildClientDescriptorMap(ctx)).get(parsed.client)
     if (descriptor && !descriptor.attachProbe && !(ctx.clients?.getClient(parsed.client))) {
-      const resumed = await resumeRecording({ name: parsed.client, ctx, parsed })
+      const resumed = await resumeRecording({ name: parsed.client, descriptor, ctx, parsed })
+      if (resumed === 'central_managed') {
+        if (parsed.json) {
+          ctx.stdout.write(JSON.stringify({
+            status: 'failed',
+            action: 'attach',
+            client: parsed.client,
+            dry_run: parsed.dryRun === true,
+            error_kind: 'central_managed',
+          }) + '\n')
+        }
+        return 1
+      }
       if (resumed === 'changed' || resumed === 'unchanged') {
         if (parsed.json) {
           ctx.stdout.write(JSON.stringify({
@@ -356,7 +382,7 @@ async function runClientLifecycle(action, argv, ctx) {
     return 1
   }
 
-  let exitCode = 0
+  let exitCode = switchOnlyFailed ? 1 : 0
   /** @type {Map<string, ClientDescriptor> | undefined} */
   let descriptorMap
   for (const name of clientNames) {
@@ -550,7 +576,7 @@ async function runClientLifecycle(action, argv, ctx) {
               // logs and swallows its own marker error.
               // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
               rearmRefusedAttachMarker({ name, ctx, dryRun: false })
-              await resumeRecording({ name, ctx, parsed })
+              if (await resumeRecording({ name, ctx, parsed }) === 'central_managed') exitCode = 1
               // The settings are already wired, but attach means settings *and*
               // assets, and this branch is the one an operator on a
               // daemon-managed install actually reaches. Short-circuiting past
@@ -626,7 +652,7 @@ async function runClientLifecycle(action, argv, ctx) {
         json: parsed.json,
       })
       rearmRefusedAttachMarker({ name, ctx, dryRun: parsed.dryRun === true })
-      await resumeRecording({ name, ctx, parsed })
+      if (await resumeRecording({ name, ctx, parsed }) === 'central_managed') exitCode = 1
       // Attach wires a client into HypAware, and its registered skills and
       // subagents are part of that wiring: manual attach skipping them was the
       // inconsistency, not the norm (the wizard has always treated
@@ -1754,12 +1780,14 @@ function writeCoreDetachOutput({ ctx, name, json, quietNoop, recordingSwitch, re
  * 0466). Reports only a change: an attach of a client that was never
  * detached prints nothing new. A failed write is a warning, not an attach
  * failure: the settings are wired, and `hyp status` names the contradiction.
+ * A central entry that turns recording off is reported as an error: the
+ * caller fails the attach, since recording stays off.
  *
- * @param {{ name: string, ctx: CommandRunContext, parsed: { dryRun: boolean, json: boolean } }} args
+ * @param {{ name: string, descriptor?: ClientDescriptor, ctx: CommandRunContext, parsed: { dryRun: boolean, json: boolean } }} args
  * @returns {Promise<ClientRecordingWriteResult['status'] | undefined>}
  */
-async function resumeRecording({ name, ctx, parsed }) {
-  const descriptor = (await buildClientDescriptorMap(ctx)).get(name)
+async function resumeRecording({ name, ctx, parsed, ...args }) {
+  const descriptor = args.descriptor ?? (await buildClientDescriptorMap(ctx)).get(name)
   if (!descriptor) return undefined
   const result = await writeClientRecording({
     env: ctx.env,
@@ -1783,6 +1811,8 @@ async function resumeRecording({ name, ctx, parsed }) {
     }
   } else if (result.status === 'failed') {
     ctx.stderr.write(`warning: could not switch recording back on in ${result.configPath}: ${result.message ?? 'unknown error'}\n`)
+  } else if (result.status === 'central_managed' && !parsed.json) {
+    ctx.stderr.write(`error: your organization's HypAware policy turns off recording for ${name} (the central config sets recording: false on ${descriptor.plugin}); ask your HypAware admin\n`)
   }
   return result.status
 }

@@ -314,3 +314,40 @@ test('a refused detach skips --purge and keeps the local CA', async () => {
     await s.cleanup()
   }
 })
+
+test('attach all resumes Claude Desktop, which registers no adapter', async () => {
+  const s = await stage()
+  try {
+    assert.equal(await runDetach(['claude-desktop'], cliCtx(s).ctx), 0)
+    const clients = {
+      /** @param {string} name */
+      getClient: (name) => (name === 'codex' ? { name, requiresEndpoint: false, attach: async () => {} } : undefined),
+      listClients: () => [{ name: 'codex' }],
+    }
+    const cli = cliCtx(s, { clients })
+    assert.equal(await runAttach(['all'], cli.ctx), 0, cli.err())
+    assert.match(cli.out(), /recording claude-desktop again/)
+    const entry = (await s.readLocal()).plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude-desktop')
+    assert.equal(entry.recording, undefined)
+  } finally {
+    await s.cleanup()
+  }
+})
+
+test('attach fails when the org config turns recording off', async () => {
+  const s = await stage()
+  try {
+    const controlDir = path.join(s.env.HYP_HOME, 'hypaware', 'config-control')
+    await fsp.mkdir(controlDir, { recursive: true })
+    await fsp.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({
+      version: 2, plugins: [{ name: '@hypaware/claude-desktop', recording: false }],
+    }))
+    const cli = cliCtx(s, { clients: { getClient: () => undefined, listClients: () => [] } })
+    assert.equal(await runAttach(['claude-desktop', '--json'], cli.ctx), 1)
+    const payload = JSON.parse(cli.out())
+    assert.equal(payload.status, 'failed')
+    assert.equal(payload.error_kind, 'central_managed')
+  } finally {
+    await s.cleanup()
+  }
+})

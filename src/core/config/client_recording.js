@@ -111,9 +111,9 @@ export async function writeClientRecording({ env, plugin, recording, dryRun = fa
     ? (await readRawPlugins(centralPath)).find((entry) => entry.name === plugin)
     : undefined
   if (centralEntry && centralEntry.enabled !== false) {
-    // Attach on a central entry has nothing to switch back on; detach is the
-    // direction org policy forbids.
-    return recording === false
+    // Detach is the direction org policy forbids. Attach has nothing to
+    // switch back on, unless the central entry itself turns recording off.
+    return recording === false || centralEntry.recording === false
       ? { status: 'central_managed', configPath }
       : { status: 'unchanged', configPath }
   }
