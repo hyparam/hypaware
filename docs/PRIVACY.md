@@ -327,8 +327,9 @@ hyp telemetry status
 
 Organization telemetry goes to the HypAware server this machine is enrolled
 with, using its existing enrollment. The CLI does not send telemetry anywhere
-else. The server also sends the HypAware version, OS, and configured client
-names to PostHog for product analytics.
+else. The server also copies the HypAware version, OS family, and configured
+client names to PostHog for product analytics, where they are kept until
+Hyperparam deletes them.
 
 ### Control and preview
 
