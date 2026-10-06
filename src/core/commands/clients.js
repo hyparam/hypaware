@@ -1872,6 +1872,13 @@ function parseIgnoreArgs(argv) {
 }
 
 /**
+ * An ignore is prospective (LLP 0049): rows already cached under the folder
+ * stay until a separate purge, so the write receipt names that step.
+ */
+const FOLDER_PURGE_NOTE =
+  'To delete what was already recorded in ignored folders on this machine, run `hyp privacy purge --ignored`.'
+
+/**
  * Write a .hypignore at the explicit path, or the repo root by default.
  * @ref LLP 0049#cli [implements]: dotfile creation is idempotent and prospective-only
  * @param {string[]} argv
@@ -1918,6 +1925,7 @@ export async function runIgnore(argv, ctx) {
   // CACHE_TTL_MS). Future enhancement: signal the daemon here to invalidate and
   // prime this cwd's cache entry so the drop applies with zero latency.
   ctx.stdout.write(`wrote ${file}\n`)
+  ctx.stdout.write(`${FOLDER_PURGE_NOTE}\n`)
   return 0
 }
 
@@ -2005,6 +2013,7 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
   // Same latency caveat as the dotfile write: a running daemon's resolver
   // picks this up within the matcher's cache TTL, not instantly.
   ctx.stdout.write(`marked ${resolvedTarget} as ${vocabulary.className(targetClass)}${vocabulary.storeSuffix(listPath)}\n`)
+  if (targetClass === 'ignore') ctx.stdout.write(`${FOLDER_PURGE_NOTE}\n`)
   return 0
 }
 

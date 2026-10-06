@@ -12,9 +12,9 @@ to the **hypaware-query** skill, which owns that ground entirely.
 
 ## What HypAware is
 
-A modular logs and telemetry collector with a plugin-kernel architecture, part
-of HypStack, an open-source stack for AI observability. It captures the sources
-below into a local Iceberg-backed query cache that everything else reads from.
+A modular logs and telemetry collector with a plugin-kernel architecture. It
+captures the sources below into a local Iceberg-backed query cache that
+everything else reads from.
 What stays on the machine and what can leave is drawn under "What is opt-in".
 
 ## What it captures (sources)

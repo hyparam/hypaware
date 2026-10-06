@@ -23,7 +23,13 @@ npm install -g hypaware
 hyp setup
 ```
 
-Setup first asks how to collect. **Sync to the cloud** is the default: press
+You can also ask your AI agent to install HypAware using these same two
+commands. Without a terminal, `hyp setup` prints a guide so the agent can
+walk you through the choices and run unattended setup. You complete any
+browser sign-ins yourself. Agents using a terminal can read the guide with
+`hyp setup --guide`.
+
+On a terminal, setup first asks how to collect. **Sync to the cloud** is the default: press
 Enter and a browser sign-in enrolls this machine, so your history follows you
 across machines. Choose **Local only** to keep recordings on this machine.
 Then it asks which clients to capture, installs the background daemon, and
@@ -113,7 +119,7 @@ immediately, so answer **n** to keep the review period. Check the deadline with
 before sharing recordings.
 
 One person can sign in and sync on their own. To put more than one person in
-an organization, [contact us](https://hypaware.ai/contact/?utm_medium=readme)
+an organization, [contact us](https://hypaware.ai/contact?utm_medium=readme)
 and we'll set it up; there is no self-serve invite yet. See the
 [team setup guide](./docs/TEAM_SETUP.md).
 

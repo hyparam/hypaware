@@ -22,9 +22,6 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 
 const CONTROL_PATH = '/_hypaware/ignore/session'
 
-/** The other, independent governor. LLP 0066 R7: either match suppresses. */
-const FOLDER_GOVERNOR_NOTE = 'folder:  folder rules are checked separately - see `hyp privacy show`'
-
 /**
  * The recorder's `total`, worded so it cannot be read as a second verdict on
  * this session: "not ignored (1 ignored)" looked like a contradiction.
@@ -41,38 +38,67 @@ function ignoreListCount(total) {
  * @ref LLP 0403#contract [implements]: persistence replaces restart expiry.
  */
 const SESSION_IGNORE_NOTE =
-  'this opt-out survives daemon restarts until `hyp session unignore`; a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
+  'this opt-out survives daemon restarts until `hyp session unignore`; a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers.'
 
 /**
- * What a confirmed `ignored` establishes, printed next to it by the writer and
- * the reader alike, for the same no-drift reason as `SESSION_IGNORE_NOTE`.
+ * The opt-out is prospective: rows captured before it stay in the cache (and
+ * on any remote they already reached). The receipt names the exact purge
+ * command, with the resolved id, so removing them is one deliberate step
+ * rather than a search through the docs. A session purge also deletes from
+ * remotes, so the remote reach is stated rather than hidden behind the hint.
  *
- * The control route is a `Set` over opaque tokens: `POST` adds whatever it was
- * handed and answers `ignored: true`, `GET` is the same `Set.has`. Neither verb
- * sees a single exchange, so neither can establish that the id is one live
- * traffic carries - the drop happens later, in the client adapter, keyed on the
- * `session_id` it stamps on the row (LLP 0066 R5). "the gateway will drop this
- * session" was therefore a promise the receipt could not support: an id no
- * exchange will ever carry (a Codex thread id, a finished session's id, a typo)
- * prints exactly the same line and suppresses nothing.
- *
- * Naming the caller's own responsibility is the other half. The gap is closed
- * by resolving the right key BEFORE the call (`resolveSessionIdForCli`), not by
- * anything the route can answer afterwards, so the receipt says which of the
- * two claims it is making.
- *
- * @ref LLP 0066#receipt-is-membership [implements]: R14 - the receipt states
- * set membership and names who owns the key, rather than reporting a drop
- * nothing verified.
+ * @param {string} sessionId
+ * @returns {{ command: string, localOnlyCommand: string }}
  */
-const MEMBERSHIP_NOTE =
-  'what this proves: every recorder listed as ignored holds this exact id in its drop set, and nothing more. The control route never inspects traffic, so an exchange is dropped only where the client adapter stamps it with this same session_id - an id this session does not carry prints this same line and suppresses nothing. Naming the right id is on the caller, which is why this verb resolves it (or takes it explicitly) rather than asking a recorder to confirm it afterwards.'
+function sessionPurgeCommands(sessionId) {
+  // A dash-led id would parse as a flag after a space, so it binds with `=`.
+  const sep = sessionId.startsWith('-') ? '=' : ' '
+  const command = `hyp privacy purge --session${sep}${shellArg(sessionId)}`
+  return { command, localOnlyCommand: `${command} --local-only` }
+}
 
 /**
- * The machine-readable form of `MEMBERSHIP_NOTE`, carried by the write verbs'
- * `--json` receipt. `status: 'ok'` on its own reads as "done" to the skills
- * that parse it, which is the same overclaim in the shape an agent actually
- * consumes.
+ * @param {string} sessionId
+ * @returns {string}
+ */
+function sessionPurgeNote(sessionId) {
+  const { command, localOnlyCommand } = sessionPurgeCommands(sessionId)
+  return `To delete what this session already recorded, run \`${command}\`. It also deletes copies on configured remotes; \`${localOnlyCommand}\` keeps those.`
+}
+
+/**
+ * The `--json` twin of `sessionPurgeNote`, for an agent to act on.
+ *
+ * @param {string} sessionId
+ */
+function sessionPurgeJson(sessionId) {
+  const { command, localOnlyCommand } = sessionPurgeCommands(sessionId)
+  return {
+    earlier_rows: 'retained',
+    command,
+    command_deletes_remote: true,
+    local_only_command: localOnlyCommand,
+  }
+}
+
+/**
+ * Quote an argument for a POSIX shell only when it needs it, so the common
+ * uuid prints bare.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function shellArg(value) {
+  return /^[A-Za-z0-9._:@%+=,/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * What a confirmed `ignored` establishes, carried by the write verbs'
+ * `--json` receipt. The control route is a `Set` over opaque tokens: `POST`
+ * adds whatever it was handed and `GET` is the same `Set.has`, so neither can
+ * establish that the id is one live traffic carries. `status: 'ok'` on its
+ * own reads as "done" to the skills that parse it. The human output no longer
+ * spells this out (LLP 0463); its headline still says "in the drop set".
  *
  * The reader's `--json` needs no equivalent: it already reports `status` as
  * `ignored` / `not_ignored` / `unknown` beside a tri-state `ignored`, which is
@@ -81,38 +107,6 @@ const MEMBERSHIP_NOTE =
  * @ref LLP 0066#receipt-is-membership [implements]: R14
  */
 const MEMBERSHIP_GUARANTEE = 'set_membership'
-
-/**
- * The control plane's authenticity contract, printed beside every **confirmed**
- * answer, by the writer and the reader alike.
- *
- * `validateControlResponse` proves the responder saw our token; nothing proves
- * the responder IS the gateway. A local process that binds the resolved port and
- * echoes the token back yields a confident `ignored: true` for a session nothing
- * is dropping (issue #451). Authenticating it would need peer-process identity,
- * which has no portable form, and a gateway-written secret defends nothing
- * because whoever can bind that port runs as the same uid and can read the same
- * file ([LLP 0067 §cli-response-check](../../../../llp/0067-session-opt-out.design.md#cli-response-check)).
- *
- * So the guarantee is stated rather than proved, and the statement is
- * **unconditional**: the verb cannot tell the gateway from the impostor, so a
- * note printed only "when spoofed" would be a claim it cannot make, and its
- * absence would read as proof of authenticity.
- *
- * The endpoint is named in the note rather than left as "that port": on the
- * `daemon_status` path this is the only line about the endpoint at all, and a
- * reader pasting the output into a support thread should not have to reconstruct
- * which address was trusted.
- *
- * @ref LLP 0166#stated-not-proved [implements]: the responder is never
- * authenticated, and every confirmed answer says so.
- *
- * @param {string} endpoint
- * @returns {string}
- */
-function responderTrustNote(endpoint) {
-  return `trust:   nothing proves the responder at ${endpoint} is the HypAware gateway - any process on this machine could bind that port and answer. This answer is only as trustworthy as this machine.`
-}
 
 /**
  * `hyp session status` exit code for a **confirmed** "this session is NOT
@@ -449,6 +443,7 @@ async function runMutation(argv, ctx, method, usage) {
         // Same field, same constant, on the verbs whose output reads as done.
         // @ref LLP 0166#stated-not-proved [implements]
         endpoint_authenticated: false,
+        ...(primary.ignored ? { purge: sessionPurgeJson(resolvedId.sessionId) } : {}),
         recorders: outcomes.map((o) => ({
           recorder: o.recorder,
           endpoint: o.endpoint,
@@ -466,11 +461,11 @@ async function runMutation(argv, ctx, method, usage) {
   // the route added an opaque token to a set (LLP 0066#receipt-is-membership).
   // The removal says no more than that either. "recording resumed" was the same
   // overclaim mirrored: a token nothing carried suppressed nothing to resume,
-  // and the folder governor below is a separate reason a session stays unrecorded.
+  // and folder policy is a separate reason a session stays unrecorded.
   ctx.stdout.write(
     primary.ignored
       ? `session ${resolvedId.sessionId}: ignored - this id is in the ${primary.recorder} drop set (${ignoreListCount(primary.total)})\n`
-      : `session ${resolvedId.sessionId}: not ignored - this id is out of the ${primary.recorder} drop set, so this opt-out suppresses nothing now (${ignoreListCount(primary.total)})\n`
+      : `session ${resolvedId.sessionId}: not ignored - this id is out of the ${primary.recorder} drop set (${ignoreListCount(primary.total)})\n`
   )
   // Every further confirmed recorder gets its own line: "ignored" on one
   // recorder is not ignored while a second one records, so each write is
@@ -484,7 +479,7 @@ async function runMutation(argv, ctx, method, usage) {
   }
   if (primary.ignored) {
     ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
-    ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
+    ctx.stdout.write(`${sessionPurgeNote(resolvedId.sessionId)}\n`)
   }
   // The write verbs carry the same provenance caveats as the read: "ignored"
   // printed off an inferred id is a claim about a session the user may not be
@@ -493,17 +488,9 @@ async function runMutation(argv, ctx, method, usage) {
     idSource: resolvedId.source,
     idEvidence: resolvedId.evidence ?? null,
     threadId: resolvedId.threadId ?? null,
-    endpoint: primary.endpoint,
-    endpointSource: primary.endpointSource,
   })) {
     ctx.stdout.write(`${note}\n`)
   }
-  // The trust contract is per responder, and it is unconditional (LLP 0166),
-  // so each further endpoint gets the same disclosure the primary one got.
-  for (const outcome of confirmed.slice(1)) {
-    ctx.stdout.write(`${responderTrustNote(outcome.endpoint)}\n`)
-  }
-  ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   return allOk ? 0 : SESSION_EXIT_UNKNOWN
 }
 
@@ -591,39 +578,28 @@ function writeStatus(ctx, json, report) {
       ? 'no session was identified, so nothing was checked. If you are inside an AI session, assume it IS being recorded.\n'
       : 'assume this session IS being recorded until a check succeeds.\n')
     writeRecorderStatusLines(ctx, report.recorders)
-    writeRecorderTrustNotes(ctx, report.recorders)
-    ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
     ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
-    ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
     writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
-      endpoint: report.endpoint,
-      endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
     }
-    writeRecorderTrustNotes(ctx, secondaryRecorders(report))
-    ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else {
-    ctx.stdout.write(`session ${report.session_id}: not ignored - this session IS being recorded\n`)
+    ctx.stdout.write(`session ${report.session_id}: not ignored\n`)
     ctx.stdout.write('run `hyp session ignore` to opt out.\n')
     writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
-      endpoint: report.endpoint,
-      endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
     }
-    writeRecorderTrustNotes(ctx, secondaryRecorders(report))
-    ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   }
 
   if (report.status === 'ignored') return 0
@@ -671,28 +647,12 @@ function writeRecorderStatusLines(ctx, outcomes) {
 }
 
 /**
- * Every confirmed per-recorder answer carries the same local-responder trust
- * disclosure as the legacy primary answer. Unknown rows make no membership
- * claim and therefore add no responder note.
- *
- * @param {CommandRunContext} ctx
- * @param {SessionStatusOutcome[]} outcomes
- */
-function writeRecorderTrustNotes(ctx, outcomes) {
-  for (const outcome of outcomes) {
-    if (outcome.status !== 'unknown') {
-      ctx.stdout.write(`${responderTrustNote(outcome.endpoint)}\n`)
-    }
-  }
-}
-
-/**
  * Notes qualifying a CONFIRMED answer, printed next to it.
  *
- * A membership answer rests on two claims the verb cannot always prove: that
- * the id is this session's, and that the endpoint is the gateway. An explicit
- * argument, or a client-set `CLAUDE_CODE_SESSION_ID`, states the first outright;
- * every Codex path only INFERS it from a rollout on disk, so both get a note.
+ * A membership answer rests on a claim the verb cannot always prove: that the
+ * id is this session's. An explicit argument, or a client-set
+ * `CLAUDE_CODE_SESSION_ID`, states it outright; every Codex path only INFERS it
+ * from a rollout on disk, so both Codex paths get a note.
  * `CODEX_THREAD_ID` does not exempt its path: Codex states the **thread**, and
  * the container the drop keys on still has to be read out of that thread's
  * rollout (LLP 0067#cli-session-id). What the variable buys is liveness, not the
@@ -702,15 +662,6 @@ function writeRecorderTrustNotes(ctx, outcomes) {
  * OUTLIVES its spawn keeps the variable - but it is far narrower than the mtime
  * bound, and qualifying it too would train the reader to skip the caveat on the
  * paths where it is load-bearing.
- *
- * The second claim is never proved, only graded. A live daemon's `status.json`
- * says the gateway bound that port; a pinned `listen` says only that it was
- * asked to, so the weaker source gets its own note. Neither says who answers
- * there NOW, and `validateControlResponse` can prove the responder saw our
- * token but not that it is the gateway, so `responderTrustNote` rides every
- * confirmed answer under both sources (issue #451, LLP 0166). Naming the
- * evidence in the output is the only remedy available at this layer, and it is
- * this change's own thesis: a control that can be wrong must at least say so.
  *
  * A Codex answer also carries a **grain** disclosure, which is not about weak
  * evidence but about the key itself: the resolved id is the session container,
@@ -726,13 +677,11 @@ function writeRecorderTrustNotes(ctx, outcomes) {
  *   idSource: SessionStatusReport['session_id_source'],
  *   idEvidence: string | null,
  *   threadId: string | null,
- *   endpoint: string | null,
- *   endpointSource: SessionStatusReport['endpoint_source'],
  * }} args
  * @returns {string[]}
  */
 function provenanceNotes(args) {
-  const { idSource, idEvidence, threadId, endpoint, endpointSource } = args
+  const { idSource, idEvidence, threadId } = args
   /** @type {string[]} */
   const notes = []
   if (idSource === 'codex_rollout') {
@@ -742,7 +691,7 @@ function provenanceNotes(args) {
   }
   if (idSource === 'codex_env_rollout') {
     notes.push(
-      `session id: the session containing the thread ${CODEX_THREAD_ENV} states, read from ${idEvidence ?? 'that rollout'} on disk. Codex states the thread, not the session, so the container had to be read rather than stated.`
+      `session id: the session containing the thread ${CODEX_THREAD_ENV} states, read from ${idEvidence ?? 'that rollout'} on disk.`
     )
   }
   if (threadId) {
@@ -750,15 +699,6 @@ function provenanceNotes(args) {
       `scope:   the gateway drops by SESSION, so every Codex thread in this session is covered - sibling and subagent threads too, not only thread ${threadId}.`
     )
   }
-  if (endpointSource === 'config_listen') {
-    notes.push(
-      'endpoint:  from the pinned `listen`, not a live daemon - nothing proved the gateway still owns that port.'
-    )
-  }
-  // Last, and on every confirmed answer: the weaker of the two endpoint
-  // sources gets the extra note above, but neither of them authenticates the
-  // responder, so the contract is stated whichever one produced the port.
-  if (endpoint) notes.push(responderTrustNote(endpoint))
   return notes
 }
 

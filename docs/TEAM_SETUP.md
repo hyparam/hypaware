@@ -27,7 +27,7 @@ Get an organization in HypAware Cloud, then set up each machine to join it.
 You can sign in to HypAware Cloud and sync your own machines without setting
 up a team.
 
-For a team, [contact us](https://hypaware.ai/contact/?utm_medium=docs) to set up
+For a team, [contact us](https://hypaware.ai/contact?utm_medium=docs) to set up
 an organization for your email domain. Teammates join automatically when they
 sign in with a verified email address from that domain.
 

@@ -95,6 +95,9 @@ test('hyp ignore writes a self-documenting .hypignore at the git repo root', asy
     assert.match(body, /^ignore$/m, 'first meaningful token is the ignore class')
     assert.match(body, /HypAware usage policy/, 'has a self-documenting comment header')
     assert.match(res.stdout, new RegExp(`wrote ${file.replace(/[.\\]/g, '\\$&')}`))
+    // Prospective only: the receipt points at the purge for earlier rows.
+    assert.match(res.stdout, /already recorded in ignored folders/)
+    assert.match(res.stdout, /`hyp privacy purge --ignored`/)
   })
 })
 

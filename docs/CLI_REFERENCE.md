@@ -95,6 +95,17 @@ daemon, attach clients, install client assets, and import history.
 Important options include repeatable `--source` and `--client`, `--export`,
 `--retention-days`, `--from-file`, `--no-daemon`, and `--bin`.
 
+With no arguments and no output terminal, setup prints an agent guide on
+stdout and exits `0` without configuring the machine. It lists detected
+sources, recording disclosures, choices and commands, browser sign-in
+handoffs, and verification. An agent asks the person before selecting sources
+or enabling cloud sync, then runs explicit unattended flags. `hyp setup
+--guide` prints the same guide even on a terminal; use this flag alone.
+Cloud login from an agent shell needs `hyp remote login --no-browser` (print
+the sign-in URL) or `--browser` (open it); without either flag piped stdin is
+treated as a static token. Unattended setup does not enable GitHub collection;
+once the person enables it, `hyp github login --no-browser` prints a device code. The person completes each browser sign-in while the command waits.
+
 `--dry-run` reports what would be written and writes no configuration,
 including with `--from-file`. It still refuses an existing configuration
 without `--force`, exactly where a real run would.
@@ -730,6 +741,12 @@ Saves the exact session ID as ignored and adds it to every available
 recorder's drop set. This stops future capture only. It doesn't delete existing rows. The Claude
 telemetry listener deletes ignored-session bodies from its transient spool.
 
+A confirmed ignore prints the exact command to delete what the session already
+recorded, `hyp privacy purge --session <id>`, plus its `--local-only` form.
+The default form also deletes the session's rows from configured remotes. With `--json`, the same hint is a `purge` object:
+`earlier_rows` (`retained`), `command`, `command_deletes_remote` (`true`), and
+`local_only_command`.
+
 ```sh
 hyp session ignore
 ```
@@ -1209,7 +1226,9 @@ hyp privacy set <path> sync|local-only|ignore
 ```
 
 Upserts an exact machine-local path marking. It doesn't write a dotfile or
-delete rows.
+delete rows. An `ignore` marking prints a line naming
+`hyp privacy purge --ignored`, which deletes what was already recorded in
+every ignored folder.
 
 ```sh
 hyp privacy set ./private-research local-only
@@ -1252,7 +1271,9 @@ Writes a shareable `.hypignore` file in an existing directory at the explicit
 path. With no path, uses
 the repository root, or the current directory when outside a repository.
 Use `hyp privacy set <path> sync|local-only|ignore` for machine-local markings
-and `hyp privacy show [path]` to report without writing.
+and `hyp privacy show [path]` to report without writing. The receipt names
+`hyp privacy purge --ignored` to delete what was already recorded in ignored
+folders.
 
 ```sh
 hyp privacy ignore ./customer-data
