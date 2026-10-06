@@ -26,7 +26,7 @@ import { positionals } from './remote_commands.js'
 import { isTty } from './stdio.js'
 import { PromptCancelledError, select } from './tui/index.js'
 import { isPromptBackError, isPromptCancelledError } from './tui/runtime.js'
-import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
+import { buildWalkthroughClientDescriptorMap, resolveHypHome } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
 import { PICK_DEADLINE_NOTICE, armPickDeadline, askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
@@ -1892,9 +1892,7 @@ const STORE_SLOT_LIMIT = 1000
  * @returns {string}
  */
 function reportsStoreRoot(ctx) {
-  const home = ctx.env.HOME || os.homedir()
-  const hypHome = ctx.env.HYP_HOME || path.join(home, '.hyp')
-  return path.resolve(ctx.cwd ?? process.cwd(), hypHome, 'reports')
+  return path.resolve(ctx.cwd ?? process.cwd(), resolveHypHome(ctx.env), 'reports')
 }
 
 /**
