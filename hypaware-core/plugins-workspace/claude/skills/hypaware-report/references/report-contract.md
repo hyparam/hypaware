@@ -1,5 +1,35 @@
 # Analysis and Markdown report contract
 
+## Analytical aim
+
+Explain what determines the quality and value of the work, then identify the
+most useful decisions the reader can make. Error frequency and token volume
+are signals for investigation, not rankings of importance. A deeper insight
+connects observations to a plausible mechanism and a consequential choice;
+renaming several bugs as a "systemic issue" does not establish that connection.
+
+Start from the user's intended outcomes and the available evidence of results.
+Distinguish completed activity, accepted output, and demonstrated usefulness.
+Trace a bounded selection of work from request through decisions, handoffs,
+verification, delivery, and later correction or reuse where recorded. Include
+successful cases as well as failures and expensive sessions. State how the
+sample was chosen; neither success nor error samples establish prevalence.
+
+Useful lines of inquiry include where effort stops improving results, which
+constraints govern end-to-end completion, when extra checking changes the
+outcome, and which successful practices could transfer to other work. Consider
+work selection, task framing, information availability, feedback timing,
+coordination, and reuse when the record makes them relevant. These are lenses,
+not mandatory categories or a reason to expand the user's requested scope.
+
+For consequential interpretations, separate observed facts from the proposed
+explanation. Seek a contrasting case or an alternative explanation and state
+what would change the conclusion. Differences in task difficulty, recording
+coverage, or selection can explain apparent improvements. If causal evidence
+is weak, propose a bounded comparison instead of presenting a hypothesis as
+an established root cause. Do not invent impact or demand a numerical estimate
+where the record only supports a qualitative consequence.
+
 ## Questions to investigate
 
 Choose the questions supported by the local record. Empty findings need no
@@ -73,8 +103,13 @@ replacing the server's two visuals. Link usage and work where their findings
 appear; link health from the sentence giving the failure rate. Avoid a footer
 link list or disconnected headline metrics.
 
-Rank at most 4 recommendations by value. Each entry names the exact change and
-target, its motivating finding, 2 or 3 supporting figures when available, and
+Rank at most 4 recommendations by expected outcome improvement, reach, evidence
+strength, and adoption effort. Do not favor a finding merely because it has
+an easy patch or a large count. Consolidate symptoms only when a shared
+mechanism is supported. Preserve useful concrete fixes; do not force a balance
+between tactical and broader recommendations. Each entry names the proposed
+change or decision and its target, its motivating finding, 2 or 3 supporting
+figures when available, and
 its detail-page link. Never invent figures to fill a template. The ranking
 appears only here. Do not justify rank in prose.
 
@@ -94,12 +129,25 @@ the brief's weekly trend and usage page's daily table answer different questions
 
 ## Recommendation pages
 
-Each page states the problem, measured frequency and recency, and exact proposal.
-Include its full ready-to-apply artifact: a real diff against recorded file
-content, a complete skill or command file including frontmatter, exact config
-text, or concrete source/destination paths. Do not invent unseen file contents.
-If the record cannot support an exact change, narrow or omit the proposal.
-Do not implement recommendations as part of writing the report.
+Each page connects the observed pattern, its consequence for the user's
+outcomes, the proposed mechanism, and a concrete intervention. Give frequency
+and recency where measurable, the strongest relevant contrast or counterevidence,
+and the tradeoff: what could get worse and what should be preserved.
+
+Make the next action usable. For an implementation fix, include a real diff
+against recorded content, a complete skill or command file with frontmatter,
+exact config text, or concrete source/destination paths. For a workflow or
+policy change, specify the affected decision, when the change applies, and how
+to judge its result. For an uncertain mechanism, provide a bounded experiment:
+the hypothesis, comparison, observation window or sample, outcome measure,
+quality guardrail, and the decision each result would support. These are
+proposal artifacts too; do not invent a file edit merely to satisfy the format.
+Label proposed thresholds as choices, not measured facts. "Measure more" alone
+is insufficient: identify the decision the measurement will enable.
+
+Do not invent unseen file contents. Narrow or omit a recommendation whose
+mechanism and actionable next step cannot be supported. Do not implement
+recommendations as part of writing the report.
 
 Cite 1 to 3 verified recorded turns on the page using ordinary Markdown links
 to page-local headings such as `[failed invocation](#evidence-1)`. Under those
@@ -121,7 +169,12 @@ Review the draft for contradictory figures, unsupported recommendations,
 incomplete proposed artifacts, and an overview that misstates its changes.
 These are blocking findings. Check that recommendations fit the recorded
 workflow, do not prescribe reverting deliberate vendor defaults, and are not
-ordinary corrected errors promoted into advice.
+ordinary corrected errors promoted into advice. Check whether the draft only
+catalogs visible defects while ignoring evidence about outcomes or successful
+practices. Each broader claim needs a supported mechanism and a decision it
+changes; generic calls for more automation, documentation, or telemetry do not
+qualify. A report consisting of fixes can still be the right result when those
+are the most valuable supported interventions.
 
 Separately check sums, denominators, percentages, fixed date buckets, comparable
 units, evidence locators, query basis, relative links, and all required files.

@@ -27,6 +27,13 @@ Read [querying.md](references/querying.md) before querying. Read
 [report-contract.md](references/report-contract.md) before investigating and
 again when writing and reviewing. Both travel with this skill.
 
+The report should improve decisions about how work gets done and how good its
+results are. Investigate successful patterns and constraints on outcomes as
+well as failures. A clean run can still pursue the wrong objective or spend
+most effort on low-value work; a noisy run can deliver a valuable result.
+Use the evidence to choose recommendations, without a quota for fixes or for
+strategic insights.
+
 ## Scope and inventory
 
 1. Resolve the requested period to inclusive absolute dates. Default to the
@@ -95,10 +102,15 @@ If coverage cannot be completed within the budget, disclose the omitted dates
 and their known row counts beside affected findings and in the delivery message.
 
 Investigate the questions in the report contract that the record supports.
-Compare earlier and later slices, follow failures through recovery, and check
+Compare earlier and later slices, trace intended outcomes through completion
+and follow-up, follow failures through recovery, and check
 whether a proposed fix was already adopted. Use only user-selected previous
 reports for comparisons; measure their recommendations against current-period
-data rather than treating old prose as new evidence.
+data rather than treating old prose as new evidence. Before choosing the final
+recommendations, compare candidate explanations across slices, look for a
+successful contrast or counterexample, and ask which intervention would most
+improve the user's outcomes. Use existing query and delegation budgets for
+this synthesis; do not add another exhaustive pass.
 
 ## Write, review, deliver
 

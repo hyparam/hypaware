@@ -59,6 +59,9 @@ Return a compact structured summary containing:
 - scope: exact dates and filters examined, including any incomplete slices
 - summary: 2 or 3 sentences answering the question
 - observations: specific findings with counts, shares, and dates
+- interpretation: plausible mechanism, consequence for intended outcomes,
+  contrasting evidence or alternative explanation, and what remains unknown;
+  keep this separate from observed facts
 - figures: each label, value, and basis (filters, dates, denominator)
 - evidence: relevant recorded date, session_id, message_id, chain identity
   (agent_id or conversation_id), tool_call_id when relevant, and a short note
@@ -71,11 +74,14 @@ where compatible. Report numbers, not impressions: "31 of 214 calls failed"
 is usable; "calls often failed" is not. Never guess to fill a missing figure.
 ```
 
-For the initial worker, ask what work dominates the largest slice, what recurring
-failures or unusual behavior warrant a follow-up, and which figures and turns
-support those observations. For a coverage sweep, ask what ran in each assigned
+For the initial worker, ask what outcomes the dominant work sought, what the
+record shows about results, and which successful patterns, constraints, or
+failures warrant follow-up. Ask which figures and turns support the answer. For a coverage sweep, ask what ran in each assigned
 slice and whether anything differs from the patterns already identified. For a
-deep read, name the particular hypothesis and evidence needed to test it.
+deep read, name the particular hypothesis and evidence needed to test it,
+including a useful contrasting case or evidence that could disprove it. Do not
+assign every deep read to an error cluster; choose questions by their potential
+to change a decision about outcomes.
 
 The coordinator normalizes returned fields into the report ledger. Keep a
 worker's observations tied to its actual scope, reuse its measured figures,
