@@ -44,9 +44,11 @@ private material.
 
 ## Pages
 
-Deliver `report.md`, `usage.md`, `work.md`, `health.md`, and zero to four
-`recommendation-<slug>.md` pages. A standalone recommendation needs only its
-recommendation page. Slugs match `[a-z0-9][a-z0-9-]*`. Use relative page links,
+Deliver `report.md` and up to four `recommendation-<slug>.md` pages. Use
+`usage.md`, `work.md`, and `health.md` for substantive supporting analysis;
+small or narrowly scoped reviews can keep evidence in the brief and proposals
+instead of manufacturing extra pages. A standalone recommendation needs only
+its recommendation page. Slugs match `[a-z0-9][a-z0-9-]*`. Use relative page links,
 Markdown tables and fenced code; no raw HTML, images, or renderer assets.
 Each page identifies scope and absolute dates, with a descriptive H1 title and
 a short bold thesis. Write plainly, without em dashes. Token volume, never

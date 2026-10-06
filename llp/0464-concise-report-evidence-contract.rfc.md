@@ -39,7 +39,8 @@ Keep the analyst assignment in one template and publishing in a reference read
 only when requested. Preserve host-specific worker selection, registered-dataset
 and privacy boundaries, safe query shapes, period coverage disclosure, and
 independent or explicit self-review. Preserve Markdown page names and linked
-recommendation headings used by the hosted renderer. Publishing commands must
+recommendation headings used by the hosted renderer. Evidence pages accompany
+substantive analysis; small reviews can keep it in the brief and proposals. Publishing commands must
 match the installed CLI; a skill cannot supply an unavailable subcommand.
 
 Before aggregating historical usage, verify provider/source identities and
