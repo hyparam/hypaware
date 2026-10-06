@@ -15,8 +15,13 @@
   "constraints": [
     {
       "id": "one-carrier-rule",
-      "pattern": "one[- ]carrier row|one[- ]carrier rule|Usage appears on exactly one assistant part per response",
-      "harm": "Usage rides exactly one row per response (LLP 0035). Someone who does not know this adds a dedup that double-counts or drops rows."
+      "pattern": "does not (guarantee|establish) uniqueness across capture sources",
+      "harm": "Usage rides one carrier row per captured response (LLP 0035, LLP 0390), but one provider response can be captured by more than one lane or as historical stream updates (LLP 0464). Without this caveat a plain SUM double-counts: measured on real local data, carriers summed to 262,398,752 output tokens where verified request identity gave 192,384,696. A blanket dedup instead merges unrelated records or drops unmatched captures."
+    },
+    {
+      "id": "usage-identity-never-missing-ids",
+      "pattern": "Never merge unrelated records with missing request IDs",
+      "harm": "A missing request ID is not a shared key (LLP 0464). A usage dedup that groups on a NULL or absent identity, or on identical token values, collapses distinct responses into one and silently undercounts, while still reading as an exact total."
     },
     {
       "id": "usage-not-raw-frame",
@@ -45,7 +50,7 @@
     },
     {
       "id": "graph-derived-facets",
-      "pattern": "Always answer skill and program questions from the graph|derived facets|Skills and programs are derived by the graph",
+      "pattern": "Skills and programs are derived by the graph; do not reconstruct them from message text|Always answer skill and program questions from the graph|derived facets",
       "harm": "Skills and programs have no column in ai_gateway_messages; they are derived at projection time. Ad hoc SQL reconstruction measurably disagrees with the canonical derivation: a 3-surface LIKE approximation returned 52 sessions where the strict rules give 44, and a first-token approximation of programs returned 470 garbage tokens against the graph's 86. The answer is confidently wrong with no error."
     },
     {
