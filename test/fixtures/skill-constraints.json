@@ -19,6 +19,11 @@
       "harm": "Usage rides one carrier row per captured response (LLP 0035, LLP 0390), but one provider response can be captured by more than one lane or as historical stream updates (LLP 0464). Without this caveat a plain SUM double-counts: measured on real local data, carriers summed to 262,398,752 output tokens where verified request identity gave 192,384,696. A blanket dedup instead merges unrelated records or drops unmatched captures."
     },
     {
+      "id": "usage-identity-never-missing-ids",
+      "pattern": "Never merge unrelated records with missing request IDs",
+      "harm": "A missing request ID is not a shared key (LLP 0464). A usage dedup that groups on a NULL or absent identity, or on identical token values, collapses distinct responses into one and silently undercounts, while still reading as an exact total."
+    },
+    {
       "id": "usage-not-raw-frame",
       "pattern": "attributes\\.usage.{0,40}NOT.{0,20}raw_frame|NOT.{0,10}`?raw_frame`?",
       "harm": "Reading usage from raw_frame instead of attributes.usage yields wrong or missing token counts."

@@ -8,7 +8,7 @@ user-invocable: false
 
 Use `hyp query` to inspect recorded activity. Commands run locally unless you add `--remote <target>`.
 
-Start with `ai_gateway_messages` for recorded AI conversations, prompts, responses, and tool calls/results. Use other datasets when the question specifically concerns telemetry, graph relationships, or another source.
+Start with `ai_gateway_messages` for recorded AI conversations, prompts, responses, and tool calls/results. Use other datasets when the question specifically concerns telemetry, skills or programs, graph relationships, or another source.
 
 ## Local or remote
 
@@ -83,13 +83,13 @@ Extract token fields with `COALESCE(CAST(JSON_EXTRACT(attributes, '$.usage.input
 
 Before summing token volumes, check usage-bearing records for repeated provider request identities and inspect bounded examples. Verify identity semantics for each provider and source. Count proven copies/updates of one response once: prefer the final usage record, or the record with the highest output count when these are verified cumulative updates of the same response. Take all counters from that same record. Do not sum updates or take independent maxima of different counters. Keep unmatched captures; filtering to one entrypoint can discard real requests. Never merge unrelated records with missing request IDs or deduplicate on identical token values alone. Reconcile identities across date partitions before combining totals. If identity cannot be resolved, report the defensible scope and coverage instead of a falsely exact combined total.
 
-Read usage from `attributes.usage`, not `raw_frame`. Keep input, output, cache read, and cache write separate; reasoning may already be included in output. Missing usage is not zero consumption.
+Read usage from `attributes.usage`, not `raw_frame`. `input_tokens` is net of cache. Keep input, output, cache read, and cache write separate; reasoning may already be included in output. Missing usage is not zero consumption.
 
 Run `hyp query schema ai_gateway_messages` for the full column list. For OpenClaw activity, read [openclaw.md](openclaw.md) before choosing a source filter.
 
 ## Activity graph: `node` / `edge`
 
-Prefer the graph for skill and program inventories, identities, and relationships. Skills and programs are derived by the graph; do not reconstruct them from message text or tool arguments when the graph can answer. Use message text or tool arguments for invocation details, verification, or as a fallback when the graph is unavailable. Distinguish observed invocations from mere mentions, and disclose fallback coverage limits. Repo keys normalize different remote-URL spellings that a raw `git_remote LIKE` misses, and Skill and Program keys are shared across Claude and Codex. The graph is derived and rebuildable; never hand-edit it to correct captured activity.
+Prefer the graph for skill and program inventories, identities, and relationships. Skills and programs are derived by the graph; do not reconstruct them from message text or tool arguments. Use message text or tool arguments for invocation details, or as a fallback only when the graph is unavailable. Distinguish observed invocations from mere mentions, and disclose fallback coverage limits. Repo keys normalize different remote-URL spellings that a raw `git_remote LIKE` misses, and Skill and Program keys are shared across Claude and Codex. The graph is derived and rebuildable; never hand-edit it to correct captured activity.
 
 - Run `hyp graph project` before querying a local graph. Remote projection is maintained by the server and cannot be run from here.
 - If `node`/`edge` or graph commands are unavailable, the graph is not composed on this install: report that limitation rather than treating it as zero activity, use messages where they can answer the question, and tell the user to re-run `hyp setup` to add it.
