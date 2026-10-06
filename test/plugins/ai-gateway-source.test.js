@@ -11,6 +11,9 @@ import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gate
 import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+
+/** @import { LogRecord } from '../../src/core/observability/types.js' */
 
 // A source with an empty routing table binds no listener at all, so a test
 // that needs a live port must give it something to route even when it only
@@ -555,7 +558,16 @@ async function settleFinalizers() {
 }
 
 // @ref LLP 0399#exchange-scope [tests]: source append failure cannot retain snapshot identity or trigger history reads
-test('source appends independent exchange snapshots and reports append failure without seeding', async () => {
+test('source appends independent exchange snapshots and reports append failure without seeding', async (t) => {
+  /** @type {LogRecord[]} */
+  const sourceLogs = []
+  // Append failures use getLogger('sources'), independently of ctx.log.
+  const loggerProvider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (records) => { sourceLogs.push(...records) } }],
+  })
+  logs.setGlobalLoggerProvider(loggerProvider)
+  t.after(() => loggerProvider.shutdown())
   const upstream = await startEchoUpstream('snapshot-ok')
   const state = createGatewayState()
   state.projectors.push({
@@ -607,7 +619,15 @@ test('source appends independent exchange snapshots and reports append failure w
       assert.equal(appended[i].request_id, appended[i + 1].request_id)
     }
     assert.equal(discoveries, 0, 'success and append failure both bypass committed history')
-    assert.equal(logged.filter((entry) => entry.event === 'aigw.exchange_write_failed').length, 1)
+    const failures = sourceLogs.filter((record) => record.body === 'aigw.exchange_write_failed')
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].loggerName, 'hypaware.sources')
+    assert.equal(failures[0].severityText, 'ERROR')
+    assert.deepEqual(failures[0].attributes, {
+      hyp_component: 'sources', hyp_plugin: '@hypaware/ai-gateway',
+      upstream: 'echo', error: 'snapshot append failed',
+      ...(process.env.DEV_RUN_ID ? { dev_run_id: process.env.DEV_RUN_ID } : {}),
+    }, 'failure diagnostic carries only component/plugin/upstream/error and optional run ID, no wire payload')
     assert.equal(logged.filter((entry) => entry.event === 'aigw.exchange').length, 19)
   } finally {
     await source.stop()
