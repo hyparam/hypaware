@@ -13,7 +13,7 @@ import { mergeUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway
 import { compileConfig } from '../../hypaware-core/plugins-workspace/ai-gateway/src/config.js'
 import { activate } from '../../hypaware-core/plugins-workspace/ollama/src/index.js'
 
-// @ref LLP 0399#seams [tests]: discoverable for explicit config, never a default client/source/picker
+// @ref LLP 0469#seams [tests]: discoverable for explicit config, never a default client/source/picker
 test('Ollama is bundled for explicit activation with only a gateway capability requirement', async () => {
   const catalog = await discoverBundledPlugins()
   assert.equal(catalog.failed.length, 0)

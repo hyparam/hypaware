@@ -1,11 +1,11 @@
-# LLP 0398: Direct local Ollama API text capture
+# LLP 0468: Direct local Ollama API text capture
 
 **Type:** Spec
 **Status:** Accepted
 **Systems:** Gateway, Plugins, Sources, Query
 **Author:** Neutral Next designer / delivery owner
 **Date:** 2026-10-05
-**Related:** LLP 0016, LLP 0026, LLP 0030, LLP 0035, LLP 0038, LLP 0069, LLP 0193, LLP 0194, LLP 0399, LLP 0400
+**Related:** LLP 0016, LLP 0026, LLP 0030, LLP 0035, LLP 0038, LLP 0069, LLP 0193, LLP 0194, LLP 0469, LLP 0470
 
 ## Intent {#intent}
 
@@ -48,7 +48,7 @@ LAUNCH.md and SPEC.md in the pilot mission retain authorization and acceptance.
    Leave unknown repository context unknown. Explain the directory-policy limit
    and that local inference can still be exported by configured sinks.
 
-The exchange-local retention contract in LLP 0399 extends LLP 0016's generic
+The exchange-local retention contract in LLP 0469 extends LLP 0016's generic
 gateway projection mechanics without putting provider semantics into the
 gateway. It introduces no new column, config key, durable envelope or dependency.
 

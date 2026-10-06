@@ -2324,7 +2324,7 @@ export interface AiGatewayProjectedExchange {
    * and an absent/null conversation_id declares an exchange snapshot: row
    * expansion uses temporary state without committed seeding or shared
    * history/dedup. Other sessions and the projected writer/backfill retain
-   * their existing state contracts. (LLP 0399#exchange-scope)
+   * their existing state contracts. (LLP 0469#exchange-scope)
    */
   session_id: string
   /**

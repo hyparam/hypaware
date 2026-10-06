@@ -557,7 +557,7 @@ async function settleFinalizers() {
   for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
-// @ref LLP 0399#exchange-scope [tests]: source append failure cannot retain snapshot identity or trigger history reads
+// @ref LLP 0469#exchange-scope [tests]: source append failure cannot retain snapshot identity or trigger history reads
 test('source appends independent exchange snapshots and reports append failure without seeding', async (t) => {
   /** @type {LogRecord[]} */
   const sourceLogs = []

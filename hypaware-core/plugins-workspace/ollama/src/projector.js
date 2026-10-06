@@ -25,7 +25,7 @@ export function createOllamaExchangeProjector() {
     match(input) {
       return input.upstream === 'ollama' && input.provider === 'ollama' && input.method === 'POST' && input.path?.split('?', 1)[0] === '/api/chat'
     },
-    // @ref LLP 0399#wire [implements]: completion and admission precede every row; a failed exchange yields no partial history
+    // @ref LLP 0469#wire [implements]: completion and admission precede every row; a failed exchange yields no partial history
     project(input, ctx) {
       /** @param {string} reason */
       const drop = reason => {
@@ -39,7 +39,7 @@ export function createOllamaExchangeProjector() {
       }
       if (input.error) return drop('transport_error')
       if (input.status_code == null || input.status_code < 200 || input.status_code >= 300) return drop('http_error')
-      // @ref LLP 0399#resources-journey [implements]: direct projector calls also reject oversize decoded capture bodies before parsing
+      // @ref LLP 0469#resources-journey [implements]: direct projector calls also reject oversize decoded capture bodies before parsing
       if (Buffer.byteLength(input.request_body ?? '') + Buffer.byteLength(input.response_body ?? '') > CAPTURE_BYTES) return drop('capture_limit')
       const request = parseMaybeJson(input.request_body)
       if (!isPlainObject(request) || !nonempty(request.model) || !Array.isArray(request.messages) || (request.stream !== undefined && typeof request.stream !== 'boolean')) return drop('invalid_request')
@@ -60,7 +60,7 @@ export function createOllamaExchangeProjector() {
       }
       /** @type {AiGatewayProjectedMessage[]} */
       const messages = []
-      // @ref LLP 0399#exchange-scope [implements]: explicit blocks preserve empty positions; index identity and immediate links stay exchange-local
+      // @ref LLP 0469#exchange-scope [implements]: explicit blocks preserve empty positions; index identity and immediate links stay exchange-local
       for (let index = 0; index < request.messages.length; index++) {
         const message = request.messages[index]
         messages.push({ role: message.role, content: [{ type: 'text', text: message.content }], message_id: `${input.exchange_id}:request:${index}`, previous_message_id: index === 0 ? [] : [`${input.exchange_id}:request:${index - 1}`], message_created_at: input.ts_start })
@@ -71,7 +71,7 @@ export function createOllamaExchangeProjector() {
         stop_reason: typeof terminal.done_reason === 'string' ? terminal.done_reason : undefined,
         raw_frame: raw, attributes: usage ? { usage } : undefined,
       })
-      // @ref LLP 0399#resources-journey [implements]: system text stays in ordered rows; an exchange-wide copy would multiply serialized bytes by row count
+      // @ref LLP 0469#resources-journey [implements]: system text stays in ordered rows; an exchange-wide copy would multiply serialized bytes by row count
       return { provider: 'ollama', session_id: input.exchange_id, request_id: input.exchange_id, client_name: 'ollama', entrypoint: 'ollama-api', conversation_source: 'ollama', model: model ?? request.model, messages }
     },
   }
@@ -119,7 +119,7 @@ function readResponse(body, stream) {
     if (record.done) terminal = record
     return undefined
   }
-  // @ref LLP 0399#resources-journey [implements]: parse each record once, release nonterminal objects, join fragments once
+  // @ref LLP 0469#resources-journey [implements]: parse each record once, release nonterminal objects, join fragments once
   if (stream) {
     let start = 0
     while (start < body.length) {
@@ -157,7 +157,7 @@ function readUsage(terminal, input, log) {
     if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) counts[key] = value
     else invalid(key, 'invalid_count')
   }
-  // @ref LLP 0399#usage-privacy [implements]: input is net only with observed cache, inconsistent pairs are omitted; only new response carries usage
+  // @ref LLP 0469#usage-privacy [implements]: input is net only with observed cache, inconsistent pairs are omitted; only new response carries usage
   const usage = /** @type {JsonObject} */ ({})
   const prompt = counts.prompt_eval_count
   const cache = counts.prompt_eval_cached_count

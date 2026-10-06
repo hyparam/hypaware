@@ -1964,9 +1964,9 @@ export withholding in configurations with sinks. The fake-upstream
 Ollama service, an installed model producing supported text responses such as `gemma3:4b`, curl,
 Node and ripgrep. Record candidate SHA, Ollama version, model identity and the
 disposable home. Do not download models, alter the existing service/config, or
-stop it. Use only short synthetic text. Related: [LLP 0398](../llp/0398-ollama-direct-capture.spec.md),
-[LLP 0399](../llp/0399-ollama-direct-capture.design.md),
-[LLP 0400](../llp/0400-ollama-direct-capture.plan.md).
+stop it. Use only short synthetic text. Related: [LLP 0468](../llp/0468-ollama-direct-capture.spec.md),
+[LLP 0469](../llp/0469-ollama-direct-capture.design.md),
+[LLP 0470](../llp/0470-ollama-direct-capture.plan.md).
 
 ### Steps
 

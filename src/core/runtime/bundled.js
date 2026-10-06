@@ -87,7 +87,7 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/claude-account',
   '@hypaware/claude-desktop',
   '@hypaware/github',
-  // @ref LLP 0399#seams [implements]: native Ollama capture requires explicit plugins[] opt-in
+  // @ref LLP 0469#seams [implements]: native Ollama capture requires explicit plugins[] opt-in
   '@hypaware/ollama',
 ]))
 

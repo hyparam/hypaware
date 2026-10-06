@@ -1,13 +1,13 @@
-# LLP 0399: Direct Ollama capture through the existing gateway
+# LLP 0469: Direct Ollama capture through the existing gateway
 
 **Type:** design
 **Status:** Active
 **Systems:** Gateway, Plugins, Sources, Query
 **Author:** Neutral Next designer
 **Date:** 2026-10-05
-**Related:** LLP 0398, LLP 0400, LLP 0005, LLP 0010, LLP 0016, LLP 0026, LLP 0030, LLP 0035, LLP 0038, LLP 0050, LLP 0069, LLP 0193, LLP 0194, LLP 0204
+**Related:** LLP 0468, LLP 0470, LLP 0005, LLP 0010, LLP 0016, LLP 0026, LLP 0030, LLP 0035, LLP 0038, LLP 0050, LLP 0069, LLP 0193, LLP 0194, LLP 0204
 
-@ref LLP 0398#requirements: implements the accepted direct local text API capture request
+@ref LLP 0468#requirements: implements the accepted direct local text API capture request
 
 ## Existing seams and alternatives {#seams}
 
@@ -259,7 +259,7 @@ Owner scope and retention decisions are `01M47XAP04SQFYVNP31BDH2Q1H` and
 `01M47XBZYNZ51H5CX63Y3DAXYY`. Full evidence stays in mission DESIGN-EVIDENCE.md.
 These consultations settle design direction, not implementation or acceptance.
 
-LLP 0400 assigns automated proof and documentation. Independent review and real
+LLP 0470 assigns automated proof and documentation. Independent review and real
 Ollama acceptance at the integrated SHA remain with the delivery owner, including
 the mission's controlled seat-recovery checkpoint. No publication or production
 integration follows from these documents.

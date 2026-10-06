@@ -1,14 +1,14 @@
-# LLP 0400: Implement direct Ollama API capture
+# LLP 0470: Implement direct Ollama API capture
 
 **Type:** plan
 **Status:** Active
 **Systems:** Gateway, Plugins, Sources, Query
 **Author:** Neutral Next designer
 **Date:** 2026-10-05
-**Related:** LLP 0398, LLP 0399, LLP 0016, LLP 0035, LLP 0038, LLP 0204
+**Related:** LLP 0468, LLP 0469, LLP 0016, LLP 0035, LLP 0038, LLP 0204
 
-@ref LLP 0399#seams: use the existing gateway capability and a narrowly scoped adapter
-@ref LLP 0398#acceptance: delivery requires current-commit independent and live evidence
+@ref LLP 0469#seams: use the existing gateway capability and a narrowly scoped adapter
+@ref LLP 0468#acceptance: delivery requires current-commit independent and live evidence
 
 ## Change set {#change-set}
 
@@ -31,7 +31,7 @@ never its dispatcher. Owner advances routine stages; no human LLP-approval gate.
 
 ## T1: Generic exchange-scoped projection {#t1}
 
-Implement LLP 0399's nonempty exchange-ID equality/no-thread predicate in
+Implement LLP 0469's nonempty exchange-ID equality/no-thread predicate in
 `ai-gateway/src/message_projector.js`. The true branch uses temporary conversation
 state, bypasses all committed seeding and leaves listener-lifetime identity/maps
 untouched. The ordinary branch stays intact. Document the rule on the existing
@@ -39,7 +39,7 @@ untouched. The ordinary branch stays intact. Document the rule on the existing
 `hypaware-plugin-kernel-types.d.ts`, without a new field. Attach the directly
 applicable `@ref` above the branch/predicate. Read touched refs before changing.
 
-@ref LLP 0399#exchange-scope: exchange snapshots must not accumulate history or seed entries with uptime
+@ref LLP 0469#exchange-scope: exchange snapshots must not accumulate history or seed entries with uptime
 
 Extend existing gateway message-projector/source test homes as appropriate.
 Demonstrate the old path's retention/seed issue before fixing. Meaningful proof:
@@ -64,7 +64,7 @@ repair all older long-lived-session state as adjacent work.
 ## T2: Adapter, smoke and documents {#t2}
 
 Build on the integrated T1 commit. Keep implementation choices flexible within
-LLP 0399's admission/completion, identity and resource contract. Reuse
+LLP 0469's admission/completion, identity and resource contract. Reuse
 `hypaware/core/util`, existing row expansion and manifest conventions; no new
 runtime dependencies. Add the small adapter in
 `hypaware-core/plugins-workspace/ollama/`, with minimal activation/projector
@@ -72,9 +72,9 @@ modules and only necessary declarations. Register its existing gateway capabilit
 requirement, distinct upstream, narrow projector and explicit discovery through
 `src/core/runtime/bundled.js`'s exclusion set. No pretend client/picker/config.
 
-@ref LLP 0399#wire: capture supported text only after valid terminal completion
-@ref LLP 0399#usage-privacy: preserve observed counters, unknown context and one response usage carrier
-@ref LLP 0399#resources-journey: run bounded split-daemon capture and document its exact inverse
+@ref LLP 0469#wire: capture supported text only after valid terminal completion
+@ref LLP 0469#usage-privacy: preserve observed counters, unknown context and one response usage carrier
+@ref LLP 0469#resources-journey: run bounded split-daemon capture and document its exact inverse
 
 Traditional tests cover activation/manifest/config discovery, exact route and
 projector matching, coexistence with Claude/Codex/OpenClaw, JSON and arbitrarily

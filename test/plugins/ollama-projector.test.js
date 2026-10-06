@@ -58,7 +58,7 @@ test('route and projector claim only exact native Ollama POST chat including que
   assert.equal(createOpenclawExchangeProjector().match(input), false)
 })
 
-// @ref LLP 0399#exchange-scope [tests]: empty and equal context positions remain real ordered linked rows
+// @ref LLP 0469#exchange-scope [tests]: empty and equal context positions remain real ordered linked rows
 test('JSON rows preserve empty system/user/historical assistant and equal positions; usage only on new response', async () => {
   const messages = [{ role: 'system', content: '' }, { role: 'user', content: '' }, { role: 'assistant', content: '' }, { role: 'user', content: 'same' }, { role: 'user', content: 'same' }]
   const input = exchange({ request_body: JSON.stringify(request({ messages })), response_body: JSON.stringify(terminal({ message: { role: 'assistant', content: '' }, prompt_eval_count: 16, prompt_eval_cached_count: 11, eval_count: 0 })) })
@@ -92,7 +92,7 @@ test('JSON rows preserve empty system/user/historical assistant and equal positi
   assert.ok(second.every(row => !first.some(old => old.message_id === row.message_id)))
 })
 
-// @ref LLP 0399#resources-journey [tests]: serialized system content grows with input bytes, not system bytes times snapshot row count
+// @ref LLP 0469#resources-journey [tests]: serialized system content grows with input bytes, not system bytes times snapshot row count
 test('system rows preserve empty/equal positions without multiplying spool bytes across context rows', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ollama-system-spool-'))
   const spool = createCacheSpool({ cacheRoot, appendChunk: async () => ({ bytesWritten: 0 }) })
@@ -169,7 +169,7 @@ for (const finalNewline of ['', '\n', '\r\n']) {
   }
 }
 
-// @ref LLP 0399#usage-privacy [tests]: absent counts stay absent; invalid pairs never clamp or fabricate usage
+// @ref LLP 0469#usage-privacy [tests]: absent counts stay absent; invalid pairs never clamp or fabricate usage
 for (const [label, counters, expected, reasons] of /** @type {Array<[string, Record<string, unknown>, Record<string, number> | undefined, number]>} */ ([
   ['missing', {}, undefined, 0],
   ['missing cache', { prompt_eval_count: 16, eval_count: 3 }, { output_tokens: 3 }, 0],

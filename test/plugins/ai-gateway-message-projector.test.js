@@ -1600,7 +1600,7 @@ test('a rollback of the newest exchange restores the thread tail exactly', () =>
   assert.deepEqual(retry.map((r) => r.previous_message_id), [['a1'], ['u2']])
 })
 
-// @ref LLP 0399#exchange-scope [tests]: exchange snapshots never seed or retain listener history
+// @ref LLP 0469#exchange-scope [tests]: exchange snapshots never seed or retain listener history
 for (const targeted of [false, true]) {
   test(`exchange-scoped snapshots skip storage and listener retention (targeted reads: ${targeted})`, async () => {
     let discovers = 0

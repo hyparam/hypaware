@@ -234,7 +234,7 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
 
-      // @ref LLP 0399#exchange-scope [implements]: snapshots have no shared history or committed seed
+      // @ref LLP 0469#exchange-scope [implements]: snapshots have no shared history or committed seed
       if (typeof input.exchange_id === 'string' && input.exchange_id.length > 0 &&
           projection.session_id === input.exchange_id && projection.conversation_id == null) {
         return aiGatewayRowsFromProjectedExchange(projection, {

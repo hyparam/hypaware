@@ -33,7 +33,7 @@ const contextMessages = [{ role: 'system', content: '' }, { role: 'user', conten
 /**
  * Actual gateway and processing child, local fixture only. The adapter is
  * loaded from ordinary explicit config, never an in-process fake projector.
- * @ref LLP 0400#t2 [tests]: faithful native wire, persisted snapshots, actual JSONL reasons and reversible collector lifecycle
+ * @ref LLP 0470#t2 [tests]: faithful native wire, persisted snapshots, actual JSONL reasons and reversible collector lifecycle
  * @param {{ harness: any, expect: any }} args
  */
 export async function run({ harness, expect }) {
