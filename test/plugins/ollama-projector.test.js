@@ -2,15 +2,19 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { createOllamaExchangeProjector, ollamaUpstreamPreset } from '../../hypaware-core/plugins-workspace/ollama/src/projector.js'
-import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { AI_GATEWAY_MESSAGE_COLUMNS, createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createRecorder } from '../../hypaware-core/plugins-workspace/ai-gateway/src/recorder.js'
 import { CAPTURE_BYTES } from '../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
 import { createOpenclawExchangeProjector } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
+import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
 
 /** @import { AiGatewayExchangeInput } from '../../hypaware-plugin-kernel-types.js' */
 
@@ -86,6 +90,48 @@ test('JSON rows preserve empty system/user/historical assistant and equal positi
   const second = (await rows({ ...input, exchange_id: 'exchange-2' })).rows
   assert.equal(second.length, 6)
   assert.ok(second.every(row => !first.some(old => old.message_id === row.message_id)))
+})
+
+// @ref LLP 0399#resources-journey [tests]: serialized system content grows with input bytes, not system bytes times snapshot row count
+test('system rows preserve empty/equal positions without multiplying spool bytes across context rows', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ollama-system-spool-'))
+  const spool = createCacheSpool({ cacheRoot, appendChunk: async () => ({ bytesWritten: 0 }) })
+  let previousBytes = 0
+  try {
+    for (const scale of [1, 2, 4]) {
+      const system = 's'.repeat(16_384 * scale)
+      const messages = [{ role: 'system', content: system }, { role: 'system', content: '' }, { role: 'system', content: system }, { role: 'assistant', content: '' }, ...Array.from({ length: 100 * scale }, () => ({ role: 'user', content: 'same' }))]
+      const id = `system-scale-${scale}`
+      const input = exchange({ exchange_id: id, request_body: JSON.stringify(request({ messages })) })
+      const expanded = (await rows(input)).rows
+      assert.equal(expanded.length, messages.length + 1)
+      const table = path.join(cacheRoot, `scale-${scale}`)
+      const appended = await spool.append(table, AI_GATEWAY_MESSAGE_COLUMNS, expanded)
+      const serialized = await fs.readFile(path.join(table, SPOOL_DIR, 'active.jsonl'))
+      assert.equal(appended.bytesWritten, serialized.byteLength)
+      const envelope = JSON.parse(serialized.toString('utf8'))
+      assert.equal(envelope.version, 1)
+      assert.equal(envelope.rows.length, expanded.length)
+      for (let index = 0; index < envelope.rows.length; index++) {
+        const row = envelope.rows[index]
+        const expected = index < messages.length ? messages[index] : { role: 'assistant', content: 'answer' }
+        assert.equal(row.role, expected.role)
+        assert.equal(row.content_text ?? '', expected.content)
+        assert.equal(row.message_index, index)
+        assert.equal(row.part_index, 0)
+        assert.equal(row.message_id, `${id}:${index < messages.length ? `request:${index}` : 'response'}`)
+        assert.equal(row.part_id, `${row.message_id}#0`)
+        assert.deepEqual(row.previous_message_id, index ? [envelope.rows[index - 1].message_id] : [])
+      }
+      const captureBytes = Buffer.byteLength(input.request_body ?? '') + Buffer.byteLength(input.response_body ?? '')
+      assert.ok(serialized.byteLength < captureBytes * 8, `${scale}: ${serialized.byteLength} spool bytes amplify ${captureBytes} capture bytes`)
+      if (previousBytes) assert.ok(serialized.byteLength <= previousBytes * 2.1, 'doubling system bytes and row count must stay linear')
+      assert.ok(envelope.rows.every(row => row.system_text === undefined), 'system content lives only in its ordered rows')
+      previousBytes = serialized.byteLength
+    }
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
 })
 
 test('reported model wins; request fallback only without reports; creation time and token-limit reason survive', async () => {

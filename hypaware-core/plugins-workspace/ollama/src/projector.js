@@ -60,13 +60,10 @@ export function createOllamaExchangeProjector() {
       }
       /** @type {AiGatewayProjectedMessage[]} */
       const messages = []
-      /** @type {string[]} */
-      const systems = []
       // @ref LLP 0399#exchange-scope [implements]: explicit blocks preserve empty positions; index identity and immediate links stay exchange-local
       for (let index = 0; index < request.messages.length; index++) {
         const message = request.messages[index]
         messages.push({ role: message.role, content: [{ type: 'text', text: message.content }], message_id: `${input.exchange_id}:request:${index}`, previous_message_id: index === 0 ? [] : [`${input.exchange_id}:request:${index - 1}`], message_created_at: input.ts_start })
-        if (message.role === 'system') systems.push(message.content)
       }
       messages.push({
         role: 'assistant', content: [{ type: 'text', text: content }], message_id: `${input.exchange_id}:response`, previous_message_id: [`${input.exchange_id}:request:${request.messages.length - 1}`],
@@ -74,7 +71,8 @@ export function createOllamaExchangeProjector() {
         stop_reason: typeof terminal.done_reason === 'string' ? terminal.done_reason : undefined,
         raw_frame: raw, attributes: usage ? { usage } : undefined,
       })
-      return { provider: 'ollama', session_id: input.exchange_id, request_id: input.exchange_id, client_name: 'ollama', entrypoint: 'ollama-api', conversation_source: 'ollama', model: model ?? request.model, system_text: systems.length ? systems.join('\n') : undefined, messages }
+      // @ref LLP 0399#resources-journey [implements]: system text stays in ordered rows; an exchange-wide copy would multiply serialized bytes by row count
+      return { provider: 'ollama', session_id: input.exchange_id, request_id: input.exchange_id, client_name: 'ollama', entrypoint: 'ollama-api', conversation_source: 'ollama', model: model ?? request.model, messages }
     },
   }
 }
