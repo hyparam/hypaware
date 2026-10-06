@@ -88,7 +88,7 @@ Run `hyp query schema ai_gateway_messages` for the full column list. For OpenCla
 
 ## Activity graph: `node` / `edge`
 
-Prefer the graph for skill and program inventories, identities, and relationships. Use message text or tool arguments for invocation details, verification, or fallback when graph coverage is unavailable or incomplete. Distinguish observed invocations from mere mentions, and disclose fallback coverage limits. Repo keys normalize different remote-URL spellings that a raw `git_remote LIKE` misses, and Skill and Program keys are shared across Claude and Codex. The graph is derived and rebuildable; never hand-edit it to correct captured activity.
+Prefer the graph for skill and program inventories, identities, and relationships. Skills and programs are derived by the graph; do not reconstruct them from message text or tool arguments when the graph can answer. Use message text or tool arguments for invocation details, verification, or as a fallback when the graph is unavailable. Distinguish observed invocations from mere mentions, and disclose fallback coverage limits. Repo keys normalize different remote-URL spellings that a raw `git_remote LIKE` misses, and Skill and Program keys are shared across Claude and Codex. The graph is derived and rebuildable; never hand-edit it to correct captured activity.
 
 - Run `hyp graph project` before querying a local graph. Remote projection is maintained by the server and cannot be run from here.
 - If `node`/`edge` or graph commands are unavailable, the graph is not composed on this install: report that limitation rather than treating it as zero activity, use messages where they can answer the question, and tell the user to re-run `hyp setup` to add it.
