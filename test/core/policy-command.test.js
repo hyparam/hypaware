@@ -202,7 +202,11 @@ test('hyp policy set <path> ignore also names the marking as machine-local', asy
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy set', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.equal(res.stdout, `marked ${root} as ignore (machine-local policy store)\n`)
+    assert.equal(
+      res.stdout,
+      `marked ${root} as ignore (machine-local policy store)\n` +
+        'To delete what was already recorded in ignored folders on this machine, run `hyp privacy purge --ignored`.\n'
+    )
   })
 })
 

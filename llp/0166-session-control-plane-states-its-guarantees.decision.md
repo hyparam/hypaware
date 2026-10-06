@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-31
 **Related:** LLP 0066, LLP 0067, LLP 0086
+**Extended-by:** LLP 0463 (the human `trust:` note is removed; `endpoint_authenticated` stays in `--json`).
 
 > Two questions were asked of the `hyp session` control plane in the same week,
 > and they have the same answer. **#451:** can the CLI prove that whatever
