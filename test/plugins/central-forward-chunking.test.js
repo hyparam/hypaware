@@ -725,7 +725,7 @@ test('an open-dataset baseline failure never falls back to historical ingest', a
   const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
 
   assert.equal(result.status, 'failed')
-  assert.match(result.error ?? '', /watermark disk unavailable/)
+  assert.match(result.error ?? '', /central.forward local rollout failed/)
   assert.equal(calls.filter((c) => c.method === 'POST').length, 0)
   // The baseline now precedes registration, so a local state failure makes no
   // remote call at all and the partition can retry without duplicate history.
@@ -1244,7 +1244,7 @@ test('backpressure drains the throttle response body before parking', async () =
   })
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
   assert.equal(result.status, 'exported')
-  assert.equal(drains(), 2) // both throttle bodies cancelled; the 202 returns without draining
+  assert.equal(drains(), 3) // two throttle bodies and the final acknowledgement are released
 })
 
 test('each backpressure wait emits central.forward.backpressure telemetry', async () => {
