@@ -112,12 +112,13 @@ export async function resolvePickSeeding(opts) {
   const obsEnv = readObservabilityEnv(env)
   const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
 
-  // Interactive only: the local config this run replaces. Reading it up
-  // front is what makes the phase a reconfigure rather than a fresh compose
-  // that happens to land on an occupied path. Non-interactive callers
-  // (`--yes`, presets, `--from-file`) state every input on the command line,
-  // so they keep composing from scratch and their output stays byte-identical.
-  const existing = interactive ? await readLocalConfig(configPath) : undefined
+  // Read the local config for interactive reconfiguration and the narrow
+  // source-based Ollama add/repeat path. Other unattended source choices
+  // retain their existing fresh composition behavior; from-file bypasses this phase.
+  // @ref LLP 0474#setup [implements]: source-based Ollama add/repeat carries the existing install without running attended setup
+  const local = await readLocalConfig(configPath)
+  const existing = interactive || opts.picks?.sources.includes('ollama') || local?.plugins?.some(p => p.name === '@hypaware/ollama')
+    ? local : undefined
   // A config on disk only makes this run a reconfigure when it records a
   // pick answer. `hyp remote add` before the first `hyp init` creates a
   // config that holds only `query.remotes`; reading a seed off that file
@@ -344,9 +345,9 @@ export async function runWizardPick(opts) {
   let exportOrigin = 'default'
 
   if (opts.picks) {
-    rawSources = opts.picks.sources
-    exportChoice = opts.picks.exportChoice
-    retentionDays = opts.picks.retentionDays
+    rawSources = existing ? /** @type {PickerSource[]} */ ([...new Set([...configuredPickerSources(existing, descriptors), ...opts.picks.sources])]) : opts.picks.sources
+    exportChoice = existing && (opts.exportOrigin ?? 'default') === 'default' ? configuredExportChoice(existing) : opts.picks.exportChoice
+    retentionDays = existing && !opts.picks.retentionExplicit ? configuredRetentionDays(existing) ?? opts.picks.retentionDays : opts.picks.retentionDays
     exportOrigin = opts.exportOrigin ?? 'default'
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)

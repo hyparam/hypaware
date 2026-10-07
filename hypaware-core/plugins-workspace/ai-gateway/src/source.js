@@ -93,7 +93,7 @@ export function createStartSource(state) {
             // Omitted while idle, which is already how `gatewaySourceDetails`
             // (core `daemon/status.js`) reads "no reachable gateway here" off
             // the status file for a bind that never happened.
-            ...(proxy ? { host: proxy.host, port: proxy.port } : { listening: false }),
+            ...(proxy && state.listen ? { host: proxy.host, port: proxy.port } : { listening: false }),
             // Raw configured names, pre-compile, deliberately: an entry the
             // compiler dropped (a `url =` where `base_url` was meant) still
             // appears here, which is what lets core see the difference
@@ -118,6 +118,8 @@ export function createStartSource(state) {
               ? { upstreams_dropped_names: configured.droppedNames }
               : {}),
             registered_presets: Array.from(state.presets.keys()),
+            // @ref LLP 0474#setup [implements]: publish resolved transport facts so a saved endpoint is not mistaken for the live route
+            upstream_aliases: proxy && state.listen ? state.aliasRoutes : [],
             projectors: state.projectors.map((p) => p.name),
             // @ref LLP 0066#ephemeral: surface the live opt-out count so an
             // operator can see an active session drop without grepping logs.
@@ -168,15 +170,21 @@ export function createStartSource(state) {
         // new config. Connections in flight finish through the
         // recorder's drain (called inside stop()) so their rows are not
         // lost across the reload.
-        await proxy?.stop()
+        const previous = proxy
+        proxy = undefined
         state.listen = undefined
+        state.aliasRoutes = []
+        await previous?.stop()
         proxy = await launchListener(nextCtx, state, liveState)
         activeCtx = nextCtx
       },
 
       async stop() {
-        await proxy?.stop()
+        const previous = proxy
+        proxy = undefined
         state.listen = undefined
+        state.aliasRoutes = []
+        await previous?.stop()
       },
     }
   }
@@ -220,6 +228,7 @@ async function launchListener(ctx, state, liveState) {
   // `config.upstreams` and `state.presets`, neither of which moves between
   // the two binds.
   const upstreams = mergeUpstreams(config.upstreams, state)
+  state.aliasRoutes = []
   const configured = readConfiguredUpstreams(ctx)
   if (upstreams.length === 0) {
     liveState.listenFallbackFrom = undefined
@@ -449,6 +458,12 @@ async function launchListener(ctx, state, liveState) {
   })
 
   state.listen = { host: proxy.host, port: proxy.port }
+  // @ref LLP 0474#setup [implements]: only the successfully bound gateway publishes live alias facts; a processing-side desired table is unconfirmed
+  state.aliasRoutes = upstreams.filter(u => u.aliasOf).flatMap(u => {
+    const url = new URL(u.base_url)
+    if (url.username || url.password || url.search || url.hash || url.href.length > 2048) return []
+    return [{ name: u.name, canonical: /** @type {string} */ (u.aliasOf), path_prefix: u.path_prefix ?? '/', base_url: url.href }]
+  })
 
   // Hook stop so in-flight exchanges drain before the listener fully closes.
   const originalStop = proxy.stop
@@ -709,6 +724,19 @@ export function mergeUpstreams(configUpstreams, state) {
     // Likewise the provider label: a config entry that omits it would otherwise
     // write unattributed rows.
     if (!existing.provider && preset.provider) existing.provider = preset.provider
+  }
+  // @ref LLP 0474#routes [implements]: one resolved transport per alias, preserving ordinary preset ownership
+  for (const [name, { canonicalName, route }] of state.aliases) {
+    if (merged.has(name)) throw new Error(`ai-gateway: alias '${name}' name collision`)
+    if (state.aliases.has(canonicalName)) throw new Error(`ai-gateway: alias '${name}' targets an alias chain`)
+    const canonical = merged.get(canonicalName)
+    if (!canonical) throw new Error(`ai-gateway: alias '${name}' missing canonical target '${canonicalName}'`)
+    const base = new URL(canonical.base_url)
+    const to = base.pathname.replace(/\/+$/, '') || '/'
+    merged.set(name, {
+      ...canonical, ...route, name, aliasOf: canonicalName,
+      rewrite: { from: route.rewrite.from, to },
+    })
   }
   return Array.from(merged.values())
 }

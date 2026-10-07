@@ -2076,6 +2076,8 @@ export interface VerbRegistry {
  */
 export interface AiGatewayCapability {
   registerUpstreamPreset(preset: AiGatewayUpstreamPreset): void
+  /** Runtime-only scoped door, resolved once from an operator-owned upstream. */
+  registerUpstreamAlias(name: string, canonicalName: string, route: AiGatewayUpstreamAliasRoute): void
   registerClient(client: AiGatewayClientRegistration): void
   registerExchangeProjector(projector: AiGatewayExchangeProjector): void
   /**
@@ -2209,6 +2211,17 @@ export interface AiGatewayUpstreamPreset {
 export interface AiGatewayUpstreamPathRewrite {
   from: string
   to: string
+}
+
+// @ref LLP 0474#routes [implements]: aliases own a reserved door while canonical config owns transport
+export interface AiGatewayUpstreamAliasRoute {
+  path_prefix: string
+  provider?: string
+  priority?: number
+  match(input: AiGatewayRouteInput): boolean
+  rewrite: AiGatewayUpstreamPathRewrite
+  /** Forwarding-only discovery/control calls never acquire raw capture slots. */
+  captureMatch?(input: AiGatewayRouteInput): boolean
 }
 
 /**

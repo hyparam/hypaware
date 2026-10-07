@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/ollama",
   "version": "1.0.0",
-  "description": "Explicit native Ollama text POST /api/chat capture through the AI gateway. Records request-context snapshots and completed JSON or NDJSON assistant responses; no managed client attach or history import.",
+  "description": "Native Ollama chat and generation snapshots through explicit process-scoped CLI or SDK routing. Preserves text and omitted-image markers; no history import.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -10,5 +10,22 @@
   "permissions": [],
   "requires": {
     "capabilities": { "hypaware.ai-gateway": "^2.0.0" }
+  },
+  "contributes": {
+    "client": { "name": "ollama", "backfill_provider": false },
+    "picker": [{
+      "name": "ollama",
+      "label": "Ollama",
+      "summary": "Opens a local port; route your next CLI or SDK client explicitly. Records submitted text and omitted-media markers. Configured sinks may export local-model conversations. Cwd/repository are unknown, so directory exclusions cannot protect this lane. No history import or outage replay.",
+      "detect": { "settings_file": ".ollama/history" },
+      "needs_setup": true,
+      "configure_command": "ollama setup",
+      "compose": {
+        "requires_gateway": true,
+        "plugin": { "name": "@hypaware/ollama" },
+        "gateway_upstream": { "name": "ollama", "base_url": "http://127.0.0.1:11434", "path_prefix": "/api/chat", "provider": "ollama" }
+      }
+    }],
+    "commands": [{ "name": "ollama setup", "category": "capture-movement", "audience": "everyday", "summary": "Check Ollama readiness and explain explicit CLI/SDK routing" }]
   }
 }

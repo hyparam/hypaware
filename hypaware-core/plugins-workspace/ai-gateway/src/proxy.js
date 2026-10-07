@@ -37,6 +37,11 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ])
 
+// Keep the reserved namespace scan bounded by registered aliases, with no
+// retained request data and no extra full-table scan on ordinary routes.
+/** @type {WeakMap<CompiledUpstream[], CompiledUpstream[]>} */
+const aliasesByRoutingTable = new WeakMap()
+
 /**
  * Start the HTTP proxy listener. Returns the bound host/port and a
  * `stop()` to close it. The proxy is purely a pass-through; observation
@@ -490,8 +495,11 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // captured-where-possible.
   // @ref LLP 0247#degraded-listeners-forward-it-blind [implements]: no live interception means no capture, matching the blind tunnels beside it
   const absoluteFormBlind = absoluteForm && !opts.interception
+  // @ref LLP 0474#routes [implements]: alias discovery narrows capture before raw admission; it cannot override blind/path policy
+  // @ref LLP 0234#recording-is-opt-in-per-path [constrained-by]: capture predicates only narrow existing eligibility
   const recording = !absoluteFormBlind && ((!proxyMode && !absoluteForm)
     || shouldRecordProxyExchange(upstream, parsedUrl.pathname))
+    && matchesCapture(upstream, req.method ?? 'GET', parsedUrl.pathname, req.headers)
 
   const isHttps = upstream.baseUrl.protocol === 'https:'
   const lib = isHttps ? https : http
@@ -626,6 +634,11 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
  */
 export function matchUpstream(upstreams, method, pathname, headers) {
   const routeInput = buildRouteInput(method, pathname, headers)
+  // @ref LLP 0474#routes [implements]: an alias reserves its namespace even when its allowlist rejects a request
+  const alias = (aliasesByRoutingTable.get(upstreams) ?? upstreams).find(u => u.aliasOf && u.prefix && pathMatchesPrefix(pathname, u.prefix))
+  if (alias) {
+    try { return alias.match?.(routeInput) === true ? alias : undefined } catch { return undefined }
+  }
   for (const u of upstreams) {
     if (typeof u.match === 'function') {
       let matched
@@ -640,6 +653,12 @@ export function matchUpstream(upstreams, method, pathname, headers) {
     if (u.prefix && pathMatchesPrefix(pathname, u.prefix)) return u
   }
   return undefined
+}
+
+/** @param {CompiledUpstream} upstream @param {string} method @param {string} pathname @param {IncomingHttpHeaders} headers */
+function matchesCapture(upstream, method, pathname, headers) {
+  if (!upstream.captureMatch) return true
+  try { return upstream.captureMatch(buildRouteInput(method, pathname, headers)) === true } catch { return false }
 }
 
 /**
@@ -789,8 +808,20 @@ export function compileUpstreams(upstreams) {
     if (u.provider) compiled.provider = u.provider
     if (u.rewrite) compiled.rewrite = compileRewrite(u.name, u.rewrite, u.path_prefix)
     if (u.record_prefix) compiled.recordPrefix = u.record_prefix
+    if (u.aliasOf) compiled.aliasOf = u.aliasOf
+    if (u.captureMatch) compiled.captureMatch = u.captureMatch
     out.push(compiled)
   }
+  const aliases = out.filter(u => u.aliasOf)
+  for (const alias of aliases) {
+    for (const other of out) {
+      if (other === alias || !other.prefix || other.prefix === '/') continue
+      if (pathMatchesPrefix(other.prefix, alias.prefix ?? '/') || pathMatchesPrefix(alias.prefix ?? '/', other.prefix)) {
+        throw new Error(`ai-gateway: alias '${alias.name}' namespace conflicts with upstream '${other.name}'`)
+      }
+    }
+  }
+  aliasesByRoutingTable.set(out, aliases)
   return out.sort((a, b) => {
     if (a.priority !== b.priority) return b.priority - a.priority
     const aRank = prefixRank(a.prefix)
