@@ -107,8 +107,9 @@ export async function activate(ctx) {
       return {
         ...sink,
         async close() {
-          await pullLoop.stop()
-          await sink.close()
+          const closing = sink.close()
+          const results = await Promise.allSettled([closing, pullLoop.stop()])
+          for (const result of results) if (result.status === 'rejected') throw result.reason
         },
       }
     },
