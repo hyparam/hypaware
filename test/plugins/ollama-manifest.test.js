@@ -12,6 +12,10 @@ import { createGatewayState, createAiGatewayApi } from '../../hypaware-core/plug
 import { mergeUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 import { compileConfig } from '../../hypaware-core/plugins-workspace/ai-gateway/src/config.js'
 import { activate } from '../../hypaware-core/plugins-workspace/ollama/src/index.js'
+import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { materializeClientAssets, clientAssetBaseDirs } from '../../src/core/runtime/client_assets.js'
+import { resolveLaunchers } from '../../src/core/cli/wizard/first_ask.js'
+import { runReportGenerate } from '../../src/core/cli/report_commands.js'
 
 // @ref LLP 0474#setup [tests]: visible declarative suggestion, explicit activation and no settings marker
 test('Ollama is bundled for explicit activation with only a gateway capability requirement', async () => {
@@ -49,7 +53,7 @@ test('explicit config activates Ollama after gateway; omitting the capability fa
 test('activation contributes one preset/projector/client/alias; named upstream override follows existing config ownership', () => {
   const state = createGatewayState()
   const gateway = createAiGatewayApi(state)
-  activate(/** @type {any} */ ({ commands: { register() {} }, requireCapability: (name, version) => {
+  activate(/** @type {any} */ ({ commands: { register() {}, registerGroup() {} }, requireCapability: (name, version) => {
     assert.equal(name, 'hypaware.ai-gateway')
     assert.equal(version, '^2.0.0')
     return gateway
@@ -65,4 +69,42 @@ test('activation contributes one preset/projector/client/alias; named upstream o
   assert.equal(overridden.length, 2)
   assert.equal(overridden[0].base_url, 'http://127.0.0.1:21500')
   assert.equal(overridden[0].provider, 'ollama')
+})
+
+// @ref LLP 0474#setup [tests]: an empty existing asset directory declares no writable client home and no launcher
+test('real Ollama manifest/catalog is asset-free across all-client materialization and ask/report selection', async t => {
+  const bundled = await discoverBundledPlugins()
+  const descriptors = buildPluginCatalog([...bundled.loaded, ...bundled.excluded]).clientDescriptors
+  const ollama = descriptors.get('ollama')
+  assert.ok(ollama)
+  assert.equal(ollama.skillDir, '')
+  assert.equal(ollama.agentDir, undefined)
+  assert.equal(ollama.attachProbe, undefined)
+  assert.equal(ollama.launch, undefined)
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ollama-assets-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const source = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ollama-skill-'))
+  t.after(() => fs.rm(source, { recursive: true, force: true }))
+  await fs.writeFile(path.join(source, 'SKILL.md'), 'test-owned fixture')
+  const options = /** @type {any} */ ({ homeDir: home, clients: 'all', descriptors,
+    skills: { list: () => [{ name: 'test-owned-skill', plugin: '@hypaware/ollama', clients: ['all'], sourceDir: source }] },
+    agents: { list: () => [] },
+  })
+  const result = await materializeClientAssets(options)
+  assert.ok(result.installed.some(x => x.client === 'claude'))
+  assert.ok(result.installed.every(x => x.client !== 'ollama' && x.dest !== path.join(home, 'test-owned-skill')))
+  assert.deepEqual(clientAssetBaseDirs(ollama, home), [])
+  assert.equal(await fs.stat(path.join(home, 'test-owned-skill')).then(() => true, () => false), false)
+  assert.equal(await fs.stat(path.join(home, '.ollama')).then(() => true, () => false), false)
+  const resolutions = []
+  const launchers = await resolveLaunchers({ clients: ['ollama', 'claude'], descriptors, env: { HOME: home }, resolve: async bin => { resolutions.push(bin); return `/test-owned/${bin}` } })
+  assert.deepEqual(launchers.map(x => x.client), ['claude'])
+  assert.deepEqual(resolutions, ['claude'])
+  let error = ''
+  const ctx = /** @type {any} */ ({ env: { HOME: home, HYP_HOME: home }, cwd: home, stdout: { write() {} }, stderr: { write(s) { error += s } } })
+  const code = await runReportGenerate([], ctx, /** @type {any} */ ({
+    collectStatus: async () => ({ clients: [{ name: 'ollama', configured: true, recording: true, attachable: false }] }),
+  }))
+  assert.equal(code, 1)
+  assert.match(error, /no recorded client.*skill can be started/)
 })

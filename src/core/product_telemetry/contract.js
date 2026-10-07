@@ -84,6 +84,8 @@ export const COMMANDS = Object.freeze([
   'join',
   'leave',
   'mcp serve',
+  // @ref LLP 0474#setup [implements]: the bundled setup command joins only the finite command vocabulary
+  'ollama setup',
   'other',
   'plugin',
   'plugin info',

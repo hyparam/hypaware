@@ -40,6 +40,10 @@ export function activate(ctx) {
       }
     },
   })
+  ctx.commands.registerGroup({ name: 'ollama', plugin: '@hypaware/ollama',
+    summary: 'Configure explicit Ollama routing and check local readiness',
+    help: 'Use setup for direct service discovery and next-launch CLI/SDK routing recipes. Setup never starts or loads a model.',
+  })
   ctx.commands.register({ name: 'ollama setup', plugin: '@hypaware/ollama', category: 'capture-movement', audience: 'everyday',
     summary: 'Check Ollama readiness and explain explicit CLI/SDK routing', usage: 'hyp ollama setup [--upstream URL] [--json]',
     run: (argv, commandCtx) => runOllamaSetup(argv, commandCtx, gateway),

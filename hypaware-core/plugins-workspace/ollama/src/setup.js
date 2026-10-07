@@ -49,6 +49,9 @@ export function validateOllamaUpstream(upstream, collectors) {
     try { collector = new URL(endpoint) } catch { continue }
     const port = url.port || (url.protocol === 'https:' ? '443' : '80')
     const collectorPort = collector.port || (collector.protocol === 'https:' ? '443' : '80')
+    // URL serializes dotted IPv4-mapped literals as hex. Opting in here
+    // narrows allowed direct targets by rejecting collector loops, rather
+    // than granting trust to an inbound Host header or socket peer.
     if (port === collectorPort && (url.hostname === collector.hostname
       || (isLoopbackHost(url.hostname, { hexMappedIpv4: true }) && isLoopbackHost(collector.hostname, { hexMappedIpv4: true }))
       || (['0.0.0.0', '[::]'].includes(collector.hostname) && isLoopbackHost(url.hostname, { hexMappedIpv4: true })))) {

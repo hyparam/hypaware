@@ -12,7 +12,7 @@
     "capabilities": { "hypaware.ai-gateway": "^2.0.0" }
   },
   "contributes": {
-    "client": { "name": "ollama", "backfill_provider": false },
+    "client": { "name": "ollama", "skill_dir": "", "backfill_provider": false },
     "picker": [{
       "name": "ollama",
       "label": "Ollama",

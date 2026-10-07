@@ -253,6 +253,10 @@ test('native CLI parses fresh/add/repeat/from-file without attended probes and a
   assert.equal(attended.recording, true)
   assert.equal(attended.confirmed, false)
   assert.equal(probes, 1, 'only attended discovery runs, malformed version stops without retry')
+  await run(['client', 'detach', 'ollama', '--json'])
+  assert.equal(JSON.parse(await fs.readFile(f.configPath, 'utf8')).plugins.find(p => p.name === '@hypaware/ollama').recording, false)
+  assert.equal(await fs.stat(path.join(f.env.HOME, '.ollama')).then(() => true, () => false), false)
+  assert.equal(await fs.stat(path.join(f.env.HOME, 'hypaware-query')).then(() => true, () => false), false)
 })
 
 test('route confirmation needs a fresh matching gateway generation, actual port and exact transport', async t => {
