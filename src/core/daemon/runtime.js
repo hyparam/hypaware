@@ -678,12 +678,31 @@ export async function runDaemon(opts = {}) {
   }
 
   // ----- Sink driver -----
+  /** @type {Set<string>} */
+  const failingSinks = new Set()
   const driver = createSinkDriver({
     sinkRegistry: boot.runtime.sinks,
     queryRegistry: boot.runtime.query,
     storage: boot.runtime.storage,
     stateRoot,
     config: boot.config ?? undefined,
+    // @ref LLP 0471#daemon-work [implements]: actual completion stamps and bounded transition state, never a queued report
+    onComplete({ instance, startedAt, completedAt, report }) {
+      if (shutdownInFlight) return
+      const snap = sinkSnapshots.get(instance) ?? { instance, plugin: '', kind: '' }
+      snap.lastTickAt = startedAt
+      if (report.status === 'exported') {
+        snap.lastSuccessAt = completedAt
+        if (failingSinks.delete(instance)) fileLog.info('daemon.sink_export_recovered', { hyp_sink_instance: instance })
+      } else {
+        if (!failingSinks.has(instance)) fileLog.warn('daemon.sink_export_failed', {
+          hyp_sink_instance: instance, status: report.status, error_kind: 'sink_export',
+        })
+        failingSinks.add(instance)
+      }
+      sinkSnapshots.set(instance, snap)
+      requestBookkeeping()
+    },
   })
 
   // ----- Backfill sweep driver -----
@@ -853,83 +872,78 @@ export async function runDaemon(opts = {}) {
     }
   }
 
-  async function runTick() {
-    const now = new Date()
-    await withSpan(
-      'sink.tick',
-      {
-        [Attr.COMPONENT]: 'daemon',
-        [Attr.OPERATION]: 'sink.tick',
-        daemon_mode: mode,
-        status: 'ok',
-      },
-      async () => {
-        const report = await driver.tick({ now, source: 'daemon' })
-        // The scheduled backfill sweep (LLP 0170) rides this same tick. The
-        // await covers only the cron due-check and the fire: each due
-        // provider's run is started unblocked inside `tick`, so a slow
-        // transcript scan never stalls the sink snapshots, the source-detail
-        // refresh, or `persist()` below.
-        // @ref LLP 0172#lane-b-sweep [implements]: one sibling call on the existing 60-second loop, not a second timer
-        await sweepDriver.tick({ now })
-        for (const sinkReport of report.sinks) {
-          const snap = sinkSnapshots.get(sinkReport.instance) ?? {
-            instance: sinkReport.instance,
-            plugin: '',
-            kind: '',
-          }
-          snap.lastTickAt = now.toISOString()
-          if (sinkReport.status === 'exported') {
-            snap.lastSuccessAt = snap.lastTickAt
-          }
-          sinkSnapshots.set(sinkReport.instance, snap)
-        }
-      },
-      { component: 'daemon' }
-    ).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err)
-      fileLog.error('daemon.tick_failed', { message })
-    })
-    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
-    await refreshSourceStatus()
-    persist()
+  /** @type {Promise<void> | null} */
+  let bookkeepingInFlight = null
+  let bookkeepingRequested = false
 
-    // The daily self-update check rides this tick rather than owning a
-    // timer (same shape as the backfill sweep above). The pass itself
-    // is TTL-gated and provenance-guarded, so this is a cheap state
-    // read on almost every tick. An applied update exits through the
-    // staged-restart path: the service manager relaunches onto the new
-    // code.
-    // @ref LLP 0309#cadence [implements]: boot + daily with jitter, applied via the staged restart
-    if (autoUpdateEnabled && !selfUpdateInFlight) {
-      selfUpdateInFlight = true
-      void runSelfUpdatePass({
-        stateRoot,
-        env,
-        configPath: boot.configPath ?? opts.configPath,
-        autoUpdate: autoUpdateEnabled,
-        runningVersion,
-        // A restart exit is only an update when something relaunches us;
-        // hand-run in a terminal, the pass installs nothing and says why.
-        supervised,
-        log: (event, fields) => fileLog.info(event, fields ?? {}),
-      }).then((result) => {
-        if (result.action === 'updated' && triggerShutdown) {
-          void triggerShutdown('restart')
-        }
-      }).catch((err) => {
-        // `runSelfUpdatePass` never throws, but the restart handler above
-        // can, and an unhandled rejection is a dead daemon under Node's
-        // default `--unhandled-rejections=throw`.
-        fileLog.error('self_update.tick_failed', {
-          message: err instanceof Error ? err.message : String(err),
-        })
-      }).finally(() => { selfUpdateInFlight = false })
-    }
+  // @ref LLP 0471#daemon-work [implements]: a synchronous one-active/one-bit gate cannot retain one promise per timer fire
+  function requestBookkeeping() {
+    if (shutdownInFlight) return
+    if (bookkeepingInFlight) { bookkeepingRequested = true; return }
+    bookkeepingInFlight = (async () => {
+      do {
+        bookkeepingRequested = false
+        await runBookkeeping()
+      } while (bookkeepingRequested && !shutdownInFlight)
+    })().catch(() => {
+      fileLog.error('daemon.tick_failed', { error_kind: 'bookkeeping' })
+    }).finally(() => { bookkeepingInFlight = null })
+  }
+
+  function runTick() {
+    if (shutdownInFlight) return
+    driver.dispatch()
+    requestBookkeeping()
+  }
+
+  async function runBookkeeping() {
+    return withSpan('daemon.bookkeeping', {
+      [Attr.COMPONENT]: 'daemon', [Attr.OPERATION]: 'daemon.bookkeeping', daemon_mode: mode,
+    }, async () => {
+      const now = new Date()
+      // @ref LLP 0172#lane-b-sweep [implements]: the existing interval requests a bounded due-check, never waits for provider completion
+      await sweepDriver.tick({ now })
+      status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, retain: configuredSinkInstances })
+      await refreshSourceStatus()
+      persist()
+
+      // The daily self-update check rides this tick rather than owning a
+      // timer (same shape as the backfill sweep above). The pass itself
+      // is TTL-gated and provenance-guarded, so this is a cheap state
+      // read on almost every tick. An applied update exits through the
+      // staged-restart path: the service manager relaunches onto the new
+      // code.
+      // @ref LLP 0309#cadence [implements]: boot + daily with jitter, applied via the staged restart
+      if (autoUpdateEnabled && !selfUpdateInFlight) {
+        selfUpdateInFlight = true
+        void runSelfUpdatePass({
+          stateRoot,
+          env,
+          configPath: boot.configPath ?? opts.configPath,
+          autoUpdate: autoUpdateEnabled,
+          runningVersion,
+          // A restart exit is only an update when something relaunches us;
+          // hand-run in a terminal, the pass installs nothing and says why.
+          supervised,
+          log: (event, fields) => fileLog.info(event, fields ?? {}),
+        }).then((result) => {
+          if (result.action === 'updated' && triggerShutdown) {
+            void triggerShutdown('restart')
+          }
+        }).catch((err) => {
+          // `runSelfUpdatePass` never throws, but the restart handler above
+          // can, and an unhandled rejection is a dead daemon under Node's
+          // default `--unhandled-rejections=throw`.
+          fileLog.error('self_update.tick_failed', {
+            message: err instanceof Error ? err.message : String(err),
+          })
+        }).finally(() => { selfUpdateInFlight = false })
+      }
+    }, { component: 'daemon' })
   }
 
   if (tickIntervalMs > 0) {
-    tickHandle = setInterval(() => { void runTick() }, tickIntervalMs)
+    tickHandle = setInterval(runTick, tickIntervalMs)
     if (typeof tickHandle.unref === 'function') tickHandle.unref()
   }
 
@@ -1224,6 +1238,10 @@ export async function runDaemon(opts = {}) {
       clearInterval(maintenanceHandle)
       maintenanceHandle = null
     }
+    // @ref LLP 0471#close-order [implements]: stop admission and signal all sink resources before any unrelated shutdown await
+    driver.stop()
+    bookkeepingRequested = false
+    const sinksClosing = closeAllSinks({ runtime: boot.runtime, fileLog })
     if (maintenanceInFlight) {
       await maintenanceInFlight
     }
@@ -1240,8 +1258,8 @@ export async function runDaemon(opts = {}) {
     // timer is unref'd so it can never be what keeps the process alive.
     //
     // Armed here rather than at the top of shutdown, so the deadline
-    // covers the part that can wedge (a client stream holding a source's
-    // `server.close()` open) and not the reconcile pass the line above
+    // covers sink settlement and a client stream holding a source's
+    // `server.close()` open and not the reconcile pass the line above
     // deliberately waits for: `hyp backfill` is a multi-minute import by
     // design, and forcing an exit through it is the orphaned child and
     // lost marker that settle exists to prevent.
@@ -1264,6 +1282,7 @@ export async function runDaemon(opts = {}) {
       }, RESTART_EXIT_DEADLINE_MS)
       forcedExit.unref()
     }
+    await Promise.all([driver.drain(), bookkeepingInFlight])
     // Last chance to capture accruing source details: the sources are still
     // running here, and after `stopAllSources` below their probes are gone.
     // A daemon that never reached a tick (or stopped between ticks) would
@@ -1292,7 +1311,7 @@ export async function runDaemon(opts = {}) {
         for (const snap of status.sources) {
           snap.state = 'stopped'
         }
-        await closeAllSinks({ runtime: boot.runtime, fileLog })
+        await sinksClosing
       },
       { component: 'daemon' }
     ).catch((err) => {
