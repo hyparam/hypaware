@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import { constants } from 'node:fs'
 import path from 'node:path'
 import { setImmediate as yieldTurn } from 'node:timers/promises'
+import { compareStrings } from '../util/compare_strings.js'
 
 /** @import { SinkDiagnosticRecord } from '../../../src/core/sinks/types.js' */
 
@@ -97,7 +98,7 @@ export async function readDiagnosticRecord(dir, name, instance) {
 function newestFirst(a, b) {
   if (a.at !== b.at) return b.at - a.at
   if (a.sequence !== b.sequence) return a.sequence > b.sequence ? -1 : 1
-  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  return compareStrings(a.name, b.name)
 }
 
 /** @param {SinkDiagnosticRecord[]} records @param {SinkDiagnosticRecord} record @param {string | undefined} protectedName */
