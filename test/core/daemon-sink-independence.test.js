@@ -8,7 +8,7 @@ import http from 'node:http'
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import { runDaemon } from '../../src/core/daemon/runtime.js'
-import { readStatusFile } from '../../src/core/daemon/status.js'
+import { readStatusFile, collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
@@ -33,7 +33,7 @@ async function until(check) {
   assert.fail('disposable runtime condition did not settle')
 }
 async function read(dir, name) { return fs.readFile(path.join(dir, name), 'utf8').catch(() => '') }
-async function stage(t, url, { central = false, uncooperative = false, tickIntervalMs = 25 } = {}) {
+async function stage(t, url, { central = false, uncooperative = false, tickIntervalMs = 25, maintenance = false, beforeBoot = async (home) => {} } = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sink-independent-'))
   const install = path.join(home, 'hypaware', 'plugins', PLUGIN)
   await fs.mkdir(install, { recursive: true })
@@ -105,7 +105,7 @@ export async function activate(ctx) {
   } })
   const configPath = defaultConfigPath(home)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
-  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name: PLUGIN, config: {} }], auto_update: false, query: { cache: { maintenance: { enabled: false } } }, sinks: {
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [{ name: PLUGIN, config: {} }], auto_update: false, query: { cache: { maintenance: { enabled: maintenance, interval_minutes: 0.005 } } }, sinks: {
     'a-central': { plugin: PLUGIN, config: { schedule: '* * * * *' } },
     'z-local': { plugin: PLUGIN, config: { schedule: '* * * * *' } },
   } }))
@@ -116,6 +116,7 @@ export async function activate(ctx) {
     await fs.rm(home, { recursive: true, force: true, maxRetries: 5 })
   })
   if (uncooperative) await fs.writeFile(path.join(home, 'hold-central'), '1')
+  await beforeBoot(home)
   daemon = await runDaemon({ hypHome: home, configPath, env: { ...process.env, HYP_HOME: home }, runId: 'sink-independent', tickIntervalMs, installSignalHandlers: false })
   return { home, daemon, stateRoot: path.join(home, 'hypaware') }
 }
@@ -280,4 +281,46 @@ test('registry close ownership is established before plugin code reenters', asyn
   await reentered
   assert.deepEqual(calls, ['a', 'b'])
   assert.deepEqual(registry.list(), [])
+})
+
+
+// @ref LLP 0471#diagnostic-history [tests]: ordinary daemon logs cleanup separately and retries on its existing maintenance cadence
+test('disposable runtime retries denied diagnostic cleanup without changing export recovery', async t => {
+  const unlink = fs.unlink
+  let denied = true
+  let outbox = ''
+  fs.unlink = async target => {
+    if (denied && outbox && String(target).startsWith(outbox) && String(target).endsWith('.json')) {
+      throw Object.assign(new Error('synthetic cleanup refusal'), { code: 'EACCES' })
+    }
+    return unlink(target)
+  }
+  t.after(() => { fs.unlink = unlink })
+  const server = http.createServer((req, res) => { res.end('ok') })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => { server.closeAllConnections()
+    server.close() })
+  const { home, stateRoot } = await stage(t, endpoint(server), { maintenance: true, beforeBoot: async home => {
+    outbox = path.join(home, 'hypaware', 'sinks', 'z-local', 'outbox')
+    await fs.mkdir(outbox, { recursive: true })
+    const at = new Date(Date.now() - 60000).toISOString()
+    for (let i = 1; i <= 120; i++) await fs.writeFile(path.join(outbox, `z-local-${at}-${i}.json`), '{}')
+    await fs.writeFile(path.join(home, 'fail'), '1')
+  } })
+  const logs = async () => (await read(path.join(stateRoot, 'logs'), 'daemon.log')).split('\n').filter(Boolean).map(line => JSON.parse(line))
+  await until(async () => (await logs()).some(row => row.event === 'daemon.sink_outbox_cleanup_failed'))
+  const cleanup = (await logs()).find(row => row.event === 'daemon.sink_outbox_cleanup_failed')
+  assert.equal(cleanup.error_kind, 'EACCES')
+  assert.equal(cleanup.hyp_sink_instance, 'z-local')
+  assert.ok((await fs.readdir(outbox)).length > 100, 'denied cleanup honestly exceeds cap')
+  denied = false
+  await until(async () => (await fs.readdir(outbox)).length === 100)
+  assert.equal(statusAt(stateRoot).sinks.find(sink => sink.instance === 'z-local')?.lastSuccessAt, undefined)
+  await fs.rm(path.join(home, 'fail'))
+  await until(() => Boolean(statusAt(stateRoot).sinks.find(sink => sink.instance === 'z-local')?.lastSuccessAt))
+  const report = await collectHypAwareStatus({ env: { ...process.env, HYP_HOME: home, HYP_CONFIG: '' }, platform: 'darwin', isLaunchAgentInstalled: () => false })
+  assert.equal(report.diagnostics.some(d => d.kind === 'sink_export_failing' && d.message.startsWith('z-local:')), false)
+  assert.ok(report.recentErrorCount >= 100, 'recovery does not erase retained evidence')
+  assert.ok((await logs()).some(row => row.event === 'daemon.sink_export_recovered' && row.hyp_sink_instance === 'z-local'))
 })

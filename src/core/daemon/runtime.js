@@ -686,6 +686,9 @@ export async function runDaemon(opts = {}) {
     storage: boot.runtime.storage,
     stateRoot,
     config: boot.config ?? undefined,
+    onDiagnosticCleanupFailure(instance, code) {
+      fileLog.warn('daemon.sink_outbox_cleanup_failed', { hyp_sink_instance: instance, error_kind: code })
+    },
     // @ref LLP 0471#daemon-work [implements]: actual completion stamps and bounded transition state, never a queued report
     onComplete({ instance, startedAt, completedAt, report }) {
       if (shutdownInFlight) return
@@ -1005,6 +1008,8 @@ export async function runDaemon(opts = {}) {
       })
       await tracer.startActiveSpan('maintenance.tick', { attributes: attrs }, async (span) => {
         try {
+          // @ref LLP 0471#diagnostic-history [implements]: cleanup retries use this existing cadence, including when exports keep failing
+          await driver.maintainDiagnostics()
           const report = await maintainCache({
             cacheRoot: boot.runtime.storage.cacheRoot,
             budgetMs: mCfg.max_tick_ms,
