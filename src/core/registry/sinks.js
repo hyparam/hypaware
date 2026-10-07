@@ -49,6 +49,18 @@ const instanceNames = new WeakMap()
  */
 const instanceConfigs = new WeakMap()
 
+/** @type {WeakMap<object, () => void>} */
+const executionStops = new WeakMap()
+/** @type {WeakSet<object>} */
+const closedHandles = new WeakSet()
+
+// @ref LLP 0471#instance-ownership [implements]: close invalidates the shared handle gate before awaiting plugin work
+/** @param {ExtendedSinkHandle} handle @param {() => void} stop */
+export function onSinkHandleClose(handle, stop) {
+  if (closedHandles.has(handle)) stop()
+  else executionStops.set(handle, stop)
+}
+
 /**
  * The instance name this module keyed `handle` under: the string
  * `instantiate` validated, out of the kernel's own record rather than off the
@@ -660,18 +672,22 @@ export function createSinkRegistry() {
    * @param {PluginName} [owner]
    */
   async function closeAll(owner) {
-    const names = Array.from(handles.keys())
-    for (const name of names) {
-      const handle = handles.get(name)
-      if (!handle) continue
-      if (owner !== undefined && owners.get(name) !== owner) continue
+    const selected = Array.from(handles.entries()).filter(([name]) => owner === undefined || owners.get(name) === owner)
+    for (const [, handle] of selected) {
+      closedHandles.add(handle)
+      executionStops.get(handle)?.()
+      executionStops.delete(handle)
+    }
+    for (const [name, handle] of selected) {
       try {
         await handle.sink.close()
       } catch {
         // best-effort during shutdown
       }
-      handles.delete(name)
-      owners.delete(name)
+      if (handles.get(name) === handle) {
+        handles.delete(name)
+        owners.delete(name)
+      }
     }
   }
 
