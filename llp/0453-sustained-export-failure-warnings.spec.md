@@ -5,6 +5,7 @@
 **Systems:** Daemon, CLI
 **Author:** Brendan / Codex
 **Date:** 2026-09-29
+**Extended-by:** LLP 0471 (preserves the warning rule with completion-based recovery and finite diagnostic history)
 
 <!-- @ref LLP 0349#decision [extends]: historical export errors are not evidence that delivery still needs attention -->
 

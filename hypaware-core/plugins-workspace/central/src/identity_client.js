@@ -1,11 +1,12 @@
 // @ts-check
 
 import fs from 'node:fs'
+import { centralLifetime, readCentralJson, readErrorDetail } from './backoff.js'
 
 import { atomicWriteJsonSync, canonicalOrigin, isPlainObject, sha256Hex } from 'hypaware/core/util'
 
 /**
- * @import { AcquireSource, PersistedIdentity } from './types.js'
+ * @import { AcquireSource, PersistedIdentity, RefreshLease, RefreshOperation } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
 
 /**
@@ -64,7 +65,7 @@ export class IdentityClient {
     this.now = opts.now ?? Date.now
     /** @type {PersistedIdentity | undefined} */
     this.identity = undefined
-    /** @type {Promise<void> | undefined} */
+    /** @type {RefreshOperation | undefined} */
     this.refreshing = undefined
   }
 
@@ -168,21 +169,59 @@ export class IdentityClient {
    * a burst of `getCurrentJwt()` calls right at the expiry edge causes
    * one network call, not N.
    *
+   * @param {AbortSignal} [signal]
    * @returns {Promise<void>}
    */
-  async refresh() {
-    if (this.refreshing) {
-      await this.refreshing
-      return
+  refresh(signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason)
+    if (this.refreshing?.lifetime.signal.aborted) {
+      return Promise.reject(new Error('identity refresh closing; retry after settlement'))
     }
-    this.refreshing = this.doRefresh().finally(() => {
-      this.refreshing = undefined
+    if (!this.refreshing) {
+      /** @type {RefreshOperation} */
+      const operation = { lifetime: centralLifetime(undefined, 'identity refresh'), consumers: new Set() }
+      this.refreshing = operation
+      /** @param {unknown} [error] */
+      const settle = (error) => {
+        operation.lifetime.dispose()
+        if (this.refreshing === operation) this.refreshing = undefined
+        for (const lease of operation.consumers) lease.finish(error)
+        operation.consumers.clear()
+        operation.cancelled?.finish(operation.lifetime.signal.reason)
+        operation.cancelled = undefined
+      }
+      // @ref LLP 0471#shared-auth [implements]: one resource settlement handler; cancelled leases detach without shared-promise reactions
+      this.doRefresh(operation.lifetime.signal).then(() => settle(), settle)
+    }
+    const operation = this.refreshing
+    return new Promise((resolve, reject) => {
+      let finished = false
+      /** @type {RefreshLease} */
+      const lease = { finish(error) {
+        if (finished) return
+        finished = true
+        signal?.removeEventListener('abort', cancel)
+        operation.consumers.delete(lease)
+        if (error !== undefined) reject(error)
+        else resolve()
+      } }
+      const cancel = () => {
+        signal?.removeEventListener('abort', cancel)
+        operation.consumers.delete(lease)
+        if (operation.consumers.size) lease.finish(signal?.reason)
+        else {
+          operation.cancelled = lease
+          operation.lifetime.abort(signal?.reason)
+        }
+      }
+      operation.consumers.add(lease)
+      signal?.addEventListener('abort', cancel, { once: true })
+      if (signal?.aborted) cancel()
     })
-    await this.refreshing
   }
 
-  /** @returns {Promise<void>} */
-  async doRefresh() {
+  /** @param {AbortSignal} signal @returns {Promise<void>} */
+  async doRefresh(signal) {
     if (!this.identity) {
       throw new Error('identity refresh failed: no current JWT to refresh')
     }
@@ -191,15 +230,17 @@ export class IdentityClient {
     try {
       response = await this.fetchFn(url, {
         method: 'POST',
+        signal,
         headers: { authorization: `Bearer ${this.identity.jwt}` },
       })
-    } catch (err) {
-      throw new Error(`failed to reach central server ${this.centralUrl}: ${formatError(err)}`)
+    } catch {
+      signal.throwIfAborted()
+      throw new Error('identity refresh failed: transport unavailable')
     }
     if (!response.ok) {
-      throw new Error(`identity refresh failed: ${await readErrorDetail(response)}`)
+      throw new Error(`identity refresh failed: ${await readErrorDetail(response, signal)}`)
     }
-    const parsed = await readJsonResponse(response, 'refresh')
+    const parsed = await readCentralJson(response, signal)
     const identity = identityFromPayload(parsed, this.identity.gateway_id)
     // Preserve the mint provenance across refresh; the bootstrap token is
     // typically absent in steady state, so re-derive it from the prior
@@ -207,6 +248,7 @@ export class IdentityClient {
     identity.central_url = this.identity.central_url
     identity.bootstrap_token_fp = this.identity.bootstrap_token_fp
     if (this.identity.origin !== undefined) identity.origin = this.identity.origin
+    signal.throwIfAborted()
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -215,15 +257,17 @@ export class IdentityClient {
    * Return the current JWT, lazily refreshing if it sits inside the
    * refresh window. Hot path is a single in-memory check.
    *
+   * @param {AbortSignal} [signal]
    * @returns {Promise<string>}
    */
-  async getCurrentJwt() {
+  async getCurrentJwt(signal) {
+    signal?.throwIfAborted()
     if (!this.identity) {
       throw new Error('identity not acquired - call acquire() first')
     }
     const remainingSec = this.identity.expires_at - Math.floor(this.now() / 1000)
     if (remainingSec <= REFRESH_WINDOW_SECONDS) {
-      await this.refresh()
+      await this.refresh(signal)
     }
     if (!this.identity) {
       throw new Error('identity refresh did not produce a JWT')
@@ -421,35 +465,10 @@ function joinUrl(base, suffix) {
  */
 async function readJsonResponse(response, kind) {
   try {
-    return await response.json()
+    return await readCentralJson(response)
   } catch (err) {
     throw new Error(`identity ${kind} failed: invalid JSON in server response: ${formatError(err)}`)
   }
-}
-
-/**
- * @param {Response} response
- */
-async function readErrorDetail(response) {
-  let body
-  try {
-    body = await response.text()
-  } catch {
-    body = ''
-  }
-  if (body.length > 0) {
-    try {
-      const parsed = JSON.parse(body)
-      if (isPlainObject(parsed)) {
-        const error = typeof parsed.error === 'string' ? parsed.error : undefined
-        if (error) return `${response.status} ${error}`
-      }
-    } catch {
-      // plain text body: fall through
-    }
-    return `${response.status} ${body.trim().slice(0, 200)}`
-  }
-  return `${response.status} ${response.statusText || ''}`.trim()
 }
 
 /** @param {unknown} err */

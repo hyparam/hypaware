@@ -554,7 +554,7 @@ for (const scenario of [
       const clearsOlderThan = typeof scenario.success === 'number' && scenario.success >= 0 ? scenario.success : Infinity
       const unresolved = scenario.failures.filter((minutes) => minutes > 0 && minutes <= clearsOlderThan).length
       assert.equal(warning.severity, 'warning')
-      assert.match(warning.message, new RegExp(`^central: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure .+ ago$`))
+      assert.match(warning.message, new RegExp(`^central: ${unresolved} retained failed export record${unresolved === 1 ? '' : 's'} with no later success recorded; last failure .+ ago$`))
       // A remote destination is not repaired by bouncing the local daemon.
       assert.equal(warning.repair.some((r) => r.includes('daemon restart')), false)
     }
@@ -630,7 +630,7 @@ test('export recovery is per destination and dev telemetry cannot revive recover
   assert.equal(report.diagnostics.some((d) => d.kind === 'recent_errors'), false)
   const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
   assert.equal(warnings.length, 1, warnings.map((w) => w.message).join(' | '))
-  assert.match(warnings[0].message, /^failing: 3 failed export attempts with no later success recorded/)
+  assert.match(warnings[0].message, /^failing: 3 retained failed export records with no later success recorded/)
 })
 
 // Deleting the `sinks` key is a removal like emptying it or replacing the set,
@@ -700,7 +700,7 @@ test('export warning: an unreadable local config still warns about a failing sin
   )
   const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
   assert.equal(warnings.length, 1, 'an unreadable config must not suppress a live export failure')
-  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+  assert.match(warnings[0].message, /^central: 1 retained failed export record with no later success recorded/)
 })
 
 // A local `sinks` entry the central layer's merge drops as `invalid_merge`
@@ -737,7 +737,7 @@ test('export warning: a sinks entry the central layer merge dropped still warns'
   )
   const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
   assert.equal(warnings.length, 1, 'a merge-dropped entry must not suppress a live export failure')
-  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+  assert.match(warnings[0].message, /^central: 1 retained failed export record with no later success recorded/)
 })
 
 // A central layer that fails to parse is the third non-removal: it leaves
@@ -768,7 +768,7 @@ test('export warning: an unreadable central layer still warns about a failing si
   )
   const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
   assert.equal(warnings.length, 1, 'an unreadable central layer must not suppress a live export failure')
-  assert.match(warnings[0].message, /^central: 1 failed export attempt with no later success recorded/)
+  assert.match(warnings[0].message, /^central: 1 retained failed export record with no later success recorded/)
 })
 
 // A merge-dropped entry speaks only for the destination it names. Dropping

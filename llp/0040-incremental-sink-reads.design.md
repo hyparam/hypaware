@@ -7,6 +7,7 @@
 **Date:** 2026-06-25
 **Generated-by:** neutral
 **Related:** LLP 0039, LLP 0013, LLP 0014
+**Extended-by:** LLP 0471 (preserves the watermark contract; clarifies risk 6's historical outbox replay claim and diagnostic-only retention)
 
 > Technical design covering the request in [LLP 0039](./0039-incremental-sink-reads.spec.md):
 > give the central **forward** sink and the core **blob** sink a per-sink

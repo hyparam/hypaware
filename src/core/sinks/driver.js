@@ -6,14 +6,23 @@ import { noteProductPipeline } from '../product_telemetry/client.js'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
-import { sinkInstanceName } from '../registry/sinks.js'
+import { sinkInstanceName, onSinkHandleClose } from '../registry/sinks.js'
+import { atomicWriteJson } from '../util/fs_atomic.js'
+import { createDiagnosticHistory } from './diagnostic_history.js'
 
 /**
  * @import { DatasetRegistration, ExportProgress, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
- * @import { DriverOptions, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
+ * @import { DriverOptions, TickOptions, TickReport, SinkRunOutcome, SinkExecutionState } from '../../../src/core/sinks/types.js'
  */
+
+// @ref LLP 0471#instance-ownership [implements]: all drivers share one active run and one pending opportunity per handle
+/** @type {WeakMap<ExtendedSinkHandle, SinkExecutionState>} */
+const executions = new WeakMap()
+
+/** @type {WeakMap<ExtendedSinkHandle, ReturnType<typeof createDiagnosticHistory>>} */
+const diagnosticHistories = new WeakMap()
 
 /**
  * Build the kernel sink driver. The driver iterates sink handles on
@@ -39,58 +48,197 @@ export function createSinkDriver(opts) {
 
   let batchSeq = 0
 
-  /**
-   * @param {TickOptions} [tickOpts]
-   * @returns {Promise<TickReport>}
-   */
-  async function tick(tickOpts = {}) {
+  let stopped = false
+  /** Only actual operations owned by this driver, removed on settlement. @type {Set<SinkExecutionState>} */
+  const owned = new Set()
+  /** Explicit manual receipts only, bounded by the shared handle gate. @type {Set<Promise<SinkRunOutcome>>} */
+  const waiting = new Set()
+
+  /** @param {ExtendedSinkHandle} handle @param {string} instance */
+  function diagnosticHistory(handle, instance) {
+    let history = diagnosticHistories.get(handle)
+    if (!history) {
+      history = createDiagnosticHistory(path.join(stateRoot, 'sinks', instance, 'outbox'), instance, code => {
+        log.warn('sink.outbox_cleanup_failed', { [Attr.SINK_INSTANCE]: instance, error_kind: code })
+        try { opts.onDiagnosticCleanupFailure?.(instance, code) } catch (error) { logDispatchError(error) }
+      })
+      diagnosticHistories.set(handle, history)
+    }
+    return history
+  }
+
+  /** Existing daemon maintenance calls this; failed cleanup never adds its own timer. */
+  async function maintainDiagnostics() {
+    for (const handle of sinkRegistry.listHandles()) {
+      if (stopped) return
+      await diagnosticHistory(handle, sinkInstanceName(handle)).maintain()
+    }
+  }
+
+  /** @param {ExtendedSinkHandle} handle @returns {SinkExecutionState} */
+  function execution(handle) {
+    const existing = executions.get(handle)
+    if (existing) return existing
+    /** @type {SinkExecutionState} */
+    const state = {
+      active: false, operation: null, rerun: false, manual: null, stopped: false,
+      stop() {
+        state.stopped = true
+        state.rerun = false
+        const receipt = state.manual
+        state.manual = null
+        receipt?.resolve({ report: refused(handle, 'Sync stopped before its pending follow-up started; retry after restart.') })
+      },
+      scheduled: scheduleRerun,
+    }
+    executions.set(handle, state)
+    onSinkHandleClose(handle, state.stop)
+    return state
+  }
+
+  /** @param {ExtendedSinkHandle} handle @param {SinkExecutionState} state */
+  function scheduleRerun(handle, state) {
+    start(handle, state, { source: 'daemon' }).catch(logDispatchError)
+  }
+
+  /** @param {unknown} error */
+  function logDispatchError(error) {
+    log.warn('sink.dispatch_failed', { [Attr.COMPONENT]: 'sinks', [Attr.OPERATION]: 'sink.dispatch', error: describeThrown(error) })
+  }
+
+  /** @param {ExtendedSinkHandle} handle @param {string} error @returns {TickReport['sinks'][number]} */
+  function refused(handle, error) {
+    return { instance: sinkInstanceName(handle), status: 'failed', partitionsExported: 0, bytesWritten: 0, error }
+  }
+
+  /** @param {ExtendedSinkHandle} handle @param {SinkExecutionState} state @param {TickOptions} tickOpts */
+  function start(handle, state, tickOpts) {
+    // Ownership is synchronous, before the first policy lookup or discovery.
+    state.active = true
+    owned.add(state)
+    const operation = (async () => {
+      try { return await execute(handle, state, tickOpts) }
+      finally {
+        state.active = false
+        state.operation = null
+        owned.delete(state)
+        const receipt = state.manual
+        const rerun = state.rerun
+        state.manual = null
+        state.rerun = false
+        if (!state.stopped && !stopped) {
+          if (receipt) receipt.run().then(receipt.resolve, receipt.reject)
+          else if (rerun) state.scheduled(handle, state)
+        } else receipt?.resolve({ report: refused(handle, 'Sync stopped; retry after restart.') })
+      }
+    })()
+    state.operation = operation
+    return operation
+  }
+
+  /** @param {ExtendedSinkHandle} handle @param {SinkExecutionState} state @param {TickOptions} tickOpts @returns {Promise<SinkRunOutcome>} */
+  async function execute(handle, state, tickOpts) {
+    if (state.stopped || stopped) return { report: refused(handle, 'Sync stopped; retry after restart.') }
     const now = tickOpts.now ?? new Date()
     const source = tickOpts.source ?? 'manual'
-    instruments.sinkTicksTotal.add(1, { source })
-    // An enrolling login's first-sync review window is open: hold the whole
-    // tick so the daemon's first backfill cannot forward rows the user is
-    // still reviewing (the one-time window LLP 0069's #281 note deferred).
-    // Held rows stay in the cache and export on the first tick after the
-    // deadline passes; the deadline is absolute and bounded, so a machine can
-    // never stall exports indefinitely. The hold is driver-wide (every sink,
-    // not just off-machine ones): the driver cannot know which sinks leave the
-    // machine without a new registration concept, and briefly deferring a
-    // local sink is harmless where a missed forward hold is not.
-    // @ref LLP 0101#hold [implements]: exports nothing while now < the marker's absolute deadline
-    const firstSyncDeadline = await readFirstSyncDeadline({ stateDir: stateRoot, now: now.getTime() })
-    if (firstSyncDeadline !== null && now.getTime() < firstSyncDeadline) {
-      log.info('sink.tick_held_first_sync', {
-        [Attr.COMPONENT]: 'sinks',
-        [Attr.OPERATION]: 'sink.tick',
-        hyp_reason: 'first_sync_hold',
-        hyp_deadline: new Date(firstSyncDeadline).toISOString(),
-        source,
-      })
-      return { sinks: [], held: 'first_sync_hold' }
+    const held = await firstSyncHeld(now, source)
+    if (state.stopped || stopped) return { report: refused(handle, 'Sync stopped; retry after restart.') }
+    if (held) return { held: 'first_sync_hold' }
+    const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
+    if (tickOpts.force !== true && !cronMatches(schedule, now)) return {}
+    const instance = sinkInstanceName(handle)
+    const startedAt = new Date().toISOString()
+    tickOpts.onProgress?.(instance)
+    const report = await runSink(handle, instance, schedule, now, tickOpts.onProgress, state)
+    // Closed lifetimes cannot update a replacement's host snapshot.
+    if (!state.stopped && !stopped) {
+      try { opts.onComplete?.({ instance, startedAt, completedAt: new Date().toISOString(), report }) }
+      catch (error) { logDispatchError(error) }
     }
-    const handles = sinkRegistry.listHandles()
+    return { report }
+  }
+
+  /** @param {Date} now @param {TickOptions['source']} source */
+  // @ref LLP 0101#hold [implements]: every admitted run remains behind the absolute driver-wide review deadline
+  async function firstSyncHeld(now, source) {
+    const deadline = await readFirstSyncDeadline({ stateDir: stateRoot, now: now.getTime() })
+    if (deadline === null || now.getTime() >= deadline) return false
+    log.info('sink.tick_held_first_sync', { [Attr.COMPONENT]: 'sinks', [Attr.OPERATION]: 'sink.tick', hyp_reason: 'first_sync_hold', hyp_deadline: new Date(deadline).toISOString(), source })
+    return true
+  }
+
+  // @ref LLP 0471#manual-work [implements]: one awaited receipt upgrades the sole scheduled opportunity without sharing its progress
+  /** @param {TickOptions} [tickOpts] @returns {Promise<TickReport>} */
+  async function tick(tickOpts = {}) {
+    instruments.sinkTicksTotal.add(1, { source: tickOpts.source ?? 'manual' })
     /** @type {TickReport['sinks']} */
     const sinks = []
-    for (const handle of handles) {
-      // The registry's key, read once and carried through the export below,
-      // so the batch id, the outbox path, the span and every metric name the
-      // instance by the name `instantiate` validated rather than by a
-      // property its owner can replace (issue #1976).
-      //
-      // Only the name is fixed here. `handle.config` on the `schedule` line
-      // below is the same kind of live property, still read off the handle
-      // and still ahead of the due check, so a tick can still be lost to one
-      // (issue #2059).
+    let selected = false
+    for (const handle of sinkRegistry.listHandles()) {
       const instance = sinkInstanceName(handle)
       if (tickOpts.sinkInstance && instance !== tickOpts.sinkInstance) continue
-      const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
-      const isDue = tickOpts.force === true || cronMatches(schedule, now)
-      if (!isDue) continue
-      tickOpts.onProgress?.(instance)
-      const report = await runSink(handle, instance, schedule, now, tickOpts.onProgress)
-      sinks.push(report)
+      selected = true
+      const state = execution(handle)
+      /** @type {SinkRunOutcome} */
+      let outcome
+      if (state.stopped || stopped) outcome = { report: refused(handle, 'Sync stopped; retry after restart.') }
+      else if (!state.active) outcome = await start(handle, state, tickOpts)
+      else if (state.manual) outcome = { report: refused(handle, 'A sync is active and a follow-up is pending; retry after it finishes.') }
+      else {
+        const { force, onProgress, source } = tickOpts
+        /** @type {Promise<SinkRunOutcome>} */
+        const receipt = new Promise((resolve, reject) => {
+          state.rerun = true
+          // Only explicit manual intent is retained; time and discovery are fresh on admission.
+          state.manual = { run: () => start(handle, state, { force, onProgress, source }), resolve, reject }
+        })
+        waiting.add(receipt)
+        try { outcome = await receipt }
+        finally { waiting.delete(receipt) }
+      }
+      if (outcome.held) return { sinks, held: outcome.held }
+      if (outcome.report) sinks.push(outcome.report)
+    }
+    if (!selected && !stopped && await firstSyncHeld(tickOpts.now ?? new Date(), tickOpts.source ?? 'manual')) {
+      return { sinks, held: 'first_sync_hold' }
     }
     return { sinks }
+  }
+
+  // @ref LLP 0471#instance-ownership [implements]: busy scheduled fires allocate no promise, receipt or inventory
+  /** @param {Pick<TickOptions, 'sinkInstance' | 'now'>} [dispatchOpts] @returns {void} */
+  function dispatch(dispatchOpts = {}) {
+    if (stopped) return
+    instruments.sinkTicksTotal.add(1, { source: 'daemon' })
+    for (const handle of sinkRegistry.listHandles()) {
+      if (dispatchOpts.sinkInstance && sinkInstanceName(handle) !== dispatchOpts.sinkInstance) continue
+      try {
+        const state = execution(handle)
+        if (state.stopped) continue
+        const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
+        if (!cronMatches(schedule, dispatchOpts.now ?? new Date())) continue
+        // @ref LLP 0471#instance-ownership [implements]: the sole pending scheduled run uses its requesting host, with no per-fire closure
+        state.scheduled = scheduleRerun
+        if (state.active) state.rerun = true
+        else {
+          start(handle, state, { source: 'daemon', now: dispatchOpts.now }).catch(logDispatchError)
+        }
+      } catch (error) { logDispatchError(error) }
+    }
+  }
+
+  /** Stop admission first; plugin close is initiated by the owning host/registry. */
+  function stop() {
+    stopped = true
+    for (const state of owned) state.stop()
+    for (const handle of sinkRegistry.listHandles()) executions.get(handle)?.stop()
+  }
+
+  /** Await actual work, including a rerun already admitted before stop. */
+  async function drain() {
+    while (owned.size || waiting.size) {
+      await Promise.allSettled([...Array.from(owned, state => state.operation), ...waiting])
+    }
   }
 
   /**
@@ -99,11 +247,13 @@ export function createSinkDriver(opts) {
    * @param {string} schedule
    * @param {Date} now
    * @param {TickOptions['onProgress']} onProgress
+   * @param {SinkExecutionState} state
    * @returns {Promise<TickReport['sinks'][number]>}
    */
-  async function runSink(handle, instance, schedule, now, onProgress) {
+  async function runSink(handle, instance, schedule, now, onProgress, state) {
     const batchId = nextBatchId(now, instance)
     const partitions = await discoverReadyPartitions(handle, instance)
+    if (state.stopped || stopped) return refused(handle, 'Sync stopped before export; retry after restart.')
     return withSpan(
       'sink.export_batch',
       {
@@ -297,7 +447,16 @@ export function createSinkDriver(opts) {
           tablePath: p.tablePath,
         })),
       }
-      fs.writeFileSync(filePath, JSON.stringify(payload, null, 2))
+      // @ref LLP 0471#diagnostic-history [implements]: commit new evidence atomically before any history pruning
+      await diagnosticHistory(handle, instance).publish(`${batchId}.json`, async () => {
+        // Preserve an existing symlink rather than replacing it with diagnostic evidence.
+        try {
+          if ((await fs.promises.lstat(filePath)).isSymbolicLink()) throw new Error('Diagnostic path is a symlink')
+        } catch (error) {
+          if (/** @type {{code?: string}} */ (error)?.code !== 'ENOENT') throw error
+        }
+        await atomicWriteJson(filePath, payload)
+      })
     } catch (err) {
       // `describeThrown` for the same reason the two catches above use it:
       // everything this catch guards reads a plugin's own partition objects,
@@ -353,7 +512,7 @@ export function createSinkDriver(opts) {
     return `${instance}-${now.toISOString()}-${batchSeq}`
   }
 
-  return { tick }
+  return { tick, dispatch, stop, drain, maintainDiagnostics }
 }
 
 /**

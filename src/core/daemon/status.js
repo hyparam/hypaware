@@ -31,6 +31,7 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { sinkInstanceName } from '../registry/sinks.js'
+import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { isEphemeralRecordedBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
@@ -4165,25 +4166,15 @@ const DAEMON_LOG_TAIL_BYTES = 1024 * 1024
 const DEV_TELEMETRY_TAIL_BYTES = 1024 * 1024
 
 /**
- * The timestamp the sink driver bakes into an outbox filename. `persistOutbox`
- * writes `<batchId>.json` where `batchId` is `<instance>-<iso>-<seq>`, so the
- * age of every failed export batch is readable from the directory listing
- * alone, with no file opened. Anything that does not match is not a batch this
- * daemon wrote and is not evidence of a failure, so it is skipped rather than
- * counted.
- */
-const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/
-
-/**
- * Count the failures this install has actually recorded in the last
+ * Count the retained failures this install recorded in the last
  * {@link RECENT_ERROR_WINDOW_HOURS} hours, across every store that exists on
  * an ordinary install.
  *
  * The two stores a production install keeps are disjoint, so nothing there is
  * counted twice: `daemon.log` carries what `fileLog` emits (boot, tick,
  * reload, source and maintenance failures) and the sink driver does not write
- * to it at all, while the sink outbox carries one file per failed export batch
- * and nothing else writes one.
+ * to it directly. The daemon records bounded sink transitions as warnings,
+ * while the sink outbox retains up to 100 failed export records per instance.
  *
  * `daemon.log` is read twice because there are two of them (LLP 0038): the
  * gateway keeps the one at the primary state root, and the processing child
@@ -4384,46 +4375,36 @@ async function countDaemonLogErrors(logPath, sinceMs) {
 // @ref LLP 0453#warning-rule [implements]: a destination warns while it holds an export failure with no later success, however old
 async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
   const result = { total: 0, diagnostics: /** @type {StatusDiagnostic[]} */ ([]) }
-  /** @type {Dirent[]} */
-  let instances
   try {
-    instances = await fsp.readdir(sinksDir, { withFileTypes: true })
-  } catch {
-    return result
-  }
-  for (const instance of instances) {
-    if (!instance.isDirectory()) continue
-    /** @type {string[]} */
-    let files
-    try {
-      files = await fsp.readdir(path.join(sinksDir, instance.name, 'outbox'))
-    } catch {
-      continue
+    const instances = await fsp.opendir(sinksDir)
+    for await (const instance of instances) {
+      if (!instance.isDirectory()) continue
+      const dir = path.join(sinksDir, instance.name, 'outbox')
+      const success = lastSuccess.get(instance.name)
+      let unresolved = 0
+      let last = -Infinity
+      try {
+        // @ref LLP 0471#diagnostic-history [implements]: stream retained evidence with bounded metadata, never partition inventories
+        for await (const name of diagnosticEntries(dir, instance.name)) {
+          const record = await readDiagnosticRecord(dir, name, instance.name)
+          if (!record) continue
+          const at = record.at
+          if (at >= sinceMs) result.total += 1
+          if (success === undefined || at > nowMs || at < success) continue
+          unresolved += 1
+          last = Math.max(last, at)
+        }
+      } catch { /* Missing or unreadable history contributes only evidence already read. */ }
+      if (unresolved > 0) {
+        result.diagnostics.push({
+          severity: 'warning',
+          kind: 'sink_export_failing',
+          message: `${sanitizeLabel(instance.name) ?? 'unknown'}: ${unresolved} retained failed export record${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
+          repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(dir, 512)}`],
+        })
+      }
     }
-    // `-Infinity` when the destination has never succeeded, so `at < success`
-    // is the one recovery test, and `undefined` when it is not configured.
-    const success = lastSuccess.get(instance.name)
-    let unresolved = 0
-    let last = -Infinity
-    for (const file of files) {
-      const match = OUTBOX_BATCH_TIMESTAMP.exec(file)
-      if (!match) continue
-      const at = Date.parse(match[1])
-      if (!Number.isFinite(at)) continue
-      if (at >= sinceMs) result.total += 1
-      if (success === undefined || at > nowMs || at < success) continue
-      unresolved += 1
-      last = Math.max(last, at)
-    }
-    if (unresolved > 0) {
-      result.diagnostics.push({
-        severity: 'warning',
-        kind: 'sink_export_failing',
-        message: `${sanitizeLabel(instance.name) ?? 'unknown'}: ${unresolved} failed export attempt${unresolved === 1 ? '' : 's'} with no later success recorded; last failure ${formatGapDuration(nowMs - last)} ago`,
-        repair: [`check destination connectivity and inspect failure records in ${sanitizeLabel(path.join(sinksDir, instance.name, 'outbox'), 512)}`],
-      })
-    }
-  }
+  } catch { /* No readable sink history. */ }
   return result
 }
 
