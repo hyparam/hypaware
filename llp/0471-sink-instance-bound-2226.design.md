@@ -1,7 +1,7 @@
 # LLP 0471: Bound sink work by logical instance
 
 **Type:** design
-**Status:** Draft
+**Status:** Active
 **Systems:** Sinks, Daemon, Plugins
 **Author:** HypForge steward
 **Date:** 2026-10-07
@@ -21,7 +21,8 @@ sink instance, independent local exports and daemon health work, actual bounded
 central cancellation, and finite failure history. A global `runTick` guard would
 retain the blocked destination's control over unrelated work and is rejected.
 This design extends the clauses identified below without rewriting their history.
-It is Draft pending the orchestration actionability checkpoint before repair.
+Orchestration actionability readback accepted this design before implementation.
+Candidate proof and independent review remain required.
 
 ## Evidence and boundary {#boundary}
 

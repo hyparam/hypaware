@@ -1,7 +1,7 @@
 # LLP 0472: Implement bounded sink instances
 
 **Type:** plan
-**Status:** Draft
+**Status:** Active
 **Systems:** Sinks, Daemon, Plugins
 **Author:** HypForge steward
 **Date:** 2026-10-07
@@ -21,9 +21,9 @@
 Parent `nn-maint-sink-tick-overlap-20261007`, issue #2226, owner HypForge steward.
 Admission 2127 reserves one maintenance slot; disposition 2150 admits this design
 and plan stage. Authoring branch `codex/sink-instance-bound-2226` starts at
-`e6784482e04ce77eb2e15ed11a29f29d638f8903`. Design and plan are Draft until the
-orchestrator's actionability/overlap readback; product repair and publication
-remain held for that checkpoint. Existing PR #1034 is deferred with its history
+`e6784482e04ce77eb2e15ed11a29f29d638f8903`. Design and plan passed the
+orchestrator's actionability/overlap readback before repair. Immediate task
+advancement follows the same parent's disposition; publication remains held. Existing PR #1034 is deferred with its history
 preserved. OTLP and git diagnostics remain unreserved second/third priorities.
 
 Design/plan share slug `sink-instance-bound-2226`. After stage disposition, use
@@ -224,10 +224,10 @@ unrelated tests do not establish product acceptance or landing authority.
 
 ## Checkpoint and limits {#checkpoint}
 
-The documentation checkpoint is due 2026-10-07T22:19:49Z: committed doc SHA/base,
+The documentation checkpoint was due 2026-10-07T22:19:49Z: committed doc SHA/base,
 affected clauses/forward refs, parsed tasks/dependencies, concrete test matrix,
 guardian journeys, cancellation feasibility and current effort/impact on this same
-parent. Return it to the orchestrator before product repair. These drafts express
+parent. It was returned to the orchestrator before product repair. These documents express
 settled issue intent; no choice-only RFC or fresh human approval is requested.
 
 Remaining delivery estimate is 6-10 focused hours, accepted as planning uncertainty,
