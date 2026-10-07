@@ -11,6 +11,7 @@
 **Extended-by:** LLP 0450 (adds report generate to the finite command vocabulary)
 **Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
 **Extended-by:** LLP 0465 (adds report save to the finite command vocabulary)
+**Extended-by:** hypaware-server LLP 0503#machine-enrolled (a server-repo document, not this repo's numbering: settles vendor sharing for three fields only, see #policy)
 
 ## Contract {#contract}
 
@@ -42,6 +43,14 @@ old local or organization history is never copied into that generation.
 `preview` prints the exact next queued wire payload. Vendor sharing and
 standalone registration are unavailable pending separately settled policy,
 receiver registration, credentials and retention/deletion prerequisites.
+
+> Extended-by: hypaware-server LLP 0503#machine-enrolled settles vendor
+> sharing for three fields only: `hyp_version`, `os_family` and
+> `client_names`, folded onto finite vocabularies and copied to PostHog on the
+> server's `machine_enrolled` event. The LLP 0408 enrollment consent covers
+> it; `hyp telemetry off` stops it at the source, because no batch is sent.
+> PostHog keeps the copies until Hyperparam deletes them. Any other field
+> going to a vendor needs its own request.
 
 ## Outbox {#outbox}
 
