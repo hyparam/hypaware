@@ -78,7 +78,7 @@ export function createOllamaExchangeProjector() {
       // @ref LLP 0474#projection [implements]: completed model load/unload is intentional control traffic, never a persisted conversation
       if (generate && (terminal.done_reason === 'load' || terminal.done_reason === 'unload')) {
         if (nonempty(request.prompt) || nonempty(request.system) || imageCount || content.length) return drop('invalid_response')
-        ctx.log.info('plugin.ollama.capture_control', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'control', reason: terminal.done_reason })
+        ctx.log.info('plugin.ollama.capture_control', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'skipped', reason: terminal.done_reason })
         return undefined
       }
       const usage = readUsage(terminal, input, ctx.log)
@@ -110,7 +110,7 @@ export function createOllamaExchangeProjector() {
         stop_reason: typeof terminal.done_reason === 'string' ? terminal.done_reason : undefined,
         raw_frame: raw, attributes: usage ? { usage } : undefined,
       })
-      ctx.log.info('plugin.ollama.capture_projected', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'projected', reason: imageCount + responseImages ? 'media_omitted' : 'text' })
+      ctx.log.info('plugin.ollama.capture_projected', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'ok', reason: imageCount + responseImages ? 'media_omitted' : 'text' })
       // @ref LLP 0469#resources-journey [implements]: system text stays in ordered rows; an exchange-wide copy would multiply serialized bytes by row count
       return { provider: 'ollama', session_id: input.exchange_id, request_id: input.exchange_id, client_name: 'ollama', entrypoint: 'ollama-api', conversation_source: 'ollama', model: model ?? request.model, messages }
     },

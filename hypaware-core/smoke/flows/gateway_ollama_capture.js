@@ -139,6 +139,9 @@ export async function run({ harness, expect }) {
     assert.ok((await usage.text()).includes('invalid counter'))
     await waitExchanges(4)
     await until(async () => (await diagnostic('plugin.ollama.invalid_usage')).length === 1, 'actual adapter counter diagnostic')
+    const projected = await diagnostic('plugin.ollama.capture_projected')
+    assert.equal(projected.length, 5, 'projection includes the failed append, so it cannot claim persistence')
+    assert.ok(projected.every(record => record.attributes.status === 'ok' && record.attributes.reason === 'text'))
 
     step('unsupported_and_failed')
     const unsupported = await post(base, 'json', JSON.stringify({ model: 'smoke-ollama', messages: [{ role: 'user', content: 'SECRET unsupported', tool_calls: [{ function: { name: 'SECRET tool' } }] }], stream: false }))

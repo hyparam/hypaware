@@ -15,6 +15,7 @@ import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-works
 import { createOpenclawExchangeProjector } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
+import { buildAttrs } from '../../src/core/observability/attrs.js'
 
 /** @import { AiGatewayExchangeInput } from '../../hypaware-plugin-kernel-types.js' */
 
@@ -302,6 +303,9 @@ test('mixed and media-only messages preserve positions, markers, correlation and
   assert.equal(result.rows.filter(row => attrs(row).usage !== undefined).length, 1)
   assert.deepEqual(attrs(result.rows[result.rows.length - 1]).usage, { output_tokens: 0 })
   assert.doesNotMatch(JSON.stringify(result), /SECRET_MEDIA_PAYLOAD|filename|mime_type/)
+  const diagnostic = result.logs.find(log => log.event === 'plugin.ollama.capture_projected')
+  assert.equal(buildAttrs(diagnostic?.fields).status, 'ok')
+  assert.equal(diagnostic?.fields?.reason, 'media_omitted')
 })
 
 test('native data URI text reuses shared stripping and records repeated context as new snapshots', async () => {
@@ -368,6 +372,7 @@ for (const reason of ['load', 'unload']) {
     assert.deepEqual(result.rows, [])
     assert.equal(result.logs.some(log => log.event === 'plugin.ollama.capture_dropped'), false)
     assert.equal(result.logs.find(log => log.event === 'plugin.ollama.capture_control')?.fields?.reason, reason)
+    assert.equal(buildAttrs(result.logs.find(log => log.event === 'plugin.ollama.capture_control')?.fields).status, 'skipped')
   })
 }
 
