@@ -165,6 +165,8 @@ export interface PickerPicks {
   sources: PickerSource[]
   exportChoice: PickerExport
   retentionDays: number
+  /** Explicit opt-in to GitHub collection; browser login is a separate command. */
+  github?: boolean
 }
 
 export interface PickerFinaleActions {
@@ -306,6 +308,8 @@ export interface InitFlags {
   yes: boolean
   noDaemon: boolean
   dryRun: boolean
+  github?: boolean
+  noBackfill?: boolean
   clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'pi')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined

@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { runInit, writeSetupGuide } from '../../src/core/commands/init.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { dispatch } from '../../src/core/cli/dispatch.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 
 /**
@@ -62,7 +63,9 @@ test('agent guide reuses detection, filters hidden/platform rows and preserves e
   assert.match(guide, /codex: --source codex/)
   assert.doesNotMatch(guide, /Disclosure for claude-desktop|Disclosure for raw-openai/)
   assert.match(guide, /Other source IDs: .*claude-desktop.*raw-openai/)
-  assert.match(guide, /hyp setup --source claude --export local-parquet --retention-days 120/)
+  assert.match(guide, /hyp setup --source claude --export local-parquet --retention-days 90/)
+  assert.ok(guide.includes('Offer "Cloud sync (recommended)" and "Local only"'))
+  assert.ok(guide.includes('Confirm the choice before enrollment; honor an existing local-only preference'))
   assert.doesNotMatch(guide, /hyp setup --source claude --source codex/)
   assert.ok(guide.includes(`Existing local config: ${configPath}`))
   assert.equal(await fs.readFile(configPath, 'utf8'), config)
@@ -83,8 +86,21 @@ test('guide explains human handoffs and verification', async (t) => {
   const f = await fixture(t)
   await writeSetupGuide(f.ctx, { catalog: catalog(), platform: 'linux' })
   for (const instruction of [
-    'hyp remote login --no-browser', 'hyp github login --no-browser',
-    'unattended setup does not enable GitHub collection',
+    'hyp remote login --browser', 'hyp remote login --no-browser',
+    'run hyp github login to open', 'hyp github login --no-browser',
+    'cloud first, then GitHub if enabled and requested',
+    'Wait for the command to finish and check its result before starting the next sign-in',
+    'Never run sign-ins in parallel',
+    'On failure, cancellation or timeout, resolve it or ask whether to skip',
+    'wait for their result before starting any other sign-in',
+    'Separately ask: collect GitHub information', 'add --github to the setup command',
+    '--yes never opts into GitHub', 'hyp github status',
+    'Offer optional history import now or later; add --no-backfill for later',
+    'Scheduled recovery still imports history',
+    'run hyp backfill <client>',
+    'hyp sync --dry-run', '--yes cannot bypass that review',
+    'hyp query overview --json', 'Suggest a new skill?', 'run hyp ask in an interactive terminal',
+    'hyp setup --from-file <existing-config-path> --github --force',
     'hyp privacy folders ask', 'hyp privacy client <name> local-only',
     'Existing enrollment remains', 'hyp leave', 'first-sync privacy review',
     'Never ask the person to paste passwords or access tokens',
@@ -114,4 +130,51 @@ test('guide combined with install flags refuses instead of applying choices', as
   assert.equal(await runInit(['--guide', '--yes'], f.ctx), 2)
   assert.match(f.stderr(), /unknown flag --guide/)
   assert.deepEqual(await fs.readdir(f.home), [])
+})
+
+// @ref LLP 0462#parity [tests]: the public flag enables collection without requiring a terminal or starting OAuth
+for (const github of [false, true]) {
+  test(`unattended setup GitHub opt-in=${github} writes the explicit selection`, async (t) => {
+    const f = await fixture(t)
+    const args = ['setup', '--source', 'otel', '--no-daemon', '--no-backfill', '--export', 'keep-local']
+    if (github) args.push('--github')
+    const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr }
+    assert.equal(await dispatch([...args, '--dry-run'], opts), 0, f.stderr())
+    assert.equal(/Would enable GitHub collection/.test(f.stdout()), github)
+    const configPath = path.join(f.home, 'hypaware-config.json')
+    await assert.rejects(fs.access(configPath))
+    assert.equal(await dispatch(args, opts), 0, f.stderr())
+    assert.equal(/GitHub collection enabled\. Next: run hyp github login/.test(f.stdout()), github)
+    const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    const names = config.plugins.map((p) => p.name)
+    assert.equal(names.includes('@hypaware/github'), github)
+    if (github) assert.equal(names.filter((name) => name === '@hypaware/context-graph').length, 1)
+    assert.ok(names.includes('@hypaware/otel'))
+    assert.doesNotMatch(f.stdout(), /Waiting for GitHub authorization|Opening your browser/)
+  })
+}
+
+test('GitHub opt-in from an existing config keeps settings, backs up, and does not duplicate plugins', async (t) => {
+  const f = await fixture(t)
+  const configPath = path.join(f.home, 'hypaware-config.json')
+  const config = { version: 2, plugins: [
+    { name: '@hypaware/context-graph' },
+    { name: '@hypaware/github', enabled: false, config: { inventory: 'session_repos' } },
+  ] }
+  const original = JSON.stringify(config) + '\n'
+  await fs.writeFile(configPath, original)
+  const opts = { env: f.ctx.env, stdout: f.ctx.stdout, stderr: f.ctx.stderr }
+  const args = ['setup', '--from-file', configPath, '--github']
+  assert.equal(await dispatch(args, opts), 1)
+  assert.equal(await fs.readFile(configPath, 'utf8'), original)
+  assert.equal(await dispatch([...args, '--force', '--dry-run'], opts), 0, f.stderr())
+  assert.equal(await fs.readFile(configPath, 'utf8'), original)
+  assert.equal(await dispatch([...args, '--force'], opts), 0, f.stderr())
+  assert.match(f.stdout(), /GitHub collection enabled\. Next: run hyp github login/)
+  const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.equal(after.plugins.length, 2)
+  assert.deepEqual(after.plugins[1], { ...config.plugins[1], enabled: true })
+  const backups = (await fs.readdir(f.home)).filter((name) => name.startsWith('hypaware-config.json.bak-'))
+  assert.equal(backups.length, 1)
+  assert.equal(await fs.readFile(path.join(f.home, backups[0]), 'utf8'), original)
 })

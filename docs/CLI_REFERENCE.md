@@ -93,7 +93,13 @@ configuration. It can write or replace the local configuration, install the
 daemon, attach clients, install client assets, and import history.
 `--force` backs up and replaces an existing configuration.
 Important options include repeatable `--source` and `--client`, `--export`,
-`--retention-days`, `--from-file`, `--no-daemon`, and `--bin`.
+`--retention-days`, `--from-file`, `--github`, `--no-backfill`, `--no-daemon`,
+and `--bin`. `--github` enables GitHub collection (a separate opt-in that
+`--yes` never implies) without signing in; run `hyp github login` afterward.
+With `--from-file`, it adds GitHub to the supplied configuration and keeps its
+other settings. `--no-backfill` skips the optional one-time history imports;
+clients with scheduled recovery still import history. Neither flag applies to
+a preset.
 
 With no arguments and no output terminal, setup prints an agent guide on
 stdout and exits `0` without configuring the machine. It lists detected
@@ -103,8 +109,9 @@ or enabling cloud sync, then runs explicit unattended flags. `hyp setup
 --guide` prints the same guide even on a terminal; use this flag alone.
 Cloud login from an agent shell needs `hyp remote login --no-browser` (print
 the sign-in URL) or `--browser` (open it); without either flag piped stdin is
-treated as a static token. Unattended setup does not enable GitHub collection;
-once the person enables it, `hyp github login --no-browser` prints a device code. The person completes each browser sign-in while the command waits.
+treated as a static token. After setup with `--github`, `hyp github login`
+opens the authorization page (`--no-browser` prints the URL and device code
+instead). The person completes each browser sign-in while the command waits.
 
 `--dry-run` reports what would be written and writes no configuration,
 including with `--from-file`. It still refuses an existing configuration

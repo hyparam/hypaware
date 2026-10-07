@@ -42,6 +42,20 @@ import {
 export const LOCKED_LABEL_SUFFIX = ' · set by your team'
 
 /**
+ * Apply the explicit GitHub collection choice to a composed local config.
+ * @param {HypAwareV2Config} config
+ * @ref LLP 0462#parity [implements]: flags and the attended offer share GitHub activation
+ */
+export function enableGithubCollection(config) {
+  const plugins = config.plugins ??= []
+  for (const name of ['@hypaware/context-graph', '@hypaware/github']) {
+    const existing = plugins.find((plugin) => plugin.name === name)
+    if (existing) existing.enabled = true
+    else plugins.push({ name })
+  }
+}
+
+/**
  * Everything the pick lane decides *before* it asks anything: the ordered
  * descriptors, the locked set, the config on disk, the detection pass, and
  * the seed those three produce (LLP 0183 #seed-from-config, LLP 0191
@@ -397,6 +411,7 @@ export async function runWizardPick(opts) {
     composeWith,
     ...(existing ? { existing } : {}),
   })
+  if (opts.picks?.github) enableGithubCollection(config)
 
   // The wizard orchestrator defers the write until every question lane has
   // run (LLP 0190 #commit-point): the save then lands after the sync
