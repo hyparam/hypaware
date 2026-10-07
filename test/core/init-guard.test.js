@@ -349,6 +349,18 @@ test('setup claude-and-otel-local -X refuses with exit 2 and writes no config', 
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })
 
+// A preset writes its own plugin list and runs no picker finale, so a picker
+// choice it would drop refuses instead of reporting success without it.
+for (const flag of ['--github', '--no-backfill', '--github=true']) {
+  test(`setup claude-and-otel-local ${flag} refuses with exit 2 and writes no config`, async () => {
+    const { hypHome, stderr, opts } = await makeHome()
+    const code = await dispatch(['setup', 'claude-and-otel-local', flag], opts)
+    assert.equal(code, 2)
+    assert.match(stderr.text(), /is not supported with a preset/)
+    await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+  })
+}
+
 // The gate refuses typos without disturbing the spellings the preset honors:
 // a bare preset run still writes.
 test('setup claude-and-otel-local still writes the config past the flag gate', async () => {

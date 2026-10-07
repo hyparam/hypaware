@@ -97,6 +97,7 @@ test('guide explains human handoffs and verification', async (t) => {
     '--yes never opts into GitHub', 'hyp github status',
     'Offer optional history import now or later; add --no-backfill for later',
     'Scheduled recovery still imports history',
+    'run hyp backfill <client>',
     'hyp sync --dry-run', '--yes cannot bypass that review',
     'hyp query overview --json', 'Suggest a new skill?', 'run hyp ask in an interactive terminal',
     'hyp setup --from-file <existing-config-path> --github --force',

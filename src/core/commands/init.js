@@ -114,6 +114,13 @@ export async function runInit(argv, ctx) {
       writeUnknownFlag(ctx, unknownFlag)
       return 2
     }
+    // A preset writes its own plugin list and runs no picker finale, so these
+    // choices would be dropped while setup reports success.
+    const pickerOnly = presetArgv.find((t) => /^--(github|no-backfill)(=|$)/.test(t))
+    if (pickerOnly !== undefined) {
+      ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with --source instead\n`)
+      return 2
+    }
     return preset.run(presetArgv, ctx)
   }
 
@@ -239,6 +246,7 @@ export async function writeSetupGuide(ctx, opts = {}) {
       `  --retention-days <n>: unattended default ${DEFAULT_RETENTION_DAYS} days; interactive local default ${LOCAL_INSTALL_RETENTION_DAYS}.`,
       '  The unattended run imports existing history for chosen clients within the retention window.',
       '  Offer optional history import now or later; add --no-backfill for later.',
+      '    To import deferred history later, run hyp backfill <client>.',
       '    This skips only optional one-time imports. Scheduled recovery still imports history for sweep-backed clients.',
       '    For those clients, explain the automatic import instead of offering a choice that cannot stop it.',
       `  Use --retention-days ${LOCAL_INSTALL_RETENTION_DAYS} for local setup or ${DEFAULT_RETENTION_DAYS} for cloud setup unless an override was chosen.`,
