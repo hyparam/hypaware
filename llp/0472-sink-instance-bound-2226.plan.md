@@ -11,10 +11,10 @@
 
 ## Tasks
 
-- id: T1  branch: codex/sink-instance-bound-2226/T1  deps: []    -- driver instance ownership and awaited manual admission
-- id: T2  branch: codex/sink-instance-bound-2226/T2  deps: []    -- central transport lifetime and shared authentication cancellation
-- id: T3  branch: codex/sink-instance-bound-2226/T3  deps: [T1, T2]    -- daemon independent work, completion and abort-before-await shutdown
-- id: T4  branch: codex/sink-instance-bound-2226/T4  deps: [T3]    -- bounded diagnostic retention and truthful status evidence
+- id: T1  branch: codex/sink-instance-bound-2226-tasks/T1  deps: []    -- driver instance ownership and awaited manual admission
+- id: T2  branch: codex/sink-instance-bound-2226-tasks/T2  deps: []    -- central transport lifetime and shared authentication cancellation
+- id: T3  branch: codex/sink-instance-bound-2226-tasks/T3  deps: [T1, T2]    -- daemon independent work, completion and abort-before-await shutdown
+- id: T4  branch: codex/sink-instance-bound-2226-tasks/T4  deps: [T3]    -- bounded diagnostic retention and truthful status evidence
 
 ## Ownership and execution {#execution}
 
