@@ -314,3 +314,58 @@ test('manual tick retains driver-wide hold reporting even with no selected handl
   s.add('local', false)
   assert.deepEqual(await d.tick({ sinkInstance: 'missing', force: true }), { sinks: [], held: 'first_sync_hold' })
 })
+
+// @ref LLP 0471#instance-ownership [tests]: busy scheduled requests retain the requesting driver's fresh discovery and completion host
+test('shared scheduled rerun switches driver context without allocating per-fire promises', async t => {
+  const s = await stage(t)
+  s.add('central')
+  const discoveries = []
+  const completions = []
+  const make = owner => s.driver({
+    queryRegistry: { listDatasets() { discoveries.push(owner)
+      return [] } },
+    onComplete() { completions.push(owner) },
+  })
+  const manual = make('manual')
+  const daemon = make('daemon')
+  const first = manual.tick({ force: true })
+  await until(() => s.calls.length === 1)
+  let promises = 0
+  const hook = createHook({ init(id, type) { if (type === 'PROMISE') promises++ } })
+  hook.enable()
+  try { for (let i = 0; i < 1000; i++) daemon.dispatch() }
+  finally { hook.disable() }
+  assert.equal(promises, 0)
+  s.release()
+  await first
+  await until(() => s.calls.length === 2)
+  assert.deepEqual(discoveries, ['manual', 'daemon'])
+  for (let i = 0; i < 1000; i++) { daemon.dispatch()
+    manual.dispatch() }
+  s.release()
+  await until(() => s.calls.length === 3)
+  assert.deepEqual(discoveries, ['manual', 'daemon', 'manual'])
+  s.release()
+  await Promise.all([manual.drain(), daemon.drain()])
+  assert.deepEqual(completions, ['manual', 'daemon', 'manual'])
+  assert.equal(s.calls.length, 3)
+  const explicit = make('explicit')
+  const progress = []
+  const running = manual.tick({ force: true })
+  await until(() => s.calls.length === 4)
+  daemon.dispatch()
+  const pending = explicit.tick({ force: true, onProgress: instance => progress.push(instance) })
+  for (let i = 0; i < 1000; i++) daemon.dispatch()
+  assert.deepEqual(progress, [], 'queued manual progress starts only with its own forced run')
+  s.release()
+  await running
+  await until(() => s.calls.length === 5)
+  assert.deepEqual(discoveries, ['manual', 'daemon', 'manual', 'manual', 'explicit'])
+  assert.deepEqual(progress, ['central'])
+  s.release()
+  await pending
+  await Promise.all([manual.drain(), daemon.drain(), explicit.drain()])
+  assert.deepEqual(completions, ['manual', 'daemon', 'manual', 'manual', 'explicit'])
+  assert.equal(s.calls.length, 5, 'manual receipt consumes the one scheduled rerun opportunity')
+  assert.equal(s.peak(), 1)
+})

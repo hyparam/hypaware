@@ -101,12 +101,19 @@ function newestFirst(a, b) {
   return compareStrings(a.name, b.name)
 }
 
-/** @param {SinkDiagnosticRecord[]} records @param {SinkDiagnosticRecord} record @param {string | undefined} protectedName */
-function keepNewest(records, record, protectedName) {
+// @ref LLP 0471#diagnostic-history [implements]: a future cohort cannot erase the newest currently actionable evidence without a success
+/** @param {SinkDiagnosticRecord[]} records @param {SinkDiagnosticRecord} record @param {string | undefined} protectedName @param {number} cutoff */
+function keepNewest(records, record, protectedName, cutoff) {
   records.push(record)
   records.sort(newestFirst)
   if (records.length <= HISTORY_LIMIT) return undefined
-  const index = records[HISTORY_LIMIT].name === protectedName ? HISTORY_LIMIT - 1 : HISTORY_LIMIT
+  let actionable
+  for (let i = 0; i < records.length; i++) {
+    if (records[i].at <= cutoff) { actionable = records[i]
+      break }
+  }
+  let index = HISTORY_LIMIT
+  while (records[index].name === protectedName || records[index] === actionable) index--
   return records.splice(index, 1)[0]
 }
 
@@ -131,12 +138,13 @@ export function createDiagnosticHistory(dir, instance, onFailure) {
 
   /** @param {string | undefined} protectedName */
   async function reconcile(protectedName) {
+    const cutoff = Date.now()
     /** @type {SinkDiagnosticRecord[]} */
     const selected = []
     try {
       for await (const name of diagnosticEntries(dir, instance)) {
         const record = await readDiagnosticRecord(dir, name, instance)
-        if (record) keepNewest(selected, record, protectedName)
+        if (record) keepNewest(selected, record, protectedName, cutoff)
       }
     } catch (error) {
       if (/** @type {{code?: string}} */ (error)?.code !== 'ENOENT') throw error
@@ -185,7 +193,7 @@ export function createDiagnosticHistory(dir, instance, onFailure) {
         const record = await readDiagnosticRecord(dir, name, instance)
         if (!record) return
         records = records.filter(previous => previous.name !== name)
-        const removed = keepNewest(records, record, name)
+        const removed = keepNewest(records, record, name, Date.now())
         if (removed) await removeOrdinary(dir, removed.name)
       })
     })

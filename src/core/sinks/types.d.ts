@@ -232,7 +232,7 @@ export interface SinkExecutionState {
   manual: SinkManualReceipt | null
   stopped: boolean
   stop: () => void
-  scheduled: () => void
+  scheduled: (handle: ExtendedSinkHandle, state: SinkExecutionState) => void
 }
 
 export interface MaterializeResult {

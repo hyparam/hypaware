@@ -89,11 +89,16 @@ export function createSinkDriver(opts) {
         state.manual = null
         receipt?.resolve({ report: refused(handle, 'Sync stopped before its pending follow-up started; retry after restart.') })
       },
-      scheduled() { start(handle, state, { source: 'daemon' }).catch(logDispatchError) },
+      scheduled: scheduleRerun,
     }
     executions.set(handle, state)
     onSinkHandleClose(handle, state.stop)
     return state
+  }
+
+  /** @param {ExtendedSinkHandle} handle @param {SinkExecutionState} state */
+  function scheduleRerun(handle, state) {
+    start(handle, state, { source: 'daemon' }).catch(logDispatchError)
   }
 
   /** @param {unknown} error */
@@ -123,7 +128,7 @@ export function createSinkDriver(opts) {
         state.rerun = false
         if (!state.stopped && !stopped) {
           if (receipt) receipt.run().then(receipt.resolve, receipt.reject)
-          else if (rerun) state.scheduled()
+          else if (rerun) state.scheduled(handle, state)
         } else receipt?.resolve({ report: refused(handle, 'Sync stopped; retry after restart.') })
       }
     })()
@@ -212,9 +217,10 @@ export function createSinkDriver(opts) {
         if (state.stopped) continue
         const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
         if (!cronMatches(schedule, dispatchOpts.now ?? new Date())) continue
+        // @ref LLP 0471#instance-ownership [implements]: the sole pending scheduled run uses its requesting host, with no per-fire closure
+        state.scheduled = scheduleRerun
         if (state.active) state.rerun = true
         else {
-          state.scheduled = () => { start(handle, state, { source: 'daemon' }).catch(logDispatchError) }
           start(handle, state, { source: 'daemon', now: dispatchOpts.now }).catch(logDispatchError)
         }
       } catch (error) { logDispatchError(error) }

@@ -1,6 +1,7 @@
 // @ts-check
 
 import process from 'node:process'
+import path from 'node:path'
 import { createProductClient, productAdapters } from '../product_telemetry/client.js'
 import { productEvent } from '../product_telemetry/collection.js'
 
@@ -23,6 +24,7 @@ import { attachHandler } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
+import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
@@ -678,8 +680,24 @@ export async function runDaemon(opts = {}) {
   }
 
   // ----- Sink driver -----
-  /** @type {Set<string>} */
-  const failingSinks = new Set()
+  /** @type {Map<string, number>} */
+  const failingSinks = new Map()
+  // @ref LLP 0471#daemon-work [implements]: one boot pass restores unresolved transitions, never one scan per completion
+  const historyNow = Date.now()
+  for (const handle of boot.runtime.sinks.listHandles()) {
+    const instance = sinkInstanceName(handle)
+    const dir = path.join(stateRoot, 'sinks', instance, 'outbox')
+    const success = Date.parse(sinkSnapshots.get(instance)?.lastSuccessAt ?? '')
+    const recoveredAt = Number.isFinite(success) && success <= historyNow ? success : -Infinity
+    try {
+      for await (const name of diagnosticEntries(dir, instance)) {
+        const record = await readDiagnosticRecord(dir, name, instance)
+        if (record && record.at <= historyNow && record.at >= recoveredAt) {
+          failingSinks.set(instance, Math.max(failingSinks.get(instance) ?? -Infinity, record.at))
+        }
+      }
+    } catch { /* Restore only evidence actually read; absent history makes no transition claim. */ }
+  }
   const driver = createSinkDriver({
     sinkRegistry: boot.runtime.sinks,
     queryRegistry: boot.runtime.query,
@@ -696,12 +714,16 @@ export async function runDaemon(opts = {}) {
       snap.lastTickAt = startedAt
       if (report.status === 'exported') {
         snap.lastSuccessAt = completedAt
-        if (failingSinks.delete(instance)) fileLog.info('daemon.sink_export_recovered', { hyp_sink_instance: instance })
+        const failedAt = failingSinks.get(instance)
+        if (failedAt !== undefined && Date.parse(completedAt) > failedAt) {
+          failingSinks.delete(instance)
+          fileLog.info('daemon.sink_export_recovered', { hyp_sink_instance: instance })
+        }
       } else {
         if (!failingSinks.has(instance)) fileLog.warn('daemon.sink_export_failed', {
           hyp_sink_instance: instance, status: report.status, error_kind: 'sink_export',
         })
-        failingSinks.add(instance)
+        failingSinks.set(instance, Math.max(failingSinks.get(instance) ?? -Infinity, Date.parse(completedAt)))
       }
       sinkSnapshots.set(instance, snap)
       requestBookkeeping()
