@@ -232,3 +232,43 @@ test('a colliding symlink prevents publication and preserves its target and hist
   assert.equal(await fs.readFile(outside, 'utf8'), 'private sentinel')
   assert.equal((await fs.readdir(s.dir)).length, 111)
 })
+
+// @ref LLP 0471#diagnostic-history [tests]: a future cohort cannot prune the sole actionable warning without recovery, even after retry or restart
+test('future history preserves actionable evidence through cleanup, retry, publication and restart', async t => {
+  const s = await stage(t)
+  const now = Date.now()
+  const future = new Date(now + 86400000).toISOString()
+  const actual = new Date(now - 10000).toISOString()
+  for (let i = 1; i <= 100; i++) await record(s.dir, 'central', i, future, future)
+  const actionable = await record(s.dir, 'central', 101, actual, actual)
+  const warning = async () => (await s.snapshot()).diagnostics.some(d => d.kind === 'sink_export_failing')
+  assert.equal(await warning(), true)
+  const errors = []
+  const history = createDiagnosticHistory(s.dir, 'central', code => errors.push(code))
+  const unlink = fs.unlink
+  let denied = true
+  fs.unlink = async target => {
+    if (denied && String(target).startsWith(s.dir)) throw Object.assign(new Error('synthetic refusal'), { code: 'EACCES' })
+    return unlink(target)
+  }
+  t.after(() => { fs.unlink = unlink })
+  await history.maintain()
+  assert.deepEqual(errors, ['EACCES'])
+  assert.equal(await warning(), true)
+  denied = false
+  await history.maintain()
+  assert.equal(await warning(), true, 'retry cannot erase warning without any success')
+  assert.ok(await fs.stat(actionable))
+  assert.equal((await fs.readdir(s.dir)).length, 100)
+  const newFuture = `central-${future}-102.json`
+  await history.publish(newFuture, () => record(s.dir, 'central', 102, future, future).then(() => {}))
+  assert.ok(await fs.stat(path.join(s.dir, newFuture)), 'newly published record stays protected alongside actionable evidence')
+  assert.ok(await fs.stat(actionable))
+  assert.equal(await warning(), true)
+  await createDiagnosticHistory(s.dir, 'central', () => {}).maintain()
+  assert.ok(await fs.stat(actionable), 'restart cleanup retains nonfuture warning evidence')
+  assert.equal((await fs.readdir(s.dir)).length, 100)
+  assert.equal(await warning(), true)
+  assert.equal((await s.snapshot(actual)).diagnostics.some(d => d.kind === 'sink_export_failing'), true, 'equal success is not recovery')
+  assert.equal((await s.snapshot(new Date().toISOString())).diagnostics.some(d => d.kind === 'sink_export_failing'), false, 'strictly later own-instance success still recovers')
+})
