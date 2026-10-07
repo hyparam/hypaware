@@ -158,8 +158,10 @@ All paths below are relative to `HYP_HOME`:
 <!-- @ref LLP 0471#diagnostic-history: prune owned diagnostic evidence without acknowledging cache payload -->
 Each destination's `hypaware/sinks/<instance>/outbox/` holds failure diagnostics,
 not rows waiting to be uploaded. HypAware writes the new record atomically,
-then keeps it and the newest recognized history, up to 100 records per
-destination after successful cleanup. An unsuccessful write prunes nothing.
+then retains up to 100 recognized records per destination after successful cleanup.
+It protects the new record and the newest failure dated no later than cleanup,
+then fills the remaining places with the newest history.
+An unsuccessful write prunes nothing.
 Cleanup preserves unfamiliar files, symlinks and other destinations' records.
 It does not delete cache rows, advance export progress or clear an export warning.
 
