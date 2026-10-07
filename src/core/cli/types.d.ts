@@ -259,7 +259,7 @@ export interface FinaleSummary {
    * deliberate no-attach-on-join posture): not applicable to the attach
    * lane, so `ok: true` and the run summary prints nothing for it.
    */
-  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean }[]
+  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean; notRecording?: boolean }[]
   skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   /**
@@ -427,6 +427,20 @@ export interface CoreCommandArgSpec {
   schema: VerbInputSchema
   /** argv token aliases, e.g. `{ '-y': '--yes' }`. */
   aliases?: Record<string, string>
+}
+
+/**
+ * One saved report as `hyp report list` inventories the store
+ * (`$HYP_HOME/reports`): the folder's name and path and the brief's mtime,
+ * never its contents.
+ */
+export interface LocalReportRow {
+  name: string
+  path: string
+  /** `report.md`'s mtime as ISO-8601, the listing's sort key and display. */
+  modifiedAt: string
+  /** The same mtime as a number, for ordering without re-parsing. */
+  mtimeMs: number
 }
 
 /**

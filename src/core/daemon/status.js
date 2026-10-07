@@ -12,6 +12,7 @@ import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../config/client_detach_disk.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy, readCodexCaptureMode } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
+import { isEntryRecording } from '../config/client_recording.js'
 import {
   isOtlpHeadersOverride,
   otlpOverrideSignal,
@@ -2145,6 +2146,12 @@ export async function collectHypAwareStatus(opts = {}) {
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
+    // One state per client: recording, or not. A detached client
+    // (`recording: false`) is a choice, not a fault, so nothing below warns
+    // about it; only a client that should be recording and whose wiring is
+    // gone does.
+    // @ref LLP 0466#status [implements]: status reads the same switch the runner and reconciler read
+    const recording = configured && isEntryRecording(config?.plugins?.find((entry) => entry.name === descriptor.plugin))
     // Attach state is only a real state for a client that declares an
     // `attach_probe`. Without one there is no settings-file write to read back,
     // `action_attach.desired()` skips the descriptor for exactly that reason
@@ -2178,6 +2185,7 @@ export async function collectHypAwareStatus(opts = {}) {
       name: clientName,
       plugin: descriptor.plugin,
       configured,
+      recording,
       attachable,
       attached: probe.attached,
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
@@ -2195,7 +2203,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // attach-missing warning would point at work capture does not need.
     // @ref LLP 0358#transcript-primary [implements]: Desktop capture health is
     //   independent of the optional managed-profile experiment
-    if (configured && attachable && !probe.attached) {
+    if (recording && attachable && !probe.attached) {
       // The repair is `hyp client attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
       // declares `contributes.client` for probe/status plumbing but no
@@ -3077,7 +3085,11 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     const inert = !descriptor.attachProbe
     const raw = entry.config?.attach
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
-    if (hasBlock) {
+    // A detached client is one the reconciler skips (LLP 0466), so its attach
+    // action is suppressed, never pending.
+    if (!isEntryRecording(entry)) {
+      declaredAttach.set(clientName, { onJoin: false, inert })
+    } else if (hasBlock) {
       const onJoin = readAttachPolicy(entry).onJoin !== false
       declaredAttach.set(clientName, { onJoin, inert })
     } else if (hasCentral) {

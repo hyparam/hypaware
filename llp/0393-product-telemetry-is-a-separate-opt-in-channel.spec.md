@@ -10,6 +10,7 @@
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
 **Extended-by:** LLP 0450 (adds report generate to the finite command vocabulary)
 **Extended-by:** LLP 0451 (retire the local report render command; keep the shared renderer)
+**Extended-by:** LLP 0465 (adds report save to the finite command vocabulary)
 **Extended-by:** hypaware-server LLP 0503#machine-enrolled (a server-repo document, not this repo's numbering: settles vendor sharing for three fields only, see #policy)
 
 ## Contract {#contract}

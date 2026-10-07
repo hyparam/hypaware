@@ -129,6 +129,12 @@ export function createCodexBackfillProvider(opts) {
   // source, so `hyp backfill` skips `--private` (`ignore`) dirs, never re-importing
   // sessions a live capture already dropped.
   const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
+  // `on_join: false` declines the history import, and a cold sweep would
+  // otherwise import every retained rollout. Floor the sweep at activation so
+  // it records only what happens from here on; manual `hyp backfill` is
+  // unaffected.
+  // @ref LLP 0466#on-join [implements]: the sweep keeps recording without importing declined history
+  const sweepFloorMs = readBackfillPolicy({ name: pluginName, config }).onJoin === false ? Date.now() : undefined
 
   return {
     name: clientName,
@@ -138,8 +144,13 @@ export function createCodexBackfillProvider(opts) {
     // Gateway mode selects the provider writer, so it registers no sweep:
     // running both lanes forever would be permanent unpaid work for a route
     // the operator explicitly opted out of.
+    // `backfill.on_join` does not gate it: in transcript mode the sweep is
+    // the only capture lane, so opting out of the join-time history import
+    // must not also stop recording (#2076). The off switch for recording is
+    // `hyp client detach codex`, which the backfill runner enforces.
     // @ref LLP 0429#sweep [implements]: ordinary capture rides the existing background queue, including Desktop
-    ...(config?.capture_mode !== 'gateway' && readBackfillPolicy({ name: pluginName, config }).onJoin !== false
+    // @ref LLP 0466#on-join [implements]: on_join is the join-time import only; recording is the detach switch
+    ...(config?.capture_mode !== 'gateway'
       ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } }
       : {}),
     async *run(ctx) {
@@ -169,7 +180,11 @@ export function createCodexBackfillProvider(opts) {
           })
         }
       }
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, deferrals, ignoredSessions: opts.ignoredSessions })
+      yield* runCodexBackfill({
+        ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, deferrals,
+        ignoredSessions: opts.ignoredSessions,
+        ...(ctx.sweep && sweepFloorMs !== undefined ? { floorMs: sweepFloorMs } : {}),
+      })
     },
   }
 }
@@ -241,6 +256,7 @@ function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
  *   ignoredSessions?: Set<string>,
  *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
  *   deferrals: Map<string, number>,
+ *   floorMs?: number,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
@@ -249,6 +265,9 @@ async function* runCodexBackfill(args) {
   refreshSessionIgnores(args.ignoredSessions)
   const log = ctx.log
   const window = resolveWindow(ctx)
+  if (args.floorMs !== undefined && (window.sinceMs === undefined || window.sinceMs < args.floorMs)) {
+    window.sinceMs = args.floorMs
+  }
 
   log.info('codex.backfill.scan_started', {
     component: COMPONENT,

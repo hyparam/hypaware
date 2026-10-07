@@ -842,6 +842,15 @@ export interface PluginConfigInstance {
    * maps to its canonical git source.
    */
   source?: string
+  /**
+   * Whether HypAware records the client this plugin contributes
+   * (`contributes.client`). Absent means recording. `hyp client detach`
+   * writes `false` to the local entry and `hyp client attach` removes it;
+   * the backfill runner, the attach-on-join reconciler, `hyp setup`, and
+   * `hyp status` all read it. Ignored for a plugin that contributes no
+   * client.
+   */
+  recording?: boolean
 }
 
 /**
@@ -2375,6 +2384,11 @@ export interface AiGatewayProjectedExchange {
    * Partition key and session container, always present: the Claude
    * session id or Codex `metadata.session_id`. A session holds the main
    * loop plus N subagent / side-chat threads. (LLP 0030)
+   * On the live wire dispatcher, equality with a nonempty input.exchange_id
+   * and an absent/null conversation_id declares an exchange snapshot: row
+   * expansion uses temporary state without committed seeding or shared
+   * history/dedup. Other sessions and the projected writer/backfill retain
+   * their existing state contracts. (LLP 0469#exchange-scope)
    */
   session_id: string
   /**
@@ -2938,6 +2952,14 @@ export interface BackfillRunContext {
    * while the shared-tree gate keeps its own fail-open rules.
    */
   isPluginConfigured?: (plugin: PluginName) => boolean
+  /**
+   * Whether a plugin's client is detached (`recording: false`, LLP 0466),
+   * read fresh by the runner. `isPluginConfigured` already answers false for
+   * a detached plugin; this is the narrower question a shared-tree provider
+   * asks about its own client, whose unclaimed sessions otherwise fail open.
+   * Absent means nothing is detached.
+   */
+  isPluginDetached?: (plugin: PluginName) => boolean
   storage: QueryStorageService
   /** True only for a daemon-scheduled provider pass. */
   sweep?: boolean

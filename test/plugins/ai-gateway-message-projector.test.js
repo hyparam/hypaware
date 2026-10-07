@@ -13,6 +13,9 @@ import {
   SESSION_INDEX_REBUILD_MS,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
+import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
+import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { createOpenclawExchangeProjector } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../hypaware-plugin-kernel-types.js'
@@ -1607,3 +1610,243 @@ test('a rollback of the newest exchange restores the thread tail exactly', () =>
   assert.deepEqual(retry.map((r) => r.message_id), ['u2', 'a2'])
   assert.deepEqual(retry.map((r) => r.previous_message_id), [['a1'], ['u2']])
 })
+
+// @ref LLP 0469#exchange-scope [tests]: exchange snapshots never seed or retain listener history
+for (const targeted of [false, true]) {
+  test(`exchange-scoped snapshots skip storage and listener retention (targeted reads: ${targeted})`, async () => {
+    let discovers = 0
+    let reads = 0
+    const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+      async discoverCachePartitions() {
+        discovers++
+        return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/committed', rowCount: 1 }]
+      },
+      async *readRows() { reads++; yield { session_id: 'old-session', message_id: 'old-message' } },
+      ...(targeted ? { async *readRowsWhere() { reads++ } } : {}),
+    }))
+    const { projector, collections } = observeListenerCollections(() => createAiGatewayMessageProjector({
+      gatewayId: 'gw-test',
+      storage,
+      projectors: [registered('snapshot', { project: snapshotProjection })],
+    }))
+
+    // Alternate successful append lifetimes and append-failure rollback.
+    // The journal must not capture temporary state even while append is pending.
+    let journalEntries = 0
+    for (let i = 0; i < 1000; i++) {
+      const input = exchange({ exchange_id: `snapshot-${i}` })
+      /** @type {(() => void)[]} */
+      const journal = []
+      const rows = await projector.projectExchange(input, { journal })
+      assert.equal(rows.length, 3)
+      journalEntries += journal.length
+      if (i % 2) {
+        rollbackAiGatewayStateJournal(journal)
+      }
+    }
+    assert.ok(collections.length >= 5, 'observer covers conversation maps, seen set and seed promises')
+    assert.deepEqual({ discovers, reads, journalEntries, listenerSizes: collections.map((collection) => collection.size) },
+      { discovers: 0, reads: 0, journalEntries: 0, listenerSizes: collections.map(() => 0) },
+      'zero storage discovery/reads, undo closures and retained listener identity/seed entries')
+  })
+}
+
+test('an exchange snapshot retries with identical IDs and links after failed append', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test', projectors: [registered('snapshot', { project: snapshotProjection })],
+  })
+  /** @type {(() => void)[]} */
+  const journal = []
+  const first = await projector.projectExchange(exchange(), { journal })
+  assert.equal(journal.length, 0, 'temporary state needs no append rollback or retained undo closures')
+  rollbackAiGatewayStateJournal(journal)
+  assert.deepEqual(await projector.projectExchange(exchange()), first)
+})
+
+test('null thread uses temporary snapshot state and an expansion failure leaves no shared mutations', async () => {
+  let fail = true
+  const { projector, collections } = observeListenerCollections(() => createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('snapshot', {
+      project: (input) => ({
+        ...snapshotProjection(input),
+        conversation_id: /** @type {any} */ (null),
+        messages: [
+          { role: 'user', content: 'first', message_id: 'first' },
+          { role: 'assistant', get content() { if (fail) throw new Error('expansion failed'); return 'second' } },
+        ],
+      }),
+    })],
+  }))
+  /** @type {(() => void)[]} */
+  const journal = []
+  await assert.rejects(projector.projectExchange(exchange(), { journal }), /expansion failed/)
+  assert.equal(journal.length, 0)
+  assert.ok(collections.every((collection) => collection.size === 0), 'failure never enters shared state')
+  fail = false
+  const retry = await projector.projectExchange(exchange())
+  assert.equal(retry.length, 2)
+  assert.deepEqual(retry.map((row) => row.previous_message_id), [[], ['first']])
+  assert.ok(collections.every((collection) => collection.size === 0))
+})
+
+test('exchange snapshots preserve equal-text positions, explicit IDs and local links across distinct requests', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('snapshot', { project: snapshotProjection })],
+  })
+  const first = await projector.projectExchange(exchange({ exchange_id: 'snapshot-A' }))
+  const second = await projector.projectExchange(exchange({ exchange_id: 'snapshot-B' }))
+  for (const { id, rows } of [{ id: 'snapshot-A', rows: first }, { id: 'snapshot-B', rows: second }]) {
+    const ids = [0, 1, 2].map((index) => `${id}:${index}`)
+    assert.deepEqual(rows.map((row) => row.message_id), ids)
+    assert.deepEqual(rows.map((row) => row.part_id), ids.map((messageId) => `${messageId}#0`))
+    assert.deepEqual(rows.map((row) => row.message_index), [0, 1, 2])
+    assert.deepEqual(rows.map((row) => row.content_text), ['same text', 'same text', 'same text'])
+    assert.deepEqual(rows.map((row) => row.previous_message_id), [[], [ids[0]], [ids[1]]])
+    assert.deepEqual(rows.map((row) => row.request_id), [id, id, id])
+  }
+  assert.equal(new Set([...first, ...second].map((row) => row.part_id)).size, 6)
+})
+
+for (const scenario of [
+  { name: 'missing exchange ID', input: { exchange_id: undefined }, session: 'normal-session' },
+  { name: 'empty exchange ID', input: { exchange_id: '' }, session: 'normal-session' },
+  { name: 'unequal session ID', input: { exchange_id: 'ex-1' }, session: 'normal-session' },
+  { name: 'supplied thread', input: { exchange_id: 'ex-1' }, session: 'ex-1', thread: 'thread-1' },
+  { name: 'supplied empty thread', input: { exchange_id: 'ex-1' }, session: 'ex-1', thread: '' },
+]) {
+  test(`ordinary dispatcher retains seed/replay/rollback behavior: ${scenario.name}`, async () => {
+    let scans = 0
+    const storage = stubStorage([
+      { partition: {}, rows: [{ session_id: scenario.session, message_id: 'committed-id' }] },
+    ], () => scans++)
+    const { projector, collections } = observeListenerCollections(() => createAiGatewayMessageProjector({
+      gatewayId: 'gw-test',
+      storage,
+      projectors: [registered('normal', {
+        project: () => ({
+          provider: 'native',
+          session_id: scenario.session,
+          ...(scenario.thread !== undefined ? { conversation_id: scenario.thread } : {}),
+          messages: [
+            { role: 'user', content: 'committed', message_id: 'committed-id' },
+            { role: 'assistant', content: 'new fallback' },
+          ],
+        }),
+      })],
+    }))
+    const input = exchange(scenario.input)
+    /** @type {(() => void)[]} */
+    const journal = []
+    const first = await projector.projectExchange(input, { journal })
+    assert.equal(first.length, 1, 'committed explicit identity is seeded and suppressed')
+    assert.ok(journal.length > 0, 'ordinary fallback expansion remains journaled')
+    assert.ok(collections.every((collection) => collection.size > 0), 'observer sees real shared-state retention')
+    rollbackAiGatewayStateJournal(journal)
+    const retry = await projector.projectExchange(input)
+    assert.deepEqual(retry, first, 'ordinary fallback IDs and links survive failed-append retry')
+    assert.equal((await projector.projectExchange(input)).length, 0, 'ordinary same-session replay is deduped')
+    assert.equal(scans, 2, 'one index build and one memoized committed-session scan')
+  })
+}
+
+test('exchange snapshots do not borrow an ordinary session tail or seed memo with the same session ID', async () => {
+  let scans = 0
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    storage: stubStorage([], () => scans++),
+    projectors: [registered('mixed', {
+      project: (input) => ({
+        provider: 'native',
+        session_id: 'snapshot-shared',
+        messages: [{ role: 'user', content: String(input.path) }],
+      }),
+    })],
+  })
+  const ordinary = await projector.projectExchange(exchange({ exchange_id: 'normal-exchange', path: 'ordinary' }))
+  assert.equal(scans, 1)
+  const snapshot = await projector.projectExchange(exchange({ exchange_id: 'snapshot-shared', path: 'snapshot' }))
+  assert.deepEqual(snapshot[0].previous_message_id, [])
+  assert.equal(scans, 1, 'snapshot does not consult existing seed memo')
+  const next = await projector.projectExchange(exchange({ exchange_id: 'normal-next', path: 'next ordinary' }))
+  assert.deepEqual(next[0].previous_message_id, [ordinary[0].message_id], 'snapshot never changes the ordinary tail')
+})
+
+test('Claude, Codex and OpenClaw wire fallbacks keep ordinary shared dedup and seeding', async () => {
+  const anthropic = exchange({
+    exchange_id: 'raw-exchange-fallback', path: '/v1/messages', provider: 'anthropic',
+    request_headers: '{}',
+    request_body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: 'hello' }] }),
+    response_body: JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: 'ok' }] }),
+  })
+  const cases = [
+    { adapter: createClaudeExchangeProjector({ homeDir: '/nonexistent', stateFile: '/nonexistent/context.jsonl' }), input: anthropic },
+    { adapter: createCodexExchangeProjector(), input: exchange({
+      ...anthropic, path: '/v1/chat/completions', provider: 'openai',
+      response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+    }) },
+    { adapter: createOpenclawExchangeProjector(), input: exchange({
+      ...anthropic, request_headers: JSON.stringify({ 'x-hypaware-client': 'openclaw' }),
+    }) },
+  ]
+  for (const { adapter, input } of cases) {
+    let scans = 0
+    const projector = createAiGatewayMessageProjector({
+      gatewayId: 'gw-test', storage: stubStorage([], () => scans++),
+      projectors: [{ ...adapter, _seq: 0 }],
+    })
+    const rows = await projector.projectExchange(input)
+    assert.ok(rows.length >= 2, `${adapter.name}: actual fallback wire input projects request and response`)
+    assert.notEqual(rows[0].session_id, input.exchange_id, `${adapter.name}: does not copy raw exchange ID`)
+    assert.equal((await projector.projectExchange(input)).length, 0, `${adapter.name}: same-session replay still dedups`)
+    assert.equal(scans, 1, `${adapter.name}: ordinary seed discovery still runs`)
+  }
+})
+
+/** @param {AiGatewayExchangeInput} input @returns {AiGatewayProjectedExchange} */
+function snapshotProjection(input) {
+  return {
+    provider: 'native', session_id: input.exchange_id, request_id: input.exchange_id,
+    messages: [0, 1, 2].map((index) => ({
+      role: index === 2 ? 'assistant' : 'user', content: 'same text',
+      message_id: `${input.exchange_id}:${index}`,
+      previous_message_id: index === 0 ? [] : [`${input.exchange_id}:${index - 1}`],
+    })),
+  }
+}
+
+/**
+ * Observe only allocations during synchronous dispatcher construction, then
+ * restore constructors before projection/IO. These are the actual closed-over
+ * listener collections; per-exchange collections are allocated later. The
+ * ordinary-path test above calibrates the observer against retained state.
+ * No GC timing, heap thresholds or production inspection API is needed.
+ * @param {() => ReturnType<typeof createAiGatewayMessageProjector>} build
+ */
+function observeListenerCollections(build) {
+  const NativeMap = globalThis.Map
+  const NativeSet = globalThis.Set
+  /** @type {Array<Map<unknown, unknown> | Set<unknown>>} */
+  const collections = []
+  globalThis.Map = new Proxy(NativeMap, {
+    construct(target, args) {
+      const collection = Reflect.construct(target, args)
+      collections.push(collection)
+      return collection
+    },
+  })
+  globalThis.Set = new Proxy(NativeSet, {
+    construct(target, args) {
+      const collection = Reflect.construct(target, args)
+      collections.push(collection)
+      return collection
+    },
+  })
+  try {
+    return { projector: build(), collections }
+  } finally {
+    globalThis.Map = NativeMap
+    globalThis.Set = NativeSet
+  }
+}

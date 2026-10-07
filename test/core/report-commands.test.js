@@ -23,6 +23,7 @@ import {
   runReportMark,
   runReportPublish,
   runReportRecommend,
+  runReportSave,
 } from '../../src/core/cli/report_commands.js'
 import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
 import { SpanStatusCode, TracerProvider } from '../../src/core/observability/runtime.js'
@@ -2229,4 +2230,443 @@ test('a flat row the server sent without its report join reads as unknown, not u
   assert.equal(await runReportList(['--recommendations'], ctx), 0)
   assert.equal(out.join(''), `  ${REC}\t[open]\t\t?/?/?\tOrphan\n`)
   assert.doesNotMatch(out.join(''), /undefined/)
+})
+
+/* ---------- save and the saved-report store ---------- */
+
+/**
+ * A store under a fresh HYP_HOME and a drafted report folder beside it, the
+ * shape the skill leaves in the caller's directory.
+ *
+ * @param {TestContext} t
+ * @param {{ name?: string, pages?: Record<string, string> }} [opts]
+ */
+async function storeFixture(t, { name = 'hypaware-report-2026-08-01-to-2026-08-31', pages = { 'report.md': '# Brief\n', 'usage.md': '# Usage\n' } } = {}) {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-store-home-'))
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-store-cwd-'))
+  t.after(async () => {
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(cwd, { recursive: true, force: true })
+  })
+  const draft = path.join(cwd, name)
+  await fs.mkdir(draft)
+  for (const [page, text] of Object.entries(pages)) await fs.writeFile(path.join(draft, page), text)
+  const io = ctxWith({ HYP_HOME: hypHome })
+  io.ctx.cwd = cwd
+  return { ...io, hypHome, cwd, draft, name, store: path.join(hypHome, 'reports') }
+}
+
+/**
+ * Every span the process emits until the test ends.
+ *
+ * @param {TestContext} t
+ */
+async function captureSpans(t) {
+  /** @type {any[]} */
+  const captured = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch(/** @type {any[]} */ spans) { captured.push(...spans) } }],
+  })
+  provider.register()
+  t.after(() => provider.shutdown())
+  return { captured }
+}
+
+// @ref LLP 0465#save [tests]: a validated folder moves into $HYP_HOME/reports under its own name
+// @ref LLP 0465#move [tests]: the draft is gone once saved; only its pages were removed
+test('save moves a validated report folder into the store and removes the draft', async (t) => {
+  const { ctx, out, draft, name, store } = await storeFixture(t)
+  const code = await runReportSave([draft], ctx)
+  assert.equal(code, 0, out.join(''))
+  const saved = path.join(store, name)
+  assert.deepEqual((await fs.readdir(saved)).sort(), ['report.md', 'usage.md'])
+  assert.equal(await fs.readFile(path.join(saved, 'report.md'), 'utf8'), '# Brief\n')
+  await assert.rejects(fs.stat(draft), { code: 'ENOENT' })
+  const text = out.join('')
+  assert.match(text, new RegExp(`^saved ${name} to ${saved.replaceAll('.', '\\.')}\n`))
+  assert.match(text, /list: hyp report list --local/)
+  // The period hint is the range the generator encoded in the name, never today.
+  assert.match(text, new RegExp(`publish: hyp report publish ${name} --kind usage-review --period 2026-08-01-to-2026-08-31\n`))
+})
+
+test('save resolves a relative folder against the command\'s cwd', async (t) => {
+  const { ctx, draft, name, store } = await storeFixture(t)
+  assert.equal(await runReportSave([`./${name}`], ctx), 0)
+  assert.ok((await fs.stat(path.join(store, name, 'report.md'))).isFile())
+  await assert.rejects(fs.stat(draft), { code: 'ENOENT' })
+})
+
+test('save --keep copies and leaves the draft where it was', async (t) => {
+  const { ctx, out, draft, name, store } = await storeFixture(t)
+  assert.equal(await runReportSave([draft, '--keep'], ctx), 0)
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['report.md', 'usage.md'])
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
+  assert.match(out.join(''), new RegExp(`kept: ${draft.replaceAll('.', '\\.')}`))
+})
+
+// @ref LLP 0465#save [tests]: the publish allow-list gates the store, so working notes never reach it
+test('save refuses a folder with a stray file before creating anything in the store', async (t) => {
+  const { ctx, err, draft, hypHome } = await storeFixture(t, { pages: { 'report.md': '# Brief\n', 'ledger.md': 'q1: ...\n' } })
+  assert.equal(await runReportSave([draft], ctx), 2)
+  assert.match(err.join(''), /unsupported report entry 'ledger\.md'/)
+  // Nothing was created: not the store, not even HYP_HOME's reports parent.
+  await assert.rejects(fs.stat(path.join(hypHome, 'reports')), { code: 'ENOENT' })
+  // And the draft is intact.
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['ledger.md', 'report.md'])
+})
+
+test('save refuses a missing folder, a file, a folder without report.md, and an unsafe name', async (t) => {
+  const { ctx, err, draft, cwd } = await storeFixture(t)
+  assert.equal(await runReportSave([path.join(cwd, 'nowhere')], ctx), 2)
+  assert.match(err.join(''), /no such directory/)
+  assert.equal(await runReportSave([path.join(draft, 'report.md')], ctx), 2)
+  assert.match(err.join(''), /is not a directory/)
+  const noEntry = path.join(cwd, 'notes')
+  await fs.mkdir(noEntry)
+  await fs.writeFile(path.join(noEntry, 'usage.md'), '# Usage\n')
+  assert.equal(await runReportSave([noEntry], ctx), 2)
+  assert.match(err.join(''), /must contain report\.md/)
+  const hidden = path.join(cwd, '.hidden-report')
+  await fs.mkdir(hidden)
+  await fs.writeFile(path.join(hidden, 'report.md'), '# Brief\n')
+  assert.equal(await runReportSave([hidden], ctx), 2)
+  assert.match(err.join(''), /folder name must match/)
+  assert.equal(await runReportSave([], ctx), 2)
+  assert.equal(await runReportSave([draft, '--nope'], ctx), 2)
+})
+
+test('save suffixes a taken name instead of overwriting, and says so', async (t) => {
+  const { ctx, out, draft, name, store, cwd } = await storeFixture(t)
+  assert.equal(await runReportSave([draft, '--keep'], ctx), 0)
+  // A second draft with the same name and different content.
+  await fs.writeFile(path.join(draft, 'report.md'), '# Brief, revised\n')
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.equal(await fs.readFile(path.join(store, name, 'report.md'), 'utf8'), '# Brief\n')
+  assert.equal(await fs.readFile(path.join(store, `${name}-2`, 'report.md'), 'utf8'), '# Brief, revised\n')
+  assert.match(out.join(''), new RegExp(`saved ${name}-2 to .* \\(${name} was taken\\)`))
+  assert.match(out.join(''), new RegExp(`publish: hyp report publish ${name}-2 --kind usage-review --period 2026-08-01-to-2026-08-31`))
+  assert.deepEqual(await fs.readdir(cwd), [])
+})
+
+test('the save receipt names the slot by path when its bare name would publish something else', async (t) => {
+  const { ctx, out, draft, name, store, cwd } = await storeFixture(t)
+  assert.equal(await runReportSave([draft, '--keep'], ctx), 0)
+  // Another draft under cwd already carries the name the store suffixes to:
+  // a bare name would publish that unreviewed draft, since a path wins.
+  await fs.mkdir(path.join(cwd, `${name}-2`))
+  out.length = 0
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.match(out.join(''), new RegExp(`publish: hyp report publish ${path.join(store, `${name}-2`).replaceAll('.', '\\.')} --kind`))
+  // A suffix that outgrows the name grammar is printed by path too.
+  const long = 'r'.repeat(128)
+  const { ctx: ctx2, out: out2, draft: draft2, store: store2 } = await storeFixture(t, { name: long })
+  assert.equal(await runReportSave([draft2, '--keep'], ctx2), 0)
+  assert.equal(await runReportSave([draft2], ctx2), 0)
+  assert.match(out2.join(''), new RegExp(`publish: hyp report publish ${path.join(store2, `${long}-2`).replaceAll('.', '\\.')} --kind`))
+})
+
+test('save refuses a folder that is already in the store', async (t) => {
+  const { ctx, err, draft, name, store } = await storeFixture(t)
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.equal(await runReportSave([path.join(store, name)], ctx), 2)
+  assert.match(err.join(''), /is already in the store/)
+  assert.deepEqual(await fs.readdir(store), [name])
+})
+
+test('save leaves a draft folder in place when a file appeared during the move, and names it', async (t) => {
+  const { ctx, out, draft, name, store } = await storeFixture(t)
+  // Validation ran against a clean folder; the stray file lands after. The
+  // test cannot interleave, so it stands in for a race by writing the file
+  // before the unlinks but after the copy would have validated: the command
+  // never `rm -rf`s, so the outcome is the same.
+  const original = fs.copyFile
+  let planted = false
+  t.after(() => { fs.copyFile = original })
+  fs.copyFile = /** @type {any} */ (async (/** @type {string} */ src, /** @type {string} */ dest, /** @type {number | undefined} */ mode) => {
+    if (!planted) {
+      planted = true
+      await fs.writeFile(path.join(draft, 'late-notes.txt'), 'x')
+    }
+    return original(src, dest, mode)
+  })
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
+  assert.deepEqual(await fs.readdir(draft), ['late-notes.txt'])
+  assert.match(out.join(''), /not removed: .*; its report pages are saved/)
+})
+
+test('save still succeeds with its receipt when the draft cannot be removed', async (t) => {
+  const { ctx, out, draft, name, store } = await storeFixture(t)
+  // A read-only draft: the copy lands, the first unlink fails. Stub unlink so
+  // the test holds under root too, where chmod would not stop it.
+  const original = fs.unlink
+  t.after(() => { fs.unlink = original })
+  fs.unlink = /** @type {any} */ (async () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }) })
+  assert.equal(await runReportSave([draft], ctx), 0)
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['report.md', 'usage.md'])
+  const text = out.join('')
+  assert.match(text, /not removed: .*EACCES.*; its report pages are saved/)
+  assert.match(text, /publish: hyp report publish /)
+})
+
+test('save telemetry records the outcome and never a path or name', async (t) => {
+  const { ctx, draft, name } = await storeFixture(t)
+  const { captured } = await captureSpans(t)
+  assert.equal(await runReportSave([draft], ctx), 0)
+  const { ctx: ctx2 } = await storeFixture(t, { pages: { 'report.md': '# b\n', 'ledger.md': 'x' } })
+  assert.equal(await runReportSave([path.join(ctx2.cwd, name)], ctx2), 2)
+  const spans = captured.filter((span) => span.name === 'report.save')
+  assert.equal(spans.length, 2)
+  assert.equal(spans[0].attributes.status, 'ok')
+  assert.equal(spans[0].attributes.keep, false)
+  assert.equal(spans[0].attributes.page_count, 2)
+  assert.equal(spans[1].attributes.error_kind, 'unsupported-entry')
+  for (const span of spans) {
+    for (const value of Object.values(span.attributes)) {
+      assert.ok(!String(value).includes(name), `span leaks the folder name: ${value}`)
+      assert.ok(!String(value).includes(os.tmpdir()), `span leaks a path: ${value}`)
+    }
+  }
+})
+
+/* ---------- list: the saved section ---------- */
+
+/**
+ * @param {string} store
+ * @param {string} name
+ * @param {Date} mtime
+ */
+async function savedReport(store, name, mtime) {
+  await fs.mkdir(path.join(store, name), { recursive: true })
+  const brief = path.join(store, name, 'report.md')
+  await fs.writeFile(brief, '# Brief\n')
+  await fs.utimes(brief, mtime, mtime)
+}
+
+// @ref LLP 0465#list [tests]: --local reads the store and nothing else
+test('list --local lists saved reports newest first without a remote read', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  const { calls } = stubServer(t, () => { throw new Error('--local must not contact a server') })
+  await savedReport(store, 'hypaware-report-2026-07-01-to-2026-07-31', new Date('2026-08-02T10:00:00Z'))
+  await savedReport(store, 'hypaware-report-2026-08-01-to-2026-08-31', new Date('2026-09-02T10:00:00Z'))
+  await savedReport(store, '.hidden', new Date('2026-09-03T10:00:00Z'))
+  await fs.mkdir(path.join(store, 'no-brief'))
+  await fs.writeFile(path.join(store, 'stray.md'), '# not a folder\n')
+  await fs.symlink(path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31'), path.join(store, 'linked'))
+  await fs.mkdir(path.join(store, 'linked-brief'))
+  await fs.symlink(path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31', 'report.md'), path.join(store, 'linked-brief', 'report.md'))
+  assert.equal(await runReportList(['--local'], ctx), 0)
+  assert.equal(calls.length, 0)
+  const lines = out.join('').split('\n').filter(Boolean)
+  assert.deepEqual(lines, [
+    `saved reports (${store}):`,
+    '  2026-09-02T10:00:00.000Z\tlocal\thypaware-report-2026-08-01-to-2026-08-31',
+    '  2026-08-02T10:00:00.000Z\tlocal\thypaware-report-2026-07-01-to-2026-07-31',
+    '  publish one: hyp report publish <name> --kind <kind> --period <period>',
+  ])
+})
+
+test('list --local --json prints the saved rows as an array marked local', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  await savedReport(store, 'hypaware-report-2026-08-01-to-2026-08-31', new Date('2026-09-02T10:00:00Z'))
+  assert.equal(await runReportList(['--local', '--json'], ctx), 0)
+  assert.deepEqual(JSON.parse(out.join('')), [
+    { source: 'local', name: 'hypaware-report-2026-08-01-to-2026-08-31', path: path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31'), modifiedAt: '2026-09-02T10:00:00.000Z' },
+  ])
+})
+
+test('list --local with no store says where saves go', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  assert.equal(await runReportList(['--local'], ctx), 0)
+  assert.match(out.join(''), new RegExp(`^no saved reports in ${store.replaceAll('.', '\\.')} - 'hyp report save <dir>'`))
+})
+
+test('list --local refuses the remote\'s selectors and filters', async (t) => {
+  const { ctx, err } = await storeFixture(t)
+  const { calls } = stubServer(t, () => ({ status: 200, json: { reports: [] } }))
+  for (const argv of [['--local', '--remote', 'prod'], ['--local', '--kind', 'k'], ['--local', '--recommendations'], ['--local', '--status', 'open'], ['--local', '--org', 'acme']]) {
+    assert.equal(await runReportList(argv, ctx), 2, argv.join(' '))
+  }
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), /--local lists saved reports only and takes none of --remote/)
+  assert.match(err.join(''), /takes none of --status/)
+})
+
+test('list caps the saved section at the newest 100 and counts the rest', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  for (let i = 0; i < 101; i++) {
+    await savedReport(store, `r-${String(i).padStart(3, '0')}`, new Date(Date.UTC(2026, 0, 1, 0, i)))
+  }
+  assert.equal(await runReportList(['--local'], ctx), 0)
+  const lines = out.join('').split('\n').filter(Boolean)
+  assert.equal(lines.length, 1 + 100 + 1 + 1)
+  assert.match(lines[1], /\tr-100$/)
+  assert.match(lines[100], /\tr-001$/)
+  assert.equal(lines[101], '  1 more not listed (newest 100 shown)')
+})
+
+// @ref LLP 0465#list [tests]: saved reports are a section after the remote's rows in text
+// @ref LLP 0467#json-remote-only [tests]: --json carries the remote's rows alone
+test('list appends the saved section after the published reports, but not to the JSON array', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  stubServer(t, () => ({
+    status: 200,
+    json: { reports: [{ id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z' }] },
+  }))
+  await savedReport(store, 'hypaware-report-2026-08-01-to-2026-08-31', new Date('2026-09-02T10:00:00Z'))
+  assert.equal(await runReportList([], ctx), 0)
+  assert.deepEqual(out.join('').split('\n'), [
+    '  2026-07-20T10:00:00.000Z\tusage-review/2026-W29\trpt-b\t1200 bytes\tWeekly',
+    '',
+    `saved reports (${store}):`,
+    '  2026-09-02T10:00:00.000Z\tlocal\thypaware-report-2026-08-01-to-2026-08-31',
+    '  publish one: hyp report publish <name> --kind <kind> --period <period>',
+    '',
+  ])
+  out.length = 0
+  assert.equal(await runReportList(['--json'], ctx), 0)
+  const rows = JSON.parse(out.join(''))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].id, 'rpt-b')
+  assert.equal(rows[0].source, undefined)
+  out.length = 0
+  assert.equal(await runReportList(['--local', '--json'], ctx), 0)
+  assert.deepEqual(JSON.parse(out.join('')), [
+    { source: 'local', name: 'hypaware-report-2026-08-01-to-2026-08-31', path: path.join(store, 'hypaware-report-2026-08-01-to-2026-08-31'), modifiedAt: '2026-09-02T10:00:00.000Z' },
+  ])
+})
+
+// @ref LLP 0467#json-remote-only [tests]: a --limit/--before page holds only remote rows, so the next cursor is the last row's publishedAt
+test('list --json pages by --limit and --before with no saved rows mixed in', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  const published = [
+    { id: 'rpt-c', kind: 'usage-review', period: '2026-W30', bytes: 1, publishedAt: '2026-07-27T10:00:00.000Z' },
+    { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', bytes: 1, publishedAt: '2026-07-20T10:00:00.000Z' },
+    { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 1, publishedAt: '2026-07-13T10:00:00.000Z' },
+  ]
+  const { calls } = stubServer(t, (/** @type {string} */ _method, /** @type {URL} */ url) => {
+    const params = url.searchParams
+    const before = params.get('before')
+    const limit = Number(params.get('limit') ?? 100)
+    return { status: 200, json: { reports: published.filter((r) => before === null || r.publishedAt < before).slice(0, limit) } }
+  })
+  await savedReport(store, 'hypaware-report-2026-08-01-to-2026-08-31', new Date('2026-09-02T10:00:00Z'))
+  await savedReport(store, 'hypaware-report-2026-09-01-to-2026-09-30', new Date('2026-10-02T10:00:00Z'))
+  /** @type {string[]} */
+  const seen = []
+  /** @type {string | null} */
+  let before = null
+  for (let page = 0; page < 5; page++) {
+    out.length = 0
+    const argv = ['--kind', 'usage-review', '--limit', '2', '--json', ...(before ? ['--before', before] : [])]
+    assert.equal(await runReportList(argv, ctx), 0)
+    const rows = JSON.parse(out.join(''))
+    assert.ok(rows.length <= 2, `page ${page} exceeds --limit: ${rows.length}`)
+    for (const row of rows) {
+      assert.equal(row.source, undefined, `page ${page} carries a saved row`)
+      assert.equal(typeof row.publishedAt, 'string')
+      seen.push(row.id)
+    }
+    if (rows.length < 2) break
+    before = rows[rows.length - 1].publishedAt
+  }
+  assert.deepEqual(seen, ['rpt-c', 'rpt-b', 'rpt-a'])
+  assert.equal(calls.length, 2)
+})
+
+test('list with nothing published still shows the saved section after the hint', async (t) => {
+  const { ctx, out, store } = await storeFixture(t)
+  stubServer(t, () => ({ status: 200, json: { reports: [] } }))
+  await savedReport(store, 'hypaware-report-2026-08-01-to-2026-08-31', new Date('2026-09-02T10:00:00Z'))
+  assert.equal(await runReportList([], ctx), 0)
+  const text = out.join('')
+  assert.match(text, /^no reports published/)
+  assert.match(text, /saved reports \(/)
+})
+
+// @ref LLP 0465#list [tests]: an implicit remote failure degrades to the saved section; an explicit one, or --json, keeps its exit
+test('list degrades an implicit remote failure to the saved section, but not an explicit or --json one', async (t) => {
+  const { ctx, out, err, store } = await storeFixture(t)
+  stubServer(t, () => ({ status: 503, json: { error: 'unavailable' } }))
+  await savedReport(store, 'hypaware-report-2026-08-01-to-2026-08-31', new Date('2026-09-02T10:00:00Z'))
+  assert.equal(await runReportList([], ctx), 0)
+  assert.match(err.join(''), /hyp report list: HTTP 503: unavailable - listing saved reports only\n/)
+  assert.match(out.join(''), /saved reports \(/)
+  for (const argv of [['--remote', 'prod'], ['--kind', 'usage-review'], ['--json']]) {
+    out.length = 0
+    err.length = 0
+    assert.equal(await runReportList(argv, ctx), 1, argv.join(' '))
+    assert.equal(out.join(''), '')
+    assert.match(err.join(''), /HTTP 503: unavailable\n/)
+    assert.doesNotMatch(err.join(''), /listing saved reports only/)
+  }
+  // The flat form never has a saved section to fall back to.
+  err.length = 0
+  assert.equal(await runReportList(['--recommendations'], ctx), 1)
+  assert.doesNotMatch(err.join(''), /listing saved reports only/)
+})
+
+test('list with an unreadable store warns and still lists the remote', async (t) => {
+  const { ctx, out, err, store } = await storeFixture(t)
+  stubServer(t, () => ({ status: 200, json: { reports: [{ id: 'rpt-b', kind: 'k', period: 'p', bytes: 1, publishedAt: 'x' }] } }))
+  await fs.mkdir(store, { recursive: true })
+  await fs.chmod(store, 0o000)
+  // Restored in a `finally`, not `t.after`: the fixture's recursive rm cannot
+  // enter a 0o000 directory, so a failed assertion would wedge the cleanup.
+  try {
+    assert.equal(await runReportList([], ctx), 0)
+    assert.match(err.join(''), /cannot read saved reports in/)
+    assert.match(out.join(''), /rpt-b/)
+    err.length = 0
+    assert.equal(await runReportList(['--local'], ctx), 1)
+    assert.match(err.join(''), /cannot read saved reports in/)
+  } finally {
+    await fs.chmod(store, 0o700)
+  }
+})
+
+/* ---------- publish by saved name ---------- */
+
+// @ref LLP 0465#publish-by-name [tests]: a saved name is what publish takes once the folder left the caller's directory
+test('publish takes a saved report by name and bundles the store folder', async (t) => {
+  const { ctx, out, draft, name } = await storeFixture(t)
+  assert.equal(await runReportSave([draft], ctx), 0)
+  out.length = 0
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-1', kind: 'usage-review', period: '2026-08-01-to-2026-08-31', files: 2, bytes: 10 } } }))
+  assert.equal(await runReportPublish([name, '--kind', 'usage-review', '--period', '2026-08-01-to-2026-08-31'], ctx), 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].headers['content-type'], 'application/gzip')
+  assert.deepEqual(ustarMemberNames(zlib.gunzipSync(/** @type {Buffer} */ (calls[0].body))), ['report.md', 'usage.md'])
+  assert.match(out.join(''), /published usage-review\/2026-08-01-to-2026-08-31\/rpt-1/)
+})
+
+test('publish prefers a path that exists over a saved report of the same name', async (t) => {
+  const { ctx, draft, name, store } = await storeFixture(t)
+  assert.equal(await runReportSave([draft, '--keep'], ctx), 0)
+  await fs.writeFile(path.join(draft, 'report.md'), '# Brief, revised locally\n')
+  await fs.rm(path.join(draft, 'usage.md'))
+  const { calls } = stubServer(t, () => ({ status: 201, json: { report: { id: 'rpt-1', kind: 'k', period: 'p' } } }))
+  assert.equal(await runReportPublish([name, '--kind', 'k', '--period', 'p'], ctx), 0)
+  assert.deepEqual(ustarMemberNames(zlib.gunzipSync(/** @type {Buffer} */ (calls[0].body))), ['report.md'])
+  assert.ok((await fs.stat(path.join(store, name, 'usage.md'))).isFile())
+})
+
+test('publish names the store when a bare name is neither a path nor saved', async (t) => {
+  const { ctx, err, store } = await storeFixture(t)
+  const { calls } = stubServer(t, () => ({ status: 201, json: {} }))
+  assert.equal(await runReportPublish(['hypaware-report-2025-01-01-to-2025-01-31', '--kind', 'k', '--period', 'p'], ctx), 2)
+  assert.equal(calls.length, 0)
+  assert.match(err.join(''), new RegExp(`no such file or directory: hypaware-report-2025-01-01-to-2025-01-31, and no saved report of that name in ${store.replaceAll('.', '\\.')}`))
+  err.length = 0
+  assert.equal(await runReportPublish(['./missing/dir', '--kind', 'k', '--period', 'p'], ctx), 2)
+  assert.match(err.join(''), /no such file or directory: \.\/missing\/dir\n/)
+})
+
+test('generate tells the client to finish with hyp report save', async (t) => {
+  const { ctx } = await generateFixture(t)
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportGenerate([], ctx, deps), 0)
+  assert.match(launches[0].prompt, /'hyp report save <that directory>'/)
 })

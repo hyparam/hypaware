@@ -385,9 +385,9 @@ Use `hyp report --help` to list report operations:
 hyp report --help
 ```
 
-`generate` is local. The other report commands use a remote target and
-resolve the default remote if `--remote` is omitted. `publish`, `recommend`,
-`mark`, and `delete` require a write-capable credential.
+`generate` and `save` are local. The other report commands use a remote
+target and resolve the default remote if `--remote` is omitted. `publish`,
+`recommend`, `mark`, and `delete` require a write-capable credential.
 
 ### `hyp report generate`
 
@@ -415,13 +415,48 @@ the directory you typed the command in does
 ([PRIVACY.md](PRIVACY.md#marking-directories)). No remote login is required,
 and nothing is published unless requested.
 
-The skill writes `./hypaware-report-<from>-to-<to>/report.md` and linked pages,
-using `-2`, `-3`, etc. if the folder already exists, unless you request another
-destination. A declined pick starts nothing and succeeds; no recorded client
-carrying the skill, or a process-start failure, returns `1`. The exit status
-covers the launch only, never whether report generation completed.
-`hyp report list` continues to list published reports only; use
-`hyp report publish <folder> ...` to share one.
+The skill drafts `./hypaware-report-<from>-to-<to>/report.md` and linked
+pages, using `-2`, `-3`, etc. if the folder already exists, unless you request
+another destination, and once the report is reviewed runs
+`hyp report save` on that folder, which moves it into `$HYP_HOME/reports`.
+A declined pick starts nothing and succeeds; no recorded client carrying the
+skill, or a process-start failure, returns `1`. The exit status covers the
+launch only, never whether report generation completed. `hyp report list`
+shows the saved report; `hyp report publish <name> ...` shares it.
+
+### `hyp report save`
+
+```text
+hyp report save <dir> [--keep]
+```
+
+Moves a finished report folder into the store, `$HYP_HOME/reports/<name>/`
+(`~/.hyp/reports` unless `HYP_HOME` is set), where `hyp report list` finds it
+and `hyp report publish <name>` takes it by name. The skill ends with this
+step so an agent never writes under your home directory itself.
+
+The folder is held to the publish allow-list before anything moves: it must
+hold `report.md` and otherwise only `usage.md`, `work.md`, `health.md`, and
+`recommendation-<slug>.md` as regular files. A stray file (a working ledger,
+`.DS_Store`) is named and the command exits `2` with nothing created. The
+folder keeps its name, which must be a plain directory name with no hidden
+prefix; a taken name gets `-2`, `-3`, etc. rather than overwriting. By default
+the source folder is removed once its pages are copied: only those pages are
+unlinked and the folder removed with a plain `rmdir`, so a file that appeared
+since is left where it is and named. `--keep` copies and leaves the draft.
+
+```sh
+hyp report save ./hypaware-report-2026-08-01-to-2026-08-31
+```
+
+```text
+saved hypaware-report-2026-08-01-to-2026-08-31 to /Users/me/.hyp/reports/hypaware-report-2026-08-01-to-2026-08-31
+  list: hyp report list --local
+  publish: hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08-01-to-2026-08-31
+```
+
+The period on the publish line is read off the folder name the generator
+chose; a name in another shape leaves a `<period>` placeholder to fill in.
 
 ### `hyp report publish`
 
@@ -429,8 +464,10 @@ covers the launch only, never whether report generation completed.
 hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]
 ```
 
-Uploads Markdown for the remote to render. A single file must be `.md` or
-`.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
+Uploads Markdown for the remote to render. The source is a path, or the name
+of a saved report (`hyp report list --local`), which resolves to
+`$HYP_HOME/reports/<name>` when no such path exists here. A single file must
+be `.md` or `.markdown`, sent as `text/markdown`. A folder must contain `report.md` at
 its root and may otherwise contain only `usage.md`, `work.md`, `health.md`,
 and `recommendation-<slug>.md` (slug: lowercase `[a-z0-9][a-z0-9-]*`).
 The legacy `change-<slug>.md` spelling is also accepted. HTML,
@@ -440,7 +477,7 @@ publish path. The remote identifies repeat uploads by content hash. `--org`
 applies only to an operator credential that can name an organization.
 
 ```sh
-hyp report publish ./hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
+hyp report publish hypaware-report-2026-08-01-to-2026-08-31 --kind usage-review --period 2026-08
 ```
 
 ### `hyp report recommend`
@@ -474,10 +511,29 @@ published hyprec-0123456789abcdef (recommendation/2026-10-03/REPORT_ID)
 ### `hyp report list`
 
 ```text
-hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]
+hyp report list [--local] [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--recommendations] [--status <state,...>] [--org <org>] [--json] [--remote <target>]
 ```
 
-Lists the newest reports visible to the selected organization. An empty list
+Lists the newest reports visible to the selected organization, then this
+machine's saved reports (`$HYP_HOME/reports`, as `hyp report save` leaves
+them) in their own section, newest first by `report.md` mtime, at most 100
+with the rest counted. A machine with nothing saved prints no section.
+`--local` prints the saved section alone, with no remote read, and takes none
+of the remote's selectors or filters. When nothing selects or filters the
+remote and it cannot be read, the saved reports are still listed under a
+one-line warning and the command exits `0`; `--remote`, any filter, or
+`--json` keeps the failure and its exit code. `--json` prints the remote's
+records alone, so `--limit` bounds the array and the last row's `publishedAt`
+is the next `--before`; `--local --json` prints the saved reports, one row
+each as `{ "source": "local", "name", "path", "modifiedAt" }`.
+
+```text
+saved reports (/Users/me/.hyp/reports):
+  2026-09-02T10:00:00.000Z	local	hypaware-report-2026-08-01-to-2026-08-31
+  publish one: hyp report publish <name> --kind <kind> --period <period>
+```
+
+An empty remote list
 succeeds. Each report's recommendations follow its line, one per line, as the
 minted id, its state in brackets, the `recommendation-<slug>` page the id
 names, and the page's title, with its thesis on the line below. The state is
@@ -516,6 +572,7 @@ whole.
 
 ```sh
 hyp report list --kind usage-review --limit 10 --json
+hyp report list --local --json
 hyp report list --status open,in_progress
 ```
 
@@ -798,8 +855,10 @@ hyp client attach [client] [--dry-run] [--json]
 
 Short form: `hyp attach`, which the guides use.
 
-Writes only HypAware-managed client settings and installs registered skills and
-subagents. Repeating the command is a no-op. Claude Code uses its OTEL settings
+Starts recording this client. Writes only HypAware-managed client settings and
+installs registered skills and subagents, and turns recording back on for a
+client you detached. Repeating the command is a no-op. Claude Desktop has no
+settings to write, so attaching it only turns its recording back on. Claude Code uses its OTEL settings
 and requires version 2.1.193 or later. Gateway-backed clients require an active
 gateway configuration. OpenCode installs a HypAware-owned plugin in its shared
 CLI/Desktop config home and requires no gateway. `--dry-run` writes nothing.
@@ -822,9 +881,17 @@ hyp client detach [client] [--dry-run] [--purge] [--json]
 
 Short form: `hyp detach`, which the guides use.
 
-Replays the on-disk undo marker and removes only managed settings. It keeps
-recordings. Claude telemetry detach removes the managed OTEL settings and
-sweeps the raw-body spool. For a legacy or other proxy attach, `--purge` also
+Stops recording this client. Detach switches the client off in the local
+config (`"recording": false` on its plugin entry), so the daemon's scheduled
+transcript import and every other capture lane stop picking up its new
+sessions, with no daemon restart. It then replays the on-disk undo marker and
+removes only managed settings. Recorded history is kept; use
+[`hyp privacy purge`](#hyp-privacy-purge) to delete it. `hyp status` shows a
+detached client as "Not recording", with no warning. Run
+`hyp client attach <client>` to record it again. If your organization's
+central config requires the client, detach refuses and changes nothing.
+Claude telemetry detach removes the managed OTEL settings and sweeps the
+raw-body spool. For a legacy or other proxy attach, `--purge` also
 removes the local interception CA and its keychain trust. `--dry-run` writes
 nothing. The command doesn't ask for confirmation.
 
@@ -1110,11 +1177,14 @@ capture:
 
 | Plugin | Default interval | Does `backfill.on_join: false` stop scheduled recovery? |
 | --- | --- | --- |
-| `@hypaware/codex` (transcript mode) | One minute | Yes |
+| `@hypaware/codex` (transcript mode) | One minute | No (it is Codex's only capture lane) |
 | `@hypaware/pi` | Five minutes | Yes |
 | `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
 | `@hypaware/cursor` | Five minutes | Yes |
 | `@hypaware/openclaw` | Five minutes | No |
+
+`hyp client detach <client>` stops every client's scheduled recovery, whatever
+`on_join` says; `hyp client attach <client>` resumes it.
 
 A positive `backfill.window_days` bounds both the join-time import and scheduled
 recovery. Older sessions remain on disk but are not imported. Widening the
@@ -1131,8 +1201,8 @@ or 90 days if that setting is absent. A retention value of `0` means no age
 limit. See [retention configuration](CONFIGURATION.md#set-local-retention).
 
 `sweep_cron` changes the recovery cadence. OpenClaw schedules recovery even when
-`backfill.on_join` is false; bound it with `window_days` or disable the integration
-to stop its automatic capture.
+`backfill.on_join` is false; bound it with `window_days`, or run
+`hyp client detach openclaw` to stop its capture.
 
 ## Collect GitHub activity
 
@@ -1365,7 +1435,7 @@ permission-restricted central seed layer, and installs or restarts the daemon.
 It does not authenticate with the server. Authentication and the full organization
 configuration arrive when the daemon connects. Local configuration and history remain.
 `--no-daemon` writes only the seed. Start `hyp daemon run` under your own
-supervisor, or install the service separately where a service manager exists. `--force` allows the existing CLI path if global
+supervisor that relaunches it on exit code `75` (see [`hyp daemon run`](#hyp-daemon-run)), or install the service separately where a service manager exists. `--force` allows the existing CLI path if global
 installation fails.
 
 ```sh
@@ -1451,6 +1521,22 @@ hyp daemon run [--config <path>]
 
 Runs the daemon in the current terminal until it receives a stop signal.
 `daemon start` starts the installed service.
+
+When the daemon applies a new organization configuration or a plugin change,
+it exits with code `75` to be relaunched on the new code. An installed service
+relaunches automatically. In the foreground, nothing does, so whatever starts
+`hyp daemon run` has to run it again on `75`. This loop does that and exits with
+the daemon's own status otherwise, so a supervisor still sees a failed start:
+
+```sh
+rc=75
+while [ "$rc" -eq 75 ]; do hyp daemon run && rc=0 || rc=$?; done
+exit "$rc"
+```
+
+The first daemon start after `hyp join` or `hyp remote login --no-daemon`
+usually takes this path, because that is when the organization configuration
+arrives.
 
 ```sh
 hyp daemon run

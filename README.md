@@ -86,6 +86,9 @@ See [reports](./docs/REPORTS.md) for generation and publishing.
 
 ## Supported clients
 
+For explicit native Ollama text API capture, see the
+[local capture/query/stop recipe](./docs/CLIENTS.md#direct-ollama-api-text-capture).
+
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
 OpenClaw, Hermes Agent, Pi, and any tool that exports OpenTelemetry logs,
 traces, or metrics.

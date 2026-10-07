@@ -33,6 +33,9 @@ const NUL_BYTE = String.fromCharCode(0)
 /** @type {Map<string, Promise<unknown>>} */
 const partitionMutationLocks = new Map()
 
+/** Guard owner names this process holds right now. @type {Set<string>} */
+const heldMutationOwners = new Set()
+
 /**
  * `error_kind` of the refusal {@link claimPartitionMutation} raises when the
  * guard is held or unverifiable. Tagged rather than left to message matching
@@ -98,6 +101,8 @@ export function withPartitionMutationLocks(partitionDirs, fn) {
  * Recovery unlinks that exact dead owner's entry before rmdir: a competing
  * reclaimer that lost the unlink must not remove a successor's directory.
  * Empty or malformed locks fail closed (including a crash during admission).
+ * An owner carrying this process's own PID that it does not hold is a
+ * previous incarnation's: in a container the daemon is always PID 1.
  * @ref LLP 0417#cache-mutation-guard [implements]: CLI purge and daemon publication share a non-expiring guard
  * @param {string} partitionDir
  * @returns {() => void}
@@ -122,20 +127,27 @@ function claimPartitionMutation(partitionDir) {
       if (entries.length !== 1 || !/^[1-9]\d*-[a-f0-9-]{36}$/.test(entries[0])) throw busy()
       const pid = Number(entries[0].split('-')[0])
       if (!Number.isSafeInteger(pid)) throw busy()
-      try { process.kill(pid, 0) } catch (error) {
-        if (errCode(error) !== 'ESRCH') throw busy()
-        // No force: losing this exact unlink must abort recovery.
-        fs.unlinkSync(path.join(directory, entries[0]))
-        fs.rmdirSync(directory)
-        continue
+      // @ref LLP 0417#cache-mutation-guard [implements]: a guard naming our own PID that we do not hold is dead, so PID reuse never wedges a restarted container
+      let dead = pid === process.pid && !heldMutationOwners.has(entries[0])
+      if (!dead) {
+        try { process.kill(pid, 0) } catch (error) {
+          if (errCode(error) !== 'ESRCH') throw busy()
+          dead = true
+        }
       }
-      throw busy()
+      if (!dead) throw busy()
+      // No force: losing this exact unlink must abort recovery.
+      fs.unlinkSync(path.join(directory, entries[0]))
+      fs.rmdirSync(directory)
+      continue
     }
   }
   const file = path.join(directory, owner)
   // Failed owner publication leaves the directory closed for inspection.
   fs.writeFileSync(file, '', { flag: 'wx', mode: 0o600 })
+  heldMutationOwners.add(owner)
   return () => {
+    heldMutationOwners.delete(owner)
     fs.unlinkSync(file)
     fs.rmdirSync(directory)
   }

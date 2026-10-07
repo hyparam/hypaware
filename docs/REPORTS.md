@@ -36,11 +36,17 @@ hyp report generate "Cover last week and focus on repeated debugging work"
 
 Without additional instructions, it reviews the previous calendar month.
 
-The report skill writes `./hypaware-report-<from>-to-<to>/`, adding a numbered
-suffix if needed. The session follows the current directory's recording and
-sync policy, excerpts it quotes from `local-only` history included
-([PRIVACY.md](PRIVACY.md#marking-directories)). Publishing remains a separate
-action, using `hyp report publish <folder> ...`.
+The report skill drafts `./hypaware-report-<from>-to-<to>/`, adding a numbered
+suffix if needed, and when the report is reviewed runs `hyp report save` on it,
+which moves the folder into `~/.hyp/reports` (`$HYP_HOME/reports`). Every
+finished report is in that one place, and `hyp report list` shows them beside
+the published ones (`hyp report list --local` shows them alone; in JSON, only
+`--local --json` lists them, and `--json` alone lists published reports). The agent
+never writes under your home directory itself; the CLI does the move, and
+only a folder that would publish is admitted. The session follows the current
+directory's recording and sync policy, excerpts it quotes from `local-only`
+history included ([PRIVACY.md](PRIVACY.md#marking-directories)). Publishing
+remains a separate action, using `hyp report publish <name> ...`.
 
 You can also write a Markdown report yourself with your findings, query scope,
 and tables. The remote renders uploaded Markdown; no local render step is needed.
@@ -50,12 +56,12 @@ and tables. The remote renders uploaded Markdown; no local render step is needed
 Publishing makes the report appear in your organization's
 [HypAware Cloud dashboard](https://app.hypaware.ai/), where your team can read it.
 
-To share the generated report with your organization, replace `REPORT_FOLDER`
-with the folder printed by the report skill and `PERIOD` with the reporting
-period, such as `2026-W36`:
+To share the generated report with your organization, replace `REPORT_NAME`
+with the saved name printed by `hyp report save` (a path to a folder works
+too) and `PERIOD` with the reporting period, such as `2026-W36`:
 
 ```sh
-hyp report publish REPORT_FOLDER --kind usage-review --period PERIOD --remote team
+hyp report publish REPORT_NAME --kind usage-review --period PERIOD --remote team
 hyp report list --kind usage-review --limit 10 --remote team
 ```
 

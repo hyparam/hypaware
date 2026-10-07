@@ -172,6 +172,7 @@ test('a hostile client probe error cannot drive the terminal from hyp status', a
     name: 'codex',
     plugin: '@hypaware/codex',
     configured: false,
+    recording: false,
     attachable: true,
     attached: false,
     // What `JSON.parse` says about a settings file whose bytes are hostile:
@@ -203,7 +204,7 @@ test('an unbounded client probe error is clamped', async () => {
   const report = await collectHypAwareStatus({ env: env(hypHome) })
   const long = 'b'.repeat(5000)
   report.clients = report.clients.filter((c) => c.name !== 'codex')
-  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, attachable: true, attached: false, error: long })
+  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, recording: false, attachable: true, attached: false, error: long })
 
   const stdout = makeBuf()
   renderStatusText({
@@ -238,7 +239,7 @@ test('hyp status --json still reports the etag and probe error the files hold', 
   const report = await collectHypAwareStatus({ env: env(hypHome) })
   const probeError = `Unexpected token '${ERASE_LINE}'`
   report.clients = report.clients.filter((c) => c.name !== 'codex')
-  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, attachable: true, attached: false, error: probeError })
+  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, recording: false, attachable: true, attached: false, error: probeError })
 
   const payload = renderStatusJson({
     report,

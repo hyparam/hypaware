@@ -265,6 +265,34 @@ test('desired() honors an explicit attach.on_join:false opt-out (no action)', ()
   assert.deepEqual(desired, [])
 })
 
+test('desired() never names a detached client, even one detached after boot', async () => {
+  const handler = createAttachHandler()
+  // @ref LLP 0466#reattach-paths [tests]: the reconciler skips a detached client
+  const inBoot = handler.desired(makeCtx({
+    plugins: [{ name: '@hypaware/claude', enabled: true, recording: false, config: {} }],
+    descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+    clients: clientsWith({ claude: attachRegistration('claude') }),
+  }))
+  assert.deepEqual(inBoot, [])
+  // The daemon booted before `hyp client detach` wrote the switch: the
+  // in-memory entry still records, the file on disk does not.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'action-attach-detached-'))
+  try {
+    await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({
+      version: 2, plugins: [{ name: '@hypaware/claude', recording: false }],
+    }))
+    const afterBoot = handler.desired(makeCtx({
+      env: { HOME: hypHome, HYP_HOME: hypHome },
+      plugins: [{ name: '@hypaware/claude', enabled: true, config: {} }],
+      descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+      clients: clientsWith({ claude: attachRegistration('claude') }),
+    }))
+    assert.deepEqual(afterBoot, [])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 test('desired() does not fail open on a non-boolean on_join (treats it as opt-out)', () => {
   const handler = createAttachHandler()
   // The typo'd JSON string `"false"` is not a boolean; it must suppress, not

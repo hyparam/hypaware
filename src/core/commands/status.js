@@ -193,6 +193,7 @@ export function projectClientStatus(report, clients) {
     return {
       name: client.name,
       configured: client.configured,
+      recording: client.configured && client.recording !== false,
       attachable: client.attachable !== false,
       attached: client.attached,
       mode: client.mode ?? null,
@@ -240,7 +241,8 @@ export function renderClientStatusText(rows, stdout) {
         ? (row.mode ? `attached (${row.mode})` : 'attached')
         : 'not attached'
       : 'attach n/a'
-    stdout.write(`  ${row.name}: ${row.configured ? 'configured' : 'not configured'}, ${attach}, ${row.provenance}\n`)
+    stdout.write(`  ${row.name}: ${row.recording ? 'recording' : 'not recording'}, ${attach}, ${row.provenance}\n`)
+    if (row.configured && !row.recording) stdout.write(`    to record it again: hyp client attach ${row.name}\n`)
     if (row.telemetry_endpoint || row.listener_endpoint) {
       const clientEndpoint = row.telemetry_endpoint ?? 'unknown client endpoint'
       const listenerEndpoint = row.listener_endpoint ?? 'listener not running'
@@ -329,20 +331,34 @@ export function renderStatusSummary({ report, stdout }) {
 
   stdout.write('\n  Clients                 Status                           Data\n')
   if (names.size === 0) stdout.write('    None configured\n')
+  /** @type {string[]} */
+  const notRecording = []
   for (const name of names) {
     const client = clients.get(name)
     const capture = health.get(name)
+    // One state per client (LLP 0466): recording, or not. "Settings missing"
+    // is the one contradiction, a client that should be recording whose
+    // wiring is gone, and the attention block carries its warning.
+    // @ref LLP 0466#status [implements]: a detached client reads "Not recording", with a hint and no warning
+    if (client && client.configured && client.recording === false) notRecording.push(name)
     const state = client?.error ? 'Could not check'
+      : client && client.configured && client.recording === false ? 'Not recording'
       : capture?.state === 'gap' ? 'Telemetry may be interrupted'
-      : client?.attached ? `Attached${client.mode ? ` (${printable(client.mode)})` : ''}`
-      : client?.attachable !== false && client?.configured ? 'Not attached'
-      : 'Configured'
+      : client?.attached ? `Recording${client.mode ? ` (${printable(client.mode)})` : ''}`
+      : client?.attachable !== false && client?.configured ? 'Settings missing'
+      // A probe-less source listed only by its sharing policy has no client
+      // row, and it records whenever it is listed.
+      : !client || client.configured ? 'Recording'
+      : 'Not recording'
     // A missing policy on an enrolled host is unknown, never permission to sync.
     const sharing = localOnly.has(name) ? 'Local only' : syncing.has(name) ? 'Sync'
       : report.layered?.hasCentral ? 'Unknown' : 'Local only'
     stdout.write(`  ${printable(name, 22).padEnd(22)}  ${state.padEnd(31)}  ${sharing}\n`)
   }
   if (syncing.size > 0) stdout.write('\n  Sync = organization sharing policy, not delivery confirmation.\n')
+  for (const name of notRecording) {
+    stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
+  }
 
   renderStatusAttention(report, stdout)
   stdout.write('\nMore details: hyp status --verbose\n')
@@ -538,6 +554,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     client_attach: report.clients.map((c) => ({
       name: c.name,
       configured: c.configured,
+      recording: c.configured && c.recording !== false,
       // `attached` stays a boolean for every row so a consumer can keep
       // pinning it; `attachable: false` is what says the boolean carries no
       // information for this client (#544).
@@ -928,6 +945,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       seen.add(c.name)
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
+      // @ref LLP 0466#status [implements]: the verbose row names the recording state beside the attach facts
+      if (c.configured && c.recording === false) state.push('not recording')
       // A client with no attach probe has no attach state to report: printing
       // `not attached` for it invites a `hyp client attach` that is a documented
       // no-op and can never change the line (#544). Where there is an attach,
@@ -951,6 +970,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
             : 'not attached'
       )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
+      if (c.configured && c.recording === false) stdout.write(`        to record it again: hyp client attach ${c.name}\n`)
       // The probe's error is not this build's prose: a settings file that is
       // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
       // an excerpt of the file back. The client wrote that file, so it is

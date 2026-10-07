@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportMark, runReportPublish, runReportRecommend } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportMark, runReportPublish, runReportRecommend, runReportSave } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -778,7 +778,9 @@ function buildCoreCommands(registry) {
       summary: 'Generate and manage reports',
       help:
         "'generate' starts a recorded AI client with the report skill in the\n" +
-        "current directory. Optional instructions set its period and focus.\n\n" +
+        "current directory. Optional instructions set its period and focus.\n" +
+        "'save' moves the finished folder into $HYP_HOME/reports, where 'list'\n" +
+        "shows it and 'publish' takes it by name.\n\n" +
         'The rest talk to the remote. Reports are hosted there (there is no\n' +
         'local reports plane), so publish/recommend/list/get/fix/mark/delete each\n' +
         'take --remote <target> and default to the default remote target, the same\n' +
@@ -802,9 +804,29 @@ function buildCoreCommands(registry) {
         'terminal with its normal permissions and is recorded under the current',
         'directory\'s own usage class. This is not session isolation: excerpts it',
         'reads out of local-only history are quoted into a transcript that syncs',
-        'if this directory does. No remote login is required.',
+        'if this directory does. No remote login is required. The skill drafts',
+        "here and finishes with 'hyp report save', which moves the folder into",
+        '$HYP_HOME/reports.',
       ].join('\n'),
       run: runReportGenerate,
+    },
+    {
+      name: 'report save',
+      summary: 'Move a finished report folder into $HYP_HOME/reports, where list and publish find it',
+      usage: coreUsage('report save'),
+      help: [
+        'The folder must hold report.md and only the pages publish accepts',
+        '(usage.md, work.md, health.md, recommendation-<slug>.md), so the store',
+        'never holds working notes, raw logs, or stray files; anything else is',
+        'refused before a byte moves. The folder keeps its name, with -2, -3,',
+        '... if the name is taken. By default the source folder is removed once',
+        'its pages are copied (only those pages are removed, never a file that',
+        'appeared since); --keep leaves it. The receipt names the saved folder',
+        "and the 'hyp report publish <name> ...' that shares it. This is the step",
+        'the hypaware-report skill ends with, so an agent never writes under',
+        'your home directory itself.',
+      ].join('\n'),
+      run: runReportSave,
     },
     {
       name: 'report publish',
@@ -817,7 +839,9 @@ function buildCoreCommands(registry) {
         'lowercase and matches [a-z0-9][a-z0-9-]*. Folders must contain only',
         'supported Markdown files. HTML, raw HTML inside Markdown, images,',
         'and client assets are not accepted. Put HTML examples in code',
-        'fences. The remote renders the report for the team; no local',
+        'fences. A bare name that is no path here publishes the saved report',
+        "of that name from $HYP_HOME/reports ('hyp report list --local' shows",
+        'them). The remote renders the report for the team; no local',
         'rendering step is needed. Folder uploads use system tar',
         "with --format=ustar. kind names the report family (e.g.",
         "usage-review); period is the covered slice (e.g. 2026-W29).",
@@ -844,15 +868,22 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'report list',
-      summary: "List the org's published reports (newest first), with their recommendations",
+      summary: "List the org's published reports (newest first) and this machine's saved ones",
       usage: coreUsage('report list'),
       help: [
+        "Saved reports ($HYP_HOME/reports, as 'hyp report save' leaves them) follow",
+        'the published ones in their own section, newest first by report.md',
+        'mtime, at most 100 with the rest counted. --local lists that section',
+        'alone, with no remote read, and takes no remote filter. When nothing',
+        'selects or filters the remote and it cannot be read, saved reports are',
+        'still listed under a warning; --json keeps the failure instead.',
         'Under each report, one line per recommendation: id, [state], page, and',
         'title. The state is open, in_progress, applied, or dismissed; a',
         "recommendation nobody has marked is open. --recommendations lists the",
         'recommendations themselves, flat across reports (a standalone one says',
         "'standalone' where its report would be); --status <state,...> filters",
-        "them and implies --recommendations. --json prints the remote's records whole.",
+        "them and implies --recommendations. --json prints the remote's records whole",
+        'and nothing else; --local --json prints the saved reports.',
       ].join('\n'),
       run: runReportList,
     },

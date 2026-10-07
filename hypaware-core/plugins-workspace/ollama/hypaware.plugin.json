@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/ollama",
+  "version": "1.0.0",
+  "description": "Explicit native Ollama text POST /api/chat capture through the AI gateway. Records request-context snapshots and completed JSON or NDJSON assistant responses; no managed client attach or history import.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [],
+  "requires": {
+    "capabilities": { "hypaware.ai-gateway": "^2.0.0" }
+  }
+}
