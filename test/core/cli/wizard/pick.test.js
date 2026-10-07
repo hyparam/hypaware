@@ -768,7 +768,7 @@ test('derivePickedClients: the derived set over every bundled picker row is pinn
     catalog.pickerDescriptors,
     catalog.clientDescriptors
   )
-  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'cursor', 'openclaw', 'opencode', 'pi'])
+  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'cursor', 'ollama', 'openclaw', 'opencode', 'pi'])
 })
 
 // --- reconfigure: the existing config, not detection, is the starting state ---
