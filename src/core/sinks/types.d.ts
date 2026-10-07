@@ -166,6 +166,15 @@ export interface DriverOptions {
   config?: HypAwareV2Config
   /** Actual admitted exports only, with bounded scalar summary and wall-clock completion. */
   onComplete?: (completion: SinkCompletion) => void
+  /** Separate cleanup failure, never an export acknowledgement or payload reason. */
+  onDiagnosticCleanupFailure?: (instance: string, code: string) => void
+}
+
+/** Bounded scalar metadata for one recognized ordinary driver diagnostic. */
+export interface SinkDiagnosticRecord {
+  name: string
+  at: number
+  sequence: bigint
 }
 
 export interface TickOptions {

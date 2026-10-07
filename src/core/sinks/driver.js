@@ -7,6 +7,8 @@ import { noteProductPipeline } from '../product_telemetry/client.js'
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { sinkInstanceName, onSinkHandleClose } from '../registry/sinks.js'
+import { atomicWriteJson } from '../util/fs_atomic.js'
+import { createDiagnosticHistory } from './diagnostic_history.js'
 
 /**
  * @import { DatasetRegistration, ExportProgress, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
@@ -18,6 +20,9 @@ import { sinkInstanceName, onSinkHandleClose } from '../registry/sinks.js'
 // @ref LLP 0471#instance-ownership [implements]: all drivers share one active run and one pending opportunity per handle
 /** @type {WeakMap<ExtendedSinkHandle, SinkExecutionState>} */
 const executions = new WeakMap()
+
+/** @type {WeakMap<ExtendedSinkHandle, ReturnType<typeof createDiagnosticHistory>>} */
+const diagnosticHistories = new WeakMap()
 
 /**
  * Build the kernel sink driver. The driver iterates sink handles on
@@ -48,6 +53,27 @@ export function createSinkDriver(opts) {
   const owned = new Set()
   /** Explicit manual receipts only, bounded by the shared handle gate. @type {Set<Promise<SinkRunOutcome>>} */
   const waiting = new Set()
+
+  /** @param {ExtendedSinkHandle} handle @param {string} instance */
+  function diagnosticHistory(handle, instance) {
+    let history = diagnosticHistories.get(handle)
+    if (!history) {
+      history = createDiagnosticHistory(path.join(stateRoot, 'sinks', instance, 'outbox'), instance, code => {
+        log.warn('sink.outbox_cleanup_failed', { [Attr.SINK_INSTANCE]: instance, error_kind: code })
+        try { opts.onDiagnosticCleanupFailure?.(instance, code) } catch (error) { logDispatchError(error) }
+      })
+      diagnosticHistories.set(handle, history)
+    }
+    return history
+  }
+
+  /** Existing daemon maintenance calls this; failed cleanup never adds its own timer. */
+  async function maintainDiagnostics() {
+    for (const handle of sinkRegistry.listHandles()) {
+      if (stopped) return
+      await diagnosticHistory(handle, sinkInstanceName(handle)).maintain()
+    }
+  }
 
   /** @param {ExtendedSinkHandle} handle @returns {SinkExecutionState} */
   function execution(handle) {
@@ -415,7 +441,16 @@ export function createSinkDriver(opts) {
           tablePath: p.tablePath,
         })),
       }
-      fs.writeFileSync(filePath, JSON.stringify(payload, null, 2))
+      // @ref LLP 0471#diagnostic-history [implements]: commit new evidence atomically before any history pruning
+      await diagnosticHistory(handle, instance).publish(`${batchId}.json`, async () => {
+        // Preserve an existing symlink rather than replacing it with diagnostic evidence.
+        try {
+          if ((await fs.promises.lstat(filePath)).isSymbolicLink()) throw new Error('Diagnostic path is a symlink')
+        } catch (error) {
+          if (/** @type {{code?: string}} */ (error)?.code !== 'ENOENT') throw error
+        }
+        await atomicWriteJson(filePath, payload)
+      })
     } catch (err) {
       // `describeThrown` for the same reason the two catches above use it:
       // everything this catch guards reads a plugin's own partition objects,
@@ -471,7 +506,7 @@ export function createSinkDriver(opts) {
     return `${instance}-${now.toISOString()}-${batchSeq}`
   }
 
-  return { tick, dispatch, stop, drain }
+  return { tick, dispatch, stop, drain, maintainDiagnostics }
 }
 
 /**
