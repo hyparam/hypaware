@@ -538,7 +538,20 @@ async function runPickerInit(flags, ctx) {
       ...(flags.binPath ? { binPath: flags.binPath } : {}),
     },
   })
+  if (result.exitCode === 0 && flags.github) writeGithubNextStep(ctx, flags.dryRun)
   return result.exitCode
+}
+
+/**
+ * Setup enables GitHub collection but never signs in, so say what remains.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {boolean} dryRun
+ */
+function writeGithubNextStep(ctx, dryRun) {
+  ctx.stdout.write(dryRun
+    ? '(dry-run) Would enable GitHub collection; then run hyp github login\n'
+    : 'GitHub collection enabled. Next: run hyp github login, then hyp daemon restart if the daemon is running.\n')
 }
 
 /**
@@ -571,6 +584,8 @@ async function runInitFromFile(flags, ctx) {
     ctx.stderr.write(`hyp setup: --from-file: invalid JSON: ${message}\n`)
     return 1
   }
+  // Before validation, so the config actually written is the one validated.
+  if (flags.github && parsed && typeof parsed === 'object') enableGithubCollection(/** @type {HypAwareV2Config} */ (parsed))
   const catalogCtx = await buildKnownPluginsForCtx(ctx)
   const validation = await validateConfig(/** @type {any} */ (parsed), { knownPlugins: catalogCtx.knownPlugins, knownDatasets: catalogCtx.knownDatasets, unloadablePlugins: catalogCtx.unloadablePlugins })
   if (!validation.ok) {
@@ -581,7 +596,6 @@ async function runInitFromFile(flags, ctx) {
     }
     return 1
   }
-  if (flags.github) enableGithubCollection(/** @type {HypAwareV2Config} */ (parsed))
 
   await withSpan(
     'wizard.pick.start',
@@ -651,6 +665,7 @@ async function runInitFromFile(flags, ctx) {
   )
 
   ctx.stdout.write(dryRun ? `(dry-run) Would write ${targetPath}\n` : `✓ Wrote ${targetPath}\n`)
+  if (flags.github) writeGithubNextStep(ctx, dryRun)
   return 0
 }
 
