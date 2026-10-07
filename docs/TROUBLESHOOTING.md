@@ -84,6 +84,31 @@ Cloud. After reviewing the destination plan, use `hyp sync` to attempt
 delivery and inspect each sink's result. It can partially succeed and still
 return failure.
 
+<!-- @ref LLP 0471#chunk-lifetime: the elapsed deadline belongs to each logical Cloud chunk, not a whole sync -->
+Cloud sync gives each upload chunk a 330-second limit, including authentication,
+the request, response reading and retry waits. Retries share that limit;
+a healthy sync with several chunks can take longer overall. Timeout or stop
+cancels the current Cloud request and waits. Unacknowledged rows remain eligible
+for a later export while they remain in the local cache. Check connectivity
+and the destination's failure reason, then retry with `hyp sync` after fixing it.
+
+<!-- @ref LLP 0471#daemon-work: only a strictly later full completion for this destination establishes recovery -->
+An export warning clears only when that same configured destination records a
+full successful completion strictly after its failure was recorded. Starting
+an upload, acknowledging some rows, queuing a follow-up or succeeding at another
+destination does not clear it. The warning can remain after 24 hours; equal
+timestamps do not establish recovery. Ordinary daemon logs record failure and
+later recovery separately. See [diagnostic logs](#find-diagnostic-logs).
+
+<!-- @ref LLP 0472#t4: retained diagnostic history and unresolved warnings describe different facts -->
+The verbose status `recent errors` count describes retained history from the
+last 24 hours, including recovered failures. It is not a count of unsent rows
+or every failure the installation has ever had. A warning can clear while this
+count stays nonzero. Deleting failure records or letting them age does not
+deliver data; retries use the cache and saved export progress. See
+[storage paths](CONFIGURATION.md#know-where-data-lives) for the diagnostic cap
+and cleanup limits.
+
 Remote sign-in with `--no-forward` grants query access without setting up
 sync. `hyp leave` stops sync but keeps local recordings.
 See [team setup](TEAM_SETUP.md) and [privacy controls](PRIVACY.md).

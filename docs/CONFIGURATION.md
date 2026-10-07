@@ -143,7 +143,7 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/config-control/` | Central enrollment and managed configuration |
 | `hypaware/cache/` | Local query cache |
 | `hypaware/plugins/` | Per-plugin state |
-| `hypaware/sinks/` | Export state and retry outboxes |
+| `hypaware/sinks/` | Export progress and retained failure diagnostics |
 | `exports/` | Default local Parquet destination |
 | `spool/claude-bodies/` | Transient Claude raw bodies |
 | `hypaware/logs/daemon.log` | Main structured daemon log |
@@ -154,6 +154,23 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/tls/` | Local proxy certificate authority and certificates |
 | `hypaware/processing/logs/daemon.log` | Processing daemon log |
 | `hypaware/dev-telemetry/` | Local development diagnostics |
+
+<!-- @ref LLP 0471#diagnostic-history: prune owned diagnostic evidence without acknowledging cache payload -->
+Each destination's `hypaware/sinks/<instance>/outbox/` holds failure diagnostics,
+not rows waiting to be uploaded. HypAware writes the new record atomically,
+then keeps it and the newest recognized history, up to 100 records per
+destination after successful cleanup. An unsuccessful write prunes nothing.
+Cleanup preserves unfamiliar files, symlinks and other destinations' records.
+It does not delete cache rows, advance export progress or clear an export warning.
+
+If filesystem access prevents cleanup, history can temporarily exceed 100.
+The daemon logs a separate cleanup failure and retries on its existing cache
+maintenance schedule, rather than rescanning old history on each export failure.
+With automatic cache maintenance disabled, no cleanup timer runs: a new sink
+handle after restart can retry cleanup when it next publishes a failure.
+Check directory permissions and the [diagnostic logs](TROUBLESHOOTING.md#find-diagnostic-logs).
+`hyp sink maintain` maintains export tables; it is not a command for pruning
+these diagnostics.
 
 ## Manage optional plugins
 
