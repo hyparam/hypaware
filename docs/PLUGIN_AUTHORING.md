@@ -179,6 +179,25 @@ ctx.sinks.register({
 Blob sinks pair with an encoder (`hypaware.encoder`) or table-format
 writer (`hypaware.table-format`); see [Capabilities](#capabilities).
 
+<!-- @ref LLP 0471#instance-ownership: all drivers using a registry handle share its finite execution lifetime -->
+The driver admits one active export and one pending follow-up per registered
+sink instance. Scheduled destinations run independently. Drivers sharing the
+same registry handle in one process share this bound; an ordinary `hyp sync`
+CLI process has its own registry, so this is not a cross-process lock.
+
+<!-- @ref LLP 0472#t1: awaited manual admission owns fresh progress and cannot become a second queue -->
+An awaited manual tick processes selected destinations sequentially. If an
+instance is busy, one manual caller can occupy its pending follow-up and await
+its own fresh run and progress. Further callers receive a busy failure result
+and can retry after completion. Refusal does not create an export failure record
+or signal recovery. Stop settles a pending caller unsuccessfully without
+starting its run.
+
+Implement `close()` to cancel owned transport and waits and await their cleanup.
+Daemon shutdown initiates cancellation on all sinks before awaiting their
+completion. JavaScript cannot force an uncooperative plugin's asynchronous work
+to settle, so a plugin that ignores `close()` can keep shutdown pending.
+
 ### Registering datasets
 
 Declare `contributes.datasets: [{ name }]` and register a schema plus
