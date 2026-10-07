@@ -6,6 +6,7 @@
 **Author:** Neutral Next designer / delivery owner
 **Date:** 2026-10-05
 **Related:** LLP 0016, LLP 0026, LLP 0030, LLP 0035, LLP 0038, LLP 0069, LLP 0193, LLP 0194, LLP 0469, LLP 0470
+**Extended-by:** LLP 0473 (installed lifecycle, native clients and mixed-content markers)
 
 ## Intent {#intent}
 

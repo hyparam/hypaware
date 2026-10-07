@@ -6,6 +6,7 @@
 **Author:** Neutral Next designer
 **Date:** 2026-10-05
 **Related:** LLP 0468, LLP 0469, LLP 0016, LLP 0035, LLP 0038, LLP 0204
+**Extended-by:** LLP 0475 (everyday installed native-client lifecycle and persistence proof)
 
 @ref LLP 0469#seams: use the existing gateway capability and a narrowly scoped adapter
 @ref LLP 0468#acceptance: delivery requires current-commit independent and live evidence

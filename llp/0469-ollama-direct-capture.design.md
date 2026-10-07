@@ -6,6 +6,8 @@
 **Author:** Neutral Next designer
 **Date:** 2026-10-05
 **Related:** LLP 0468, LLP 0470, LLP 0005, LLP 0010, LLP 0016, LLP 0026, LLP 0030, LLP 0035, LLP 0038, LLP 0050, LLP 0069, LLP 0193, LLP 0194, LLP 0204
+**Extended-by:** LLP 0473 (request for the installed lifecycle and native mixed-content journey)
+**Extended-by:** LLP 0474 (native route, recording and mixed-content design)
 
 @ref LLP 0468#requirements: implements the accepted direct local text API capture request
 
