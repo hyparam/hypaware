@@ -8,6 +8,7 @@
 **Related:** LLP 0468, LLP 0469, LLP 0130, LLP 0466
 **Extends:** LLP 0468, LLP 0469 (installed lifecycle, native client compatibility and mixed-content markers)
 **Source:** [HYP-71](https://linear.app/hyperparam/issue/HYP-71/complete-ollama-collection-detection-onboarding-routing-and-capture), issue UUID b3a15c80-6744-47c1-ae6b-f25d9e93dc6d, revision 2026-10-07T22:28:19.870Z
+**Extended-by:** LLP 0474 (technical design)
 
 ## Intent {#intent}
 
