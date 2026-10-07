@@ -132,7 +132,7 @@ test('a re-point with no token refuses a login seed and points at re-login, not 
   const { fetchFn, calls } = makeFetch()
   await assert.rejects(
     new IdentityClient({ centralUrl: 'https://central-b.example', persistedPath, fetchFn, now }).acquire(),
-    /central URL mismatch.*hyp remote login/s
+    /central URL mismatch.*`hyp remote login <name>` for a remote that points at https:\/\/central-b\.example.*`hyp remote add <name> https:\/\/central-b\.example`/s
   )
   assert.equal(calls.bootstrap, 0)
   assert.equal(calls.refresh, 0)
