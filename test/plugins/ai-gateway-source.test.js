@@ -17,6 +17,7 @@ import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+import { createOllamaExchangeProjector } from '../../hypaware-core/plugins-workspace/ollama/src/projector.js'
 
 /** @import { LogRecord } from '../../src/core/observability/types.js' */
 
@@ -446,12 +447,12 @@ function fakeCtx(config, logged) {
   })
 }
 
-/** @param {string} body */
+/** @param {string | (() => string)} body */
 async function startEchoUpstream(body) {
   const server = http.createServer((req, res) => {
     req.resume()
     res.writeHead(200, { 'content-type': 'text/plain' })
-    res.end(body)
+    res.end(typeof body === 'function' ? body() : body)
   })
   await new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -634,6 +635,65 @@ test('source appends independent exchange snapshots and reports append failure w
       ...(process.env.DEV_RUN_ID ? { dev_run_id: process.env.DEV_RUN_ID } : {}),
     }, 'failure diagnostic carries only component/plugin/upstream/error and optional run ID, no wire payload')
     assert.equal(logged.filter((entry) => entry.event === 'aigw.exchange').length, 19)
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// @ref LLP 0475#t1 [tests]: actual adapter admission and append failure keep forwarded native bytes intact without history reads
+test('Ollama generate source omits media and survives failed append; controls/unsupported captures do not append', async () => {
+  let wire = JSON.stringify({ model: 'fixture', response: 'native answer', done: true, done_reason: 'stop', eval_count: 2 })
+  const upstream = await startEchoUpstream(() => wire)
+  const state = createGatewayState()
+  state.projectors.push({ ...createOllamaExchangeProjector(), _seq: 0 })
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const ctx = fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', provider: 'ollama', base_url: upstream.url, path_prefix: '/api/generate' }] }, logged)
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  let attempts = 0
+  ctx.storage.discoverCachePartitions = async () => { throw new Error('unexpected history discovery') }
+  ctx.storage.readRows = async function* () { throw new Error('unexpected history read') }
+  ctx.storage.appendRows = async (_path, _columns, rows) => {
+    if (++attempts === 1) throw new Error('fixture append failure')
+    appended.push(...rows)
+  }
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status)
+    const status = await source.status()
+    assert.ok(status.details)
+    const url = `http://${status.details.host}:${status.details.port}/api/generate`
+    for (let index = 0; index < 21; index++) {
+      const response = await fetch(url, { method: 'POST', headers: { 'x-hyp-dev-run-id': 'ollama-source-t1' }, body: JSON.stringify({ model: 'fixture', prompt: 'same supplied prompt', images: ['SECRET_MEDIA'], stream: false, think: index === 20 }) })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), wire)
+      await settleFinalizers()
+    }
+    assert.equal(attempts, 20)
+    assert.equal(appended.length, 57)
+    assert.equal(new Set(appended.map(row => row.session_id)).size, 19)
+    assert.equal(new Set(appended.map(row => row.part_id)).size, 57)
+    for (let index = 0; index < appended.length; index += 3) {
+      assert.deepEqual(appended[index].previous_message_id, [])
+      assert.deepEqual(appended[index + 2].previous_message_id, [appended[index].message_id])
+      assert.equal(appended[index + 1].part_type, 'image')
+      assert.equal(appended[index + 1].content_text, undefined)
+      assert.equal(/** @type {any} */ (appended[index + 2].attributes).usage.output_tokens, 2)
+      assert.equal(/** @type {any} */ (appended[index].attributes).dev_run_id, 'ollama-source-t1')
+    }
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_projected').length, 20)
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_dropped').length, 1)
+    wire = JSON.stringify({ response: '', done: true, done_reason: 'load' })
+    const control = await fetch(url, { method: 'POST', body: JSON.stringify({ model: 'fixture', prompt: '', think: false }) })
+    assert.equal(await control.text(), wire)
+    await settleFinalizers()
+    assert.equal(attempts, 20, 'load-only traffic never attempts append')
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_control').length, 1)
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_dropped').length, 1)
+    assert.doesNotMatch(JSON.stringify(appended), /SECRET_MEDIA/)
+    assert.doesNotMatch(JSON.stringify(logged.filter(entry => entry.event.startsWith('plugin.ollama.'))), /SECRET_MEDIA|same supplied prompt|native answer/)
   } finally {
     await source.stop()
     await upstream.close()
