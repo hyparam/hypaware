@@ -205,7 +205,7 @@ test('no api-key-shaped credential reaches chatgpt.com on a default hyp init ins
   const table = compileUpstreams(mergeUpstreams([
     { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
     { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: NEUTRAL_PREFIX, provider: 'chatgpt' },
-  ], /** @type {any} */ ({ presets })))
+  ], /** @type {any} */ ({ presets, aliases: new Map() })))
 
   // The premise, asserted rather than assumed: config really did take the
   // guard off the chatgpt entry. If this ever stops being true the cases

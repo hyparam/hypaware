@@ -291,6 +291,7 @@ export interface EvaluateReturningGateOptions {
  */
 export interface ConfigurePhasePicked {
   descriptors: PickerDescriptor[]
+  config?: HypAwareV2Config
   /**
    * Picked source ids the existing config already composed before this
    * run. A `needs_setup` row here was consented to when it was first

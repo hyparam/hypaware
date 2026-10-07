@@ -6,6 +6,7 @@ import type {
   AiGatewaySettlementEnricher,
   AiGatewayUpstreamPathRewrite,
   AiGatewayUpstreamPreset,
+  AiGatewayUpstreamAliasRoute,
   PluginActivationContext,
 } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { Exchange, createNullExchange } from './recorder.js'
@@ -109,6 +110,9 @@ export interface UpstreamConfig {
    * (LLP 0234); never a routing input.
    */
   record_prefix?: string
+  /** Runtime-only alias metadata; never compiled from persisted config. */
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface AiGatewayConfig {
@@ -149,6 +153,8 @@ export interface CompiledUpstream {
   match: ((input: AiGatewayRouteInput) => boolean) | undefined
   /** Validated outbound path-prefix swap, applied when the request is forwarded (LLP 0313). */
   rewrite?: AiGatewayUpstreamPathRewrite
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface ProxyOptions {
@@ -245,6 +251,8 @@ export interface ThreadChain {
  */
 export interface GatewayState {
   presets: Map<string, AiGatewayUpstreamPreset>
+  aliases: Map<string, { canonicalName: string, route: AiGatewayUpstreamAliasRoute }>
+  aliasRoutes: { name: string, canonical: string, path_prefix: string, base_url: string }[]
   clients: Map<string, AiGatewayClientRegistration>
   projectors: RegisteredProjector[]
   enrichers: Map<string, AiGatewaySettlementEnricher>

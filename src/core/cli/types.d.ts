@@ -76,6 +76,7 @@ export type PickerSource =
   | 'pi'
   | 'claude-desktop'
   | 'openclaw'
+  | 'ollama'
   | 'hermes'
   | 'raw-anthropic'
   | 'raw-openai'
@@ -165,6 +166,7 @@ export interface PickerPicks {
   sources: PickerSource[]
   exportChoice: PickerExport
   retentionDays: number
+  retentionExplicit?: boolean
   /** Explicit opt-in to GitHub collection; browser login is a separate command. */
   github?: boolean
 }
@@ -310,10 +312,11 @@ export interface InitFlags {
   dryRun: boolean
   github?: boolean
   noBackfill?: boolean
-  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'pi')[]
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'ollama')[]
   sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number
+  retentionExplicit?: boolean
   fromFile?: string
   binPath?: string
   /** Overwrite an existing local config (backs it up first). */

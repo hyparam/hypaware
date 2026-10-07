@@ -11,7 +11,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { createGatewayState, createAiGatewayApi } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { ollamaNativeRoute } from '../../hypaware-core/plugins-workspace/ollama/src/setup.js'
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
 import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
@@ -780,4 +781,43 @@ test('damaged exclusions do not prevent gateway or adapter activation in a real 
       assert.ok(result?.ok, `${name} activates with unreadable exclusions`)
     }
   } finally { fs.rmSync(hypHome, { recursive: true, force: true }) }
+})
+
+test('alias transport facts come from the bound generation, clear on failed reload/stop, and exclude unsafe URLs', async () => {
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamAlias('ollama-native', 'ollama', ollamaNativeRoute())
+  const config = (base_url) => fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url, path_prefix: '/api/chat' }] })
+  const source = await createStartSource(state)(config('http://localhost:21500/service/'))
+  assert.ok(source.status && source.reload)
+  try {
+    const first = await source.status()
+    assert.ok(first.details?.port)
+    assert.deepEqual(first.details.upstream_aliases, [{ name: 'ollama-native', canonical: 'ollama', path_prefix: '/ollama', base_url: 'http://localhost:21500/service/' }])
+    await source.reload(config('http://localhost:21501/changed'))
+    const next = await source.status()
+    assert.deepEqual(next.details?.upstream_aliases, [{ name: 'ollama-native', canonical: 'ollama', path_prefix: '/ollama', base_url: 'http://localhost:21501/changed' }])
+    await source.reload(config('http://user:private-token@localhost:21501/changed?secret=x'))
+    const unsafe = await source.status()
+    assert.deepEqual(unsafe.details?.upstream_aliases, [])
+    assert.equal(JSON.stringify(unsafe).includes('private-token'), false)
+    await assert.rejects(source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url: 'http://localhost:21501' }, { name: 'ollama-native', base_url: 'http://localhost:2' }] })), /collision/)
+    const failed = await source.status()
+    assert.equal(failed.details?.listening, false)
+    assert.deepEqual(failed.details?.upstream_aliases, [])
+    assert.equal(state.listen, undefined)
+  } finally { await source.stop() }
+  assert.deepEqual((await source.status()).details?.upstream_aliases, [])
+})
+
+test('processing-only desired aliases never report live compiled transport facts', async () => {
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamAlias('ollama-native', 'ollama', ollamaNativeRoute())
+  setGatewayProcessTransport({ role: 'processing', endpoint: { host: '127.0.0.1', port: 21522 }, receive() { return async () => {} } })
+  let source
+  try {
+    source = await createStartSource(state)(fakeCtx({ upstreams: [{ name: 'ollama', base_url: 'http://localhost:21500/service/' }] }))
+    assert.ok(source.status)
+    assert.equal((await source.status()).details?.port, 21522)
+    assert.deepEqual((await source.status()).details?.upstream_aliases, [])
+  } finally { await source?.stop(); setGatewayProcessTransport(undefined) }
 })

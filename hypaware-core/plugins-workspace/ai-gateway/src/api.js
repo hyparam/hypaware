@@ -14,6 +14,8 @@ import { createProjectedExchangeWriter } from './exchange_writer.js'
 export function createGatewayState(ignoredSessions = new Set()) {
   return {
     presets: new Map(),
+    aliases: new Map(),
+    aliasRoutes: [],
     clients: new Map(),
     projectors: [],
     enrichers: new Map(),
@@ -54,6 +56,7 @@ export function createAiGatewayApi(state, deps = {}) {
       if (typeof preset.base_url !== 'string' || preset.base_url.length === 0) {
         throw new TypeError(`registerUpstreamPreset '${preset.name}': base_url is required`)
       }
+      if (state.aliases.has(preset.name)) throw new TypeError('registerUpstreamPreset: alias name collision')
       const hasMatch = typeof preset.match === 'function'
       const hasPathPrefix = typeof preset.path_prefix === 'string' && preset.path_prefix.length > 0
       if (!hasMatch && !hasPathPrefix) {
@@ -62,6 +65,32 @@ export function createAiGatewayApi(state, deps = {}) {
         )
       }
       state.presets.set(preset.name, preset)
+    },
+
+    // @ref LLP 0474#routes [implements]: registration is runtime-only; resolve after normal operator/preset merge
+    registerUpstreamAlias(name, canonicalName, route) {
+      if (typeof name !== 'string' || !name || name.length > 128 || typeof canonicalName !== 'string' || !canonicalName || canonicalName.length > 128) {
+        throw new TypeError('registerUpstreamAlias: name and canonical target are required')
+      }
+      if (name === canonicalName) throw new TypeError('registerUpstreamAlias: self reference')
+      if (state.aliases.size >= 32) throw new TypeError('registerUpstreamAlias: alias limit exceeded')
+      if (state.aliases.has(name) || state.presets.has(name)) throw new TypeError('registerUpstreamAlias: duplicate name collision')
+      if (state.aliases.has(canonicalName) || [...state.aliases.values()].some(a => a.canonicalName === name)) {
+        throw new TypeError('registerUpstreamAlias: alias chains are unsupported')
+      }
+      if (!route || typeof route.path_prefix !== 'string' || route.path_prefix.length > 256 || !route.path_prefix.startsWith('/') || route.path_prefix === '/'
+        || route.path_prefix.endsWith('/') || /[?#]/.test(route.path_prefix) || route.path_prefix.split('/').includes('..')
+        || typeof route.match !== 'function' || !route.rewrite || route.rewrite.from !== route.path_prefix
+        || route.rewrite.to !== '/' || (route.captureMatch !== undefined && typeof route.captureMatch !== 'function')
+        || (route.priority !== undefined && !Number.isFinite(route.priority))) {
+        throw new TypeError('registerUpstreamAlias: invalid scoped route or root rewrite')
+      }
+      state.aliases.set(name, { canonicalName, route: {
+        path_prefix: route.path_prefix,
+        ...(route.provider !== undefined ? { provider: route.provider } : {}),
+        ...(route.priority !== undefined ? { priority: route.priority } : {}),
+        match: route.match, rewrite: { ...route.rewrite }, captureMatch: route.captureMatch,
+      } })
     },
 
     registerClient(client) {
