@@ -223,9 +223,10 @@ export const RESTART_EXIT_DEADLINE_MS = 120_000
  *  4. Once every configured source returns a `StartedSource`, status
  *     flips to `healthy`. Failures degrade the state to `degraded`
  *     but do not abort the daemon. Operators get a partial system.
- *  5. A 60s (or `tickIntervalMs`) loop drives the sink driver. Each
- *     tick is a `sink.tick` child span; the bundled sink driver opens
- *     its own `sink.export_batch` spans inside.
+ *  5. A 60s (or `tickIntervalMs`) loop dispatches due sink instances
+ *     and independently requests `daemon.bookkeeping`. Dispatch emits
+ *     the daemon tick counter; actual instance exports open
+ *     `sink.export_batch` spans.
  *  6. SIGTERM / SIGINT / a `stop.request` control file /
  *     `handle.stop()` flip the daemon into `stopping`, stop every
  *     source (each one inside a `source.stop` span), close the daemon
