@@ -227,6 +227,10 @@ test('capture evidence retains only known routes and reasons, capped scalar summ
   assert.match(stderr, /WARN.*append_failure/)
   assert.match(stderr, /INFO.*text/)
   assert.doesNotMatch(stderr, /SECRET|invalid/)
+  tracker.record('route-0', 'text', 'safe:4', true)
+  at += 30_000
+  tracker.snapshot()
+  assert.equal(stderr.split('\n').filter(Boolean).length, 4, 'periodic status flushes a coalesced recovery without requiring more traffic')
   const merged = mergeCaptureOutcomes(tracker.snapshot(), [{ route: 'route-0', observed: Infinity, failed: NaN, persisted: -1, reasons: { text: 9e99, append_failure: NaN, arbitrary: 200 }, reason: 'arbitrary', prompt: 'SECRET' }])
   const summary = /** @type {any} */ (merged[0])
   assert.equal(summary.observed, 0x7fffffff)

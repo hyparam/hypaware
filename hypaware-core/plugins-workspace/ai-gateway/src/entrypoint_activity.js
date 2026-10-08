@@ -136,6 +136,16 @@ export function createCaptureOutcomes(routes) {
     entries.set(route, { route, observed: 0, persisted: 0, failed: 0, reasons: {}, reported_at: 0 })
   }
   const mirror = getLogger('ai-gateway-capture', { mirrorStderr: true })
+  /** @param {CaptureOutcomeEntry} entry @param {number} at @param {string} [id] */
+  function report(entry, at, id) {
+    const reason = entry.reason
+    if (!reason || entry.reported_reason === reason || (entry.reported_at !== 0 && at - entry.reported_at < 30_000)) return
+    entry.reported_at = at
+    entry.reported_reason = reason
+    const fields = { operation: 'capture_outcome', route: entry.route, reason, ...(id ? { exchange_id: id } : {}) }
+    if (BENIGN_CAPTURE_REASONS.has(reason)) mirror.info('aigw.capture_outcome', fields)
+    else mirror.warn('aigw.capture_outcome', fields)
+  }
   return {
     /** @param {string} route @param {AiGatewayCaptureReason | 'observed'} reason @param {string} [id] @param {boolean} [persisted] */
     record(route, reason, id, persisted = false) {
@@ -152,15 +162,15 @@ export function createCaptureOutcomes(routes) {
       if (!persisted && (reason === 'text' || reason === 'media_omitted')) return
       entry.last_outcome = timestamp
       entry.reason = reason
-      if (entry.reported_reason !== reason && (entry.reported_at === 0 || at - entry.reported_at >= 30_000)) {
-        entry.reported_at = at
-        entry.reported_reason = reason
-        const fields = { operation: 'capture_outcome', route, reason, ...(safeId ? { exchange_id: safeId } : {}) }
-        if (BENIGN_CAPTURE_REASONS.has(reason)) mirror.info('aigw.capture_outcome', fields)
-        else mirror.warn('aigw.capture_outcome', fields)
-      }
+      report(entry, at, safeId)
     },
-    snapshot: () => [...entries.values()].map(({ reported_at, reported_reason, ...entry }) => ({ ...entry, reasons: { ...entry.reasons } })),
+    snapshot() {
+      // Existing periodic source status flushes the final coalesced transition,
+      // even if a single recovery was the last traffic. No timer or ledger.
+      const at = Date.now()
+      for (const entry of entries.values()) report(entry, at, entry.reason === 'text' || entry.reason === 'media_omitted' ? entry.persisted_id : BENIGN_CAPTURE_REASONS.has(entry.reason ?? '') ? undefined : entry.failed_id)
+      return [...entries.values()].map(({ reported_at, reported_reason, ...entry }) => ({ ...entry, reasons: { ...entry.reasons } }))
+    },
   }
 }
 
