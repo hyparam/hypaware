@@ -55,7 +55,7 @@ export function createStartSource(state) {
    * @returns {Promise<StartedSource>}
    */
   return async function startAiGatewaySource(ctx) {
-    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], caHosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} */
+    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], caHosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity>, recording?: { generation: string, recording: boolean } }} */
     const liveState = {
       rowsWritten: 0,
       exchangeBytes: 0,
@@ -223,7 +223,7 @@ export function createStartSource(state) {
  *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
- * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], caHosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity> }} liveState
+ * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined, interception: { fingerprint: string, hosts: string[], caHosts: string[], notAfter: string, certPath: string } | undefined, interceptionError: string | undefined, entrypoints: ReturnType<typeof createEntrypointActivity>, recording?: { generation: string, recording: boolean } }} liveState
  * @returns {Promise<StartedProxy | undefined>}
  */
 async function launchListener(ctx, state, liveState) {
@@ -302,7 +302,11 @@ async function launchListener(ctx, state, liveState) {
     yield* state.aliases?.keys() ?? []
   })())
   transport?.observeCapture?.((route, reason, id) => outcomes.record(route, reason, id))
-  const gate = createRecordingGate({ env: ctx.env, generation: transport?.generation })
+  const gate = createRecordingGate({
+    env: ctx.env,
+    generation: liveState.recording?.generation ?? transport?.generation,
+    recording: liveState.recording?.recording,
+  })
   const recorder = transport?.recorder ?? createRecorder({ redactHeaders: config.redactHeaders })
   const projector = createAiGatewayMessageProjector({
     gatewayId: config.gatewayId,
@@ -452,7 +456,17 @@ async function launchListener(ctx, state, liveState) {
     if (!endpoint || !transport.receive) throw new Error('gateway process endpoint unavailable')
     state.listen = endpoint
     const close = transport.receive(onExchangeFinished, (recording, signal, generation) => gate.refresh(recording, signal, generation), settleVerification)
-    return { ...endpoint, server: http.createServer(), stopped: Promise.resolve(), recordingDetails: () => ({ ...gate.snapshot(), capture_outcomes: outcomes.snapshot() }), stop: () => { gate.stop(); return close() } }
+    return {
+      ...endpoint, server: http.createServer(), stopped: Promise.resolve(),
+      recordingDetails: () => ({ ...gate.snapshot(), capture_outcomes: outcomes.snapshot() }),
+      stop() {
+        // @ref LLP 0474#recording [implements]: keep the accepted generation and off latch across source reload; the stopped gate still rejects old queued/parsing work
+        const current = gate.current()
+        liveState.recording = { generation: current.generation, recording: current.recording }
+        gate.stop()
+        return close()
+      },
+    }
   }
 
   // Proxy mode: mint the machine-local CA for exactly the hosts the routing

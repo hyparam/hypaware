@@ -14,6 +14,8 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
 import { aiGatewayTablePath, AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
+import { ollamaCaptureFromSnapshot } from '../../src/core/daemon/status.js'
+import { mergeCaptureOutcomes } from '../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js'
 import { requestOllamaVerification, VERIFY_PATH } from '../../src/core/control/client_recording.js'
 import { setGatewayProcessTransport, createCaptureSender, createCaptureReceiver } from '../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
@@ -28,7 +30,7 @@ function deferred() {
   const promise = new Promise(done => { resolve = () => done(undefined) })
   return { promise, resolve }
 }
-async function fixture(t, mode = 'inline') {
+async function fixture(t, mode = 'inline', allowUnsupported = false) {
   const home = temporaryDirectory('hyp-ollama-settlement-')
   const env = { ...isolatedClientEnv(process.env, home), HYP_HOME: home, HYP_CONFIG: path.join(home, 'hypaware-config.json') }
   let inference = 0
@@ -40,13 +42,14 @@ async function fixture(t, mode = 'inline') {
     for await (const chunk of req) raw += chunk
     const body = JSON.parse(raw)
     inference++
-    assert.equal(body.think, false)
+    if (req.url === '/api/generate') return res.end(JSON.stringify({ model: body.model, response: '', done: true, done_reason: 'load' }))
+    if (!allowUnsupported) assert.equal(body.think, false)
     assert.equal(body.stream, false)
     res.end(JSON.stringify({ model: body.model, done: true, message: { role: 'assistant', content: 'OK' } }))
   })
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', () => resolve(undefined)))
   const address = /** @type {AddressInfo} */ (upstream.address())
-  const config = { version: 2, auto_update: false, plugins: [
+  const config = { version: /** @type {const} */ (2), auto_update: false, plugins: [
     { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url: `http://127.0.0.1:${address.port}` }] } },
     { name: '@hypaware/ollama' },
   ] }
@@ -335,10 +338,10 @@ for (const reattach of [false, true]) test('detach during admitted flush cannot 
   const off = /** @type {any} */ (structuredClone(f.config))
   off.plugins[1] = { name: '@hypaware/ollama', recording: false }
   await fs.writeFile(f.env.HYP_CONFIG, JSON.stringify(off))
-  assert.equal((await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', body: '{"recording":false}' })).status, 200)
+  assert.equal((await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"recording":false}' })).status, 200)
   if (reattach) {
     await fs.writeFile(f.env.HYP_CONFIG, JSON.stringify(f.config))
-    assert.equal((await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', body: '{"recording":true}' })).status, 200)
+    assert.equal((await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"recording":true}' })).status, 200)
   }
   release.resolve()
   const result = await pending
@@ -502,4 +505,53 @@ test('representative backlog and hooks use the same full-flush work as direct ba
     cpuMs: (cpu.user + cpu.system) / 1000, elapsedMs: performance.now() - started, heapBeforeBytes: heapBefore, peakHeapBytes: peakHeap, peakRssBytes: peakRss }))
   assert.equal(hookRows, rows)
   assert.equal((await f.kernel.storage.pendingInfo(table)).pending, false)
+})
+
+// @ref LLP 0474#diagnostics [tests]: benign provider control is not recovery from a capture failure in either heap
+for (const mode of ['inline', 'split']) test('source failure reason survives load control until fresh persistence or a new failure: ' + mode, async t => {
+  const f = await fixture(t, mode, true)
+  async function summary() {
+    const gateway = await f.kernel.sources.status('ai-gateway')
+    assert.ok(gateway?.details)
+    const recorded = mode === 'split' ? await f.processing.status() : gateway
+    assert.ok(recorded?.details)
+    const outcomes = mergeCaptureOutcomes(recorded.details.capture_outcomes, gateway.details.capture_outcomes)
+    const snapshot = { ...f.pid, state: /** @type {const} */ ('healthy'), healthyAt: f.pid.startedAt, uptimeMs: Date.now() - Date.parse(f.pid.startedAt), sinks: [], sources: [{ name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: /** @type {const} */ ('started'), details: { ...gateway.details, capture_outcomes: outcomes, capture_ready: true } }] }
+    const entry = /** @type {any} */ (outcomes.find(entry => entry.route === 'ollama-native'))
+    assert.ok(entry)
+    return { status: ollamaCaptureFromSnapshot(f.config, snapshot, f.pid), entry }
+  }
+  async function request(route, body) {
+    const response = await fetch(f.root + '/ollama/api/' + route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    assert.equal(response.status, 200)
+    await response.text()
+    await new Promise(resolve => setTimeout(resolve, 30))
+  }
+  await request('chat', { model: 'tiny:local', messages: [{ role: 'user', content: 'unsupported' }], think: true, stream: false })
+  const failed = await summary()
+  assert.equal(failed.status.reason, 'unsupported_shape')
+  assert.equal(failed.status.state, 'failed')
+  for (let i = 0; i < 3; i++) await request('generate', { model: 'tiny:local', prompt: '', stream: false })
+  const benign = await summary()
+  assert.equal(benign.status.state, 'failed')
+  assert.equal(benign.status.reason, 'unsupported_shape')
+  assert.equal(benign.status.next, failed.status.next)
+  assert.equal(benign.entry.last_failed, failed.entry.last_failed)
+  assert.equal(benign.entry.failed_id, failed.entry.failed_id)
+  assert.equal(benign.entry.last_outcome, failed.entry.last_outcome)
+  assert.equal(benign.entry.reasons.load_unload, 3)
+  assert.equal(benign.entry.persisted, 0)
+  const result = await f.verify()
+  assert.equal(result.code, 0, result.error + result.output)
+  const recovered = await summary()
+  assert.equal(recovered.status.state, 'persisted')
+  assert.equal(recovered.status.reason, null)
+  assert.equal(recovered.entry.reason, 'text')
+  assert.ok(recovered.entry.last_persisted > failed.entry.last_failed)
+  await request('chat', { messages: [{ role: 'user', content: 'invalid model' }], stream: false })
+  const newer = await summary()
+  assert.equal(newer.status.state, 'failed')
+  assert.equal(newer.status.reason, 'invalid_request')
+  assert.ok(newer.entry.last_failed > recovered.entry.last_persisted)
+  assert.notEqual(newer.entry.failed_id, failed.entry.failed_id)
 })

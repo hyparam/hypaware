@@ -160,6 +160,9 @@ export function createCaptureOutcomes(routes) {
       if (persisted) { entry.persisted = count(entry.persisted); entry.last_persisted = timestamp; entry.persisted_id = safeId }
       if (!BENIGN_CAPTURE_REASONS.has(reason)) { entry.failed = count(entry.failed); entry.last_failed = timestamp; entry.failed_id = safeId }
       if (!persisted && (reason === 'text' || reason === 'media_omitted')) return
+      // @ref LLP 0474#diagnostics [implements]: benign traffic is not recovery; equal timestamp append/failure remains conservatively failed
+      if (entry.reason && !BENIGN_CAPTURE_REASONS.has(entry.reason) && BENIGN_CAPTURE_REASONS.has(reason)
+        && (!persisted || timestamp <= (entry.last_failed ?? ''))) return
       entry.last_outcome = timestamp
       entry.reason = reason
       report(entry, at, safeId)
@@ -203,6 +206,14 @@ export function mergeCaptureOutcomes(recorded, live) {
           merged[key] = entry[key]
           if (idKey) merged[idKey] = entry[idKey]
         }
+      }
+      // @ref LLP 0474#diagnostics [implements]: terminal stamps across both heaps decide recovery, never a newer benign forwarding outcome
+      const previousFailure = typeof previous.reason === 'string' && !BENIGN_CAPTURE_REASONS.has(previous.reason) && typeof previous.last_failed === 'string'
+      const entryFailure = typeof entry.reason === 'string' && !BENIGN_CAPTURE_REASONS.has(entry.reason) && typeof entry.last_failed === 'string'
+      const failure = entryFailure && (!previousFailure || String(entry.last_failed) > String(previous.last_failed)) ? entry : previousFailure ? previous : undefined
+      if (failure && String(failure.last_failed) >= String(merged.last_persisted ?? '')) {
+        merged.reason = failure.reason
+        merged.last_outcome = failure.last_outcome
       }
       // Histories overlap at raw admission/projection; counts are observed
       // lower bounds, not a sum pretending to be a durable request ledger.

@@ -1,6 +1,7 @@
 // @ts-check
 
 /** @import { StartedSource } from '../../hypaware-plugin-kernel-types.js' */
+/** @import { GatewayProcessTransport } from '../../hypaware-core/plugins-workspace/ai-gateway/src/types.js' */
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -12,6 +13,7 @@ import { createGatewayState, createAiGatewayApi } from '../../hypaware-core/plug
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 import { createOllamaExchangeProjector } from '../../hypaware-core/plugins-workspace/ollama/src/projector.js'
 import { createCaptureReceiver, createCaptureSender, setGatewayProcessTransport } from '../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
+import { createRecordingControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/recording.js'
 import { ollamaNativeRoute } from '../../hypaware-core/plugins-workspace/ollama/src/setup.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 
@@ -100,15 +102,18 @@ async function fixture(mode = 'inline') {
   assert.ok(details)
   /** @type {StartedSource | undefined} */
   let processing
+  /** @type {GatewayProcessTransport | undefined} */
+  let processingTransport
   if (mode === 'split') {
-    setGatewayProcessTransport({ role: 'processing', generation: /** @type {string} */ (details.recording_generation),
+    processingTransport = { role: 'processing', generation: /** @type {string} */ (details.recording_generation),
       endpoint: { host: /** @type {string} */ (details.host), port: /** @type {number} */ (details.port) },
       receive(onExchange, refreshRecording) {
         receiver = createCaptureReceiver({ onExchange, refreshRecording, send: frame => sender.message(frame) })
         sender.message({ type: 'gateway.capture_ready' })
         return () => receiver?.close() ?? Promise.resolve()
       },
-    })
+    }
+    setGatewayProcessTransport(processingTransport)
     processing = await createStartSource(state)(ctx)
     setGatewayProcessTransport(undefined)
   }
@@ -116,11 +121,16 @@ async function fixture(mode = 'inline') {
   /** @param {boolean} recording */
   const barrier = async recording => {
     await policy({ name: '@hypaware/ollama', recording })
-    const response = await fetch(root + '/_hypaware/recording/ollama', { method: 'POST', body: JSON.stringify({ recording }) })
+    const response = await fetch(root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ recording }) })
     return { status: response.status, body: await response.json() }
   }
   return {
     root, rows, source, processing, policy, home, configPath, ctx, arrived, release, appendStarted, appendRelease, barrier, parseStarted, parseRelease, sender,
+    async reloadProcessing() {
+      setGatewayProcessTransport(processingTransport)
+      try { await processing?.reload?.(ctx) }
+      finally { setGatewayProcessTransport(undefined) }
+    },
     holdParse() { holdParse = true },
     queue() { queue = true },
     flush() { queue = false; for (const frame of frames.splice(0)) receiver?.message(frame) },
@@ -257,7 +267,7 @@ test('repeated detach and source reload preserve off; raw disk enable alone does
     assert.match(await request(), /answer/)
     await tick()
     assert.equal(f.rows.length, 0)
-    assert.equal((await fetch(root + '/_hypaware/recording/ollama', { method: 'POST', body: '{"recording":true}' })).status, 200)
+    assert.equal((await fetch(root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"recording":true}' })).status, 200)
     await request()
     await tick()
     assert.equal(f.rows.length, 2)
@@ -307,9 +317,9 @@ for (const mode of ['inline', 'split']) test('disconnect releases one bounded ba
     await f.appendStarted.promise
     await f.policy({ name: '@hypaware/ollama', recording: false })
     const controller = new AbortController()
-    const lost = fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', body: '{"recording":false}', signal: controller.signal }).catch(() => undefined)
+    const lost = fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"recording":false}', signal: controller.signal }).catch(() => undefined)
     await tick()
-    const busy = await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', body: '{"recording":false}' })
+    const busy = await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"recording":false}' })
     assert.equal(busy.status, 409)
     await busy.text()
     assert.ok(f.sender.snapshot().recording_waiters <= 1)
@@ -317,7 +327,7 @@ for (const mode of ['inline', 'split']) test('disconnect releases one bounded ba
     await lost
     await tick()
     assert.equal(f.sender.snapshot().recording_waiters, 0)
-    const pending = fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', body: '{"recording":false}' }).then(async response => { await response.text(); return response.status })
+    const pending = fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"recording":false}' }).then(async response => { await response.text(); return response.status })
     await tick()
     const stopped = f.source.stop()
     assert.equal(await pending, 503)
@@ -331,7 +341,7 @@ test('control body and method are bounded before attempting refresh', async () =
   const f = await fixture()
   try {
     for (const [body, status] of /** @type {[string, number][]} */ ([['x'.repeat(257), 413], ['{"recording":false,"extra":true}', 400], ['{}', 400]])) {
-      const response = await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', body })
+      const response = await fetch(f.root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body })
       assert.equal(response.status, status)
       await response.text()
     }
@@ -401,4 +411,121 @@ for (const mode of ['inline', 'split']) test('one append stamps exactly one pers
     assert.equal(entry.failed, 0)
     assert.match(entry.persisted_id, /^[a-f0-9]{32}$/)
   } finally { await f.close() }
+})
+
+// @ref LLP 0474#recording [tests]: reload keeps explicit resume while old queued exchanges remain invalid
+test('processing source reload preserves resumed generation and rejects queued pre-detach raw frames', async () => {
+  const f = await fixture('split')
+  try {
+    f.queue()
+    f.release.resolve()
+    await f.request()
+    assert.equal((await f.barrier(false)).status, 200)
+    const resumed = await f.barrier(true)
+    assert.equal(resumed.status, 200)
+    assert.ok(resumed.body && typeof resumed.body === 'object' && 'generation' in resumed.body)
+    await f.reloadProcessing()
+    assert.equal((await f.processing?.status?.())?.details?.recording_generation, resumed.body.generation)
+    f.flush()
+    await tick()
+    assert.equal(f.rows.length, 0)
+    await f.request()
+    await tick()
+    assert.equal(f.rows.length, 2)
+  } finally { await f.close() }
+})
+
+test('processing reload cannot resume an off gate after a saved-policy enable without attach', async () => {
+  const f = await fixture('split')
+  try {
+    f.release.resolve()
+    assert.equal((await f.barrier(false)).status, 200)
+    await f.policy({ name: '@hypaware/ollama', recording: true })
+    await f.reloadProcessing()
+    assert.equal((await f.processing?.status?.())?.details?.recording_enabled, false)
+    assert.match(await f.request(), /answer/)
+    await tick()
+    assert.equal(f.rows.length, 0)
+    assert.equal((await f.barrier(true)).status, 200)
+    await f.request()
+    await tick()
+    assert.equal(f.rows.length, 2)
+  } finally { await f.close() }
+})
+
+// @ref LLP 0474#recording [tests]: local trust and JSON admission precede all recording state changes
+test('recording control rejects Host, Origin, path and content-type violations before mutation', async () => {
+  const f = await fixture()
+  try {
+    const before = (await f.source.status?.())?.details
+    const saved = await fs.readFile(f.configPath, 'utf8')
+    const cases = [
+      { headers: { origin: 'http://untrusted.example' }, status: 403 },
+      { headers: { origin: 'null' }, status: 403 },
+      { headers: { host: 'untrusted.example' }, status: 421 },
+      { headers: { host: '127.0.0.1:1' }, status: 403 },
+      { headers: { host: 'user@localhost:' + new URL(f.root).port }, status: 421 },
+      { suffix: '?extra=1', status: 403 },
+      { noContentType: true, status: 415 },
+      { headers: { 'content-type': 'text/plain' }, status: 415 },
+      { headers: { 'content-type': 'application/x-www-form-urlencoded' }, status: 415 },
+      { headers: { 'content-type': 'application/json; charset=iso-8859-1' }, status: 415 },
+    ]
+    for (const entry of cases) {
+      const status = await new Promise((resolve, reject) => {
+        const request = http.request(f.root + '/_hypaware/recording/ollama' + (entry.suffix ?? ''), {
+          method: 'POST', headers: entry.noContentType ? {} : { 'content-type': 'application/json', ...entry.headers },
+        }, response => {
+          response.resume()
+          response.once('end', () => resolve(response.statusCode))
+        })
+        request.once('error', reject)
+        request.end('{"recording":false}')
+      })
+      assert.equal(status, entry.status, JSON.stringify(entry))
+      const after = (await f.source.status?.())?.details
+      assert.equal(after?.recording_generation, before?.recording_generation)
+      assert.equal(after?.recording_enabled, true)
+      assert.equal(await fs.readFile(f.configPath, 'utf8'), saved)
+    }
+    f.release.resolve()
+    await f.request()
+    await tick()
+    assert.equal(f.rows.length, 2)
+    assert.equal((await f.barrier(false)).status, 200)
+    await f.policy({ name: '@hypaware/ollama', recording: true })
+    assert.equal((await fetch(f.root + '/_hypaware/recording/ollama', {
+      method: 'POST', headers: { 'content-type': 'Application/JSON; charset=UTF-8' }, body: '{"recording":true}',
+    })).status, 200)
+  } finally { await f.close() }
+})
+
+test('recording control refuses remote peers and non-origin request targets before refresh', async t => {
+  let calls = 0
+  const handler = createRecordingControlHandler({ async refresh() { calls++; return {} } })
+  const server = http.createServer((req, res) => handler.handle(req, res))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(undefined)))
+  t.after(async () => { handler.close(); await new Promise(resolve => server.close(() => resolve(undefined))) })
+  const address = server.address()
+  assert.ok(address && typeof address === 'object')
+  const root = `http://127.0.0.1:${address.port}`
+  for (const target of [root + '/_hypaware/recording/ollama', '/_hypaware/recording/ollama?extra=1']) {
+    const status = await new Promise(resolve => {
+      const req = http.request(root, { method: 'POST', path: target, headers: { 'content-type': 'application/json' } }, res => {
+        res.resume()
+        res.once('end', () => resolve(res.statusCode))
+      })
+      req.end('{"recording":false}')
+    })
+    assert.equal(status, 403)
+  }
+  server.removeAllListeners('request')
+  server.on('request', (req, res) => {
+    Object.defineProperty(req.socket, 'remoteAddress', { value: '203.0.113.4' })
+    handler.handle(req, res)
+  })
+  const response = await fetch(root + '/_hypaware/recording/ollama', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"recording":false}' })
+  assert.equal(response.status, 403)
+  await response.text()
+  assert.equal(calls, 0)
 })

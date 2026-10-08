@@ -227,6 +227,7 @@ test('capture evidence retains only known routes and reasons, capped scalar summ
   assert.match(stderr, /WARN.*append_failure/)
   assert.match(stderr, /INFO.*text/)
   assert.doesNotMatch(stderr, /SECRET|invalid/)
+  at += 1 // A recovery must be strictly newer than the preceding failure.
   tracker.record('route-0', 'text', 'safe:4', true)
   at += 30_000
   tracker.snapshot()
@@ -240,4 +241,57 @@ test('capture evidence retains only known routes and reasons, capped scalar summ
   assert.equal(summary.reasons.arbitrary, undefined)
   assert.doesNotMatch(JSON.stringify(merged), /SECRET|prompt|NaN|Infinity/)
   assert.equal(mergeCaptureOutcomes(tracker.snapshot(), Array.from({ length: 40 }, (_, index) => ({ route: 'more-' + index }))).length, 32)
+})
+
+// @ref LLP 0474#diagnostics [tests]: one bounded terminal reason survives benign observations; equal timestamp persistence is conservative failure
+test('capture reason preserves actionable failure until strictly newer append persistence', async t => {
+  const { createCaptureOutcomes } = await import('../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js')
+  let at = Date.parse('2026-10-08T04:00:00Z')
+  t.mock.method(Date, 'now', () => at)
+  const tracker = createCaptureOutcomes(['ollama-native'])
+  tracker.record('ollama-native', 'unsupported_shape', 'failure:1')
+  const failed = tracker.snapshot()[0]
+  tracker.record('ollama-native', 'text', 'same-stamp', true)
+  assert.equal(tracker.snapshot()[0].reason, 'unsupported_shape')
+  for (let i = 0; i < 1000; i++) {
+    at++
+    tracker.record('ollama-native', 'observed')
+    tracker.record('ollama-native', 'load_unload', 'benign')
+    tracker.record('ollama-native', 'session_ignored', 'benign')
+  }
+  const benign = tracker.snapshot()[0]
+  assert.equal(benign.reason, 'unsupported_shape')
+  assert.equal(benign.last_failed, failed.last_failed)
+  assert.equal(benign.last_outcome, failed.last_outcome)
+  assert.equal(benign.failed_id, 'failure:1')
+  assert.equal(benign.reasons.load_unload, 1000)
+  assert.equal(benign.observed, 1000)
+  assert.equal(tracker.snapshot().length, 1)
+  at++
+  tracker.record('ollama-native', 'text', 'success:1', true)
+  const recovered = tracker.snapshot()[0]
+  assert.equal(recovered.reason, 'text')
+  assert.ok(recovered.last_persisted && failed.last_failed && recovered.last_persisted > failed.last_failed)
+  at++
+  tracker.record('ollama-native', 'append_failure', 'failure:2')
+  assert.equal(tracker.snapshot()[0].reason, 'append_failure')
+  assert.equal(tracker.snapshot()[0].failed_id, 'failure:2')
+})
+
+test('split capture merge uses terminal failure and persistence stamps instead of benign traffic', async () => {
+  const { mergeCaptureOutcomes } = await import('../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js')
+  const failure = { route: 'ollama-native', failed: 1, last_failed: '2026-10-08T04:00:01.000Z', last_outcome: '2026-10-08T04:00:01.000Z', reason: 'unsupported_shape', failed_id: 'bad:1', reasons: { unsupported_shape: 1 } }
+  const benign = { route: 'ollama-native', last_outcome: '2026-10-08T04:00:02.000Z', reason: 'load_unload', reasons: { load_unload: 1 } }
+  for (const [a, b] of [[failure, benign], [benign, failure]]) {
+    const [entry] = mergeCaptureOutcomes([a], [b])
+    assert.equal(entry.reason, 'unsupported_shape')
+    assert.equal(entry.last_outcome, failure.last_outcome)
+    assert.equal(entry.failed_id, failure.failed_id)
+  }
+  for (const stamp of ['2026-10-08T04:00:01.000Z', '2026-10-08T04:00:03.000Z']) {
+    const persisted = { route: 'ollama-native', persisted: 1, last_persisted: stamp, last_outcome: stamp, reason: 'text', persisted_id: 'good:1' }
+    for (const [a, b] of [[failure, persisted], [persisted, failure]]) {
+      assert.equal(mergeCaptureOutcomes([a], [b])[0].reason, stamp === failure.last_failed ? 'unsupported_shape' : 'text')
+    }
+  }
 })

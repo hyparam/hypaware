@@ -7,6 +7,7 @@ import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
 
 import { RECORDING_TIMEOUT_MS } from '../../../../src/core/control/client_recording.js'
 import { VERIFY_PATH } from '../../../../src/core/control/client_recording.js'
+import { RECORDING_PATH } from '../../../../src/core/control/client_recording.js'
 export { RECORDING_ROUTE, RECORDING_PATH, RECORDING_TIMEOUT_MS } from '../../../../src/core/control/client_recording.js'
 
 /** @import { IncomingMessage, ServerResponse } from 'node:http' */
@@ -21,14 +22,14 @@ export function isOllamaCapture(input) {
  * appends. No request ledger survives settlement. Refresh closes admission
  * synchronously before awaiting storage; attach starts another generation.
  * @ref LLP 0474#recording [implements]: old streams cannot revive across detach and reattach; confirmed off drains admitted writes
- * @param {{ env: NodeJS.ProcessEnv, generation?: string }} opts
+ * @param {{ env: NodeJS.ProcessEnv, generation?: string, recording?: boolean }} opts
  */
 export function createRecordingGate(opts) {
   const read = createClientRecordingPolicyReader({ env: opts.env, plugin: '@hypaware/ollama' })
   const epoch = randomBytes(12).toString('hex')
   let serial = 0
   let generation = opts.generation ?? `${epoch}:${serial}`
-  let enabled = read().recording
+  let enabled = opts.recording !== false && read().recording
   let stopped = false
   let busy = false
   /** @type {Set<Promise<unknown>>} */
@@ -97,6 +98,16 @@ export function createRecordingControlHandler(opts) {
     /** @param {IncomingMessage} req @param {ServerResponse} res */
     handle(req, res) {
       const reply = (code, body) => { if (!res.destroyed && !res.writableEnded) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) } }
+      if (!isLocalControlRequest(req, RECORDING_PATH)) {
+        drainRequestBody(req, res)
+        reply(403, { reason: 'control_forbidden' })
+        return
+      }
+      if (req.method === 'POST' && !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '')) {
+        drainRequestBody(req, res)
+        reply(415, { reason: 'unsupported_content_type' })
+        return
+      }
       if (req.method !== 'POST' || active) {
         drainRequestBody(req, res)
         reply(active ? 409 : 405, { reason: active ? 'recording_busy' : 'method_not_allowed' })
@@ -152,6 +163,16 @@ export function createRecordingControlHandler(opts) {
   }
 }
 
+// @ref LLP 0476#control [implements]: both mutating local controls reject browser, rebinding and proxy targets before admission
+/** @param {IncomingMessage} req @param {string} path */
+function isLocalControlRequest(req, path) {
+  let host
+  try { host = new URL('http://' + req.headers.host) } catch { /* reject malformed authority */ }
+  return isLoopbackHost(req.socket.remoteAddress) && !!host && isLoopbackHost(host.hostname)
+    && !host.username && !host.password && !host.search && !host.hash && host.pathname === '/'
+    && Number(host.port || 80) === req.socket.localPort && req.headers.origin === undefined && req.url === path
+}
+
 /** @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js' */
 /** @type {WeakMap<ExtendedQueryStorageService, { done?: (reason: string) => void }>} */
 const verificationOperations = new WeakMap()
@@ -204,11 +225,7 @@ export function createVerificationControlHandler(opts) {
           res.end(JSON.stringify(body))
         }
       }
-      let host
-      try { host = new URL('http://' + req.headers.host) } catch { /* reject malformed authority */ }
-      if (!isLoopbackHost(req.socket.remoteAddress) || !host || !isLoopbackHost(host.hostname)
-        || host.username || host.password || host.search || host.hash || host.pathname !== '/' || Number(host.port || 80) !== req.socket.localPort
-        || req.headers.origin !== undefined || req.url !== VERIFY_PATH) {
+      if (!isLocalControlRequest(req, VERIFY_PATH)) {
         drainRequestBody(req, res)
         reply(403, { reason: 'control_forbidden' })
         return
