@@ -1,7 +1,7 @@
 # LLP 0476: Live-service settlement for an Ollama verification check
 
 **Type:** design
-**Status:** Draft
+**Status:** Active
 **Systems:** Cache, Query, Gateway, Daemon, Plugins
 **Author:** HypForge designer
 **Date:** 2026-10-08
