@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process'
 
 import { Attr, getKernelInstruments, SpanStatusCode, withSpan } from '../observability/index.js'
+import { captureGitOutput, GIT_OUTPUT_LIMIT } from './git_output.js'
 
 /**
  * @import { PluginLockEntry, PluginUpdateState } from '../../../hypaware-plugin-kernel-types.js'
@@ -286,10 +287,8 @@ function execGit(args) {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    /** @type {Buffer[]} */
-    const stdoutChunks = []
-    /** @type {Buffer[]} */
-    const stderrChunks = []
+    const stdout = captureGitOutput(child.stdout)
+    const stderr = captureGitOutput(child.stderr, true)
     let timedOut = false
     let settled = false
 
@@ -314,14 +313,13 @@ function execGit(args) {
       resolve(result)
     }
 
-    child.stdout?.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)))
-    child.stderr?.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)))
     child.on('error', () => finish({ code: -1, stdout: '', stderr: 'git binary unavailable' }))
     child.on('close', (code) => {
+      const stdoutFailed = code === 0 && stdout.overflowed()
       finish({
-        code: timedOut ? -1 : (code ?? -1),
-        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        code: timedOut || stdoutFailed ? -1 : (code ?? -1),
+        stdout: stdout.read(),
+        stderr: stdoutFailed ? `git stdout exceeded ${GIT_OUTPUT_LIMIT}-byte limit\n${stderr.read()}` : stderr.read(),
         ...(timedOut ? { timedOut: true } : {}),
       })
     })
