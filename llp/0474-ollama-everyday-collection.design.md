@@ -8,7 +8,7 @@
 **Depends-on:** sink-instance-bound-2226
 **Related:** LLP 0473, LLP 0468, LLP 0469, LLP 0130, LLP 0131, LLP 0183, LLP 0466, LLP 0038, LLP 0164, LLP 0313, LLP 0430, LLP 0471, LLP 0472
 **Extends:** LLP 0469 (native client routes, mixed content and production diagnostics), LLP 0183 (selected Ollama upstream preservation), LLP 0430 (this request's specific installed-client proof)
-**Extended-by:** LLP 0476 (#diagnostics: bounded cohort settlement and non-mutating verification read context)
+**Extended-by:** LLP 0476 (#diagnostics: live-service full flush and migration-disabled verification reader)
 
 @ref LLP 0473#requirements: complete installed discovery, routing, persistence and reversible recording
 @ref LLP 0469#exchange-scope: retain snapshot identities and temporary expansion state

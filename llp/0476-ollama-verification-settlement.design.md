@@ -1,4 +1,4 @@
-# LLP 0476: Bounded settlement for an Ollama verification check
+# LLP 0476: Live-service settlement for an Ollama verification check
 
 **Type:** design
 **Status:** Draft
@@ -6,235 +6,212 @@
 **Author:** HypForge designer
 **Date:** 2026-10-08
 **Related:** LLP 0473, LLP 0474, LLP 0475, LLP 0321, LLP 0322, LLP 0105, LLP 0038
-**Extends:** LLP 0474 (#diagnostics: storage-owned finite settlement and non-mutating query context), LLP 0475 (#t4: sequencing and proof)
+**Extends:** LLP 0474 (#diagnostics: existing-service full flush and migration-disabled verification reader), LLP 0475 (#t4: sequencing and proof)
 **Change-set:** ollama-everyday-collection, existing T4
-**Source-check:** source-check-T4-extension.json, 2026-10-08T01:05:49.804Z, unchanged HYP-71 revision/readiness/Phil owner
+**Source-check:** source-check-T4-reduced-scope.json, 2026-10-08T02:09:57.765908Z; unchanged HYP-71 scope/Ready/current Phil, same correction child
 
 @ref LLP 0473#requirements: keep the normal installed first persisted check and honest failure outcome
 @ref LLP 0474#diagnostics: success still requires fresh correlated query-visible request and completed response
 
-## Gap and decision {#decision}
+## Gap and reduced decision {#decision}
 
-At `250a91262046c2d1a3d13ee0cddc91debf637530`, query discovery and spool
-settlement precede signal linkage. Killing a writing worker can interrupt mutation
-lock publication or a commit before its spool checkpoint. Refresh never is read
-only at the query freshness step and misses new durable spool rows. Ordinary
-boot also migrates config/opt-outs and activates plugins with writable paths.
+At product base `250a91262046c2d1a3d13ee0cddc91debf637530`, new low-volume
+capture remains in spool until normal settlement. Query refresh never does not
+settle it, and discovery/settlement precedes signal linkage. A deadline must not
+kill a worker performing auto/always mutation. The current T4 reader uses
+createKernelRuntime without bootKernel or plugin activation; its concrete write
+hazard is resolveLayeredConfigForDaemon requesting grep migration.
 
-Forced gateway flush has one snapshot/drain, plus at most a second active
-rotation/drain under failure coalescing. It is not an infinite tail loop, but its
-shared current/legacy backlog and second-cohort growth have no fixed work cap.
-Read scope.from/to and pendingInfo preflight cannot establish a synchronized
-mutation frontier. Gateway settlement can invoke enrichers and fallback dedupe
-whose history reads are outside a spool-byte cap.
+Phil's actual-stop clarification (native inbound2dcea7f8153f8eebd783,
+U090FKDAP8W/1791424687.532229) allows recording to stop when HypAware stops.
+Owner T4-REDUCED-SCOPE-DISPOSITION.md and steward
+T4-STOP-INTENT-REASSESSMENT.md choose the smaller existing-service path. This
+revises the unaccepted Draft at `9aef6ea64ffffffa845dd1773cb80c9c95b01a31`.
+The partial-spool frontier, fixed mutation-input ceilings, alternate reader
+framework and mandatory drain across actual stop are withdrawn. Prior readbacks
+remain historical evidence, not review of these revised bytes.
 
-Add a private bounded cohort operation on the existing processor-owned storage
-service, separate from strict full flush. Confirm using a genuinely non-mutating
-context over existing dataset/query/visibility machinery. This is a technical
-extension of the same feature, not another change set, request, task graph,
-listener, cache crash repair or general query/force-flush policy change.
+Request ordinary full flush from the current live service and confirm through
+the existing query reader with migration disabled. Keep actual stop/orphan policy,
+storage semantics and fresh visible committed-pair success. This extends original
+T4 only, with no new request, plan, graph, listener or repair framework.
 
-## Cohort admission and storage {#cohort}
+## Existing full flush and its cost {#cohort}
 
-The server fixes dataset ai_gateway_messages and derives its current
-aiGatewayTablePath (v5). It never takes a table path, SQL or dataset from a caller,
-and does not settle legacy v4 or call flushAll. The shared v5 cohort may include
-earlier rows from other clients; it is not a date-scoped or Ollama-only mutation.
-Normal committed history remains intact. State that scope accurately.
+The service fixes dataset ai_gateway_messages and derives current aiGatewayTablePath
+(proxy_messages_v5) internally from the actual storage instance. Invoke its existing
+flushTable(tablePath, { force: true }); never flushAll, flushDataset, accept caller
+table paths/SQL or create a second storage process. It does not settle legacy v4.
+The current table contains earlier and other-client rows: shared full refresh,
+not time-scoped or Ollama-only mutation.
 
-Use the SAME storage/spool instance and per-table flush/write ownership as
-ordinary append, size-threshold flush and sinks. Add a private admission that
-refuses contention rather than adding another flush promise to the mutex queue.
-Hold synchronization while freezing and validating the prospective cohort, then
-rotate active once using the existing durable format. Admit no second active
-rotation and no newly arrived file. Later appends stay outside the owned frontier.
-Detect a changed identity/size or foreign writer and refuse, not silently expand.
-Pin each admitted file identity and byte extent; read only that extent, preserving
-any post-frontier suffix with its existing progress. The bounded operation does
-not unlink source files: retain completed prefix checkpoints for ordinary full
-flush cleanup, avoiding a stat/unlink race against a foreign append. File/entry
-caps include retained completed files; excessive residue gives actionable refusal,
-not a new cleanup sweep or indefinite rotation. Do not claim a new cross-process
-spool-writer protocol or support concurrent foreign force writers.
+Reuse ordinary flush locks, hooks, sequence allocation, purge/partition checks,
+commit-before-progress checkpoints and full success/failure stamps without changes.
+A full success may clear the ordinary failure stamp and advance full-flush freshness.
+Keep the existing finite one-pass drain and possible second active rotation/drain
+after recovery from a standing failure. No partial-success stamp is added.
 
-Initial fixed ceilings: 16 MiB encoded cohort, eight recognized spool files,
-8192 total rows, existing bounded batch readers with at most one decoded batch
-retained. Enumerate the fixed spool directory incrementally with a finite entry
-budget of 64 directory entries and 16 MiB per line; fail on excess/unknown
-ownership or planted paths instead of allocating
-a whole inventory. Bound each input line before JSON parsing. Validate file and
-row limits under ownership, not a preceding pendingInfo read. Implementation
-must record representative size/CPU/heap and may tighten these ceilings without
-excluding the fixed tiny check; increasing them requires design readback.
+Work is proportional to current-v5 backlog and can invoke enrichers and fallback/
+history dedupe. Finite passes do not imply fixed work, duration or RSS. The withdrawn
+16 MiB/eight-file/8192-row/64-entry frontier is not a requirement or admission claim;
+pendingInfo is not synchronized admission. Query time predicates bound targeted
+confirmation reads, not shared storage writes. Explain that explicit verification
+can settle earlier/other-client pending rows through ordinary refresh, and configured
+sinks may export the disclosed fixed check.
 
-Preflight every admitted row before cache commits. Reuse the gateway's existing
-settlement-selection logic: refuse a cohort needing fallback-history dedupe or a
-registered enricher's external/history work. Native null-cwd Ollama rows with no
-enricher remain admissible. Pin settlement-hook/enricher registration generation
-at preflight and revalidate eligibility before admitting each checkpoint unit;
-reload/reconciliation invalidates it and returns partial/unconfirmed rather than
-allowing new unbounded hook work. Do not skip enrichment, alter rows, invent cwd, drop
-other clients or disable privacy filtering to make the check pass. Existing
-purge/withhold and partition validation still apply at the storage write boundary.
-Normal tiny native checks beside retained committed history and eligible concurrent
-other-client traffic MUST pass; an implementation that always refuses is invalid.
+This is user-invoked, with no background sweep or status-triggered work. Measure
+representative small and backlogged tables, including hooks, against direct ordinary
+full flush at the same seam: rows/bytes/backlog, CPU, peak heap and latency, plus
+added timers/listeners/control state. Return harmful added load before adding any
+frontier or changing behavior. Performance remains a product requirement.
 
-The unit is one streamFlushFile yielded batch, followed by the existing
-storage appendChunk across its destination groups, then writeProgress(resumeOffset).
-Use at most 256 rows/1 MiB per yielded batch; one indivisible encoded row may use
-the 16 MiB line cap and cannot be interrupted mid-commit. Reuse stable ingest
-sequence allocation and existing append/partition guards. A stop request prevents starting another unit; a unit
-already admitted finishes commit AND progress publication before releasing its
-ownership. Unfinished durable data stays for normal recovery/flush. Budget or
-semantic refusal before mutation leaves rows/checkpoints/stamps unchanged. Partial
-cohort completion never claims full refresh. A cohort success does not clear the
-ordinary full-flush failure stamp or advance lastFlushAt to hide excluded work;
-write failures retain the existing bounded failure evidence. Ordinary auto/always,
-coalesced retry and sink force semantics remain unchanged.
+@ref LLP 0321#decision: use existing strict full forced-refresh semantics
+@ref LLP 0322#coalesce-the-retry: retain ordinary second-active-cohort recovery and stamps
 
-@ref LLP 0321#decision: a bounded verification operation cannot weaken strict forced refresh
-@ref LLP 0322#coalesce-the-retry: ordinary force still drains its second active cohort after successful recovery
+## Trusted control and service ownership {#control}
 
-## Control, ownership and lifecycle {#lifecycle}
+Use one fixed reserved local gateway control route/current owned processor IPC,
+or the same callback on actual in-process storage. Advertise through existing
+source control/details, with no persisted config/schema or new listener.
+Validate current PID/run/source, recording generation, operation ID, loopback
+peer, direct origin-form, Host and absence of browser Origin. Refuse absolute-form,
+tunnels, redirects, remote peers, stale/replaced identity and unknown keys. Cap
+body at 256 bytes and receipt at 1 KiB, with bounded operation/check metadata only:
+no credentials, SQL, paths or conversation content. Never proxy/capture the receipt.
 
-Advertise one fixed reserved local control route on the current live gateway;
-bridge to its currently owned processor IPC. In-process mode invokes the same
-storage operation directly. Validate fresh PID/run/source identity, operation ID,
-loopback peer, direct origin-form, Host and absence of browser Origin. Refuse
-absolute-form/tunnel access, redirects, remote peers and unknown request keys.
-Cap body at 256 bytes and response at 1 KiB; allow only bounded check correlation/time
-metadata. No credential, SQL/path/config authority or conversation payload in
-the receipt. A receipt proves scoped settlement only and is never proxied/captured.
+Retain one requested-operation latch per ACTUAL storage/service process lifetime,
+not per source/control-handler closure. Acquire before invoking existing flush,
+including time queued under ordinary storage locking. Reload/reconciliation reuses
+that latch; replacing a handler cannot discard mutation ownership. While pending,
+return busy without another flush, queued rerun, growing promise/listener list or
+token history. Other ordinary callers retain existing scheduling: this adds at most
+one requested full-flush promise to it.
 
-One requested settlement globally per owning processor/storage service, no pending
-rerun queue or permanent token ledger. Caller timeout/disconnect cancels its sole
-bounded waiter, NOT mutation ownership. Keep the writer slot until actual safe
-settlement, returning busy to later callers. Lost/replaced-child receipts cannot
-release that slot or satisfy another operation. Failure paths clear caller timers,
-listeners and bounded IPC state; continuing work retains only its finite cohort.
+Caller timeout/disconnect removes the bounded waiter, not the service's flush
+promise. Keep one operation record until that actual promise resolves/rejects or
+the actual service exits. Late receipts cannot produce success. Guard release by
+service/operation identity; stale/replaced-child or handler receipts cannot release
+another operation. Clear caller timers/listeners/IPC waiter state on every path;
+no accumulated completion subscribers.
 
-Refuse new admission when recording is off, source policy is unreadable, processor
-is stale/unavailable or shutdown began. Never attach, restart, change policy or
-rotate a capture generation. Already owned pre-detach spool may become queryable
-as history; it cannot resurrect suppressed captures. Off/run/generation changes
-before final confirmation suppress command success and any current-health claim.
-Recording barriers drain capture append ownership, not a full historical flush.
+Reject new admission when recording is off, policy unreadable, shutdown begun,
+or processor/run/generation unavailable or stale. Never attach, restart, resume,
+change policy or rotate capture generation. A live service finishing an owned
+flush after detach can expose previously captured history; it does not resume
+recording. Capture append barriers remain separate from historical full settlement.
+Final success requires fresh run/recording/generation agreement and the committed pair.
 
-Shutdown stops settlement admission and disconnects caller receipts immediately.
-Preserve driver.stop and sink abort/close initiation BEFORE awaiting this work.
-The storage-owned stop flag cancels directory/preflight read streams before any
-commit and prevents iterator.next from beginning another batch. After appendChunk
-starts, join that batch AND writeProgress in the private owner.close promise;
-caller cancellation cannot abort either. Source.stop joins this promise after
-stopping admission; processor handle.stop joins source stop. Receiver.close alone
-does not join storage. Gateway forwarding, heartbeat and unrelated sink admission
-never await verification settlement on their hot paths.
+## Caller deadline versus actual stop {#lifecycle}
 
-**Unresolved lifecycle decision:** processor.js exits immediately on IPC
-disconnect, so the join chain above is bypassed. gateway.js stop/replacement kills
-its processor after 4000 ms. A finite input cohort cannot guarantee stalled storage
-commit plus checkpoint completes in 4000 ms. Keeping both ordinary policies unchanged
-therefore cannot establish safe supported disconnect/stop for an active mutation.
-The concrete choice is an operation-aware disconnect/drain transition and explicit
-graceful-versus-forced result inside the existing four-second ceiling, or a different
-persistence path. The transition makes the join reachable; it cannot guarantee
-safe drain when the forced deadline expires during stalled I/O. Its effect on
-the existing no-orphan and stop guarantees needs
-owner/steward disposition; it is not settled by this Draft. No timeout change,
-lock recovery, orphan writer, crash replay repair or product implementation is
-authorized here. External kill remains a limitation, never proof of ordinary
-drain safety. Until this decision and its executable proof are resolved, the
-settlement seam is not actionable for activation.
+A 30-second caller timeout must not terminate the live service mutating storage.
+Only the genuinely read-only query child is disposable. Live service work can
+finish after the caller receives unconfirmed; its latch survives source replacement.
 
-@ref LLP 0038#lifecycle-and-operator-behavior: preserve split ownership and the existing final stop ceiling
-@ref LLP 0474#recording: off/generation control remains independent of settling previously captured history
+Actual HypAware stop, processor loss or supervisor disconnect is different.
+Preserve processor.js immediate exit on IPC disconnect, gateway.js 4000 ms
+stop/replacement ceiling, current sink-close initiation/order and no-orphan policy.
+The check can be interrupted and must report unconfirmed. Do not restart, retain
+an orphan writer, wait beyond the deadline or promise admitted commit/checkpoint
+drain across stop. No new stop/join policy is added.
 
-## Non-mutating read context and result {#confirmation}
+Baseline ordinary storage has external-termination lock/checkpoint limits. Phil's
+clarification does not authorize corruption or assert crash safety. Compare retained
+spool/data/locks and restart behavior against baseline termination at the IDENTICAL
+existing flush seam. Only a demonstrated added hazard creates repair scope; do not
+require or silently implement general cache/lock/crash recovery. Forced exit or
+unconfirmed cannot count as completed flush, verify or recording-barrier success.
 
-Use the existing createQueryRegistry, aiGatewayDatasetRegistration(undefined),
-createQueryStorageService read methods and executeQuerySql with refresh never.
-Construct a single-purpose context instead of invoking bootKernel, plugin
-activation, createPluginPaths or source/sink starts in the killable worker.
-Read manifests/catalog and layered configuration using existing validation/merge
-helpers with migration disabled; verify the configured owning dataset/plugin is
-enabled and compatible. Resolve the same actual HYP_HOME/config/callerCwd and
-ordinary visibility policy, no includeLocalOnly override or raw cache shortcut.
-Refuse unknown/unreadable state rather than guessing a default install or policy.
+@ref LLP 0038#lifecycle-and-operator-behavior: retain existing supervisor and ultimate stop behavior
+@ref LLP 0474#recording: detach/off barriers and old-generation suppression remain settled
 
-Keep the ordinary shared query wrapper and dataset discovery/source creation,
-including purge visibility. A read-only storage facade refuses every mutator
-and exposes only required methods. Constructors, imports, metadata reads and
-cleanup must be demonstrated non-mutating; refresh never alone is insufficient.
-No arbitrary installed plugin entrypoint runs. This changes only the verification
-worker construction, not ordinary boot/migrations/query behavior. Parent owns
-worker termination/reaping on every path, returning bounded metadata only.
+## Existing migration-disabled reader and confirmation {#confirmation}
 
-Keep the separately bounded 30-second inference phase and disclosed fixed prompt.
-One monotonic 30-second persistence budget includes all control, boot/discovery,
-at most six sequential query reads and bounded retry waits. Use both scope.from/to
-and SQL time predicates, including midnight; cap result rows/bytes and worker
-heap work. HTTP can finish before append: allow at most six sequential cohort
-admission attempts, only after the preceding owner actually settled, sharing
-that total budget. Busy consumes no repeated polling loop; bounded waits or an
-actionable non-success are required. Never repeat inference or reset a deadline.
+Keep current createKernelRuntime({ cacheRoot }), gateway dataset registration and
+executeQuerySql with refresh never, actual installed layered config/catalog,
+callerCwd, local-only/session-purge visibility and result/heap caps. Storage is lazy;
+ingest-sequence writes begin at next/reserveBlock, not construction. Do not replace
+kernel/query architecture or activate plugins, sources, sinks, bootKernel or writable
+plugin paths in the disposable worker.
 
-Only the fresh check's policy-visible committed request/completed assistant pair,
-shared request_id/token/provider/model/order, satisfies verification. Old, hidden,
-poisoned, load-only, append-count or receipt evidence cannot pass. Disconnection,
-off/stale state or elapsed deadline suppress late success. Budget/enrichment
-refusal preserves all rows and says confirmation unconfirmed with recovery via
-the ordinary explicit cache/query-refresh path; never silently invoke full force.
-Timeout says inference completed, storage confirmation unconfirmed and collector
-may finish, not canceled/lost/stopped. Status creates no worker/query/settlement.
+Eliminate migrateGrep:true from verify's config reads. Reuse bundled/installed
+catalog discovery and buildPluginCatalog with exported resolveLayeredConfigFromDisk
+(default migrateGrep:false), or one compatible read-only option on the existing
+catalog resolver preserving its ordinary daemon default. This is a helper option,
+not persisted config. Keep validation and owning plugin/dataset selection.
+Unreadable, invalid or unsupported actual config/policy returns unconfirmed, never
+guessed defaults or a visibility bypass.
 
-@ref LLP 0105#unknown: worker construction retains the normal caller visibility boundary
+Prove real imports, constructors, catalog/config resolution, dataset discovery and
+cleanup non-mutating. Include legacy grep config that otherwise acquires a lock,
+creates a backup and atomic-writes. Snapshot config/cache/spool/progress/allocator
+and directories before/after, including a killed stalled reader. Refresh never alone
+is insufficient. Parent owns kill/reap/cleanup on every child outcome; no writing
+task may run there.
+
+Keep separately bounded 30-second inference and disclosed fixed prompt. After it,
+one monotonic 30-second persistence budget includes control, worker startup/config/
+discovery, all waits, at most six sequential reads and six settlement attempts.
+A later attempt requires the previous ACTUAL flush to settle under the SAME
+deadline. No busy loop, inference retry, deadline reset or reader auto/always refresh.
+
+HTTP completion can precede append: a first flush may finish before the fresh pair
+reaches spool. Permit a later serialized flush/read within those budgets. Use both
+scope.from/to and SQL time predicates across midnight, capped rows/bytes and existing
+query heap limit. Only the fresh policy-visible committed request and completed new
+assistant with shared request_id/token/provider/model/order passes, with a final
+fresh live run/recording/generation check. Receipt, append count, HTTP, load-only
+generate, old/hidden/poison rows or historical status cannot pass.
+
+Timeout says confirmation unconfirmed and live collector work may finish; actual
+stop says interrupted/unconfirmed. Distinguish completed inference from persistence.
+Give explicit recovery without automatic restart, inference retry or further flush
+after deadline. Off/stale/run replacement suppresses late success. Status creates
+no query worker, query or settlement.
+
+@ref LLP 0105#unknown: retain ordinary caller visibility and fail unreadable policy closed
 
 ## Existing T4 sequencing, proof and effort {#delivery}
 
-This extension attaches only to LLP 0475 T4; no independent plan or integration
-branch. Original T4 author retains its verify/status/matcher/query-worker edits.
-Owner reviews the exact committed Draft and its unresolved lifecycle/effort
-disposition. Only after acceptance and fresh source-stage confirmation does the
-owner assign implementation seats and exact bases. Preserve current T4 dirty work;
-no automatic author rebase. Owner chooses serial merge/cherry-pick or author-owned
-rebase after an explicit custody readback. Coordinate storage/runtime paths with
-steward; do not redirect or edit the active T4 checkout.
+This Draft attaches only to LLP 0475 T4. Original author retains dirty250a command/
+setup/index/manifest, status/types, telemetry and verify/test edits. Designer changes
+documents only. Exact committed owner actionability and fresh source-stage check
+precede implementation; owner assigns precise custody/base and serial merge,
+cherry-pick or author-owned rebase after readback. No automatic rebase, second writer,
+independent plan/graph or implementation activation by this doc.
 
-Required homes/interfaces: private bounded spool/storage admission and types in
-src/core/cache/{spool,storage,types}; reusable settlement-eligibility predicate in
-gateway dataset; gateway source control/process_transport and processor/source
-close ownership; existing Ollama verify/query worker and its pure read context.
-No broad sql.js signal redesign or ordinary boot mutation option is needed.
-T4 owns its manifest/index/setup/verify command, status/types, telemetry vocabulary
-and verify tests. Proposed seam ownership covers intrinsic read construction,
-cache/storage/types, gateway dataset/control/transport and processor lifecycle
-with new focused tests; it is not a second activated writer. The T4 worker consumes
-the accepted pure-context API on the owner-selected integrated SHA. Receiver
-publication hold remains unchanged; this doc alters no receiver/server contract.
+Reduced homes: gateway source/control and process_transport.js/type contract,
+minimal processor callback wiring, existing Ollama verify.js/tests, and a narrow
+existing config-resolution helper option only if needed. Latch follows actual
+storage/service lifetime. Cache/spool/partition algorithm, gateway stop deadline
+and daemon stop ordering need no redesign. Original change-set/task graph remains
+authoritative; the existing observer only reads this extension as design.
 
-Proof on actual storage/control/worker code: tiny fresh capture below threshold
-beside retained history and concurrent eligible traffic; delayed append after
-first settlement and deadline miss; old/hidden/poison rows; large current/legacy
-backlog and directory/byte/row limits; growth between preflight and rotation;
-coalesced failure/ordinary-force stamps; enrichment refusal retaining data;
-timeout/disconnect and many retries with one writer, eventual retry; replaced IPC,
-malformed body/peer/Host/Origin/proxy rejection; real worker kill during construction/
-discovery with no filesystem mutations or leaked work; off/reattach generations;
-normal shutdown/disconnect at preflight and admitted unit with immediate sink
-close initiation. Forced exit limits are recorded, not counted as safe proof.
-Traditional checks and running-app fixture proof precede T5 installed acceptance.
+Future proof: real split/in-process tiny fresh capture below threshold with no
+helpful sink; retained history/concurrent traffic; delayed append positive/timeout;
+old/hidden/poison/load-only pairs; caller timeout and repeated callers with one
+actual flush/bounded waiter/eventual release; reload/replaced IPC; off/reattach/run
+changes; control malformed/Host/Origin/peer/proxy/stale rejection; legacy-config
+read/kill filesystem snapshots and visibility parity; actual stop/supervisor loss
+unconfirmed/no restart/no orphan versus identical baseline; unchanged full-force/
+coalescing/stamps/partition/sequence tests and backlog/hook CPU/heap measurement.
+Existing committed-row tests are not fresh-spool proof.
 
-CPU/memory: finite directory/cohort expansion and one live writer/worker avoid
-growth with caller count; no enricher/history scan hides behind byte limits.
-Bounded preflight costs one extra read of at most the admitted cohort and can
-briefly delay append under ownership; measure that effect. Chunk and metadata
-buffers die at checkpoint/close. Fixed work does not promise fixed storage-IO
-latency or a process RSS ceiling. Candidate lifecycle/resource evidence remains
-owed, and general disk/lock/crash repair is outside scope.
+T5 retains maintained README/CLIENTS/TROUBLESHOOTING incoming explanations and
+normal installed CLI/SDK first persisted capture and reversible stop/resume journeys:
+shared full-refresh cost, caller-timeout continuation versus actual stop, configured
+sink export and honest support/privacy boundaries. Draft consultation establishes
+no installed success or crash-safety claim.
 
-Estimate: 8-14 additional implementation/test hours beyond original T4 command
-work, plus review/fixes, with uncertainty in checkpoint close and pure-context
-policy parity. Design authoring has a one-hour checkpoint, not an implementation
-commitment. Owner/mayor disposes material delivery impact before committing that
-work. Failure to implement these narrow contracts returns an evidenced limitation,
-not a weakened verification success, changed full force or implicit repair scope.
+CPU/memory pass: new state is one operation/one bounded waiter, fixed body/result,
+finite attempts/reads, no accumulating listeners/reruns/busy loop. Existing full-flush
+metadata/hook/backlog cost remains variable and needs comparison; request bounds do
+not establish fixed mutation-work or RSS. Return harmful added load before inventing
+a frontier/framework.
+
+Estimate: 3-6 additional implementation/test hours beyond retained T4, plus independent
+review/fixes, medium-low confidence. This replaces speculative 8-14-hour frontier/
+lifecycle/framework expansion, not a deadline or implementation commitment.
+After future owner activation, checkpoint within 90 minutes at real tiny control-
+to-flush confirmation and non-mutating legacy-config reader proof. Return newly
+demonstrated material scope/effort changes to owner/mayor before expanding.
+Designer correction checkpoint is 45 minutes from actual reclaim.
