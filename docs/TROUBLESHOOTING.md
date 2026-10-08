@@ -42,6 +42,9 @@ hyp cache status
 3. Check the daemon is running. Use `hyp daemon start` for an installed service,
    or follow [headless setup](TEAM_SETUP.md#ci-and-headless-deployment) when there is no service manager.
 4. Start a new client process and complete a turn so it uses the managed settings.
+   Ollama attach enables recording and prints recipes without editing client files
+   or shell/service `OLLAMA_HOST`; use its
+   [explicit CLI host or SDK constructor](CLIENTS.md#route-a-cli-or-sdk-client).
 5. Check `hyp privacy show /absolute/path/to/project` for an ignore marking.
 
 For Claude Code, `hyp client status claude` reports the configured and live
@@ -52,7 +55,10 @@ version requirements.
 For transcript-only clients, allow time for the scheduled recovery sweep.
 
 Detaching a gateway-routed client restores its own connection settings if a
-stopped gateway is preventing normal use. See [client management](CLIENTS.md).
+stopped gateway is preventing normal use where that integration manages them.
+Ollama detach leaves the capture host unchanged. With its collector stopped,
+launch the CLI at the preserved direct root or construct a new SDK object with
+that root using [direct recovery](CLIENTS.md#stop-and-resume-ollama-recording).
 
 ## Ollama capture is unconfirmed
 

@@ -8,7 +8,9 @@ Use `hyp setup` to choose which AI clients to record. Setup configures those
 clients and imports supported session history. Ollama records explicitly routed
 new requests and has no history import. You can also run
 `hyp attach <client>` to configure a client and `hyp backfill <provider>` to
-import history.
+import history. Ollama attach enables recording and prints
+[explicit host recipes](#route-a-cli-or-sdk-client); it does not edit client files
+or the calling shell's or service's `OLLAMA_HOST`.
 
 ## Contents
 
@@ -63,6 +65,8 @@ Attach is safe to repeat and preserves unrelated client settings. Start a new
 client process so it reads the updated configuration, complete a short turn,
 then check `hyp query overview` or search for a distinctive phrase with
 `hyp query grep`. Capture and cache visibility can take time to settle.
+For Ollama, starting a new process alone does not route it through capture:
+use the [printed CLI host or SDK constructor](#route-a-cli-or-sdk-client).
 
 For missing recordings, see [troubleshooting](TROUBLESHOOTING.md#no-new-recordings).
 
@@ -194,7 +198,9 @@ The supported client versions are **Ollama CLI 0.35.1** and **official Python SD
 version, tags, model show, chat and generate calls are forwarded. OpenAI-compatible
 routes and model-management commands are outside this capture route.
 
-Choose a model already listed by setup. Start a new CLI at the printed host:
+Replace `gemma3:4b` in every CLI, SDK, verify and direct-recovery example below
+with the exact installed model name listed by setup. Start a new CLI at the
+printed host:
 
 ```sh
 OLLAMA_HOST=http://127.0.0.1:18521/ollama ollama run gemma3:4b --think=false
