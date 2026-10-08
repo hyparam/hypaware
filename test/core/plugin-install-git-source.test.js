@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 
 import {
   applyGitSourceFlags,
@@ -353,4 +355,165 @@ test('pickLsRemoteSha prefers the HEAD line when HEAD was requested', () => {
 
 test('pickLsRemoteSha returns undefined when no commit-shaped SHA is present', () => {
   assert.equal(pickLsRemoteSha('not-a-sha refs/heads/main\n', 'main'), undefined)
+})
+
+const fakeGitOptions = { skip: process.platform === 'win32' && 'fake git uses a POSIX executable' }
+const execute = promisify(execFile)
+
+// Isolate PATH and process.env in a child so concurrent tests cannot run real git
+// or inherit a fixture's timeout. The outer deadline makes pipe deadlocks fail.
+/** @param {string} body @param {'fetch' | 'update' | 'missing'} [action] @param {number} [probeTimeoutMs] */
+async function runFakeGit(body, action = 'fetch', probeTimeoutMs = 5000) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-git-output-'))
+  try {
+    const bin = path.join(dir, 'bin')
+    await fs.mkdir(bin)
+    await fs.writeFile(path.join(dir, 'package.json'), '{"type":"module"}')
+    if (action !== 'missing') {
+      await fs.writeFile(path.join(bin, 'git'), `#!${process.execPath}
+import fs from 'node:fs/promises'
+import path from 'node:path'
+const args = process.argv.slice(2)
+if (args[0] === '--version') {
+  console.log('git version fixture')
+  process.exit(0)
+}
+async function emit(stream, data) {
+  await new Promise((resolve, reject) => stream.write(data, error => error ? reject(error) : resolve()))
+}
+async function flood(stream) {
+  const block = Buffer.alloc(65536, 120)
+  for (let i = 0; i < 128; i++) await emit(stream, block)
+}
+async function artifact() {
+  const dest = args.at(-1)
+  await fs.mkdir(dest, { recursive: true })
+  await fs.writeFile(path.join(dest, 'hypaware.plugin.json'), JSON.stringify({
+    schema_version: 1, runtime: 'node', hypaware_api: '^1.0.0',
+    name: '@hypaware/output-fixture', version: '1.0.0', entrypoint: './index.js',
+    requires: {}, provides: {}, permissions: [],
+  }))
+  await fs.writeFile(path.join(dest, 'index.js'), 'export function activate() {}')
+}
+${body}
+await fs.writeFile(process.env.FIXTURE_MARKER, 'drained')
+`, { mode: 0o755 })
+    }
+    const source = { kind: 'git', raw: 'https://example.invalid/fixture.git', gitUrl: 'https://example.invalid/fixture.git', ref: 'main' }
+    const script = `
+import fs from 'node:fs/promises'
+import { fetchGitSource } from ${JSON.stringify(new URL('../../src/core/plugin_install/git_fetch.js', import.meta.url).href)}
+import { checkForPluginUpdate } from ${JSON.stringify(new URL('../../src/core/plugin_install/update_check.js', import.meta.url).href)}
+const source = ${JSON.stringify(source)}
+const stateDir = ${JSON.stringify(path.join(dir, 'state'))}
+const result = ${action === 'update'
+  ? "await checkForPluginUpdate({ entry: { name: '@hypaware/output-fixture', source, resolved_ref: '1'.repeat(40) } })"
+  : "await fetchGitSource({ source, stateDir, runId: 'output-test' })"}
+const temporaryStatePresent = await fs.access(stateDir + '/tmp/plugin-fetch/output-test').then(() => true, () => false)
+const drained = await fs.readFile(${JSON.stringify(path.join(dir, 'marker'))}, 'utf8').catch(() => '')
+console.log(JSON.stringify({ result, temporaryStatePresent, drained }))
+`
+    const { stdout } = await execute(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, PATH: bin, FIXTURE_MARKER: path.join(dir, 'marker'), HYP_GIT_PROBE_TIMEOUT_MS: String(probeTimeoutMs) },
+      timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+    })
+    return JSON.parse(stdout)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('git clone bounds large failure diagnostics while draining both pipes and cleaning staging', fakeGitOptions, async () => {
+  const { result, temporaryStatePresent, drained } = await runFakeGit(String.raw`
+await emit(process.stderr, 'fatal: https://u:secret@example.invalid/repo token=secret\n')
+await Promise.all([flood(process.stdout), flood(process.stderr)])
+process.exitCode = 1
+`)
+  assert.equal(result.errorKind, 'git_clone_failed')
+  assert.ok(Buffer.byteLength(result.message) <= 65536 + 128)
+  assert.match(result.message, /fatal: https:\/\/<redacted>@/)
+  assert.match(result.message, /truncated/)
+  assert.doesNotMatch(result.message, /secret/)
+  assert.equal(drained, 'drained')
+  assert.equal(temporaryStatePresent, false)
+})
+
+test('git diagnostic truncation cannot reveal credentials cut before their closing delimiter', fakeGitOptions, async () => {
+  const { result } = await runFakeGit(String.raw`
+await emit(process.stderr, 'fatal: permission denied\n')
+await emit(process.stderr, 'x'.repeat(65480) + '\nhttps://u:secret-prefix')
+await emit(process.stderr, 'secret-suffix'.repeat(10000) + '@example.invalid/repo\n')
+process.exitCode = 1
+`)
+  assert.ok(Buffer.byteLength(result.message) <= 65536 + 128)
+  assert.doesNotMatch(result.message, /secret|https:\/\/u:/)
+  assert.match(result.message, /permission denied/)
+})
+
+test('git small diagnostics retain text and split UTF-8 while redacting split credentials', fakeGitOptions, async () => {
+  const { result } = await runFakeGit(String.raw`
+await emit(process.stderr, 'fatal: https://u:sec')
+await emit(process.stderr, 'ret@example.invalid/repo token=sec')
+await emit(process.stderr, 'ret caf')
+await emit(process.stderr, Buffer.from([0xc3]))
+await emit(process.stderr, Buffer.from([0xa9, 10]))
+process.exitCode = 1
+`)
+  assert.equal(result.message, 'plugin install: git clone failed: fatal: https://<redacted>@example.invalid/repo token=<redacted> café')
+})
+
+test('git successful clone drains oversized progress without changing the resolved commit', fakeGitOptions, async () => {
+  const { result, temporaryStatePresent, drained } = await runFakeGit(String.raw`
+if (args[0] === 'clone') {
+  await Promise.all([flood(process.stdout), flood(process.stderr)])
+  await artifact()
+} else if (args.includes('rev-parse')) await emit(process.stdout, '1'.repeat(40) + '\n')
+`)
+  assert.equal(result.ok, true, JSON.stringify(result).slice(0, 300))
+  assert.equal(result.resolvedRef, '1'.repeat(40))
+  assert.equal(temporaryStatePresent, false)
+  assert.equal(drained, 'drained')
+})
+
+test('git resolve refuses oversized functional stdout instead of installing a partial ref', fakeGitOptions, async () => {
+  const { result, temporaryStatePresent, drained } = await runFakeGit(String.raw`
+if (args[0] === 'clone') await artifact()
+else if (args.includes('rev-parse')) {
+  await emit(process.stdout, '1'.repeat(40) + '\n')
+  await flood(process.stdout)
+}
+`)
+  assert.equal(result.ok, false)
+  assert.equal(result.errorKind, 'git_checkout_failed')
+  assert.match(result.message, /stdout.*limit/)
+  assert.equal(temporaryStatePresent, false)
+  assert.equal(drained, 'drained')
+})
+
+test('git update refuses oversized ref lists even when their prefix contains a valid SHA', fakeGitOptions, async () => {
+  const { result, drained } = await runFakeGit(String.raw`
+await emit(process.stdout, '1'.repeat(40) + '\trefs/tags/main\n')
+await Promise.all([flood(process.stdout), flood(process.stderr)])
+await emit(process.stdout, '\n' + '2'.repeat(40) + '\trefs/tags/main^{}\n')
+`, 'update')
+  assert.equal(result.available, false)
+  assert.equal(result.error, 'git_ls_remote_failed')
+  assert.equal(result.latest_ref, undefined)
+  assert.equal(drained, 'drained')
+})
+
+test('git update preserves ordinary peeled-ref selection and failure classification', fakeGitOptions, async () => {
+  const { result } = await runFakeGit(String.raw`
+await emit(process.stdout, '1'.repeat(40) + '\trefs/tags/main\n' + '2'.repeat(40) + '\trefs/tags/main^{}\n')
+`, 'update')
+  assert.equal(result.latest_ref, '2'.repeat(40))
+  assert.equal(result.available, true)
+  const failed = await runFakeGit('await Promise.all([flood(process.stdout), flood(process.stderr)])\nprocess.exitCode = 1', 'update')
+  assert.equal(failed.result.error, 'git_ls_remote_failed')
+  assert.equal(failed.drained, 'drained')
+})
+
+test('git spawn failure and probe timeout retain their existing classifications', fakeGitOptions, async () => {
+  assert.equal((await runFakeGit('', 'missing')).result.errorKind, 'git_unavailable')
+  assert.equal((await runFakeGit('setInterval(() => {}, 1000)', 'update', 250)).result.error, 'git_probe_timeout')
 })
