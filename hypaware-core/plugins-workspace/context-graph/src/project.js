@@ -1,5 +1,7 @@
 // @ts-check
 
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
+
 import { compareStrings } from 'hypaware/core/util'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
@@ -19,6 +21,9 @@ import {
  * @import { ExecuteSqlOptions, ExecuteSqlResult } from '../../../../src/core/query/types.js'
  * @import { Contract, ContractRule, GraphRow, RulePredicate } from './types.js'
  */
+
+/** The longest the rule loop runs before letting the event loop turn. */
+const RULE_LOOP_SLICE_MS = 50
 
 /** The dedicated projection heap budget when the knob is unset: 3 GiB. */
 const GRAPH_PROJECTION_DEFAULT_MAX_HEAP_BYTES = 3072 * 1024 * 1024
@@ -133,6 +138,17 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         }
       }
 
+      // A scan's rows arrive fully materialized, so the rule loop over them
+      // has no await of its own. On a daemon a busy day kept every request
+      // waiting for seconds; yielding every RULE_LOOP_SLICE_MS bounds that.
+      let sliceStart = performance.now()
+      /** @param {number} index @returns {boolean} */
+      const yieldDue = (index) => (index & 255) === 0 && performance.now() - sliceStart >= RULE_LOOP_SLICE_MS
+      const yieldNow = async () => {
+        await yieldToEventLoop()
+        sliceStart = performance.now()
+      }
+
       let sourceRows = 0
       let scanCount = 0
       for (const contract of contracts) {
@@ -172,7 +188,9 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
           })
           sourceRows += result.rows.length
           scanCount += 1
-          for (const row of result.rows) {
+          for (let i = 0; i < result.rows.length; i++) {
+            if (yieldDue(i)) await yieldNow()
+            const row = result.rows[i]
             if (keep && !keep(row)) continue
             applyRules(row, declarative)
           }
@@ -203,7 +221,9 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
           })
           sourceRows += result.rows.length
           scanCount += 1
-          for (const row of result.rows) {
+          for (let i = 0; i < result.rows.length; i++) {
+            if (yieldDue(i)) await yieldNow()
+            const row = result.rows[i]
             if (keep && !keep(row)) continue
             applyRules(row, rules)
           }
