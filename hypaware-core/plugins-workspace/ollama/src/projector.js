@@ -5,7 +5,7 @@ import { USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { CAPTURE_BYTES } from '../../ai-gateway/src/process_transport.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCaptureReason, AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const REQUEST_FIELDS = new Set(['model', 'messages', 'stream', 'format', 'options', 'keep_alive', 'tools', 'think'])
@@ -32,18 +32,21 @@ export function createOllamaExchangeProjector() {
     },
     // @ref LLP 0469#wire [implements]: completion and admission precede every row; a failed exchange yields no partial history
     project(input, ctx) {
-      /** @param {string} reason */
+      /** @param {AiGatewayCaptureReason} reason */
       const drop = reason => {
+        ctx.captureOutcome?.(reason)
         ctx.log.warn('plugin.ollama.capture_dropped', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'dropped', reason })
         return undefined
       }
       if (!nonempty(input.exchange_id)) return drop('invalid_request')
       if (ctx.isSessionIgnored?.(input.exchange_id)) {
+        ctx.captureOutcome?.('session_ignored')
         ctx.log.info('plugin.ollama.capture_dropped', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'dropped', reason: 'session_ignored' })
         return USAGE_POLICY_DROP
       }
       if (input.error) return drop('transport_error')
       if (input.status_code == null || input.status_code < 200 || input.status_code >= 300) return drop('http_error')
+      if (input.is_sse) return drop('unsupported_shape')
       // @ref LLP 0469#resources-journey [implements]: direct projector calls also reject oversize decoded capture bodies before parsing
       if (Buffer.byteLength(input.request_body ?? '') + Buffer.byteLength(input.response_body ?? '') > CAPTURE_BYTES) return drop('capture_limit')
       const path = nativePath(input)
@@ -78,6 +81,7 @@ export function createOllamaExchangeProjector() {
       // @ref LLP 0474#projection [implements]: completed model load/unload is intentional control traffic, never a persisted conversation
       if (generate && (terminal.done_reason === 'load' || terminal.done_reason === 'unload')) {
         if (nonempty(request.prompt) || nonempty(request.system) || imageCount || content.length) return drop('invalid_response')
+        ctx.captureOutcome?.('load_unload')
         ctx.log.info('plugin.ollama.capture_control', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'skipped', reason: terminal.done_reason })
         return undefined
       }
@@ -110,6 +114,7 @@ export function createOllamaExchangeProjector() {
         stop_reason: typeof terminal.done_reason === 'string' ? terminal.done_reason : undefined,
         raw_frame: raw, attributes: usage ? { usage } : undefined,
       })
+      ctx.captureOutcome?.(imageCount + responseImages ? 'media_omitted' : 'text')
       ctx.log.info('plugin.ollama.capture_projected', { component: 'ollama', operation: 'project_exchange', exchange_id: input.exchange_id, status: 'ok', reason: imageCount + responseImages ? 'media_omitted' : 'text' })
       // @ref LLP 0469#resources-journey [implements]: system text stays in ordered rows; an exchange-wide copy would multiply serialized bytes by row count
       return { provider: 'ollama', session_id: input.exchange_id, request_id: input.exchange_id, client_name: 'ollama', entrypoint: 'ollama-api', conversation_source: 'ollama', model: model ?? request.model, messages }
@@ -170,7 +175,7 @@ function omittedMediaContent(text, count) {
  * @param {boolean} stream
  * @param {boolean} generate
  * @param {number} imageBudget
- * @returns {string | { content: string, terminal: Record<string, unknown>, model?: string, imageCount: number }}
+ * @returns {AiGatewayCaptureReason | { content: string, terminal: Record<string, unknown>, model?: string, imageCount: number }}
  */
 function readResponse(body, stream, generate, imageBudget) {
   /** @type {string[]} */
@@ -180,7 +185,7 @@ function readResponse(body, stream, generate, imageBudget) {
   /** @type {string | undefined} */
   let model
   let imageCount = 0
-  /** @param {string} line @returns {string | undefined} */
+  /** @param {string} line @returns {AiGatewayCaptureReason | undefined} */
   const consume = line => {
     if (terminal) return 'trailing_record'
     const record = parseMaybeJson(line)

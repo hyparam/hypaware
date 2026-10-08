@@ -5,7 +5,7 @@ import zlib, { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } f
 
 // zstd landed in node 22.15 / 23.8; feature-detect so older runtimes
 // fall through to decodeBody's unknown-codec path instead of crashing.
-const zstdDecompress = /** @type {((buf: Buffer) => Buffer) | undefined} */ (
+const zstdDecompress = /** @type {((buf: Buffer, opts?: { maxOutputLength: number }) => Buffer) | undefined} */ (
   /** @type {Record<string, unknown>} */ (zlib).zstdDecompressSync
 )
 
@@ -124,6 +124,11 @@ export class Exchange {
     this.tsStartMs = Date.now()
     /** @type {string} */
     this.tsStart = new Date(this.tsStartMs).toISOString()
+    /** @type {string | undefined} */
+    this.recordingGeneration = init.recordingGeneration
+    this.captureLimit = init.captureLimit
+    this.recording = true
+    this.captureChunks = 0
     /** @type {string} */
     this.upstream = init.upstream
     /** @type {string | undefined} */
@@ -201,6 +206,7 @@ export class Exchange {
    * @param {Buffer | Uint8Array} chunk
    */
   appendRequestChunk(chunk) {
+    if (!this.admitChunk(chunk)) return
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     this.requestChunks.push(buf)
     this.requestBytes += buf.byteLength
@@ -228,7 +234,7 @@ export class Exchange {
    * @param {Buffer | Uint8Array} chunk
    */
   appendResponseChunk(chunk) {
-    if (this.isSse) return
+    if (this.isSse || !this.admitChunk(chunk)) return
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     this.responseChunks.push(buf)
     this.responseBytes += buf.byteLength
@@ -249,9 +255,12 @@ export class Exchange {
    * @param {Buffer | Uint8Array} chunk
    */
   consumeStreamChunk(chunk) {
+    if (!this.admitChunk(chunk)) return
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     this.responseBytes += buf.byteLength
-    if (parseEncodings(this.responseContentEncoding).length > 0) {
+    // Bounded native captures retain stream bytes for adapter admission,
+    // avoiding event-object amplification from a foreign stream dialect.
+    if (this.captureLimit || parseEncodings(this.responseContentEncoding).length > 0) {
       this.responseChunks.push(buf)
       return
     }
@@ -267,6 +276,31 @@ export class Exchange {
         ...(event.id !== undefined ? { id: event.id } : {}),
       })
     }
+  }
+
+  /** @param {Buffer | Uint8Array} chunk */
+  admitChunk(chunk) {
+    if (!this.recording || this.error === 'capture_limit') return false
+    if (this.captureLimit && (++this.captureChunks > 4096 || this.requestBytes + this.responseBytes + chunk.byteLength > this.captureLimit)) {
+      this.error = 'capture_limit'
+      this.releaseCaptureBodies()
+      return false
+    }
+    return true
+  }
+
+  releaseCaptureBodies() {
+    this.requestChunks = []
+    this.responseChunks = []
+    this.streamEvents = []
+    this.sseParser = new SseParser()
+  }
+
+  cancelCapture() {
+    this.recording = false
+    this.releaseCaptureBodies()
+    this.finished = true
+    this._resolveFinished()
   }
 
   /**
@@ -307,11 +341,12 @@ export class Exchange {
     this.finished = true
 
     const tsEndMs = Date.now()
+    const decode = (buf, encoding) => decodeBody(buf, encoding, this.captureLimit, () => { this.error = 'capture_limit' })
     // The proxy is a pass-through, so a body carries whatever
     // `content-encoding` the upstream applied; decode it before parsing
     // or a gzip/br/deflate body lands as mojibake.
     const decodedResponse = this.responseChunks.length > 0
-      ? decodeBody(Buffer.concat(this.responseChunks), this.responseContentEncoding)
+      ? decode(Buffer.concat(this.responseChunks), this.responseContentEncoding)
       : ''
 
     // Header-blind SSE detection. Some upstreams stream Server-Sent
@@ -332,7 +367,7 @@ export class Exchange {
     // pass. Event `t_ms` is stamped at finalize; per-chunk arrival times
     // aren't recoverable after deferred decoding and nothing depends on
     // them being exact.
-    if (this.isSse && decodedResponse.length > 0 && this.streamEvents.length === 0) {
+    if (this.isSse && !this.captureLimit && decodedResponse.length > 0 && this.streamEvents.length === 0) {
       const events = new SseParser().feed(decodedResponse)
       this.streamEventCount = events.length
       for (const event of events) {
@@ -346,7 +381,7 @@ export class Exchange {
         })
       }
     }
-    const requestBody = decodeBody(
+    const requestBody = decode(
       Buffer.concat(this.requestChunks),
       headerValue(this._rawRequestHeaders, 'content-encoding')
     )
@@ -421,24 +456,28 @@ function looksLikeSse(body) {
  *
  * @param {Buffer} buf
  * @param {string | string[] | undefined} encodingHeader
+ * @param {number} [limit]
+ * @param {() => void} [onLimit]
  * @returns {string}
  */
-function decodeBody(buf, encodingHeader) {
+function decodeBody(buf, encodingHeader, limit, onLimit) {
   if (buf.byteLength === 0) return ''
   const encodings = parseEncodings(encodingHeader)
   if (encodings.length === 0) return buf.toString('utf8')
   let current = buf
+  const opts = limit ? { maxOutputLength: limit } : undefined
   // `content-encoding` lists transforms in the order they were applied;
   // decode in reverse to undo them.
   for (let i = encodings.length - 1; i >= 0; i--) {
     const enc = encodings[i]
     try {
-      if (enc === 'gzip' || enc === 'x-gzip') current = gunzipSync(current)
-      else if (enc === 'br') current = brotliDecompressSync(current)
-      else if (enc === 'deflate') current = inflateOrRaw(current)
-      else if (enc === 'zstd' && zstdDecompress) current = zstdDecompress(current)
+      if (enc === 'gzip' || enc === 'x-gzip') current = gunzipSync(current, opts)
+      else if (enc === 'br') current = brotliDecompressSync(current, opts)
+      else if (enc === 'deflate') current = inflateOrRaw(current, opts)
+      else if (enc === 'zstd' && zstdDecompress) current = zstdDecompress(current, opts)
       else return current.toString('utf8') // unknown codec: stop, keep what we have
-    } catch {
+    } catch (err) {
+      if (limit && /** @type {NodeJS.ErrnoException} */ (err).code === 'ERR_BUFFER_TOO_LARGE') { onLimit?.(); return '' }
       return buf.toString('utf8') // undecodable: fall back to the raw bytes
     }
   }
@@ -450,13 +489,15 @@ function decodeBody(buf, encodingHeader) {
  * conformant decoder first, then the headerless variant.
  *
  * @param {Buffer} buf
+ * @param {{ maxOutputLength: number }} [opts]
  * @returns {Buffer}
  */
-function inflateOrRaw(buf) {
+function inflateOrRaw(buf, opts) {
   try {
-    return inflateSync(buf)
-  } catch {
-    return inflateRawSync(buf)
+    return inflateSync(buf, opts)
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ERR_BUFFER_TOO_LARGE') throw err
+    return inflateRawSync(buf, opts)
   }
 }
 

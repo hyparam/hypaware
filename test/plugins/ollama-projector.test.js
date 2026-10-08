@@ -29,13 +29,15 @@ function context() {
   /** @type {Array<{ event: string, fields?: Record<string, unknown> }>} */
   const logs = []
   const emit = (event, fields) => { logs.push({ event, fields }) }
-  return { logs, log: { info: emit, warn: emit, error: emit, debug: emit } }
+  /** @type {string[]} */
+  const outcomes = []
+  return { logs, outcomes, captureOutcome: reason => outcomes.push(reason), log: { info: emit, warn: emit, error: emit, debug: emit } }
 }
 /** @param {AiGatewayExchangeInput} input */
 async function rows(input) {
   const ctx = context()
   const writer = createAiGatewayMessageProjector({ gatewayId: 'ollama-test', projectors: [{ ...createOllamaExchangeProjector(), _seq: 0 }], log: ctx.log })
-  return { rows: await writer.projectExchange(input), logs: ctx.logs }
+  return { rows: await writer.projectExchange(input, { captureOutcome: ctx.captureOutcome }), logs: ctx.logs, outcomes: ctx.outcomes }
 }
 /** @param {Record<string, unknown>} row */
 const attrs = row => /** @type {Record<string, any>} */ (row.attributes)
@@ -198,6 +200,7 @@ for (const [label, counters, expected, reasons] of /** @type {Array<[string, Rec
 }
 
 const invalid = [
+  ['foreign SSE dialect', { is_sse: true }, 'unsupported_shape'],
   ['upstream refusal', { status_code: null, error: 'SECRET upstream refusal' }, 'transport_error'],
   ['non-2xx', { status_code: 503 }, 'http_error'],
   ['client abort', { error: 'SECRET client aborted' }, 'transport_error'],
@@ -241,6 +244,8 @@ for (const [label, overrides, reason] of invalid) {
     const diagnostic = result.logs.find(log => log.event === 'plugin.ollama.capture_dropped')
     assert.ok(diagnostic)
     assert.equal(diagnostic.fields?.reason, reason)
+    assert.deepEqual(result.outcomes, [reason])
+    assert.ok(!result.logs.some(log => log.fields?.reason === 'no_projector_match'))
     assert.equal(diagnostic.fields?.component, 'ollama')
     assert.equal(diagnostic.fields?.operation, 'project_exchange')
     assert.equal(diagnostic.fields?.status, 'dropped')

@@ -15,6 +15,7 @@ import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { writeClientRecording } from '../config/client_recording.js'
+import { confirmOllamaRecording } from '../control/client_recording.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
 import { removeCaTrust } from '../tls/darwin_trust.js'
@@ -169,6 +170,17 @@ async function runClientLifecycle(action, argv, ctx) {
           exitCode = 1
           continue
         }
+        if (name === 'ollama' && !parsed.dryRun) {
+          const confirmed = await confirmOllamaRecording({ env: ctx.env, recording: false })
+          if (!confirmed.confirmed) {
+            const message = 'Recording disabled in configuration; live stop not confirmed. Retry hyp client detach ollama or run hyp daemon stop. Use the preserved direct Ollama host for your next client.'
+            if (parsed.json) ctx.stdout.write(JSON.stringify({ status: 'failed', action: 'detach', client: name, recording: false, error_kind: 'recording_barrier_unconfirmed', error: message }) + '\n')
+            else ctx.stderr.write(message + '\n')
+            if (!parsed.json) await writeOllamaDirectRecovery(ctx)
+            exitCode = 1
+            continue
+          }
+        }
         await detachClientViaCore({
           name,
           descriptor,
@@ -177,6 +189,7 @@ async function runClientLifecycle(action, argv, ctx) {
           recordingSwitch: recording.status,
           ctx,
         })
+        if (name === 'ollama' && !parsed.json && !parsed.dryRun) await writeOllamaDirectRecovery(ctx)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         ctx.stderr.write(`error: detach client '${name}' failed: ${message}\n`)
@@ -2592,3 +2605,17 @@ const HYPIGNORE_TEMPLATE = `# HypAware usage policy (.hypignore)
 # The token below names the usage class. V1 implements only \`ignore\`.
 ignore
 `
+
+/** @param {CommandRunContext} ctx */
+async function writeOllamaDirectRecovery(ctx) {
+  const entry = new URL('../../../hypaware-core/plugins-workspace/ollama/src/setup.js', import.meta.url).href
+  const { routingRecipes } = await import(entry)
+  const { stateDir, hypHome } = readObservabilityEnv(ctx.env)
+  const layers = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath: ctx.env.HYP_CONFIG ?? defaultConfigPath(hypHome) })
+  const config = layers.effective ?? ctx.config
+  const upstreams = config.plugins?.find(p => p.name === '@hypaware/ai-gateway')?.config?.upstreams
+  const upstream = Array.isArray(upstreams) ? upstreams.find(u => u && typeof u === 'object' && !Array.isArray(u) && u.name === 'ollama') : undefined
+  const direct = upstream && typeof upstream === 'object' && !Array.isArray(upstream) && typeof upstream.base_url === 'string' ? upstream.base_url : 'http://127.0.0.1:11434'
+  const recipes = routingRecipes('', direct)
+  ctx.stdout.write(`Existing clients retain their gateway host and use it unrecorded after a confirmed stop. Direct next launch (also works with the collector stopped):\n${recipes.direct_cli}\n${recipes.direct_sdk}\n`)
+}
