@@ -391,6 +391,32 @@ test('absolute-form verification is rejected before upstream matching or capture
   assert.equal(f.inference(), 0)
 })
 
+test('verification receipts reject overlong service identity and unexpected settlement values', async t => {
+  const { createVerificationControlHandler } = await import('../../hypaware-core/plugins-workspace/ai-gateway/src/recording.js')
+  let runId = 'x'.repeat(2000)
+  const control = createVerificationControlHandler({ current: () => ({ runId, generation: 'one', recording: true }),
+    settle: async () => ({ payload: 'x'.repeat(2000) }) })
+  const server = http.createServer((req, res) => control.handle(req, res))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(undefined)))
+  t.after(async () => {
+    control.close()
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(() => resolve(undefined)))
+  })
+  const port = /** @type {AddressInfo} */ (server.address()).port
+  const root = `http://127.0.0.1:${port}`
+  const invalid = await fetch(root + VERIFY_PATH)
+  const raw = await invalid.text()
+  assert.equal(invalid.status, 503)
+  assert.ok(Buffer.byteLength(raw) <= 1024)
+  runId = 'valid'
+  const result = await fetch(root + VERIFY_PATH, { method: 'POST', body: JSON.stringify({ runId, generation: 'one', operation: 'test' }) })
+  const value = await result.text()
+  assert.equal(result.status, 503)
+  assert.ok(Buffer.byteLength(value) <= 1024)
+  assert.equal(JSON.parse(value).reason, 'processor_unavailable')
+})
+
 test('real non-loopback peer cannot invoke verification even with loopback Host', async t => {
   const { networkInterfaces } = await import('node:os')
   const address = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal)?.address

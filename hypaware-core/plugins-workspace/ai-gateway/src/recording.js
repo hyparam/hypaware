@@ -214,8 +214,10 @@ export function createVerificationControlHandler(opts) {
         return
       }
       const policy = opts.current()
-      const response = (reason, operation = undefined) => ({ reason, runId: policy.runId, generation: policy.generation, ...(operation ? { operation } : {}) })
-      const rejected = closed || !policy.runId ? 'processor_unavailable' : !policy.recording ? policy.reason === 'policy_unreadable' ? 'policy_unreadable' : 'recording_disabled' : undefined
+      const identity = typeof policy.runId === 'string' && /^[a-zA-Z0-9:_-]{1,80}$/.test(policy.runId)
+        && typeof policy.generation === 'string' && /^[a-zA-Z0-9:_-]{1,80}$/.test(policy.generation)
+      const response = (reason, operation = undefined) => ({ reason, ...(identity ? { runId: policy.runId, generation: policy.generation } : {}), ...(operation ? { operation } : {}) })
+      const rejected = closed || !identity ? 'processor_unavailable' : !policy.recording ? policy.reason === 'policy_unreadable' ? 'policy_unreadable' : 'recording_disabled' : undefined
       if (req.method === 'GET') {
         drainRequestBody(req, res)
         reply(rejected ? 503 : 200, response(rejected ?? 'ready'))
@@ -264,7 +266,10 @@ export function createVerificationControlHandler(opts) {
           return
         }
         void opts.settle(job.generation, controller.signal).then(
-          reason => reply(reason === 'settled' ? 200 : 503, response(reason, job.operation)),
+          reason => {
+            const known = typeof reason === 'string' && ['settled', 'settlement_busy', 'settlement_failed', 'stale_generation', 'policy_unreadable', 'processor_unavailable'].includes(reason)
+            reply(known && reason === 'settled' ? 200 : 503, response(known ? reason : 'processor_unavailable', job.operation))
+          },
           () => reply(503, response('processor_unavailable', job.operation))
         ).finally(cleanup)
       }
