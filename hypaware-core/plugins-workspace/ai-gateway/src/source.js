@@ -28,7 +28,10 @@ import { createChainedAgent, startProxy } from './proxy.js'
 import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { createRecorder, createNullExchange } from './recorder.js'
 import { getGatewayProcessTransport, CAPTURE_BYTES, MAX_CAPTURES } from './process_transport.js'
-import { createRecordingGate, createRecordingControlHandler, isOllamaCapture, RECORDING_PATH, RECORDING_ROUTE } from './recording.js'
+import { createRecordingGate, createRecordingControlHandler, createVerificationControlHandler, settleOllamaVerification, isOllamaCapture, RECORDING_PATH, RECORDING_ROUTE } from './recording.js'
+import { VERIFY_PATH, VERIFY_ROUTE } from '../../../../src/core/control/client_recording.js'
+import { readPidFile, processIsAlive } from '../../../../src/core/daemon/pid.js'
+/** @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js' */
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
 
@@ -94,7 +97,7 @@ export function createStartSource(state) {
             // Omitted while idle, which is already how `gatewaySourceDetails`
             // (core `daemon/status.js`) reads "no reachable gateway here" off
             // the status file for a bind that never happened.
-            ...(proxy && state.listen ? { host: proxy.host, port: proxy.port, listen_host: proxy.host, listen_port: proxy.port, control_routes: [RECORDING_ROUTE] } : { listening: false }),
+            ...(proxy && state.listen ? { host: proxy.host, port: proxy.port, listen_host: proxy.host, listen_port: proxy.port, control_routes: [RECORDING_ROUTE, VERIFY_ROUTE] } : { listening: false }),
             ...proxy?.recordingDetails?.(),
             // Raw configured names, pre-compile, deliberately: an entry the
             // compiler dropped (a `url =` where `base_url` was meant) still
@@ -325,6 +328,12 @@ async function launchListener(ctx, state, liveState) {
   const kernelInstruments = getKernelInstruments()
 
   const tablePath = aiGatewayTablePath(ctx.storage)
+  const settleVerification = async (generation, signal) => {
+    const policy = gate.current()
+    if (policy.reason === 'policy_unreadable' || sessionIgnoreLoadError(state.ignoredSessions)) return 'policy_unreadable'
+    if (signal.aborted || !gate.allows(generation)) return 'stale_generation'
+    return settleOllamaVerification(/** @type {ExtendedQueryStorageService} */ (ctx.storage), tablePath, signal)
+  }
 
   /** @param {Exchange} exchange @param {Set<string>} [ignoredSessions] */
   async function onExchangeFinished(exchange, ignoredSessions = state.ignoredSessions) {
@@ -442,7 +451,7 @@ async function launchListener(ctx, state, liveState) {
     const endpoint = transport.endpoint
     if (!endpoint || !transport.receive) throw new Error('gateway process endpoint unavailable')
     state.listen = endpoint
-    const close = transport.receive(onExchangeFinished, (recording, signal, generation) => gate.refresh(recording, signal, generation))
+    const close = transport.receive(onExchangeFinished, (recording, signal, generation) => gate.refresh(recording, signal, generation), settleVerification)
     return { ...endpoint, server: http.createServer(), stopped: Promise.resolve(), recordingDetails: () => ({ ...gate.snapshot(), capture_outcomes: outcomes.snapshot() }), stop: () => { gate.stop(); return close() } }
   }
 
@@ -491,6 +500,28 @@ async function launchListener(ctx, state, liveState) {
       }
     },
   })
+  // @ref LLP 0476#control [implements]: an old listener cannot borrow a replacement service's PID/run identity
+  let verificationPid
+  try { verificationPid = readPidFile(defaultStateRoot(ctx.env)) } catch { /* no live service */ }
+  const verificationControl = createVerificationControlHandler({
+    current() {
+      let runId
+      try {
+        const pid = readPidFile(defaultStateRoot(ctx.env))
+        if (pid?.pid === process.pid && pid.pid === verificationPid?.pid && pid.runId === verificationPid.runId && pid.startedAt === verificationPid.startedAt && processIsAlive(pid.pid)) runId = pid.runId
+      } catch { /* absent or replaced live identity */ }
+      const policy = gate.current()
+      if (transport?.role === 'gateway' && transport.snapshot?.().capture_ready !== true) runId = undefined
+      const policyError = sessionIgnoreLoadError(state.ignoredSessions)
+      return { ...policy, runId, reason: policyError ? 'policy_unreadable' : policy.reason, recording: policy.recording && !policyError }
+    },
+    settle(generation, signal) {
+      if (!gate.allows(generation)) return Promise.resolve('stale_generation')
+      return transport?.role === 'gateway'
+        ? transport.settleVerification?.(generation, signal) ?? Promise.resolve('processor_unavailable')
+        : settleVerification(generation, signal)
+    },
+  })
 
   /** @param {string} listen */
   const bind = (listen) => startProxy({
@@ -515,7 +546,8 @@ async function launchListener(ctx, state, liveState) {
     // before upstream matching, never proxied, no exchange recorded.
     // @ref LLP 0066#control-path
     onControlRequest(req, res, url) {
-      if (url.pathname === RECORDING_PATH) recordingControl.handle(req, res)
+      if (url.pathname === VERIFY_PATH) verificationControl.handle(req, res)
+      else if (url.pathname === RECORDING_PATH) recordingControl.handle(req, res)
       else ignoreControl(req, res, url)
     },
     log: ctx.log,
@@ -542,11 +574,12 @@ async function launchListener(ctx, state, liveState) {
   })
 
   // Hook stop so in-flight exchanges drain before the listener fully closes.
-  proxy.recordingDetails = () => ({ ...gate.snapshot(), capture_outcomes: outcomes.snapshot() })
+  proxy.recordingDetails = () => ({ capture_ready: transport?.role !== 'gateway', ...gate.snapshot(), capture_outcomes: outcomes.snapshot() })
   const originalStop = proxy.stop
   proxy.stop = async () => {
     gate.stop()
     recordingControl.close()
+    verificationControl.close()
     for (const exchange of captures) if (!exchange.finished) exchange.cancelCapture()
     await recorder.drain(5000)
     await originalStop.call(proxy)

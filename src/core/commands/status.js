@@ -192,6 +192,7 @@ export function projectClientStatus(report, clients) {
 
     return {
       name: client.name,
+      ...(client.capture ? { capture: client.capture } : {}),
       configured: client.configured,
       recording: client.configured && client.recording !== false,
       attachable: client.attachable !== false,
@@ -259,6 +260,7 @@ export function renderClientStatusText(rows, stdout) {
         : row.capture_health.state === 'unknown' ? ' [capture unconfirmed]' : ''
       stdout.write(`    capture: ${row.capture_health.state}; last event ${events}; last transcript activity ${transcripts}${gap}\n`)
     }
+    if (row.capture) renderOllamaCapture(row.capture, stdout, '    ')
     if (row.error) stdout.write(`    error: ${row.error}\n`)
     for (const entry of row.recent_entrypoints) {
       stdout.write(`    recent: ${entry.entrypoint}, ${entry.rows} row${entry.rows === 1 ? '' : 's'}, ${entry.last_seen}\n`)
@@ -343,6 +345,7 @@ export function renderStatusSummary({ report, stdout }) {
     if (client && client.configured && client.recording === false) notRecording.push(name)
     const state = client?.error ? 'Could not check'
       : client && client.configured && client.recording === false ? 'Not recording'
+      : client?.capture ? describeOllamaCapture(client.capture)
       : capture?.state === 'gap' ? 'Telemetry may be interrupted'
       : client?.attached ? `Recording${client.mode ? ` (${printable(client.mode)})` : ''}`
       : client?.attachable !== false && client?.configured ? 'Settings missing'
@@ -360,6 +363,9 @@ export function renderStatusSummary({ report, stdout }) {
     stdout.write(`\n  To record ${printable(name)} again: hyp client attach ${printable(name)}\n`)
   }
 
+  const ollama = report.clients.find(c => c.name === 'ollama')
+  if (ollama?.capture) renderOllamaCapture(ollama.capture, stdout, '  ')
+
   renderStatusAttention(report, stdout)
   stdout.write('\nMore details: hyp status --verbose\n')
 }
@@ -375,7 +381,7 @@ function statusAttention(report) {
   const gaps = report.captureHealth.filter((c) => c.state === 'gap')
   const needsAttention = report.overall !== 'healthy' || report.diagnostics.length > 0 ||
     sourceProblems.length > 0 || gaps.length > 0 || actions.length > 0 ||
-    report.cacheFlushFailuresTotal > 0 || report.clients.some((c) => c.error) || !report.daemon.running
+    report.cacheFlushFailuresTotal > 0 || report.clients.some((c) => c.error || c.capture?.state === 'failed') || !report.daemon.running
   // The verdict and the severity that produces it: an error-severity
   // diagnostic is what degrades `overall`, so reading both keeps the heading
   // from reading as an advisory on a report whose verdict contradicts its own
@@ -1150,6 +1156,9 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
+  const ollama = report.clients.find(c => c.name === 'ollama')
+  if (ollama?.capture) renderOllamaCapture(ollama.capture, stdout, '    ')
+
   section('storage')
   stdout.write(`    cache:           ${cacheRoot}\n`)
   stdout.write(
@@ -1498,4 +1507,29 @@ function inferDatasetsFromPlugins(activePlugins) {
     )
   }
   return datasets.sort((a, b) => compareStrings(a.name, b.name))
+}
+
+/** @param {HypAwareStatusReport['clients'][number]['capture']} capture */
+function describeOllamaCapture(capture) {
+  return capture?.state === 'ready' ? 'Ready; no conversation traffic'
+    : capture?.state === 'observed' ? 'Observed; capture pending'
+    : capture?.state === 'persisted' ? 'Capture persisted'
+    : capture?.state === 'failed' ? 'Capture failed'
+    : capture?.state === 'disabled' ? 'Not recording' : 'Capture unconfirmed'
+}
+
+/**
+ * @ref LLP 0474#diagnostics [implements]: default and client status share cheap route, append and bounded failure evidence
+ * @param {NonNullable<HypAwareStatusReport['clients'][number]['capture']>} capture
+ * @param {{ write(chunk: string): unknown }} stdout
+ * @param {string} indent
+ */
+function renderOllamaCapture(capture, stdout, indent) {
+  stdout.write(`${indent}Ollama: ${describeOllamaCapture(capture)}\n`)
+  stdout.write(`${indent}  Configured capture root: ${printable(capture.configuredRoot ?? 'unknown', 2048)}\n`)
+  stdout.write(`${indent}  Live capture root${capture.routeConfirmed ? '' : ' (unconfirmed)'}: ${printable(capture.captureRoot ?? 'none', 2048)}\n`)
+  if (capture.lastPersisted) stdout.write(`${indent}  ${capture.historical ? 'Historical' : 'Last'} persisted capture: ${capture.lastPersisted}\n`)
+  const earlierFailure = capture.lastPersisted && capture.lastFailed && capture.lastPersisted > capture.lastFailed
+  if (capture.lastFailed) stdout.write(`${indent}  ${capture.historical ? 'Historical failure' : earlierFailure ? 'Earlier capture failure' : 'Capture failure'}: ${capture.reason ?? 'unconfirmed'} at ${capture.lastFailed}\n`)
+  stdout.write(`${indent}  Next: ${capture.next}\n`)
 }

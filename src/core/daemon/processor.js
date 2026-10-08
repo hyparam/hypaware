@@ -44,8 +44,8 @@ async function control(msg) {
       role: 'processing',
       generation: msg.recordingGeneration,
       endpoint: msg.endpoint,
-      receive(onExchange, refreshRecording) {
-        const receiver = createCaptureReceiver({ onExchange, send, refreshRecording })
+      receive(onExchange, refreshRecording, settleVerification) {
+        const receiver = createCaptureReceiver({ onExchange, send, refreshRecording, settleVerification })
         process.on('message', receiver.message)
         send({ type: 'gateway.capture_ready' })
         return async () => {

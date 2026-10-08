@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runOllamaVerify } from './verify.js'
 import { createOllamaExchangeProjector, ollamaUpstreamPreset } from './projector.js'
 import { ollamaNativeRoute, resolveOllamaRouting, runOllamaSetup } from './setup.js'
 import { resolveConfigPath, resolveLayeredConfigForDaemon } from '../../../../src/core/runtime/boot.js'
@@ -50,6 +51,10 @@ export function activate(ctx) {
   ctx.commands.registerGroup({ name: 'ollama', plugin: '@hypaware/ollama',
     summary: 'Configure explicit Ollama routing and check local readiness',
     help: 'Use setup for direct service discovery and next-launch CLI/SDK routing recipes. Setup never starts or loads a model.',
+  })
+  ctx.commands.register({ name: 'ollama verify', plugin: '@hypaware/ollama', category: 'capture-movement', audience: 'everyday',
+    summary: 'Send an explicit check and confirm its persisted request and response', usage: 'hyp ollama verify --model NAME [--json]',
+    run: (argv, commandCtx) => runOllamaVerify(argv, commandCtx, gateway),
   })
   ctx.commands.register({ name: 'ollama setup', plugin: '@hypaware/ollama', category: 'capture-movement', audience: 'everyday',
     summary: 'Check Ollama readiness and explain explicit CLI/SDK routing', usage: 'hyp ollama setup [--upstream URL] [--json]',

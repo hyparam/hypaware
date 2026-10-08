@@ -3,8 +3,10 @@
 import { randomBytes } from 'node:crypto'
 import { createClientRecordingPolicyReader } from '../../../../src/core/config/client_recording.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
+import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
 
 import { RECORDING_TIMEOUT_MS } from '../../../../src/core/control/client_recording.js'
+import { VERIFY_PATH } from '../../../../src/core/control/client_recording.js'
 export { RECORDING_ROUTE, RECORDING_PATH, RECORDING_TIMEOUT_MS } from '../../../../src/core/control/client_recording.js'
 
 /** @import { IncomingMessage, ServerResponse } from 'node:http' */
@@ -144,6 +146,139 @@ export function createRecordingControlHandler(opts) {
       controller.signal.addEventListener('abort', () => {
         reply(503, { reason: 'recording_barrier_unconfirmed' })
         if (!req.complete) drainRequestBody(req, res)
+        cleanup()
+      }, { once: true })
+    },
+  }
+}
+
+/** @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js' */
+/** @type {WeakMap<ExtendedQueryStorageService, { done?: (reason: string) => void }>} */
+const verificationOperations = new WeakMap()
+
+// @ref LLP 0476#control [implements]: actual storage owns one full flush, surviving HTTP timeout and handler reload
+/** @param {ExtendedQueryStorageService} storage @param {string} table @param {AbortSignal} signal */
+export function settleOllamaVerification(storage, table, signal) {
+  if (signal.aborted) return Promise.resolve('processor_unavailable')
+  if (verificationOperations.has(storage)) return Promise.resolve('settlement_busy')
+  /** @type {{ done?: (reason: string) => void }} */
+  const operation = {}
+  verificationOperations.set(storage, operation)
+  const waiter = new Promise(resolve => {
+    const abort = () => finish('processor_unavailable')
+    const finish = reason => {
+      signal.removeEventListener('abort', abort)
+      operation.done = undefined
+      resolve(reason)
+    }
+    operation.done = finish
+    signal.addEventListener('abort', abort, { once: true })
+  })
+  // One completion subscriber per actual flush, never one per retry caller.
+  void Promise.resolve().then(() => storage.flushTable(table, { force: true })).then(
+    () => complete('settled'), () => complete('settlement_failed')
+  )
+  function complete(reason) {
+    if (verificationOperations.get(storage) !== operation) return
+    verificationOperations.delete(storage)
+    operation.done?.(reason)
+  }
+  return waiter
+}
+
+/** @param {{ current(): { runId?: string, generation: string, recording: boolean, reason?: string }, settle(generation: string, signal: AbortSignal): Promise<unknown> }} opts */
+export function createVerificationControlHandler(opts) {
+  /** @type {AbortController | undefined} */
+  let active
+  let closed = false
+  return {
+    close() {
+      closed = true
+      active?.abort()
+    },
+    /** @param {IncomingMessage} req @param {ServerResponse} res */
+    handle(req, res) {
+      const reply = (code, body) => {
+        if (!res.destroyed && !res.writableEnded) {
+          res.writeHead(code, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(body))
+        }
+      }
+      let host
+      try { host = new URL('http://' + req.headers.host) } catch { /* reject malformed authority */ }
+      if (!isLoopbackHost(req.socket.remoteAddress) || !host || !isLoopbackHost(host.hostname)
+        || host.username || host.password || host.search || host.hash || host.pathname !== '/' || Number(host.port || 80) !== req.socket.localPort
+        || req.headers.origin !== undefined || req.url !== VERIFY_PATH) {
+        drainRequestBody(req, res)
+        reply(403, { reason: 'control_forbidden' })
+        return
+      }
+      const policy = opts.current()
+      const identity = typeof policy.runId === 'string' && /^[a-zA-Z0-9:_-]{1,80}$/.test(policy.runId)
+        && typeof policy.generation === 'string' && /^[a-zA-Z0-9:_-]{1,80}$/.test(policy.generation)
+      const response = (reason, operation = undefined) => ({ reason, ...(identity ? { runId: policy.runId, generation: policy.generation } : {}), ...(operation ? { operation } : {}) })
+      const rejected = closed || !identity ? 'processor_unavailable' : !policy.recording ? policy.reason === 'policy_unreadable' ? 'policy_unreadable' : 'recording_disabled' : undefined
+      if (req.method === 'GET') {
+        drainRequestBody(req, res)
+        reply(rejected ? 503 : 200, response(rejected ?? 'ready'))
+        return
+      }
+      if (req.method !== 'POST' || active || rejected) {
+        drainRequestBody(req, res)
+        reply(active ? 409 : 503, response(rejected ?? (active ? 'settlement_busy' : 'method_not_allowed')))
+        return
+      }
+      const controller = new AbortController()
+      active = controller
+      const timer = setTimeout(() => controller.abort(), 30_000)
+      const abort = () => controller.abort()
+      const cleanup = () => {
+        clearTimeout(timer)
+        req.off('data', data)
+        req.off('end', end)
+        req.off('error', abort)
+        res.off('close', abort)
+        if (active === controller) active = undefined
+        body = ''
+      }
+      let body = ''
+      let bytes = 0
+      const data = chunk => {
+        bytes += chunk.length
+        if (bytes > 256) {
+          drainRequestBody(req, res)
+          reply(413, { reason: 'body_too_large' })
+          controller.abort()
+        }
+        else body += chunk.toString('utf8')
+      }
+      const end = () => {
+        let job
+        try { job = JSON.parse(body) } catch { /* scalar metadata only */ }
+        if (!job || Object.keys(job).length !== 3 || !['operation', 'generation', 'runId'].every(key => typeof job[key] === 'string' && /^[a-zA-Z0-9:_-]{1,80}$/.test(job[key]))) {
+          reply(400, { reason: 'invalid_verification_request' })
+          cleanup()
+          return
+        }
+        if (job.runId !== policy.runId || job.generation !== policy.generation) {
+          reply(409, response('stale_generation', job.operation))
+          cleanup()
+          return
+        }
+        void opts.settle(job.generation, controller.signal).then(
+          reason => {
+            const known = typeof reason === 'string' && ['settled', 'settlement_busy', 'settlement_failed', 'stale_generation', 'policy_unreadable', 'processor_unavailable'].includes(reason)
+            reply(known && reason === 'settled' ? 200 : 503, response(known ? reason : 'processor_unavailable', job.operation))
+          },
+          () => reply(503, response('processor_unavailable', job.operation))
+        ).finally(cleanup)
+      }
+      res.once('close', abort)
+      req.on('data', data)
+      req.once('end', end)
+      req.once('error', abort)
+      controller.signal.addEventListener('abort', () => {
+        reply(503, response('processor_unavailable'))
         cleanup()
       }, { once: true })
     },

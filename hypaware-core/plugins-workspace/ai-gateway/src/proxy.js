@@ -5,6 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { VERIFY_PATH } from '../../../../src/core/control/client_recording.js'
 import { isMisdirectedHost } from '../../../../src/core/otlp/server.js'
 import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
@@ -433,6 +434,11 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // anything that can make the client fetch a URL. `hyp session ignore` talks
   // to `http://127.0.0.1:<port>` directly and is unaffected.
   // @ref LLP 0247#the-control-surface-never-answers-absolute-form [implements]
+  // @ref LLP 0476#control [constrained-by]: verification is a direct local operation, never a proxied or tunneled receipt
+  if ((proxyMode || absoluteForm) && parsedUrl.pathname === VERIFY_PATH) {
+    rejectJson(req, res, 403, { error: 'verification requires direct local control' })
+    return
+  }
   if (!proxyMode && !absoluteForm && isControlPath(parsedUrl.pathname)) {
     if (typeof opts.onControlRequest === 'function') {
       opts.onControlRequest(req, res, parsedUrl)

@@ -68,7 +68,8 @@ export interface GatewayProcessTransport {
   finish?(exchange: Exchange, ignoredSessions: Set<string>): void
   generation?: string
   refreshRecording?(recording: boolean, generation: string, signal: AbortSignal): Promise<unknown>
-  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>, refresh?: (recording: boolean, signal: AbortSignal, generation: string) => Promise<unknown>): () => Promise<void>
+  settleVerification?(generation: string, signal: AbortSignal): Promise<unknown>
+  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>, refresh?: (recording: boolean, signal: AbortSignal, generation: string) => Promise<unknown>, settleVerification?: (generation: string, signal: AbortSignal) => Promise<unknown>): () => Promise<void>
   endpoint?: { host: string; port: number }
   snapshot?(): Record<string, number | boolean>
 }

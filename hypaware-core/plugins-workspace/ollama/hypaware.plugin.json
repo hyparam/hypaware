@@ -26,6 +26,6 @@
         "gateway_upstream": { "name": "ollama", "base_url": "http://127.0.0.1:11434", "path_prefix": "/api/chat", "provider": "ollama" }
       }
     }],
-    "commands": [{ "name": "ollama setup", "category": "capture-movement", "audience": "everyday", "summary": "Check Ollama readiness and explain explicit CLI/SDK routing" }]
+    "commands": [{ "name": "ollama verify", "category": "capture-movement", "audience": "everyday", "summary": "Send an explicit check and confirm its persisted request and response" }, { "name": "ollama setup", "category": "capture-movement", "audience": "everyday", "summary": "Check Ollama readiness and explain explicit CLI/SDK routing" }]
   }
 }
