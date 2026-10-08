@@ -155,7 +155,8 @@ question, see [queries](QUERYING.md#explore-recordings-with-your-agent).
 <!-- @ref LLP 0475#t5 [implements]: installed client commands replace the disposable developer configuration as the ordinary path -->
 
 Choose **Ollama** in `hyp setup`. On an existing installation, choose
-**Reconfigure** to add it beside your current clients. For unattended setup:
+**Reconfigure** to add it beside your current clients. For a fresh unattended
+installation that keeps recordings local:
 
 ```sh
 hyp setup --source ollama --export keep-local
@@ -163,9 +164,9 @@ hyp ollama setup
 hyp client status ollama
 ```
 
-`--export keep-local` selects local storage on a fresh installation. Existing
-export settings and other clients are preserved; check `hyp status` to see your
-sinks. Recorded local inference can leave the machine through configured sinks.
+To add Ollama on an existing installation while preserving its export choice,
+run `hyp setup --source ollama` without `--export`. An explicit `--export` changes
+that choice. Other clients are preserved; check `hyp status` to see your sinks. Recorded local inference can leave the machine through configured sinks.
 Setup checks the service and model inventory without starting Ollama, downloading
 or loading a model, or sending inference. Missing executable, unavailable service
 and empty model inventory are separate results. SDK use does not need the CLI
