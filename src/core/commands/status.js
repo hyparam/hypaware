@@ -1159,7 +1159,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   )
   stdout.write(`    cache size:      ${report.cache.totalBytes} bytes\n`)
   stdout.write(`    datasets:        ${datasets.length}\n`)
-  stdout.write(`    recent errors:   ${report.recentErrorCount} (24h history, includes recovered failures)\n`)
+  stdout.write(`    recent errors:   ${report.recentErrorCount} (24h retained history, includes recovered failures)\n`)
 
   if (report.usagePolicy?.localOnlyDirCount || (report.layered?.hasCentral && report.usagePolicy) || report.firstSyncHoldDeadline !== null) {
     section('sharing')

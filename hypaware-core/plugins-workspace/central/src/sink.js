@@ -2,13 +2,13 @@
 
 import { createHash } from 'node:crypto'
 
-import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
+import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail } from './backoff.js'
 
 /**
  * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation, SourceHistoryReplayPreview, SourceHistoryReplayResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
- * @import { IdentityClient } from './identity_client.js'
- * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from './types.js'
+ * @import { IdentityClient } from '../../../../hypaware-core/plugins-workspace/central/src/identity_client.js'
+ * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
@@ -84,9 +84,19 @@ export function createForwardSink(args) {
   /** @type {Map<string, Promise<number>>} */
   const partitionExports = new Map()
 
-  // Aborts an in-flight backpressure wait when the sink is closed, so a
-  // chunk paused on `Retry-After` cannot wedge daemon shutdown.
+  // Signal every owned central request/body/wait on close. Actual operation
+  // settlement, including history replay, is awaited before releasing the sink.
   const abortController = new AbortController()
+  /** @type {Set<Promise<number>>} */
+  const activeForwards = new Set()
+  /** @param {Parameters<typeof forwardPartition>[0]} args */
+  function forwardOwned(args) {
+    const pending = forwardPartition(args)
+    activeForwards.add(pending)
+    const settled = () => { activeForwards.delete(pending) }
+    pending.then(settled, settled)
+    return pending
+  }
 
   return {
     /**
@@ -111,7 +121,9 @@ export function createForwardSink(args) {
       // partition-granular outbox. Streaming-per-partition (rather than
       // grouping every partition's rows up front) is what keeps memory
       // bounded on a large backlog.
-      for (const partition of batch.partitions) {
+      // @ref LLP 0471#chunk-lifetime [implements]: no original Error/chunk frame crosses the next partition await
+      /** @param {QueryPartition} partition */
+      const exportPartition = async (partition) => {
         // Resolved INSIDE the try: `forwardingTarget` throws for a partition
         // whose dataset the local registry cannot resolve, and a throw that
         // escapes `exportBatch` costs the whole batch (the driver respools
@@ -119,6 +131,7 @@ export function createForwardSink(args) {
         // zero exported). Per-partition isolation is the contract above.
         /** @type {{ ingestName: string, registration?: DatasetRegistration } | undefined} */
         let target
+        let phase = 'dataset resolution'
         try {
           const resolved = forwardingTarget(query, partition)
           // A withheld dataset is a settled verdict, not a transport failure: it
@@ -137,7 +150,7 @@ export function createForwardSink(args) {
               if (resolved.level === 'warn') log.warn('central.forward.dataset_withheld', fields)
               else log.info('central.forward.dataset_withheld', fields)
             }
-            continue
+            return { success: true, bytesWritten: 0, withheld: true }
           }
           target = resolved
           // Scheduled ticks may overlap. Serialize one logical partition so two
@@ -148,6 +161,7 @@ export function createForwardSink(args) {
           const previous = partitionExports.get(exportKey) ?? Promise.resolve(0)
           const pending = previous.catch(() => 0).then(async () => {
             if (resolved.registration) {
+              phase = 'local rollout'
               await ensureOpenDatasetPartition({
                 partition,
                 rolloutPartitions: batch.partitions.filter((candidate) => candidate.dataset === partition.dataset),
@@ -159,7 +173,8 @@ export function createForwardSink(args) {
                 datasetRolloutLocks,
               })
             }
-            return forwardPartition({
+            phase = 'forwarding'
+            return forwardOwned({
               partition, signal: resolved.ingestName, config, identityClient, storage, watermarks, fetchFn, log,
               abortSignal: abortController.signal, sleepFn,
               registration: resolved.registration,
@@ -173,20 +188,18 @@ export function createForwardSink(args) {
           })
           partitionExports.set(exportKey, pending)
           try {
-            bytesWritten += await pending
+            const bytes = await pending
+            return { success: true, bytesWritten: bytes }
           } finally {
             if (partitionExports.get(exportKey) === pending) partitionExports.delete(exportKey)
           }
-          partitionsExported += 1
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          firstError = firstError ?? message
-          retry.push(partition)
+          const message = failureMessage(err, phase)
           // `forwardPartition` annotates the error with the failing
           // chunk's id and the count that already landed (undefined for
           // pre-stream failures like an unresolvable dataset or a rejected
           // schema registration, which throw before any chunk is built).
-          const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err ?? {})
+          const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number, hyp_bytes_written?: number }} */ (err ?? {})
           log.warn('central.forward.failed', {
             hyp_sink_signal: target?.ingestName ?? partition.dataset,
             hyp_dataset: partition.dataset,
@@ -194,6 +207,17 @@ export function createForwardSink(args) {
             batch_id: e.hyp_batch_id,
             chunks_sent: e.hyp_chunks_sent,
           })
+          return { success: false, bytesWritten: e.hyp_bytes_written ?? 0, message }
+        }
+      }
+      for (const partition of batch.partitions) {
+        const outcome = await exportPartition(partition)
+        bytesWritten += outcome.bytesWritten
+        if (outcome.success) {
+          if (!outcome.withheld) partitionsExported += 1
+        } else {
+          retry.push(partition)
+          firstError ??= outcome.message
         }
       }
 
@@ -277,7 +301,7 @@ export function createForwardSink(args) {
             })
             continue
           }
-          bytesWritten += await forwardPartition({
+          bytesWritten += await forwardOwned({
             partition,
             signal: target.ingestName,
             config,
@@ -310,7 +334,7 @@ export function createForwardSink(args) {
           // report must not get wrong.
           rowsReplayed += stats.rows
           bytesWritten += stats.bytes
-          const message = err instanceof Error ? err.message : String(err)
+          const message = failureMessage(err)
           log.warn('central.forward.history_replay_failed', {
             hyp_sink_source: request.source,
             hyp_rows_replayed: rowsReplayed,
@@ -361,11 +385,8 @@ export function createForwardSink(args) {
     },
 
     async close() {
-      // No background loops to stop here: the config pull loop wraps
-      // this sink's close() in index.js, and identity refresh is lazy
-      // (every authenticated call refreshes inside the 24h window). The
-      // one thing to interrupt is a chunk paused on server backpressure.
       abortController.abort(new Error('central.forward sink closed'))
+      await Promise.allSettled([...partitionExports.values(), ...activeForwards])
     },
   }
 }
@@ -726,6 +747,7 @@ function withDatasetRolloutLock(dataset, locks, fn) {
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
 async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats, onProgress }) {
+  abortSignal.throwIfAborted()
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
@@ -792,6 +814,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       fetchFn,
       log,
       nowFn,
+      abortSignal,
     })
     if (!supported) return 0
   }
@@ -820,9 +843,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // double-storing it on the server.
   let chunkStartSeq = since?.seq ?? '0'
 
+  // @ref LLP 0471#chunk-lifetime [implements]: flush clears each settled chunk on both success and failure
   const flushChunk = async () => {
     if (lines.length === 0) return
-    const body = lines.join('\n') + '\n'
+    let body = lines.join('\n') + '\n'
     // @ref LLP 0040#applying-it-to-both-sinks [implements]: stable per-chunk batch id keyed by the chunk's start seq, so a post-watermark-advance respool reproduces the same id and the server ledger dedupes.
     const batchId = batchIdForChunk(signal, tablePath, chunkStartSeq, body)
     const bytes = Buffer.byteLength(body, 'utf8')
@@ -844,6 +868,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
         e.hyp_bytes_written = bytesWritten
       }
       throw err
+    } finally {
+      lines = []
+      body = ''
+      pendingBytes = 0
     }
     log.debug('central.forward.chunk', {
       hyp_sink_signal: signal,
@@ -865,8 +893,6 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     // off this chunk's `after`: keeping ids stable whether a tick streams the
     // whole partition or a respool replays only the un-acked suffix.
     if (after) chunkStartSeq = after.seq
-    lines = []
-    pendingBytes = 0
   }
 
   // @ref LLP 0040#storage-api-extension [implements]: pre-upgrade null-seq rows
@@ -1045,7 +1071,7 @@ function serializeValue(value) {
  * }} args
  */
 async function postNdjson(args) {
-  const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn, hyp_dataset, chunkIndex } = args
+  const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal: parentSignal, sleepFn, hyp_dataset, chunkIndex } = args
   // Escaped the same way `ensureDatasetRegistered` escapes the registration
   // path: since the open-dataset protocol puts an arbitrary dataset name here
   // (not one of the four fixed signals), the two paths would otherwise be able
@@ -1068,84 +1094,99 @@ async function postNdjson(args) {
   // server charges backpressure from it. Each attempt builds a fresh stream:
   // a ReadableStream is single-use and the loop below re-sends the same
   // chunk after a 401 refresh or 429/503 pause.
-  const bytes = Buffer.from(body, 'utf8')
-  const streamBody = () => {
-    let offset = 0
-    return new ReadableStream({
-      pull(controller) {
-        if (offset >= bytes.byteLength) return controller.close()
-        controller.enqueue(bytes.subarray(offset, offset += BODY_STREAM_SLICE_BYTES))
-      },
-    })
-  }
-  /** @param {string} jwt */
-  const send = (jwt) => fetchFn(url, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${jwt}`,
-      'content-type': 'application/x-ndjson',
-      'content-length': String(bytes.byteLength),
-      'x-hyp-batch-id': batchId,
-    },
-    body: streamBody(),
-    duplex: 'half',
-  })
-
-  let refreshed = false
-  let waitedMs = 0
-  let backpressureRetries = 0
-  for (;;) {
-    const response = await send(await identityClient.getCurrentJwt())
-
-    if (response.status === 202 || response.ok) return
-
-    // One-shot refresh + retry on the first 401; a second falls through
-    // to the throw below as an auth failure (proto.md "Refresh window").
-    if (response.status === 401 && !refreshed) {
-      refreshed = true
-      await identityClient.refresh()
-      continue
-    }
-
-    // @ref LLP 0014#forward-sink-backpressure [implements]: 429/503 is backpressure, not failure: pace the same chunk in place, bounded inline, respool past budget.
-    if (response.status === 429 || response.status === 503) {
-      // Honor only a *positive* Retry-After. A legal `Retry-After: 0` or a
-      // past HTTP-date parses to 0 (not undefined) and carries no useful
-      // pacing: taking it verbatim would retry with zero delay, never
-      // advance `waitedMs`, and spin this loop forever. `||` (not `??`)
-      // falls a zero through to the ladder, so every wait progresses and
-      // the inline budget can bound the retries.
-      const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
-      const delaySeconds = retryAfter || RETRY_BACKOFF_SECONDS[
-        Math.min(backpressureRetries, RETRY_BACKOFF_SECONDS.length - 1)
-      ]
-      const delayMs = delaySeconds * 1000
-      if (waitedMs + delayMs > MAX_BACKPRESSURE_WAIT_MS) {
-        const detail = await readErrorDetail(response)
-        throw new Error(`central.forward POST ${url} backpressure exceeded ${MAX_BACKPRESSURE_WAIT_MS / 1000}s inline: ${detail}`)
-      }
-      log.debug('central.forward.backpressure', {
-        hyp_sink_signal: signal,
-        hyp_dataset,
-        batch_id: batchId,
-        chunk_index: chunkIndex,
-        http_status: response.status,
-        retry_after_seconds: delaySeconds,
-        retry: backpressureRetries + 1,
+  const lifetime = centralLifetime(parentSignal, 'central chunk')
+  const abortSignal = lifetime.signal
+  let bytes = Buffer.from(body, 'utf8')
+  try {
+    const streamBody = () => {
+      let offset = 0
+      return new ReadableStream({
+        pull(controller) {
+          if (offset >= bytes.byteLength) return controller.close()
+          controller.enqueue(bytes.subarray(offset, offset += BODY_STREAM_SLICE_BYTES))
+        },
       })
-      // Release the throttle response before parking: undici keeps the
-      // socket out of the pool until the body is read or cancelled, so a
-      // multi-minute pause (and every retry that piles up) would
-      // otherwise pin it.
-      await discardBody(response)
-      await sleepFn(delayMs, abortSignal)
-      waitedMs += delayMs
-      backpressureRetries += 1
-      continue
     }
+    /** @param {string} jwt */
+    const send = (jwt) => fetchFn(url, {
+      method: 'POST',
+      signal: abortSignal,
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'content-type': 'application/x-ndjson',
+        'content-length': String(bytes.byteLength),
+        'x-hyp-batch-id': batchId,
+      },
+      body: streamBody(),
+      duplex: 'half',
+    })
 
-    const detail = await readErrorDetail(response)
-    throw new Error(`central.forward POST ${url} failed: ${detail}`)
+    let refreshed = false
+    let waitedMs = 0
+    let backpressureRetries = 0
+    for (;;) {
+      const response = await send(await identityClient.getCurrentJwt(abortSignal))
+
+      abortSignal.throwIfAborted()
+      if (response.status === 202 || response.ok) {
+        await discardBody(response)
+        abortSignal.throwIfAborted()
+        return
+      }
+
+      // One-shot refresh + retry on the first 401; a second falls through
+      // to the throw below as an auth failure (proto.md "Refresh window").
+      if (response.status === 401 && !refreshed) {
+        refreshed = true
+        await discardBody(response)
+        await identityClient.refresh(abortSignal)
+        continue
+      }
+
+      // @ref LLP 0014#forward-sink-backpressure [implements]: 429/503 is backpressure, not failure: pace the same chunk in place, bounded inline, respool past budget.
+      if (response.status === 429 || response.status === 503) {
+        // Honor only a *positive* Retry-After. A legal `Retry-After: 0` or a
+        // past HTTP-date parses to 0 (not undefined) and carries no useful
+        // pacing: taking it verbatim would retry with zero delay, never
+        // advance `waitedMs`, and spin this loop forever. `||` (not `??`)
+        // falls a zero through to the ladder, so every wait progresses and
+        // the inline budget can bound the retries.
+        const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
+        const delaySeconds = retryAfter || RETRY_BACKOFF_SECONDS[
+          Math.min(backpressureRetries, RETRY_BACKOFF_SECONDS.length - 1)
+        ]
+        const delayMs = delaySeconds * 1000
+        if (waitedMs + delayMs > MAX_BACKPRESSURE_WAIT_MS) {
+          const detail = await readErrorDetail(response, abortSignal)
+          throw new Error(`central.forward POST ${url} backpressure exceeded ${MAX_BACKPRESSURE_WAIT_MS / 1000}s inline: ${detail}`)
+        }
+        log.debug('central.forward.backpressure', {
+          hyp_sink_signal: signal,
+          hyp_dataset,
+          batch_id: batchId,
+          chunk_index: chunkIndex,
+          http_status: response.status,
+          retry_after_seconds: delaySeconds,
+          retry: backpressureRetries + 1,
+        })
+        // Release the throttle response before parking: undici keeps the
+        // socket out of the pool until the body is read or cancelled, so a
+        // multi-minute pause (and every retry that piles up) would
+        // otherwise pin it.
+        await discardBody(response)
+        await sleepFn(delayMs, abortSignal)
+        waitedMs += delayMs
+        backpressureRetries += 1
+        continue
+      }
+
+      const detail = await readErrorDetail(response, abortSignal)
+      throw new Error(`central.forward POST ${url} failed: ${detail}`)
+    }
+  } finally {
+    lifetime.abort(new Error('central chunk settled'))
+    bytes = Buffer.alloc(0)
+    lifetime.dispose()
   }
 }
 
@@ -1165,11 +1206,12 @@ async function postNdjson(args) {
  *   fetchFn: typeof fetch,
  *   log: PluginLogger,
  *   nowFn: () => number,
+ *   abortSignal: AbortSignal,
  * }} args
  * @returns {Promise<boolean>}
  */
 async function ensureDatasetRegistered(args) {
-  const { centralUrl, dataset, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn } = args
+  const { centralUrl, dataset, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn, abortSignal } = args
   if (registeredDatasets.has(dataset.name)) return true
   if ((unsupportedDatasetsUntil.get(dataset.name) ?? 0) > nowFn()) return false
 
@@ -1184,10 +1226,10 @@ async function ensureDatasetRegistered(args) {
       fetchFn,
       log,
       nowFn,
+      abortSignal,
     })
-      .catch((err) => {
-        datasetRegistrations.delete(dataset.name)
-        throw err
+      .finally(() => {
+        if (datasetRegistrations.get(dataset.name) === pending) datasetRegistrations.delete(dataset.name)
       })
     datasetRegistrations.set(dataset.name, pending)
   }
@@ -1209,54 +1251,66 @@ async function ensureDatasetRegistered(args) {
  *   fetchFn: typeof fetch,
  *   log: PluginLogger,
  *   nowFn: () => number,
+ *   abortSignal: AbortSignal,
  * }} args
  */
 async function registerDataset(args) {
-  const { centralUrl, dataset, registeredDatasets, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn } = args
+  const { centralUrl, dataset, registeredDatasets, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn, abortSignal } = args
 
-  const body = {
-    schema: dataset.schema,
-    ...(dataset.sourceSignal ? { sourceSignal: dataset.sourceSignal } : {}),
-    ...(dataset.primaryTimestampColumn
-      ? { primaryTimestampColumn: dataset.primaryTimestampColumn }
-      : {}),
-  }
-  const url = joinUrl(centralUrl, `/v1/datasets/${encodeURIComponent(dataset.name)}`)
-  const send = (jwt) => fetchFn(url, {
-    method: 'PUT',
-    headers: {
-      authorization: `Bearer ${jwt}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
-
-  let response = await send(await identityClient.getCurrentJwt())
-  if (response.status === 401) {
-    await discardBody(response)
-    await identityClient.refresh()
-    response = await send(await identityClient.getCurrentJwt())
-  }
-  if (response.status === 404 || response.status === 405) {
-    await discardBody(response)
-    unsupportedDatasetsUntil.set(dataset.name, nowFn() + DATASET_REGISTRATION_REPROBE_MS)
-    log.warn('central.forward.dataset_unsupported', {
-      hyp_dataset: dataset.name,
-      http_status: response.status,
-      reprobe_after_ms: DATASET_REGISTRATION_REPROBE_MS,
+  const lifetime = centralLifetime(abortSignal, 'central registration')
+  const signal = lifetime.signal
+  try {
+    signal.throwIfAborted()
+    const body = {
+      schema: dataset.schema,
+      ...(dataset.sourceSignal ? { sourceSignal: dataset.sourceSignal } : {}),
+      ...(dataset.primaryTimestampColumn
+        ? { primaryTimestampColumn: dataset.primaryTimestampColumn }
+        : {}),
+    }
+    const url = joinUrl(centralUrl, `/v1/datasets/${encodeURIComponent(dataset.name)}`)
+    const send = (jwt) => fetchFn(url, {
+      method: 'PUT',
+      signal,
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
     })
-    return
+
+    let response = await send(await identityClient.getCurrentJwt(signal))
+    if (response.status === 401) {
+      await discardBody(response)
+      await identityClient.refresh(signal)
+      response = await send(await identityClient.getCurrentJwt(signal))
+    }
+    if (response.status === 404 || response.status === 405) {
+      await discardBody(response)
+      unsupportedDatasetsUntil.set(dataset.name, nowFn() + DATASET_REGISTRATION_REPROBE_MS)
+      log.warn('central.forward.dataset_unsupported', {
+        hyp_dataset: dataset.name,
+        http_status: response.status,
+        reprobe_after_ms: DATASET_REGISTRATION_REPROBE_MS,
+      })
+      return
+    }
+    if (!response.ok) {
+      const detail = await readErrorDetail(response, signal)
+      throw new Error(`central.forward PUT ${url} failed: ${detail}`)
+    }
+    await discardBody(response)
+    signal.throwIfAborted()
+    unsupportedDatasetsUntil.delete(dataset.name)
+    registeredDatasets.add(dataset.name)
+    log.info('central.forward.dataset_registered', {
+      hyp_dataset: dataset.name,
+      hyp_sink_signal: dataset.sourceSignal ?? dataset.name,
+    })
+  } finally {
+    lifetime.abort(new Error('central registration settled'))
+    lifetime.dispose()
   }
-  if (!response.ok) {
-    const detail = await readErrorDetail(response)
-    throw new Error(`central.forward PUT ${url} failed: ${detail}`)
-  }
-  unsupportedDatasetsUntil.delete(dataset.name)
-  registeredDatasets.add(dataset.name)
-  log.info('central.forward.dataset_registered', {
-    hyp_dataset: dataset.name,
-    hyp_sink_signal: dataset.sourceSignal ?? dataset.name,
-  })
 }
 
 /**
@@ -1273,34 +1327,12 @@ function joinUrl(base, suffix) {
   return new URL(suffix.replace(/^\//, ''), baseWithSlash).toString()
 }
 
-/** @param {Response} response */
-async function readErrorDetail(response) {
-  let body
-  try { body = await response.text() } catch { body = '' }
-  if (body.length > 0) {
-    try {
-      const parsed = JSON.parse(body)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const error = typeof /** @type {Record<string, unknown>} */ (parsed).error === 'string'
-          ? /** @type {string} */ (/** @type {Record<string, unknown>} */ (parsed).error)
-          : undefined
-        if (error) return `${response.status} ${error}`
-      }
-    } catch {
-      // plain text: fall through
-    }
-    return `${response.status} ${body.trim().slice(0, 200)}`
+/** @param {unknown} error @param {string} [phase] */
+function failureMessage(error, phase = 'forwarding') {
+  // Transport/runtime errors may carry payloads, causes or huge strings. Keep
+  // only locally generated central categories, never a remote body or stack.
+  if (error instanceof Error && /^(central\.forward|central chunk|central registration|identity refresh|central response)/.test(error.message)) {
+    return error.message.slice(0, 200)
   }
-  return `${response.status} ${response.statusText || ''}`.trim()
-}
-
-/**
- * Discard a response body we will not read (a 429/503 we are about to
- * retry past), so undici returns the socket to the pool. Cancelling is
- * best-effort: a missing or already-settled body is a no-op.
- *
- * @param {Response} response
- */
-async function discardBody(response) {
-  try { await response.body?.cancel() } catch { /* already settled or no body */ }
+  return `central.forward ${phase} failed`
 }

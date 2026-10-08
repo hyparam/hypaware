@@ -164,6 +164,17 @@ export interface DriverOptions {
   /** Kernel state root (e.g. `<HYP_HOME>/hypaware`). */
   stateRoot: string
   config?: HypAwareV2Config
+  /** Actual admitted exports only, with bounded scalar summary and wall-clock completion. */
+  onComplete?: (completion: SinkCompletion) => void
+  /** Separate cleanup failure, never an export acknowledgement or payload reason. */
+  onDiagnosticCleanupFailure?: (instance: string, code: string) => void
+}
+
+/** Bounded scalar metadata for one recognized ordinary driver diagnostic. */
+export interface SinkDiagnosticRecord {
+  name: string
+  at: number
+  sequence: bigint
 }
 
 export interface TickOptions {
@@ -193,6 +204,35 @@ export interface TickReport {
    * (LLP 0101).
    */
   held?: 'first_sync_hold'
+}
+
+/** Internal host seams, never part of the public plugin Sink contract. */
+export interface SinkCompletion {
+  instance: string
+  startedAt: string
+  completedAt: string
+  report: TickReport['sinks'][number]
+}
+
+export interface SinkRunOutcome {
+  report?: TickReport['sinks'][number]
+  held?: 'first_sync_hold'
+}
+
+export interface SinkManualReceipt {
+  run: () => Promise<SinkRunOutcome>
+  resolve: (outcome: SinkRunOutcome) => void
+  reject: (error: unknown) => void
+}
+
+export interface SinkExecutionState {
+  active: boolean
+  operation: Promise<SinkRunOutcome> | null
+  rerun: boolean
+  manual: SinkManualReceipt | null
+  stopped: boolean
+  stop: () => void
+  scheduled: (handle: ExtendedSinkHandle, state: SinkExecutionState) => void
 }
 
 export interface MaterializeResult {

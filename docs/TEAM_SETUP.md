@@ -122,6 +122,22 @@ An all-destination confirmed sync can release the first-sync review hold early.
 For replaying previously withheld history, see the
 [sync reference](CLI_REFERENCE.md#hyp-sync).
 
+<!-- @ref LLP 0471#manual-work: manual progress belongs to one awaited destination at a time -->
+The command sends to selected destinations one at a time and waits for each
+result. Cloud upload progress counts acknowledged rows; `Finishing` can still
+mean HypAware is saving export progress locally. Read each destination's final
+result before ending the process. A partial result can leave work to retry;
+the exit code alone does not prove every destination finished.
+
+<!-- @ref LLP 0471#daemon-work: scheduled destinations and daemon health work progress independently -->
+Scheduled exports run independently by destination. A slow Cloud upload does
+not make the local file export wait for it, or hold up recording recovery
+sweeps and status updates. Repeated schedule fires for a busy destination
+request one follow-up run rather than building a queue of exports.
+
+For timeouts, unresolved warnings and retained error history, see
+[export troubleshooting](TROUBLESHOOTING.md#an-export-or-team-sync-is-missing).
+
 ## Manage remote access
 
 ```sh
