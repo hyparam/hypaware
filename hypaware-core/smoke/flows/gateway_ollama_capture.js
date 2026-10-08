@@ -139,7 +139,7 @@ export async function run({ harness, expect }) {
     gateway.config.listen = '127.0.0.1:0'
     gateway.config.upstreams.find(entry => entry.name === 'ollama').base_url = direct
     gateway.config.upstreams.push({ name: 'echo-anthropic', base_url: direct, path_prefix: '/v1/messages', priority: 1000 })
-    selected.plugins.push({ name: '@hypaware/claude' })
+    selected.plugins.push({ name: '@hypaware/claude', config: { telemetry: { listen_host: '127.0.0.1', listen_port: 0 } } })
     selected.auto_update = false
     selected.query.cache.maintenance = { enabled: false }
     await fs.writeFile(configPath, JSON.stringify(selected))
