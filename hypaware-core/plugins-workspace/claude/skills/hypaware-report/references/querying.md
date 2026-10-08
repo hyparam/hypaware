@@ -64,11 +64,11 @@ Never GROUP BY / DISTINCT / row-fetch wide content columns (`cwd`,
 objects or per-row string transforms. Use the installed SQL dialect and schema;
 an engine error is a reason to simplify, not repeatedly try the same query.
 
-Three engine limits that cost report runs the most retries:
+SQL limits:
 
-- **Subqueries cannot reference the outer query.** A correlated subquery fails with a misleading `Table "x" not found`, so renaming the alias will not help. Aggregate in a derived table and JOIN it back: for the first message per session, join on `MIN(message_created_at)` grouped by `session_id`, or use `ROW_NUMBER()` below.
-- **`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` works; aggregates with `OVER` (`COUNT`, `MAX`, `SUM`) are refused.** Aggregate in a subquery instead, or bucket by time, e.g. per-minute counts with `substr(CAST(message_created_at AS VARCHAR), 1, 16)`.
-- **There is no DATE type and no `DATE()` function.** The `date` column already holds the day (`MIN(date)`, `COUNT(DISTINCT date)`); for a timestamp use `DATE_TRUNC('day', CAST(message_created_at AS TIMESTAMP))`.
+- **Subqueries cannot reference the outer query.** Aggregate in a derived table and JOIN it back (first message per session: join on `MIN(message_created_at)` grouped by `session_id`), or use `ROW_NUMBER()`.
+- **`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` works; `COUNT`, `MAX`, and `SUM` with `OVER` do not.** Aggregate in a subquery, or bucket by time (per minute: `substr(CAST(message_created_at AS VARCHAR), 1, 16)`).
+- **There is no DATE type and no `DATE()` function.** Use the `date` column (`MIN(date)`, `COUNT(DISTINCT date)`) or `DATE_TRUNC('day', CAST(message_created_at AS TIMESTAMP))`.
 
 For entity relationships and outcomes, inspect available graph/GitHub datasets
 rather than inferring delivery from counts of commands or assistant claims.
