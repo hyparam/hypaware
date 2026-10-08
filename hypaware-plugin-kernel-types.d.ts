@@ -2329,7 +2329,15 @@ export interface AiGatewayExchangeProjector {
     | undefined
 }
 
+/** Finite capture outcomes; payloads and upstream exception text never cross this seam. */
+export type AiGatewayCaptureReason = 'text' | 'media_omitted' | 'load_unload' | 'session_ignored' |
+  'invalid_request' | 'unsupported_shape' | 'invalid_response' | 'malformed_stream' | 'trailing_record' | 'missing_terminal' |
+  'transport_error' | 'upstream_unavailable' | 'http_error' | 'capture_limit' | 'processor_unavailable' | 'append_failure' |
+  'recording_disabled' | 'owner_absent' | 'owner_disabled' | 'policy_unreadable' | 'stale_generation' | 'recording_barrier_unconfirmed'
+
 export interface AiGatewayExchangeProjectorContext {
+  /** Adapter-owned semantic admission, independent of eventual append success. */
+  captureOutcome?(reason: AiGatewayCaptureReason): void
   log: PluginLogger
   /**
    * Read-only membership test against the gateway's in-memory

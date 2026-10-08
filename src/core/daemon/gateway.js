@@ -85,6 +85,7 @@ export async function runGatewayDaemon(opts = {}) {
   /** @type {DaemonStatus} */
   const status = { state: 'starting', pid: process.pid, startedAt, healthyAt: startedAt, uptimeMs: 0, runId, mode: 'foreground', sources: [], sinks: [] }
   const { createCaptureSender, setGatewayProcessTransport } = await import(PROCESS_TRANSPORT_ENTRY)
+  const { mergeCaptureOutcomes } = await import(new URL('../../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js', import.meta.url).href)
   const sender = createCaptureSender({ getChild: () => child, log })
   setGatewayProcessTransport({ role: 'gateway', ...sender })
 
@@ -137,7 +138,7 @@ export async function runGatewayDaemon(opts = {}) {
         // Only the gateway proves the bound endpoint and live ignore set.
         const recordedDetails = /** @type {Record<string, unknown>} */ (recorded?.details ?? {})
         const liveDetails = /** @type {Record<string, unknown>} */ (gateway.details ?? {})
-        gateway.details = { ...recordedDetails, ...liveDetails, recent_entrypoints: recordedDetails.recent_entrypoints ?? [] }
+        gateway.details = { ...recordedDetails, ...liveDetails, recent_entrypoints: recordedDetails.recent_entrypoints ?? [], capture_outcomes: mergeCaptureOutcomes(recordedDetails.capture_outcomes, liveDetails.capture_outcomes) }
         status.sources.unshift(gateway)
       }
       status.sinks = matches ? processor?.sinks ?? [] : []
@@ -184,6 +185,7 @@ export async function runGatewayDaemon(opts = {}) {
     })
     child = next
     next.on('message', sender.message)
+    next.on('disconnect', () => { if (child === next) sender.reset() })
     next.on('error', error => log.warn('processing.spawn_failed', { message: error.message }))
     next.on('exit', (code, signal) => {
       if (child !== next) return
@@ -202,10 +204,10 @@ export async function runGatewayDaemon(opts = {}) {
       void refreshStatus()
     })
     void gatewaySnapshot().then(snapshot => {
-      const details = /** @type {{ host?: string, port?: number } | undefined} */ (snapshot?.details)
+      const details = /** @type {{ host?: string, port?: number, recording_generation?: string } | undefined} */ (snapshot?.details)
       const host = details?.host
       const port = details?.port
-      next.send({ type: 'processing.start', hypHome, configPath: opts.configPath, runtimeStateRoot: processingRoot, runId: `${runId}-processing-${restarts}`, tickIntervalMs: opts.tickIntervalMs, endpoint: host && port ? { host, port } : undefined }, error => {
+      next.send({ type: 'processing.start', recordingGeneration: details?.recording_generation, hypHome, configPath: opts.configPath, runtimeStateRoot: processingRoot, runId: `${runId}-processing-${restarts}`, tickIntervalMs: opts.tickIntervalMs, endpoint: host && port ? { host, port } : undefined }, error => {
         if (error) log.warn('processing.start_failed', { message: error.message })
       })
     }).catch(error => { log.warn('processing.start_failed', { message: String(error) }); next.kill() })
@@ -232,6 +234,7 @@ export async function runGatewayDaemon(opts = {}) {
   async function stop(code = 0, bootFailure) {
     if (stopping) return done
     stopping = true
+    sender.reset()
     clearTimeout(restartTimer)
     clearTimeout(processingStopTimer)
     clearInterval(heartbeat)

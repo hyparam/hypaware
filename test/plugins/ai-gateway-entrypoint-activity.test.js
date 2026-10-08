@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createEntrypointActivity } from '../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js'
+/** @import { AiGatewayCaptureReason } from '../../hypaware-plugin-kernel-types.js' */
 
 // The gateway's half of "hyp status names recent client surfaces": count and
 // timestamp whatever the projector wrote into `entrypoint`, interpret none of
@@ -190,4 +191,53 @@ test('clamping an astral entrypoint leaves a well-formed string', () => {
   assert.equal(entry.entrypoint.isWellFormed(), true)
   // The marker is inside the ceiling, not bolted on past it.
   assert.ok(entry.entrypoint.length <= 120, `length ${entry.entrypoint.length}`)
+})
+
+// @ref LLP 0474#diagnostics [tests]: every reason remains finite, append failure cannot stamp persistence, and default stderr does not need telemetry
+test('capture evidence retains only known routes and reasons, capped scalar summaries and coalesced default stderr', async t => {
+  const { createCaptureOutcomes, CAPTURE_REASONS, mergeCaptureOutcomes } = await import('../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js')
+  let at = Date.parse('2026-10-07T10:00:00Z')
+  t.mock.method(Date, 'now', () => at)
+  let stderr = ''
+  t.mock.method(process.stderr, 'write', chunk => { stderr += chunk; return true })
+  const tracker = createCaptureOutcomes(Array.from({ length: 100 }, (_, index) => 'route-' + index))
+  assert.equal(tracker.snapshot().length, 32)
+  tracker.record('arbitrary-SECRET', 'append_failure', 'SECRET invalid\nID')
+  for (const reason of CAPTURE_REASONS) tracker.record('route-0', /** @type {AiGatewayCaptureReason} */ (reason), 'safe:1')
+  let entry = tracker.snapshot()[0]
+  assert.equal(Object.keys(entry.reasons).length, CAPTURE_REASONS.length)
+  assert.equal(entry.persisted, 0)
+  assert.equal(entry.last_persisted, undefined)
+  tracker.record('route-0', 'text', 'safe:2')
+  assert.equal(tracker.snapshot()[0].last_persisted, undefined, 'projection alone is not persistence')
+  at += 30_000
+  tracker.record('route-0', 'text', 'safe:2', true)
+  entry = tracker.snapshot()[0]
+  assert.equal(entry.persisted, 1)
+  const stamp = entry.last_persisted
+  const id = entry.persisted_id
+  at += 30_000
+  tracker.record('route-0', 'append_failure', 'safe:3')
+  for (let index = 0; index < 100; index++) tracker.record('route-0', 'append_failure', 'safe:3')
+  entry = tracker.snapshot()[0]
+  assert.equal(entry.last_persisted, stamp)
+  assert.equal(entry.persisted_id, id)
+  assert.equal(entry.failed_id, 'safe:3')
+  assert.equal(stderr.split('\n').filter(Boolean).length, 3)
+  assert.match(stderr, /WARN.*append_failure/)
+  assert.match(stderr, /INFO.*text/)
+  assert.doesNotMatch(stderr, /SECRET|invalid/)
+  tracker.record('route-0', 'text', 'safe:4', true)
+  at += 30_000
+  tracker.snapshot()
+  assert.equal(stderr.split('\n').filter(Boolean).length, 4, 'periodic status flushes a coalesced recovery without requiring more traffic')
+  const merged = mergeCaptureOutcomes(tracker.snapshot(), [{ route: 'route-0', observed: Infinity, failed: NaN, persisted: -1, reasons: { text: 9e99, append_failure: NaN, arbitrary: 200 }, reason: 'arbitrary', prompt: 'SECRET' }])
+  const summary = /** @type {any} */ (merged[0])
+  assert.equal(summary.observed, 0x7fffffff)
+  assert.ok(summary.persisted >= 1)
+  assert.equal(summary.reasons.text, 0x7fffffff)
+  assert.ok(Number.isFinite(summary.reasons.append_failure))
+  assert.equal(summary.reasons.arbitrary, undefined)
+  assert.doesNotMatch(JSON.stringify(merged), /SECRET|prompt|NaN|Infinity/)
+  assert.equal(mergeCaptureOutcomes(tracker.snapshot(), Array.from({ length: 40 }, (_, index) => ({ route: 'more-' + index }))).length, 32)
 })

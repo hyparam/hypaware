@@ -40,11 +40,17 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   const log = getLogger('smoke')
   const step = smoke_step => log.info('smoke.step', { dev_run_id: harness.devRunId, smoke_name: harness.smokeName, smoke_step })
+  /** @type {Map<string, http.ServerResponse>} */
+  const held = new Map()
   const upstream = http.createServer((req, res) => {
     req.resume()
     req.on('end', () => {
       const which = req.headers['x-smoke-case']
-      if (which === 'error') {
+      if (typeof which === 'string' && which.startsWith('held_')) {
+        res.writeHead(200, { 'content-type': 'application/x-ndjson' })
+        res.write(JSON.stringify(message('held answer')) + '\n')
+        held.set(which, res)
+      } else if (which === 'error') {
         res.writeHead(503, { 'content-type': 'application/json' })
         res.end('{"error":"SECRET upstream message"}')
       } else if (which === 'abort') {
@@ -255,6 +261,66 @@ export async function run({ harness, expect }) {
     assert.equal(directResult.status, 200)
     assert.equal(await directResult.text(), jsonResponse)
     assert.deepEqual(await query(), saved, 'direct request after stop was captured')
+
+    // @ref LLP 0475#t3 [tests]: real CLI, gateway HTTP, processing child generation and persisted cache across detach/attach/restart
+    step('recording_held_off')
+    base = await boot()
+    const lifecycleBody = JSON.stringify({ model: 'smoke-ollama', messages: [{ role: 'user', content: 'lifecycle question' }] })
+    /** @param {'attach' | 'detach'} action */
+    const client = async action => {
+      let output = ''
+      let errors = ''
+      const code = await dispatch(['client', action, 'ollama', '--json'], { env, stdout: { write: value => { output += value; return true } }, stderr: { write: value => { errors += value; return true } } })
+      assert.equal(code, 0, errors + output)
+      const receipt = JSON.parse(output)
+      assert.equal(receipt.status, 'ok')
+      return receipt
+    }
+    const heldOff = await post(base, 'held_off', lifecycleBody)
+    await until(() => held.has('held_off'), 'held stream before off')
+    await client('detach')
+    held.get('held_off')?.end(JSON.stringify(message('', true)) + '\n')
+    assert.match(await heldOff.text(), /held answer/)
+    for (const route of ['/api/chat', '/ollama/api/chat']) {
+      const passthrough = await fetch(base + route, { method: 'POST', body: lifecycleBody })
+      assert.equal(passthrough.status, 200)
+      assert.equal(await passthrough.text(), jsonResponse)
+    }
+    await client('detach')
+    await handle?.stop()
+    await handle?.done
+    assert.deepEqual(await query(), saved, 'off receipt admitted late history')
+    assert.equal(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins.find(entry => entry.name === '@hypaware/ollama').recording, false)
+
+    step('recording_restart_off')
+    base = await boot()
+    assert.equal(/** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.recording_enabled, false)
+    const restartOff = await post(base, 'json', lifecycleBody)
+    assert.equal(await restartOff.text(), jsonResponse)
+    await client('attach')
+    step('recording_held_reattach')
+    const heldAttach = await fetch(base + '/ollama/api/chat', { method: 'POST', body: lifecycleBody, headers: { 'x-smoke-case': 'held_reattach' } })
+    await until(() => held.has('held_reattach'), 'held stream before reattach')
+    await client('detach')
+    await client('attach')
+    held.get('held_reattach')?.end(JSON.stringify(message('', true)) + '\n')
+    assert.match(await heldAttach.text(), /held answer/)
+    const fresh = await post(base, 'json', lifecycleBody)
+    assert.equal(await fresh.text(), jsonResponse)
+    await until(async () => (await diagnostic('plugin.ollama.capture_projected')).length >= projected.length + 1, 'fresh generation projected')
+    await client('detach')
+    await until(() => /** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.capture_outcomes?.some(entry => entry.last_persisted && entry.persisted_id), 'processor persistence summary reached gateway status')
+    const outcomes = /** @type {any[]} */ (/** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.capture_outcomes ?? [])
+    assert.ok(outcomes.length <= 32)
+    assert.ok(outcomes.some(entry => entry.last_persisted && entry.persisted_id))
+    await handle?.stop()
+    await handle?.done
+    const afterLifecycle = await query()
+    assert.equal(afterLifecycle.length, saved.length + 2)
+    const newRows = afterLifecycle.filter(row => !saved.some(old => old.message_id === row.message_id))
+    assert.deepEqual(newRows.map(row => row.content_text), ['lifecycle question', null])
+    assert.ok(afterLifecycle.every(row => row.content_text !== 'held answer'))
+    step('recording_complete')
     step('complete')
     await obs.shutdown()
     expect.that('smoke records split lifecycle and completed direct request step', await expect.logs(), records => records.some(record => record.body === 'smoke.step' && record.attributes.smoke_step === 'direct_after_stop' && record.attributes.smoke_name === harness.smokeName))

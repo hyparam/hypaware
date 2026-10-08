@@ -5,6 +5,7 @@ import { ollamaNativeRoute, resolveOllamaRouting, runOllamaSetup } from './setup
 import { resolveConfigPath, resolveLayeredConfigForDaemon } from '../../../../src/core/runtime/boot.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { writeClientRecording } from '../../../../src/core/config/client_recording.js'
+import { confirmOllamaRecording } from '../../../../src/core/control/client_recording.js'
 
 /**
  * @import { AiGatewayCapability, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -29,6 +30,12 @@ export function activate(ctx) {
       const result = await writeClientRecording({ env: ctx.env, plugin: '@hypaware/ollama', recording: true, dryRun: attachCtx.dryRun })
       if (result.status === 'failed' || result.status === 'central_managed' || result.status === 'no_entry') {
         throw new Error('Ollama recording could not be enabled; check organization policy and hyp setup --source ollama')
+      }
+      if (!attachCtx.dryRun) {
+        let endpoint
+        try { endpoint = gateway.localEndpoint() } catch { /* CLI boot has no local listener. */ }
+        const confirmed = await confirmOllamaRecording({ env: ctx.env, recording: true, endpoint })
+        if (!confirmed.confirmed) throw new Error('Recording enabled in configuration; live resume not confirmed. Retry hyp client attach ollama or run hyp daemon restart, then attach again.')
       }
       const payload = { status: 'ok', action: 'attach', client: 'ollama', dry_run: attachCtx.dryRun === true, recording: !attachCtx.dryRun, ...routing,
         changed: result.status === 'changed', next: 'Route your next client using this URL',

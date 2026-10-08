@@ -22,17 +22,18 @@ import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
 import { createControlHandler } from '../../../../src/core/control/session_ignore.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
-import { createEntrypointActivity } from './entrypoint_activity.js'
+import { createEntrypointActivity, createCaptureOutcomes } from './entrypoint_activity.js'
 import { createAiGatewayMessageProjector, rollbackAiGatewayStateJournal } from './message_projector.js'
 import { createChainedAgent, startProxy } from './proxy.js'
 import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { createRecorder, createNullExchange } from './recorder.js'
-import { getGatewayProcessTransport } from './process_transport.js'
+import { getGatewayProcessTransport, CAPTURE_BYTES, MAX_CAPTURES } from './process_transport.js'
+import { createRecordingGate, createRecordingControlHandler, isOllamaCapture, RECORDING_PATH, RECORDING_ROUTE } from './recording.js'
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
 
 /**
- * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCaptureReason, PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AiGatewayConfig, FinishedRow, GatewayState, StartedProxy, UpstreamConfig } from './types.js'
  * @import { Exchange } from './recorder.js'
  */
@@ -93,7 +94,8 @@ export function createStartSource(state) {
             // Omitted while idle, which is already how `gatewaySourceDetails`
             // (core `daemon/status.js`) reads "no reachable gateway here" off
             // the status file for a bind that never happened.
-            ...(proxy && state.listen ? { host: proxy.host, port: proxy.port } : { listening: false }),
+            ...(proxy && state.listen ? { host: proxy.host, port: proxy.port, listen_host: proxy.host, listen_port: proxy.port, control_routes: [RECORDING_ROUTE] } : { listening: false }),
+            ...proxy?.recordingDetails?.(),
             // Raw configured names, pre-compile, deliberately: an entry the
             // compiler dropped (a `url =` where `base_url` was meant) still
             // appears here, which is what lets core see the difference
@@ -289,6 +291,15 @@ async function launchListener(ctx, state, liveState) {
   }
   const transport = getGatewayProcessTransport()
   transport?.configure?.(config.redactHeaders)
+  const outcomes = createCaptureOutcomes((function* () {
+    yield 'ollama'
+    yield 'ollama-native'
+    for (const upstream of upstreams) yield upstream.name
+    yield* state.presets.keys()
+    yield* state.aliases?.keys() ?? []
+  })())
+  transport?.observeCapture?.((route, reason, id) => outcomes.record(route, reason, id))
+  const gate = createRecordingGate({ env: ctx.env, generation: transport?.generation })
   const recorder = transport?.recorder ?? createRecorder({ redactHeaders: config.redactHeaders })
   const projector = createAiGatewayMessageProjector({
     gatewayId: config.gatewayId,
@@ -304,6 +315,8 @@ async function launchListener(ctx, state, liveState) {
     // set, not a snapshot. @ref LLP 0066#enforcement
     isSessionIgnored: (id) => state.ignoredSessions.has(id),
   })
+  /** @type {Set<Exchange>} */
+  const captures = new Set()
   const sourcesLog = getLogger('sources')
   const meter = getMeter('plugin.ai-gateway')
   const exchangeBytesCounter = meter.createCounter('aigw.exchange_bytes', {
@@ -315,11 +328,27 @@ async function launchListener(ctx, state, liveState) {
 
   /** @param {Exchange} exchange @param {Set<string>} [ignoredSessions] */
   async function onExchangeFinished(exchange, ignoredSessions = state.ignoredSessions) {
+    try { await processExchange(exchange, ignoredSessions) }
+    finally { captures.delete(exchange) }
+  }
+
+  /** @param {Exchange} exchange @param {Set<string>} ignoredSessions */
+  async function processExchange(exchange, ignoredSessions) {
     if (transport?.role === 'gateway') {
       transport.finish?.(exchange, ignoredSessions)
       return
     }
-    if (sessionIgnoreLoadError(state.ignoredSessions) || sessionIgnoreLoadError(ignoredSessions)) return
+    const ollama = isOllamaCapture(exchange)
+    if (ollama && transport?.role === 'processing') outcomes.record(exchange.upstream, 'observed')
+    if ((ollama && !gate.allows(exchange.recordingGeneration)) || sessionIgnoreLoadError(state.ignoredSessions) || sessionIgnoreLoadError(ignoredSessions)) {
+      if (ollama) {
+        const policy = gate.current()
+        outcomes.record(exchange.upstream, policy.recording ? 'stale_generation' : /** @type {AiGatewayCaptureReason} */ (policy.reason), exchange.id)
+      }
+      exchange.finished = true
+      exchange._resolveFinished()
+      return
+    }
     /** @type {FinishedRow} */
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
@@ -350,10 +379,23 @@ async function launchListener(ctx, state, liveState) {
     // told about.
     let appended = false
     try {
-      const messageRows = await projector.projectExchange(row, { journal, isSessionIgnored: id => ignoredSessions.has(id) })
+      /** @type {AiGatewayCaptureReason | undefined} */
+      let projectedReason
+      const messageRows = await projector.projectExchange(row, {
+        journal, isSessionIgnored: id => ignoredSessions.has(id),
+        captureOutcome: ollama ? reason => {
+          projectedReason = row.error === 'capture_limit' ? 'capture_limit' : reason === 'transport_error' && row.status_code == null ? 'upstream_unavailable' : reason
+          if (projectedReason !== 'text' && projectedReason !== 'media_omitted') outcomes.record(row.upstream, projectedReason, row.exchange_id)
+        } : undefined,
+      })
       if (messageRows.length > 0) {
-        await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+        // @ref LLP 0474#recording [implements]: revalidate after async projection and acquire append before the stop barrier can acknowledge
+        const write = () => ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+        const task = ollama ? gate.append(exchange.recordingGeneration, write) : write()
+        if (!task) { outcomes.record(row.upstream, 'stale_generation', row.exchange_id); rollbackAiGatewayStateJournal(journal); return }
+        await task
         appended = true
+        if (ollama) outcomes.record(row.upstream, projectedReason === 'media_omitted' ? 'media_omitted' : 'text', row.exchange_id, true)
         liveState.rowsWritten += messageRows.length
         // Recorded only after the append resolves: "recent clients" in
         // `hyp status` must mean rows that landed, not rows that were
@@ -372,7 +414,7 @@ async function launchListener(ctx, state, liveState) {
       const devRunId = extractDevRunId(row.metadata)
       ctx.log.info('aigw.exchange', {
         upstream: row.upstream,
-        path: row.path ?? '',
+        path: ollama ? (row.path ?? '').split('?', 1)[0] : row.path ?? '',
         status_code: row.status_code ?? 0,
         request_bytes: row.request_bytes ?? 0,
         response_bytes: row.response_bytes ?? 0,
@@ -383,11 +425,12 @@ async function launchListener(ctx, state, liveState) {
     } catch (err) {
       if (!appended) rollbackAiGatewayStateJournal(journal)
       const message = err instanceof Error ? err.message : String(err)
-      liveState.lastError = message
+      liveState.lastError = ollama ? (appended ? 'capture_bookkeeping_failure' : 'append_failure') : message
+      if (ollama && !appended) outcomes.record(row.upstream, 'append_failure', row.exchange_id)
       sourcesLog.error('aigw.exchange_write_failed', {
         [Attr.PLUGIN]: PLUGIN_NAME,
         upstream: row.upstream,
-        error: message,
+        error: ollama ? liveState.lastError : message,
       })
     }
   }
@@ -399,8 +442,8 @@ async function launchListener(ctx, state, liveState) {
     const endpoint = transport.endpoint
     if (!endpoint || !transport.receive) throw new Error('gateway process endpoint unavailable')
     state.listen = endpoint
-    const close = transport.receive(onExchangeFinished)
-    return { ...endpoint, server: http.createServer(), stopped: Promise.resolve(), stop: close }
+    const close = transport.receive(onExchangeFinished, (recording, signal, generation) => gate.refresh(recording, signal, generation))
+    return { ...endpoint, server: http.createServer(), stopped: Promise.resolve(), recordingDetails: () => ({ ...gate.snapshot(), capture_outcomes: outcomes.snapshot() }), stop: () => { gate.stop(); return close() } }
   }
 
   // Proxy mode: mint the machine-local CA for exactly the hosts the routing
@@ -429,19 +472,52 @@ async function launchListener(ctx, state, liveState) {
   // a second agent would leak a keep-alive pool nothing ever closes.
   const chainedAgent = config.upstreamProxy ? createChainedAgent(config.upstreamProxy) : undefined
 
+  const ignoreControl = createControlHandler({ ignoredSessions: state.ignoredSessions, log: ctx.log })
+  const recordingControl = createRecordingControlHandler({
+    async refresh(recording, signal) {
+      try {
+        // Old raw bodies are no longer useful; keep forwarding sockets intact.
+        for (const exchange of captures) if (!exchange.finished) { exchange.cancelCapture(); captures.delete(exchange) }
+        const result = await gate.refresh(recording, signal)
+        if (transport?.role === 'gateway') {
+          if (!transport.refreshRecording) throw new Error('processor_unavailable')
+          await transport.refreshRecording(recording, result.generation, signal)
+          if (gate.current().recording !== recording || signal.aborted) throw new Error('recording_policy_changed')
+        }
+        return result
+      } catch (error) {
+        outcomes.record('ollama-native', 'recording_barrier_unconfirmed')
+        throw error
+      }
+    },
+  })
+
   /** @param {string} listen */
   const bind = (listen) => startProxy({
     listen,
     upstreams,
-    startExchange: (init) => sessionIgnoreLoadError(state.ignoredSessions)
-      ? createNullExchange()
-      : recorder.startExchange(init),
+    startExchange(init) {
+      if (sessionIgnoreLoadError(state.ignoredSessions)) return createNullExchange()
+      if (isOllamaCapture(init)) {
+        outcomes.record(init.upstream, 'observed')
+        const policy = gate.current()
+        if (!policy.recording) { outcomes.record(init.upstream, /** @type {AiGatewayCaptureReason} */ (policy.reason)); return createNullExchange() }
+        if (captures.size >= MAX_CAPTURES) { outcomes.record(init.upstream, 'capture_limit'); return createNullExchange() }
+        init = { ...init, recordingGeneration: policy.generation, captureLimit: CAPTURE_BYTES }
+      }
+      const exchange = recorder.startExchange(init)
+      if (isOllamaCapture(init) && transport?.role !== 'gateway') captures.add(exchange)
+      return exchange
+    },
     onExchangeFinished,
     // Serve `/_hypaware/*` control requests locally over the gateway's
     // ignored-session set (POST/DELETE /_hypaware/ignore/session). Handled
     // before upstream matching, never proxied, no exchange recorded.
     // @ref LLP 0066#control-path
-    onControlRequest: createControlHandler({ ignoredSessions: state.ignoredSessions, log: ctx.log }),
+    onControlRequest(req, res, url) {
+      if (url.pathname === RECORDING_PATH) recordingControl.handle(req, res)
+      else ignoreControl(req, res, url)
+    },
     log: ctx.log,
     ...(interception?.hooks ? { interception: interception.hooks } : {}),
     ...(interception?.tunnelOnly ? { tunnelOnly: true } : {}),
@@ -466,8 +542,12 @@ async function launchListener(ctx, state, liveState) {
   })
 
   // Hook stop so in-flight exchanges drain before the listener fully closes.
+  proxy.recordingDetails = () => ({ ...gate.snapshot(), capture_outcomes: outcomes.snapshot() })
   const originalStop = proxy.stop
   proxy.stop = async () => {
+    gate.stop()
+    recordingControl.close()
+    for (const exchange of captures) if (!exchange.finished) exchange.cancelCapture()
     await recorder.drain(5000)
     await originalStop.call(proxy)
     // Close the chained agent's keep-alive sockets; a config reload builds a

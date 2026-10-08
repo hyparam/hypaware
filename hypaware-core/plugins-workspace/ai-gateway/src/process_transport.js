@@ -2,8 +2,10 @@
 
 import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { Exchange, createRecorder } from './recorder.js'
+import { RECORDING_TIMEOUT_MS, isOllamaCapture } from './recording.js'
 
 /**
+ * @import { AiGatewayCaptureReason } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ChildProcess } from 'node:child_process'
  * @import { ExchangeInit, GatewayProcessTransport, ResponseStart } from '../../../../hypaware-core/plugins-workspace/ai-gateway/src/types.js'
  */
@@ -44,9 +46,14 @@ export function createCaptureSender(opts) {
   let ready = false
   let dropped = 0
   let reported = false
+  /** @type {{ id: number, recording: boolean, generation: string, settle(error?: Error, result?: unknown): void } | undefined} */
+  let recordingRequest
+  let controlSerial = 0
+  /** @type {((route: string, reason: AiGatewayCaptureReason, id?: string) => void) | undefined} */
+  let observeCapture
 
   function reportDrop() {
-    dropped++
+    dropped = Math.min(0x7fffffff, dropped + 1)
     if (reported) return
     reported = true
     opts.log.warn('gateway.capture_dropped', { reason: 'processor_unavailable_or_capture_limit', dropped })
@@ -84,15 +91,17 @@ export function createCaptureSender(opts) {
       if (size <= FRAME_BYTES && active.size < MAX_CAPTURES && send({ op: 'start', id: this.id, init: safeInit, ts: this.tsStartMs }, size)) {
         this.accepted = true
         active.add(this)
-      } else reportDrop()
+      } else { observeCapture?.(init.upstream, !ready || !opts.getChild()?.connected ? 'processor_unavailable' : 'capture_limit', this.id); reportDrop() }
     }
 
-    abandon() {
+    /** @param {AiGatewayCaptureReason} [reason] */
+    abandon(reason = 'capture_limit') {
       if (!this.accepted) return
       this.accepted = false
       active.delete(this)
       if (!send({ op: 'cancel', id: this.id }, 128)) cancellations.add(this.id)
-      reportDrop()
+      observeCapture?.(this.upstream, reason, this.id)
+      if (reason !== 'stale_generation') reportDrop()
     }
 
     /** @param {'request'|'response'} op @param {Buffer | Uint8Array} chunk */
@@ -126,18 +135,47 @@ export function createCaptureSender(opts) {
   }
 
   function reset() {
+    recordingRequest?.settle(new Error('processor_unavailable'))
     ready = false
     pending.clear()
     cancellations.clear()
     pendingBytes = 0
     for (const exchange of active) {
       exchange.accepted = false
+      observeCapture?.(exchange.upstream, 'processor_unavailable', exchange.id)
       reportDrop()
     }
     active.clear()
   }
 
   return {
+    /** @param {(route: string, reason: AiGatewayCaptureReason, id?: string) => void} callback */
+    observeCapture(callback) { observeCapture = callback },
+    /** @param {boolean} recording @param {string} generation @param {AbortSignal} signal */
+    refreshRecording(recording, generation, signal) {
+      const child = opts.getChild()
+      for (const exchange of active) if (isOllamaCapture(exchange)) exchange.abandon('stale_generation')
+      if (recordingRequest || !ready || !child?.connected || signal.aborted) return Promise.reject(new Error('processor_unavailable'))
+      return new Promise((resolve, reject) => {
+        const id = ++controlSerial
+        const abort = () => settle(new Error('recording_barrier_unconfirmed'))
+        const timer = setTimeout(abort, RECORDING_TIMEOUT_MS)
+        function settle(error, result) {
+          if (recordingRequest?.id !== id) return
+          recordingRequest = undefined
+          clearTimeout(timer)
+          signal.removeEventListener('abort', abort)
+          if (error) {
+            try { if (child?.connected) child.send({ type: 'gateway.recording_cancel', id }, () => {}) } catch { /* An IPC close race must not reach provider forwarding. */ }
+            reject(error)
+          } else resolve(result)
+        }
+        recordingRequest = { id, recording, generation, settle }
+        signal.addEventListener('abort', abort, { once: true })
+        try { child.send({ type: 'gateway.recording_refresh', id, recording, generation }, error => { if (error) settle(new Error('processor_unavailable')) }) }
+        catch { settle(new Error('processor_unavailable')) }
+      })
+    },
     /** @param {readonly string[]} redactHeaders */
     configure(redactHeaders) { redactSet = createRecorder({ redactHeaders }).redactSet },
     recorder: {
@@ -173,7 +211,12 @@ export function createCaptureSender(opts) {
     },
     /** @param {unknown} input */
     message(input) {
-      const msg = /** @type {{ type?: string, seq?: number }} */ (input)
+      const msg = /** @type {{ type?: string, seq?: number, id?: number, ok?: boolean, result?: unknown }} */ (input)
+      if (msg.type === 'gateway.recording_ack' && msg.id === recordingRequest?.id) {
+        const result = /** @type {{ recording?: boolean, generation?: string } | undefined} */ (msg.result)
+        const matches = msg.ok && result?.recording === recordingRequest?.recording && result?.generation === recordingRequest?.generation
+        recordingRequest?.settle(matches ? undefined : new Error('recording_barrier_unconfirmed'), msg.result)
+      }
       if (msg.type === 'gateway.capture_ready') { ready = true; reported = false }
       if (msg.type === 'gateway.capture_paused') reset()
       if (msg.type === 'gateway.capture_dropped') reportDrop()
@@ -189,14 +232,14 @@ export function createCaptureSender(opts) {
       }
     },
     reset,
-    snapshot: () => ({ capture_ready: ready, capture_dropped: dropped, capture_pending_bytes: pendingBytes, capture_active: active.size }),
+    snapshot: () => ({ capture_ready: ready, capture_dropped: dropped, capture_pending_bytes: pendingBytes, capture_active: active.size, recording_waiters: recordingRequest ? 1 : 0 }),
   }
 }
 
 /**
  * Reconstruct exchanges only in the processing heap. The adapter's existing
  * ignore checks still run before append; there is no raw durable capture.
- * @param {{ onExchange(exchange: Exchange, ignored: Set<string>): Promise<void>, send(message: object): void }} opts
+ * @param {{ onExchange(exchange: Exchange, ignored: Set<string>): Promise<void>, send(message: object): void, refreshRecording?(recording: boolean, signal: AbortSignal, generation: string): Promise<unknown> }} opts
  */
 export function createCaptureReceiver(opts) {
   /** @type {Map<string, { exchange: Exchange, bytes: number, at: number }>} */
@@ -204,6 +247,9 @@ export function createCaptureReceiver(opts) {
   const recorder = createRecorder()
   let retainedBytes = 0
   let finishing = 0
+  let closed = false
+  /** @type {{ id: number, controller: AbortController } | undefined} */
+  let recordingRequest
   /** @type {Set<Promise<void>>} */
   const tasks = new Set()
 
@@ -225,8 +271,28 @@ export function createCaptureReceiver(opts) {
   return {
     /** @param {unknown} input */
     message(input) {
+      const control = /** @type {{ type?: string, id?: number, recording?: boolean, generation?: string }} */ (input)
+      if (control.type === 'gateway.recording_cancel') {
+        if (control.id === recordingRequest?.id) recordingRequest?.controller.abort()
+        return
+      }
+      if (control.type === 'gateway.recording_refresh') {
+        if (closed || recordingRequest || !opts.refreshRecording || !Number.isSafeInteger(control.id) || typeof control.recording !== 'boolean' || typeof control.generation !== 'string' || !/^[a-zA-Z0-9:_-]{1,80}$/.test(control.generation)) {
+          opts.send({ type: 'gateway.recording_ack', id: control.id, ok: false })
+          return
+        }
+        const id = /** @type {number} */ (control.id)
+        const controller = new AbortController()
+        recordingRequest = { id, controller }
+        const timeout = setTimeout(() => controller.abort(), RECORDING_TIMEOUT_MS)
+        void opts.refreshRecording(control.recording, controller.signal, control.generation).then(
+          result => { if (!controller.signal.aborted && !closed) opts.send({ type: 'gateway.recording_ack', id, ok: true, result }) },
+          () => { if (!closed) opts.send({ type: 'gateway.recording_ack', id, ok: false }) }
+        ).finally(() => { clearTimeout(timeout); if (recordingRequest?.id === id) recordingRequest = undefined })
+        return
+      }
       const msg = /** @type {{ type?: string, seq: number, id: string, op: string, init: ExchangeInit, ts: number, data: Buffer, head: ResponseStart, ignored: string[], error?: string }} */ (input)
-      if (msg.type !== 'gateway.capture') return
+      if (msg.type !== 'gateway.capture' || closed) return
       try {
         if (msg.op === 'start') {
           if (active.size + finishing >= MAX_CAPTURES) { opts.send({ type: 'gateway.capture_dropped' }); return }
@@ -264,6 +330,8 @@ export function createCaptureReceiver(opts) {
       } finally { opts.send({ type: 'gateway.capture_ack', seq: msg.seq }) }
     },
     async close() {
+      closed = true
+      recordingRequest?.controller.abort()
       clearInterval(timer)
       for (const id of active.keys()) discard(id)
       await Promise.allSettled(tasks)

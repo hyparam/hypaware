@@ -506,6 +506,7 @@ test('a failure after the append does not roll the dedupe back onto rows that la
   /** @type {Record<string, unknown>[]} */
   const appended = []
   const ctx = /** @type {any} */ ({
+    env: { HOME: path.join(os.tmpdir(), 'post-append-fixture'), HYP_HOME: path.join(os.tmpdir(), 'post-append-fixture') },
     config: {
       listen: '127.0.0.1:0',
       upstreams: [{ name: 'anthropic', base_url: upstream.url, path_prefix: '/v1/messages', provider: 'anthropic' }],
@@ -651,6 +652,9 @@ test('Ollama generate source omits media and survives failed append; controls/un
   /** @type {{ level: string, event: string, attrs: any }[]} */
   const logged = []
   const ctx = fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', provider: 'ollama', base_url: upstream.url, path_prefix: '/api/generate' }] }, logged)
+  const recordingHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ollama-source-policy-'))
+  ctx.env.HYP_CONFIG = path.join(recordingHome, 'config.json')
+  fs.writeFileSync(ctx.env.HYP_CONFIG, JSON.stringify({ plugins: [{ name: '@hypaware/ollama' }] }))
   /** @type {Record<string, unknown>[]} */
   const appended = []
   let attempts = 0
@@ -698,6 +702,7 @@ test('Ollama generate source omits media and survives failed append; controls/un
   } finally {
     await source.stop()
     await upstream.close()
+    fs.rmSync(recordingHome, { recursive: true, force: true })
   }
 })
 

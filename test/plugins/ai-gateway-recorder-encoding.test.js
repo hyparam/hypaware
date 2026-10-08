@@ -207,3 +207,47 @@ test('a JSON response with no content-type stays non-SSE (no false sniff)', () =
   assert.equal(row.is_sse, false, 'a JSON body must not be mistaken for SSE')
   assert.equal(row.response_body, json)
 })
+
+// @ref LLP 0474#recording [tests]: inline capture has the raw handoff ceiling too, including decompressed bodies; unrelated clients keep existing decoding
+for (const [encoding, compress] of /** @type {[string, (input: Buffer) => Buffer][]} */ ([['gzip', gzipSync], ['br', brotliCompressSync], ['deflate', deflateSync], ['deflate', deflateRawSync]])) test('Ollama capture bounds decompression: ' + encoding + '-' + compress.name, () => {
+  const recorder = createRecorder()
+  const body = Buffer.alloc(1025, 'a')
+  const wire = /** @type {(input: Buffer) => Buffer} */ (compress)(body)
+  const exchange = recorder.startExchange({ upstream: 'ollama', provider: 'ollama', path: '/api/chat', method: 'POST', requestHeaders: {}, captureLimit: 1024 })
+  exchange.setResponseStart({ status: 200, headers: { 'content-encoding': /** @type {string} */ (encoding) } })
+  exchange.appendResponseChunk(wire)
+  const row = exchange.finalize()
+  assert.equal(row.error, 'capture_limit')
+  assert.equal(row.response_body, null)
+  assert.equal(exchange.responseChunks.length, 0)
+  assert.equal(finishExchange({ responseBody: wire, responseHeaders: { 'content-encoding': /** @type {string} */ (encoding) } }).response_body, body.toString())
+})
+
+test('Ollama byte and chunk ceilings discard buffered copies without stopping forwarding', () => {
+  const recorder = createRecorder()
+  const init = { upstream: 'ollama', provider: 'ollama', path: '/api/chat', method: 'POST', requestHeaders: {}, captureLimit: 1024 }
+  const exchange = recorder.startExchange(init)
+  exchange.appendRequestChunk(Buffer.alloc(1024))
+  exchange.appendResponseChunk(Buffer.alloc(1))
+  assert.equal(exchange.error, 'capture_limit')
+  assert.equal(exchange.requestChunks.length, 0)
+  assert.equal(exchange.responseChunks.length, 0)
+  const chunks = recorder.startExchange(init)
+  for (let index = 0; index < 4097; index++) chunks.appendRequestChunk(Buffer.alloc(0))
+  assert.equal(chunks.error, 'capture_limit')
+  assert.equal(chunks.requestChunks.length, 0)
+  chunks.cancelCapture()
+  assert.equal(chunks.recording, false)
+})
+
+test('a foreign SSE shape cannot amplify bounded Ollama bytes into event objects', () => {
+  const recorder = createRecorder()
+  const exchange = recorder.startExchange({ upstream: 'ollama', provider: 'ollama', path: '/api/chat', method: 'POST', requestHeaders: {}, captureLimit: 16 * 1024 * 1024 })
+  exchange.setResponseStart({ status: 200, headers: { 'content-type': 'text/event-stream' } })
+  exchange.consumeStreamChunk(Buffer.from('data: x\n\n'.repeat(100_000)))
+  assert.equal(exchange.streamEvents.length, 0)
+  const row = exchange.finalize()
+  assert.equal(row.is_sse, true)
+  assert.equal(row.stream_events?.length, 0)
+  assert.equal(row.response_body, null)
+})

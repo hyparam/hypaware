@@ -1,6 +1,7 @@
 import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
 import type {
   AiGatewayClientRegistration,
+  AiGatewayCaptureReason,
   AiGatewayExchangeProjector,
   AiGatewayRouteInput,
   AiGatewaySettlementEnricher,
@@ -12,7 +13,26 @@ import type {
 import type { Exchange, createNullExchange } from './recorder.js'
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
 
+export interface CaptureOutcomeEntry {
+  route: string
+  observed: number
+  persisted: number
+  failed: number
+  reasons: Partial<Record<AiGatewayCaptureReason, number>>
+  reason?: AiGatewayCaptureReason
+  last_outcome?: string
+  last_observed?: string
+  last_persisted?: string
+  last_failed?: string
+  persisted_id?: string
+  failed_id?: string
+  reported_at: number
+  reported_reason?: AiGatewayCaptureReason
+}
+
 export interface ExchangeInit {
+  recordingGeneration?: string
+  captureLimit?: number
   upstream: string
   provider: string | undefined
   method: string | undefined
@@ -40,12 +60,15 @@ export interface RecorderOptions {
 export interface GatewayProcessTransport {
   role: 'gateway' | 'processing'
   configure?(redactHeaders: readonly string[]): void
+  observeCapture?(callback: (route: string, reason: AiGatewayCaptureReason, id?: string) => void): void
   recorder?: {
     startExchange(init: ExchangeInit): Exchange
     drain(timeoutMs?: number): Promise<void>
   }
   finish?(exchange: Exchange, ignoredSessions: Set<string>): void
-  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>): () => Promise<void>
+  generation?: string
+  refreshRecording?(recording: boolean, generation: string, signal: AbortSignal): Promise<unknown>
+  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>, refresh?: (recording: boolean, signal: AbortSignal, generation: string) => Promise<unknown>): () => Promise<void>
   endpoint?: { host: string; port: number }
   snapshot?(): Record<string, number | boolean>
 }
@@ -162,6 +185,8 @@ export interface ProxyOptions {
   upstreams: UpstreamConfig[]
   onExchangeFinished(exchange: Exchange): void | Promise<void>
   startExchange(init: {
+    recordingGeneration?: string
+    captureLimit?: number
     upstream: string
     provider: string | undefined
     method: string | undefined
@@ -207,6 +232,7 @@ export interface ProxyOptions {
 }
 
 export interface StartedProxy {
+  recordingDetails?(): Record<string, unknown>
   host: string
   port: number
   /**
