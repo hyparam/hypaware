@@ -36,9 +36,10 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *     session-context JSONL; the projector reads them back and stamps
  *     them onto every row for that session.
  *   - **Daemon self-telemetry**: `source.start` for ai-gateway,
- *     `sink.tick`, `cache.append` for `ai_gateway_messages`,
+ *     the daemon dispatch counter, `cache.append` for `ai_gateway_messages`,
  *     `daemon.shutdown`, and the `aigw.exchange` log tagged with the
- *     contract `dev_run_id` header.
+ *     contract `dev_run_id` header. No configured sinks means no
+ *     `sink.export_batch` span.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -227,8 +228,8 @@ export async function run({ harness, expect }) {
   })
   expect.that('gateway: fallback-session upstream returned 200', fallbackResp.statusCode, (v) => v === 200)
 
-  // Wait for the in-flight sink tick interval to fire at least once so
-  // the JSONL exporter captures a `sink.tick` span before shutdown.
+  // Let the daemon dispatch interval fire before shutdown; even with
+  // no configured sinks it emits the daemon tick counter.
   await sleep(120)
 
   // ----- Shut down the daemon (drains the gateway's recorder) -----
@@ -419,11 +420,19 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
 
-  const sinkTicks = traces.filter((/** @type {any} */ t) => t.name === 'sink.tick')
+  // @ref LLP 0471#instance-ownership [tests]: zero-sink dispatch counts a daemon tick without an instance export
+  const metrics = await expect.metrics()
   expect.that(
-    'traces: at least one sink.tick span fired during the daemon run',
-    sinkTicks,
-    (rows) => Array.isArray(rows) && rows.length >= 1,
+    'metrics: same-run daemon sink dispatch fired before shutdown',
+    metrics,
+    (rows) => rows.some((/** @type {any} */ m) =>
+      m.name === 'hyp_sink_ticks_total' && m.attributes?.source === 'daemon' &&
+      m.resource?.dev_run_id === harness.devRunId && Number(m.value) > 0),
+  )
+  expect.that(
+    'traces: zero-sink fixture emits no sink.export_batch spans',
+    traces.filter((/** @type {any} */ t) => t.name === 'sink.export_batch'),
+    (rows) => rows.length === 0,
   )
 
   const cacheAppends = traces.filter(

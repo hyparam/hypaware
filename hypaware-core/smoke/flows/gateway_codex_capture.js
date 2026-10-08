@@ -41,8 +41,9 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *   - The `/backend-api/codex/responses` rows carry `is_sse=true`, a
  *     positive `stream_event_count` under `attributes.gateway`, and
  *     Codex turn metadata projected into first-class columns.
- *   - Daemon self-telemetry (`source.start`, `sink.tick`,
- *     `cache.append`, `daemon.shutdown`) is present in JSONL.
+ *   - Daemon self-telemetry (`source.start`, the daemon dispatch counter,
+ *     `cache.append`, `daemon.shutdown`) is present in JSONL. With no
+ *     configured sinks, no `sink.export_batch` span is emitted.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -364,10 +365,19 @@ export async function run({ harness, expect }) {
     ),
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
+  // @ref LLP 0471#instance-ownership [tests]: zero-sink dispatch counts a daemon tick without an instance export
+  const metrics = await expect.metrics()
   expect.that(
-    'traces: at least one sink.tick fired before shutdown',
-    traces.filter((/** @type {any} */ t) => t.name === 'sink.tick'),
-    (rows) => Array.isArray(rows) && rows.length >= 1,
+    'metrics: same-run daemon sink dispatch fired before shutdown',
+    metrics,
+    (rows) => rows.some((/** @type {any} */ m) =>
+      m.name === 'hyp_sink_ticks_total' && m.attributes?.source === 'daemon' &&
+      m.resource?.dev_run_id === harness.devRunId && Number(m.value) > 0),
+  )
+  expect.that(
+    'traces: zero-sink fixture emits no sink.export_batch spans',
+    traces.filter((/** @type {any} */ t) => t.name === 'sink.export_batch'),
+    (rows) => rows.length === 0,
   )
   expect.that(
     'traces: at least two cache.append spans for ai_gateway_messages',
