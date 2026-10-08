@@ -48,6 +48,8 @@ export function createCaptureSender(opts) {
   let reported = false
   /** @type {{ id: number, recording: boolean, generation: string, settle(error?: Error, result?: unknown): void } | undefined} */
   let recordingRequest
+  /** @type {{ id: number, generation: string, child: ChildProcess, settle(reason: string): void } | undefined} */
+  let verificationRequest
   let controlSerial = 0
   /** @type {((route: string, reason: AiGatewayCaptureReason, id?: string) => void) | undefined} */
   let observeCapture
@@ -136,6 +138,7 @@ export function createCaptureSender(opts) {
 
   function reset() {
     recordingRequest?.settle(new Error('processor_unavailable'))
+    verificationRequest?.settle('processor_unavailable')
     ready = false
     pending.clear()
     cancellations.clear()
@@ -151,6 +154,31 @@ export function createCaptureSender(opts) {
   return {
     /** @param {(route: string, reason: AiGatewayCaptureReason, id?: string) => void} callback */
     observeCapture(callback) { observeCapture = callback },
+    /** @param {string} generation @param {AbortSignal} signal */
+    settleVerification(generation, signal) {
+      const child = opts.getChild()
+      if (verificationRequest) return Promise.resolve('settlement_busy')
+      if (!ready || !child?.connected || signal.aborted) return Promise.resolve('processor_unavailable')
+      return new Promise(resolve => {
+        const id = ++controlSerial
+        const abort = () => settle('processor_unavailable')
+        const timer = setTimeout(abort, 30_000)
+        const settle = reason => {
+          if (verificationRequest?.id !== id) return
+          verificationRequest = undefined
+          clearTimeout(timer)
+          signal.removeEventListener('abort', abort)
+          if (reason === 'processor_unavailable') {
+            try { if (child.connected) child.send({ type: 'gateway.verify_cancel', id }, () => {}) } catch { /* closed IPC */ }
+          }
+          resolve(reason)
+        }
+        verificationRequest = { id, generation, child, settle }
+        signal.addEventListener('abort', abort, { once: true })
+        try { child.send({ type: 'gateway.verify', id, generation }, error => { if (error) settle('processor_unavailable') }) }
+        catch { settle('processor_unavailable') }
+      })
+    },
     /** @param {boolean} recording @param {string} generation @param {AbortSignal} signal */
     refreshRecording(recording, generation, signal) {
       const child = opts.getChild()
@@ -211,7 +239,12 @@ export function createCaptureSender(opts) {
     },
     /** @param {unknown} input */
     message(input) {
-      const msg = /** @type {{ type?: string, seq?: number, id?: number, ok?: boolean, result?: unknown }} */ (input)
+      const msg = /** @type {{ type?: string, seq?: number, id?: number, ok?: boolean, result?: unknown, generation?: string, reason?: string }} */ (input)
+      if (msg.type === 'gateway.verify_ack' && msg.id === verificationRequest?.id) {
+        const matches = opts.getChild() === verificationRequest?.child && msg.generation === verificationRequest?.generation
+          && ['settled', 'settlement_busy', 'settlement_failed', 'stale_generation', 'policy_unreadable', 'processor_unavailable'].includes(msg.reason ?? '')
+        verificationRequest?.settle(matches ? /** @type {string} */ (msg.reason) : 'processor_unavailable')
+      }
       if (msg.type === 'gateway.recording_ack' && msg.id === recordingRequest?.id) {
         const result = /** @type {{ recording?: boolean, generation?: string } | undefined} */ (msg.result)
         const matches = msg.ok && result?.recording === recordingRequest?.recording && result?.generation === recordingRequest?.generation
@@ -239,7 +272,7 @@ export function createCaptureSender(opts) {
 /**
  * Reconstruct exchanges only in the processing heap. The adapter's existing
  * ignore checks still run before append; there is no raw durable capture.
- * @param {{ onExchange(exchange: Exchange, ignored: Set<string>): Promise<void>, send(message: object): void, refreshRecording?(recording: boolean, signal: AbortSignal, generation: string): Promise<unknown> }} opts
+ * @param {{ onExchange(exchange: Exchange, ignored: Set<string>): Promise<void>, send(message: object): void, refreshRecording?(recording: boolean, signal: AbortSignal, generation: string): Promise<unknown>, settleVerification?(generation: string, signal: AbortSignal): Promise<unknown> }} opts
  */
 export function createCaptureReceiver(opts) {
   /** @type {Map<string, { exchange: Exchange, bytes: number, at: number }>} */
@@ -250,6 +283,8 @@ export function createCaptureReceiver(opts) {
   let closed = false
   /** @type {{ id: number, controller: AbortController } | undefined} */
   let recordingRequest
+  /** @type {{ id: number, controller: AbortController } | undefined} */
+  let verificationRequest
   /** @type {Set<Promise<void>>} */
   const tasks = new Set()
 
@@ -272,6 +307,25 @@ export function createCaptureReceiver(opts) {
     /** @param {unknown} input */
     message(input) {
       const control = /** @type {{ type?: string, id?: number, recording?: boolean, generation?: string }} */ (input)
+      if (control.type === 'gateway.verify_cancel') {
+        if (verificationRequest && control.id === verificationRequest.id) verificationRequest.controller.abort()
+        return
+      }
+      if (control.type === 'gateway.verify') {
+        if (closed || verificationRequest || !opts.settleVerification || !Number.isSafeInteger(control.id) || typeof control.generation !== 'string' || !/^[a-zA-Z0-9:_-]{1,80}$/.test(control.generation)) {
+          opts.send({ type: 'gateway.verify_ack', id: control.id, generation: control.generation, reason: verificationRequest ? 'settlement_busy' : 'processor_unavailable' })
+          return
+        }
+        const id = /** @type {number} */ (control.id)
+        const controller = new AbortController()
+        verificationRequest = { id, controller }
+        const timeout = setTimeout(() => controller.abort(), 30_000)
+        void opts.settleVerification(control.generation, controller.signal).then(
+          reason => { if (!closed && !controller.signal.aborted) opts.send({ type: 'gateway.verify_ack', id, generation: control.generation, reason }) },
+          () => { if (!closed && !controller.signal.aborted) opts.send({ type: 'gateway.verify_ack', id, generation: control.generation, reason: 'settlement_failed' }) }
+        ).finally(() => { clearTimeout(timeout); if (verificationRequest?.id === id) verificationRequest = undefined })
+        return
+      }
       if (control.type === 'gateway.recording_cancel') {
         if (control.id === recordingRequest?.id) recordingRequest?.controller.abort()
         return
@@ -332,6 +386,7 @@ export function createCaptureReceiver(opts) {
     async close() {
       closed = true
       recordingRequest?.controller.abort()
+      verificationRequest?.controller.abort()
       clearInterval(timer)
       for (const id of active.keys()) discard(id)
       await Promise.allSettled(tasks)

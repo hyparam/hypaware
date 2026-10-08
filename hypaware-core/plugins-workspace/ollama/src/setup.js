@@ -107,11 +107,11 @@ export async function checkOllamaReadiness({ upstream, env }) {
   return result
 }
 
-/** @param {URL} root @param {string} pathname @param {AbortSignal} signal @param {{ remaining: number }} budget */
-async function probeJson(root, pathname, signal, budget) {
+/** @param {URL} root @param {string} pathname @param {AbortSignal} signal @param {{ remaining: number }} budget @param {RequestInit} [init] */
+export async function probeJson(root, pathname, signal, budget, init = {}) {
   const target = new URL(root)
   target.pathname = root.pathname.replace(/\/+$/, '') + pathname
-  const response = await fetch(target, { signal, redirect: 'manual' })
+  const response = await fetch(target, { ...init, signal, redirect: 'manual' })
   if (!response.ok) { await response.body?.cancel(); throw new Error('probe_http_error') }
   const reader = response.body?.getReader()
   if (!reader) throw new Error('probe_malformed')

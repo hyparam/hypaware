@@ -373,8 +373,24 @@ export interface ClientActionsReport {
   actions: ClientActionReport[]
 }
 
+/** Current-run route and bounded append evidence for Ollama. */
+export interface OllamaCaptureStatus {
+  state: 'ready' | 'observed' | 'persisted' | 'failed' | 'disabled' | 'unconfirmed'
+  configuredRoot: string | null
+  captureRoot: string | null
+  routeConfirmed: boolean
+  processorReady: boolean
+  lastPersisted: string | null
+  lastFailed: string | null
+  historical: boolean
+  reason: string | null
+  next: string
+}
+
 /** Per-client attach state probed off the user's home directory. */
 export interface ClientAttachReport {
+  /** Bounded current-run Ollama route and append evidence, without cache reads. */
+  capture?: OllamaCaptureStatus
   /** `claude` or `codex`. */
   name: string
   /** The plugin that owns this client (for layer provenance, LLP 0031). */
