@@ -8,7 +8,8 @@ import { fork } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
-import { readStatusFile } from '../../src/core/daemon/status.js'
+import { processingStateRoot, readPidFile } from '../../src/core/daemon/pid.js'
+import { readStatusFile, ollamaCaptureFromSnapshot } from '../../src/core/daemon/status.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { aiGatewayDatasetRegistration, aiGatewayTablePath } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
@@ -34,8 +35,7 @@ function alive(pid) {
 async function retainedLocks(root) {
   return (await fs.readdir(root, { recursive: true })).filter(name => /(?:\.lock|lockfile)(?:\/|$)/.test(name)).sort()
 }
-async function service(t, split, blocked = false) {
-  const home = temporaryDirectory('hyp-ollama-process-')
+async function service(t, split, blocked = false, tickIntervalMs = 0, home = temporaryDirectory('hyp-ollama-process-')) {
   const configPath = path.join(home, 'hypaware-config.json')
   const env = { ...isolatedClientEnv(process.env, home), HYP_HOME: home, HYP_CONFIG: configPath }
   const upstream = http.createServer((req, res) => {
@@ -43,7 +43,9 @@ async function service(t, split, blocked = false) {
     if (req.url === '/api/version') return res.end('{"version":"fixture"}')
     if (req.url === '/api/tags') return res.end('{"models":[{"name":"tiny:local"}]}')
     req.resume()
-    req.once('end', () => res.end('{"model":"tiny:local","done":true,"message":{"role":"assistant","content":"OK"}}'))
+    req.once('end', () => res.end(req.url === '/api/generate'
+      ? '{"model":"tiny:local","response":"","done":true,"done_reason":"load"}'
+      : '{"model":"tiny:local","done":true,"message":{"role":"assistant","content":"OK"}}'))
   })
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', () => resolve(undefined)))
   const upstreamPort = /** @type {AddressInfo} */ (upstream.address()).port
@@ -66,7 +68,7 @@ fs.rename = async (from, to) => {
   const script = path.join(home, 'run-service.mjs')
   await fs.writeFile(script, `import { ${split ? 'runGatewayDaemon' : 'runDaemon'} as run } from ${JSON.stringify(entry)}
 import { aiGatewayTablePath } from ${JSON.stringify(dataset)}
-const handle = await run({ hypHome: ${JSON.stringify(home)}, configPath: ${JSON.stringify(configPath)}, runId: 'fixture-live', tickIntervalMs: 0, installSignalHandlers: false, env: process.env${split && blocked ? `, processingExecArgv: ['--import', ${JSON.stringify(pathToFileURL(preload).href)}]` : ''} })
+const handle = await run({ hypHome: ${JSON.stringify(home)}, configPath: ${JSON.stringify(configPath)}, runId: 'fixture-live', tickIntervalMs: ${tickIntervalMs}, installSignalHandlers: false, env: process.env${split && blocked ? `, processingExecArgv: ['--import', ${JSON.stringify(pathToFileURL(preload).href)}]` : ''} })
 process.on('message', async message => {
   if (message === 'flush') void handle.runtime.storage.flushTable(aiGatewayTablePath(handle.runtime.storage), { force: true })
   if (message === 'stop') {
@@ -165,4 +167,117 @@ for (const lostSupervisor of [false, true]) test('split daemon interrupts reques
   // Existing commit-before-checkpoint recovery may replay already committed
   // native rows. Verification adds no claim of exactly-once crash recovery.
   assert.equal(state.committedAfterRecovery, 4)
+})
+
+async function command(f, argv) {
+  let output = ''
+  let error = ''
+  const code = await dispatch(argv, { env: f.env, stdout: { write: value => { output += value } }, stderr: { write: value => { error += value } } })
+  return { code, output, error }
+}
+
+// @ref LLP 0474#recording [tests]: processing-only source reload retains the live generation after explicit detach and reattach
+test('actual split processing SIGHUP keeps resumed fresh capture and recording generations', async t => {
+  const f = await service(t, true, false, 25)
+  const verify = () => command(f, ['ollama', 'verify', '--model', 'tiny:local', '--json'])
+  assert.equal((await verify()).code, 0)
+  assert.equal((await command(f, ['client', 'detach', 'ollama'])).code, 0)
+  const attached = await command(f, ['client', 'attach', 'ollama'])
+  assert.equal(attached.code, 0, attached.error + attached.output)
+  assert.equal((await verify()).code, 0)
+  const live = await requestOllamaVerification({ endpoint: f.root, runId: f.status.runId, deadline: Date.now() + 1000 })
+  const processor = f.status.processes.processing.pid
+  const processorRoot = processingStateRoot(f.state)
+  const recordingDetails = () => /** @type {any} */ (readStatusFile(processorRoot)?.sources.find(s => s.name === 'ai-gateway')?.details)
+  const observed = () => recordingDetails()?.capture_outcomes.find(entry => entry.route === 'ollama-native')?.observed
+  for (let i = 0; i < 3; i++) {
+    // Wait for this source's actual observations, then its replacement's reset.
+    // A status-file mtime alone can change before a reload completes.
+    await waitFor(() => observed() > 0)
+    process.kill(processor, 'SIGHUP')
+    await waitFor(() => observed() === 0)
+    const result = await verify()
+    assert.equal(result.code, 0, result.error + result.output)
+    assert.equal(JSON.parse(result.output).status, 'persisted')
+    const details = recordingDetails()
+    assert.equal(details.recording_generation, live.generation)
+    assert.equal(details.recording_enabled, true)
+    assert.equal(alive(processor), true)
+    assert.equal(readStatusFile(f.state)?.processes?.processing.pid, processor)
+  }
+})
+
+// @ref LLP 0474#recording [tests]: an unauthorized recording control cannot change a live gate or prevent fresh persistence
+test('actual split recording control refuses browser Origin without mutating capture', async t => {
+  const f = await service(t, true)
+  const verify = () => command(f, ['ollama', 'verify', '--model', 'tiny:local', '--json'])
+  assert.equal((await verify()).code, 0)
+  const saved = await fs.readFile(f.env.HYP_CONFIG, 'utf8')
+  const control = { endpoint: f.root, runId: f.status.runId, deadline: Date.now() + 1000 }
+  const before = await requestOllamaVerification(control)
+  const response = await fetch(f.root + '/_hypaware/recording/ollama', {
+    method: 'POST', headers: { origin: 'http://untrusted.example', 'content-type': 'text/plain' }, body: '{"recording":false}',
+  })
+  const status = response.status
+  await response.text()
+  const after = await requestOllamaVerification({ ...control, deadline: Date.now() + 1000 })
+  const result = await verify()
+  assert.equal(after.reason, 'ready')
+  assert.equal(after.generation, before.generation)
+  assert.equal(await fs.readFile(f.env.HYP_CONFIG, 'utf8'), saved)
+  assert.equal(result.code, 0, result.error + result.output)
+  assert.equal(JSON.parse(result.output).status, 'persisted')
+  assert.equal(status, 403)
+  assert.equal((await command(f, ['client', 'detach', 'ollama'])).code, 0)
+  assert.equal((await verify()).code, 1)
+  assert.equal((await command(f, ['client', 'attach', 'ollama'])).code, 0)
+  assert.equal((await verify()).code, 0)
+})
+
+// @ref LLP 0474#diagnostics [tests]: actual split status retains actionable failure while off, recovers only on new persistence and resets current evidence on service restart
+test('actual split failure survives benign control and off, with persistence recovery and fresh restart evidence', async t => {
+  const f = await service(t, true, false, 25)
+  const capture = async fixture => ollamaCaptureFromSnapshot(JSON.parse(await fs.readFile(fixture.env.HYP_CONFIG, 'utf8')), readStatusFile(fixture.state), readPidFile(fixture.state))
+  async function request(route, body) {
+    const response = await fetch(f.root + '/ollama/api/' + route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    assert.equal(response.status, 200)
+    await response.text()
+  }
+  await request('chat', { model: 'tiny:local', messages: [{ role: 'user', content: 'unsupported' }], think: true, stream: false })
+  const failed = await waitFor(async () => { const state = await capture(f); return state.state === 'failed' && state.reason === 'unsupported_shape' ? state : undefined })
+  await request('generate', { model: 'tiny:local', prompt: '', stream: false })
+  await waitFor(() => /** @type {any} */ (readStatusFile(f.state)?.sources[0]?.details)?.capture_outcomes.find(entry => entry.route === 'ollama-native')?.reasons.load_unload === 1)
+  const benign = await capture(f)
+  assert.equal(benign.reason, 'unsupported_shape')
+  assert.equal(benign.lastFailed, failed.lastFailed)
+  assert.equal(benign.next, failed.next)
+  assert.equal(benign.lastPersisted, null)
+  assert.equal((await command(f, ['client', 'detach', 'ollama'])).code, 0)
+  const off = await capture(f)
+  assert.equal(off.state, 'disabled')
+  assert.equal(off.historical, true)
+  assert.equal(off.reason, 'unsupported_shape')
+  assert.equal((await command(f, ['client', 'attach', 'ollama'])).code, 0)
+  const verified = await command(f, ['ollama', 'verify', '--model', 'tiny:local', '--json'])
+  assert.equal(verified.code, 0, verified.error + verified.output)
+  await waitFor(async () => (await capture(f)).state === 'persisted')
+  const recovered = await capture(f)
+  assert.equal(recovered.reason, null)
+  assert.ok(recovered.lastPersisted && failed.lastFailed && recovered.lastPersisted > failed.lastFailed)
+  await request('chat', { messages: [{ role: 'user', content: 'invalid model' }], stream: false })
+  const newer = await waitFor(async () => { const state = await capture(f); return state.state === 'failed' && state.reason === 'invalid_request' ? state : undefined })
+  assert.ok(newer.lastFailed > recovered.lastPersisted)
+  const historical = readStatusFile(f.state)
+  const oldPid = readPidFile(f.state)
+  const config = JSON.parse(await fs.readFile(f.env.HYP_CONFIG, 'utf8'))
+  f.child.send('stop')
+  await waitFor(f.exited, 6000)
+  assert.equal(ollamaCaptureFromSnapshot(config, historical, oldPid).historical, true)
+  const restarted = await service(t, true, false, 25, f.home)
+  const fresh = await capture(restarted)
+  assert.equal(fresh.state, 'ready')
+  assert.equal(fresh.reason, null)
+  assert.equal(fresh.lastFailed, null)
+  assert.equal(fresh.lastPersisted, null)
+  assert.equal(fresh.historical, false)
 })
