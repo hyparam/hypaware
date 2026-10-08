@@ -101,8 +101,10 @@ that backlog. The disposable query worker only reads committed data with normal
 caller policy and disables legacy query-config migration. A receipt, spool row,
 HTTP result, old saved stamp or hidden row cannot establish verification success.
 
-Default status carries bounded capture evidence and finite recent failure reasons;
-ordinary daemon/processor logs carry safe projection, append and lifecycle events.
+Default status carries bounded capture evidence and finite recent failure reasons.
+These summaries can lag until the next processor status update. Check the ordinary
+daemon log for a safe failure reason while waiting; it also carries projection,
+append and lifecycle events.
 No prompt or response text is needed to diagnose these reasons. Optional dev
 telemetry can supply structured run/exchange correlation, but is not required for
 the ordinary status/log path. See [diagnostic logs](#find-diagnostic-logs).
