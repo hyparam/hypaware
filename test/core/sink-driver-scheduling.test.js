@@ -5,7 +5,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHook } from 'node:async_hooks'
-import { setImmediate as turn } from 'node:timers/promises'
+import { setImmediate as turn, setTimeout as pause } from 'node:timers/promises'
 import { MeterProvider, metrics } from '../../src/core/observability/runtime.js'
 import { resetKernelInstruments } from '../../src/core/observability/meter.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
@@ -62,7 +62,9 @@ async function stage(t) {
 }
 
 async function until(predicate) {
-  for (let i = 0; i < 100 && !predicate(); i++) await turn()
+  // Filesystem preflight may outlast many immediate turns on a busy runner.
+  const deadline = performance.now() + 5000
+  while (!predicate() && performance.now() < deadline) await pause(5)
   assert.ok(predicate(), 'expected work did not start')
 }
 
