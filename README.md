@@ -86,11 +86,15 @@ See [reports](./docs/REPORTS.md) for generation and publishing.
 
 ## Supported clients
 
-For explicit native Ollama text API capture, see the
-[local capture/query/stop recipe](./docs/CLIENTS.md#direct-ollama-api-text-capture).
+<!-- @ref LLP 0475#t5 [implements]: ordinary installed Ollama setup and explicit client routing have maintained instructions -->
+
+Choose Ollama in `hyp setup`, then run `hyp ollama setup` for the live CLI/SDK
+capture host. Run `hyp ollama verify --model <installed-model>` to confirm a fresh
+saved request and response. See [Ollama setup, recording and direct recovery](./docs/CLIENTS.md#record-ollama)
+for supported versions and privacy limits.
 
 Claude Code, Claude Desktop, Codex (CLI and Desktop), Cursor, OpenCode,
-OpenClaw, Hermes Agent, Pi, and any tool that exports OpenTelemetry logs,
+OpenClaw, Hermes Agent, Pi, Ollama, and any tool that exports OpenTelemetry logs,
 traces, or metrics.
 
 Claude Code is captured through its built-in telemetry, so it still talks
