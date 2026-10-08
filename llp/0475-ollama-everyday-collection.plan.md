@@ -8,6 +8,7 @@
 **Depends-on:** sink-instance-bound-2226
 **Related:** LLP 0473, LLP 0474, LLP 0472, LLP 0466, LLP 0430
 **Extends:** LLP 0470 (everyday installed journey and running-client recording proof)
+**Extended-by:** LLP 0476 (#t4: existing-service settlement ownership, sequencing and proof)
 
 @ref LLP 0473#requirements: deliver the installed discovery-to-persistence and reversible recording journey
 @ref LLP 0474: implement scoped native routing, bounded default evidence and a processor-confirmed stop
