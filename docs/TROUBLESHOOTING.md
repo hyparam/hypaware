@@ -18,6 +18,7 @@ or `hyp status --json` for scripts.
 ## Contents
 
 - [No new recordings](#no-new-recordings)
+- [Ollama capture is unconfirmed](#ollama-capture-is-unconfirmed)
 - [History or search results are missing](#history-or-search-results-are-missing)
 - [An export or team sync is missing](#an-export-or-team-sync-is-missing)
 - [A command is missing or rejects an option](#a-command-is-missing-or-rejects-an-option)
@@ -52,6 +53,65 @@ For transcript-only clients, allow time for the scheduled recovery sweep.
 
 Detaching a gateway-routed client restores its own connection settings if a
 stopped gateway is preventing normal use. See [client management](CLIENTS.md).
+
+## Ollama capture is unconfirmed
+
+<!-- @ref LLP 0474#diagnostics [implements]: default status and local diagnostics distinguish readiness, observed traffic, persistence evidence and actionable finite failures -->
+<!-- @ref LLP 0476#lifecycle [constrained-by]: completed inference with timed-out confirmation leaves settings unchanged and may finish in a live collector -->
+
+```sh
+hyp ollama setup
+hyp client status ollama
+hyp status --verbose
+```
+
+Check the **Direct upstream**, service/model inventory and **Capture root (live)**
+separately. An executable on PATH does not prove a service or model is ready.
+Use a model already listed and the supported CLI/SDK recipes in
+[clients](CLIENTS.md#route-a-cli-or-sdk-client). A configured or stale capture root
+is not a live route. After saved endpoint changes with an unconfirmed restart,
+run `hyp daemon restart` and check setup again.
+
+| Result or reason | Next step |
+| --- | --- |
+| Ready, no traffic | Route the next client to the printed live `/ollama` root, or explicitly run `hyp ollama verify --model NAME`. |
+| Observed, awaiting persistence | Give the processor time to finish; use verify for a fresh committed-pair check. |
+| Persisted stamp | The append resolved. Verify or query the particular request to establish current visibility. |
+| Off or historical evidence | Successful detach keeps the running host forwarding without capture. Use `hyp client attach ollama` to resume new requests. |
+| `unsupported_shape` | Use native chat/generate with `think=False`, no nonempty thinking/tools, and supported fields. Unsupported exchanges are omitted in full. |
+| `malformed_stream`, `missing_terminal`, `trailing_record` | The stream must finish with exactly one completed terminal and no later nonblank records. Retry the request explicitly after fixing its producer. |
+| `http_error`, `upstream_unavailable`, `transport_error` | Check the direct Ollama service and saved custom upstream with setup. Direct inference and capture are separate outcomes. |
+| `capture_limit`, `processor_unavailable`, `append_failure` | Check the ordinary daemon log and processing health. Lost capture is not replayed. |
+| `policy_unreadable` | Restore readable, valid policy/configuration. Verification does not bypass policy. |
+| Unconfirmed attach/detach | Follow the command's recovery guidance and retry for live confirmation. A saved setting alone is not a completed barrier. |
+
+`hyp ollama verify --model NAME --json` returns machine-readable status, reason and
+whether HTTP completed; its prompt/export disclosure goes to stderr. A
+`persistence_timeout` means inference completed but storage confirmation timed
+out. The live collector may finish; settings are unchanged. A later check can
+report `settlement_busy` until the original storage operation actually settles.
+The command never retries inference automatically. If the actual collector stops
+or its processor is lost, confirmation can be interrupted and remains unconfirmed.
+
+<!-- @ref LLP 0476#cohort [implements]: the shared full refresh keeps ordinary earlier/other-client backlog and storage/sink hooks -->
+
+Verification refreshes the shared current gateway spool, including earlier and
+other-client pending rows, with normal storage/sink hooks. Its cost depends on
+that backlog. The disposable query worker only reads committed data with normal
+caller policy and disables legacy query-config migration. A receipt, spool row,
+HTTP result, old saved stamp or hidden row cannot establish verification success.
+
+Default status carries bounded capture evidence and finite recent failure reasons;
+ordinary daemon/processor logs carry safe projection, append and lifecycle events.
+No prompt or response text is needed to diagnose these reasons. Optional dev
+telemetry can supply structured run/exchange correlation, but is not required for
+the ordinary status/log path. See [diagnostic logs](#find-diagnostic-logs).
+
+When the collector has stopped, use the preserved direct-host CLI command or a
+new `Client(host=...)` from [direct recovery](CLIENTS.md#stop-and-resume-ollama-recording).
+This restores inference without recording. Off/stopped historical timestamps do
+not claim current health. Ollama has no history import or outage replay, and its
+unknown directory means directory exclusions cannot protect these API requests.
 
 ## History or search results are missing
 
