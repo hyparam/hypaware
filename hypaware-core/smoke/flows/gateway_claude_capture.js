@@ -166,7 +166,7 @@ export async function run({ harness, expect }) {
   )
 
   // ----- Boot the daemon (under the new boot path) -----
-  // tickIntervalMs=50 so at least one `sink.tick` span fires before stop.
+  // tickIntervalMs=50 so the daemon dispatch counter advances before stop.
   const handle = await runDaemon({
     hypHome: harness.hypHome,
     configPath,
