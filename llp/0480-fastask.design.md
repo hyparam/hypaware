@@ -7,6 +7,7 @@
 **Date:** 2026-10-09
 **Related:** LLP 0479 (request), LLP 0004 (paths and state directories), LLP 0023 (graph identity and provenance), LLP 0033 (remote attach), LLP 0034 (verbs and MCP), LLP 0063 (connection ladder), LLP 0064 (graph query), LLP 0070 and LLP 0105 (export and query seams), LLP 0166 and LLP 0300 (local control trust), LLP 0213 (graph guidance lives in the query skill), LLP 0248 (command tree), LLP 0305 (central eligibility), LLP 0393 (product telemetry vocabulary), LLP 0394 (source health in status), LLP 0430 (no manual acceptance procedures), LLP 0457 and LLP 0458 (skill updates); server LLP 0554 (`hypaware.graph-snapshot/1`), server LLP 0553, LLP 0557, LLP 0558 (`hypaware.session-evidence/1`), server LLP 0555 T11 (server-first command vocabulary)
 **Implemented-by:** [LLP 0481](./0481-fastask.plan.md)
+**Extended-by:** [LLP 0487](./0487-fastask-teaches-agent-directed-exploration.decision.md) (agent-callable `query team-graph discover|neighbors|search`; the skill teaches agent-directed exploration first; the planner is optional)
 **Extended-by:** [LLP 0486](./0486-t11-stress-thresholds-after-measurement.decision.md) (slice time cap 4 ms; memory plateau and no-growth window)
 **Extended-by:** [LLP 0485](./0485-the-client-work-budget-is-clocked-on-process-cpu.decision.md) (the work budget is clocked on whole-process CPU, duty 0.2, sleeps capped at 2 s)
 **Extended-by:** [LLP 0484](./0484-discovery-walks-touched-and-the-build-is-bounded-before-it-starts.decision.md) (discovery walks `touched` with a vocabulary-drift guard; up-front size refusal; `MAX_INDEX_BYTES` 256 MB)
@@ -86,6 +87,8 @@ Command names the client will report (for server LLP 0555 T11): `fastask`,
 `graph replica status`, `graph replica refresh`, `query evidence`.
 
 ## Commands {#command}
+
+**Extended-by:** [LLP 0487#decision](./0487-fastask-teaches-agent-directed-exploration.decision.md#decision): three agent-callable operations, `query team-graph discover`, `neighbors` and `search`, join the commands below; `hyp fastask` stays as an optional shortcut.
 
 <a id="command-tree"></a>Following LLP 0248's tree (journeys stand alone, operations sit under a
 noun). `query evidence` sits under the query journey and `graph replica
@@ -466,6 +469,8 @@ used and is executed by the acceptance tests (journey 4): a suggested command
 that does not run is a test failure.
 
 ## Skill guidance {#skill}
+
+**Extended-by:** [LLP 0487#decision](./0487-fastask-teaches-agent-directed-exploration.decision.md#decision): the routing paragraph teaches agent-directed exploration first (discover, neighbors, search, evidence); `hyp fastask` is an optional shortcut, never described as benchmark-proven.
 
 Shipped only in the enabling task. Both `hypaware-query` copies (Claude and
 Codex) gain a short routing paragraph, and a side file `fastask.md` beside
