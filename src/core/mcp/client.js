@@ -77,7 +77,8 @@ export function createHttpMcpClient(opts) {
       const text = await safeText(res)
       // safeText swallows a read the abort cut short; report the abort, not the status.
       opts.signal?.throwIfAborted()
-      throw new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`)
+      // `status` lets a caller tell a capacity refusal (429) from other failures.
+      throw Object.assign(new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`), { status: res.status })
     }
     const message = await parseRpcResponse(res, id)
     if (message?.error) {
