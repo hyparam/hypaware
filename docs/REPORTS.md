@@ -48,6 +48,18 @@ directory's recording and sync policy, excerpts it quotes from `local-only`
 history included ([PRIVACY.md](PRIVACY.md#marking-directories)). Publishing
 remains a separate action, using `hyp report publish <name> ...`.
 
+<!-- @ref LLP 0461 [explains]: the report skill offers a single-recommendation path that hyp report recommend publishes -->
+To get one recommendation instead of a full report, ask for it:
+
+```sh
+hyp report generate "Give me one recommendation about repeated test failures"
+```
+
+Unless you name a period, the skill uses the 14 days ending yesterday. It writes one
+`recommendation-<slug>.md` page in the current directory and does not save a
+report folder. Publish the page only if you want to share it, with
+[`hyp report recommend`](CLI_REFERENCE.md#hyp-report-recommend).
+
 You can also write a Markdown report yourself with your findings, query scope,
 and tables. The remote renders uploaded Markdown; no local render step is needed.
 
