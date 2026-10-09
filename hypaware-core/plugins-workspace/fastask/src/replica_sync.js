@@ -603,7 +603,7 @@ export function createReplicaSync(opts) {
  * @param {ReplicaTarget} target
  * @returns {Promise<string | null>}
  */
-async function credentialFingerprint(target) {
+export async function credentialFingerprint(target) {
   try {
     const resolved = await target.token(false)
     if (!resolved.ok) return null

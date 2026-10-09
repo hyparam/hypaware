@@ -6,6 +6,7 @@
 **Author:** HypForge designer
 **Date:** 2026-10-09
 **Extends:** [LLP 0480#discovery](./0480-fastask.design.md#discovery) (which edge kinds discovery follows) and [LLP 0480#index](./0480-fastask.design.md#index) (the build's memory bound)
+**Extended-by:** [LLP 0485#memory](./0485-the-client-work-budget-is-clocked-on-process-cpu.decision.md#memory) (the 1x bound is per build; back-to-back refreshes must not grow)
 **Related:** LLP 0023 (graph projection), LLP 0481 (plan; tasks T1, T6, T11); server LLP 0554#data-files, server LLP 0556 T1, server LLP 0560
 
 > LLP 0481 T6 (implementer-5, `0f9ab58b`) raised two questions. Discovery
