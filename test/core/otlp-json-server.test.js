@@ -12,7 +12,7 @@ import net from 'node:net'
 import os from 'node:os'
 import zlib from 'node:zlib'
 
-import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
+import { MAX_DECODED_BODY_BYTES, createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
 import { streamOversizedBody } from '../helpers/oversized_body.js'
 
 /**
@@ -295,6 +295,95 @@ test('gzip and deflate bodies are decoded before the handler sees them', async (
       assert.deepEqual(req.data, { resourceMetrics: [] })
       // The count is of decoded bytes, not of what came off the wire.
       assert.equal(req.payloadBytes, Buffer.byteLength(payload))
+    }
+  } finally {
+    await s.close()
+  }
+})
+
+// The bound is on decoded bytes, so a compressed body cannot buy its way past
+// it: a few KiB of gzip inflate to whatever the sender chose before the handler
+// ever ran.
+test('a body past the decoded cap is refused with 413 in every encoding, and the listener keeps serving', async () => {
+  const s = await startServer()
+  try {
+    // Valid JSON, so nothing but its size can refuse it.
+    const json = JSON.stringify({ resourceLogs: [] })
+    const oversized = Buffer.from(json + ' '.repeat(MAX_DECODED_BODY_BYTES + 1 - Buffer.byteLength(json)))
+    /** @type {[string, Buffer][]} */
+    const cases = [
+      ['identity', oversized],
+      ['gzip', zlib.gzipSync(oversized)],
+      ['deflate', zlib.deflateSync(oversized)],
+    ]
+    for (const [encoding, body] of cases) {
+      const res = await fetch(`${s.origin}/v1/logs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': encoding },
+        body,
+      })
+      assert.equal(res.status, 413, encoding)
+      const answer = /** @type {{ code: number, message: string }} */ (await res.json())
+      assert.equal(answer.code, 3, encoding)
+      assert.match(answer.message, new RegExp(`${MAX_DECODED_BODY_BYTES} bytes`), encoding)
+    }
+    assert.equal(s.seen.length, 0)
+
+    const after = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resourceLogs: [] }),
+    })
+    assert.equal(after.status, 200)
+    assert.equal(s.seen.length, 1)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a body exactly at the decoded cap still reaches the handler', async () => {
+  const s = await startServer()
+  try {
+    const json = JSON.stringify({ resourceLogs: [] })
+    const atCap = json + ' '.repeat(MAX_DECODED_BODY_BYTES - Buffer.byteLength(json))
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: zlib.gzipSync(atCap),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].payloadBytes, MAX_DECODED_BODY_BYTES)
+    assert.deepEqual(s.seen[0].data, { resourceLogs: [] })
+  } finally {
+    await s.close()
+  }
+})
+
+test('an identity body past the decoded cap is read only up to about the cap', async () => {
+  const s = await startServer()
+  try {
+    const out = await streamOversizedBody(s.bound.port, {
+      requestLine: 'POST /v1/logs',
+      bytes: MAX_DECODED_BODY_BYTES + 8 * 1024 * 1024,
+    })
+    assert.ok(out.sent < out.total, `read all ${out.total} bytes of a body past the cap`)
+    assert.equal(s.seen.length, 0)
+    const [served] = s.sockets
+    assert.ok(served, 'the upload opened no server connection to measure')
+    if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+    // Up to the cap the body is read as a candidate export, and past it only
+    // the shared drain's bounded discard follows; the margin covers the
+    // socket reads already in flight when each stop lands.
+    assert.ok(
+      served.bytesRead < MAX_DECODED_BODY_BYTES + 2 * 1024 * 1024,
+      `read ${served.bytesRead} of the ${out.total} bytes it refused`
+    )
+    // A sender that reads while it uploads gets the refusal, announced as a
+    // closing connection rather than handed back to a pool.
+    if (out.received) {
+      assert.match(out.received, /^HTTP\/1\.1 413 /, out.received.slice(0, 80))
+      assert.match(out.received, /\r\nconnection: close\r\n/i, out.received.slice(0, 200))
     }
   } finally {
     await s.close()
