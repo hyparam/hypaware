@@ -132,7 +132,7 @@ async function teamServer(t, opts = {}) {
     req.on('data', (c) => { raw += c })
     req.on('end', async () => {
       const msg = JSON.parse(raw)
-      const reply = (/** @type {unknown} */ result, /** @type {unknown} */ error) => {
+      const reply = (/** @type {unknown} */ result, /** @type {unknown} */ error = undefined) => {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(error ? { jsonrpc: '2.0', id: msg.id, error } : { jsonrpc: '2.0', id: msg.id, result }))
       }

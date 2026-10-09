@@ -84,7 +84,8 @@ test('same basename in two repositories without a repository context returns com
   // sessions are newer: ambiguity is never collapsed into one confident lead.
   const groupsLed = new Set(result.leads.map((l) => l.group))
   assert.ok(groupsLed.has('acme/app:src/login.js') && groupsLed.has('other/lib:lib/login.js'))
-  assert.ok(result.leads.every((l) => l.why.every((w) => w.anchor.proven && !w.anchor.in_repo)))
+  // Outside the caller's repository a match is a candidate, unproven (LLP 0488#path-tokens).
+  assert.ok(result.leads.every((l) => l.why.every((w) => !w.anchor.proven && !w.anchor.in_repo)))
 })
 
 test('the caller\'s repository is preferred and resolves the ambiguity', async () => {
@@ -98,7 +99,7 @@ test('the caller\'s repository is preferred and resolves the ambiguity', async (
   assert.ok(result.leads.some((l) => l.session_id.startsWith('s-other')))
   const top = result.leads[0]
   assert.equal(top.rank, 1)
-  assert.equal(top.why[0].anchor.match, 'basename')
+  assert.equal(top.why[0].anchor.match, 'token')
   assert.equal(top.why[0].edge, 'touched')
   assert.deepEqual(top.session, { first_seen: new Date(T0).toISOString(), cwd: `/w/${top.session_id}`, git_branch: 'main', client_name: 'claude-code', user_id: 'u-1' })
   assert.equal(vocabularyMismatch(index), null)
@@ -142,7 +143,7 @@ test('a session matching more terms ranks first, with its exemplar message and t
   assert.deepEqual(top.why.map((w) => w.term).sort(), ['login', 'poll'])
   assert.deepEqual(top.exemplar, { message_id: 'm-acme-2', part_id: null })
   assert.equal(top.touched_at, new Date(T0 + 12 * DAY).toISOString())
-  assert.equal(top.why[0].anchor.match, 'stem')
+  assert.equal(top.why[0].anchor.match, 'token')
 })
 
 test('a term with no anchor returns no graph leads and says so', async () => {
@@ -215,11 +216,11 @@ test('the visit budget bounds the walk, keeps the newest touches and reports tru
 
 test('leads default to 8 and are capped at 40', async () => {
   const index = await graph({
-    files: ['acme/app:a.js'],
-    touches: Array.from({ length: 60 }, (_, n) => /** @type {[string, string, number]} */ ([`s${n}`, 'acme/app:a.js', n])),
+    files: ['acme/app:alpha.js'],
+    touches: Array.from({ length: 60 }, (_, n) => /** @type {[string, string, number]} */ ([`s${n}`, 'acme/app:alpha.js', n])),
   })
-  assert.equal(discover(index, { question: 'a.js' }).leads.length, 8)
-  assert.equal(discover(index, { question: 'a.js', leads: 500 }).leads.length, 40)
+  assert.equal(discover(index, { question: 'alpha.js' }).leads.length, 8)
+  assert.equal(discover(index, { question: 'alpha.js', leads: 500 }).leads.length, 40)
 })
 
 test('on the pinned fixture, discovery walks touched edges to the session, from unproven absolute-path anchors, non-ASCII names included', async () => {
@@ -230,9 +231,11 @@ test('on the pinned fixture, discovery walks touched edges to the session, from 
     edges: fs.readFileSync(path.join(GRAPH, 'edges.ndjson.gz')),
   })
   const result = discover(index, { question: 'what changed in app.js and café-日本-🚀.md', repo: 'fx-org/fx-repo' })
+  // Path tokens (LLP 0488): one matched term each, equal weight, so the more
+  // recently touched file ranks first.
   assert.deepEqual(result.anchors.map((a) => [a.key, a.match, a.proven, a.in_repo]), [
-    ['/work/fx-repo/src/app.js', 'basename', false, false],
-    ['/work/fx-repo/docs/café-日本-🚀.md', 'basename', false, false],
+    ['/work/fx-repo/docs/café-日本-🚀.md', 'token', false, false],
+    ['/work/fx-repo/src/app.js', 'token', false, false],
   ])
   assert.equal(result.no_anchor, false)
   // The re-pinned fixture carries the projectors' `touched` (LLP 0484#edge-kinds).
@@ -246,10 +249,10 @@ test('on the pinned fixture, discovery walks touched edges to the session, from 
     rank: 1,
     score: 6,
     // Equal weights: the lead's group is its earliest anchor's term.
-    group: 'app.js',
+    group: 'café-日本-🚀.md',
     why: [
-      { anchor: { type: 'File', node_id: 'b9ed4fa6dc7e6e60fda8964f', key: '/work/fx-repo/docs/café-日本-🚀.md', match: 'basename', proven: false, in_repo: false }, term: 'café-日本-🚀.md', edge: 'touched', touched_at: '2026-09-02T10:15:30.001Z' },
-      { anchor: { type: 'File', node_id: 'daed8234d97ecd3c21815e80', key: '/work/fx-repo/src/app.js', match: 'basename', proven: false, in_repo: false }, term: 'app.js', edge: 'touched', touched_at: '2026-08-31T22:36:02.500Z' },
+      { anchor: { type: 'File', node_id: 'b9ed4fa6dc7e6e60fda8964f', key: '/work/fx-repo/docs/café-日本-🚀.md', match: 'token', proven: false, in_repo: false }, term: 'café-日本-🚀.md', edge: 'touched', touched_at: '2026-09-02T10:15:30.001Z' },
+      { anchor: { type: 'File', node_id: 'daed8234d97ecd3c21815e80', key: '/work/fx-repo/src/app.js', match: 'token', proven: false, in_repo: false }, term: 'app.js', edge: 'touched', touched_at: '2026-08-31T22:36:02.500Z' },
     ],
     touched_at: '2026-09-02T10:15:30.001Z',
     exemplar: { message_id: 'fx-msg-0003', part_id: null },

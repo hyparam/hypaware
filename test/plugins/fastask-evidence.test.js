@@ -432,7 +432,7 @@ function discoveryOf(leads, extra = {}) {
     terms: [{ text: "login's", kind: /** @type {any} */ ('word') }, { text: 'poll', kind: /** @type {any} */ ('word') }],
     anchors: [], leads, ambiguous: true, groups: [], no_anchor: false, fallback: null,
     page: { offset: 0, limit: 8, next_offset: null },
-    coverage: { visits: 1840, truncated: false, anchors_truncated: 0, unresolved_edges_met: 2, sessions_considered: 9 },
+    coverage: { visits: 1840, truncated: false, anchors_truncated: 0, unresolved_edges_met: 2, sessions_considered: 9, postings_examined: 4 },
     ...extra,
   }
 }

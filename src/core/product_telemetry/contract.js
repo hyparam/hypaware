@@ -69,7 +69,6 @@ export const COMMANDS = Object.freeze([
   'enrichment curate',
   'enrichment propose',
   'enrichment status',
-  'fastask',
   'gascity attach',
   'gascity detach',
   'gascity list',

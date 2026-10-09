@@ -1,6 +1,6 @@
 // @ts-check
 
-import { FASTASK_USAGE, EVIDENCE_USAGE, PLUGIN_NAME, queryEvidenceVerb, runFastask, runQueryEvidence, runReplicaRefresh, runReplicaStatus } from './commands.js'
+import { EVIDENCE_USAGE, PLUGIN_NAME, queryEvidenceVerb, runQueryEvidence, runReplicaRefresh, runReplicaStatus } from './commands.js'
 import { SOURCE_NAME, createReplicaSource } from './replica_source.js'
 import { DISCOVER_USAGE, NEIGHBORS_USAGE, SEARCH_USAGE, runTeamGraphDiscover, runTeamGraphNeighbors, runTeamGraphSearch } from './team_graph.js'
 
@@ -16,7 +16,7 @@ import { DISCOVER_USAGE, NEIGHBORS_USAGE, SEARCH_USAGE, runTeamGraphDiscover, ru
  * no skill text advertises it yet.
  *
  * @ref LLP 0480#enablement [implements]: commands register on the integration branch only behind an explicit plugins[] entry; skills and default activation wait for enablement
- * @ref LLP 0480#command-tree [implements]: fastask is a top-level journey beside ask; graph replica sits beside graph project and compact; query evidence under query
+ * @ref LLP 0480#command-tree [implements]: graph replica sits beside graph project and compact; query evidence and query team-graph under query
  * @param {PluginActivationContext} ctx
  */
 export function activate(ctx) {
@@ -28,33 +28,7 @@ export function activate(ctx) {
     start: createReplicaSource(),
   })
 
-  ctx.commands.register({
-    name: 'fastask',
-    plugin: PLUGIN_NAME,
-    category: 'explore-share',
-    audience: 'everyday',
-    summary: "Find the team's sessions behind a question: leads with original text, fast",
-    usage: FASTASK_USAGE,
-    help: [
-      'Answers with leads, not an answer: the sessions that touched the files the',
-      'question names, why each was chosen, a few excerpts of their original text,',
-      'and commands to read further. Every result names its source: the team graph',
-      'replica (warm through the daemon, or cold from disk), the team server (slow),',
-      'or local captures only.',
-      '',
-      '  --remote <target>  team server to read (default: the default remote)',
-      '  --org <label>      organization to read on the server',
-      '  --repo <path>      repository the question is about (default: this one)',
-      '  --file <path>      a file to anchor on; repeatable',
-      '  --budget-ms <n>    time budget in milliseconds (default 2000)',
-      '  --leads <n>        leads to return, 1 to 40 (default 8)',
-      '  --json             the fastask/1 document',
-      '',
-      'Exit 0 with leads or an explicit "no leads", 1 when nothing could be read,',
-      '2 on a usage error.',
-    ].join('\n'),
-    run: (argv, runCtx) => runFastask(argv, runCtx, { pluginDir }),
-  })
+  // @ref LLP 0488#planner-deferred [implements]: hyp fastask is not registered; runFastask stays for a later, separately validated evaluation
 
   ctx.commands.registerGroup({
     name: 'graph replica',
@@ -62,7 +36,7 @@ export function activate(ctx) {
     summary: 'The team graph replica this machine keeps for the default remote',
     help: [
       'A copy of the team graph from the default remote, kept by the daemon for',
-      'hyp fastask. It is teammates\' data: never exported or forwarded.',
+      'hyp query team-graph. It is teammates\' data: never exported or forwarded.',
       '',
       '  hyp graph replica status    one line: state and how old the data is',
       '  hyp graph replica refresh   ask the daemon to check for a newer graph now',
@@ -102,7 +76,7 @@ export function activate(ctx) {
     usage: EVIDENCE_USAGE,
     help: [
       'Reads original session text from a team server through its session_evidence',
-      'tool. fastask prints these commands as follow-ups and continuations.',
+      'tool. hyp query team-graph search prints these commands for its hits.',
       'Without --remote it is a usage error: the evidence lives on the server.',
     ].join('\n'),
     run: runQueryEvidence,

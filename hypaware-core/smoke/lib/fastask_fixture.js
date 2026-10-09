@@ -62,6 +62,31 @@ function message(session, id, role, ms, text) {
   }
 }
 
+/**
+ * `graph_neighbors` over the published graph, in the context-graph verb's
+ * shape: the seed by id or natural key, one hop, the asked direction.
+ *
+ * @param {{ node: any[], edge: any[] }} tables
+ * @param {any} args
+ */
+function graphNeighbors(tables, args) {
+  const seed = tables.node.find((n) => n.node_id === args.node || n.natural_key === args.node)
+  if (!seed) return { ok: false, error: `no node matches '${args.node}'` }
+  /** @param {string} id */
+  const node = (id) => {
+    const n = tables.node.find((x) => x.node_id === id)
+    return n ? { node_id: n.node_id, node_type: n.node_type, natural_key: n.natural_key, label: n.label } : { node_id: id, node_type: 'Unknown', natural_key: id, label: null }
+  }
+  const out = []
+  for (const e of tables.edge) {
+    if (Array.isArray(args.edge_type) && !args.edge_type.includes(e.edge_type)) continue
+    if (args.direction !== 'in' && e.src_id === seed.node_id) out.push({ hop: 1, edge_type: e.edge_type, direction: 'out', from: seed.node_id, node: node(e.dst_id), source_keys: e.source_keys })
+    if (args.direction !== 'out' && e.dst_id === seed.node_id) out.push({ hop: 1, edge_type: e.edge_type, direction: 'in', from: seed.node_id, node: node(e.src_id), source_keys: e.source_keys })
+  }
+  const limit = Number.isInteger(args.limit) ? args.limit : 100
+  return { ok: true, seed: node(seed.node_id), neighbors: out.slice(0, limit), reachable: out.length, truncated: out.length > limit, totalNodes: out.length + 1, totalEdges: out.length }
+}
+
 /** @param {string} type @param {string} key */
 const nodeId = (type, key) => createHash('sha256').update(`${type}\0${key}`).digest('hex').slice(0, 24)
 
@@ -203,6 +228,7 @@ export async function startFastaskServer() {
       return reply({ tools: [
         { name: 'query_sql' },
         { name: 'grep_search' },
+        { name: 'graph_neighbors' },
         { name: 'session_evidence', inputSchema: { type: 'object', properties: { contract: { type: 'string', enum: ['hypaware.session-evidence/1'] } } } },
       ] })
     }
@@ -213,6 +239,10 @@ export async function startFastaskServer() {
         return reply({ structuredContent: { columns: Object.keys(rows[0] ?? {}), rows }, content: [{ type: 'text', text: JSON.stringify({ rows }) }] })
       }
       if (name === 'grep_search') return reply({ structuredContent: { hits: [] }, content: [{ type: 'text', text: '{"hits":[]}' }] })
+      if (name === 'graph_neighbors') {
+        const answer = graphNeighbors(tables, args)
+        return reply({ structuredContent: answer, content: [{ type: 'text', text: JSON.stringify(answer) }] })
+      }
       if (name === 'session_evidence') {
         const answer = evidenceAnswer(args)
         return reply({ structuredContent: answer, content: [{ type: 'text', text: JSON.stringify(answer) }] })

@@ -157,13 +157,20 @@ export interface GraphIndex {
   inOffsets: Uint32Array
   inEdges: Uint32Array
 
-  /** Lowercased basename and stem to File node indexes. */
+  /** Lowercased basename to File node indexes (`--file` resolution). */
   fileByBasename: Map<string, number | number[]>
-  fileByStem: Map<string, number | number[]>
   /** `owner/repo` (lowercased, as keyed) to the File nodes keyed under it. */
   fileByRepo: Map<string, number | number[]>
   /** Last three segments of absolute-path File keys, lowercased. */
   fileBySuffix: Map<string, number | number[]>
+  /** Path tokens (LLP 0488#path-tokens): token to id, and id to token. */
+  tokenIds: Map<string, number>
+  tokenNames: string[]
+  /** Postings of token t: `tokenPostings[tokenOffsets[t] .. tokenOffsets[t + 1])`, each `node * 2 + (basename ? 1 : 0)`, ascending. */
+  tokenOffsets: Uint32Array
+  tokenPostings: Uint32Array
+  /** Token ids in token order, for prefix lookup. */
+  sortedTokenIds: Uint32Array
 }
 
 export interface SnapshotIndexInput {
@@ -186,7 +193,7 @@ export interface Term {
   kind: TermKind
 }
 
-export type AnchorMatch = 'exact' | 'absolute' | 'suffix' | 'basename' | 'stem'
+export type AnchorMatch = 'exact' | 'absolute' | 'suffix' | 'basename' | 'stem' | 'token' | 'token_prefix'
 
 export interface Anchor {
   node: number
@@ -216,6 +223,8 @@ export interface DiscoveryInput {
   leads?: number
   maxAnchors?: number
   maxVisits?: number
+  /** Token postings examined at most (60,000 unless a test lowers it). */
+  maxPostings?: number
 }
 
 export interface LeadReason {
@@ -270,6 +279,8 @@ export interface DiscoveryResult {
     anchors_truncated: number
     unresolved_edges_met: number
     sessions_considered: number
+    /** Token postings examined to find term anchors (at most 60,000). */
+    postings_examined: number
   }
 }
 

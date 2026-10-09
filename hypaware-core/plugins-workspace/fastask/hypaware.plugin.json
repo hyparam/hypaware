@@ -20,12 +20,6 @@
     ],
     "commands": [
       {
-        "name": "fastask",
-        "category": "explore-share",
-        "audience": "everyday",
-        "summary": "Find the team's sessions behind a question: leads with original text, fast"
-      },
-      {
         "name": "graph replica status",
         "category": "additional",
         "audience": "operator",

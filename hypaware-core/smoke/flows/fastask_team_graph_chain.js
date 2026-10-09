@@ -80,7 +80,7 @@ export async function run({ harness, expect }) {
     await step('warm', async () => {
       handle = await runDaemon({ hypHome: harness.hypHome, configPath, env, runId: harness.devRunId, tickIntervalMs: 50, installSignalHandlers: false })
       const daemon = handle
-      await waitFor(() => daemon.snapshot().sources.find((s) => s.name === 'team-graph-replica')?.details?.index_generation === 'g1', 20_000, 'the daemon to sync and index g1')
+      await waitFor(() => /** @type {any} */ (daemon.snapshot().sources.find((s) => s.name === 'team-graph-replica')?.details)?.index_generation === 'g1', 20_000, 'the daemon to sync and index g1')
       await waitFor(async () => {
         const status = JSON.parse(await fs.readFile(path.join(harness.stateDir, 'run', 'status.json'), 'utf8').catch(() => '{}'))
         return (status.sources ?? []).some((/** @type {any} */ s) => s.name === 'team-graph-replica' && s.details?.control_routes?.includes('fastask/neighbors'))
