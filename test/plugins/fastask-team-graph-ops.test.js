@@ -250,7 +250,8 @@ test('a token in more than 5,000 files only scores; it never seeds a candidate a
   const both = discover(index, { question: '', terms: ['rarething', 'common'] })
   assert.equal(both.anchors[0].key, 'acme/app:src/common/rarething.js')
   assert.equal(both.anchors[0].term, 'rarething + common', 'the common token still counts for a file a rarer one found')
-  assert.equal(both.coverage.postings_examined, 1)
+  // One posting seeds the rare file; the probe of 'common' reads ~log2(5,011) more.
+  assert.ok(both.coverage.postings_examined > 1 && both.coverage.postings_examined <= 1 + Math.ceil(Math.log2(SEED_MAX_FILES + 12)) + 1, `${both.coverage.postings_examined}`)
 })
 
 test('postings are read rarest first and capped; reaching the cap sets anchors_truncated', async () => {
@@ -365,4 +366,18 @@ test('F11: the token dictionary sorts in budgeted slices, in code-unit order, wi
     clearInterval(timer)
   }
   assert.ok(maxGap < 50, `the event loop ran during the sort (longest gap ${maxGap.toFixed(1)} ms)`)
+})
+
+test('F12: probes of common tokens count against the posting bound, which stops them and flags truncation', async () => {
+  // 1,000 files reached through rare tokens (the 'rare' prefix seeds them),
+  // all under a directory token in 6,000 files: scoring 'common' probes it
+  // once per candidate.
+  const keys = Array.from({ length: 6000 }, (_, i) => (i < 1000 ? `acme/app:common/rare${i}.js` : `acme/app:common/other${i}.js`))
+  const index = await files(keys)
+  const unbounded = discover(index, { question: '', terms: ['rare', 'common'] })
+  assert.ok(unbounded.coverage.postings_examined > 1000, `probe reads are counted (${unbounded.coverage.postings_examined})`)
+  assert.equal(unbounded.anchors[0].term, 'rare + common')
+  const bounded = discover(index, { question: '', terms: ['rare', 'common'], maxPostings: 5000 })
+  assert.ok(bounded.coverage.postings_examined <= 5000, `stays within the bound (${bounded.coverage.postings_examined})`)
+  assert.ok(bounded.coverage.anchors_truncated > 0, 'reaching the bound is flagged')
 })

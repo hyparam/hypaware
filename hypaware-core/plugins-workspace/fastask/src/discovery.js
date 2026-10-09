@@ -465,14 +465,24 @@ function tokenAnchors(index, terms, repo, repoRoot, max, taken, maxPostings) {
       record(ordFor(packed >>> 1) * P + entry.pair, packed & 1, entry.exact, entry.count)
     }
   }
-  for (let ord = 0; ord < nodes.length; ord++) {
+  // Common tokens score the candidates rarer ones found. Every posting a
+  // probe's binary search reads counts against the same bound (review r2
+  // F12), so a query full of common tokens stays within it too.
+  const probe = { read: 0 }
+  probing: for (let ord = 0; ord < nodes.length; ord++) {
     for (let k = 0; k < P; k++) {
       for (const entry of common[k]) {
-        const base = member(index, entry.tok, nodes[ord])
+        // A probe reads at most this many postings: never start one that could cross the bound.
+        if (examined + probe.read + Math.ceil(Math.log2(entry.count + 1)) + 1 > maxPostings) {
+          truncated = true
+          break probing
+        }
+        const base = member(index, entry.tok, nodes[ord], probe)
         if (base !== -1) record(ord * P + k, base, entry.exact, entry.count)
       }
     }
   }
+  examined += probe.read
 
   /** @type {Array<{ node: number, inRepo: boolean, matched: number[], weight: number, allExact: boolean, recent: number }>} */
   const ranked = []
@@ -557,22 +567,25 @@ function matchingTokens(index, part) {
 /**
  * Whether `node` carries token `tok`: -1 if not, else 1 when the token is in
  * its basename and 0 when only in a directory. A binary search in the
- * token's ascending postings.
+ * token's ascending postings; each posting it reads adds one to `counter.read`.
  *
  * @param {GraphIndex} index
  * @param {number} tok
  * @param {number} node
+ * @param {{ read: number }} counter
  * @returns {number}
  */
-function member(index, tok, node) {
+function member(index, tok, node, counter) {
   let lo = index.tokenOffsets[tok]
   let hi = index.tokenOffsets[tok + 1]
   const want = node * 2
   while (lo < hi) {
+    counter.read++
     const mid = (lo + hi) >>> 1
     if (index.tokenPostings[mid] < want) lo = mid + 1
     else hi = mid
   }
+  if (lo < index.tokenOffsets[tok + 1]) counter.read++
   const packed = lo < index.tokenOffsets[tok + 1] ? index.tokenPostings[lo] : -1
   return packed !== -1 && packed >>> 1 === node ? packed & 1 : -1
 }
