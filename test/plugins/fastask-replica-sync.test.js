@@ -502,6 +502,20 @@ test('replica_too_large leaves the lease unrenewed', async (t) => {
   assert.equal(status.lease_expires_at, lease)
 })
 
+test('a generation whose index would not fit is refused before download and does not renew the lease (LLP 0484)', async (t) => {
+  const { sync, server, clock } = await setup(t, { syncOpts: { maxIndexBytes: 2000 } })
+  await sync.syncOnce()
+  const lease = sync.status().lease_expires_at
+  const downloads = server.dataRequests().length
+  clock.now += 3600_000
+  server.publish(await generatedGeneration({ generation: '1760001000000-1', nodeCount: 40, edgeCount: 40 }))
+  const { status } = await sync.syncOnce()
+  assert.equal(status.reason, 'replica_too_large')
+  assert.equal(status.state, 'stale')
+  assert.equal(status.lease_expires_at, lease)
+  assert.equal(server.dataRequests().length, downloads, 'nothing downloaded')
+})
+
 test('an oidc session keeps its fingerprint across hourly JWTs; a new session checks unconditionally once', async (t) => {
   /** @param {string} sid @param {number} n */
   const jwt = (sid, n) => ['e30', Buffer.from(JSON.stringify({ sid, n })).toString('base64url'), 'sig'].join('.')

@@ -9,6 +9,7 @@ import { canonicalOrigin } from '../../../../src/core/remote/builtin_remotes.js'
 import { RETRY_BACKOFF_SECONDS, abortableSleep } from '../../../../src/core/util/backoff.js'
 import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
 import { EDGE_COLUMNS, ID_RECIPE, NODE_COLUMNS, PROTOCOL, SCHEMA_VERSION, verifyManifest } from './contract.js'
+import { IndexBuildError, MAX_INDEX_BYTES, assertManifestFits } from './index_builder.js'
 import {
   REPLICA_FORMAT,
   createStaging,
@@ -72,6 +73,7 @@ const PLUGIN = '@hypaware/fastask'
  *   log?: PluginLogger,
  *   hooks?: ReplicaSyncHooks,
  *   maxReplicaBytes?: number,
+ *   maxIndexBytes?: number,
  *   budget?: { sliceMs?: number, sliceRows?: number, duty?: number },
  *   createWriteStream?: typeof fs.createWriteStream,
  * }} opts
@@ -86,6 +88,7 @@ export function createReplicaSync(opts) {
     log = SILENT,
     hooks = {},
     maxReplicaBytes = MAX_REPLICA_BYTES,
+    maxIndexBytes = MAX_INDEX_BYTES,
     budget = {},
     createWriteStream,
   } = opts
@@ -200,8 +203,8 @@ export function createReplicaSync(opts) {
     // org could match If-None-Match and keep renewing the old org's replica.
     // The record keeps a fingerprint of the credential that last renewed the
     // lease; a different one gets one unconditional check, and its answer
-    // decides (client LLP 0483#credential-change).
-    // @ref LLP 0480#replica [implements]: the replica belongs to one login; a changed credential must prove it still speaks for the held org
+    // decides.
+    // @ref LLP 0483#credential-change [implements]: a changed credential (token, or OIDC session id) omits If-None-Match once; another org is a key change
     const credential = await credentialFingerprint(target)
     const credentialChanged = credential !== null && record.generation !== null && record.credential_fp !== credential
     const ctx = { target, endpoint, paths, credential, credentialChanged }
@@ -274,12 +277,12 @@ export function createReplicaSync(opts) {
    */
   async function acceptManifest(manifest, leaseSeconds, ctx, restarts) {
     const rec = /** @type {ReplicaRecord} */ (record)
-    // Only an answer that confirms what this client serves renews the lease
-    // (client LLP 0483#lease-renewal): a 304 or a 200 naming the active
-    // generation, or the activation of a new one. A generation this client
-    // cannot activate leaves the old one serving only until the lease of the
-    // last renewing answer ends, so rows the server has since purged or
-    // withdrawn cannot linger in the replica for ever.
+    // Only an answer that confirms what this client serves renews the lease:
+    // a 304 or a 200 naming the active generation, or the activation of a new
+    // one. A generation this client cannot activate leaves the old one
+    // serving only until the lease of the last renewing answer ends, so rows
+    // the server has since purged or withdrawn cannot linger for ever.
+    // @ref LLP 0483#lease-renewal [implements]: unsupported, unverifiable, refused or too large generations never renew the lease
     const formatProblem = manifestProblem(manifest)
     if (formatProblem) {
       return settled('unsupported', 'format', 200, formatProblem, pollOf(rec))
@@ -301,7 +304,7 @@ export function createReplicaSync(opts) {
     }
 
     const total = Number(manifest.files.nodes.bytes) + Number(manifest.files.edges.bytes)
-    if (!(total <= maxReplicaBytes)) {
+    if (!(total <= maxReplicaBytes) || !indexFits(manifest)) {
       return settled(rec.generation ? 'stale' : 'unavailable', 'replica_too_large', 200, 'replica_too_large', pollOf(rec))
     }
 
@@ -350,6 +353,26 @@ export function createReplicaSync(opts) {
       if (stop.signal.aborted) throw err
       log.warn('replica activation failed', { generation: manifest.generation, error: messageOf(err) })
       return failed('activate_failed', null, 'activate_failed', undefined)
+    }
+  }
+
+  /**
+   * Whether the index of this generation fits, judged from the manifest's
+   * row counts before anything is downloaded.
+   *
+   * @ref LLP 0484#build-memory [implements]: a graph whose index would not fit is refused before download
+   * @param {any} manifest
+   */
+  function indexFits(manifest) {
+    try {
+      assertManifestFits(manifest, maxIndexBytes)
+      return true
+    } catch (err) {
+      if (err instanceof IndexBuildError && err.code === 'replica_too_large') {
+        log.info('replica refused before download: index would not fit', { generation: manifest.generation })
+        return false
+      }
+      throw err
     }
   }
 
