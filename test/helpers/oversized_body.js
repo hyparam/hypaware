@@ -24,15 +24,16 @@ import net from 'node:net'
  * (the unbounded one, which the caller asserts against).
  *
  * @param {number} port
- * @param {{ requestLine: string, host?: string }} options the request line
- *   without its HTTP version (`'POST /v1/logs'`), and the `Host` to send,
- *   which defaults to the loopback address the connection is made on
+ * @param {{ requestLine: string, host?: string, bytes?: number }} options the request line
+ *   without its HTTP version (`'POST /v1/logs'`), the `Host` to send,
+ *   which defaults to the loopback address the connection is made on, and the
+ *   body length, for a cap that only bites past the default 8 MiB
  * @returns {Promise<{ sent: number, total: number, received: string }>}
  */
 export function streamOversizedBody(port, options) {
   // Larger than any socket buffer either side could swallow whole, so a
   // server that stops reading stalls the write rather than absorbing it.
-  const body = Buffer.alloc(8 * 1024 * 1024, 'x')
+  const body = Buffer.alloc(options.bytes ?? 8 * 1024 * 1024, 'x')
   let received = ''
   let sent = 0
   return new Promise((resolve, reject) => {
