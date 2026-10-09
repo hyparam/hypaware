@@ -3,6 +3,7 @@
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
 
+import { compareStrings } from '../../../../src/core/util/compare_strings.js'
 import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
 import { EDGE_COLUMNS, NODE_COLUMNS } from './contract.js'
 
@@ -548,7 +549,8 @@ async function tokenPostings(names, tok, packed, count, budget) {
     if (wait) await wait
   }
   const order = Array.from({ length: names.length }, (_, t) => t)
-  order.sort((a, b) => (names[a] < names[b] ? -1 : names[a] > names[b] ? 1 : 0))
+  // Code-unit order, the order discover's prefix binary search compares in.
+  order.sort((a, b) => compareStrings(names[a], names[b]))
   return { offsets, postings, sorted: Uint32Array.from(order) }
 }
 

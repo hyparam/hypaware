@@ -1,5 +1,6 @@
 // @ts-check
 
+import { compareStrings } from '../../../../src/core/util/compare_strings.js'
 import { MIN_TOKEN, PLACEHOLDER, basenameOf, isAbsolute, lastSegments, repoOfKey, splitTokens } from './index_builder.js'
 
 /**
@@ -825,7 +826,7 @@ function newer(a, b) {
  * @returns {number}
  */
 function compareKeys(a, b) {
-  return (a ?? '') < (b ?? '') ? -1 : (a ?? '') > (b ?? '') ? 1 : 0
+  return compareStrings(a ?? '', b ?? '')
 }
 
 /**
