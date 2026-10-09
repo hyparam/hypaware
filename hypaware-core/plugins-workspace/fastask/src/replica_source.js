@@ -230,8 +230,11 @@ export function createReplicaSource(deps = {}) {
      */
     function answerDiscover(res, body) {
       if (typeof body?.question !== 'string') return send(res, 400, { error: 'invalid_request', message: 'question must be a string' })
+      if (!validScope(body.scope)) return send(res, 400, { error: 'invalid_request', message: 'scope (target, origin, org, credential_fp) is required' })
       const ready = servable()
       if (!ready) return send(res, 503, { error: 'replica_unavailable', replica: replicaView(sync.status()) })
+      const mismatch = scopeMismatch(body.scope, ready.status)
+      if (mismatch) return send(res, 409, { error: 'scope_mismatch', reason: mismatch })
       const result = discover(ready.index, {
         question: body.question,
         repo: typeof body.repo === 'string' ? body.repo : null,
@@ -250,9 +253,13 @@ export function createReplicaSource(deps = {}) {
       if (!body || typeof body.arguments !== 'object' || body.arguments === null || Array.isArray(body.arguments)) {
         return send(res, 400, { error: 'invalid_request', message: 'arguments must be an object' })
       }
+      if (!validScope(body.scope)) return send(res, 400, { error: 'invalid_request', message: 'scope (target, origin, org, credential_fp) is required' })
       const target = await resolveTarget()
       if (!target) return send(res, 409, { error: 'no_remote' })
-      if (typeof body.target === 'string' && body.target !== target.target) return send(res, 409, { error: 'not_default_remote' })
+      // The evidence goes to the daemon's current target, so the caller's
+      // scope must match both that target and the replica it was confirmed for.
+      const mismatch = body.scope.target !== target.target ? 'remote' : scopeMismatch(body.scope, sync.status())
+      if (mismatch) return send(res, 409, { error: 'scope_mismatch', reason: mismatch })
       // The command's abort travels here as a closed connection; it aborts
       // the upstream request, and the server sees the disconnect.
       const caller = new AbortController()
@@ -359,8 +366,36 @@ async function resolveTargetFromDisk(ctx, seen) {
  * @param {ReplicaStatus} r
  */
 function replicaView(r) {
-  const { generation_dir: _dir, ...rest } = r
+  const { generation_dir: _dir, credential_fp: _fp, ...rest } = r
   return rest
+}
+
+/**
+ * Why a caller's scope does not match the replica the daemon holds, or null
+ * when it does. The scope is what the command resolved for this call: the
+ * remote target, its canonical origin, the login's org and the credential
+ * fingerprint (`credentialFingerprint`). It is compared with the replica's
+ * record, not a fresh login read, so a new login the sync loop has not yet
+ * re-confirmed is refused, as on the cold path. Org compares exactly (null
+ * for static and environment tokens on both sides); a missing fingerprint on
+ * either side fails closed.
+ *
+ * @ref LLP 0483#credential-change [implements]: the warm path answers only for the remote, org and login the replica was confirmed for
+ * @param {any} scope
+ * @param {ReplicaStatus} status
+ * @returns {'remote' | 'org' | 'login' | null}
+ */
+export function scopeMismatch(scope, status) {
+  if (scope.target !== status.target || scope.origin !== status.origin) return 'remote'
+  if ((scope.org ?? null) !== (status.org ?? null)) return 'org'
+  if (typeof scope.credential_fp !== 'string' || typeof status.credential_fp !== 'string' || scope.credential_fp !== status.credential_fp) return 'login'
+  return null
+}
+
+/** @param {any} scope */
+function validScope(scope) {
+  return scope !== null && typeof scope === 'object' && typeof scope.target === 'string' && typeof scope.origin === 'string' &&
+    (scope.org === null || typeof scope.org === 'string') && (scope.credential_fp === null || typeof scope.credential_fp === 'string')
 }
 
 /**

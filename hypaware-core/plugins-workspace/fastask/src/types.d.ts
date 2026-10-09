@@ -300,6 +300,8 @@ export interface ReplicaStatus {
   state: ReplicaState
   reason: string | null
   servable: boolean
+  /** Fingerprint of the credential that last renewed the lease (LLP 0483); never leaves the daemon. */
+  credential_fp?: string | null
   target: string | null
   origin: string | null
   org: string | null
@@ -372,6 +374,14 @@ export type EvidenceForwardResult =
   | { ok: false, kind: 'unsupported' | 'credential' | 'network' | 'capacity', message: string, session: EvidenceSessionRecord }
   | { ok: false, kind: 'rpc', code: number, message: string, session: EvidenceSessionRecord }
 
+/** The caller's resolved remote, org and login, sent with every warm request (LLP 0483, review r1 F1). */
+export interface WarmScope {
+  target: string
+  origin: string
+  org: string | null
+  credential_fp: string | null
+}
+
 /** One `sessions` entry of a session_evidence request, before JSON encoding (server LLP 0557). */
 export interface EvidenceEntry {
   session_id: string
@@ -414,7 +424,7 @@ export interface LeadEvidence {
   skipped_parts: number
 }
 
-export type EvidenceFailureCode = 'invalid_request' | 'server_busy' | 'deadline' | 'transport' | 'freshness_unavailable'
+export type EvidenceFailureCode = 'invalid_request' | 'server_busy' | 'deadline' | 'transport' | 'freshness_unavailable' | 'entries_failed'
 
 export interface EvidenceResult {
   /** How the evidence was read: the verb, or per-session query_sql on a server without it. */
@@ -474,6 +484,32 @@ export interface FastaskFollowup {
   command: string
 }
 
+/** One message a no-anchor text search found (a `grep_search` hit, LLP 0480#discovery). */
+export interface FastaskTextHit {
+  session_id: string
+  message_id: string | null
+  part_id: string | null
+  message_created_at: string | null
+  /** The question term that matched. */
+  term: string
+  column: string | null
+  snippet: string | null
+}
+
+/** The text search run when no term anchored in the graph (LLP 0480#discovery step 5). */
+export interface FastaskTextSearch {
+  /** Always "found by text search, not the graph". */
+  label: string
+  /** `grep_search` on the remote, or local grep. */
+  path: 'grep_search' | 'local_grep'
+  terms: string[]
+  hits: FastaskTextHit[]
+  /** A limit cut the hits; more matches exist. */
+  truncated: boolean
+  /** Why the search could not run or finish, else null. */
+  error: string | null
+}
+
 /** The `fastask/1` JSON document (LLP 0480#output). */
 export interface FastaskOutput {
   contract: 'fastask/1'
@@ -482,6 +518,8 @@ export interface FastaskOutput {
   leads: FastaskOutputLead[]
   ambiguous: boolean
   followups: FastaskFollowup[]
+  /** Set only when no term anchored in the graph. */
+  text_search: FastaskTextSearch | null
   coverage: {
     graph_visits: number
     graph_truncated: boolean

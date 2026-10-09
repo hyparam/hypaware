@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { parseControlFlags } from '../../../../src/core/cli/verb_codec.js'
+import { buildOperationContext } from '../../../../src/core/cli/verb_command.js'
 import { VerbUsageError } from '../../../../src/core/cli/verb_errors.js'
 import { readStatusFile, resolveLiveControlRouteEndpointsFromStatus } from '../../../../src/core/daemon/status.js'
 import { runRemoteVerb } from '../../../../src/core/mcp/remote_verb.js'
@@ -16,27 +17,31 @@ import { readLocalReplica, loadColdIndex } from './cold_replica.js'
 import { credentialFingerprint } from './replica_sync.js'
 import { DEFAULT_LEADS, MAX_LEADS, discover } from './discovery.js'
 import { CURSOR_UNRESOLVABLE_NOTE, EVIDENCE_CONTRACT, EVIDENCE_TOOL, FRESHNESS_UNAVAILABLE_NOTE, NOT_FOUND_NOTE, callEvidence, evidenceSupport, fallbackEvidence, fetchEvidence, planEntries, skippedNote } from './evidence.js'
-import { buildFastaskOutput, renderFastaskText } from './output.js'
+import { TEXT_SEARCH_LABEL, buildFastaskOutput, renderFastaskText } from './output.js'
 import { connectRemote } from './remote_connect.js'
 import { DISCOVER_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE } from './replica_source.js'
 import { createDefaultTargetResolver } from './replica_target.js'
 import { discoverBySql } from './sql_discovery.js'
 import { summaryLine } from './summary_line.js'
-import { createWarmEvidenceClient } from './warm_client.js'
+import { SCOPE_MISMATCH, createWarmEvidenceClient } from './warm_client.js'
 
 /**
  * @import { CommandRunContext, VerbRegistration } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { DiscoveryResult, EvidenceMcpClient, EvidenceResult, FastaskSource, FastaskTimings, ReplicaStatus, ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, EvidenceMcpClient, EvidenceResult, FastaskSource, FastaskTextHit, FastaskTextSearch, FastaskTimings, ReplicaStatus, ReplicaTarget, WarmScope } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 export const PLUGIN_NAME = '@hypaware/fastask'
+/** Question terms a no-anchor text search looks for, one search each. */
+export const TEXT_SEARCH_TERMS = 3
+/** Hits asked for per term, and kept in all. */
+export const TEXT_SEARCH_LIMIT = 10
 export const DEFAULT_BUDGET_MS = 2000
 /** The longest budget a caller may ask for. */
 export const MAX_BUDGET_MS = 120_000
 export const EVIDENCE_NEEDS_REMOTE = 'query evidence reads a team server; pass --remote'
 
 export const FASTASK_USAGE = 'hyp fastask "<question>" [--remote <target>] [--org <label>] [--repo <path>] [--file <path>]... [--budget-ms <n>] [--leads <n>] [--json]'
-export const EVIDENCE_USAGE = "hyp query evidence --remote <target> --session '<entry json>' [--session ...] [--max-text-chars <n>] [--deadline-ms <n>] [--roles user,assistant] [--part-types text] [--json]"
+export const EVIDENCE_USAGE = "hyp query evidence --remote <target> [--org <label>] --session '<entry json>' [--session ...] [--max-text-chars <n>] [--deadline-ms <n>] [--roles user,assistant] [--part-types text] [--json]"
 
 /** A usage problem: exit 2. */
 class UsageError extends Error {}
@@ -206,7 +211,7 @@ async function runWithin(args, ctx, run) {
   } else {
     /** Why the replica cannot answer, when it cannot. @type {string | null} */
     let unusable = null
-    /** @type {{ discovery: DiscoveryResult, source: FastaskSource, endpoint: string | null, token: string | null } | null} */
+    /** @type {{ discovery: DiscoveryResult, source: FastaskSource, endpoint: string | null, token: string | null, scope: WarmScope } | null} */
     let replica = null
     if (target !== defaultTarget || !defaultLogin) unusable = `a replica is kept only for the default remote (${defaultTarget})`
     else if (args.org) unusable = 'the replica follows the login org; --org reads the server'
@@ -231,7 +236,7 @@ async function runWithin(args, ctx, run) {
       const r = replica
       source = r.source
       discovery = r.discovery
-      readEvidence = () => remoteEvidence({ discovery, run, warm: r.endpoint && r.token ? { endpoint: r.endpoint, token: r.token } : null, connected })
+      readEvidence = () => remoteEvidence({ discovery, run, warm: r.endpoint && r.token ? { endpoint: r.endpoint, token: r.token, scope: r.scope } : null, connected })
     } else {
       // team_server: discovery by SQL on the server, labeled slow.
       const conn = await connected()
@@ -264,6 +269,27 @@ async function runWithin(args, ctx, run) {
     }
   }
 
+  /** @type {FastaskTextSearch | null} */
+  let textSearch = null
+  if (discovery.no_anchor) {
+    const t0 = now()
+    const local = source.kind === 'local'
+    textSearch = await span('fastask.text_search', { source_kind: source.kind }, async (s) => {
+      const r = await runTextSearch({
+        terms: discovery.terms.slice(0, TEXT_SEARCH_TERMS).map((t) => t.text),
+        path: local ? 'local_grep' : 'grep_search',
+        search: local ? localGrep(ctx) : remoteGrep(connected),
+        deadlineAt: run.deadlineAt,
+        now,
+      })
+      s.setAttribute('terms', r.terms.length)
+      s.setAttribute('hits', r.hits.length)
+      if (r.error) s.setAttribute('error_kind', 'text_search')
+      return r
+    })
+    timings.discovery += now() - t0
+  }
+
   if (discovery.leads.length > 0 && readEvidence) {
     const t0 = now()
     const read = readEvidence
@@ -281,7 +307,7 @@ async function runWithin(args, ctx, run) {
     timings.evidence = now() - t0
   }
   timings.total = now() - run.started
-  const out = buildFastaskOutput({ question: args.question, source, discovery, evidence, timings })
+  const out = buildFastaskOutput({ question: args.question, source, discovery, evidence, timings, org: args.org, textSearch })
   run.runSpan.setAttribute('source_kind', source.kind)
   run.runSpan.setAttribute('source_path', source.path)
   run.runSpan.setAttribute('leads', out.leads.length)
@@ -297,13 +323,102 @@ async function runWithin(args, ctx, run) {
 }
 
 /**
+ * The text search a question with no anchor falls back to: one search per
+ * term (substring, as the server allows a caller), hits merged and
+ * deduplicated up to the limit, within the budget.
+ *
+ * @ref LLP 0480#discovery [implements]: no anchor runs the text search (grep_search --remote, or local grep) and labels its hits "found by text search, not the graph"
+ * @param {{ terms: string[], path: FastaskTextSearch['path'], search: (query: string) => Promise<any>, deadlineAt: number, now: () => number }} args
+ * @returns {Promise<FastaskTextSearch>}
+ */
+async function runTextSearch({ terms, path: searchPath, search, deadlineAt, now }) {
+  /** @type {FastaskTextSearch} */
+  const out = { label: TEXT_SEARCH_LABEL, path: searchPath, terms, hits: [], truncated: false, error: null }
+  const seen = new Set()
+  try {
+    for (const term of terms) {
+      if (deadlineAt - now() <= 0) { out.error = 'the budget ran out before every term was searched'; break }
+      const result = await search(term)
+      if (!Array.isArray(result?.hits)) throw new Error('the text search returned no hits')
+      if (result.truncated === true) out.truncated = true
+      for (const hit of result.hits) {
+        const key = `${hit.sessionId}\0${hit.partId ?? hit.messageId ?? ''}`
+        if (seen.has(key)) continue
+        if (out.hits.length === TEXT_SEARCH_LIMIT) { out.truncated = true; break }
+        seen.add(key)
+        out.hits.push(textHit(hit, term))
+      }
+    }
+  } catch (err) {
+    out.error = messageOf(err)
+  }
+  return out
+}
+
+/**
+ * @param {any} hit a grep_search hit
+ * @param {string} term
+ * @returns {FastaskTextHit}
+ */
+function textHit(hit, term) {
+  const match = Array.isArray(hit.matches) ? hit.matches[0] : null
+  return {
+    session_id: String(hit.sessionId),
+    message_id: hit.messageId ?? null,
+    part_id: hit.partId ?? null,
+    message_created_at: hit.messageCreatedAt ?? null,
+    term,
+    column: typeof match?.column === 'string' ? match.column : null,
+    snippet: typeof match?.snippet === 'string' ? match.snippet : null,
+  }
+}
+
+/**
+ * The server's `grep_search`, over the command's own connection to the
+ * caller's remote.
+ *
+ * @param {() => Promise<Awaited<ReturnType<typeof connectRemote>>>} connected
+ * @returns {(query: string) => Promise<any>}
+ */
+function remoteGrep(connected) {
+  return async (query) => {
+    const conn = await connected()
+    if (!conn.ok) throw new Error(conn.message)
+    const res = await conn.client.callTool('grep_search', { query, limit: TEXT_SEARCH_LIMIT })
+    const text = Array.isArray(res?.content) ? res.content.find((/** @type {any} */ c) => c?.type === 'text')?.text : undefined
+    if (res?.isError) throw new Error(typeof text === 'string' ? text : 'grep_search failed')
+    return res?.structuredContent ?? (typeof text === 'string' ? JSON.parse(text) : null)
+  }
+}
+
+/**
+ * This machine's grep, through the registered `grep_search` verb.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {(query: string) => Promise<any>}
+ */
+function localGrep(ctx) {
+  return async (query) => {
+    const verb = ctx.verbs?.getByTool('grep_search')
+    if (!verb) throw new Error('local text search is not available (enable @hypaware/grep)')
+    return verb.operation({ query, limit: TEXT_SEARCH_LIMIT }, buildOperationContext(ctx, 'auto'))
+  }
+}
+
+/**
  * The replica, warm through the daemon or cold from disk.
  *
  * @param {{ stateRoot: string, pluginDir: string, target: string, login: ReplicaTarget, input: any, timings: FastaskTimings, now: () => number, signal: AbortSignal, fetchImpl?: typeof fetch }} args
- * @returns {Promise<{ ok: true, discovery: DiscoveryResult, source: FastaskSource, endpoint: string | null, token: string | null } | { ok: false, reason: string }>}
+ * @returns {Promise<{ ok: true, discovery: DiscoveryResult, source: FastaskSource, endpoint: string | null, token: string | null, scope: WarmScope } | { ok: false, reason: string }>}
  */
 async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, timings, now, signal, fetchImpl }) {
   const doFetch = fetchImpl ?? globalThis.fetch
+  const origin = canonicalOrigin(login.url)
+  // What this call is for: the daemon answers only when its replica belongs
+  // to the same remote, org and login (review r1 F1).
+  // @ref LLP 0483#credential-change [implements]: every warm request carries the caller's resolved remote, org and credential fingerprint
+  const credential = await credentialFingerprint(login)
+  const scope = { target, origin: origin ?? '', org: login.org ?? null, credential_fp: credential }
   const endpoint = resolveLiveControlRouteEndpointsFromStatus({ stateRoot, route: DISCOVER_ROUTE }).find((e) => e.source === SOURCE_NAME)?.endpoint ?? null
   const token = endpoint ? readToken(pluginDir) : null
   if (endpoint && token) {
@@ -312,21 +427,23 @@ async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, ti
       const res = await doFetch(`${endpoint}/_hypaware/${DISCOVER_ROUTE}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify(input),
+        body: JSON.stringify({ ...input, scope }),
         signal,
       })
       const body = /** @type {any} */ (await res.json().catch(() => null))
       timings.discovery = now() - t0
       if (res.status === 200 && body?.result) {
-        return { ok: true, discovery: body.result, source: replicaSource(target, 'warm', body.replica, null), endpoint, token }
+        return { ok: true, discovery: body.result, source: replicaSource(target, 'warm', body.replica, null), endpoint, token, scope }
       }
       if (res.status === 503) return { ok: false, reason: unusableReason(body?.replica) }
+      // The running daemon holds another remote's, org's or login's graph:
+      // the files on disk are that replica too, so read the server instead.
+      if (res.status === 409 && body?.error === 'scope_mismatch') return { ok: false, reason: scopeReason(body.reason) }
     } catch {
       // The daemon advertised the route but did not answer: read the replica cold.
     }
   }
-  const origin = canonicalOrigin(login.url)
-  const local = origin ? await readLocalReplica(pluginDir, { target, origin, org: login.org, credential: await credentialFingerprint(login) }, Date.now()) : null
+  const local = origin ? await readLocalReplica(pluginDir, { target, origin, org: login.org, credential }, Date.now()) : null
   if (!local) return { ok: false, reason: 'the team graph has not been downloaded yet' }
   if (!local.servable || !local.dir) return { ok: false, reason: unusableReason({ state: local.state, reason: local.reason }) }
   try {
@@ -336,10 +453,16 @@ async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, ti
     const result = discover(cold.index, input)
     timings.discovery = now() - t0
     const view = { ...local.record, state: local.state }
-    return { ok: true, discovery: result, source: replicaSource(target, 'cold', view, `daemon not running: loaded the team graph in ${cold.ms} ms`), endpoint: null, token: null }
+    return { ok: true, discovery: result, source: replicaSource(target, 'cold', view, `daemon not running: loaded the team graph in ${cold.ms} ms`), endpoint: null, token: null, scope }
   } catch (err) {
     return { ok: false, reason: `the team graph could not be loaded: ${messageOf(err)}` }
   }
+}
+
+/** @param {unknown} reason why the daemon's replica does not match this call */
+function scopeReason(reason) {
+  const what = reason === 'org' ? 'organization' : reason === 'login' ? 'login' : 'remote'
+  return `the running daemon's team graph belongs to another ${what}`
 }
 
 /**
@@ -377,7 +500,7 @@ function unusableReason(view) {
  * server without the verb then falls back over a cold connection), else over
  * the command's own connection.
  *
- * @param {{ discovery: DiscoveryResult, run: { now: () => number, deadlineAt: number, signal: AbortSignal, fetchImpl?: typeof fetch }, warm: { endpoint: string, token: string } | null, connected: () => Promise<Awaited<ReturnType<typeof connectRemote>>> }} args
+ * @param {{ discovery: DiscoveryResult, run: { now: () => number, deadlineAt: number, signal: AbortSignal, fetchImpl?: typeof fetch }, warm: { endpoint: string, token: string, scope: WarmScope } | null, connected: () => Promise<Awaited<ReturnType<typeof connectRemote>>> }} args
  * @returns {Promise<EvidenceResult>}
  */
 async function remoteEvidence({ discovery, run, warm, connected }) {
@@ -385,11 +508,14 @@ async function remoteEvidence({ discovery, run, warm, connected }) {
   const planned = planEntries(discovery.leads)
   const leadCount = planned.reduce((n, p) => Math.max(n, p.lead + 1), 0)
   if (warm) {
-    const client = createWarmEvidenceClient({ endpoint: warm.endpoint, token: warm.token, signal, ...(run.fetchImpl ? { fetchImpl: run.fetchImpl } : {}) })
+    const client = createWarmEvidenceClient({ endpoint: warm.endpoint, token: warm.token, scope: warm.scope, signal, ...(run.fetchImpl ? { fetchImpl: run.fetchImpl } : {}) })
     const answer = await callEvidence({ client, planned, leadCount, deadlineAt, signal, now })
-    if (answer !== 'fallback') return answer
+    if (answer !== 'fallback' && !answer.failure?.message.startsWith(SCOPE_MISMATCH)) return answer
     const conn = await connected()
     if (!conn.ok) return failure(leadCount, conn.message)
+    // The daemon's remote changed between discovery and evidence: read evidence
+    // over this command's own connection to the caller's remote instead.
+    if (answer !== 'fallback') return fetchEvidence({ client: conn.client, leads: discovery.leads, remainingMs: deadlineAt - now(), support: evidenceSupport(conn.tools), signal, now })
     return fallbackEvidence({ client: conn.client, planned, leadCount, deadlineAt, signal, now })
   }
   const conn = await connected()
