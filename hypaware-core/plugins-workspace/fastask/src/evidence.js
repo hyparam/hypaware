@@ -376,7 +376,21 @@ export function readEvidenceResponse(planned, structured, leadCount) {
   result.read_path = paths.size === 0 ? null : paths.size === 1 ? [...paths][0] : 'mixed'
   // @ref LLP 0480#evidence [implements]: an entry whose freshness the server could not bound was not read (server LLP 0565#client); when no entry was read, nothing was
   if (acc.length > 0 && acc.every((lead) => lead.unbounded)) result.failure = { code: 'freshness_unavailable', message: FRESHNESS_UNAVAILABLE_NOTE }
+  markNothingRead(result)
   return result
+}
+
+/**
+ * Every lead an error means nothing was read at all: an aggregate failure,
+ * so the command exits 1 with the first reason a lead carries.
+ *
+ * @ref LLP 0480#evidence [implements]: an aggregate failure (nothing read at all) exits 1 with the reason
+ * @param {EvidenceResult} result
+ */
+function markNothingRead(result) {
+  if (result.failure || result.leads.length === 0 || !result.leads.every((l) => l.status === 'error')) return
+  const reason = result.leads.find((l) => l.note && l.note !== FALLBACK_LABEL)?.note
+  result.failure = { code: 'entries_failed', message: reason ? `no lead's evidence could be read: ${reason}` : "no lead's evidence could be read" }
 }
 
 /**
@@ -418,6 +432,7 @@ export async function fallbackEvidence({ client, planned, leadCount, deadlineAt,
   })
   result.complete = result.leads.every((l) => l.status === 'ok')
   result.deadline_reached = result.leads.some((l) => l.status === 'deadline')
+  markNothingRead(result)
   return result
 }
 

@@ -17,6 +17,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -27,6 +28,7 @@ import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
 import { TracerProvider } from '../../src/core/observability/runtime.js'
 import { runRemoteRemove } from '../../src/core/cli/remote_commands.js'
+import { parseControlFlags } from '../../src/core/cli/verb_codec.js'
 import { canonicalOrigin } from '../../src/core/remote/builtin_remotes.js'
 import { pluginStateDir } from '../../src/core/runtime/paths.js'
 import {
@@ -108,7 +110,7 @@ async function teamServer(t, opts = {}) {
       if (msg.method === 'notifications/initialized') { res.writeHead(202); return res.end() }
       if (msg.method === 'tools/list') {
         const evidenceTool = { name: 'session_evidence', inputSchema: { properties: { contract: { type: 'string', enum: ['hypaware.session-evidence/1'] } } } }
-        return reply(res, msg.id, { tools: [{ name: 'query_sql' }, ...(opts.tools === false ? [] : [evidenceTool])] })
+        return reply(res, msg.id, { tools: [{ name: 'query_sql' }, { name: 'grep_search' }, ...(opts.tools === false ? [] : [evidenceTool])] })
       }
       const { name, arguments: args } = msg.params
       calls.push({ name, args, auth: req.headers.authorization })
@@ -116,6 +118,7 @@ async function teamServer(t, opts = {}) {
         const rows = await collect(executeSql({ query: args.sql, tables }))
         return reply(res, msg.id, { structuredContent: { columns: Object.keys(rows[0] ?? {}), rows } })
       }
+      if (name === 'grep_search') return reply(res, msg.id, { structuredContent: grepAnswer(args) })
       if (name === 'session_evidence') {
         if (opts.evidence === 'missing') return reply(res, msg.id, undefined, { code: -32601, message: 'Unknown tool: session_evidence' })
         if (opts.evidence === 'busy') { res.writeHead(429); return res.end('org_read_capacity') }
@@ -142,6 +145,16 @@ function evidenceAnswer(args) {
     return { request_index: i, session_id: entry.session_id, status: parts.length || MESSAGES.some((m) => m.session_id === entry.session_id) ? 'ok' : 'not_found', parts, truncated: false, next_cursor: null, coverage: { received_through: '2026-10-09T02:00:00.000Z', read_path: 'indexed', fallback_reason: null } }
   })
   return { contract: 'hypaware.session-evidence/1', server_version: '1.40.0', complete: true, deadline_reached: false, elapsed_ms: 2, sessions }
+}
+
+/** A grep_search answer over MESSAGES: case-insensitive substring of the text. @param {any} args */
+function grepAnswer(args) {
+  const q = String(args.query).toLowerCase()
+  const hits = MESSAGES.filter((m) => m.content_text.toLowerCase().includes(q)).slice(0, args.limit).map((m) => ({
+    date: m.date, sessionId: m.session_id, agentId: null, conversationId: null, partId: m.part_id, messageId: m.message_id, messageCreatedAt: m.message_created_at,
+    matches: [{ column: 'content_text', snippet: m.content_text }],
+  }))
+  return { hits, truncated: false, exhausted: true }
 }
 
 /** @param {ServerResponse} res @param {number} id @param {unknown} result @param {unknown} [error] */
@@ -183,7 +196,8 @@ async function fixtureIndex() {
 /**
  * A running daemon as the command sees one: a live pid, a status.json naming
  * the source's control routes, the per-boot token, and the routes themselves.
- * @param {TestContext} t @param {ReturnType<typeof home>} h @param {{ evidence?: (args: any) => any }} [opts]
+ * `refuse` answers every request as the source does for a scope it does not hold.
+ * @param {TestContext} t @param {ReturnType<typeof home>} h @param {{ evidence?: (args: any) => any, refuse?: 'remote' | 'org' | 'login' }} [opts]
  */
 async function fakeDaemon(t, h, opts = {}) {
   const token = 'daemon-token'
@@ -202,6 +216,7 @@ async function fakeDaemon(t, h, opts = {}) {
       hits.push({ route, body, auth: req.headers.authorization })
       if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401); return res.end() }
       res.setHeader('content-type', 'application/json')
+      if (opts.refuse && (route === DISCOVER_ROUTE || route === EVIDENCE_ROUTE)) { res.writeHead(409); return res.end(JSON.stringify({ error: 'scope_mismatch', reason: opts.refuse })) }
       if (route === DISCOVER_ROUTE) return res.end(JSON.stringify({ source: 'team_replica', replica, result: discover(index, body) }))
       if (route === EVIDENCE_ROUTE) return res.end(JSON.stringify(opts.evidence ? opts.evidence(body.arguments) : { ok: true, round_trip_ms: 12, result: { structuredContent: evidenceAnswer(body.arguments) } }))
       if (route === REFRESH_ROUTE) { res.writeHead(202); return res.end(JSON.stringify({ accepted: true, replica })) }
@@ -347,7 +362,127 @@ test('warm: the daemon answers discovery and forwards evidence; no MCP handshake
   assert.deepEqual(daemon.hits.map((x) => x.route), [DISCOVER_ROUTE, EVIDENCE_ROUTE])
   assert.equal(daemon.hits[0].body.repo, 'fx-org/fx-repo', "the caller's repository is read from its origin remote")
   assert.equal(daemon.hits[0].body.leads, 2)
+  // Review r1 F1: every warm request carries the caller's remote, org and login.
+  const scope = { target: 'fx', origin: canonicalOrigin(server.url), org: null, credential_fp: createHash('sha256').update('fx-token').digest('hex').slice(0, 16) }
+  assert.deepEqual(daemon.hits[0].body.scope, scope)
+  assert.deepEqual(daemon.hits[1].body.scope, scope)
   assert.equal(server.calls.length, 0, 'the command itself never contacted the server')
+})
+
+test('warm: a daemon that refuses the scope is not used; the server answers, and says why', async (t) => {
+  const server = await teamServer(t)
+  const h = home(t, { url: server.url })
+  const daemon = await fakeDaemon(t, h, { refuse: 'login' })
+  const { ctx, out } = ctxOf(h)
+  assert.equal(await runFastask([QUESTION, '--json'], ctx), 0)
+  const doc = parse(out())
+  assert.equal(doc.source.kind, 'team_server')
+  assert.equal(doc.source.note, "read the team graph from the server (slow): the running daemon's team graph belongs to another login")
+  assert.deepEqual(daemon.hits.map((x) => x.route), [DISCOVER_ROUTE], 'no evidence through a daemon that refused')
+  assert.ok(server.calls.some((c) => c.name === 'session_evidence'), "evidence read over the command's own connection")
+})
+
+// ----- Review r1 F2: a question with no anchor runs the text search -----
+
+test('no anchor: the server text search runs with the terms, labeled as not from the graph', async (t) => {
+  const server = await teamServer(t)
+  const h = home(t, { url: server.url })
+  const { ctx, out } = ctxOf(h)
+  assert.equal(await runFastask(['why did the socket fail', '--json', '--budget-ms', '10000'], ctx), 0)
+  const doc = parse(out())
+  assert.deepEqual(doc.leads, [])
+  const greps = server.calls.filter((c) => c.name === 'grep_search')
+  assert.deepEqual(greps.map((c) => c.args.query), doc.text_search.terms, 'one search per term')
+  assert.ok(greps.length > 0 && greps.every((c) => c.args.limit === 10))
+  assert.equal(doc.text_search.label, 'found by text search, not the graph')
+  assert.equal(doc.text_search.path, 'grep_search')
+  assert.equal(doc.text_search.error, null)
+  assert.deepEqual(doc.text_search.hits.map((/** @type {any} */ x) => [x.session_id, x.part_id, x.term]), [[LEAD, 'fx-msg-0003#0', 'socket']])
+  assert.equal(doc.followups[0].why, 'search beyond the graph')
+
+  const text = ctxOf(h)
+  assert.equal(await runFastask(['why did the socket fail'], text.ctx), 0)
+  assert.match(text.out(), /^1 match for 'socket'.*, found by text search, not the graph:$/m)
+  assert.match(text.out(), new RegExp(`^  ${LEAD}  2026-08-31T22:36:30.000Z: Because the socket path was flaky\.$`, 'm'))
+})
+
+test('no anchor, local: the grep verb runs on this machine; without it the document says why', async (t) => {
+  const h = home(t)
+  /** @type {any[]} */
+  const seen = []
+  const verb = { operation: async (/** @type {any} */ params) => { seen.push(params); return grepAnswer(params) } }
+  const withGrep = ctxOf(h)
+  withGrep.ctx.verbs = { getByTool: (/** @type {string} */ tool) => (tool === 'grep_search' ? verb : undefined) }
+  assert.equal(await runFastask(['why did the socket fail', '--json'], withGrep.ctx), 0)
+  const doc = parse(withGrep.out())
+  assert.equal(doc.source.kind, 'local')
+  assert.equal(doc.text_search.path, 'local_grep')
+  assert.deepEqual(seen.map((p) => p.query), doc.text_search.terms)
+  assert.equal(doc.text_search.hits[0]?.session_id, LEAD)
+
+  const without = ctxOf(h)
+  assert.equal(await runFastask(['why did the socket fail', '--json'], without.ctx), 0)
+  const bare = parse(without.out())
+  assert.deepEqual(bare.text_search.hits, [])
+  assert.match(bare.text_search.error, /local text search is not available/)
+})
+
+test('an anchored question runs no text search', async (t) => {
+  const server = await teamServer(t)
+  const h = home(t, { url: server.url })
+  const { ctx, out } = ctxOf(h)
+  assert.equal(await runFastask([QUESTION, '--json'], ctx), 0)
+  assert.equal(parse(out()).text_search, null)
+  assert.ok(!server.calls.some((c) => c.name === 'grep_search'))
+})
+
+// ----- Review r1 F3: every entry an error is an aggregate failure -----
+
+test('evidence where every entry errored: exit 1 with coverage.evidence_failure set', async (t) => {
+  const server = await teamServer(t)
+  const h = home(t, { url: server.url })
+  await fakeDaemon(t, h, {
+    evidence: (/** @type {any} */ args) => ({ ok: true, round_trip_ms: 1, result: { structuredContent: { contract: 'hypaware.session-evidence/1', complete: false, deadline_reached: false,
+      sessions: args.sessions.map((/** @type {string} */ s, /** @type {number} */ i) => ({ request_index: i, session_id: JSON.parse(s).session_id, status: 'error', error: { code: 'cursor_unresolvable' }, parts: [], next_cursor: null, coverage: null })) } } }),
+  })
+  const { ctx, out, err } = ctxOf(h)
+  assert.equal(await runFastask([QUESTION, '--json', '--budget-ms', '10000'], ctx), 1)
+  const doc = parse(out())
+  assert.ok(doc.leads.length > 0 && doc.leads.every((/** @type {any} */ l) => l.evidence === null || l.evidence.status === 'error'))
+  assert.equal(doc.coverage.evidence_failure.code, 'entries_failed')
+  assert.match(doc.coverage.evidence_failure.message, /^no lead's evidence could be read: the server could not continue this session's evidence$/)
+
+  const text = ctxOf(h)
+  assert.equal(await runFastask([QUESTION], text.ctx), 1)
+  assert.match(text.err(), /^hyp fastask: evidence could not be read: no lead's evidence could be read/m)
+  assert.equal(err(), '')
+})
+
+// ----- Review r1 F4: --org is carried into every follow-up -----
+
+test('--org rides every follow-up and continuation, and each runs as printed', async (t) => {
+  const server = await teamServer(t)
+  const h = home(t, { url: server.url })
+  const { ctx, out } = ctxOf(h)
+  assert.equal(await runFastask([QUESTION, '--org', 'bravo', '--json', '--budget-ms', '10000'], ctx), 0)
+  const doc = parse(out())
+  assert.equal(doc.source.org, 'bravo')
+  const commands = [...doc.followups.map((/** @type {any} */ f) => f.command), ...doc.leads.map((/** @type {any} */ l) => l.evidence?.continuation).filter(Boolean)]
+  assert.ok(commands.length >= 2)
+  for (const command of commands) {
+    const argv = shellSplit(command)
+    const flags = parseControlFlags(argv.slice(3))
+    assert.ok(flags.ok, command)
+    assert.equal(flags.ok && flags.controls.org, 'bravo', command)
+    assert.equal(flags.ok && flags.controls.remote, 'fx', command)
+  }
+  const conversation = doc.followups.find((/** @type {any} */ f) => /query evidence/.test(f.command))
+  const run = ctxOf(h)
+  assert.equal(await runQueryEvidence(shellSplit(conversation.command).slice(3), run.ctx), 0, run.err())
+
+  const noOrg = ctxOf(h)
+  assert.equal(await runFastask([QUESTION, '--json'], noOrg.ctx), 0)
+  assert.ok(parse(noOrg.out()).followups.every((/** @type {any} */ f) => !f.command.includes('--org')), 'no --org when the command had none')
 })
 
 test('warm, server without the verb: the fallback goes over the command\'s own connection, labeled', async (t) => {

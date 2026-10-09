@@ -15,17 +15,23 @@ import os from 'node:os'
 import path from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
-import { DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
+import { DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
 import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
 import { generatedGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
 import { writeSession } from '../../src/core/remote/credentials.js'
 import { callEvidence } from '../../hypaware-core/plugins-workspace/fastask/src/evidence.js'
-import { createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/fastask/src/warm_client.js'
+import { SCOPE_MISMATCH, createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/fastask/src/warm_client.js'
+import { runFastask } from '../../hypaware-core/plugins-workspace/fastask/src/commands.js'
+import { writePidFile } from '../../src/core/daemon/pid.js'
+import { writeStatusFile } from '../../src/core/daemon/status.js'
+import { credentialFingerprint } from '../../hypaware-core/plugins-workspace/fastask/src/replica_sync.js'
+import { canonicalOrigin } from '../../src/core/remote/builtin_remotes.js'
 import { measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
 
 /**
  * @import { TestContext } from 'node:test'
  * @import { PluginActivationContext, StartedSource } from '../../hypaware-plugin-kernel-types.js'
+ * @import { WarmScope } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 const OK_EVIDENCE = JSON.parse(fs.readFileSync(new URL('../fixtures/contracts/session-evidence/v1/01-ok-minimal.json', import.meta.url), 'utf8'))
@@ -136,7 +142,10 @@ async function setup(t, opts = {}) {
   if (opts.waitIndex !== false) await waitFor(async () => { const d = await details(source); return d.index_generation !== null && !d.refresh_in_progress })
   const token = fs.readFileSync(path.join(stateDir, TOKEN_FILE), 'utf8')
   const port = (await details(source)).listen_port
-  return { stateDir, server, mcp, clock, source, stop, token, port, logs, paths: () => replicaPaths(stateDir, replicaKey(server.url, 'acme')) }
+  // The caller's resolved remote, org and login, as the command sends it with every warm request.
+  /** @type {WarmScope} */
+  const scope = { target: 'team', origin: /** @type {string} */ (canonicalOrigin(server.url)), org: 'acme', credential_fp: await credentialFingerprint(target) }
+  return { stateDir, server, mcp, clock, source, stop, token, port, logs, scope, target, paths: () => replicaPaths(stateDir, replicaKey(server.url, 'acme')) }
 }
 
 /** @param {StartedSource} source */
@@ -178,21 +187,21 @@ function call(port, route, body, opts = {}) {
 }
 
 test('discover answers from the warm index with the token, and refuses without it', async (t) => {
-  const { port, token } = await setup(t)
-  const ok = await call(port, DISCOVER_ROUTE, { question: 'where was app.js changed?' }, { token })
+  const { port, token, scope } = await setup(t)
+  const ok = await call(port, DISCOVER_ROUTE, { question: 'where was app.js changed?', scope }, { token })
   assert.equal(ok.status, 200)
   assert.equal(ok.body.source, 'team_replica')
   assert.equal(ok.body.replica.generation, pinnedGeneration().manifest.generation)
   assert.equal(ok.body.replica.generation_dir, undefined, 'no local paths leave the daemon')
   assert.ok(ok.body.result.leads.some((/** @type {any} */ l) => l.session_id === 'fx-session-0001'), JSON.stringify(ok.body.result.leads))
-  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'x' }, { token: null })).status, 401)
-  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'x' }, { token: 'f'.repeat(64) })).status, 401)
+  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'x', scope }, { token: null })).status, 401)
+  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'x', scope }, { token: 'f'.repeat(64) })).status, 401)
   assert.equal((await call(port, 'fastask/other', {}, { token })).status, 404)
 })
 
 test('a misdirected Host and an oversized body are refused before any work', async (t) => {
-  const { port, token } = await setup(t)
-  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'x' }, { token, host: 'attacker.example:80' })).status, 421)
+  const { port, token, scope } = await setup(t)
+  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'x', scope }, { token, host: 'attacker.example:80' })).status, 421)
   assert.equal((await call(port, DISCOVER_ROUTE, null, { token, contentLength: 10 * 1024 * 1024 })).status, 413)
   const big = JSON.stringify({ question: 'x'.repeat(70 * 1024) })
   assert.equal((await call(port, DISCOVER_ROUTE, null, { token, raw: big })).status, 413)
@@ -223,9 +232,9 @@ test('status advertises the listener and routes, and a synced summary line', asy
 })
 
 test('evidence reuses one MCP session across calls: one initialize for two calls', async (t) => {
-  const { port, token, mcp, source } = await setup(t)
-  const first = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
-  const second = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  const { port, token, mcp, source, scope } = await setup(t)
+  const first = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
+  const second = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   assert.equal(first.status, 200)
   assert.equal(first.body.ok, true)
   assert.equal(first.body.reused, false)
@@ -242,56 +251,56 @@ test('evidence reuses one MCP session across calls: one initialize for two calls
 })
 
 test('a rejected session is re-initialized and the call retried once', async (t) => {
-  const { port, token, mcp } = await setup(t)
-  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  const { port, token, mcp, scope } = await setup(t)
+  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   mcp.forgetSessions = true
-  const again = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  const again = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   assert.equal(again.body.ok, true)
   assert.equal(mcp.initializes, 2)
 })
 
 test('-32601 and -32602 come back as typed errors and force a re-initialize', async (t) => {
-  const { port, token, mcp } = await setup(t)
-  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  const { port, token, mcp, scope } = await setup(t)
+  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   for (const code of [-32601, -32602]) {
     const before = mcp.initializes
     mcp.failNext = code
-    const failed = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+    const failed = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
     assert.equal(failed.body.ok, false)
     assert.equal(failed.body.kind, 'rpc')
     assert.equal(failed.body.code, code)
-    const next = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+    const next = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
     assert.equal(next.body.ok, true)
     assert.equal(mcp.initializes, before + 1, `re-initialized after ${code}`)
   }
 })
 
 test('a server version change re-initializes before the next call', async (t) => {
-  const { port, token, mcp } = await setup(t)
-  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  const { port, token, mcp, scope } = await setup(t)
+  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   mcp.version = '1.41.0'
-  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   assert.equal(mcp.initializes, 1, 'the call that reports the new version still completes on the old session')
-  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   assert.equal(mcp.initializes, 2)
 })
 
 test('a server that refuses session reuse is recorded per-call, and calls still succeed', async (t) => {
-  const { port, token, mcp, source } = await setup(t)
+  const { port, token, mcp, source, scope } = await setup(t)
   mcp.refuseReuse = true
   for (let i = 0; i < 4; i++) {
-    const r = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+    const r = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
     assert.equal(r.body.ok, true, `call ${i}`)
   }
   assert.equal((await details(source)).evidence[0].per_call, true)
 })
 
 test('the caller\'s abort reaches the upstream request', async (t) => {
-  const { port, token, mcp } = await setup(t)
-  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  const { port, token, mcp, scope } = await setup(t)
+  await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   mcp.hang = true
   const controller = new AbortController()
-  const pending = call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token, signal: controller.signal }).catch((err) => err)
+  const pending = call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token, signal: controller.signal }).catch((err) => err)
   await waitFor(async () => mcp.calls >= 2)
   controller.abort()
   await pending
@@ -299,7 +308,7 @@ test('the caller\'s abort reaches the upstream request', async (t) => {
 })
 
 test('evidence without a tool that supports the contract says so instead of calling', async (t) => {
-  const { port, token, server } = await setup(t)
+  const { port, token, server, scope } = await setup(t)
   const { handle } = fakeMcp()
   server.state.onMcp = (req, res, msg) => {
     if (msg.method === 'tools/list') {
@@ -309,25 +318,25 @@ test('evidence without a tool that supports the contract says so instead of call
     }
     handle(req, res, msg)
   }
-  const r = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request }, { token })
+  const r = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
   assert.equal(r.body.ok, false)
   assert.equal(r.body.kind, 'unsupported')
 })
 
 test('a new generation is indexed, swapped in, and the old files removed', async (t) => {
-  const { source, server, port, token, paths } = await setup(t)
+  const { source, server, port, token, paths, scope } = await setup(t)
   server.publish(await generatedGeneration({ generation: '1760002000000-1' }))
   await source.reload?.(/** @type {any} */ ({}))
   await waitFor(async () => { const d = await details(source); return d.index_generation === '1760002000000-1' && !d.refresh_in_progress })
   assert.deepEqual(fs.readdirSync(paths().generations), ['1760002000000-1'])
-  const ok = await call(port, DISCOVER_ROUTE, { question: 'anything' }, { token })
+  const ok = await call(port, DISCOVER_ROUTE, { question: 'anything', scope }, { token })
   assert.equal(ok.body.replica.generation, '1760002000000-1')
 })
 
 test('a generation whose rows break the contract is rejected: the old one and its index stay, status says why', async (t) => {
   // The review's probe (HYP-111 r1 F5): digests valid over rows whose node_id
   // column is renamed. Before the per-line check it activated an empty index.
-  const { source, server, port, token, paths, logs } = await setup(t)
+  const { source, server, port, token, paths, logs, scope } = await setup(t)
   const before = await details(source)
   const bad = await generatedGeneration({ generation: '1760000000000-99', nodeCount: 3, edgeCount: 0 })
   const rows = gunzipSync(bad.files.nodes).toString('utf8').trim().split('\n').map((l) => JSON.parse(l))
@@ -352,17 +361,17 @@ test('a generation whose rows break the contract is rejected: the old one and it
   assert.match(status?.lastError ?? '', /schema_violation/)
   assert.deepEqual(fs.readdirSync(paths().generations), [before.generation])
   assert.deepEqual(fs.readdirSync(paths().staging), [])
-  const ok = await call(port, DISCOVER_ROUTE, { question: 'app.js' }, { token })
+  const ok = await call(port, DISCOVER_ROUTE, { question: 'app.js', scope }, { token })
   assert.equal(ok.status, 200, 'discover still answers from the previous index')
   assert.equal(ok.body.replica.generation, before.generation)
 })
 
 test('a withdrawal drops the index: discover answers 503 with the state', async (t) => {
-  const { source, server, port, token } = await setup(t)
+  const { source, server, port, token, scope } = await setup(t)
   server.state.answer = '403-snapshot_access_withdrawn'
   await source.reload?.(/** @type {any} */ ({}))
   await waitFor(async () => { const d = await details(source); return d.state === 'withdrawn' && !d.refresh_in_progress })
-  const r = await call(port, DISCOVER_ROUTE, { question: 'app.js' }, { token })
+  const r = await call(port, DISCOVER_ROUTE, { question: 'app.js', scope }, { token })
   assert.equal(r.status, 503)
   assert.equal(r.body.replica.state, 'withdrawn')
   const status = await source.status?.()
@@ -372,9 +381,9 @@ test('a withdrawal drops the index: discover answers 503 with the state', async 
 })
 
 test('T7\'s evidence client reads through the warm path exactly as through a direct MCP client', async (t) => {
-  const { port, token, mcp } = await setup(t)
+  const { port, token, mcp, scope } = await setup(t)
   const planned = OK_EVIDENCE.request.sessions.map((/** @type {string} */ text, /** @type {number} */ i) => ({ lead: i, kind: /** @type {const} */ ('window'), entry: JSON.parse(text) }))
-  const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token })
+  const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token, scope })
   const read = () => callEvidence({ client, planned, leadCount: planned.length, deadlineAt: performance.now() + 2000, sleep: async () => {} })
 
   const ok = await read()
@@ -405,7 +414,7 @@ test('T7\'s evidence client reads through the warm path exactly as through a dir
 })
 
 test('a server without the verb falls back through the warm path too', async (t) => {
-  const { port, token, server } = await setup(t)
+  const { port, token, server, scope } = await setup(t)
   const { handle } = fakeMcp()
   server.state.onMcp = (req, res, msg) => {
     if (msg.method === 'tools/list') {
@@ -416,7 +425,7 @@ test('a server without the verb falls back through the warm path too', async (t)
     handle(req, res, msg)
   }
   const planned = [{ lead: 0, kind: /** @type {const} */ ('window'), entry: JSON.parse(OK_EVIDENCE.request.sessions[0]) }]
-  const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token })
+  const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token, scope })
   assert.equal(await callEvidence({ client, planned, leadCount: 1, deadlineAt: performance.now() + 2000 }), 'fallback')
 })
 
@@ -492,3 +501,137 @@ async function waitFor(predicate, ms = 10_000) {
   }
   throw new Error('condition not reached')
 }
+
+// ----- Review r1 F1: the warm path answers only for the caller's remote, org and login -----
+
+test('discover and evidence require the caller\'s scope, and refuse another remote, org or login with 409 scope_mismatch', async (t) => {
+  const { port, token, mcp, scope } = await setup(t)
+  const body = { question: 'where was app.js changed?', arguments: OK_EVIDENCE.request }
+  for (const route of [DISCOVER_ROUTE, EVIDENCE_ROUTE]) {
+    for (const bad of [undefined, null, { target: 'team' }, { ...scope, org: 7 }]) {
+      const r = await call(port, route, { ...body, scope: bad }, { token })
+      assert.equal(r.status, 400, `${route} with scope ${JSON.stringify(bad)}`)
+      assert.equal(r.body.error, 'invalid_request')
+    }
+  }
+  /** @type {Array<[WarmScope, string]>} */
+  const cases = [
+    [{ ...scope, target: 'other' }, 'remote'],
+    [{ ...scope, origin: 'http://127.0.0.1:1' }, 'remote'],
+    [{ ...scope, org: 'bravo' }, 'org'],
+    [{ ...scope, credential_fp: 'f'.repeat(16) }, 'login'],
+    [{ ...scope, credential_fp: null }, 'login'],
+  ]
+  for (const [other, reason] of cases) {
+    for (const route of [DISCOVER_ROUTE, EVIDENCE_ROUTE]) {
+      const r = await call(port, route, { ...body, scope: other }, { token })
+      assert.equal(r.status, 409, `${route} for another ${reason}: ${JSON.stringify(other)}`)
+      assert.deepEqual(r.body, { error: 'scope_mismatch', reason })
+    }
+  }
+  assert.equal(mcp.calls, 0, 'no evidence call reached the remote for a scope that does not match')
+  assert.equal((await call(port, DISCOVER_ROUTE, { ...body, scope }, { token })).status, 200)
+  // A static or env token names no org: the server-confirmed org stands, bound by the fingerprint.
+  assert.equal((await call(port, DISCOVER_ROUTE, { ...body, scope: { ...scope, org: null } }, { token })).status, 200)
+  assert.equal((await call(port, EVIDENCE_ROUTE, { ...body, scope }, { token })).body.ok, true)
+})
+
+test('the warm evidence client turns a scope refusal into a typed error', async (t) => {
+  const { port, token, scope } = await setup(t)
+  const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token, scope: { ...scope, org: 'bravo' } })
+  await assert.rejects(client.callTool('session_evidence', OK_EVIDENCE.request), (/** @type {any} */ err) => err.code === SCOPE_MISMATCH && /another org/.test(err.message))
+})
+
+/**
+ * A second team server's MCP endpoint: an empty graph and no text matches,
+ * recording each tool call.
+ */
+function emptyMcp() {
+  /** @type {string[]} */
+  const calls = []
+  /** @type {(req: http.IncomingMessage, res: http.ServerResponse, msg: any) => void} */
+  const handle = (_req, res, msg) => {
+    /** @param {unknown} result @param {Record<string, string>} [headers] */
+    const reply = (result, headers = {}) => {
+      res.writeHead(200, { 'content-type': 'application/json', ...headers })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }))
+    }
+    if (msg.method === 'initialize') return reply({ protocolVersion: '2025-06-18', serverInfo: { name: 'hypaware-server', version: '1.40.0' } }, { 'mcp-session-id': randomUUID() })
+    if (msg.method === 'notifications/initialized') { res.writeHead(202); res.end(); return }
+    if (msg.method === 'tools/list') return reply({ tools: [{ name: 'query_sql' }, { name: 'grep_search' }] })
+    calls.push(msg.params.name)
+    if (msg.params.name === 'grep_search') return reply({ structuredContent: { hits: [], truncated: false, exhausted: true } })
+    reply({ structuredContent: { columns: [], rows: [] } })
+  }
+  return { calls, handle }
+}
+
+/**
+ * The running source advertised in a daemon status file under a fresh
+ * HYP_HOME, and a fastask command context over a config of `remotes`.
+ * @param {TestContext} t
+ * @param {Awaited<ReturnType<typeof setup>>} a
+ * @param {{ defaultRemote: string, remotes: Record<string, { url: string }>, env: Record<string, string> }} opts
+ */
+async function commandOver(t, a, opts) {
+  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fastask-scope-'))
+  t.after(() => fs.rmSync(hypHome, { recursive: true, force: true }))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const at = new Date().toISOString()
+  writePidFile(stateRoot, { pid: process.pid, startedAt: at, runId: 'scope', mode: 'foreground' })
+  writeStatusFile(stateRoot, /** @type {any} */ ({ state: 'healthy', pid: process.pid, startedAt: at, healthyAt: at, uptimeMs: 1, runId: 'scope', mode: 'foreground', sinks: [], sources: [{ name: SOURCE_NAME, plugin: '@hypaware/fastask', state: 'running', details: await details(a.source) }] }))
+  /** @type {string[]} */
+  const out = []
+  /** @type {string[]} */
+  const err = []
+  const ctx = /** @type {any} */ ({
+    env: { HYP_HOME: hypHome, ...opts.env },
+    cwd: hypHome,
+    config: { version: 2, query: { default_remote: opts.defaultRemote, remotes: opts.remotes } },
+    query: { getDataset: () => undefined },
+    storage: {},
+    stdout: { write: (/** @type {string} */ s) => { out.push(s); return true } },
+    stderr: { write: (/** @type {string} */ s) => { err.push(s); return true } },
+  })
+  const run = async () => {
+    const code = await runFastask(['why app.js', '--json', '--budget-ms', '10000'], ctx, { pluginDir: a.stateDir })
+    if (out.length === 0) throw new Error(`exit ${code} with no document: ${err.join('')}`)
+    return { code, answer: JSON.parse(out.join('')), stderr: err.join('') }
+  }
+  return run
+}
+
+// The reviewer's probe shape: the command's default remote moved to another
+// server while the running source still holds the previous remote's replica.
+test('a command whose remote changed is refused by the warm source: no stale lead, no evidence to the old remote', async (t) => {
+  const a = await setup(t)
+  const other = await startSnapshotServer()
+  t.after(() => other.close())
+  const otherMcp = emptyMcp()
+  other.state.onMcp = otherMcp.handle
+  other.state.acceptedToken = 'other-org-token'
+  const run = await commandOver(t, a, { defaultRemote: 'other', remotes: { other: { url: other.url } }, env: { HYP_REMOTE_TOKEN_OTHER: 'other-org-token' } })
+  const { code, answer } = await run()
+  assert.equal(code, 0)
+  assert.equal(answer.source.kind, 'team_server', 'the other remote\'s graph, read from its server')
+  assert.equal(answer.source.remote, 'other')
+  assert.match(answer.source.note, /belongs to another remote/)
+  assert.deepEqual(answer.leads, [], 'no lead from the previous remote\'s replica')
+  assert.equal(a.mcp.calls, 0, 'no evidence call to the previous remote')
+  assert.ok(otherMcp.calls.includes('query_sql'), 'discovery ran on the caller\'s own remote')
+})
+
+test('the same remote name and URL with another login is refused too, and reads the server instead', async (t) => {
+  const a = await setup(t)
+  const swapped = emptyMcp()
+  a.server.state.onMcp = swapped.handle
+  // The server now knows the caller by the new login; the daemon's replica was confirmed for the old one.
+  a.server.state.acceptedToken = 'another-login'
+  const run = await commandOver(t, a, { defaultRemote: 'team', remotes: { team: { url: a.server.url } }, env: { HYP_REMOTE_TOKEN_TEAM: 'another-login' } })
+  const { code, answer } = await run()
+  assert.equal(code, 0)
+  assert.equal(answer.source.kind, 'team_server')
+  assert.match(answer.source.note, /belongs to another (login|organization)/)
+  assert.deepEqual(answer.leads, [])
+  assert.equal(a.mcp.calls, 0, 'the daemon forwarded nothing for the other login')
+})

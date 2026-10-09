@@ -802,6 +802,7 @@ function describe(rec, outcome, bytesOnDisk, running, at, stateDir) {
     bytes_on_disk: bytesOnDisk,
     rows: rec?.rows ?? null,
     refresh_in_progress: running,
+    credential_fp: rec?.credential_fp ?? null,
     generation_dir: servable && rec?.generation ? replicaPaths(stateDir, rec.key).generation(rec.generation) : null,
   }
 }

@@ -248,7 +248,9 @@ for (const fixture of FIXTURES) {
       return
     }
     const response = fixture.response
-    assert.equal(result.failure, null)
+    // Every entry an error is nothing read at all: an aggregate failure (review r1 F3).
+    if (response.sessions.every((/** @type {any} */ s) => s.status === 'error')) assert.equal(result.failure?.code, 'entries_failed')
+    else assert.equal(result.failure, null)
     assert.equal(result.deadline_reached, response.deadline_reached)
     assert.equal(result.leads.length, response.sessions.length)
     response.sessions.forEach((/** @type {any} */ s, /** @type {number} */ i) => {
@@ -438,7 +440,7 @@ test('the fastask/1 document: stable fields, evidence per lead, and the timings 
   const leads = [lead('fx-session-alpha', '2026-08-31T10:00:30.000Z'), lead('fx-session-missing', '2026-08-31T10:00:30.000Z', { rank: 2 })]
   const evidence = await fetchEvidence({ client: await connect(url), leads, remainingMs: 2000, leadCount: 1 })
   const out = buildFastaskOutput({ question: 'why is login shaped this way', source: SOURCE, discovery: discoveryOf(leads), evidence, timings: TIMINGS })
-  assert.deepEqual(Object.keys(out), ['contract', 'question', 'source', 'leads', 'ambiguous', 'followups', 'coverage', 'timings_ms'])
+  assert.deepEqual(Object.keys(out), ['contract', 'question', 'source', 'leads', 'ambiguous', 'followups', 'text_search', 'coverage', 'timings_ms'])
   assert.equal(out.contract, 'fastask/1')
   assert.deepEqual(out.timings_ms, { load: 0, connect: 0, discovery: 4, evidence: 812, total: 1033 })
   assert.deepEqual(Object.keys(out.leads[0]), ['session_id', 'rank', 'group', 'why', 'session', 'evidence'])
@@ -447,6 +449,7 @@ test('the fastask/1 document: stable fields, evidence per lead, and the timings 
   assert.equal(out.coverage.evidence_received_through, '2026-10-09T02:00:00.000Z')
   assert.equal(out.coverage.evidence_path, 'session_evidence')
   assert.equal(out.coverage.partial, false)
+  assert.equal(out.text_search, null, 'no text search when the graph anchored')
   assert.deepEqual(JSON.parse(JSON.stringify(out)), out, 'plain JSON')
 })
 
@@ -622,7 +625,7 @@ test('the warm client reads at most the bound from the daemon', async (t) => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
   t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve(undefined)) }))
   const { port } = /** @type {AddressInfo} */ (server.address())
-  const warm = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token: 't' })
+  const warm = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token: 't', scope: { target: 'fx', origin: 'http://127.0.0.1', org: null, credential_fp: null } })
   await assert.rejects(warm.callTool('session_evidence', {}), /exceeds 16777216 bytes/)
 })
 
@@ -690,12 +693,20 @@ test('cursor_unresolvable is worded for the reader and never followed', async (t
   const { url } = await startServer(t, {
     evidence: (args, res, id) => {
       calls++
-      perEntry((e) => ({ session_id: e.session_id, status: 'error', parts: [], truncated: false, next_cursor: null, window: null, coverage: null, error: { code: 'cursor_unresolvable', message: 'tie group over 256 rows' } }))(args, res, id)
+      perEntry((e) => e.session_id === 'fx-session-alpha'
+        ? { session_id: e.session_id, status: 'error', parts: [], truncated: false, next_cursor: null, window: null, coverage: null, error: { code: 'cursor_unresolvable', message: 'tie group over 256 rows' } }
+        : { session_id: e.session_id, status: 'ok', parts: [], truncated: false, next_cursor: null, window: null, coverage: null })(args, res, id)
     },
   })
-  const result = await fetchEvidence({ client: await connect(url), leads: [lead('fx-session-alpha', null)], remainingMs: 2000 })
+  const client = await connect(url)
+  const mixed = await fetchEvidence({ client, leads: [lead('fx-session-alpha', null), lead('fx-session-beta', null, { rank: 2 })], remainingMs: 2000 })
   assert.equal(calls, 1)
-  assert.equal(result.leads[0].note, CURSOR_UNRESOLVABLE_NOTE)
-  assert.equal(result.failure, null, 'one entry the server could not continue is not an aggregate failure by itself')
+  assert.equal(mixed.leads[0].note, CURSOR_UNRESOLVABLE_NOTE)
+  assert.equal(mixed.failure, null, 'one entry the server could not continue is not an aggregate failure while another was read')
+  // Review r1 F3: every lead an error is nothing read at all, an aggregate failure with the reason.
+  const alone = await fetchEvidence({ client, leads: [lead('fx-session-alpha', null)], remainingMs: 2000 })
+  assert.equal(calls, 2, 'never followed: one call each')
+  assert.equal(alone.failure?.code, 'entries_failed')
+  assert.equal(alone.failure?.message, `no lead's evidence could be read: ${CURSOR_UNRESOLVABLE_NOTE}`)
   assert.equal(skippedNote(1), '1 part too large to return was skipped')
 })

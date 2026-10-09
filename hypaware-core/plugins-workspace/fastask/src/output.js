@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { DiscoveryResult, EvidenceEntry, EvidenceResult, FastaskFollowup, FastaskOutput, FastaskOutputLead, FastaskSource, FastaskTimings, LeadEvidence } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, EvidenceEntry, EvidenceResult, FastaskFollowup, FastaskOutput, FastaskOutputLead, FastaskSource, FastaskTextSearch, FastaskTimings, LeadEvidence } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 /**
@@ -17,6 +17,10 @@ export const FASTASK_CONTRACT = 'fastask/1'
 export const HUMAN_EXCERPTS = 3
 /** Characters of one excerpt line in the human rendering. */
 export const HUMAN_EXCERPT_CHARS = 240
+/** Text search hits shown in the human rendering. */
+export const HUMAN_TEXT_HITS = 5
+/** How no-anchor text search hits are labeled (LLP 0480#discovery). */
+export const TEXT_SEARCH_LABEL = 'found by text search, not the graph'
 
 /**
  * @ref LLP 0480#output [implements]: the fastask/1 shape; timings separate load, connect, discovery, evidence and total
@@ -26,11 +30,15 @@ export const HUMAN_EXCERPT_CHARS = 240
  *   discovery: DiscoveryResult,
  *   evidence: EvidenceResult | null,
  *   timings: FastaskTimings,
+ *   org?: string | null,
+ *   textSearch?: FastaskTextSearch | null,
  * }} args
  * @returns {FastaskOutput}
  */
-export function buildFastaskOutput({ question, source, discovery, evidence, timings }) {
+export function buildFastaskOutput({ question, source, discovery, evidence, timings, org = null, textSearch = null }) {
   const remote = source.kind === 'local' ? null : source.remote
+  // Follow-ups read the same scope the command read: its remote and its --org.
+  const scope = remote ? { remote, org } : null
   const fallback = evidence?.path === 'query_sql'
   /** @type {FastaskOutputLead[]} */
   const leads = discovery.leads.map((lead, i) => ({
@@ -43,7 +51,7 @@ export function buildFastaskOutput({ question, source, discovery, evidence, timi
       touched_at: w.touched_at,
     })),
     session: lead.session,
-    evidence: evidence && evidence.leads[i] ? leadEvidenceOut(evidence.leads[i], remote) : null,
+    evidence: evidence && evidence.leads[i] ? leadEvidenceOut(evidence.leads[i], scope) : null,
   }))
   const truncated = discovery.coverage.truncated
   return {
@@ -52,7 +60,8 @@ export function buildFastaskOutput({ question, source, discovery, evidence, timi
     source,
     leads,
     ambiguous: discovery.ambiguous,
-    followups: followups({ remote, discovery, question, fallback }),
+    followups: followups({ scope, discovery, question, fallback }),
+    text_search: textSearch,
     coverage: {
       graph_visits: discovery.coverage.visits,
       graph_truncated: truncated,
@@ -76,16 +85,16 @@ export function buildFastaskOutput({ question, source, discovery, evidence, timi
 
 /**
  * @param {LeadEvidence} evidence
- * @param {string | null} remote
+ * @param {{ remote: string, org: string | null } | null} scope
  * @returns {NonNullable<FastaskOutputLead['evidence']>}
  */
-function leadEvidenceOut(evidence, remote) {
+function leadEvidenceOut(evidence, scope) {
   return {
     status: evidence.status,
     parts: evidence.parts,
     note: evidence.note,
     skipped_parts: evidence.skipped_parts,
-    continuation: evidence.continuation && remote ? evidenceCommand(remote, evidence.continuation) : null,
+    continuation: evidence.continuation && scope ? evidenceCommand(scope.remote, evidence.continuation, scope.org) : null,
   }
 }
 
@@ -95,9 +104,16 @@ function leadEvidenceOut(evidence, remote) {
  *
  * @param {string} remote
  * @param {EvidenceEntry | { session_id: string }} entry
+ * @param {string | null} [org] the command's --org, carried so the follow-up reads the same organization
  */
-export function evidenceCommand(remote, entry) {
-  return `hyp query evidence --remote ${shellQuote(remote)} --session ${shellQuote(JSON.stringify(entry))} --json`
+export function evidenceCommand(remote, entry, org = null) {
+  return `hyp query evidence${scopeFlags({ remote, org })} --session ${shellQuote(JSON.stringify(entry))} --json`
+}
+
+/** @param {{ remote: string, org: string | null } | null} scope */
+function scopeFlags(scope) {
+  if (!scope) return ''
+  return ` --remote ${shellQuote(scope.remote)}${scope.org ? ` --org ${shellQuote(scope.org)}` : ''}`
 }
 
 /**
@@ -106,19 +122,19 @@ export function evidenceCommand(remote, entry) {
  * server without it), and search beyond the graph. With no anchor at all the
  * text search comes first.
  *
- * @param {{ remote: string | null, discovery: DiscoveryResult, question: string, fallback: boolean }} args
+ * @param {{ scope: { remote: string, org: string | null } | null, discovery: DiscoveryResult, question: string, fallback: boolean }} args
  * @returns {FastaskFollowup[]}
  */
-function followups({ remote, discovery, question, fallback }) {
+function followups({ scope, discovery, question, fallback }) {
   const terms = discovery.terms.map((t) => t.text).slice(0, 3).join(' ') || question
-  const remoteFlag = remote ? ` --remote ${shellQuote(remote)}` : ''
+  const remoteFlag = scopeFlags(scope)
   const search = { why: 'search beyond the graph', command: `hyp query grep${remoteFlag} ${shellQuote(terms)}` }
   /** @type {FastaskFollowup[]} */
   const out = []
   const top = discovery.leads[0]
   if (top) {
-    const command = remote && !fallback
-      ? evidenceCommand(remote, { session_id: top.session_id })
+    const command = scope && !fallback
+      ? evidenceCommand(scope.remote, { session_id: top.session_id }, scope.org)
       : `hyp query sql${remoteFlag} ${shellQuote(conversationSql(top.session_id))}`
     out.push({ why: 'read the whole conversation', command })
   }
@@ -156,6 +172,7 @@ export function renderFastaskText(out, { now = Date.now() } = {}) {
   // Every result names the source that answered (LLP 0480#sources).
   lines.push(`source: ${out.source.kind} (${out.source.path})${out.source.remote ? ` on ${out.source.remote}` : ''}${out.source.note ? ` - ${out.source.note}` : ''}`)
   if (out.leads.length === 0) lines.push('No leads: nothing in the team graph matched this question.')
+  if (out.text_search) lines.push(...textSearchLines(out.text_search))
   if (out.ambiguous) lines.push('Ambiguous: several files match; leads from each are shown.')
   for (const lead of out.leads) {
     const s = lead.session
@@ -181,6 +198,18 @@ export function renderFastaskText(out, { now = Date.now() } = {}) {
   }
   lines.push(freshnessLine(out, now))
   return `${lines.join('\n')}\n`
+}
+
+/** @param {FastaskTextSearch} search */
+function textSearchLines(search) {
+  const terms = search.terms.map((t) => `'${t}'`).join(', ')
+  if (search.error) return [`Text search for ${terms || 'the question'} did not run: ${search.error}`]
+  if (search.hits.length === 0) return [`Text search for ${terms}: no matches.`]
+  const lines = [`${search.hits.length}${search.truncated ? '+' : ''} ${search.hits.length === 1 ? 'match' : 'matches'} for ${terms}, ${search.label}:`]
+  for (const hit of search.hits.slice(0, HUMAN_TEXT_HITS)) {
+    lines.push(`  ${hit.session_id}  ${hit.message_created_at ?? ''}: ${oneLine(hit.snippet ?? '')}`)
+  }
+  return lines
 }
 
 /**
