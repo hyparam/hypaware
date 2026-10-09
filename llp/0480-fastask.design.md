@@ -559,3 +559,14 @@ assert them with stable `smoke_step` values.
 3. Default `--budget-ms` 2000 and lead and evidence allowances are proposals
    tuned by the evaluation matrix, judged against the two-second user
    target (UX guardian).
+4. How the sync source finds the default remote. Decided default
+   (2026-10-09, team; overrulable by Phil): the kernel hands plugins only
+   their own config section (LLP 0422, LLP 0425), so the source resolves the
+   default remote and its login through the same loader and function
+   `hyp status` uses (`HYP_CONFIG` or the default path, plus the central
+   layer), never a reimplementation; it re-resolves on every source reload,
+   and puts the resolved config path and target name in its status details.
+   A daemon started with a different explicit `--config` diverges exactly as
+   `hyp status` does today; a kernel accessor for the effective query config
+   is a follow-up only if that divergence is seen (steward fit: no kernel
+   contract change; CLAUDE.md: reuse before you add).
