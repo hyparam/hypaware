@@ -414,11 +414,8 @@ function localGrep(ctx) {
 async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, timings, now, signal, fetchImpl }) {
   const doFetch = fetchImpl ?? globalThis.fetch
   const origin = canonicalOrigin(login.url)
-  // What this call is for: the daemon answers only when its replica belongs
-  // to the same remote, org and login (review r1 F1).
-  // @ref LLP 0483#credential-change [implements]: every warm request carries the caller's resolved remote, org and credential fingerprint
-  const credential = await credentialFingerprint(login)
-  const scope = { target, origin: origin ?? '', org: login.org ?? null, credential_fp: credential }
+  const scope = await warmScope(target, login)
+  const credential = scope.credential_fp
   const endpoint = resolveLiveControlRouteEndpointsFromStatus({ stateRoot, route: DISCOVER_ROUTE }).find((e) => e.source === SOURCE_NAME)?.endpoint ?? null
   const token = endpoint ? readToken(pluginDir) : null
   if (endpoint && token) {
@@ -457,6 +454,19 @@ async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, ti
   } catch (err) {
     return { ok: false, reason: `the team graph could not be loaded: ${messageOf(err)}` }
   }
+}
+
+/**
+ * What a warm request is for: the daemon answers only when its replica
+ * belongs to the same remote, org and login (review r1 F1).
+ *
+ * @ref LLP 0483#credential-change [implements]: every warm request carries the caller's resolved remote, org and credential fingerprint
+ * @param {string} target the remote name
+ * @param {ReplicaTarget} login the resolved login for that remote
+ * @returns {Promise<WarmScope>}
+ */
+export async function warmScope(target, login) {
+  return { target, origin: canonicalOrigin(login.url) ?? '', org: login.org ?? null, credential_fp: await credentialFingerprint(login) }
 }
 
 /** @param {unknown} reason why the daemon's replica does not match this call */

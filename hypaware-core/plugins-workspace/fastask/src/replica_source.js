@@ -406,8 +406,12 @@ export function scopeMismatch(scope, status) {
   return null
 }
 
-/** @param {any} scope */
-function validScope(scope) {
+/**
+ * Whether a request body's `scope` has the shape every warm route requires.
+ * @param {any} scope
+ * @returns {boolean}
+ */
+export function validScope(scope) {
   return scope !== null && typeof scope === 'object' && typeof scope.target === 'string' && typeof scope.origin === 'string' &&
     (scope.org === null || typeof scope.org === 'string') && (scope.credential_fp === null || typeof scope.credential_fp === 'string')
 }
