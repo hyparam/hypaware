@@ -13,15 +13,11 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 /** @import { TestContext } from 'node:test' */
 
-// A source may publish one plain `details.summary_line`, and `hyp status`
-// prints it in every state, healthy included, unlike the health line that
-// speaks only for trouble. The team graph replica is the first publisher: the
-// age of the team's data matters even when nothing is wrong. A line left in
-// the snapshot of a daemon that is gone is not printed, since it would claim
-// a past state as current.
-// @ref LLP 0480#status-line [tests]: the summary line prints in every state, from a live source only
+// A running source can publish a summary even while healthy. A dead daemon's
+// persisted summary must not describe its past state as current.
+// @ref LLP 0491#scope [tests]: the generic source summary remains independent of graph replication
 
-const LINE = 'team graph: synced, data as of 14 h ago (acme), 52 MB'
+const LINE = 'fixture source: ready, 52 records'
 
 /** @param {TestContext} t @param {{ live: boolean, line?: unknown }} opts */
 async function report(t, { live, line = LINE }) {
@@ -37,7 +33,7 @@ async function report(t, { live, line = LINE }) {
     healthyAt: new Date().toISOString(),
     uptimeMs: 0,
     sources: [
-      { name: 'team-graph-replica', plugin: '@hypaware/graph-cache', state: 'started', details: { summary_line: line, listen_port: 1 }, health: { state: 'ready', message: String(line) } },
+      { name: 'fixture-source', plugin: '@hypaware/fixture-source', state: 'started', details: { summary_line: line, listen_port: 1 }, health: { state: 'ready', message: String(line) } },
       { name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started', details: { listen_port: 2 } },
     ],
     sinks: [],
@@ -62,7 +58,7 @@ test('a running source\'s summary line prints in the compact, verbose and JSON v
   assert.equal(verbose.text().split(LINE).length - 1, 1, 'once, not also as a health line')
 
   const json = renderStatusJson({ report: r, clientNames: [], datasets: [], cacheRoot: '/cache' })
-  assert.equal(json.sources.find((/** @type {any} */ s) => s.name === 'team-graph-replica')?.summary_line, LINE)
+  assert.equal(json.sources.find((/** @type {any} */ s) => s.name === 'fixture-source')?.summary_line, LINE)
   assert.equal(json.sources.find((/** @type {any} */ s) => s.name === 'ai-gateway')?.summary_line, undefined, 'a source without one gains nothing')
 })
 
@@ -70,13 +66,13 @@ test('a dead daemon\'s summary line is not printed', async (t) => {
   const r = await report(t, { live: false })
   const compact = buffer()
   renderStatusSummary({ report: r, stdout: compact })
-  assert.ok(!compact.text().includes('team graph:'))
+  assert.ok(!compact.text().includes('fixture source:'))
   const json = renderStatusJson({ report: r, clientNames: [], datasets: [], cacheRoot: '/cache' })
   assert.equal(json.sources[0].summary_line, undefined)
 })
 
 test('a summary line is made safe for the terminal and ignored when not a string', async (t) => {
-  const hostile = await report(t, { live: true, line: 'team graph: synced\u001b[2J\nforged line' })
+  const hostile = await report(t, { live: true, line: 'fixture source: synced\u001b[2J\nforged line' })
   const out = buffer()
   renderStatusSummary({ report: hostile, stdout: out })
   assert.ok(!out.text().includes('\u001b[2J'), 'no escape sequence reaches the terminal')

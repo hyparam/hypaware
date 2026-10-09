@@ -1,7 +1,8 @@
 # LLP 0487: Fastask Exposes Its Primitives and Teaches Agent-Directed Exploration
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0491](./0491-team-history-uses-remote-graph-and-agent-guidance.spec.md) (client replication and its commands; shared kernel utilities remain)
 **Systems:** CLI, Graph, Query, Clients
 **Author:** HypForge designer
 **Date:** 2026-10-09

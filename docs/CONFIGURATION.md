@@ -154,8 +154,6 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/tls/` | Local proxy certificate authority and certificates |
 | `hypaware/processing/logs/daemon.log` | Processing daemon log |
 | `hypaware/dev-telemetry/` | Local development diagnostics |
-| `hypaware/plugins/@hypaware/graph-cache/replicas/` | Team graph replicas (`@hypaware/graph-cache`, kept only for a logged-in default remote) |
-| `hypaware/plugins/@hypaware/graph-cache/control-token` | Per-boot token for the daemon's local team graph routes |
 
 <!-- @ref LLP 0471#diagnostic-history: prune owned diagnostic evidence without acknowledging cache payload -->
 Each destination's `hypaware/sinks/<instance>/outbox/` holds failure diagnostics,
@@ -175,42 +173,6 @@ handle after restart can retry cleanup when it next publishes a failure.
 Check directory permissions and the [diagnostic logs](TROUBLESHOOTING.md#find-diagnostic-logs).
 `hyp sink maintain` maintains export tables; it is not a command for pruning
 these diagnostics.
-
-<!-- @ref LLP 0480#replica: the replica directory, its bounds and what deletes it -->
-With `@hypaware/graph-cache` enabled, the daemon keeps one team graph replica for
-the default remote's login, in `replicas/<server>--<org>--<hash>/`: a
-`replica.json` record, the active generation under `generations/`, and a
-download in progress under `staging/`. Disk use stays near two generations plus
-one download. A generation whose files exceed 1 GB, or whose index would exceed
-256 MB of memory, is refused before it is downloaded. The replica is teammates'
-data: it is never a dataset, never exported and never forwarded.
-
-<!-- @ref LLP 0490#memory: reclaim verification and index allocations by retiring their processes -->
-Memory: verification uses a short-lived helper, and each warm graph generation
-has its own index process. A replacement builds while the previous index keeps
-answering; the previous process exits as soon as the replacement is ready. At
-most two helpers coexist. Helpers favor a smaller heap and retain the existing
-CPU yields and sleeps. The daemon forwards their bounded query results without
-rebuilding the result objects on its own heap.
-
-The 256 MB limit bounds the estimated index, not the combined process RSS.
-Allow for the Node runtimes, build allocations and temporary overlap during a
-refresh. Without a logged-in default remote, no replica is kept. The benchmark
-`benchmarks/fastask-client/stress.mjs` counts the processing daemon and all its
-helpers, including overlap; it also measures capture latency and background CPU.
-On the measured synthetic graph (142,766 nodes, 462,042 edges, about 49 MiB of
-index), 20 refreshes ended at 411 MiB combined RSS, with a 551 MiB peak during
-refresh. A graph four times larger settled at 675 MiB and peaked at 815 MiB.
-These figures include capture/query traffic and exclude the separate gateway
-process; they are measurements on one Mac, not an RSS cap or a fleet guarantee.
-
-The replica is deleted when the server withdraws access, when its lease expires
-without a successful check, on `hyp remote remove` of its remote, and when the
-default remote, the org or the login changes. With the daemon stopped, a
-command does not use a replica whose lease has expired or whose login has
-changed; the daemon's next pass deletes or re-confirms it. `hyp leave` leaves
-the replica in place (LLP 0482). An interrupted download is removed at the next
-pass.
 
 ## Manage optional plugins
 

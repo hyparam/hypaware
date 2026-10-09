@@ -138,7 +138,6 @@ export async function bootKernel(opts = {}) {
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
         migrateGrep: bootProfile === 'config',
-        migrateGraphCache: bootProfile === 'config',
       })
       const centralConfig = merged.centralConfig
       const centralConfigPath = merged.centralConfigPath
@@ -416,7 +415,7 @@ export async function bootKernel(opts = {}) {
  * raw alongside for exactly that. `localLoaded` includes the compatibility
  * entry when migration cannot persist to a read-only local file.
  *
- * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string>, migrateGrep?: boolean, migrateGraphCache?: boolean }} args
+ * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string>, migrateGrep?: boolean }} args
  * @returns {Promise<{
  *   centralConfig: HypAwareV2Config | null,
  *   localConfig: HypAwareV2Config | null,
@@ -428,12 +427,11 @@ export async function bootKernel(opts = {}) {
  *   centralQueryIgnored: boolean,
  * }>}
  */
-export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, knownPlugins, knownDatasets, migrateGrep = false, migrateGraphCache = false }) {
+export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, knownPlugins, knownDatasets, migrateGrep = false }) {
   const centralConfigPath = resolveCentralLayerPath({ stateRoot })
   const { local: localLoaded, central: centralLoaded } = await loadClientConfigLayers({
     configPath, centralConfigPath,
     migrateGrep: migrateGrep && knownPlugins?.has('@hypaware/grep') === true,
-    migrateGraphCache: migrateGraphCache && knownPlugins?.has('@hypaware/graph-cache') === true,
   })
   const localConfig = localLoaded?.ok ? localLoaded.config : null
   const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
@@ -476,9 +474,9 @@ export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, know
  * catalog drives the validation pass, so it must reflect the same
  * bundled + installed plugin set the kernel runs.
  *
- * @param {{ stateRoot: string, configPath: string | null, workspaceDir?: string, migrateGrep?: boolean, migrateGraphCache?: boolean }} args
+ * @param {{ stateRoot: string, configPath: string | null, workspaceDir?: string, migrateGrep?: boolean }} args
  */
-export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, workspaceDir, migrateGrep = true, migrateGraphCache = true }) {
+export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, workspaceDir, migrateGrep = true }) {
   const discovered = await discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {})
   const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
   const catalog = buildPluginCatalog([...discovered.loaded, ...discovered.excluded], installed.loaded)
@@ -487,7 +485,7 @@ export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, wor
     configPath,
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
-    migrateGrep, migrateGraphCache,
+    migrateGrep,
   })
 }
 

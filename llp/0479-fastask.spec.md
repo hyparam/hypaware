@@ -1,7 +1,8 @@
 # LLP 0479: Fastask With a Local Team Graph and Remote Evidence
 
 **Type:** Spec
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0491](./0491-team-history-uses-remote-graph-and-agent-guidance.spec.md) (client replication and its commands; shared kernel utilities remain)
 **Systems:** CLI, Graph, Query, MCP, Daemon, Clients
 **Author:** Phil (issue) / HypForge designer
 **Date:** 2026-10-09

@@ -922,7 +922,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   stdout.write('\n')
   // @ref LLP 0248#decision [implements]: everyday journeys get descriptions; operations stay direct in one compact list
   renderJourneyHelpSection(stdout, 'Getting started:', rows, 'getting-started', ['setup', 'status'])
-  renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'fastask', 'query', 'report'])
+  renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'query', 'report'])
   renderJourneyHelpSection(stdout, 'Control capture and movement:', rows, 'capture-movement', [
     'client', 'backfill', 'privacy', 'session', 'join', 'leave', 'sync',
   ])
@@ -1092,7 +1092,6 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
     migrateGrep: true,
-    migrateGraphCache: true,
   })
   const selection = selectBootPlugins({
     discovered: bundled,

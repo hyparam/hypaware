@@ -35,7 +35,6 @@ import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
-import { pluginStateDir } from '../runtime/paths.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -1331,47 +1330,12 @@ export async function runRemoteRemove(argv, ctx) {
     }
     return 1
   }
-  const removedReplica = await removeTeamGraphReplicas(stateDir, name)
-  if (!removedConfig && !removedToken && !removedReplica) {
+  if (!removedConfig && !removedToken) {
     ctx.stderr.write(`hyp remote remove: no target or token named '${name}'\n`)
     return 1
   }
-  ctx.stdout.write(`removed remote '${name}'${removedToken ? ' (config + token)' : ' (config)'}${removedReplica ? ' and its team graph replica' : ''}\n`)
+  ctx.stdout.write(`removed remote '${name}'${removedToken ? ' (config + token)' : ' (config)'}\n`)
   return 0
-}
-
-/**
- * Delete the team graph replica kept for `target` (`@hypaware/graph-cache`), at
- * once rather than at the daemon's next sync pass. Each replica directory
- * records its target in `replica.json`. Best effort: the sync loop also
- * deletes replicas whose target is gone, so a failure here leaves nothing
- * served.
- *
- * @ref LLP 0480#replica [implements]: hyp remote remove deletes the target's replica directory directly so removal is immediate
- * @param {string} stateDir HypAware's state directory
- * @param {string} target
- * @returns {Promise<boolean>} whether a replica was removed
- */
-async function removeTeamGraphReplicas(stateDir, target) {
-  let removed = false
-  // @ref LLP 0490#activation [implements]: renaming the pre-release plugin must not strand its cached teammate data on remote removal
-  for (const plugin of ['@hypaware/graph-cache', '@hypaware/fastask']) {
-    const root = path.join(pluginStateDir(stateDir, plugin), 'replicas')
-    let names = []
-    try { names = await fs.readdir(root) } catch { continue }
-    for (const name of names) {
-      const dir = path.join(root, name)
-      try {
-        const record = JSON.parse(await fs.readFile(path.join(dir, 'replica.json'), 'utf8'))
-        if (record?.target !== target) continue
-        await fs.rm(dir, { recursive: true, force: true })
-        removed = true
-      } catch {
-        // Unreadable or already gone: the sync loop settles it.
-      }
-    }
-  }
-  return removed
 }
 
 /* ---------- helpers ---------- */

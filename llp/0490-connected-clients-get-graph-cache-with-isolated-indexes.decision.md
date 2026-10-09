@@ -1,7 +1,8 @@
 # LLP 0490: Connected Clients Get Graph Cache with Isolated Indexes
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0491](./0491-team-history-uses-remote-graph-and-agent-guidance.spec.md) (client replication and its commands; shared kernel utilities remain)
 **Systems:** Plugins, Config, Clients, Onboarding
 **Date:** 2026-10-09
 **Extends:** LLP 0489 (activation and upgrade), LLP 0486 (memory), LLP 0415 (guarded client migration)

@@ -1,7 +1,8 @@
 # LLP 0480: Fastask - Implementation Design
 
 **Type:** Design
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0491](./0491-team-history-uses-remote-graph-and-agent-guidance.spec.md) (client replication and its commands; shared kernel utilities remain)
 **Systems:** CLI, Graph, Query, MCP, Daemon, Plugins, Privacy
 **Author:** HypForge designer
 **Date:** 2026-10-09
@@ -70,7 +71,7 @@
 
 **Extended-by:** [LLP 0488#planner-deferred](./0488-planner-deferred-and-discover-matches-path-tokens.decision.md#planner-deferred): `fastask` is not part of the shipped surface; it is unregistered on the integration branch and its code kept for later evaluation.
 
-- One new bundled plugin, `hypaware-core/plugins-workspace/graph-cache`
+- One new bundled plugin, `hypaware-core/plugins-workspace/fastask`
   (`@hypaware/fastask`), listed in `V1_EXCLUDED_FROM_DEFAULT`
   (`src/core/runtime/bundled.js`). It activates only through an explicit
   `plugins[]` entry, which is how a tester enables it before release.
