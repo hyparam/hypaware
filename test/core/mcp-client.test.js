@@ -167,3 +167,17 @@ test('a transport failure stays a plain Error with no rpcCode', async (t) => {
     !(err instanceof McpRpcError) && err.rpcCode === undefined &&
     err.message === 'MCP tools/call failed: HTTP 500 - upstream broke')
 })
+
+test('callTool with maxBytes reads at most that much and fails past it; without it, reading is unchanged', async (t) => {
+  const big = 'y'.repeat(5000)
+  const { url } = await startServer(t, (msg, res) => {
+    sendJson(res, { jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: big }] } })
+  })
+  const client = createHttpMcpClient({ url })
+  await client.initialize()
+  await assert.rejects(client.callTool('query_sql', {}, { maxBytes: 1000 }), (/** @type {any} */ err) => err.code === 'response_too_large' && /exceeds 1000 bytes/.test(err.message))
+  const whole = await client.callTool('query_sql', {}, { maxBytes: 100_000 })
+  assert.equal(whole.content[0].text.length, 5000)
+  const unbounded = await client.callTool('query_sql', {})
+  assert.equal(unbounded.content[0].text.length, 5000)
+})

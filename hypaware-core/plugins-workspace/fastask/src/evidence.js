@@ -39,6 +39,23 @@ export const EVIDENCE_PART_TYPES = Object.freeze(['text'])
 export const NOT_FOUND_NOTE = 'no readable text (purged, deleted or outside your access)'
 export const INVALID_CURSOR_NOTE = 'the continuation cursor is no longer valid; read again without it'
 export const FALLBACK_LABEL = 'server without evidence index support'
+/** Server LLP 0565#client: an entry not read because its freshness could not be bounded. Never "no evidence". */
+export const FRESHNESS_UNAVAILABLE_NOTE = 'the server could not confirm how fresh its evidence is'
+/** Server LLP 0566#consequences: the server could not resume from the cursor. */
+export const CURSOR_UNRESOLVABLE_NOTE = "the server could not continue this session's evidence"
+/** Pages a single entry is followed for, at most, within one call (each always makes progress, server LLP 0566). */
+export const MAX_FOLLOWS_PER_ENTRY = 4
+
+/** Server LLP 0566: "N parts too large to return were skipped". @param {number} n */
+export function skippedNote(n) {
+  return `${n} ${n === 1 ? 'part' : 'parts'} too large to return ${n === 1 ? 'was' : 'were'} skipped`
+}
+/**
+ * How much of a `session_evidence` response is read. The server caps its body
+ * (default 4 MiB, at least 256 KiB) and sends it about twice on the wire
+ * (server LLP 0565#byte-cap): this allows twice a cap of up to 8 MiB.
+ */
+export const EVIDENCE_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 /** Worst first: the status a lead reports when its entries disagree. */
 const STATUS_RANK = /** @type {const} */ (['error', 'deadline', 'invalid_cursor', 'partial', 'ok', 'not_found'])
@@ -185,7 +202,7 @@ export async function callEvidence({ client, planned, leadCount, deadlineAt, rou
   let args = request ?? evidenceRequest(planned, evidenceDeadlineMs(deadlineAt - now(), roundTripMs))
   for (;;) {
     try {
-      const result = await client.callTool(EVIDENCE_TOOL, args)
+      const result = await client.callTool(EVIDENCE_TOOL, args, { maxBytes: EVIDENCE_MAX_RESPONSE_BYTES })
       if (result?.isError) {
         const text = firstText(result) ?? 'session_evidence reported an error'
         const code = text.split(':', 1)[0].trim()
@@ -195,8 +212,10 @@ export async function callEvidence({ client, planned, leadCount, deadlineAt, rou
         return failedResult('session_evidence', leadCount, 'invalid_request', text, retries)
       }
       const structured = result?.structuredContent ?? parseJson(firstText(result))
+      const resends = await resendUnfitEntries({ client, planned, structured, args, deadlineAt, roundTripMs, signal, now })
       const read = readEvidenceResponse(planned, structured, leadCount)
       read.retries = retries
+      read.resends = resends
       return read
     } catch (err) {
       if (signal?.aborted) return failedResult('session_evidence', leadCount, 'deadline', 'evidence read stopped at the command budget', retries)
@@ -224,6 +243,72 @@ export async function callEvidence({ client, planned, leadCount, deadlineAt, rou
 }
 
 /**
+ * Follow entries that came back `partial` with no parts (server LLP 0565#client,
+ * LLP 0566): either the entry did not fit its share of the byte cap (its
+ * cursor unchanged) or the server skipped a part too large to return (its
+ * cursor advanced). Requested alone with its cursor, an entry always makes
+ * progress, so each is followed, page by page, while it still has no parts,
+ * the budget still leaves the floor deadline, and at most
+ * `MAX_FOLLOWS_PER_ENTRY` times. Pages merge into the entry's place in
+ * `structured`: parts appended (the reader deduplicates by `part_id`, since a
+ * resumed page may repeat rows), `skipped_parts` summed, status, cursor and
+ * coverage from the latest page. Error entries (`freshness_unavailable`,
+ * `cursor_unresolvable`) are never followed. Returns the pages fetched.
+ *
+ * @param {{
+ *   client: EvidenceMcpClient,
+ *   planned: readonly PlannedEntry[],
+ *   structured: any,
+ *   args: Record<string, unknown>,
+ *   deadlineAt: number,
+ *   roundTripMs: number,
+ *   signal?: AbortSignal,
+ *   now: () => number,
+ * }} opts
+ * @returns {Promise<number>}
+ */
+async function resendUnfitEntries({ client, planned, structured, args, deadlineAt, roundTripMs, signal, now }) {
+  const sessions = Array.isArray(structured?.sessions) ? structured.sessions : []
+  let resends = 0
+  for (let i = 0; i < sessions.length; i++) {
+    const index = sessions[i]?.request_index
+    if (!Number.isInteger(index) || !planned[index]) continue
+    for (let follow = 0; follow < MAX_FOLLOWS_PER_ENTRY; follow++) {
+      const answer = sessions[i]
+      if (answer?.status !== 'partial' || (Array.isArray(answer.parts) && answer.parts.length > 0)) break
+      const left = deadlineAt - now()
+      if (signal?.aborted || left - roundTripMs < DEADLINE_FLOOR_MS) return resends
+      const cursor = typeof answer.next_cursor === 'string' ? answer.next_cursor : planned[index].entry.cursor
+      const entry = { ...planned[index].entry, ...(cursor ? { cursor } : {}) }
+      let again
+      try {
+        const alone = await client.callTool(EVIDENCE_TOOL, { ...args, sessions: [JSON.stringify(entry)], deadline_ms: evidenceDeadlineMs(left, roundTripMs) }, { maxBytes: EVIDENCE_MAX_RESPONSE_BYTES })
+        again = alone?.isError ? null : (alone?.structuredContent ?? parseJson(firstText(alone)))?.sessions?.[0]
+      } catch {
+        // Keep what was read: the entry stays partial, with its continuation.
+        if (signal?.aborted) return resends
+        break
+      }
+      resends++
+      if (!again) break
+      sessions[i] = {
+        ...again,
+        request_index: index,
+        parts: [...(Array.isArray(answer.parts) ? answer.parts : []), ...(Array.isArray(again.parts) ? again.parts : [])],
+        ...(skippedOf(answer) + skippedOf(again) > 0 ? { skipped_parts: skippedOf(answer) + skippedOf(again) } : {}),
+        coverage: again.coverage ?? answer.coverage ?? null,
+      }
+    }
+  }
+  return resends
+}
+
+/** @param {any} answer */
+function skippedOf(answer) {
+  return Number.isSafeInteger(answer?.skipped_parts) && answer.skipped_parts > 0 ? answer.skipped_parts : 0
+}
+
+/**
  * Turn a `session_evidence` response into per-lead evidence. A lead's
  * entries merge: parts deduplicated by `part_id` in time order, the worst
  * status wins (not_found only when every entry is), and the first entry with
@@ -240,8 +325,8 @@ export function readEvidenceResponse(planned, structured, leadCount) {
   /** @type {Map<number, any>} */
   const byIndex = new Map()
   for (const s of sessions) if (Number.isInteger(s?.request_index)) byIndex.set(s.request_index, s)
-  /** @type {Array<{ statuses: string[], parts: Map<string, EvidencePart>, continuation: EvidenceEntry | null, error: string | null }>} */
-  const acc = Array.from({ length: leadCount }, () => ({ statuses: [], parts: new Map(), continuation: null, error: null }))
+  /** @type {Array<{ statuses: string[], parts: Map<string, EvidencePart>, continuation: EvidenceEntry | null, error: string | null, unbounded: boolean, skipped: number }>} */
+  const acc = Array.from({ length: leadCount }, () => ({ statuses: [], parts: new Map(), continuation: null, error: null, unbounded: false, skipped: 0 }))
   // A lead read by one entry keeps the server's order (asc or desc); one
   // read by two (window and exemplar) is merged back into time order.
   /** @type {string | null} */
@@ -259,7 +344,15 @@ export function readEvidenceResponse(planned, structured, leadCount) {
       if (!lead.parts.has(kept.part_id)) lead.parts.set(kept.part_id, kept)
     }
     if (typeof answer.next_cursor === 'string' && !lead.continuation) lead.continuation = { ...p.entry, cursor: answer.next_cursor }
-    if (answer.status === 'error') lead.error ??= answer.error?.code ? `${answer.error.code}: ${answer.error.message ?? ''}`.trim() : 'entry error'
+    // @ref LLP 0480#evidence [implements]: parts too large to return are counted, never silent (server LLP 0566)
+    lead.skipped += skippedOf(answer)
+    if (answer.status === 'error') {
+      const code = answer.error?.code
+      if (code === 'freshness_unavailable') lead.unbounded = true
+      lead.error ??= code === 'freshness_unavailable' ? FRESHNESS_UNAVAILABLE_NOTE
+        : code === 'cursor_unresolvable' ? CURSOR_UNRESOLVABLE_NOTE
+          : code ? `${code}: ${answer.error.message ?? ''}`.trim() : 'entry error'
+    }
     const received = answer.coverage?.received_through
     // The evidence is complete only through the earliest point every entry reached.
     if (typeof received === 'string' && (through === null || received < through)) through = received
@@ -268,17 +361,21 @@ export function readEvidenceResponse(planned, structured, leadCount) {
   result.leads = acc.map((lead) => {
     const status = mergeStatus(lead.statuses)
     const parts = [...lead.parts.values()]
+    const note = status === 'not_found' ? NOT_FOUND_NOTE : status === 'invalid_cursor' ? INVALID_CURSOR_NOTE : status === 'error' ? lead.error : null
     return {
       status,
       parts: lead.statuses.length > 1 ? parts.sort(byTime) : parts,
       continuation: lead.continuation,
-      note: status === 'not_found' ? NOT_FOUND_NOTE : status === 'invalid_cursor' ? INVALID_CURSOR_NOTE : status === 'error' ? lead.error : null,
+      note: lead.skipped > 0 ? [note, skippedNote(lead.skipped)].filter(Boolean).join('; ') : note,
+      skipped_parts: lead.skipped,
     }
   })
   result.complete = structured?.complete === true && result.leads.every((l) => l.status === 'ok' || l.status === 'not_found')
   result.deadline_reached = structured?.deadline_reached === true
   result.received_through = through
   result.read_path = paths.size === 0 ? null : paths.size === 1 ? [...paths][0] : 'mixed'
+  // @ref LLP 0480#evidence [implements]: an entry whose freshness the server could not bound was not read (server LLP 0565#client); when no entry was read, nothing was
+  if (acc.length > 0 && acc.every((lead) => lead.unbounded)) result.failure = { code: 'freshness_unavailable', message: FRESHNESS_UNAVAILABLE_NOTE }
   return result
 }
 
@@ -317,7 +414,7 @@ export async function fallbackEvidence({ client, planned, leadCount, deadlineAt,
   }
   result.leads = acc.map((lead) => {
     const status = mergeStatus(lead.statuses)
-    return { status, parts: [...lead.parts.values()].sort(byTime), continuation: null, note: status === 'ok' ? null : FALLBACK_LABEL }
+    return { status, parts: [...lead.parts.values()].sort(byTime), continuation: null, note: status === 'ok' ? null : FALLBACK_LABEL, skipped_parts: 0 }
   })
   result.complete = result.leads.every((l) => l.status === 'ok')
   result.deadline_reached = result.leads.some((l) => l.status === 'deadline')
@@ -434,13 +531,14 @@ function emptyResult(path, leadCount) {
   return {
     path,
     label: null,
-    leads: Array.from({ length: leadCount }, () => /** @type {LeadEvidence} */ ({ status: 'not_requested', parts: [], continuation: null, note: null })),
+    leads: Array.from({ length: leadCount }, () => /** @type {LeadEvidence} */ ({ status: 'not_requested', parts: [], continuation: null, note: null, skipped_parts: 0 })),
     complete: leadCount === 0,
     deadline_reached: false,
     received_through: null,
     read_path: null,
     failure: null,
     retries: 0,
+    resends: 0,
   }
 }
 

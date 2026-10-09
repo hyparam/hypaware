@@ -1,7 +1,8 @@
 // @ts-check
 
 import { McpRpcError } from '../../../../src/core/mcp/client.js'
-import { EVIDENCE_TOOL } from './evidence.js'
+import { readBodyCapped } from '../../../../src/core/util/backoff.js'
+import { EVIDENCE_MAX_RESPONSE_BYTES, EVIDENCE_TOOL } from './evidence.js'
 import { EVIDENCE_ROUTE } from './replica_source.js'
 
 /**
@@ -55,7 +56,10 @@ export function createWarmEvidenceClient(opts) {
         await res.body?.cancel().catch(() => {})
         throw new Error(`the daemon's evidence route answered HTTP ${res.status}`)
       }
-      const out = /** @type {EvidenceForwardResult} */ (await res.json())
+      // The daemon relays the server's capped answer: read no more than that bound.
+      const body = await readBodyCapped(res, EVIDENCE_MAX_RESPONSE_BYTES, opts.signal)
+      if (!body.ok) throw new Error(`the daemon's evidence answer exceeds ${EVIDENCE_MAX_RESPONSE_BYTES} bytes`)
+      const out = /** @type {EvidenceForwardResult} */ (JSON.parse(body.body))
       if (out.ok) {
         client.lastRoundTripMs = out.round_trip_ms
         return out.result

@@ -12,7 +12,7 @@
  * @import { TestContext } from 'node:test'
  * @import { ServerResponse } from 'node:http'
  * @import { AddressInfo } from 'node:net'
- * @import { DiscoveryResult, Lead, PlannedEntry } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, EvidenceMcpClient, Lead, PlannedEntry } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 import test from 'node:test'
@@ -27,11 +27,12 @@ import { argvToParams, parseControlFlags } from '../../src/core/cli/verb_codec.j
 import { querySqlVerb } from '../../src/core/query/verb.js'
 import { queryGrepVerb } from '../../hypaware-core/plugins-workspace/grep/src/grep_verb.js'
 import {
-  CALL_ALLOWANCE_PARTS, CAPACITY_RETRY_MS, DEADLINE_FLOOR_MS, EVIDENCE_CONTRACT, FALLBACK_LABEL, MAX_ENTRIES,
+  CALL_ALLOWANCE_PARTS, CAPACITY_RETRY_MS, CURSOR_UNRESOLVABLE_NOTE, DEADLINE_FLOOR_MS, EVIDENCE_CONTRACT, EVIDENCE_MAX_RESPONSE_BYTES, FALLBACK_LABEL, FRESHNESS_UNAVAILABLE_NOTE, MAX_ENTRIES, MAX_FOLLOWS_PER_ENTRY,
   MAX_TEXT_CHARS, NOT_FOUND_NOTE, WINDOW_MS, callEvidence, evidenceDeadlineMs, evidenceRequest, evidenceSupport,
-  fallbackSql, fetchEvidence, planEntries,
+  fallbackSql, fetchEvidence, planEntries, skippedNote,
 } from '../../hypaware-core/plugins-workspace/fastask/src/evidence.js'
 import { buildFastaskOutput, evidenceCommand, renderFastaskText, shellQuote } from '../../hypaware-core/plugins-workspace/fastask/src/output.js'
+import { createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/fastask/src/warm_client.js'
 
 const FIXTURE_DIR = path.join(import.meta.dirname, '..', 'fixtures', 'contracts', 'session-evidence', 'v1')
 const FIXTURES = fs.readdirSync(FIXTURE_DIR).filter((f) => f.endsWith('.json')).sort()
@@ -452,10 +453,10 @@ test('the fastask/1 document: stable fields, evidence per lead, and the timings 
 test('statuses and continuations render as runnable commands with the guardian wording', () => {
   const continuation = { session_id: "fx-o'session", from: '2026-08-31T09:45:30.000Z', to: '2026-08-31T10:15:30.000Z', order: /** @type {const} */ ('asc'), max_parts: 40, cursor: 'fxcur-alpha-asc-d1' }
   const evidence = {
-    path: /** @type {const} */ ('session_evidence'), label: null, complete: false, deadline_reached: true, received_through: '2026-10-09T02:00:00.000Z', read_path: 'indexed', failure: null, retries: 0,
+    path: /** @type {const} */ ('session_evidence'), label: null, complete: false, deadline_reached: true, received_through: '2026-10-09T02:00:00.000Z', read_path: 'indexed', failure: null, retries: 0, resends: 0,
     leads: [
-      { status: /** @type {const} */ ('deadline'), parts: [{ message_id: 'm1', part_id: 'm1#0', role: 'user', message_created_at: '2026-08-31T10:00:00.000Z', content_text: 'line one\nline two', text_truncated: true }], continuation, note: null },
-      { status: /** @type {const} */ ('not_found'), parts: [], continuation: null, note: NOT_FOUND_NOTE },
+      { status: /** @type {const} */ ('deadline'), parts: [{ message_id: 'm1', part_id: 'm1#0', role: 'user', message_created_at: '2026-08-31T10:00:00.000Z', content_text: 'line one\nline two', text_truncated: true }], continuation, note: null, skipped_parts: 0 },
+      { status: /** @type {const} */ ('not_found'), parts: [], continuation: null, note: NOT_FOUND_NOTE, skipped_parts: 0 },
     ],
   }
   const leads = [lead("fx-o'session", '2026-08-31T10:00:30.000Z'), lead('fx-session-missing', null, { rank: 2 })]
@@ -479,7 +480,7 @@ test('statuses and continuations render as runnable commands with the guardian w
 test('every follow-up parses with the real verb parsers, on the verb path and the fallback path', () => {
   const leads = [lead("fx-o'session", '2026-08-31T10:00:30.000Z')]
   for (const [path, label] of [['session_evidence', null], ['query_sql', FALLBACK_LABEL]]) {
-    const evidence = { path: /** @type {any} */ (path), label, complete: true, deadline_reached: false, received_through: null, read_path: null, failure: null, retries: 0, leads: [{ status: /** @type {const} */ ('ok'), parts: [], continuation: null, note: null }] }
+    const evidence = { path: /** @type {any} */ (path), label, complete: true, deadline_reached: false, received_through: null, read_path: null, failure: null, retries: 0, resends: 0, leads: [{ status: /** @type {const} */ ('ok'), parts: [], continuation: null, note: null, skipped_parts: 0 }] }
     const out = buildFastaskOutput({ question: 'q', source: SOURCE, discovery: discoveryOf(leads), evidence, timings: TIMINGS })
     assert.equal(out.followups.length, 2)
     for (const f of out.followups) {
@@ -503,4 +504,198 @@ test('every follow-up parses with the real verb parsers, on the verb path and th
 test('shellQuote leaves plain words alone and survives embedded quotes', () => {
   assert.equal(shellQuote('hyperparam'), 'hyperparam')
   for (const value of ["it's", '{"a":"b c"}', 'x\'y"z', '']) assert.deepEqual(shellSplit(`cmd ${shellQuote(value)}`), ['cmd', value])
+})
+
+// ----- Server LLP 0565#client consequences -----
+
+/** A session_evidence handler answering each entry with `answerFor(entry, index)`. @param {(entry: any, index: number, args: any) => any} answerFor */
+function perEntry(answerFor) {
+  return (/** @type {any} */ args, /** @type {ServerResponse} */ res, /** @type {number} */ id) => {
+    const sessions = args.sessions.map((/** @type {string} */ s, /** @type {number} */ i) => ({ request_index: i, ...answerFor(JSON.parse(s), i, args) }))
+    const response = { contract: EVIDENCE_CONTRACT, server_version: '1.40.0', complete: sessions.every((/** @type {any} */ s) => s.status === 'ok'), deadline_reached: false, elapsed_ms: 1, sessions }
+    reply(res, id, { structuredContent: response, content: [{ type: 'text', text: JSON.stringify(response) }] })
+  }
+}
+
+/** @param {any} entry */
+const unbounded = (entry) => ({ session_id: entry.session_id, status: 'error', parts: [], truncated: false, next_cursor: null, window: null, coverage: null, error: { code: 'freshness_unavailable', message: 'no commit watermark' } })
+
+/** @param {any} entry */
+const okWithParts = (entry) => ({
+  session_id: entry.session_id, status: 'ok', truncated: false, next_cursor: null, window: { from: entry.from ?? null, to: entry.to ?? null, bounds_source: 'request' },
+  coverage: { received_through: '2026-10-09T02:00:00.000Z', read_path: 'indexed', fallback_reason: null },
+  parts: verbRows(entry, { roles: ['user', 'assistant'], part_types: ['text'] }).slice(0, entry.max_parts).map(({ date, ...p }) => p),
+})
+
+test('freshness_unavailable: not read, not complete, worded as unconfirmed freshness, and never retried', async (t) => {
+  const { url, calls } = await startServer(t, { evidence: perEntry(unbounded) })
+  const result = await fetchEvidence({ client: await connect(url), leads: FALLBACK_LEADS, remainingMs: 2000 })
+  assert.equal(calls.filter((c) => c.name === 'session_evidence').length, 1, 'no retry within the command')
+  assert.deepEqual(result.failure, { code: 'freshness_unavailable', message: FRESHNESS_UNAVAILABLE_NOTE })
+  assert.equal(result.complete, false)
+  assert.equal(result.received_through, null)
+  assert.ok(result.leads.every((l) => l.status === 'error' && l.parts.length === 0 && l.note === FRESHNESS_UNAVAILABLE_NOTE))
+  const out = buildFastaskOutput({ question: 'q', source: SOURCE, discovery: discoveryOf(FALLBACK_LEADS), evidence: result, timings: TIMINGS })
+  const text = renderFastaskText(out)
+  assert.match(text, /the server could not confirm how fresh its evidence is/)
+  assert.doesNotMatch(text, /no evidence|no readable text|not_found/i, 'never reads as absent evidence')
+})
+
+test('freshness_unavailable on one entry only: the others are read; no aggregate failure', async (t) => {
+  const { url } = await startServer(t, { evidence: perEntry((entry, i) => (i === 0 ? unbounded(entry) : okWithParts(entry))) })
+  const result = await fetchEvidence({ client: await connect(url), leads: FALLBACK_LEADS.slice(1, 3), remainingMs: 2000 })
+  assert.equal(result.failure, null)
+  assert.equal(result.leads[0].note, FRESHNESS_UNAVAILABLE_NOTE)
+  assert.equal(result.leads[1].status, 'ok')
+  assert.equal(result.complete, false)
+})
+
+test('a partial entry with no parts is sent again alone, with its cursor, and gets its parts', async (t) => {
+  /** @type {any[]} */
+  const sent = []
+  const { url } = await startServer(t, {
+    evidence: perEntry((entry, i, args) => {
+      sent.push({ sessions: args.sessions.length, entry, roles: args.roles, part_types: args.part_types, max_text_chars: args.max_text_chars })
+      // In the full call the second entry does not fit its share; alone it does.
+      if (args.sessions.length > 1 && i === 1) return { session_id: entry.session_id, status: 'partial', parts: [], truncated: true, next_cursor: 'fxcur-unchanged', window: null, coverage: null }
+      return okWithParts(entry)
+    }),
+  })
+  const leads = [FALLBACK_LEADS[1], lead('fx-session-alpha', '2026-08-31T10:00:30.000Z')]
+  const result = await fetchEvidence({ client: await connect(url), leads, remainingMs: 2000 })
+  assert.equal(result.resends, 1)
+  const alone = sent.find((x) => x.sessions === 1)
+  assert.ok(alone, 'one entry was sent alone')
+  assert.equal(alone.entry.session_id, 'fx-session-alpha')
+  assert.equal(alone.entry.cursor, 'fxcur-unchanged', 'with its unchanged cursor')
+  assert.deepEqual([alone.roles, alone.part_types, alone.max_text_chars], [['user', 'assistant'], ['text'], MAX_TEXT_CHARS], 'with the same filters')
+  assert.equal(result.leads[1].status, 'ok')
+  assert.ok(result.leads[1].parts.length > 0)
+})
+
+test('without the budget for it, a no-part partial entry is not resent and keeps its continuation', async (t) => {
+  /** @type {number[]} */
+  const sizes = []
+  const { url } = await startServer(t, {
+    evidence: perEntry((entry, i, args) => {
+      sizes.push(args.sessions.length)
+      return { session_id: entry.session_id, status: 'partial', parts: [], truncated: true, next_cursor: 'fxcur-unchanged', window: null, coverage: null }
+    }),
+  })
+  let clock = 0
+  const client = await connect(url)
+  const planned = planEntries([lead('fx-session-alpha', '2026-08-31T10:00:30.000Z')])
+  // 300 ms left: the floor deadline of a resend (250 ms) plus the round trip does not fit.
+  const result = await callEvidence({ client, planned, leadCount: 1, deadlineAt: 300, roundTripMs: 100, now: () => clock })
+  assert.notEqual(result, 'fallback')
+  if (result === 'fallback') return
+  assert.equal(result.resends, 0)
+  assert.deepEqual(sizes, [1], 'one call, no resend')
+  assert.equal(result.leads[0].status, 'partial')
+  assert.equal(result.leads[0].continuation?.cursor, 'fxcur-unchanged')
+})
+
+test('every evidence call asks the client to bound the response it reads', async () => {
+  /** @type {Array<number | undefined>} */
+  const bounds = []
+  /** @type {EvidenceMcpClient} */
+  const client = {
+    async callTool(_name, args, opts) {
+      bounds.push(opts?.maxBytes)
+      const entries = /** @type {string[]} */ (args?.sessions)
+      const sessions = entries.map((s, i) => ({ request_index: i, session_id: JSON.parse(s).session_id, status: entries.length === 1 ? 'ok' : 'partial', parts: [], next_cursor: 'c' }))
+      return { structuredContent: { complete: false, deadline_reached: false, sessions } }
+    },
+  }
+  await fetchEvidence({ client, leads: FALLBACK_LEADS.slice(0, 2), remainingMs: 2000 })
+  assert.ok(bounds.length >= 2, 'the first call and the resends')
+  assert.ok(bounds.every((b) => b === EVIDENCE_MAX_RESPONSE_BYTES))
+  assert.equal(EVIDENCE_MAX_RESPONSE_BYTES, 16 * 1024 * 1024, 'twice a server cap of up to 8 MiB (default 4 MiB)')
+})
+
+test('the warm client reads at most the bound from the daemon', async (t) => {
+  const big = 'x'.repeat(EVIDENCE_MAX_RESPONSE_BYTES + 1024)
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, round_trip_ms: 1, result: { structuredContent: { pad: big } } }))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve(undefined)) }))
+  const { port } = /** @type {AddressInfo} */ (server.address())
+  const warm = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token: 't' })
+  await assert.rejects(warm.callTool('session_evidence', {}), /exceeds 16777216 bytes/)
+})
+
+// ----- Server LLP 0566: parts too large to return, bounded cursors -----
+
+/** A session_evidence handler that answers pages in order: `pages[n]` for the nth call. @param {Array<(entry: any) => any>} pages */
+function paged(pages) {
+  let call = 0
+  return (/** @type {any} */ args, /** @type {ServerResponse} */ res, /** @type {number} */ id) => {
+    const page = pages[Math.min(call++, pages.length - 1)]
+    perEntry((entry) => page(entry))(args, res, id)
+  }
+}
+
+const P1 = { session_id: 'fx-session-alpha', message_id: 'fx-alpha-m01', part_id: 'fx-alpha-m01#0', role: 'user', message_created_at: '2026-08-31T10:00:00.000Z', content_text: 'one', text_truncated: false }
+
+test('skipped parts are counted and worded, the cursor is followed, and a repeated part is kept once', async (t) => {
+  /** @type {any[]} */
+  const sent = []
+  const pages = paged([
+    (e) => ({ session_id: e.session_id, status: 'partial', parts: [], skipped_parts: 1, truncated: true, next_cursor: 'fxcur-after-big-1', window: null, coverage: null }),
+    (e) => ({ session_id: e.session_id, status: 'partial', parts: [], skipped_parts: 1, truncated: true, next_cursor: 'fxcur-after-big-2', window: null, coverage: null }),
+    // A resumed tie group may repeat a row already returned (LLP 0566#bounded-cursor).
+    (e) => ({ session_id: e.session_id, status: 'ok', parts: [P1, P1], truncated: false, next_cursor: null, window: null, coverage: { received_through: '2026-10-09T02:00:00.000Z', read_path: 'indexed', fallback_reason: null } }),
+  ])
+  const { url } = await startServer(t, {
+    evidence: (args, res, id) => {
+      sent.push(args.sessions.map((/** @type {string} */ s) => JSON.parse(s).cursor ?? null))
+      pages(args, res, id)
+    },
+  })
+  const result = await fetchEvidence({ client: await connect(url), leads: [lead('fx-session-alpha', '2026-08-31T10:00:30.000Z')], remainingMs: 2000 })
+  assert.deepEqual(sent, [[null], ['fxcur-after-big-1'], ['fxcur-after-big-2']], 'each page sent alone with the cursor the last one returned')
+  assert.equal(result.resends, 2)
+  const l = result.leads[0]
+  assert.equal(l.status, 'ok')
+  assert.equal(l.skipped_parts, 2, 'skipped counts add up across pages')
+  assert.deepEqual(l.parts.map((p) => p.part_id), ['fx-alpha-m01#0'], 'deduplicated by part_id')
+  assert.equal(l.note, '2 parts too large to return were skipped')
+  const out = buildFastaskOutput({ question: 'q', source: SOURCE, discovery: discoveryOf([lead('fx-session-alpha', null)]), evidence: result, timings: TIMINGS })
+  assert.equal(out.leads[0].evidence?.skipped_parts, 2)
+  assert.match(renderFastaskText(out), /evidence: ok - 2 parts too large to return were skipped/)
+})
+
+test('following an entry that keeps skipping stops after MAX_FOLLOWS_PER_ENTRY, still partial with its continuation', async (t) => {
+  let calls = 0
+  const { url } = await startServer(t, {
+    evidence: (args, res, id) => {
+      calls++
+      perEntry((e) => ({ session_id: e.session_id, status: 'partial', parts: [], skipped_parts: 1, truncated: true, next_cursor: `fxcur-${calls}`, window: null, coverage: null }))(args, res, id)
+    },
+  })
+  const result = await fetchEvidence({ client: await connect(url), leads: [lead('fx-session-alpha', null)], remainingMs: 2000 })
+  assert.equal(calls, 1 + MAX_FOLLOWS_PER_ENTRY)
+  assert.equal(result.resends, MAX_FOLLOWS_PER_ENTRY)
+  const l = result.leads[0]
+  assert.equal(l.status, 'partial')
+  assert.equal(l.skipped_parts, 1 + MAX_FOLLOWS_PER_ENTRY)
+  assert.equal(l.continuation?.cursor, `fxcur-${calls}`, 'the continuation resumes after the last page read')
+  assert.equal(l.note, `${1 + MAX_FOLLOWS_PER_ENTRY} parts too large to return were skipped`)
+})
+
+test('cursor_unresolvable is worded for the reader and never followed', async (t) => {
+  let calls = 0
+  const { url } = await startServer(t, {
+    evidence: (args, res, id) => {
+      calls++
+      perEntry((e) => ({ session_id: e.session_id, status: 'error', parts: [], truncated: false, next_cursor: null, window: null, coverage: null, error: { code: 'cursor_unresolvable', message: 'tie group over 256 rows' } }))(args, res, id)
+    },
+  })
+  const result = await fetchEvidence({ client: await connect(url), leads: [lead('fx-session-alpha', null)], remainingMs: 2000 })
+  assert.equal(calls, 1)
+  assert.equal(result.leads[0].note, CURSOR_UNRESOLVABLE_NOTE)
+  assert.equal(result.failure, null, 'one entry the server could not continue is not an aggregate failure by itself')
+  assert.equal(skippedNote(1), '1 part too large to return was skipped')
 })
