@@ -7,6 +7,8 @@
 **Date:** 2026-10-09
 **Related:** LLP 0479 (request), LLP 0004 (paths and state directories), LLP 0023 (graph identity and provenance), LLP 0033 (remote attach), LLP 0034 (verbs and MCP), LLP 0063 (connection ladder), LLP 0064 (graph query), LLP 0070 and LLP 0105 (export and query seams), LLP 0166 and LLP 0300 (local control trust), LLP 0213 (graph guidance lives in the query skill), LLP 0248 (command tree), LLP 0305 (central eligibility), LLP 0393 (product telemetry vocabulary), LLP 0394 (source health in status), LLP 0430 (no manual acceptance procedures), LLP 0457 and LLP 0458 (skill updates); server LLP 0554 (`hypaware.graph-snapshot/1`), server LLP 0553, LLP 0557, LLP 0558 (`hypaware.session-evidence/1`), server LLP 0555 T11 (server-first command vocabulary)
 **Implemented-by:** [LLP 0481](./0481-fastask.plan.md)
+**Extended-by:** [LLP 0484](./0484-discovery-walks-touched-and-the-build-is-bounded-before-it-starts.decision.md) (discovery walks `touched` with a vocabulary-drift guard; up-front size refusal; `MAX_INDEX_BYTES` 256 MB)
+**Extended-by:** [LLP 0483](./0483-replica-lease-renews-only-on-the-active-generation.decision.md) (the lease renews only on the active generation; a changed credential forces an unconditional check)
 **Extended-by:** [LLP 0482](./0482-leave-keeps-the-team-graph-replica.decision.md) (`hyp leave` keeps the replica; the "not kept after leave" status line is not used)
 **Extends:** [LLP 0248](./0248-task-oriented-cli-rollover.decision.md) (adds the top-level `fastask` journey to the canonical tree, [#command-tree](#command-tree)); [LLP 0394](./0394-a-source-reports-its-own-health.decision.md) (a source may publish one always-shown summary line, [#status-line](#status-line))
 
@@ -127,6 +129,8 @@ merges them.
 
 ## The replica {#replica}
 
+**Extended-by:** [LLP 0483#credential-change](./0483-replica-lease-renews-only-on-the-active-generation.decision.md#credential-change): static and environment-token logins key on origin plus an empty org until `manifest.org` is known, and `replica.json` records a credential fingerprint.
+
 - **Scope.** One replica per process: the default remote target (LLP 0062)
   when it has a login, keyed by the canonical server origin plus the org on
   that login (`sameServer`/`canonicalOrigin`, `builtin_remotes.js`). A login
@@ -214,6 +218,8 @@ runs a self-rescheduling loop modelled on the central config pull loop:
 
    Past lease expiry with no successful check, the state is `expired`: the
    index is dropped from memory and the files are deleted at the next pass.
+
+   **Extended-by:** [LLP 0483#lease-renewal](./0483-replica-lease-renews-only-on-the-active-generation.decision.md#lease-renewal): the `200, new generation` row renews the lease only once that generation is activated; a `200` the client cannot activate does not renew it. [LLP 0483#credential-change](./0483-replica-lease-renews-only-on-the-active-generation.decision.md#credential-change): after a credential change the next check is sent without `If-None-Match`.
 4. **Download.** For a new generation: refuse unknown `schema_version`,
    `id_recipe` or protocol major before downloading. Stream each file with
    `fetch` into `staging/` (Web stream to file through `pipeline`, so
@@ -261,6 +267,8 @@ team graph: not available yet (server has not published one)
 
 ## The warm index {#index}
 
+**Extended-by:** [LLP 0484#build-memory](./0484-discovery-walks-touched-and-the-build-is-bounded-before-it-starts.decision.md#build-memory): `MAX_INDEX_BYTES` defaults to 256 MB, a generation is refused before download when its manifest row counts times 100 bytes exceed it, and a transient build peak of about four times the index is accepted.
+
 One index per active generation, built from the two NDJSON files:
 
 - **Nodes.** `node_id` to a dense integer through a single string-keyed map;
@@ -307,6 +315,8 @@ choice). Equivalent trust and no token file, but it has no precedent here and
 adds platform code; rejected with the steward (2026-10-09).
 
 ## Discovery {#discovery}
+
+**Extended-by:** [LLP 0484#edge-kinds](./0484-discovery-walks-touched-and-the-build-is-bounded-before-it-starts.decision.md#edge-kinds): discovery walks `touched` edges (the projectors' vocabulary, passed through the snapshot unchanged); a generation with File nodes but no `touched` edges is flagged `vocabulary_mismatch` and answered through the `team_server` fallback.
 
 Input: the question, the repository context (`--repo`, else the caller's
 repository from its git remote and root), and `--file` anchors.

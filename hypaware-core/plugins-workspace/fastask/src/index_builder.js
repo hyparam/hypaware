@@ -1,0 +1,687 @@
+// @ts-check
+
+import { pipeline } from 'node:stream/promises'
+import { createGunzip } from 'node:zlib'
+
+import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
+
+/**
+ * @import { CompressedSource, Exemplar, GraphEdgeRow, GraphIndex, GraphNodeRow, IndexBuilder, IndexBuilderOptions, SessionProps, SnapshotIndexInput, WorkTicker } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ */
+
+/**
+ * The warm index over one graph generation (LLP 0480#index): a dense node
+ * table, typed-array CSR adjacency in both directions, a sparse exemplar map
+ * and the File lookups discovery needs, built from the snapshot's two gzipped
+ * NDJSON files (or from rows a local loader hands over) in work-budget
+ * slices, under a hard byte ceiling.
+ *
+ * Pure apart from `node:zlib` and the work budget: no IO beyond the sources
+ * it is given, no kernel registration.
+ */
+
+/** Hard ceiling on the index's estimated resident bytes (LLP 0484#build-memory, was 512 MB in LLP 0480#index). */
+export const MAX_INDEX_BYTES = 256 * 1024 * 1024
+
+/** Bytes per manifest row the up-front check assumes (measured about 79; LLP 0484#build-memory). */
+export const BYTES_PER_ROW = 100
+
+/** `nodeFlags` bit: the node was minted for an edge endpoint absent from the node file. */
+export const PLACEHOLDER = 1
+
+// Estimate of V8 resident cost, calibrated against measured heap by
+// benchmarks/fastask-client (it reports both). Conservative on purpose: the
+// estimate refuses before the heap grows, never after.
+const STRING_BYTES = 24 // header plus alignment; one byte per character on top
+const MAP_ENTRY_BYTES = 40 // hash table slot, chain link and load-factor slack
+const ARRAY_SLOT_BYTES = 8 // one pointer in a JS array
+const OBJECT_BYTES = 56 // a small object with four in-object fields
+const NODE_TYPED_BYTES = 1 + 1 + 8 // type, flags, first seen
+const EDGE_TYPED_BYTES = 4 + 4 + 1 + 8 // src, dst, type, first seen
+const CSR_EDGE_BYTES = 4 + 4 // one slot in each direction
+const CSR_NODE_BYTES = 4 + 4 // one offset in each direction
+// Interned type names fit a Uint8; anything past the table shares the last slot.
+const MAX_TYPES = 255
+const OTHER_TYPE = '(other)'
+
+/** A build refused or failed; `code` is stable, the message is display text. */
+export class IndexBuildError extends Error {
+  /**
+   * @param {'replica_too_large' | 'invalid_line'} code
+   * @param {string} message
+   */
+  constructor(code, message) {
+    super(message)
+    this.name = 'IndexBuildError'
+    this.code = code
+  }
+}
+
+/**
+ * Refuses a generation from its manifest alone, before it is downloaded or
+ * parsed: its row counts times `BYTES_PER_ROW` must fit `maxBytes`. A build
+ * peaks at several times its index, so this keeps an oversized graph from
+ * growing the process on the way to a refusal; the running estimate during
+ * the build stays as the second check. A manifest without row counts passes
+ * here and is held by the running estimate alone.
+ *
+ * @ref LLP 0484#build-memory [implements]: (nodes.rows + edges.rows) x 100 bytes past MAX_INDEX_BYTES is refused before download
+ * @param {any} manifest
+ * @param {number} [maxBytes]
+ */
+export function assertManifestFits(manifest, maxBytes = MAX_INDEX_BYTES) {
+  const nodes = rowsOf(manifest, 'nodes') ?? 0
+  const edges = rowsOf(manifest, 'edges') ?? 0
+  const bytes = (nodes + edges) * BYTES_PER_ROW
+  if (bytes > maxBytes) {
+    throw new IndexBuildError('replica_too_large',
+      `team graph index would exceed ${maxBytes} bytes (${nodes} nodes and ${edges} edges at ${BYTES_PER_ROW} bytes per row is ${bytes})`)
+  }
+}
+
+/**
+ * An incremental builder. `addNode` and `addEdge` take rows in any order:
+ * an edge whose endpoint has not been seen mints a placeholder node, and a
+ * node that arrives later fills that placeholder in, so a local loader that
+ * interleaves the two datasets gets the same index as the snapshot's
+ * nodes-then-edges order. Each call checks the running estimate and throws
+ * `replica_too_large` the moment it passes `maxBytes`.
+ *
+ * @param {IndexBuilderOptions} [opts]
+ * @returns {IndexBuilder}
+ */
+export function createIndexBuilder(opts = {}) {
+  const maxBytes = opts.maxBytes ?? MAX_INDEX_BYTES
+  let nodeCap = Math.max(16, opts.expectedNodes ?? 0)
+  let edgeCap = Math.max(16, opts.expectedEdges ?? 0)
+
+  /** @type {Map<string, number>} */
+  const nodeIds = new Map()
+  /** @type {string[]} */
+  const nodeTypes = []
+  /** @type {number[]} real (non-placeholder) nodes per interned type */
+  const nodeTypeCounts = []
+  /** @type {Map<string, number>} */
+  const nodeTypeIndex = new Map()
+  let nodeType = new Uint8Array(nodeCap)
+  let nodeFlags = new Uint8Array(nodeCap)
+  let nodeFirstSeen = new Float64Array(nodeCap)
+  /** @type {Array<string | null>} */
+  const naturalKey = []
+  /** @type {Array<string | null>} */
+  const label = []
+  /** @type {Map<number, SessionProps>} */
+  const sessionProps = new Map()
+  // Session props repeat heavily (one cwd, branch, client and user across
+  // many sessions); one copy of each distinct value is kept.
+  /** @type {Map<string, string>} */
+  const interned = new Map()
+
+  /** @type {string[]} */
+  const edgeTypes = []
+  /** @type {number[]} edges per interned type */
+  const edgeTypeCounts = []
+  /** @type {Map<string, number>} */
+  const edgeTypeIndex = new Map()
+  let edgeType = new Uint8Array(edgeCap)
+  let edgeSrc = new Uint32Array(edgeCap)
+  let edgeDst = new Uint32Array(edgeCap)
+  let edgeFirstSeen = new Float64Array(edgeCap)
+  /** @type {Map<number, Exemplar>} */
+  const exemplars = new Map()
+
+  /** @type {Map<string, number | number[]>} */
+  const fileByBasename = new Map()
+  /** @type {Map<string, number | number[]>} */
+  const fileByStem = new Map()
+  /** @type {Map<string, number | number[]>} */
+  const fileByRepo = new Map()
+  /** @type {Map<string, number | number[]>} */
+  const fileBySuffix = new Map()
+
+  let nodeCount = 0
+  let edgeCount = 0
+  let placeholderCount = 0
+  // Variable-size costs; the typed arrays are counted from their capacity.
+  let heapBytes = 0
+
+  // The adjacency `finish` allocates is counted from the first row, so an
+  // over-ceiling graph is refused while it parses, not after.
+  function estimate() {
+    return heapBytes + nodeCap * NODE_TYPED_BYTES + edgeCap * EDGE_TYPED_BYTES +
+      (nodeCount + 1) * CSR_NODE_BYTES + edgeCount * CSR_EDGE_BYTES
+  }
+
+  /** @param {number} extra bytes about to be allocated beyond the estimate */
+  function check(extra = 0) {
+    const bytes = estimate() + extra
+    if (bytes > maxBytes) {
+      throw new IndexBuildError('replica_too_large',
+        `team graph index would exceed ${maxBytes} bytes (estimated ${bytes} at ${nodeCount} nodes and ${edgeCount} edges)`)
+    }
+  }
+
+  /** @param {string} name */
+  function internNodeType(name) {
+    let t = nodeTypeIndex.get(name)
+    if (t !== undefined) return t
+    if (nodeTypes.length === MAX_TYPES - 1) return internNodeType(OTHER_TYPE)
+    t = nodeTypes.length
+    nodeTypes.push(name)
+    nodeTypeCounts.push(0)
+    nodeTypeIndex.set(name, t)
+    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + name.length
+    return t
+  }
+
+  /** @param {string} name */
+  function internEdgeType(name) {
+    let t = edgeTypeIndex.get(name)
+    if (t !== undefined) return t
+    if (edgeTypes.length === MAX_TYPES - 1) return internEdgeType(OTHER_TYPE)
+    t = edgeTypes.length
+    edgeTypes.push(name)
+    edgeTypeCounts.push(0)
+    edgeTypeIndex.set(name, t)
+    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + name.length
+    return t
+  }
+
+  /** @param {string | null} value */
+  function intern(value) {
+    if (value === null) return null
+    const seen = interned.get(value)
+    if (seen !== undefined) return seen
+    interned.set(value, value)
+    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + value.length
+    return value
+  }
+
+  function growNodes() {
+    nodeCap *= 2
+    check()
+    nodeType = grown(nodeType, new Uint8Array(nodeCap))
+    nodeFlags = grown(nodeFlags, new Uint8Array(nodeCap))
+    nodeFirstSeen = grown(nodeFirstSeen, new Float64Array(nodeCap))
+  }
+
+  function growEdges() {
+    edgeCap *= 2
+    check()
+    edgeType = grown(edgeType, new Uint8Array(edgeCap))
+    edgeSrc = grown(edgeSrc, new Uint32Array(edgeCap))
+    edgeDst = grown(edgeDst, new Uint32Array(edgeCap))
+    edgeFirstSeen = grown(edgeFirstSeen, new Float64Array(edgeCap))
+  }
+
+  /**
+   * @param {string} id
+   * @param {string} type
+   * @returns {number}
+   */
+  function mint(id, type) {
+    if (nodeCount === nodeCap) growNodes()
+    const i = nodeCount++
+    nodeIds.set(id, i)
+    nodeType[i] = internNodeType(type)
+    nodeFirstSeen[i] = NaN
+    naturalKey.push(null)
+    label.push(null)
+    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + id.length + 2 * ARRAY_SLOT_BYTES
+    return i
+  }
+
+  /**
+   * @param {unknown} id
+   * @param {unknown} type
+   * @returns {number} the node index, or -1 when the edge names no endpoint
+   */
+  function endpoint(id, type) {
+    const key = str(id)
+    if (!key) return -1
+    const known = nodeIds.get(key)
+    if (known !== undefined) return known
+    // @ref LLP 0480#index [implements]: an edge to an absent node gets a placeholder, counted, never dropped
+    const i = mint(key, str(type) ?? 'Unknown')
+    nodeFlags[i] = PLACEHOLDER
+    placeholderCount++
+    return i
+  }
+
+  /**
+   * @param {string} key
+   * @param {number} i
+   */
+  function indexFile(key, i) {
+    const repo = repoOfKey(key)
+    const base = basenameOf(repo === null ? key : key.slice(repo.length + 1)).toLowerCase()
+    if (!base) return
+    heapBytes += addTo(fileByBasename, base, i)
+    const dot = base.lastIndexOf('.')
+    if (dot > 0) heapBytes += addTo(fileByStem, base.slice(0, dot), i)
+    if (repo !== null) {
+      heapBytes += addTo(fileByRepo, repo, i)
+    } else if (isAbsolute(key)) {
+      const suffix = lastSegments(key, 3)
+      if (suffix !== null) heapBytes += addTo(fileBySuffix, suffix.toLowerCase(), i)
+    }
+  }
+
+  return {
+    addNode(row) {
+      const id = str(row.node_id)
+      if (!id) return
+      const type = str(row.node_type) ?? 'Unknown'
+      let i = nodeIds.get(id)
+      if (i === undefined) {
+        i = mint(id, type)
+      } else if (nodeFlags[i] & PLACEHOLDER) {
+        nodeFlags[i] &= ~PLACEHOLDER
+        placeholderCount--
+        nodeType[i] = internNodeType(type)
+      } else {
+        return // a node id appears once per file; a repeat adds nothing
+      }
+      nodeTypeCounts[nodeType[i]]++
+      const key = str(row.natural_key)
+      const text = str(row.label)
+      naturalKey[i] = key
+      label[i] = text === key ? null : text
+      heapBytes += (key ? STRING_BYTES + key.length : 0) + (label[i] ? STRING_BYTES + /** @type {string} */ (label[i]).length : 0)
+      nodeFirstSeen[i] = millis(row.first_seen)
+      if (type === 'Session') {
+        const props = objectOf(row.props)
+        sessionProps.set(i, {
+          cwd: intern(str(props?.cwd)),
+          git_branch: intern(str(props?.git_branch)),
+          client_name: intern(str(props?.client_name)),
+          user_id: intern(str(props?.user_id)),
+        })
+        heapBytes += MAP_ENTRY_BYTES + OBJECT_BYTES
+      } else if (type === 'File' && key) {
+        indexFile(key, i)
+      }
+      check()
+    },
+
+    addEdge(row) {
+      const src = endpoint(row.src_id, row.src_type)
+      const dst = endpoint(row.dst_id, row.dst_type)
+      if (src === -1 || dst === -1) return
+      if (edgeCount === edgeCap) growEdges()
+      const e = edgeCount++
+      edgeSrc[e] = src
+      edgeDst[e] = dst
+      edgeType[e] = internEdgeType(str(row.edge_type) ?? 'unknown')
+      // @ref LLP 0484#edge-kinds [implements]: a count per edge type, so a generation without the walked kind is flagged, not silently empty
+      edgeTypeCounts[edgeType[e]]++
+      edgeFirstSeen[e] = millis(row.first_seen)
+      const exemplar = exemplarOf(row.source_keys)
+      if (exemplar) {
+        exemplars.set(e, exemplar)
+        heapBytes += MAP_ENTRY_BYTES + OBJECT_BYTES +
+          (exemplar.message_id ? STRING_BYTES + exemplar.message_id.length : 0) +
+          (exemplar.part_id ? STRING_BYTES + exemplar.part_id.length : 0)
+      }
+      check()
+    },
+
+    get estimatedBytes() { return estimate() },
+
+    async finish(budget) {
+      // Release capacity slack before the adjacency is allocated, so the
+      // build's peak is the index plus one cursor array, not twice the edges.
+      if (nodeCap > nodeCount) {
+        nodeType = nodeType.slice(0, nodeCount)
+        nodeFlags = nodeFlags.slice(0, nodeCount)
+        nodeFirstSeen = nodeFirstSeen.slice(0, nodeCount)
+        nodeCap = nodeCount
+      }
+      if (edgeCap > edgeCount) {
+        edgeType = edgeType.slice(0, edgeCount)
+        edgeSrc = edgeSrc.slice(0, edgeCount)
+        edgeDst = edgeDst.slice(0, edgeCount)
+        edgeFirstSeen = edgeFirstSeen.slice(0, edgeCount)
+        edgeCap = edgeCount
+      }
+      // The adjacency is already in the estimate; its fill cursor is not.
+      check(nodeCount * 4)
+
+      let unresolvedEdges = 0
+      for (let e = 0; e < edgeCount; e++) {
+        if ((nodeFlags[edgeSrc[e]] | nodeFlags[edgeDst[e]]) & PLACEHOLDER) unresolvedEdges++
+        const wait = budget?.tick(1)
+        if (wait) await wait
+      }
+
+      const out = await adjacency(edgeSrc, nodeCount, edgeFirstSeen, budget)
+      const into = await adjacency(edgeDst, nodeCount, edgeFirstSeen, budget)
+
+      return {
+        nodeCount,
+        edgeCount,
+        placeholderCount,
+        unresolvedEdges,
+        bytes: estimate(),
+        nodeIds,
+        nodeTypes,
+        nodeTypeCounts,
+        nodeType,
+        nodeFlags,
+        naturalKey,
+        label,
+        nodeFirstSeen,
+        sessionProps,
+        edgeTypes,
+        edgeTypeCounts,
+        edgeType,
+        edgeSrc,
+        edgeDst,
+        edgeFirstSeen,
+        exemplars,
+        outOffsets: out.offsets,
+        outEdges: out.edges,
+        inOffsets: into.offsets,
+        inEdges: into.edges,
+        fileByBasename,
+        fileByStem,
+        fileByRepo,
+        fileBySuffix,
+      }
+    },
+  }
+}
+
+/**
+ * CSR over one endpoint column: `edges[offsets[i] .. offsets[i + 1])` are the
+ * ordinals of edges whose endpoint is node i, newest `first_seen` first, so a
+ * walk that stops at its visit budget keeps the most recent touches.
+ *
+ * @param {Uint32Array} endpoints
+ * @param {number} nodeCount
+ * @param {Float64Array} firstSeen
+ * @param {WorkTicker | undefined} budget
+ * @returns {Promise<{ offsets: Uint32Array, edges: Uint32Array }>}
+ */
+async function adjacency(endpoints, nodeCount, firstSeen, budget) {
+  const edgeCount = endpoints.length
+  const offsets = new Uint32Array(nodeCount + 1)
+  for (let e = 0; e < edgeCount; e++) {
+    offsets[endpoints[e] + 1]++
+    const wait = budget?.tick(1)
+    if (wait) await wait
+  }
+  for (let i = 0; i < nodeCount; i++) offsets[i + 1] += offsets[i]
+  const cursor = offsets.slice(0, nodeCount)
+  const edges = new Uint32Array(edgeCount)
+  for (let e = 0; e < edgeCount; e++) {
+    edges[cursor[endpoints[e]]++] = e
+    const wait = budget?.tick(1)
+    if (wait) await wait
+  }
+  /** @param {number} a @param {number} b */
+  const newestFirst = (a, b) => {
+    const x = firstSeen[a]
+    const y = firstSeen[b]
+    if (x === y) return a - b
+    if (x !== x) return 1 // absent times sort last
+    if (y !== y) return -1
+    return y - x
+  }
+  for (let i = 0; i < nodeCount; i++) {
+    const start = offsets[i]
+    const end = offsets[i + 1]
+    if (end - start > 1) edges.subarray(start, end).sort(newestFirst)
+    const wait = budget?.tick(end - start + 1)
+    if (wait) await wait
+  }
+  return { offsets, edges }
+}
+
+/**
+ * Builds the index for one verified generation by streaming each gzipped
+ * file through decompression and line parsing, nodes first, in work-budget
+ * slices. The manifest's row counts size the arrays and refuse an
+ * over-ceiling generation before anything is decompressed (the sync loop
+ * calls `assertManifestFits` itself before downloading). Abort is observed
+ * at slice boundaries and surfaces as the signal's reason.
+ *
+ * @ref LLP 0480#cooperative [implements]: decompress, parse and both CSR passes tick one budget; the cold path passes duty 1
+ * @param {SnapshotIndexInput} input
+ * @returns {Promise<GraphIndex>}
+ */
+export async function buildIndexFromSnapshot(input) {
+  const maxBytes = input.maxBytes ?? MAX_INDEX_BYTES
+  const expectedNodes = rowsOf(input.manifest, 'nodes')
+  const expectedEdges = rowsOf(input.manifest, 'edges')
+  // @ref LLP 0480#index [implements]: a generation past MAX_INDEX_BYTES is refused with replica_too_large instead of growing
+  assertManifestFits(input.manifest, maxBytes)
+  const { signal } = input
+  const budget = createWorkBudget({ duty: input.duty, signal, now: input.now })
+  const builder = createIndexBuilder({ maxBytes, expectedNodes, expectedEdges })
+  try {
+    await forEachLine(input.nodes, 'nodes', (row) => builder.addNode(row), builder, maxBytes, budget, signal)
+    await forEachLine(input.edges, 'edges', (row) => builder.addEdge(row), builder, maxBytes, budget, signal)
+    return await builder.finish(budget)
+  } catch (err) {
+    if (signal?.aborted) throw signal.reason
+    throw err
+  }
+}
+
+/**
+ * Decompresses one file and hands each parsed line to `onRow`, ticking the
+ * budget per line. Memory is one chunk plus one partial line, and the partial
+ * line counts against the ceiling so a single enormous line cannot grow past it.
+ *
+ * @param {CompressedSource} source
+ * @param {'nodes' | 'edges'} name
+ * @param {(row: any) => void} onRow
+ * @param {IndexBuilder} builder
+ * @param {number} maxBytes
+ * @param {WorkTicker} budget
+ * @param {AbortSignal | undefined} signal
+ */
+async function forEachLine(source, name, onRow, builder, maxBytes, budget, signal) {
+  let lineNo = 0
+  /** @type {Buffer[]} */
+  let pending = []
+  let pendingBytes = 0
+
+  /** @param {string} text */
+  function parse(text) {
+    lineNo++
+    let row
+    try {
+      row = JSON.parse(text)
+    } catch {
+      throw new IndexBuildError('invalid_line', `${name} line ${lineNo} is not JSON`)
+    }
+    if (row === null || typeof row !== 'object') throw new IndexBuildError('invalid_line', `${name} line ${lineNo} is not an object`)
+    onRow(row)
+  }
+
+  /** @param {AsyncIterable<Buffer>} chunks */
+  async function lines(chunks) {
+    for await (const chunk of chunks) {
+      let start = 0
+      let newline
+      while ((newline = chunk.indexOf(0x0a, start)) !== -1) {
+        if (pending.length === 0) {
+          if (newline > start) parse(chunk.toString('utf8', start, newline))
+        } else {
+          pending.push(chunk.subarray(start, newline))
+          parse(Buffer.concat(pending).toString('utf8'))
+          pending = []
+          pendingBytes = 0
+        }
+        start = newline + 1
+        const wait = budget.tick(1)
+        if (wait) await wait
+      }
+      if (start < chunk.byteLength) {
+        pending.push(chunk.subarray(start))
+        pendingBytes += chunk.byteLength - start
+        if (builder.estimatedBytes + pendingBytes > maxBytes) {
+          throw new IndexBuildError('replica_too_large', `${name} line ${lineNo + 1} passes the ${maxBytes}-byte index ceiling`)
+        }
+      }
+    }
+    if (pendingBytes > 0) parse(Buffer.concat(pending).toString('utf8'))
+  }
+
+  await pipeline(asIterable(source), createGunzip(), lines, { signal })
+}
+
+/**
+ * @param {CompressedSource} source
+ * @returns {AsyncIterable<Uint8Array>}
+ */
+async function* asIterable(source) {
+  if (source instanceof Uint8Array) {
+    yield source
+    return
+  }
+  yield* source
+}
+
+/**
+ * @template {Uint8Array | Uint32Array | Float64Array} T
+ * @param {T} from
+ * @param {T} to
+ * @returns {T}
+ */
+function grown(from, to) {
+  to.set(/** @type {any} */ (from))
+  return to
+}
+
+/**
+ * Adds `i` under `key`; a single index stays a number, a second one makes an
+ * array, so the common unique key costs one map entry and nothing more.
+ *
+ * @param {Map<string, number | number[]>} map
+ * @param {string} key
+ * @param {number} i
+ * @returns {number} estimated bytes added
+ */
+function addTo(map, key, i) {
+  const current = map.get(key)
+  if (current === undefined) {
+    map.set(key, i)
+    return MAP_ENTRY_BYTES + STRING_BYTES + key.length
+  }
+  if (typeof current === 'number') {
+    map.set(key, [current, i])
+    return OBJECT_BYTES + 2 * ARRAY_SLOT_BYTES
+  }
+  current.push(i)
+  return ARRAY_SLOT_BYTES
+}
+
+/**
+ * The `owner/repo` half of a bridged `owner/repo:path` File key, or null for
+ * an absolute-path key (LLP 0032's bridge-key vocabulary).
+ *
+ * @param {string} key
+ * @returns {string | null}
+ */
+export function repoOfKey(key) {
+  const colon = key.indexOf(':')
+  if (colon <= 0) return null
+  const repo = key.slice(0, colon)
+  const slash = repo.indexOf('/')
+  if (slash <= 0 || slash === repo.length - 1 || repo.indexOf('/', slash + 1) !== -1) return null
+  return repo
+}
+
+/**
+ * @param {string} path
+ * @returns {string}
+ */
+export function basenameOf(path) {
+  return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
+}
+
+/**
+ * @param {string} path
+ * @returns {boolean}
+ */
+export function isAbsolute(path) {
+  return path.startsWith('/') || path.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(path)
+}
+
+/**
+ * The last `n` path segments joined with `/`, or null when the path has fewer.
+ *
+ * @param {string} path
+ * @param {number} n
+ * @returns {string | null}
+ */
+export function lastSegments(path, n) {
+  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.length >= n ? parts.slice(-n).join('/') : null
+}
+
+/**
+ * @param {any} manifest
+ * @param {'nodes' | 'edges'} name
+ * @returns {number | undefined}
+ */
+function rowsOf(manifest, name) {
+  const rows = manifest?.files?.[name]?.rows
+  return Number.isSafeInteger(rows) && rows >= 0 ? rows : undefined
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function str(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number}
+ */
+function millis(value) {
+  if (typeof value === 'string') return Date.parse(value)
+  if (typeof value === 'number') return value
+  if (value instanceof Date) return value.getTime()
+  return NaN
+}
+
+/**
+ * A JSON column as an object: parsed already (a contract line), or a stored
+ * JSON string (a local row).
+ *
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | null}
+ */
+function objectOf(value) {
+  if (typeof value === 'string' && value.startsWith('{')) {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return null
+    }
+  }
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? /** @type {Record<string, unknown>} */ (value) : null
+}
+
+/**
+ * The exemplar an edge's `source_keys` names, when it carries one. Most
+ * `touched` edges carry only `session_id`; action-derived rules may add a
+ * `message_id` or `part_id`.
+ *
+ * @param {unknown} sourceKeys
+ * @returns {Exemplar | null}
+ */
+function exemplarOf(sourceKeys) {
+  const keys = objectOf(sourceKeys)
+  if (!keys) return null
+  const message = str(keys.message_id)
+  const part = str(keys.part_id)
+  return message || part ? { message_id: message, part_id: part } : null
+}
