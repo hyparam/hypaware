@@ -1,0 +1,119 @@
+{
+  "benchmark": "fastask-client index and discovery (LLP 0481 T6)",
+  "recorded_at": "2026-10-09T03:13:49.552Z",
+  "hardware": {
+    "platform": "darwin 25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Max",
+    "cpus": 16,
+    "memory_gb": 128
+  },
+  "node": "v24.2.0",
+  "bounds": {
+    "target_bytes_at_measured_size": 134217728,
+    "max_index_bytes": 536870912,
+    "discovery_p95_target_ms": 100
+  },
+  "runs": [
+    {
+      "scale": 1,
+      "nodes": 142766,
+      "edges": 462042,
+      "gz_bytes": 19488165,
+      "duty": 1,
+      "build_ms": 1220,
+      "build_loop_delay_ms": {
+        "p95": 1.2,
+        "max": 4.9
+      },
+      "peak_rss_mb": 214.3,
+      "baseline_rss_mb": 50.7,
+      "estimated_mb": 47.7,
+      "resident_mb": 48.1,
+      "heap_mb": 34.6,
+      "array_buffers_mb": 13.5,
+      "placeholders": 905,
+      "unresolved_edges": 905,
+      "discovery_ms": {
+        "p50": 0.03,
+        "p95": 0.77,
+        "max": 1.18
+      },
+      "discovery_queries": 400,
+      "discovery_truncated": 29,
+      "discovery_without_leads": 0
+    },
+    {
+      "scale": 1,
+      "nodes": 142766,
+      "edges": 462042,
+      "gz_bytes": 19488165,
+      "duty": 0.25,
+      "build_ms": 6088,
+      "build_loop_delay_ms": {
+        "p95": 1.7,
+        "max": 10
+      },
+      "peak_rss_mb": 190.8,
+      "baseline_rss_mb": 51.1,
+      "estimated_mb": 47.7,
+      "resident_mb": 47.3,
+      "heap_mb": 33.8,
+      "array_buffers_mb": 13.5,
+      "placeholders": 905,
+      "unresolved_edges": 905,
+      "discovery_ms": {
+        "p50": 0.03,
+        "p95": 0.9,
+        "max": 1.4
+      },
+      "discovery_queries": 400,
+      "discovery_truncated": 29,
+      "discovery_without_leads": 0
+    },
+    {
+      "scale": 4,
+      "nodes": 571064,
+      "edges": 1848168,
+      "gz_bytes": 80150143,
+      "duty": 1,
+      "build_ms": 4728,
+      "build_loop_delay_ms": {
+        "p95": 1.1,
+        "max": 23
+      },
+      "peak_rss_mb": 525.3,
+      "baseline_rss_mb": 50.7,
+      "estimated_mb": 182.9,
+      "resident_mb": 179.4,
+      "heap_mb": 125.5,
+      "array_buffers_mb": 53.9,
+      "placeholders": 3671,
+      "unresolved_edges": 3671,
+      "discovery_ms": {
+        "p50": 0.04,
+        "p95": 2.04,
+        "max": 3.22
+      },
+      "discovery_queries": 400,
+      "discovery_truncated": 45,
+      "discovery_without_leads": 0
+    },
+    {
+      "scale": 12,
+      "nodes": 1713192,
+      "edges": 5544504,
+      "gz_bytes": 245321651,
+      "duty": 1,
+      "refused": "replica_too_large",
+      "message": "team graph index would exceed 536870912 bytes (estimated 536871038 at 1717630 nodes and 2204994 edges)",
+      "build_ms": 8052,
+      "build_loop_delay_ms": {
+        "p95": 1.1,
+        "max": 57.5
+      },
+      "peak_rss_mb": 870.5,
+      "baseline_rss_mb": 51
+    }
+  ]
+}
