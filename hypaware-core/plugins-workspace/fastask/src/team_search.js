@@ -41,7 +41,7 @@ export async function searchSessions({ runSql, sessions, terms, hitsPerSession =
   const asked = uniqueSessions.slice(0, MAX_SEARCH_SESSIONS)
   const uniqueTerms = [...new Map(terms.map((t) => t.trim()).filter((t) => t.length > 0).map((t) => [t.toLowerCase(), t])).values()]
   const kept = uniqueTerms.slice(0, MAX_TERMS)
-  const patterns = kept.map((t) => t.toLowerCase().replace(/[%\\]/g, '')).filter((p) => p.length > 0)
+  const patterns = kept.map((t) => t.toLowerCase())
   const hitCap = Math.min(Math.max(1, Math.floor(hitsPerSession)), MAX_HITS_PER_SESSION)
   const charCap = Math.min(Math.max(1, Math.floor(hitChars)), MAX_TEXT_CHARS)
 
@@ -60,7 +60,13 @@ export async function searchSessions({ runSql, sessions, terms, hitsPerSession =
       try {
         const rows = await runSql(sessionSql(result.session_id, patterns, hitCap + 1))
         result.truncated = rows.length > hitCap
-        for (const row of rows.slice(0, hitCap)) result.hits.push(toHit(result.session_id, row, kept, charCap))
+        for (const row of rows) {
+          const hit = toHit(result.session_id, row, kept, charCap)
+          // A row the terms do not actually match never spends the budget.
+          if (hit.matched_terms.length === 0) continue
+          if (result.hits.length === hitCap) break
+          result.hits.push(hit)
+        }
       } catch (err) {
         result.error = err instanceof Error ? err.message : String(err)
       }
@@ -80,12 +86,16 @@ export async function searchSessions({ runSql, sessions, terms, hitsPerSession =
 }
 
 /**
+ * One session's query: any term as a literal, case-insensitive substring
+ * (`strpos`, so `_`, `%` and `\` match themselves; LIKE would treat the
+ * first two as wildcards and this engine has no ESCAPE clause).
+ *
  * @param {string} sessionId
- * @param {string[]} patterns lowercased, with LIKE's `%` and escape removed
+ * @param {string[]} patterns lowercased terms
  * @param {number} limit
  */
 export function sessionSql(sessionId, patterns, limit) {
-  const any = patterns.map((p) => `lower(content_text) LIKE ${sqlString(`%${p}%`)}`).join(' OR ')
+  const any = patterns.map((p) => `strpos(lower(content_text), ${sqlString(p)}) > 0`).join(' OR ')
   return 'SELECT message_id, part_id, role, message_created_at, content_text FROM ai_gateway_messages '
     + `WHERE session_id = ${sqlString(sessionId)} AND role IN (${EVIDENCE_ROLES.map(sqlString).join(', ')}) `
     + `AND part_type IN (${EVIDENCE_PART_TYPES.map(sqlString).join(', ')}) AND (${any}) `

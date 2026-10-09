@@ -309,7 +309,7 @@ export function runTeamGraphDiscover(argv, ctx, deps = {}) {
 /**
  * The `team-graph-discover/1` document.
  *
- * @param {{ source: FastaskSource, result: DiscoveryResult, args: TeamGraphArgs, input: { terms: string[], files: string[], leads: number, offset: number } }} args
+ * @param {{ source: FastaskSource, result: DiscoveryResult, args: TeamGraphArgs, input: { terms: string[], files: string[], leads: number, offset: number, repoRoot?: string | null } }} args
  */
 export function discoverOutput({ source, result, args, input }) {
   const flags = followFlags(source, args)
@@ -342,7 +342,9 @@ export function discoverOutput({ source, result, args, input }) {
     next: {
       neighbors: result.anchors.length ? `hyp query team-graph neighbors ${result.anchors.slice(0, MAX_STARTS).map((a) => shellQuote(a.node_id)).join(' ')} --direction in${flags} --json` : null,
       search: topSessions.length && terms.length ? `hyp query team-graph search ${topSessions.map((id) => `--session ${shellQuote(id)}`).join(' ')} ${terms.map(shellQuote).join(' ')}${flags} --json` : null,
-      next_page: result.page.next_offset !== null ? `hyp query team-graph discover ${[...input.terms.map(shellQuote), ...input.files.map((f) => `--file ${shellQuote(f)}`)].join(' ')} --limit ${input.leads} --offset ${result.page.next_offset}${flags} --json` : null,
+      // The next page re-sends every ranking input, the repository included,
+      // so it ranks exactly as this page did (whatever the caller's cwd).
+      next_page: result.page.next_offset !== null ? `hyp query team-graph discover ${[...input.terms.map(shellQuote), ...input.files.map((f) => `--file ${shellQuote(f)}`), ...(input.repoRoot ? [`--repo ${shellQuote(input.repoRoot)}`] : [])].join(' ')} --limit ${input.leads} --offset ${result.page.next_offset}${flags} --json` : null,
     },
   }
 }

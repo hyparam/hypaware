@@ -548,10 +548,51 @@ async function tokenPostings(names, tok, packed, count, budget) {
     const wait = budget?.tick(end - start + 1)
     if (wait) await wait
   }
-  const order = Array.from({ length: names.length }, (_, t) => t)
-  // Code-unit order, the order discover's prefix binary search compares in.
-  order.sort((a, b) => compareStrings(names[a], names[b]))
-  return { offsets, postings, sorted: Uint32Array.from(order) }
+  return { offsets, postings, sorted: await sortTokenIds(names, budget) }
+}
+
+/** Element moves between budget ticks while sorting tokens. */
+const SORT_TICK = 1024
+
+/**
+ * Token ids in code-unit order of their names (the order discover's prefix
+ * binary search compares in), by a bottom-up merge sort over typed arrays
+ * that reports progress to the budget every `SORT_TICK` moves, so a large
+ * dictionary yields at slice boundaries instead of blocking in one
+ * `Array.sort` (review r2 F11: 203 ms at 200,000 tokens). Work: n log n
+ * comparisons; memory: two Uint32Arrays of n.
+ *
+ * @ref LLP 0485#decision [implements]: the token sort runs in budgeted slices like the rest of the build
+ * @param {string[]} names
+ * @param {WorkTicker | undefined} budget
+ * @returns {Promise<Uint32Array>}
+ */
+export async function sortTokenIds(names, budget) {
+  const n = names.length
+  let src = new Uint32Array(n)
+  for (let i = 0; i < n; i++) src[i] = i
+  let dst = new Uint32Array(n)
+  let moves = 0
+  for (let width = 1; width < n; width *= 2) {
+    for (let lo = 0; lo < n; lo += 2 * width) {
+      const mid = Math.min(lo + width, n)
+      const hi = Math.min(lo + 2 * width, n)
+      let i = lo
+      let j = mid
+      for (let k = lo; k < hi; k++) {
+        dst[k] = i < mid && (j >= hi || compareStrings(names[src[i]], names[src[j]]) <= 0) ? src[i++] : src[j++]
+        if (++moves === SORT_TICK) {
+          moves = 0
+          const wait = budget?.tick(SORT_TICK)
+          if (wait) await wait
+        }
+      }
+    }
+    const swap = src
+    src = dst
+    dst = swap
+  }
+  return src
 }
 
 /**

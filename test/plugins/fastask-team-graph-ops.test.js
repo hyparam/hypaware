@@ -10,7 +10,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { MAX_POSTINGS, MAX_STARTS, MAX_VISITS, SEED_MAX_FILES, discover, explicitTerms, neighbors } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
-import { createIndexBuilder, splitTokens } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
+import { collect, executeSql } from 'squirreling'
+
+import { compareStrings } from '../../src/core/util/compare_strings.js'
+import { createWorkBudget } from '../../src/core/util/work_budget.js'
+import { createIndexBuilder, sortTokenIds, splitTokens } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
+import { discoverBySql } from '../../hypaware-core/plugins-workspace/fastask/src/sql_discovery.js'
+import { discoverOutput } from '../../hypaware-core/plugins-workspace/fastask/src/team_graph.js'
 import { MAX_SEARCH_SESSIONS, SEARCH_CONCURRENCY, searchSessions, sessionSql } from '../../hypaware-core/plugins-workspace/fastask/src/team_search.js'
 
 /**
@@ -146,7 +152,8 @@ test('search: one bounded query per session, at most two at a time, each reporte
   assert.equal(r.coverage.sessions_dropped, 23 - MAX_SEARCH_SESSIONS)
   assert.deepEqual(r.terms, ['login', 'POLL', 'ab%c\\'])
   assert.equal(sqls.length, MAX_SEARCH_SESSIONS)
-  assert.match(sqls[0], /LIKE '%login%' OR lower\(content_text\) LIKE '%poll%' OR lower\(content_text\) LIKE '%abc%'/)
+  // Literal matches (strpos): % and \ in a term are matched as written, not stripped.
+  assert.match(sqls[0], /strpos\(lower\(content_text\), 'login'\) > 0 OR strpos\(lower\(content_text\), 'poll'\) > 0 OR strpos\(lower\(content_text\), 'ab%c\\'\) > 0/)
   assert.match(sqls[0], /LIMIT 6$/)
 
   const [a, busy, bad] = r.sessions
@@ -164,7 +171,7 @@ test('search: one bounded query per session, at most two at a time, each reporte
 test('search SQL quotes session ids and terms', () => {
   const sql = sessionSql("it's", ["o'clock"], 3)
   assert.match(sql, /session_id = 'it''s'/)
-  assert.match(sql, /LIKE '%o''clock%'/)
+  assert.match(sql, /strpos\(lower\(content_text\), 'o''clock'\) > 0/)
   assert.match(sql, /role IN \('user', 'assistant'\) AND part_type IN \('text'\)/)
 })
 
@@ -243,7 +250,8 @@ test('a token in more than 5,000 files only scores; it never seeds a candidate a
   const both = discover(index, { question: '', terms: ['rarething', 'common'] })
   assert.equal(both.anchors[0].key, 'acme/app:src/common/rarething.js')
   assert.equal(both.anchors[0].term, 'rarething + common', 'the common token still counts for a file a rarer one found')
-  assert.equal(both.coverage.postings_examined, 1)
+  // One posting seeds the rare file; the probe of 'common' reads ~log2(5,011) more.
+  assert.ok(both.coverage.postings_examined > 1 && both.coverage.postings_examined <= 1 + Math.ceil(Math.log2(SEED_MAX_FILES + 12)) + 1, `${both.coverage.postings_examined}`)
 })
 
 test('postings are read rarest first and capped; reaching the cap sets anchors_truncated', async () => {
@@ -269,4 +277,107 @@ test('prefix recall is intended and ranks below an exact token (setup reaches se
   ])
   const confirm = await files(['acme/app:docs/confirmation-step.md'])
   assert.deepEqual(keysFor(confirm, { terms: ['confirm'] }), ['acme/app:docs/confirmation-step.md'])
+})
+
+// ----- review round 2 (F8 to F11) -----
+
+test('F8: a compound term finds the same sessions through SQL (team_server, local) as on the replica', async () => {
+  const node = [
+    { node_id: 'f', node_type: 'File', natural_key: 'acme/app:src/work-budget.js', label: null, first_seen: null, props: null },
+    { node_id: 'g', node_type: 'File', natural_key: 'acme/app:src/workflow.js', label: null, first_seen: null, props: null },
+    { node_id: 's', node_type: 'Session', natural_key: 'sess', label: null, first_seen: null, props: null },
+    { node_id: 't', node_type: 'Session', natural_key: 'other', label: null, first_seen: null, props: null },
+  ]
+  const edge = [
+    { edge_type: 'touched', src_id: 's', dst_id: 'f', src_type: 'Session', dst_type: 'File', first_seen: null, source_keys: null },
+    { edge_type: 'touched', src_id: 't', dst_id: 'g', src_type: 'Session', dst_type: 'File', first_seen: null, source_keys: null },
+  ]
+  const b = createIndexBuilder()
+  node.forEach((x) => b.addNode(x))
+  edge.forEach((x) => b.addEdge(x))
+  const replica = await b.finish()
+  /** @type {string[]} */
+  const sqls = []
+  const runSql = (/** @type {string} */ query) => { sqls.push(query); return collect(executeSql({ query, tables: { node, edge } })) }
+  for (const terms of [['workBudget'], ['work_budget'], ['work-budget.js']]) {
+    const input = { question: '', terms, repo: 'acme/app' }
+    const warm = discover(replica, input).leads.map((l) => l.session_id)
+    const sql = (await discoverBySql({ ...input, runSql })).result.leads.map((l) => l.session_id)
+    assert.deepEqual(sql, warm, terms[0])
+    assert.deepEqual(warm, ['sess'], `${terms[0]} matches work-budget.js and not workflow.js`)
+  }
+  assert.match(sqls[0], /\(strpos\(lower\(natural_key\), 'work'\) > 0 AND strpos\(lower\(natural_key\), 'budget'\) > 0\)/)
+})
+
+test('F9: search matches terms literally; a wildcard row never spends the hit budget', async () => {
+  const tables = { ai_gateway_messages: [
+    { session_id: 'sess', message_id: 'false', part_id: 'false', role: 'user', part_type: 'text', message_created_at: '2026-01-01T00:00:00Z', message_index: 0, part_index: 0, content_text: 'work-budget' },
+    { session_id: 'sess', message_id: 'true', part_id: 'true', role: 'user', part_type: 'text', message_created_at: '2026-01-01T00:01:00Z', message_index: 1, part_index: 0, content_text: 'work_budget' },
+    { session_id: 'sess', message_id: 'pct', part_id: 'pct', role: 'user', part_type: 'text', message_created_at: '2026-01-01T00:02:00Z', message_index: 2, part_index: 0, content_text: 'cut 50% off' },
+    { session_id: 'sess', message_id: 'x', part_id: 'x', role: 'user', part_type: 'text', message_created_at: '2026-01-01T00:03:00Z', message_index: 3, part_index: 0, content_text: 'cut 50x off' },
+  ] }
+  const runSql = (/** @type {string} */ query) => collect(executeSql({ query, tables }))
+  const out = await searchSessions({ runSql, sessions: ['sess'], terms: ['work_budget'], hitsPerSession: 1 })
+  assert.deepEqual(out.sessions[0].hits.map((h) => [h.message_id, h.matched_terms]), [['true', ['work_budget']]])
+  assert.equal(out.sessions[0].truncated, false)
+  const pct = await searchSessions({ runSql, sessions: ['sess'], terms: ['50%'] })
+  assert.deepEqual(pct.sessions[0].hits.map((h) => h.message_id), ['pct'], '% is not a wildcard')
+  // A row the engine returned but no term matches is dropped, not counted.
+  const loose = await searchSessions({ runSql: async () => [{ message_id: 'm0', content_text: 'nothing here' }, { message_id: 'm1', content_text: 'the budget' }], sessions: ['sess'], terms: ['budget'], hitsPerSession: 1 })
+  assert.deepEqual(loose.sessions[0].hits.map((h) => h.message_id), ['m1'])
+})
+
+test('F10: the next page re-sends the repository, so it ranks as the first page did', async () => {
+  const b = createIndexBuilder()
+  b.addNode({ node_id: 'f1', node_type: 'File', natural_key: 'acme/app:src/work.js' })
+  b.addNode({ node_id: 'f2', node_type: 'File', natural_key: 'other/lib:src/work.js' })
+  for (let i = 0; i < 4; i++) {
+    b.addNode({ node_id: `s${i}`, node_type: 'Session', natural_key: `sess-${i}` })
+    b.addEdge({ edge_type: 'touched', src_id: `s${i}`, dst_id: i < 2 ? 'f1' : 'f2', src_type: 'Session', dst_type: 'File', first_seen: T0 + i * DAY })
+  }
+  const index = await b.finish()
+  const input = { question: '', terms: ['work'], files: [], leads: 1, offset: 0, repo: 'acme/app', repoRoot: '/workspace/selected' }
+  const first = discover(index, input)
+  const args = { positional: ['work'], remote: 'fx', org: null, json: true, lists: { term: [], file: [] }, values: { repo: '/workspace/selected' }, numbers: {} }
+  const out = discoverOutput({ source: /** @type {any} */ ({ kind: 'team_replica', remote: 'fx' }), result: first, args, input })
+  assert.equal(out.next.next_page, 'hyp query team-graph discover work --repo /workspace/selected --limit 1 --offset 1 --remote fx --json')
+  // Paging with the repository gives the same order as one page holding them all.
+  const all = discover(index, { ...input, leads: 4 }).leads.map((l) => l.session_id)
+  const paged = [0, 1, 2, 3].map((offset) => discover(index, { ...input, offset }).leads[0].session_id)
+  assert.deepEqual(paged, all)
+  assert.deepEqual(all.slice(0, 2).sort(), ['sess-0', 'sess-1'], 'the caller repository ranks first')
+})
+
+test('F11: the token dictionary sorts in budgeted slices, in code-unit order, without a long stall', async () => {
+  const names = Array.from({ length: 5000 }, (_, i) => `t${((i * 7919) % 5000).toString(36)}${i % 3 ? 'é' : 'Z'}`)
+  let ticked = 0
+  const sorted = await sortTokenIds(names, { tick(rows = 1) { ticked += rows; return undefined } })
+  const expected = Array.from({ length: names.length }, (_, i) => i).sort((a, b) => compareStrings(names[a], names[b]))
+  assert.deepEqual([...sorted], expected)
+  assert.ok(ticked >= names.length * 12 - 1024, `progress reported while sorting (${ticked} moves)`)
+
+  const big = Array.from({ length: 100_000 }, (_, i) => `tok${((i * 7919) % 100_000).toString(36)}`)
+  let maxGap = 0
+  let last = performance.now()
+  const timer = setInterval(() => { const now = performance.now(); maxGap = Math.max(maxGap, now - last); last = now }, 1)
+  try {
+    await sortTokenIds(big, createWorkBudget({ duty: 1 }))
+  } finally {
+    clearInterval(timer)
+  }
+  assert.ok(maxGap < 50, `the event loop ran during the sort (longest gap ${maxGap.toFixed(1)} ms)`)
+})
+
+test('F12: probes of common tokens count against the posting bound, which stops them and flags truncation', async () => {
+  // 1,000 files reached through rare tokens (the 'rare' prefix seeds them),
+  // all under a directory token in 6,000 files: scoring 'common' probes it
+  // once per candidate.
+  const keys = Array.from({ length: 6000 }, (_, i) => (i < 1000 ? `acme/app:common/rare${i}.js` : `acme/app:common/other${i}.js`))
+  const index = await files(keys)
+  const unbounded = discover(index, { question: '', terms: ['rare', 'common'] })
+  assert.ok(unbounded.coverage.postings_examined > 1000, `probe reads are counted (${unbounded.coverage.postings_examined})`)
+  assert.equal(unbounded.anchors[0].term, 'rare + common')
+  const bounded = discover(index, { question: '', terms: ['rare', 'common'], maxPostings: 5000 })
+  assert.ok(bounded.coverage.postings_examined <= 5000, `stays within the bound (${bounded.coverage.postings_examined})`)
+  assert.ok(bounded.coverage.anchors_truncated > 0, 'reaching the bound is flagged')
 })
