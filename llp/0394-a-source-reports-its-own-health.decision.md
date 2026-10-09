@@ -7,6 +7,7 @@
 **Date:** 2026-09-08
 **Extends:** LLP 0012, LLP 0164
 **Related:** LLP 0021, LLP 0225, LLP 0385
+**Extended-by:** LLP 0480 (#status-line: a source may publish one `summary_line` that `hyp status` shows in every state, an exception to #quiet-when-healthy)
 
 > The kernel contract has published `SourceStatus.state`, `message`,
 > `rowsWritten` and `lastError` since V1, and the daemon kept only `details`.
