@@ -113,6 +113,8 @@ export interface GraphIndex {
   nodeIds: Map<string, number>
   /** Interned node type names; `nodeType[i]` indexes this. */
   nodeTypes: string[]
+  /** Real (non-placeholder) nodes per entry of `nodeTypes`. */
+  nodeTypeCounts: number[]
   nodeType: Uint8Array
   /** Bit 1: placeholder. */
   nodeFlags: Uint8Array
@@ -124,6 +126,8 @@ export interface GraphIndex {
   sessionProps: Map<number, SessionProps>
 
   edgeTypes: string[]
+  /** Edges per entry of `edgeTypes`. */
+  edgeTypeCounts: number[]
   edgeType: Uint8Array
   edgeSrc: Uint32Array
   edgeDst: Uint32Array
@@ -214,6 +218,13 @@ export interface DiscoveryGroup {
   sessions: number
 }
 
+/** The generation has File nodes but none of the edge kind discovery walks (LLP 0484#edge-kinds). */
+export interface VocabularyMismatch {
+  error_kind: 'vocabulary_mismatch'
+  /** The edge types the generation does carry, with their counts. */
+  edge_types: Record<string, number>
+}
+
 export interface DiscoveryResult {
   terms: Term[]
   anchors: Anchor[]
@@ -222,6 +233,8 @@ export interface DiscoveryResult {
   groups: DiscoveryGroup[]
   /** No term or `--file` matched a File: the caller falls back to text search. */
   no_anchor: boolean
+  /** The graph cannot answer: the caller uses the `team_server` source with this reason. */
+  fallback: { reason: 'vocabulary_mismatch', edge_types: Record<string, number> } | null
   coverage: {
     visits: number
     truncated: boolean

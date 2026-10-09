@@ -3,7 +3,7 @@
 import { PLACEHOLDER, basenameOf, isAbsolute, lastSegments, repoOfKey } from './index_builder.js'
 
 /**
- * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Term } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Term, VocabularyMismatch } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 /**
@@ -43,6 +43,28 @@ const WEIGHT_IN_REPO = 4
 const WEIGHT_PROVEN = 2
 const WEIGHT_CANDIDATE = 1
 const WEIGHT_TERM = 2
+
+/**
+ * Whether this generation can answer discovery at all: it has File nodes but
+ * no `touched` edges when a projector renamed the edge kind discovery walks.
+ * Returns the edge types it does carry, so the status line, the span and the
+ * `team_server` fallback can say why; null when the graph is usable (or has
+ * no Files, where an empty answer is honest).
+ *
+ * @ref LLP 0484#edge-kinds [implements]: File nodes without touched edges is vocabulary_mismatch, answered through team_server, never silent empty discovery
+ * @param {GraphIndex} index
+ * @returns {VocabularyMismatch | null}
+ */
+export function vocabularyMismatch(index) {
+  const file = index.nodeTypes.indexOf('File')
+  if (file === -1 || index.nodeTypeCounts[file] === 0) return null
+  const touched = index.edgeTypes.indexOf(TOUCH_EDGE)
+  if (touched !== -1 && index.edgeTypeCounts[touched] > 0) return null
+  /** @type {Record<string, number>} */
+  const edgeTypes = {}
+  index.edgeTypes.forEach((type, t) => { edgeTypes[type] = index.edgeTypeCounts[t] })
+  return { error_kind: 'vocabulary_mismatch', edge_types: edgeTypes }
+}
 
 /**
  * Up to `max` terms from a question: path-like tokens and filenames as
@@ -124,6 +146,22 @@ export function discover(index, input) {
   const { anchors, dropped } = pickAnchors(sources, maxAnchors)
   const sourceOf = new Map(sources.map((s, n) => [s.text, n]))
 
+  // Anchors still resolve (they say what the question named); the walk would
+  // find nothing, so the caller is told to ask the team server instead.
+  const mismatch = vocabularyMismatch(index)
+  if (mismatch) {
+    return {
+      terms,
+      anchors,
+      leads: [],
+      ambiguous: false,
+      groups: [],
+      no_anchor: anchors.length === 0,
+      fallback: { reason: mismatch.error_kind, edge_types: mismatch.edge_types },
+      coverage: { visits: 0, truncated: false, anchors_truncated: dropped, unresolved_edges_met: 0, sessions_considered: 0 },
+    }
+  }
+
   // @ref LLP 0480#discovery [implements]: walk touched edges into each anchor within a 20,000-visit budget, sharing it fairly across anchors
   const touched = index.edgeTypes.indexOf(TOUCH_EDGE)
   const sessionType = index.nodeTypes.indexOf(SESSION_TYPE)
@@ -184,6 +222,7 @@ export function discover(index, input) {
     ambiguous,
     groups,
     no_anchor: anchors.length === 0,
+    fallback: null,
     coverage: {
       visits,
       truncated,
