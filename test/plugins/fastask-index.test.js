@@ -14,12 +14,13 @@ import { gzipSync } from 'node:zlib'
 
 import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, verifyManifest } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
 import {
+  BYTES_PER_ROW,
   IndexBuildError,
   MAX_INDEX_BYTES,
   PLACEHOLDER,
+  assertManifestFits,
   buildIndexFromSnapshot,
   createIndexBuilder,
-  minimumIndexBytes,
 } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
 
 /**
@@ -107,6 +108,12 @@ test('the pinned graph fixture verifies, then indexes with placeholders matching
   assert.deepEqual(edited, { message_id: 'fx-msg-0002', part_id: null })
   assert.equal(index.exemplars.size, 3)
   assert.ok(index.bytes > 0 && index.bytes < MAX_INDEX_BYTES)
+
+  // Counts per type (LLP 0484#edge-kinds): every edge, real nodes only.
+  /** @param {string[]} names @param {number[]} counts */
+  const byName = (names, counts) => Object.fromEntries(names.map((n, t) => [n, counts[t]]))
+  assert.deepEqual(byName(index.edgeTypes, index.edgeTypeCounts), { EDITED: 3, READ: 1, CHANGES: 1 })
+  assert.deepEqual(byName(index.nodeTypes, index.nodeTypeCounts), { Session: 1, File: 2, PullRequest: 1, Tool: 1 })
 })
 
 test('streamed in tiny chunks, lines split across chunks index identically', async () => {
@@ -154,12 +161,27 @@ test('a node arriving after its edge fills the placeholder in (interleaved local
   assert.equal(index.placeholderCount, 0)
   assert.equal(index.unresolvedEdges, 0)
   assert.equal(index.sessionProps.get(/** @type {number} */ (index.nodeIds.get('s')))?.cwd, '/w', 'a stored JSON string is parsed')
+  assert.deepEqual(index.nodeTypeCounts, [1, 1], 'a filled placeholder counts once as a real node')
+  assert.deepEqual(index.edgeTypeCounts, [1])
   assert.ok(index.fileByBasename.has('a.js'))
 })
 
-test('a manifest whose row counts pass the ceiling is refused before anything is read', async () => {
-  const huge = { files: { nodes: { rows: 10_000_000 }, edges: { rows: 40_000_000 } } }
-  assert.ok(minimumIndexBytes(10_000_000, 40_000_000) > MAX_INDEX_BYTES)
+test('the ceiling is 256 MB and the up-front check allows 100 bytes per manifest row', () => {
+  assert.equal(MAX_INDEX_BYTES, 256 * 1024 * 1024)
+  assert.equal(BYTES_PER_ROW, 100)
+  const fits = Math.floor(MAX_INDEX_BYTES / BYTES_PER_ROW)
+  assert.doesNotThrow(() => assertManifestFits({ files: { nodes: { rows: 1 }, edges: { rows: fits - 1 } } }))
+  assert.throws(() => assertManifestFits({ files: { nodes: { rows: 1 }, edges: { rows: fits } } }),
+    (err) => err instanceof IndexBuildError && err.code === 'replica_too_large')
+  assert.doesNotThrow(() => assertManifestFits(manifest), 'the pinned fixture fits')
+  assert.doesNotThrow(() => assertManifestFits(undefined), 'no row counts: the running estimate holds it')
+  assert.throws(() => assertManifestFits({ files: { nodes: { rows: 1000 }, edges: { rows: 0 } } }, 99_999))
+})
+
+test('a manifest past the up-front bound is refused before anything is read', async () => {
+  // About 2.7M rows: the running estimate would admit the first part of this
+  // build, but at 100 bytes per row it is past 256 MB before a byte is read.
+  const huge = { files: { nodes: { rows: 1_000_000 }, edges: { rows: 1_700_000 } } }
   const untouchable = {
     [Symbol.asyncIterator]() { throw new Error('the source must not be read') },
   }

@@ -20,8 +20,11 @@ import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
  * it is given, no kernel registration.
  */
 
-/** Hard ceiling on the index's estimated resident bytes (LLP 0480#index). */
-export const MAX_INDEX_BYTES = 512 * 1024 * 1024
+/** Hard ceiling on the index's estimated resident bytes (LLP 0484#build-memory, was 512 MB in LLP 0480#index). */
+export const MAX_INDEX_BYTES = 256 * 1024 * 1024
+
+/** Bytes per manifest row the up-front check assumes (measured about 79; LLP 0484#build-memory). */
+export const BYTES_PER_ROW = 100
 
 /** `nodeFlags` bit: the node was minted for an edge endpoint absent from the node file. */
 export const PLACEHOLDER = 1
@@ -37,9 +40,6 @@ const NODE_TYPED_BYTES = 1 + 1 + 8 // type, flags, first seen
 const EDGE_TYPED_BYTES = 4 + 4 + 1 + 8 // src, dst, type, first seen
 const CSR_EDGE_BYTES = 4 + 4 // one slot in each direction
 const CSR_NODE_BYTES = 4 + 4 // one offset in each direction
-// The least a row costs once built: what the manifest's row counts commit to.
-const MIN_NODE_BYTES = MAP_ENTRY_BYTES + STRING_BYTES + NODE_TYPED_BYTES + 2 * ARRAY_SLOT_BYTES + CSR_NODE_BYTES
-const MIN_EDGE_BYTES = EDGE_TYPED_BYTES + CSR_EDGE_BYTES
 // Interned type names fit a Uint8; anything past the table shares the last slot.
 const MAX_TYPES = 255
 const OTHER_TYPE = '(other)'
@@ -58,15 +58,25 @@ export class IndexBuildError extends Error {
 }
 
 /**
- * The least an index of these row counts can cost. A manifest whose counts
- * already pass the ceiling is refused before a byte is decompressed.
+ * Refuses a generation from its manifest alone, before it is downloaded or
+ * parsed: its row counts times `BYTES_PER_ROW` must fit `maxBytes`. A build
+ * peaks at several times its index, so this keeps an oversized graph from
+ * growing the process on the way to a refusal; the running estimate during
+ * the build stays as the second check. A manifest without row counts passes
+ * here and is held by the running estimate alone.
  *
- * @param {number} nodes
- * @param {number} edges
- * @returns {number}
+ * @ref LLP 0484#build-memory [implements]: (nodes.rows + edges.rows) x 100 bytes past MAX_INDEX_BYTES is refused before download
+ * @param {any} manifest
+ * @param {number} [maxBytes]
  */
-export function minimumIndexBytes(nodes, edges) {
-  return nodes * MIN_NODE_BYTES + edges * MIN_EDGE_BYTES
+export function assertManifestFits(manifest, maxBytes = MAX_INDEX_BYTES) {
+  const nodes = rowsOf(manifest, 'nodes') ?? 0
+  const edges = rowsOf(manifest, 'edges') ?? 0
+  const bytes = (nodes + edges) * BYTES_PER_ROW
+  if (bytes > maxBytes) {
+    throw new IndexBuildError('replica_too_large',
+      `team graph index would exceed ${maxBytes} bytes (${nodes} nodes and ${edges} edges at ${BYTES_PER_ROW} bytes per row is ${bytes})`)
+  }
 }
 
 /**
@@ -89,6 +99,8 @@ export function createIndexBuilder(opts = {}) {
   const nodeIds = new Map()
   /** @type {string[]} */
   const nodeTypes = []
+  /** @type {number[]} real (non-placeholder) nodes per interned type */
+  const nodeTypeCounts = []
   /** @type {Map<string, number>} */
   const nodeTypeIndex = new Map()
   let nodeType = new Uint8Array(nodeCap)
@@ -107,6 +119,8 @@ export function createIndexBuilder(opts = {}) {
 
   /** @type {string[]} */
   const edgeTypes = []
+  /** @type {number[]} edges per interned type */
+  const edgeTypeCounts = []
   /** @type {Map<string, number>} */
   const edgeTypeIndex = new Map()
   let edgeType = new Uint8Array(edgeCap)
@@ -154,6 +168,7 @@ export function createIndexBuilder(opts = {}) {
     if (nodeTypes.length === MAX_TYPES - 1) return internNodeType(OTHER_TYPE)
     t = nodeTypes.length
     nodeTypes.push(name)
+    nodeTypeCounts.push(0)
     nodeTypeIndex.set(name, t)
     heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + name.length
     return t
@@ -166,6 +181,7 @@ export function createIndexBuilder(opts = {}) {
     if (edgeTypes.length === MAX_TYPES - 1) return internEdgeType(OTHER_TYPE)
     t = edgeTypes.length
     edgeTypes.push(name)
+    edgeTypeCounts.push(0)
     edgeTypeIndex.set(name, t)
     heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + name.length
     return t
@@ -266,6 +282,7 @@ export function createIndexBuilder(opts = {}) {
       } else {
         return // a node id appears once per file; a repeat adds nothing
       }
+      nodeTypeCounts[nodeType[i]]++
       const key = str(row.natural_key)
       const text = str(row.label)
       naturalKey[i] = key
@@ -296,6 +313,8 @@ export function createIndexBuilder(opts = {}) {
       edgeSrc[e] = src
       edgeDst[e] = dst
       edgeType[e] = internEdgeType(str(row.edge_type) ?? 'unknown')
+      // @ref LLP 0484#edge-kinds [implements]: a count per edge type, so a generation without the walked kind is flagged, not silently empty
+      edgeTypeCounts[edgeType[e]]++
       edgeFirstSeen[e] = millis(row.first_seen)
       const exemplar = exemplarOf(row.source_keys)
       if (exemplar) {
@@ -346,6 +365,7 @@ export function createIndexBuilder(opts = {}) {
         bytes: estimate(),
         nodeIds,
         nodeTypes,
+        nodeTypeCounts,
         nodeType,
         nodeFlags,
         naturalKey,
@@ -353,6 +373,7 @@ export function createIndexBuilder(opts = {}) {
         nodeFirstSeen,
         sessionProps,
         edgeTypes,
+        edgeTypeCounts,
         edgeType,
         edgeSrc,
         edgeDst,
@@ -421,7 +442,8 @@ async function adjacency(endpoints, nodeCount, firstSeen, budget) {
  * Builds the index for one verified generation by streaming each gzipped
  * file through decompression and line parsing, nodes first, in work-budget
  * slices. The manifest's row counts size the arrays and refuse an
- * over-ceiling generation before anything is decompressed. Abort is observed
+ * over-ceiling generation before anything is decompressed (the sync loop
+ * calls `assertManifestFits` itself before downloading). Abort is observed
  * at slice boundaries and surfaces as the signal's reason.
  *
  * @ref LLP 0480#cooperative [implements]: decompress, parse and both CSR passes tick one budget; the cold path passes duty 1
@@ -432,12 +454,8 @@ export async function buildIndexFromSnapshot(input) {
   const maxBytes = input.maxBytes ?? MAX_INDEX_BYTES
   const expectedNodes = rowsOf(input.manifest, 'nodes')
   const expectedEdges = rowsOf(input.manifest, 'edges')
-  const floor = minimumIndexBytes(expectedNodes ?? 0, expectedEdges ?? 0)
   // @ref LLP 0480#index [implements]: a generation past MAX_INDEX_BYTES is refused with replica_too_large instead of growing
-  if (floor > maxBytes) {
-    throw new IndexBuildError('replica_too_large',
-      `team graph index would exceed ${maxBytes} bytes (at least ${floor} for ${expectedNodes} nodes and ${expectedEdges} edges)`)
-  }
+  assertManifestFits(input.manifest, maxBytes)
   const { signal } = input
   const budget = createWorkBudget({ duty: input.duty, signal, now: input.now })
   const builder = createIndexBuilder({ maxBytes, expectedNodes, expectedEdges })

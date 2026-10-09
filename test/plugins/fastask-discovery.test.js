@@ -11,7 +11,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { MAX_ANCHORS, MAX_VISITS, discover, extractTerms } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
+import { MAX_ANCHORS, MAX_VISITS, discover, extractTerms, vocabularyMismatch } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
 import { buildIndexFromSnapshot, createIndexBuilder } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
 
 /**
@@ -101,6 +101,37 @@ test('the caller\'s repository is preferred and resolves the ambiguity', async (
   assert.equal(top.why[0].anchor.match, 'basename')
   assert.equal(top.why[0].edge, 'touched')
   assert.deepEqual(top.session, { first_seen: new Date(T0).toISOString(), cwd: `/w/${top.session_id}`, git_branch: 'main', client_name: 'claude-code', user_id: 'u-1' })
+  assert.equal(vocabularyMismatch(index), null)
+  assert.equal(result.fallback, null)
+})
+
+test('File nodes without touched edges are a vocabulary mismatch: anchors resolve, the walk is skipped, the caller falls back', async () => {
+  const builder = createIndexBuilder()
+  builder.addNode({ node_id: 's1', node_type: 'Session', natural_key: 'sess-1' })
+  builder.addNode({ node_id: 'f1', node_type: 'File', natural_key: 'acme/app:src/login.js' })
+  builder.addEdge({ edge_type: 'EDITED', src_id: 's1', dst_id: 'f1', src_type: 'Session', dst_type: 'File' })
+  builder.addEdge({ edge_type: 'READ', src_id: 's1', dst_id: 'f1', src_type: 'Session', dst_type: 'File' })
+  builder.addEdge({ edge_type: 'READ', src_id: 's1', dst_id: 'f1', src_type: 'Session', dst_type: 'File' })
+  const index = await builder.finish()
+  assert.deepEqual(vocabularyMismatch(index), { error_kind: 'vocabulary_mismatch', edge_types: { EDITED: 1, READ: 2 } })
+  const result = discover(index, { question: 'login.js', repo: 'acme/app' })
+  assert.deepEqual(result.fallback, { reason: 'vocabulary_mismatch', edge_types: { EDITED: 1, READ: 2 } })
+  assert.deepEqual(result.leads, [])
+  assert.equal(result.no_anchor, false)
+  assert.equal(result.anchors[0].key, 'acme/app:src/login.js')
+  assert.equal(result.coverage.visits, 0)
+})
+
+test('a graph with no File nodes is not a vocabulary mismatch', async () => {
+  const builder = createIndexBuilder()
+  builder.addNode({ node_id: 's1', node_type: 'Session', natural_key: 'sess-1' })
+  builder.addNode({ node_id: 't1', node_type: 'Tool', natural_key: 'Bash' })
+  builder.addEdge({ edge_type: 'used', src_id: 's1', dst_id: 't1', src_type: 'Session', dst_type: 'Tool' })
+  // A File known only as a placeholder endpoint is not a File node of this generation.
+  builder.addEdge({ edge_type: 'EDITED', src_id: 's1', dst_id: 'gone', src_type: 'Session', dst_type: 'File' })
+  const index = await builder.finish()
+  assert.equal(vocabularyMismatch(index), null)
+  assert.equal(discover(index, { question: 'anything' }).fallback, null)
 })
 
 test('a session matching more terms ranks first, with its exemplar message and touch time', async () => {
@@ -204,4 +235,9 @@ test('on the pinned fixture, an absolute-path File anchors as an unproven candid
     ['/work/fx-repo/docs/café-日本-🚀.md', 'basename', false, false],
   ])
   assert.equal(result.no_anchor, false)
+  // Until server LLP 0556 T1 renames them, the fixture's Session to File edges
+  // (EDITED, READ) are not the walked vocabulary (LLP 0484#edge-kinds); after
+  // the re-pin this test asserts leads.
+  assert.deepEqual(result.fallback, { reason: 'vocabulary_mismatch', edge_types: { EDITED: 3, READ: 1, CHANGES: 1 } })
+  assert.deepEqual(result.leads, [])
 })
