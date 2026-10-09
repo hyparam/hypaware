@@ -42,6 +42,24 @@
         "category": "explore-share",
         "audience": "everyday",
         "summary": "Read original session text from a team server (session_evidence); used by fastask follow-ups"
+      },
+      {
+        "name": "query team-graph discover",
+        "category": "explore-share",
+        "audience": "everyday",
+        "summary": "Team graph files matching your terms, and the sessions that touched them"
+      },
+      {
+        "name": "query team-graph neighbors",
+        "category": "explore-share",
+        "audience": "everyday",
+        "summary": "One hop from team graph nodes: what touched them, or what they touched"
+      },
+      {
+        "name": "query team-graph search",
+        "category": "explore-share",
+        "audience": "everyday",
+        "summary": "Find text inside candidate sessions on the team server"
       }
     ]
   }

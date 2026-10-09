@@ -23,7 +23,7 @@ test('fastask is bundled, excluded from default, and declares its source and com
   const entry = catalog.excluded.find((e) => e.manifest.name === '@hypaware/fastask')
   assert.ok(entry)
   assert.deepEqual(entry.manifest.contributes?.sources, [{ name: 'team-graph-replica' }])
-  assert.deepEqual(entry.manifest.contributes?.commands?.map((c) => c.name), ['fastask', 'graph replica status', 'graph replica refresh', 'query evidence'])
+  assert.deepEqual(entry.manifest.contributes?.commands?.map((c) => c.name), ['fastask', 'graph replica status', 'graph replica refresh', 'query evidence', 'query team-graph discover', 'query team-graph neighbors', 'query team-graph search'])
 })
 
 test('a default boot registers nothing of fastask; an explicit entry registers the source and the commands', async (t) => {
@@ -43,7 +43,7 @@ test('a default boot registers nothing of fastask; an explicit entry registers t
   assert.equal(activation?.ok, true)
   assert.deepEqual(explicit.runtime.sources.list().map((s) => s.name), ['team-graph-replica'])
   const commands = explicit.runtime.commands.list().filter((c) => c.plugin === '@hypaware/fastask').map((c) => c.name).sort()
-  assert.deepEqual(commands, ['fastask', 'graph replica refresh', 'graph replica status', 'query evidence'])
+  assert.deepEqual(commands, ['fastask', 'graph replica refresh', 'graph replica status', 'query evidence', 'query team-graph discover', 'query team-graph neighbors', 'query team-graph search'])
   const verb = explicit.runtime.verbs.list().find((v) => v.name === 'query evidence')
   assert.equal(verb?.tool, 'session_evidence')
   assert.equal(verb?.exposure, 'cli-only', 'never an MCP tool of this client')

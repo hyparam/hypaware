@@ -111,7 +111,7 @@ export function evidenceCommand(remote, entry, org = null) {
 }
 
 /** @param {{ remote: string, org: string | null } | null} scope */
-function scopeFlags(scope) {
+export function scopeFlags(scope) {
   if (!scope) return ''
   return ` --remote ${shellQuote(scope.remote)}${scope.org ? ` --org ${shellQuote(scope.org)}` : ''}`
 }

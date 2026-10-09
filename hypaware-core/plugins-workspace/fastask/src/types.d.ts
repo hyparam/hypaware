@@ -659,3 +659,14 @@ export interface SearchResult {
   sessions: SearchSession[]
   coverage: { sessions_asked: number, sessions_dropped: number, terms_dropped: number, hits: number }
 }
+
+/** The parsed arguments shared by the three `query team-graph` commands. */
+export interface TeamGraphArgs {
+  positional: string[]
+  remote: string | null
+  org: string | null
+  json: boolean
+  lists: Record<string, string[]>
+  values: Record<string, string>
+  numbers: Record<string, number>
+}
