@@ -112,7 +112,7 @@ test('the pinned graph fixture verifies, then indexes with placeholders matching
   // Counts per type (LLP 0484#edge-kinds): every edge, real nodes only.
   /** @param {string[]} names @param {number[]} counts */
   const byName = (names, counts) => Object.fromEntries(names.map((n, t) => [n, counts[t]]))
-  assert.deepEqual(byName(index.edgeTypes, index.edgeTypeCounts), { EDITED: 3, READ: 1, CHANGES: 1 })
+  assert.deepEqual(byName(index.edgeTypes, index.edgeTypeCounts), { touched: 5 })
   assert.deepEqual(byName(index.nodeTypes, index.nodeTypeCounts), { Session: 1, File: 2, PullRequest: 1, Tool: 1 })
 })
 

@@ -64,10 +64,10 @@
     "edges": {
       "path": "generations/1760000000000-7/edges.ndjson.gz",
       "rows": 5,
-      "bytes": 571,
-      "uncompressed_bytes": 1873,
-      "sha256": "61b26ee74d1de0a876672b0a5d3476d3a44e32d1b34fe0b2203a530540a90fa9",
-      "set_digest": "24bcaab643786ea64b91f13e7eba179bd3f4fc08d982b0f11380938dd4807b45"
+      "bytes": 548,
+      "uncompressed_bytes": 1879,
+      "sha256": "953dcfb7d3ea9bb5e4656b8e266619e1767f72ecfb127df532ccee8faf1af3be",
+      "set_digest": "dea7de15baf401bbddef20acefada1e0aedd77e221b5cf07503c8085a62fc5db"
     }
   },
   "unresolved": {

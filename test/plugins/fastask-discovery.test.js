@@ -222,7 +222,7 @@ test('leads default to 8 and are capped at 40', async () => {
   assert.equal(discover(index, { question: 'a.js', leads: 500 }).leads.length, 40)
 })
 
-test('on the pinned fixture, an absolute-path File anchors as an unproven candidate, non-ASCII names included', async () => {
+test('on the pinned fixture, discovery walks touched edges to the session, from unproven absolute-path anchors, non-ASCII names included', async () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(GRAPH, 'manifest.json'), 'utf8'))
   const index = await buildIndexFromSnapshot({
     manifest,
@@ -235,9 +235,23 @@ test('on the pinned fixture, an absolute-path File anchors as an unproven candid
     ['/work/fx-repo/docs/café-日本-🚀.md', 'basename', false, false],
   ])
   assert.equal(result.no_anchor, false)
-  // Until server LLP 0556 T1 renames them, the fixture's Session to File edges
-  // (EDITED, READ) are not the walked vocabulary (LLP 0484#edge-kinds); after
-  // the re-pin this test asserts leads.
-  assert.deepEqual(result.fallback, { reason: 'vocabulary_mismatch', edge_types: { EDITED: 3, READ: 1, CHANGES: 1 } })
-  assert.deepEqual(result.leads, [])
+  // The re-pinned fixture carries the projectors' `touched` (LLP 0484#edge-kinds).
+  assert.equal(result.fallback, null)
+  assert.equal(result.ambiguous, false)
+  // app.js is also touched from a session absent from the node file.
+  assert.equal(result.coverage.unresolved_edges_met, 1)
+  assert.deepEqual(result.leads, [{
+    session_id: 'fx-session-0001',
+    rank: 1,
+    score: 6,
+    // Equal weights: the lead's group is its earliest anchor's term.
+    group: 'app.js',
+    why: [
+      { anchor: { type: 'File', key: '/work/fx-repo/docs/café-日本-🚀.md', match: 'basename', proven: false, in_repo: false }, term: 'café-日本-🚀.md', edge: 'touched', touched_at: '2026-09-02T10:15:30.001Z' },
+      { anchor: { type: 'File', key: '/work/fx-repo/src/app.js', match: 'basename', proven: false, in_repo: false }, term: 'app.js', edge: 'touched', touched_at: '2026-08-31T22:36:02.500Z' },
+    ],
+    touched_at: '2026-09-02T10:15:30.001Z',
+    exemplar: { message_id: 'fx-msg-0003', part_id: null },
+    session: { first_seen: '2026-08-31T22:35:40.016Z', cwd: null, git_branch: null, client_name: null, user_id: null },
+  }])
 })
