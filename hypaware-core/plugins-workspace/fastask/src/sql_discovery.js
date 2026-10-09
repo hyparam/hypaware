@@ -1,7 +1,7 @@
 // @ts-check
 
 import { discover, explicitTerms, extractTerms } from './discovery.js'
-import { basenameOf, createIndexBuilder } from './index_builder.js'
+import { MIN_TOKEN, basenameOf, createIndexBuilder, splitTokens } from './index_builder.js'
 
 /**
  * @import { DiscoveryResult } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
@@ -42,19 +42,29 @@ const IN_CHUNK = 500
  * @returns {Promise<{ result: DiscoveryResult, queries: number, capped: boolean }>}
  */
 export async function discoverBySql({ runSql, question, terms, offset, repo = null, repoRoot = null, files = [], leads }) {
-  const words = new Set((terms ? explicitTerms(terms) : extractTerms(question)).map((t) => t.text.toLowerCase()))
+  // The prefilter keeps any File the replica's matching could: for each
+  // term, every part of 3+ characters appears in the key (LLP 0488's compound
+  // rule), and for each --file, its basename. `strpos` is a literal match, so
+  // `_`, `%` and `\` in a term match themselves. discover then applies the
+  // token rule to what this returns, as on the replica.
+  // @ref LLP 0488#path-tokens [implements]: team_server and local discovery prefilter by the same term parts the replica matches
+  /** @type {string[][]} */
+  const clauses = []
+  for (const term of terms ? explicitTerms(terms) : extractTerms(question)) {
+    const parts = [...new Set(splitTokens(term.text).filter((p) => p.length >= MIN_TOKEN))]
+    if (parts.length) clauses.push(parts)
+  }
   for (const file of files) {
     const base = basenameOf(file).toLowerCase()
-    if (base) words.add(base)
+    if (base) clauses.push([base])
   }
-  const patterns = [...words].map((w) => w.replace(/[%\\]/g, '')).filter((w) => w.length >= 2)
   const builder = createIndexBuilder()
   let queries = 0
   let capped = false
-  if (patterns.length > 0) {
+  if (clauses.length > 0) {
     const fileRows = await runSql(
       'SELECT node_id, node_type, natural_key, label, first_seen FROM node WHERE node_type = \'File\' AND ('
-      + patterns.map((p) => `lower(natural_key) LIKE ${sqlString(`%${p}%`)}`).join(' OR ')
+      + clauses.map((parts) => `(${parts.map((p) => `strpos(lower(natural_key), ${sqlString(p)}) > 0`).join(' AND ')})`).join(' OR ')
       + `) LIMIT ${MAX_SQL_FILES}`,
     )
     queries++
