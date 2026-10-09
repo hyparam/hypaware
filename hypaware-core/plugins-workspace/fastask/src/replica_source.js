@@ -28,6 +28,8 @@ const PLUGIN = '@hypaware/fastask'
 /** Control routes under the reserved `/_hypaware/` prefix, advertised in status details. */
 export const DISCOVER_ROUTE = 'fastask/discover'
 export const EVIDENCE_ROUTE = 'fastask/evidence'
+/** `graph replica refresh`: start a check now, coalesced with any in flight. */
+export const REFRESH_ROUTE = 'fastask/refresh'
 /** The per-boot bearer, mode 0600, in the plugin state directory (the trust boundary). */
 export const TOKEN_FILE = 'control-token'
 /** A discover request is a question and a few paths. */
@@ -203,7 +205,8 @@ export function createReplicaSource(deps = {}) {
       const url = requestUrlOf(req)
       if (!url) return reject(req, res, 400, 'invalid_request')
       const route = url.pathname === `/_hypaware/${DISCOVER_ROUTE}` ? DISCOVER_ROUTE
-        : url.pathname === `/_hypaware/${EVIDENCE_ROUTE}` ? EVIDENCE_ROUTE : null
+        : url.pathname === `/_hypaware/${EVIDENCE_ROUTE}` ? EVIDENCE_ROUTE
+          : url.pathname === `/_hypaware/${REFRESH_ROUTE}` ? REFRESH_ROUTE : null
       if (!route) return reject(req, res, 404, 'not_found')
       if (!authorized(req.headers.authorization)) return reject(req, res, 401, 'unauthorized')
       if (req.method !== 'POST') return reject(req, res, 405, 'method_not_allowed')
@@ -213,6 +216,11 @@ export function createReplicaSource(deps = {}) {
       const body = await readJson(req, res, route === DISCOVER_ROUTE ? DISCOVER_BODY_CAP : EVIDENCE_BODY_CAP)
       if (body === undefined) return
       if (route === DISCOVER_ROUTE) return answerDiscover(res, body)
+      if (route === REFRESH_ROUTE) {
+        // @ref LLP 0480#sync [implements]: graph replica refresh starts a pass now, coalesced with any check in flight; the command does not wait for it
+        void sync.refresh().catch(() => {})
+        return send(res, 202, { accepted: true, replica: replicaView(sync.status()) })
+      }
       return answerEvidence(res, body)
     }
 
@@ -292,7 +300,7 @@ export function createReplicaSource(deps = {}) {
             summary_line: line,
             listen_host: bound.host,
             listen_port: bound.port,
-            control_routes: [DISCOVER_ROUTE, EVIDENCE_ROUTE],
+            control_routes: [DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE],
             evidence: forwarder.status(),
           }),
         }

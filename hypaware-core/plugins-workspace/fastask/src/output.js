@@ -152,6 +152,8 @@ export function shellQuote(value) {
 export function renderFastaskText(out, { now = Date.now() } = {}) {
   /** @type {string[]} */
   const lines = []
+  // Every result names the source that answered (LLP 0480#sources).
+  lines.push(`source: ${out.source.kind} (${out.source.path})${out.source.remote ? ` on ${out.source.remote}` : ''}${out.source.note ? ` - ${out.source.note}` : ''}`)
   if (out.leads.length === 0) lines.push('No leads: nothing in the team graph matched this question.')
   if (out.ambiguous) lines.push('Ambiguous: several files match; leads from each are shown.')
   for (const lead of out.leads) {
@@ -186,11 +188,13 @@ export function renderFastaskText(out, { now = Date.now() } = {}) {
  */
 function freshnessLine(out, now) {
   if (out.source.kind === 'local') return 'local captures only'
+  const evidenceThrough = out.coverage.evidence_received_through ? `evidence received through ${out.coverage.evidence_received_through}` : 'evidence freshness unknown'
+  // The server's own graph, read now: there is no replica age to report.
+  if (out.source.kind === 'team_server') return `team graph read from the server just now, ${evidenceThrough}`
   const graph = out.source.watermark
     ? `team graph as of ${out.source.watermark} (${age(out.source.watermark_age_s ?? Math.max(0, Math.round((now - Date.parse(out.source.watermark)) / 1000)))})`
     : 'team graph age unknown'
-  const evidence = out.coverage.evidence_received_through ? `evidence received through ${out.coverage.evidence_received_through}` : 'evidence freshness unknown'
-  return `${graph}, ${evidence}`
+  return `${graph}, ${evidenceThrough}`
 }
 
 /** @param {number} seconds */

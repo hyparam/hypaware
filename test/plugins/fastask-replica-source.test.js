@@ -14,7 +14,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 
-import { DISCOVER_ROUTE, EVIDENCE_ROUTE, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
+import { DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
 import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
 import { generatedGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
 import { writeSession } from '../../src/core/remote/credentials.js'
@@ -213,7 +213,7 @@ test('status advertises the listener and routes, and a synced summary line', asy
   assert.equal(status?.state, 'ready')
   assert.equal(d.listen_host, '127.0.0.1')
   assert.ok(Number.isInteger(d.listen_port) && d.listen_port > 0)
-  assert.deepEqual(d.control_routes, [DISCOVER_ROUTE, EVIDENCE_ROUTE])
+  assert.deepEqual(d.control_routes, [DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE])
   assert.ok(d.index_bytes > 0)
   assert.equal(d.state, 'synced')
   assert.match(d.summary_line, /^team graph: synced, data as of \d+ h ago \(acme\), \d+ (B|KB)$/)

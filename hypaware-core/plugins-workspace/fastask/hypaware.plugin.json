@@ -2,13 +2,47 @@
   "schema_version": 1,
   "name": "@hypaware/fastask",
   "version": "1.0.0",
-  "description": "Team graph replica and fast evidence lookup for agents. Explicit plugins[] opt-in only; commands arrive with enablement.",
+  "description": "Team graph replica and fast evidence lookup for agents. Explicit plugins[] opt-in only until enablement.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
-  "permissions": ["network", "read_state", "write_state"],
+  "permissions": [
+    "network",
+    "read_state",
+    "write_state"
+  ],
   "contributes": {
-    "sources": [{ "name": "team-graph-replica" }]
+    "sources": [
+      {
+        "name": "team-graph-replica"
+      }
+    ],
+    "commands": [
+      {
+        "name": "fastask",
+        "category": "explore-share",
+        "audience": "everyday",
+        "summary": "Find the team's sessions behind a question: leads with original text, fast"
+      },
+      {
+        "name": "graph replica status",
+        "category": "additional",
+        "audience": "operator",
+        "summary": "Show the team graph replica state and the age of its data"
+      },
+      {
+        "name": "graph replica refresh",
+        "category": "additional",
+        "audience": "operator",
+        "summary": "Ask the daemon to check the team graph replica now"
+      },
+      {
+        "name": "query evidence",
+        "category": "explore-share",
+        "audience": "everyday",
+        "summary": "Read original session text from a team server (session_evidence); used by fastask follow-ups"
+      }
+    ]
   }
 }
