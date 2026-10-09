@@ -22,7 +22,8 @@
   `hyp query team-graph` is not a known command on this machine, team-graph
   exploration is not enabled here; use the existing remote tools instead
   (`hyp query grep`, `hyp query sql` and `hyp query graph neighbors` with
-  `--remote`, then `hyp query evidence --remote`), and tell the user once that
+  `--remote`; `hyp query evidence` belongs to the same plugin, so it is absent
+  too), and tell the user once that
   rerunning `hyp setup` enables team-graph exploration. This is LLP
   0479#req-skill's own fallback for "no usable replica", so an existing
   install gets working tools and one clear enable hint, never a dead
@@ -38,7 +39,9 @@
 ## New installs {#new-installs}
 
 New installs get the plugin through `compose_with` on `@hypaware/ai-gateway`
-plus the Claude and Codex presets (the LLP 0213 route), as T14 builds it.
+(the LLP 0213 route), which covers both the Claude and the Codex picks in the
+`hyp setup` picker; the Claude client also has a literal init preset that
+includes it. There is no separate Codex preset to change.
 Release notes and user help tell existing installs to rerun `hyp setup` to
 enable team-graph exploration.
 
@@ -53,5 +56,7 @@ HypForge drain.
 ## Consequences {#consequences}
 
 - T14 (implementer-4): the guard in both skill copies, the guard test above,
-  `compose_with` and presets, and the release-note and help text.
+  `compose_with` and the Claude init preset, and the release-note and help text.
+- Corrected 2026-10-09 ~15:08Z with T14's implementer: the guard no longer
+  names `query evidence` (a plugin verb), and only Claude has a preset.
 - CPU and memory: none; skill text and configuration only.
