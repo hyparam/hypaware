@@ -3,6 +3,7 @@
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
 
+import { compareStrings } from '../../../../src/core/util/compare_strings.js'
 import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
 import { EDGE_COLUMNS, NODE_COLUMNS } from './contract.js'
 
@@ -24,8 +25,13 @@ import { EDGE_COLUMNS, NODE_COLUMNS } from './contract.js'
 /** Hard ceiling on the index's estimated resident bytes (LLP 0484#build-memory, was 512 MB in LLP 0480#index). */
 export const MAX_INDEX_BYTES = 256 * 1024 * 1024
 
-/** Bytes per manifest row the up-front check assumes (measured about 79; LLP 0484#build-memory). */
-export const BYTES_PER_ROW = 100
+/**
+ * Bytes per manifest row the up-front check assumes (LLP 0484#build-memory,
+ * re-fitted for path tokens by LLP 0488#path-tokens): the index measured 99.3
+ * estimated bytes per row on the real 1x team graph and 84.6 on the synthetic
+ * one (LLP 0481 T15), so 110 leaves about 10 percent.
+ */
+export const BYTES_PER_ROW = 110
 
 /** `nodeFlags` bit: the node was minted for an edge endpoint absent from the node file. */
 export const PLACEHOLDER = 1
@@ -41,6 +47,11 @@ const NODE_TYPED_BYTES = 1 + 1 + 8 // type, flags, first seen
 const EDGE_TYPED_BYTES = 4 + 4 + 1 + 8 // src, dst, type, first seen
 const CSR_EDGE_BYTES = 4 + 4 // one slot in each direction
 const CSR_NODE_BYTES = 4 + 4 // one offset in each direction
+const POSTING_BUILD_BYTES = 4 + 4 // token id and packed node during the build
+const POSTING_BYTES = 4 // packed node and basename flag, once built
+const TOKEN_BYTES = MAP_ENTRY_BYTES + STRING_BYTES + 2 * ARRAY_SLOT_BYTES + 4 + 4 // dictionary entry, name, sorted id, offset
+/** Path tokens shorter than this are not indexed: shorter terms are dropped (LLP 0488#path-tokens). */
+export const MIN_TOKEN = 3
 // Interned type names fit a Uint8: 254 named slots, then one shared slot.
 export const MAX_TYPES = 255
 export const OTHER_TYPE = '(other)'
@@ -112,7 +123,7 @@ export function rowProblem(row, columns) {
  * the build stays as the second check. A manifest without row counts passes
  * here and is held by the running estimate alone.
  *
- * @ref LLP 0484#build-memory [implements]: (nodes.rows + edges.rows) x 100 bytes past MAX_INDEX_BYTES is refused before download
+ * @ref LLP 0484#build-memory [implements]: (nodes.rows + edges.rows) x BYTES_PER_ROW past MAX_INDEX_BYTES is refused before download
  * @param {any} manifest
  * @param {number} [maxBytes]
  */
@@ -144,6 +155,8 @@ export function createIndexBuilder(opts = {}) {
 
   /** @type {Map<string, number>} */
   const nodeIds = new Map()
+  /** @type {string[]} the node id of each dense index, so results can name nodes */
+  const nodeIdOf = []
   /** @type {string[]} */
   const nodeTypes = []
   /** @type {number[]} real (non-placeholder) nodes per interned type */
@@ -179,8 +192,18 @@ export function createIndexBuilder(opts = {}) {
 
   /** @type {Map<string, number | number[]>} */
   const fileByBasename = new Map()
-  /** @type {Map<string, number | number[]>} */
-  const fileByStem = new Map()
+  // Path tokens (LLP 0488#path-tokens): a dictionary, and postings collected
+  // as (token, node * 2 + basename flag) pairs, grouped by token at finish.
+  /** @type {Map<string, number>} */
+  const tokenIds = new Map()
+  /** @type {string[]} */
+  const tokenNames = []
+  let postCap = Math.max(64, Math.ceil((opts.expectedNodes ?? 0) * 2))
+  let postTok = new Uint32Array(postCap)
+  let postPacked = new Uint32Array(postCap)
+  let postCount = 0
+  /** @type {Map<string, number>} reused per file: token to basename flag */
+  const fileTokens = new Map()
   /** @type {Map<string, number | number[]>} */
   const fileByRepo = new Map()
   /** @type {Map<string, number | number[]>} */
@@ -196,7 +219,8 @@ export function createIndexBuilder(opts = {}) {
   // over-ceiling graph is refused while it parses, not after.
   function estimate() {
     return heapBytes + nodeCap * NODE_TYPED_BYTES + edgeCap * EDGE_TYPED_BYTES +
-      (nodeCount + 1) * CSR_NODE_BYTES + edgeCount * CSR_EDGE_BYTES
+      (nodeCount + 1) * CSR_NODE_BYTES + edgeCount * CSR_EDGE_BYTES +
+      postCap * POSTING_BUILD_BYTES + postCount * POSTING_BYTES
   }
 
   /** @param {number} extra bytes about to be allocated beyond the estimate */
@@ -281,11 +305,12 @@ export function createIndexBuilder(opts = {}) {
     if (nodeCount === nodeCap) growNodes()
     const i = nodeCount++
     nodeIds.set(id, i)
+    nodeIdOf.push(id)
     nodeType[i] = internNodeType(type)
     nodeFirstSeen[i] = NaN
     naturalKey.push(null)
     label.push(null)
-    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + id.length + 2 * ARRAY_SLOT_BYTES
+    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + id.length + 3 * ARRAY_SLOT_BYTES
     return i
   }
 
@@ -312,16 +337,50 @@ export function createIndexBuilder(opts = {}) {
    */
   function indexFile(key, i) {
     const repo = repoOfKey(key)
-    const base = basenameOf(repo === null ? key : key.slice(repo.length + 1)).toLowerCase()
+    const rel = repo === null ? key : key.slice(repo.length + 1)
+    indexTokens(rel, i)
+    const base = basenameOf(rel).toLowerCase()
     if (!base) return
     heapBytes += addTo(fileByBasename, base, i)
-    const dot = base.lastIndexOf('.')
-    if (dot > 0) heapBytes += addTo(fileByStem, base.slice(0, dot), i)
     if (repo !== null) {
       heapBytes += addTo(fileByRepo, repo, i)
     } else if (isAbsolute(key)) {
       const suffix = lastSegments(key, 3)
       if (suffix !== null) heapBytes += addTo(fileBySuffix, suffix.toLowerCase(), i)
+    }
+  }
+
+  /**
+   * One posting per distinct token of the path, flagged when the token comes
+   * from the basename.
+   *
+   * @ref LLP 0488#path-tokens [implements]: directory segments and basename parts are tokens; each records whether it came from the basename
+   * @param {string} filePath the relative path of a bridged key, else the path
+   * @param {number} i
+   */
+  function indexTokens(filePath, i) {
+    fileTokens.clear()
+    const norm = filePath.replace(/\\/g, '/')
+    const slash = norm.lastIndexOf('/')
+    for (const t of splitTokens(slash === -1 ? '' : norm.slice(0, slash))) if (t.length >= MIN_TOKEN) fileTokens.set(t, 0)
+    for (const t of splitTokens(norm.slice(slash + 1))) if (t.length >= MIN_TOKEN) fileTokens.set(t, 1)
+    for (const [token, base] of fileTokens) {
+      let id = tokenIds.get(token)
+      if (id === undefined) {
+        id = tokenNames.length
+        tokenNames.push(token)
+        tokenIds.set(token, id)
+        heapBytes += TOKEN_BYTES + token.length
+      }
+      if (postCount === postCap) {
+        postCap *= 2
+        check()
+        postTok = grown(postTok, new Uint32Array(postCap))
+        postPacked = grown(postPacked, new Uint32Array(postCap))
+      }
+      postTok[postCount] = id
+      postPacked[postCount] = i * 2 + base
+      postCount++
     }
   }
 
@@ -414,6 +473,10 @@ export function createIndexBuilder(opts = {}) {
 
       const out = await adjacency(edgeSrc, nodeCount, edgeFirstSeen, budget)
       const into = await adjacency(edgeDst, nodeCount, edgeFirstSeen, budget)
+      const tokens = await tokenPostings(tokenNames, postTok, postPacked, postCount, budget)
+      postTok = new Uint32Array(0)
+      postPacked = new Uint32Array(0)
+      postCap = 0
 
       return {
         nodeCount,
@@ -422,6 +485,7 @@ export function createIndexBuilder(opts = {}) {
         unresolvedEdges,
         bytes: estimate(),
         nodeIds,
+        nodeIdOf,
         nodeTypes,
         nodeTypeCounts,
         nodeType,
@@ -442,12 +506,71 @@ export function createIndexBuilder(opts = {}) {
         inOffsets: into.offsets,
         inEdges: into.edges,
         fileByBasename,
-        fileByStem,
         fileByRepo,
         fileBySuffix,
+        tokenIds,
+        tokenNames,
+        tokenOffsets: tokens.offsets,
+        tokenPostings: tokens.postings,
+        sortedTokenIds: tokens.sorted,
       }
     },
   }
+}
+
+/**
+ * Groups the build's (token, packed node) pairs by token: postings of token t
+ * are `postings[offsets[t] .. offsets[t + 1])`, each `node * 2 + basename`,
+ * ascending, so membership is a binary search. Also the token ids in token
+ * order, for prefix lookup by binary search.
+ *
+ * @param {string[]} names
+ * @param {Uint32Array} tok
+ * @param {Uint32Array} packed
+ * @param {number} count
+ * @param {WorkTicker | undefined} budget
+ */
+async function tokenPostings(names, tok, packed, count, budget) {
+  const offsets = new Uint32Array(names.length + 1)
+  for (let p = 0; p < count; p++) offsets[tok[p] + 1]++
+  for (let t = 0; t < names.length; t++) offsets[t + 1] += offsets[t]
+  const cursor = offsets.slice(0, names.length)
+  const postings = new Uint32Array(count)
+  for (let p = 0; p < count; p++) {
+    postings[cursor[tok[p]]++] = packed[p]
+    const wait = budget?.tick(1)
+    if (wait) await wait
+  }
+  for (let t = 0; t < names.length; t++) {
+    const start = offsets[t]
+    const end = offsets[t + 1]
+    if (end - start > 1) postings.subarray(start, end).sort()
+    const wait = budget?.tick(end - start + 1)
+    if (wait) await wait
+  }
+  const order = Array.from({ length: names.length }, (_, t) => t)
+  // Code-unit order, the order discover's prefix binary search compares in.
+  order.sort((a, b) => compareStrings(names[a], names[b]))
+  return { offsets, postings, sorted: Uint32Array.from(order) }
+}
+
+/**
+ * Lowercase tokens of a path or a term: split on '/', '-', '_', '.',
+ * whitespace and camelCase boundaries (LLP 0488#path-tokens).
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function splitTokens(text) {
+  /** @type {string[]} */
+  const out = []
+  for (const piece of text.split(/[\\/\-_.\s]+/)) {
+    if (!piece) continue
+    for (const part of piece.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/)) {
+      if (part) out.push(part.toLowerCase())
+    }
+  }
+  return out
 }
 
 /**

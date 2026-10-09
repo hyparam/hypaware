@@ -1,6 +1,6 @@
 // @ts-check
 
-import { discover, extractTerms } from './discovery.js'
+import { discover, explicitTerms, extractTerms } from './discovery.js'
 import { basenameOf, createIndexBuilder } from './index_builder.js'
 
 /**
@@ -32,6 +32,8 @@ const IN_CHUNK = 500
  * @param {{
  *   runSql: (sql: string) => Promise<Record<string, unknown>[]>,
  *   question: string,
+ *   terms?: string[],
+ *   offset?: number,
  *   repo?: string | null,
  *   repoRoot?: string | null,
  *   files?: string[],
@@ -39,8 +41,8 @@ const IN_CHUNK = 500
  * }} args
  * @returns {Promise<{ result: DiscoveryResult, queries: number, capped: boolean }>}
  */
-export async function discoverBySql({ runSql, question, repo = null, repoRoot = null, files = [], leads }) {
-  const words = new Set(extractTerms(question).map((t) => t.text.toLowerCase()))
+export async function discoverBySql({ runSql, question, terms, offset, repo = null, repoRoot = null, files = [], leads }) {
+  const words = new Set((terms ? explicitTerms(terms) : extractTerms(question)).map((t) => t.text.toLowerCase()))
   for (const file of files) {
     const base = basenameOf(file).toLowerCase()
     if (base) words.add(base)
@@ -84,7 +86,7 @@ export async function discoverBySql({ runSql, question, repo = null, repoRoot = 
     for (const row of edgeRows) builder.addEdge(row)
   }
   const index = await builder.finish()
-  const result = discover(index, { question, repo, repoRoot, files, ...(leads !== undefined ? { leads } : {}) })
+  const result = discover(index, { question, repo, repoRoot, files, ...(leads !== undefined ? { leads } : {}), ...(terms ? { terms } : {}), ...(offset !== undefined ? { offset } : {}) })
   if (capped) result.coverage.truncated = true
   return { result, queries, capped }
 }
