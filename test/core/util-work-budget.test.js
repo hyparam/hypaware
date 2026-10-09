@@ -86,15 +86,23 @@ test('defaults are the design values: 4 ms of CPU, 4,096 rows, duty 0.2, sleeps 
   assert.equal(typeof createWorkBudget().tick, 'function')
 })
 
-test('the default clock is process CPU: busy work ends a slice, idle time does not', async () => {
-  const budget = createWorkBudget({ sliceMs: 5, sliceRows: 1_000_000 })
-  await new Promise((resolve) => realSetTimeout(resolve, 30))
-  assert.equal(budget.tick(1), undefined, '30 ms asleep used no CPU')
+test('the default clock is process CPU: wall time alone does not end a slice, busy work does', async () => {
+  // A 200 ms CPU slice outlasts a 300 ms sleep: sleeping costs the process
+  // only a little CPU. Not zero, though: timer, GC and test-runner threads
+  // count toward process.cpuUsage (on Node 24 and 26 CI a 30 ms sleep used
+  // over 5 ms), so the sleep is held to half the slice rather than to nothing.
+  const sliceMs = 200
+  const budget = createWorkBudget({ sliceMs, sliceRows: 1_000_000, duty: 1 })
+  const before = processCpuMs()
+  await new Promise((resolve) => realSetTimeout(resolve, 300))
+  const asleep = processCpuMs() - before
+  assert.ok(asleep < sliceMs / 2, `a 300 ms sleep used ${asleep.toFixed(1)} ms of process CPU`)
+  assert.equal(budget.tick(1), undefined, '300 ms of wall time did not end a 200 ms CPU slice')
   const start = processCpuMs()
   let x = 0
-  while (processCpuMs() - start < 10) x += Math.sqrt(x + 1)
+  while (processCpuMs() - start < sliceMs) x += Math.sqrt(x + 1)
   const wait = budget.tick(1)
-  assert.ok(wait instanceof Promise, `10 ms of CPU ended the slice (${x > 0})`)
+  assert.ok(wait instanceof Promise, `${sliceMs} ms of CPU ended the slice (${x > 0})`)
   await wait
 })
 
