@@ -1,7 +1,7 @@
 # LLP 0480: Fastask - Implementation Design
 
 **Type:** Design
-**Status:** Accepted
+**Status:** Active
 **Systems:** CLI, Graph, Query, MCP, Daemon, Plugins, Privacy
 **Author:** HypForge designer
 **Date:** 2026-10-09
