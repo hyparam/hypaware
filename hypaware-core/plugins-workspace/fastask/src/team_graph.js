@@ -597,6 +597,7 @@ export function runTeamGraphSearch(argv, ctx, deps = {}) {
         hitsPerSession: args.numbers.hits ?? DEFAULT_HITS_PER_SESSION, hitChars: args.numbers.chars ?? DEFAULT_HIT_CHARS,
       })
       s.setAttribute('source_kind', source.kind)
+      s.setAttribute('source_path', source.path)
       s.setAttribute('sessions', result.sessions.length)
       s.setAttribute('hits', result.coverage.hits)
       s.setAttribute('failed_sessions', result.sessions.filter((x) => x.error).length)
