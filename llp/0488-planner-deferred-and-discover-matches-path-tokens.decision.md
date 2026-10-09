@@ -71,7 +71,11 @@ named in design text, so selection is never tuned to it.)
 four or more characters, when the token starts with the term (`onboard`
 matches `onboarding`; `walkthrough` matches `walkthroughs`). Terms shorter
 than three characters are dropped. Matching is never substring-anywhere, so
-`setup` does not match `setuptools`.
+`setup` does not match `setuptools`. A term that itself contains separators
+(`work_budget`, `parseRetryAfter`, `login.js`) is split by the same rule; a
+file matches it only when every part of three or more characters matches one
+of the file's tokens (order and adjacency not required), and it counts as one
+term for ranking, weighted by its rarest part.
 
 **Ranking.** A file's score counts the distinct terms it matches, weighting a
 basename-token match above a directory-token match and an exact token above a
