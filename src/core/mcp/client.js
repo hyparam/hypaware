@@ -20,11 +20,18 @@ import { safeText } from '../http_text.js'
 const PROTOCOL_VERSION = '2025-06-18'
 
 /**
+ * `signal`, when given, is passed to every request this client makes, and
+ * a request is not sent once it has aborted. Aborting rejects the pending
+ * call with the signal's reason and drops the HTTP connection, so the server
+ * sees the disconnect and can stop its work.
+ *
+ * @ref LLP 0480#evidence [implements]: the evidence call is aborted at the command's own budget
  * @param {{
  *   url: string,
  *   token?: string,
  *   fetchImpl?: typeof fetch,
  *   clientInfo?: { name: string, version: string },
+ *   signal?: AbortSignal,
  * }} opts
  */
 export function createHttpMcpClient(opts) {
@@ -52,7 +59,8 @@ export function createHttpMcpClient(opts) {
       ...(params !== undefined ? { params } : {}),
     }
     const headers = mcpRequestHeaders({ token: opts.token, sessionId })
-    const res = await doFetch(opts.url, { method: 'POST', headers, body: JSON.stringify(body) })
+    opts.signal?.throwIfAborted()
+    const res = await doFetch(opts.url, { method: 'POST', headers, body: JSON.stringify(body), signal: opts.signal })
     const sid = res.headers?.get?.('mcp-session-id')
     if (sid) sessionId = sid
 
@@ -67,11 +75,13 @@ export function createHttpMcpClient(opts) {
     if (!res.ok) {
       if (isAuthStatus(res.status)) throw authRejectionError(res.status)
       const text = await safeText(res)
+      // safeText swallows a read the abort cut short; report the abort, not the status.
+      opts.signal?.throwIfAborted()
       throw new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`)
     }
     const message = await parseRpcResponse(res, id)
     if (message?.error) {
-      throw new Error(`remote ${method} error ${message.error.code}: ${message.error.message}`)
+      throw new McpRpcError(method, message.error.code, message.error.message)
     }
     return message?.result
   }
@@ -97,6 +107,29 @@ export function createHttpMcpClient(opts) {
     async listTools() {
       return rpc('tools/list', {})
     },
+  }
+}
+
+/**
+ * A JSON-RPC error answer from the remote. The message text is unchanged
+ * from before this class existed; `rpcCode` keeps the numeric code so a
+ * caller can tell a missing tool (`-32601`) or a bad argument (`-32602`)
+ * from a transport failure, which is a plain `Error`.
+ *
+ * @ref LLP 0480#evidence [implements]: the JSON-RPC code stays distinguishable from the message text
+ */
+export class McpRpcError extends Error {
+  /**
+   * @param {string} method
+   * @param {number} rpcCode
+   * @param {string} rpcMessage
+   */
+  constructor(method, rpcCode, rpcMessage) {
+    super(`remote ${method} error ${rpcCode}: ${rpcMessage}`)
+    this.name = 'McpRpcError'
+    this.method = method
+    this.rpcCode = rpcCode
+    this.rpcMessage = rpcMessage
   }
 }
 
