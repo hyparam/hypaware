@@ -70,8 +70,13 @@ named in design text, so selection is never tuned to it.)
 **Matching.** A term matches a token when they are equal, or, for terms of
 four or more characters, when the token starts with the term (`onboard`
 matches `onboarding`; `walkthrough` matches `walkthroughs`). Terms shorter
-than three characters are dropped. Matching is never substring-anywhere, so
-`setup` does not match `setuptools`. A term that itself contains separators
+than three characters are dropped. Matching is never inside a word: `setup`
+does not match `resetup`. A prefix match does reach longer words (`setup`
+matches `setuptools`, `confirm` matches `confirmation`); that recall is
+intended, and such matches rank below exact token matches. Capping how many
+characters a prefix match may add was considered and rejected: it would drop
+real inflections such as `confirm` to `confirmation` and `config` to
+`configuration`. A term that itself contains separators
 (`work_budget`, `parseRetryAfter`, `login.js`) is split by the same rule; a
 file matches it only when every part of three or more characters matches one
 of the file's tokens (order and adjacency not required), and it counts as one
