@@ -348,6 +348,13 @@ export function createReplicaSync(opts) {
       if (!verified.ok) {
         log.warn('replica download failed verification', { generation: manifest.generation, problems: verified.problems.slice(0, 5) })
         await removeTree(staged)
+        // A line the index could never hold is the same refusal as a manifest
+        // that would not fit: settled until the next poll, the held
+        // generation kept and its lease not renewed.
+        // @ref LLP 0483#lease-renewal [implements]: a generation refused for a too-long line never renews the lease
+        if (verified.refused === 'line_too_large') {
+          return settled(rec.generation ? 'stale' : 'unavailable', 'replica_too_large', 200, 'line_too_large', pollOf(rec))
+        }
         return failed('verify_failed', 200, 'verify_failed', undefined)
       }
       await fs.promises.writeFile(path.join(staged, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 })
@@ -427,7 +434,13 @@ export function createReplicaSync(opts) {
   /**
    * Verifies the staged files with the ported reference verifier, reading
    * from disk under the cooperative budget so a large generation shares the
-   * process with capture and queries.
+   * process with capture and queries. The budget also ticks on decompressed
+   * work, since a small compressed chunk can inflate to far more.
+   *
+   * No line may be longer than `maxIndexBytes`: the index builder counts a
+   * partial line against that same ceiling, so such a line could never be
+   * indexed, and the verifier refuses it while reading instead of leaving it
+   * to the builder.
    *
    * @param {string} staged
    * @param {any} manifest
@@ -442,7 +455,10 @@ export function createReplicaSync(opts) {
         yield /** @type {Buffer} */ (chunk)
       }
     }
-    return verifyManifest({ manifest, nodes: budgeted('nodes'), edges: budgeted('edges') })
+    return verifyManifest(
+      { manifest, nodes: budgeted('nodes'), edges: budgeted('edges') },
+      { maxLineBytes: maxIndexBytes, signal: stop.signal, tick: work.tick },
+    )
   }
 
   /**

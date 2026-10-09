@@ -5,7 +5,8 @@ import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
 
 /**
- * @import { CompressedSource, MeasuredFile, SetDigest, SnapshotFileFacts, SnapshotFiles, SnapshotVerification } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { Hash } from 'node:crypto'
+ * @import { CompressedSource, MeasureOptions, MeasuredFile, SetDigest, SnapshotFileFacts, SnapshotFiles, SnapshotVerification } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 /**
@@ -17,9 +18,14 @@ import { createGunzip } from 'node:zlib'
  *
  * Ported from the server's reference module `src/graph/snapshot-contract.js`
  * at the commit recorded in `test/fixtures/contracts/graph-snapshot/v1/SOURCE.md`.
- * The function bodies are unchanged; only the type declarations moved to
- * `types.d.ts` for this repository's style. The pinned fixtures win over this
- * file and over prose when they disagree.
+ * The function bodies are unchanged except where marked below; the type
+ * declarations moved to `types.d.ts` for this repository's style. The pinned
+ * fixtures win over this file and over prose when they disagree.
+ *
+ * Client-only change (review r1 F6): `measureFile` hashes each line as it
+ * streams instead of buffering it, and takes a line ceiling, an abort signal
+ * and a work-budget tick, because here it reads files a server sent rather
+ * than files this process wrote. The facts it computes are unchanged.
  *
  * Pure apart from `node:crypto` and `node:zlib`: no IO and no kernel imports.
  *
@@ -118,17 +124,21 @@ export function createSetDigest() {
   // acc[0] is the most significant word.
   const acc = new Uint32Array(8)
   let rows = 0
+  /** @param {Buffer} digest a line's SHA-256 */
+  function addHash(digest) {
+    let carry = 0
+    for (let i = 7; i >= 0; i--) {
+      const sum = acc[i] + digest.readUInt32BE(i * 4) + carry
+      acc[i] = sum >>> 0
+      carry = sum > 0xffffffff ? 1 : 0
+    }
+    rows++
+  }
   return {
     add(line) {
-      const digest = createHash('sha256').update(line).digest()
-      let carry = 0
-      for (let i = 7; i >= 0; i--) {
-        const sum = acc[i] + digest.readUInt32BE(i * 4) + carry
-        acc[i] = sum >>> 0
-        carry = sum > 0xffffffff ? 1 : 0
-      }
-      rows++
+      addHash(createHash('sha256').update(line).digest())
     },
+    addHash,
     get rows() { return rows },
     hex() {
       let hex = ''
@@ -141,15 +151,27 @@ export function createSetDigest() {
 /**
  * Measures a compressed file exactly as served: SHA-256 and length of the
  * compressed bytes, then, while decompressing, line count, decompressed
- * length and set digest. Streams: memory is one chunk plus one partial line.
+ * length and set digest. Streams: each line is hashed piece by piece as it
+ * arrives, so memory is one decompressed chunk and one hash state however
+ * long a line is.
  *
  * `problems` reports format faults found on the way (not gzip, an empty line,
  * a missing final newline); facts are still returned for what was read.
  *
+ * `maxLineBytes` stops decompression at the first line longer than it and
+ * reports `refused: 'line_too_large'`, so a small file that inflates to one
+ * enormous line costs at most the ceiling in decompression and hashing.
+ * `tick` is a work-budget tick, called per line and per decompressed chunk;
+ * `signal` aborts the read, and abort (here or inside `tick`) rejects with
+ * its reason instead of being reported as a format problem.
+ *
+ * @ref LLP 0480#cooperative [implements]: the verifier ticks the budget on decompressed work, not only on compressed reads
  * @param {CompressedSource} source
+ * @param {MeasureOptions} [opts]
  * @returns {Promise<MeasuredFile>}
  */
-export async function measureFile(source) {
+export async function measureFile(source, opts = {}) {
+  const { maxLineBytes = Infinity, signal, tick } = opts
   /** @type {string[]} */
   const problems = []
   const fileHash = createHash('sha256')
@@ -157,8 +179,17 @@ export async function measureFile(source) {
   let bytes = 0
   let uncompressedBytes = 0
   let emptyLines = 0
-  /** @type {Buffer[]} */
-  let pending = []
+  /** The line read so far: its hash (created on its first byte) and length. */
+  const line = { hash: /** @type {Hash | null} */ (null), bytes: 0 }
+  let tooLong = false
+  /** @type {unknown} */
+  let interrupted
+
+  /** @param {unknown} err */
+  function stopWith(err) {
+    interrupted = err
+    throw err
+  }
 
   /** @param {AsyncIterable<Uint8Array>} chunks */
   async function* countCompressed(chunks) {
@@ -176,25 +207,45 @@ export async function measureFile(source) {
       let start = 0
       let newline
       while ((newline = chunk.indexOf(0x0a, start)) !== -1) {
-        const tail = chunk.subarray(start, newline)
-        const line = pending.length === 0 ? tail : Buffer.concat([...pending, tail])
-        pending = []
-        if (line.byteLength === 0) emptyLines++
-        else digest.add(line)
+        line.bytes += newline - start
+        if (line.bytes > maxLineBytes) {
+          tooLong = true
+          throw new Error('line too long')
+        }
+        if (line.bytes === 0) emptyLines++
+        else digest.addHash((line.hash ?? createHash('sha256')).update(chunk.subarray(start, newline)).digest())
+        line.hash = null
+        line.bytes = 0
         start = newline + 1
+        const wait = tick?.(1)
+        if (wait) await wait.catch(stopWith)
       }
-      if (start < chunk.byteLength) pending.push(chunk.subarray(start))
+      if (start < chunk.byteLength) {
+        // @ref LLP 0484#build-memory [implements]: a line past the ceiling is refused while it is read, before it costs memory
+        line.bytes += chunk.byteLength - start
+        if (line.bytes > maxLineBytes) {
+          tooLong = true
+          throw new Error('line too long')
+        }
+        (line.hash ??= createHash('sha256')).update(chunk.subarray(start))
+      }
+      const wait = tick?.(0)
+      if (wait) await wait.catch(stopWith)
     }
   }
 
   try {
-    await pipeline(asIterable(source), countCompressed, createGunzip(), splitLines)
+    await pipeline(asIterable(source), countCompressed, createGunzip(), splitLines, ...(signal ? [{ signal }] : []))
   } catch (err) {
-    problems.push(`not a readable gzip stream (${/** @type {NodeJS.ErrnoException} */ (err).code ?? 'error'})`)
+    if (signal?.aborted) throw signal.reason
+    if (interrupted !== undefined) throw interrupted
+    if (!tooLong) problems.push(`not a readable gzip stream (${/** @type {NodeJS.ErrnoException} */ (err).code ?? 'error'})`)
   }
-  if (problems.length === 0 && pending.length > 0) {
+  if (tooLong) {
+    problems.push(`line ${digest.rows + emptyLines + 1} is longer than the ${maxLineBytes}-byte line ceiling`)
+  } else if (problems.length === 0 && line.hash !== null) {
     // Counted and digested so the row comparison still means something.
-    digest.add(Buffer.concat(pending))
+    digest.addHash(line.hash.digest())
     problems.push('last line has no trailing newline')
   }
   if (emptyLines > 0) problems.push(`${emptyLines} empty line(s)`)
@@ -208,6 +259,7 @@ export async function measureFile(source) {
       set_digest: digest.hex(),
     },
     problems,
+    refused: tooLong ? 'line_too_large' : null,
   }
 }
 
@@ -236,10 +288,14 @@ async function* asIterable(source) {
  * It does not recompute `unresolved` (that needs every node id) and does not
  * parse lines; the importer parses as it loads.
  *
+ * `opts` passes to `measureFile` for each file. A file refused for a long
+ * line ends the verification there: the other file is not read.
+ *
  * @param {SnapshotFiles} files
+ * @param {MeasureOptions} [opts]
  * @returns {Promise<SnapshotVerification>}
  */
-export async function verifyManifest(files) {
+export async function verifyManifest(files, opts) {
   const { manifest } = files
   /** @type {string[]} */
   const problems = []
@@ -261,16 +317,17 @@ export async function verifyManifest(files) {
     }
     const path = `generations/${manifest.generation}/${name}.ndjson.gz`
     if (expected.path !== path) problems.push(`${name}: path is ${JSON.stringify(expected.path)}, expected ${JSON.stringify(path)}`)
-    const { facts, problems: fileProblems } = await measureFile(files[name])
+    const { facts, problems: fileProblems, refused } = await measureFile(files[name], opts)
     observed[name] = facts
     for (const problem of fileProblems) problems.push(`${name}: ${problem}`)
+    if (refused) return { ok: false, problems, observed, refused }
     for (const key of /** @type {const} */ (['rows', 'bytes', 'uncompressed_bytes', 'sha256', 'set_digest'])) {
       if (expected[key] !== facts[key]) {
         problems.push(`${name}: ${key} is ${JSON.stringify(facts[key])}, manifest says ${JSON.stringify(expected[key])}`)
       }
     }
   }
-  return { ok: problems.length === 0, problems, observed }
+  return { ok: problems.length === 0, problems, observed, refused: null }
 }
 
 /**
