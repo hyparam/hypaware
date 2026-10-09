@@ -2,11 +2,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import { mkdtempSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
 import { fork } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { temporaryDirectory } from '../helpers/temp_dir.js'
+import { removeTemporaryDirectory } from '../helpers/temp_dir.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 import { processingStateRoot, readPidFile } from '../../src/core/daemon/pid.js'
 import { readStatusFile, ollamaCaptureFromSnapshot } from '../../src/core/daemon/status.js'
@@ -16,6 +18,7 @@ import { aiGatewayDatasetRegistration, aiGatewayTablePath } from '../../hypaware
 import { executeQuerySql } from '../../src/core/query/sql.js'
 import { requestOllamaVerification } from '../../src/core/control/client_recording.js'
 /** @import { AddressInfo } from 'node:net' */
+/** @import { TestContext } from 'node:test' */
 
 async function waitFor(check, timeout = 8000) {
   const until = Date.now() + timeout
@@ -32,10 +35,40 @@ function alive(pid) {
     return true
   } catch { return false }
 }
+/**
+ * A test's home for the daemons it starts. node:test runs a test's `after`
+ * hooks in registration order and skips the rest once one throws, so a
+ * separate directory-removal hook registered before the daemons' teardown
+ * runs first, races a still-running daemon's writes (ENOTEMPTY), and its
+ * throw then skips the teardown, leaving the daemon and its processor alive
+ * to hold the runner open. One hook therefore does both, in order: stop every
+ * daemon started in the home (newest first) and wait for each processor, then
+ * remove the home whatever happened.
+ * @param {TestContext} t
+ */
+function testHome(t) {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'hyp-ollama-process-'))
+  /** @type {Array<() => Promise<void>>} */
+  const stops = []
+  t.after(async () => {
+    /** @type {unknown[]} */
+    const errors = []
+    try {
+      for (const stop of [...stops].reverse()) {
+        try { await stop() } catch (err) { errors.push(err) }
+      }
+    } finally {
+      removeTemporaryDirectory(home)
+    }
+    if (errors.length) throw errors[0]
+  })
+  return { home, stops }
+}
 async function retainedLocks(root) {
   return (await fs.readdir(root, { recursive: true })).filter(name => /(?:\.lock|lockfile)(?:\/|$)/.test(name)).sort()
 }
-async function service(t, split, blocked = false, tickIntervalMs = 0, home = temporaryDirectory('hyp-ollama-process-')) {
+async function service(t, split, blocked = false, tickIntervalMs = 0, owner = testHome(t)) {
+  const home = owner.home
   const configPath = path.join(home, 'hypaware-config.json')
   const env = { ...isolatedClientEnv(process.env, home), HYP_HOME: home, HYP_CONFIG: configPath }
   const upstream = http.createServer((req, res) => {
@@ -82,24 +115,43 @@ process.send?.('ready')
   const child = fork(script, [], { env, execArgv: blocked ? ['--import', pathToFileURL(preload).href] : [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   let exited = false
   child.once('exit', () => { exited = true })
-  t.after(async () => {
-    if (!exited && child.connected) child.send('stop')
-    try { await waitFor(() => exited, 6000) } catch {
-      child.kill('SIGKILL')
-      await waitFor(() => exited)
-    }
-    upstream.closeAllConnections()
-    await new Promise(resolve => upstream.close(() => resolve(undefined)))
-  })
   const state = path.join(home, 'hypaware')
+  /** @type {number | undefined} */
+  let processor
+  owner.stops.push(async () => {
+    try {
+      // The processor seen at start-up and the one of record now (a home's
+      // status file is shared with a later daemon started in it).
+      const processors = new Set([processor, readStatusFile(state)?.processes?.processing?.pid])
+      if (!exited && child.connected) child.send('stop')
+      try { await waitFor(() => exited, 6000) } catch {
+        child.kill('SIGKILL')
+        await waitFor(() => exited)
+      }
+      for (const pid of processors) {
+        if (!pid || pid === process.pid || !alive(pid)) continue
+        try { await waitFor(() => !alive(pid), 3000) } catch {
+          // The daemon's stop path should have ended it; say so where CI
+          // shows it rather than leaving it to hold the runner open.
+          console.error(`ollama-verification-process: processor ${pid} outlived its daemon; killing it`)
+          process.kill(pid, 'SIGKILL')
+          await waitFor(() => !alive(pid))
+        }
+      }
+    } finally {
+      upstream.closeAllConnections()
+      await new Promise(resolve => upstream.close(() => resolve(undefined)))
+    }
+  })
   const status = await waitFor(() => {
     const snapshot = readStatusFile(state)
     const details = /** @type {any} */ (snapshot?.sources.find(s => s.name === 'ai-gateway')?.details)
     return snapshot?.state === 'healthy' && details?.capture_ready ? snapshot : undefined
   })
+  processor = status.processes?.processing?.pid
   const details = /** @type {any} */ (status.sources.find(s => s.name === 'ai-gateway')?.details)
   const root = `http://${details.host}:${details.port}`
-  return { home, env, state, root, child, status, details, exited: () => exited }
+  return { home, owner, env, state, root, child, status, details, exited: () => exited }
 }
 
 // @ref LLP 0476#delivery [tests]: the actual supervisor and processor callback settle low-volume fresh capture through ordinary command dispatch
@@ -273,7 +325,7 @@ test('actual split failure survives benign control and off, with persistence rec
   f.child.send('stop')
   await waitFor(f.exited, 6000)
   assert.equal(ollamaCaptureFromSnapshot(config, historical, oldPid).historical, true)
-  const restarted = await service(t, true, false, 25, f.home)
+  const restarted = await service(t, true, false, 25, f.owner)
   const fresh = await capture(restarted)
   assert.equal(fresh.state, 'ready')
   assert.equal(fresh.reason, null)
