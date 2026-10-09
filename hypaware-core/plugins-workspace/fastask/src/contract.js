@@ -10,7 +10,7 @@ import { createGunzip } from 'node:zlib'
 
 /**
  * The client side of the server's `hypaware.graph-snapshot/1` wire contract
- * (server LLP 0554#contract, readings settled by server LLP 0559): how a graph
+ * (server LLP 0554#contract, readings settled by server LLP 0560): how a graph
  * row becomes one NDJSON line, the order-independent set digest over those
  * lines, and a streaming verifier that checks served files against their
  * manifest before a replica is activated.

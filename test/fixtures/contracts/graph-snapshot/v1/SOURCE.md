@@ -12,7 +12,7 @@ to the server repository.
 - Commit: `63cba4771704c0af281f186c0ceefdeeecd646ea`
 - Server path: `test/fixtures/contracts/graph-snapshot/v1/`
 - Contract version: `hypaware.graph-snapshot/1`
-- Contract prose: server LLP 0554 (#contract, #lease), with the readings settled by server LLP 0559
+- Contract prose: server LLP 0554 (#contract, #lease), with the readings settled by server LLP 0560 (numbered 0559 when pinned; renumbered for a collision, content unchanged)
 - Pinned for: LLP 0481 T1 (HYP-111), 2026-10-09
 
 The reference verifier `src/graph/snapshot-contract.js` at the same commit is ported, function bodies unchanged, to `hypaware-core/plugins-workspace/fastask/src/contract.js`.
