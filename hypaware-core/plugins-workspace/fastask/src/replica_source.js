@@ -9,18 +9,19 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../src/core/otlp/server.js'
 import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../../../../src/core/runtime/boot.js'
+import { canonicalOrigin } from '../../../../src/core/remote/builtin_remotes.js'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { discover } from './discovery.js'
 import { createEvidenceForwarder } from './evidence_forwarder.js'
 import { IndexBuildError, buildIndexFromSnapshot } from './index_builder.js'
-import { createReplicaSync } from './replica_sync.js'
+import { createReplicaSync, credentialFingerprint } from './replica_sync.js'
 import { createDefaultTargetResolver } from './replica_target.js'
 import { summaryLine } from './summary_line.js'
 
 /**
  * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { GraphIndex, ReplicaStatus, ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { GraphIndex, ReplicaStatus, ReplicaTarget, WarmScope } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 export const SOURCE_NAME = 'team-graph-replica'
@@ -268,9 +269,15 @@ export function createReplicaSource(deps = {}) {
       if (!validScope(body.scope)) return send(res, 400, { error: 'invalid_request', message: 'scope (target, origin, org, credential_fp) is required' })
       const target = await resolveTarget()
       if (!target) return send(res, 409, { error: 'no_remote' })
-      // The evidence goes to the daemon's current target, so the caller's
-      // scope must match both that target and the replica it was confirmed for.
-      const mismatch = body.scope.target !== target.target ? 'remote' : scopeMismatch(body.scope, sync.status())
+      // The evidence goes to the target as resolved now, which may have moved
+      // (a new URL, org or login under the same name) since the replica that
+      // produced the caller's leads was confirmed. Both the caller's scope and
+      // the fresh target must match that replica's binding; otherwise nothing
+      // is forwarded to either origin.
+      // @ref LLP 0483#credential-change [implements]: evidence is forwarded only when the fresh target still matches the replica binding (review r2 F1)
+      const binding = sync.status()
+      const mismatch = body.scope.target !== target.target ? 'remote'
+        : scopeMismatch(body.scope, binding) ?? scopeMismatch(await warmScope(target.target, target), binding)
       if (mismatch) return send(res, 409, { error: 'scope_mismatch', reason: mismatch })
       // The command's abort travels here as a closed connection; it aborts
       // the upstream request, and the server sees the disconnect.
@@ -404,6 +411,19 @@ export function scopeMismatch(scope, status) {
   if (typeof scope.org === 'string' && scope.org !== status.org) return 'org'
   if (typeof scope.credential_fp !== 'string' || typeof status.credential_fp !== 'string' || scope.credential_fp !== status.credential_fp) return 'login'
   return null
+}
+
+/**
+ * What a warm request is for: the daemon answers only when its replica
+ * belongs to the same remote, org and login (review r1 F1).
+ *
+ * @ref LLP 0483#credential-change [implements]: every warm request carries the caller's resolved remote, org and credential fingerprint
+ * @param {string} target the remote name
+ * @param {ReplicaTarget} login the resolved login for that remote
+ * @returns {Promise<WarmScope>}
+ */
+export async function warmScope(target, login) {
+  return { target, origin: canonicalOrigin(login.url) ?? '', org: login.org ?? null, credential_fp: await credentialFingerprint(login) }
 }
 
 /**

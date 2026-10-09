@@ -31,7 +31,7 @@ import { measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/c
 /**
  * @import { TestContext } from 'node:test'
  * @import { PluginActivationContext, StartedSource } from '../../hypaware-plugin-kernel-types.js'
- * @import { WarmScope } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { ReplicaTarget, WarmScope } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 const OK_EVIDENCE = JSON.parse(fs.readFileSync(new URL('../fixtures/contracts/session-evidence/v1/01-ok-minimal.json', import.meta.url), 'utf8'))
@@ -123,7 +123,8 @@ async function setup(t, opts = {}) {
   const { mcp, handle } = fakeMcp()
   server.state.onMcp = handle
   const clock = { now: Date.parse('2026-10-09T16:00:00.000Z') }
-  const target = { target: 'team', url: server.url, org: 'acme', token: async () => /** @type {const} */ ({ ok: true, token: 'tok' }) }
+  /** @type {ReplicaTarget} */
+  const target = { target: 'team', url: server.url, org: 'acme', token: async () => ({ ok: true, token: 'tok' }) }
   /** @type {string[]} */
   const logs = []
   const log = { debug() {}, info(/** @type {string} */ m) { logs.push(m) }, warn(/** @type {string} */ m) { logs.push(m) }, error(/** @type {string} */ m) { logs.push(m) } }
@@ -540,6 +541,40 @@ test('the warm evidence client turns a scope refusal into a typed error', async 
   const { port, token, scope } = await setup(t)
   const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token, scope: { ...scope, org: 'bravo' } })
   await assert.rejects(client.callTool('session_evidence', OK_EVIDENCE.request), (/** @type {any} */ err) => err.code === SCOPE_MISMATCH && /another org/.test(err.message))
+})
+
+// Review r2 F1: the reviewer's race. Discovery succeeds, then the target
+// moves under the same name before evidence, with no sync pass in between.
+test('evidence after a same-name URL change without a sync is refused, and reaches neither origin', async (t) => {
+  const { port, token, mcp, scope, target } = await setup(t)
+  const other = await startSnapshotServer()
+  t.after(() => other.close())
+  const second = fakeMcp()
+  other.state.onMcp = second.handle
+  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'app.js', scope }, { token })).status, 200)
+  target.url = other.url
+  const r = await call(port, EVIDENCE_ROUTE, { arguments: OK_EVIDENCE.request, scope }, { token })
+  assert.equal(r.status, 409)
+  assert.deepEqual(r.body, { error: 'scope_mismatch', reason: 'remote' })
+  assert.equal(second.mcp.calls, 0, 'nothing forwarded to the new origin')
+  assert.equal(mcp.calls, 0, 'nothing forwarded to the old origin')
+})
+
+test('evidence after an org or login change under the same target, without a sync, is refused', async (t) => {
+  const { port, token, mcp, scope, target } = await setup(t)
+  const body = { arguments: OK_EVIDENCE.request, scope }
+  const org = target.org
+  target.org = 'bravo'
+  assert.deepEqual((await call(port, EVIDENCE_ROUTE, body, { token })).body, { error: 'scope_mismatch', reason: 'org' })
+  target.org = org
+  const resolve = target.token
+  target.token = async () => ({ ok: true, token: 'another-login' })
+  assert.deepEqual((await call(port, EVIDENCE_ROUTE, body, { token })).body, { error: 'scope_mismatch', reason: 'login' })
+  target.token = async () => ({ ok: false, error: 'logged out' })
+  assert.deepEqual((await call(port, EVIDENCE_ROUTE, body, { token })).body, { error: 'scope_mismatch', reason: 'login' }, 'no credential fails closed')
+  assert.equal(mcp.calls, 0)
+  target.token = resolve
+  assert.equal((await call(port, EVIDENCE_ROUTE, body, { token })).body.ok, true, 'the unchanged target is served')
 })
 
 /**
