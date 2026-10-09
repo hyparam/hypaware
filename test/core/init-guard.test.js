@@ -315,6 +315,60 @@ test('setup claude-and-otel-local --force=false refuses to clobber an existing c
   )
 })
 
+// Regression (#2440): any inline value other than exactly `true` read as
+// false, so `--dry-run=TRUE` wrote the config the operator asked only to
+// preview. A malformed boolean now refuses with exit 2 before any write,
+// with the same message the no-preset form gives.
+for (const token of ['--dry-run=TRUE', '--dry-run=1', '--dry-run=yes', '--dry-run=on', '--dry-run=']) {
+  test(`setup claude-and-otel-local ${token} refuses with exit 2 and writes no config`, async () => {
+    const { hypHome, stdout, stderr, opts } = await makeHome()
+    const code = await dispatch(['setup', 'claude-and-otel-local', token], opts)
+    assert.equal(code, 2, stdout.text())
+    assert.equal(stderr.text(), `hyp setup: --dry-run expects true|false (got ${token.slice('--dry-run='.length)})\n`)
+    await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+  })
+}
+
+for (const token of ['--force=TRUE', '--force=1']) {
+  test(`setup claude-and-otel-local ${token} refuses with exit 2 and leaves an existing config`, async () => {
+    const { hypHome, stderr, opts } = await makeHome()
+    const configPath = path.join(hypHome, 'hypaware-config.json')
+    await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+
+    const code = await dispatch(['setup', 'claude-and-otel-local', token], opts)
+    assert.equal(code, 2)
+    assert.match(stderr.text(), /--force expects true\|false/)
+    assert.deepEqual((await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')), [])
+    assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, EXISTING.plugins)
+  })
+}
+
+// The compound case from #2440: `--dry-run=1` read as false let
+// `--force=true` overwrite an existing config for real.
+test('setup claude-and-otel-local --dry-run=1 --force=true leaves an existing config', async () => {
+  const { hypHome, stderr, opts } = await makeHome()
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify(EXISTING) + '\n')
+
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry-run=1', '--force=true'], opts)
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /--dry-run expects true\|false \(got 1\)/)
+  assert.deepEqual((await fs.readdir(hypHome)).filter((n) => n.startsWith('hypaware-config.json.bak-')), [])
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, EXISTING.plugins)
+})
+
+// The flag-name half of #2440: the codec snake-normalizes names, so
+// `--dry_run=true` must not slip past the preset as an unread flag. The
+// preset gate added for #2437 already refuses it as unknown, as the
+// no-preset form does; this pins that.
+test('setup claude-and-otel-local --dry_run=true refuses with exit 2 and writes no config', async () => {
+  const { hypHome, stderr, opts } = await makeHome()
+  const code = await dispatch(['setup', 'claude-and-otel-local', '--dry_run=true'], opts)
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /unknown flag '--dry_run=true'/)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
+})
+
 // Regression (#2437): the preset dispatch runs before any flag parsing and
 // handed raw argv to a preset that reads only the two flags it honors, so
 // `--help`, `-h`, and an unrecognized flag were ignored and the config write
