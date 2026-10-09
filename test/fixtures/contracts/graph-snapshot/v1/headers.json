@@ -20,8 +20,8 @@
   },
   "edges_200": {
     "content-type": "application/gzip",
-    "content-length": "571",
-    "etag": "\"sha256:61b26ee74d1de0a876672b0a5d3476d3a44e32d1b34fe0b2203a530540a90fa9\"",
+    "content-length": "548",
+    "etag": "\"sha256:953dcfb7d3ea9bb5e4656b8e266619e1767f72ecfb127df532ccee8faf1af3be\"",
     "cache-control": "private, max-age=31536000, immutable"
   }
 }

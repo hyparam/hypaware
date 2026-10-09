@@ -9,11 +9,12 @@ to the server repository.
 
 - Repository: `hyparam/hypaware-server`
 - Branch: `integration/authorized-graph-snapshots`
-- Commit: `63cba4771704c0af281f186c0ceefdeeecd646ea`
+- Commit: `25ad7621a790c19ff1fbed49cd92f830470c4aa3`
 - Server path: `test/fixtures/contracts/graph-snapshot/v1/`
 - Contract version: `hypaware.graph-snapshot/1`
 - Contract prose: server LLP 0554 (#contract, #lease), with the readings settled by server LLP 0559
 - Pinned for: LLP 0481 T1 (HYP-111), 2026-10-09
+- Re-pinned: 2026-10-09 for LLP 0484#edge-kinds. Edge kinds are now `touched` (server LLP 0556 T1 follow-up `0a001870`), so the edges file, its manifest entry, its ETag and the README changed. The nodes file and the responses did not change, and the server's `src/graph/snapshot-contract.js` is unchanged since `63cba477`, the first pin.
 
 The reference verifier `src/graph/snapshot-contract.js` at the same commit is ported, function bodies unchanged, to `hypaware-core/plugins-workspace/fastask/src/contract.js`.
 
@@ -24,11 +25,11 @@ and check that nothing changed.
 ## SHA-256
 
 ```text
-0032c71e5aceb44abc8945f098a4b169ba6b86c694bbc40221f34d885acc6294  README.md
-6388e3db5a3276a1262661cece479d1e12f6e80c7779eed16854911344204762  edges.ndjson
-61b26ee74d1de0a876672b0a5d3476d3a44e32d1b34fe0b2203a530540a90fa9  edges.ndjson.gz
-5461bc2094b6666950e5ad19b9f4f17b1001ec050dddaddc8447512922860eb7  headers.json
-b6411187fe3ffab6ca20ffc84455057c150a995183a522cd8d0d690b76851af5  manifest.json
+275ada191985e3b0e00870df30e8d036cdd1183263fe2ed320a52159b7c88849  README.md
+6ef6a16184c1114a8a0d20424690d7c53570036742addde8a73e20cee4509c8b  edges.ndjson
+953dcfb7d3ea9bb5e4656b8e266619e1767f72ecfb127df532ccee8faf1af3be  edges.ndjson.gz
+3421bb2435e56b06e33cc57ca23fc54482035f0f8bc6c6bf275009e3ab0c8178  headers.json
+bc25040c7c69520223db86677db7675d00f41dc997dda03e09f5bc0069c424c1  manifest.json
 5d73f2c18e230c0ac851accfa55e555a28cefe742e210149615253a323d987f4  nodes.ndjson
 e52e795d0078dd18d94bcdd656ac5d904da5a91584314bfdf0b73205696dc082  nodes.ndjson.gz
 bbde3355cb3218d8782acc02b493a82e12f44eb96635ba353ad586a1ca7578ee  responses/304-not-modified.json

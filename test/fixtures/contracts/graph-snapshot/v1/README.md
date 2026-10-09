@@ -25,6 +25,22 @@ a node with every optional column absent, and three edges whose endpoint is
 missing from the node file (two share one missing id, so
 `unresolved.edges` is 3 and `unresolved.endpoint_ids` is 2).
 
+## Edge and node kinds
+
+`edge_type` and `node_type` are the projectors' own vocabulary, passed
+through unchanged (hypaware LLP 0484#edge-kinds, referenced from LLP 0554).
+The edges here are `touched`, as the real projectors emit them:
+`Session -touched-> File` from `ai-gateway.t0` and
+`PullRequest -touched-> File` from `github.t0`.
+
+**Changed 2026-10-09:** the first v1 fixture used the placeholder kinds
+`EDITED`, `READ` and `CHANGES`, which no projector emits. They are now
+`touched`. Edge ids are content-addressed over the kind, so every `edge_id`,
+the edges file's `bytes`, `sha256`, `uncompressed_bytes` and `set_digest`,
+and the edges ETag changed with it. The contract version is unchanged
+(`hypaware.graph-snapshot/1`): the fixtures win over prose, and a client that
+pinned the earlier files should copy them again.
+
 ## Rules a client relies on
 
 - **Verify before activating.** Check `protocol`, `schema.schema_version`,
