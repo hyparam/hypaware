@@ -10,6 +10,7 @@ one non-blocking background queue because their materializer and spool state is 
 **Generated-by:** neutral
 **Related:** LLP 0167, LLP 0171, LLP 0168, LLP 0169, LLP 0170
 **Extended-by:** LLP 0430 (manual acceptance procedures are retired; release requirements that ran one no longer apply)
+**Extended-by:** LLP 0471 (#daemon-work: the interval now dispatches sink work without awaiting it and requests the sweep through a coalesced daemon.bookkeeping pass; the sink.tick span this design names is gone)
 
 > Technical design for the one deliverable set LLP 0171 specifies: the
 > reworked `@hypaware/openclaw` attach/detach module (Lane A), the daemon-side
