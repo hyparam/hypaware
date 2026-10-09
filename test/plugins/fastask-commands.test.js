@@ -30,7 +30,7 @@ import { runRemoteRemove } from '../../src/core/cli/remote_commands.js'
 import { canonicalOrigin } from '../../src/core/remote/builtin_remotes.js'
 import { pluginStateDir } from '../../src/core/runtime/paths.js'
 import {
-  DEFAULT_BUDGET_MS, EVIDENCE_NEEDS_REMOTE, parseFastaskArgs, runFastask, runQueryEvidence, runReplicaRefresh, runReplicaStatus,
+  DEFAULT_BUDGET_MS, EVIDENCE_NEEDS_REMOTE, parseFastaskArgs, renderEvidenceText, runFastask, runQueryEvidence, runReplicaRefresh, runReplicaStatus,
 } from '../../hypaware-core/plugins-workspace/fastask/src/commands.js'
 import { discover } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
 import { createIndexBuilder } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
@@ -372,7 +372,7 @@ test('nothing could be read for the leads: exit 1 with the reason, and the docum
   assert.equal(parse(out()).coverage.evidence_failure.code, 'server_busy')
   const human = ctxOf(h)
   assert.equal(await runFastask([QUESTION], human.ctx), 1)
-  assert.match(human.err(), /no evidence could be read: server busy/)
+  assert.match(human.err(), /evidence could not be read: server busy/)
   assert.equal(err(), '')
 })
 
@@ -501,3 +501,16 @@ function shellSplit(line) {
   if (started) out.push(cur)
   return out
 }
+
+test('query evidence text: skipped parts, unconfirmed freshness and an unresolvable cursor are worded for the reader', () => {
+  const text = renderEvidenceText({ sessions: [
+    { session_id: 'a', status: 'partial', parts: [], skipped_parts: 3, next_cursor: 'c' },
+    { session_id: 'b', status: 'error', parts: [], error: { code: 'freshness_unavailable', message: 'no watermark' } },
+    { session_id: 'c', status: 'error', parts: [], error: { code: 'cursor_unresolvable', message: 'tie group too large' } },
+    { session_id: 'd', status: 'not_found', parts: [] },
+  ] })
+  assert.match(text, /^a: partial - 3 parts too large to return were skipped$/m)
+  assert.match(text, /^b: error - the server could not confirm how fresh its evidence is$/m)
+  assert.match(text, /^c: error - the server could not continue this session's evidence$/m)
+  assert.match(text, /^d: not_found - no readable text \(purged, deleted or outside your access\)$/m)
+})

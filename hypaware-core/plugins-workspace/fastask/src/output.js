@@ -84,6 +84,7 @@ function leadEvidenceOut(evidence, remote) {
     status: evidence.status,
     parts: evidence.parts,
     note: evidence.note,
+    skipped_parts: evidence.skipped_parts,
     continuation: evidence.continuation && remote ? evidenceCommand(remote, evidence.continuation) : null,
   }
 }

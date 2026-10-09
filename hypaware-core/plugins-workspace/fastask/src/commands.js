@@ -15,7 +15,7 @@ import { pluginStateDir } from '../../../../src/core/runtime/paths.js'
 import { readLocalReplica, loadColdIndex } from './cold_replica.js'
 import { credentialFingerprint } from './replica_sync.js'
 import { DEFAULT_LEADS, MAX_LEADS, discover } from './discovery.js'
-import { EVIDENCE_CONTRACT, EVIDENCE_TOOL, callEvidence, evidenceSupport, fallbackEvidence, fetchEvidence, planEntries } from './evidence.js'
+import { CURSOR_UNRESOLVABLE_NOTE, EVIDENCE_CONTRACT, EVIDENCE_TOOL, FRESHNESS_UNAVAILABLE_NOTE, NOT_FOUND_NOTE, callEvidence, evidenceSupport, fallbackEvidence, fetchEvidence, planEntries, skippedNote } from './evidence.js'
 import { buildFastaskOutput, renderFastaskText } from './output.js'
 import { connectRemote } from './remote_connect.js'
 import { DISCOVER_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE } from './replica_source.js'
@@ -290,7 +290,7 @@ async function runWithin(args, ctx, run) {
   ctx.stdout.write(args.json ? `${JSON.stringify(out, null, 2)}\n` : renderFastaskText(out))
   // Nothing at all could be read for the leads found: an aggregate failure.
   if (evidence?.failure) {
-    if (!args.json) ctx.stderr.write(`hyp fastask: no evidence could be read: ${evidence.failure.message}\n`)
+    if (!args.json) ctx.stderr.write(`hyp fastask: evidence could not be read: ${evidence.failure.message}\n`)
     return 1
   }
   return 0
@@ -403,9 +403,9 @@ async function remoteEvidence({ discovery, run, warm, connected }) {
  */
 function failure(leadCount, message) {
   return {
-    path: 'session_evidence', label: null, complete: false, deadline_reached: false, received_through: null, read_path: null, retries: 0,
+    path: 'session_evidence', label: null, complete: false, deadline_reached: false, received_through: null, read_path: null, retries: 0, resends: 0,
     failure: { code: 'transport', message },
-    leads: Array.from({ length: leadCount }, () => ({ status: /** @type {const} */ ('error'), parts: [], continuation: null, note: message })),
+    leads: Array.from({ length: leadCount }, () => ({ status: /** @type {const} */ ('error'), parts: [], continuation: null, note: message, skipped_parts: 0 })),
   }
 }
 
@@ -759,12 +759,18 @@ export async function runQueryEvidence(argv, ctx) {
 }
 
 /** @param {any} body */
-function renderEvidenceText(body) {
+export function renderEvidenceText(body) {
   /** @type {string[]} */
   const lines = []
   for (const s of Array.isArray(body?.sessions) ? body.sessions : []) {
-    const note = s.status === 'not_found' ? ' - no readable text (purged, deleted or outside your access)' : s.error?.message ? ` - ${s.error.message}` : ''
-    lines.push(`${s.session_id}: ${s.status}${note}`)
+    const code = s.error?.code
+    const reason = s.status === 'not_found' ? NOT_FOUND_NOTE
+      : code === 'freshness_unavailable' ? FRESHNESS_UNAVAILABLE_NOTE
+        : code === 'cursor_unresolvable' ? CURSOR_UNRESOLVABLE_NOTE
+          : s.error?.message ?? null
+    const skipped = Number.isSafeInteger(s.skipped_parts) && s.skipped_parts > 0 ? skippedNote(s.skipped_parts) : null
+    const note = [reason, skipped].filter(Boolean).join('; ')
+    lines.push(`${s.session_id}: ${s.status}${note ? ` - ${note}` : ''}`)
     for (const p of Array.isArray(s.parts) ? s.parts : []) {
       lines.push(`  ${p.role} ${p.message_created_at}: ${String(p.content_text ?? '').replace(/\s+/g, ' ').trim()}${p.text_truncated ? ' [cut]' : ''}`)
     }
