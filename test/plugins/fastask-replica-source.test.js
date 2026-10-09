@@ -17,6 +17,7 @@ import path from 'node:path'
 import { DISCOVER_ROUTE, EVIDENCE_ROUTE, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
 import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
 import { generatedGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
+import { writeSession } from '../../src/core/remote/credentials.js'
 
 /**
  * @import { TestContext } from 'node:test'
@@ -321,6 +322,49 @@ test('a withdrawal drops the index: discover answers 503 with the state', async 
   assert.equal(status?.state, 'degraded')
   assert.equal(/** @type {any} */ (status?.details).summary_line, 'team graph: removed, access to acme was withdrawn')
   assert.equal(/** @type {any} */ (status?.details).index_generation, null)
+})
+
+test('the real resolver reads the hyp status config, shows its path and target, and follows a reload', async (t) => {
+  // Two servers standing in for two remotes; the config's default moves from one to the other.
+  const first = await startSnapshotServer()
+  const second = await startSnapshotServer()
+  first.publish(pinnedGeneration())
+  second.publish(await generatedGeneration({ generation: '1760004000000-1' }))
+  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fastask-real-resolver-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  /** @param {string} name */
+  const writeConfig = (name) => fs.writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/fastask' }],
+    query: { default_remote: name, remotes: { one: { url: first.url }, two: { url: second.url } } },
+  }))
+  writeConfig('one')
+  for (const target of ['one', 'two']) {
+    await writeSession(stateRoot, target, { refreshToken: 'r', accessJwt: 'tok', expiresAt: '2099-01-01T00:00:00.000Z', org: 'acme' })
+  }
+  const pluginState = path.join(stateRoot, 'plugins', 'fastask')
+  const log = { debug() {}, info() {}, warn() {}, error() {} }
+  const ctx = /** @type {PluginActivationContext} */ (/** @type {unknown} */ ({ paths: { stateDir: pluginState }, log, env: { HYP_HOME: hypHome, HYP_CONFIG: configPath }, config: {} }))
+  const source = await createReplicaSource({ duty: 1 })(ctx)
+  t.after(async () => {
+    await source.stop()
+    await first.close()
+    await second.close()
+    fs.rmSync(hypHome, { recursive: true, force: true })
+  })
+  await waitFor(async () => { const d = await details(source); return d.index_generation !== null && !d.refresh_in_progress })
+  let d = await details(source)
+  assert.equal(d.config_path, configPath, 'the config read is visible in status')
+  assert.equal(d.target, 'one')
+  assert.equal(d.index_generation, pinnedGeneration().manifest.generation)
+
+  writeConfig('two')
+  await source.reload?.(ctx)
+  await waitFor(async () => { const x = await details(source); return x.target === 'two' && x.index_generation === '1760004000000-1' && !x.refresh_in_progress })
+  d = await details(source)
+  assert.equal(d.origin, new URL(second.url).origin)
+  assert.equal(fs.readdirSync(path.join(pluginState, 'replicas')).length, 1, 'the old remote\'s replica is gone')
 })
 
 test('stop during a build aborts it promptly and leaves no staging', async (t) => {

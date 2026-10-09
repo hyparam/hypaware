@@ -55,7 +55,7 @@ const EVIDENCE_BODY_CAP = 512 * 1024
  *
  * @ref LLP 0480#index [implements]: the daemon builds, swaps and serves the warm index on a guarded loopback route with a per-boot token
  * @param {{
- *   resolveTarget?: (ctx: PluginActivationContext) => Promise<ReplicaTarget | null>,
+ *   resolveTarget?: (ctx: PluginActivationContext, seen: { config_path: string | null }) => Promise<ReplicaTarget | null>,
  *   fetchImpl?: typeof fetch,
  *   now?: () => number,
  *   timeZone?: string,
@@ -73,7 +73,11 @@ export function createReplicaSource(deps = {}) {
     const now = deps.now ?? Date.now
     const stateDir = ctx.paths.stateDir
     const stop = new AbortController()
-    const resolveTarget = () => (deps.resolveTarget ?? resolveTargetFromDisk)(ctx)
+    // Where the default remote was last read from, shown in status so a
+    // daemon reading another config than the user edits is visible.
+    /** @type {{ config_path: string | null }} */
+    const seen = { config_path: null }
+    const resolveTarget = () => (deps.resolveTarget ?? resolveTargetFromDisk)(ctx, seen)
     const forwarder = createEvidenceForwarder({ fetchImpl: deps.fetchImpl })
 
     /** @type {{ generation: string, index: GraphIndex, buildMs: number } | null} */
@@ -284,6 +288,7 @@ export function createReplicaSource(deps = {}) {
             index_bytes: active?.index.bytes ?? 0,
             index_build_ms: active?.buildMs ?? null,
             index_error: indexError,
+            config_path: seen.config_path,
             summary_line: line,
             listen_host: bound.host,
             listen_port: bound.port,
@@ -294,8 +299,14 @@ export function createReplicaSource(deps = {}) {
         return status
       },
       async reload() {
-        // The default remote may have changed: check now.
-        void sync.refresh().catch(() => {})
+        // The default remote or login may have changed: resolve it again now.
+        // A pass already running may have read the old config before this
+        // reload, so it is followed by one more.
+        // @ref LLP 0480#replica [implements]: every reload re-resolves the default remote without a daemon restart (designer, 2026-10-09)
+        const running = sync.status().refresh_in_progress
+        void sync.refresh()
+          .then(() => (running ? sync.refresh() : undefined))
+          .catch(() => {})
       },
       async stop() {
         stop.abort(new Error('team graph replica source stopping'))
@@ -315,16 +326,19 @@ export function createReplicaSource(deps = {}) {
 
 /**
  * The default remote, read from the same config files `hyp status` reads
- * (`HYP_CONFIG`, else the default path, plus the central layer). A config
- * that exists but cannot be read throws, so the sync backs off instead of
- * treating it as "no login" and deleting the replica.
+ * (`HYP_CONFIG`, else the default path, plus the central layer), through
+ * the daemon's own exported path and layer resolution rather than a copy of
+ * it. A config that exists but cannot be read throws, so the sync backs off
+ * instead of treating it as "no login" and deleting the replica.
  *
  * @param {PluginActivationContext} ctx
+ * @param {{ config_path: string | null }} seen records the path read, for status
  * @returns {Promise<ReplicaTarget | null>}
  */
-async function resolveTargetFromDisk(ctx) {
+async function resolveTargetFromDisk(ctx, seen) {
   const obs = readObservabilityEnv(ctx.env)
   const configPath = resolveConfigPath({ explicit: undefined, env: ctx.env, hypHome: obs.hypHome })
+  seen.config_path = configPath
   const layered = await resolveLayeredConfigFromDisk({ stateRoot: obs.stateDir, configPath })
   const local = layered.localLoaded
   if (local && !local.ok && local.errorKind !== 'config_missing') throw new Error(`config unreadable: ${local.message}`)
