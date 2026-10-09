@@ -94,16 +94,12 @@ tradeoffs. The proposal must be usable:
 
 A page is read at a glance first and in full second, so lay it out in that
 order. The thesis is one sentence of at most 25 words. Under it, open with
-`## At a glance`: a three-column table, one row each in this order, with the
-label in bold: **What we saw**, **What it costs**, **The fix**, **Expected
-effect**. The header row is `| | Figure | In one line |` with the Figure column
-right-aligned. The Figure cell holds one number as digits with its unit (`49 of
-51`, `82 calls`, `1 hook`); the last cell is at most 10 words and holds no dates,
-quoted text, identifiers, paths, flags, or code. Those details belong in the
-sections. The renderer rules table rows and sets figures in tabular numerals,
-and uploaded pages cannot carry HTML, so this table is the most prominent
-shape a published page can give its headline figures. Read the four rows
-aloud: if they take more than 20 seconds, cut. Then one `##` section per topic in the same order
+`## At a glance`: exactly four bullets, in this order and with a bold lead-in:
+**What we saw**, **What it costs**, **The fix**, and **Expected effect**. Each
+bullet is at most 12 words after the lead-in, carries one number written as
+digits, and contains no dates, quoted text, identifiers, paths, flags, or code.
+Those details belong in the sections. Read the four bullets aloud: if they
+take more than 20 seconds, cut. Then one `##` section per topic in the same order
 (What we saw, What it costs, The fix, Expected effect and the case against it),
 followed by Evidence, Query, and Check before applying. One claim per sentence,
 the figure first; state each figure once in the glance and once in its section,
