@@ -154,8 +154,6 @@ All paths below are relative to `HYP_HOME`:
 | `hypaware/tls/` | Local proxy certificate authority and certificates |
 | `hypaware/processing/logs/daemon.log` | Processing daemon log |
 | `hypaware/dev-telemetry/` | Local development diagnostics |
-| `hypaware/plugins/@hypaware/fastask/replicas/` | Team graph replicas (`@hypaware/fastask`, kept only for a logged-in default remote) |
-| `hypaware/plugins/@hypaware/fastask/control-token` | Per-boot token for the daemon's local team graph routes |
 
 <!-- @ref LLP 0471#diagnostic-history: prune owned diagnostic evidence without acknowledging cache payload -->
 Each destination's `hypaware/sinks/<instance>/outbox/` holds failure diagnostics,
@@ -175,32 +173,6 @@ handle after restart can retry cleanup when it next publishes a failure.
 Check directory permissions and the [diagnostic logs](TROUBLESHOOTING.md#find-diagnostic-logs).
 `hyp sink maintain` maintains export tables; it is not a command for pruning
 these diagnostics.
-
-<!-- @ref LLP 0480#replica: the replica directory, its bounds and what deletes it -->
-With `@hypaware/fastask` enabled, the daemon keeps one team graph replica for
-the default remote's login, in `replicas/<server>--<org>--<hash>/`: a
-`replica.json` record, the active generation under `generations/`, and a
-download in progress under `staging/`. Disk use stays near two generations plus
-one download. A generation whose files exceed 1 GB, or whose index would exceed
-256 MB of memory, is refused before it is downloaded. The replica is teammates'
-data: it is never a dataset, never exported and never forwarded.
-
-<!-- @ref LLP 0486#decision: the processing daemon's memory plateau is a stated fact, not growth -->
-Memory: building the replica's index runs in the background at a bounded CPU
-share. Each new generation is indexed in turn, and the processing daemon's
-resident memory then levels off rather than growing: in testing, with a team
-graph whose index is about 48 MB, it settled at about 560 MB (about 11 times
-the index) and stayed there. A daemon reaches that level within about a week
-at one new generation a day. Without a logged-in default remote, no replica is
-kept and none of this applies.
-
-The replica is deleted when the server withdraws access, when its lease expires
-without a successful check, on `hyp remote remove` of its remote, and when the
-default remote, the org or the login changes. With the daemon stopped, a
-command does not use a replica whose lease has expired or whose login has
-changed; the daemon's next pass deletes or re-confirms it. `hyp leave` leaves
-the replica in place (LLP 0482). An interrupted download is removed at the next
-pass.
 
 ## Manage optional plugins
 

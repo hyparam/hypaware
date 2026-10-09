@@ -1,7 +1,8 @@
 # LLP 0481: Fastask - Plan
 
 **Type:** Plan
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0491](./0491-team-history-uses-remote-graph-and-agent-guidance.spec.md) (client replication and its commands; shared kernel utilities remain)
 **Systems:** CLI, Graph, Query, MCP, Daemon, Plugins, Privacy
 **Author:** HypForge designer
 **Date:** 2026-10-09

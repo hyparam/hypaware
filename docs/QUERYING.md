@@ -201,38 +201,34 @@ examples above. The `node` and `edge` datasets are also queryable with SQL.
 Remote graph traversal uses `--remote`; projecting the local graph does not
 refresh the remote's graph.
 
-<!-- @ref LLP 0487#decision: the agent explores the team graph itself; these are the four commands it uses -->
+<!-- @ref LLP 0491#guidance: agents discover specific remote files before reading indexed session evidence -->
 ## Explore the team's history
 
-With a team remote set up, the `@hypaware/fastask` plugin keeps a copy of the
-team's activity graph on this machine (the *team graph*) and adds four
-commands. Your agent uses them for questions about the team's past work, such
-as why a change was made or whether a step was removed on purpose:
+The shipped Claude and Codex query skills teach agents to search the team
+server's graph for specific filenames, follow those files to promising sessions,
+search a small batch of sessions, and verify the original conversation. If the
+first batch misses, the agent refines the file leads before expanding its search.
+The server's session index accelerates eligible session-scoped reads.
+
+This uses existing remote tools:
 
 ```sh
-hyp query team-graph discover setup confirm config      # files whose paths match, and the sessions that touched them
-hyp query team-graph neighbors <node-id>                # follow relationships from a file or a session
-hyp query team-graph search --session <id> confirm      # find the turns inside candidate sessions
-hyp query evidence --remote team --session '{"session_id":"<id>"}'   # read the original conversation
+hyp query sql "SELECT node_id, natural_key, label FROM node WHERE node_type = 'File' AND LOWER(natural_key) LIKE '%<feature>%' ORDER BY natural_key LIMIT 40" --remote team --format json
+hyp query graph neighbors <file-node-id> --type File --direction in --edge-type touched --depth 1 --limit 50 --remote team --json
+hyp query grep "<term>" --session-id <session-id> --remote team --format json
 ```
 
-Each result names its source: the local copy kept by the daemon (`warm`), the
-local copy loaded by the command itself when the daemon is stopped (`cold`),
-the server (slower), or this machine's own captures. Results are leads with a
-freshness bound, not a complete history: `watermark_age_s` says how old the
-team graph is, and it usually lags today's work. `hyp graph replica status`
-shows the copy's state; `hyp graph replica refresh` asks the daemon to check
-for a newer one.
+Replace placeholders with terms and IDs from the question and results. A
+Session node's `natural_key` is the message dataset's `session_id`. Read the
+surrounding messages with session-scoped remote SQL, or use the remote
+`session_evidence` MCP tool when advertised. File names and graph links are
+leads, not proof of what was decided. Check incomplete results and later
+relevant sessions before concluding whether a decision still stands.
 
-The four commands are the shipped surface. A one-shot `hyp fastask
-"<question>"` planner is deferred and not available.
-
-`hyp setup` adds the plugin to a new install. If you set HypAware up before
-this release, rerun `hyp setup` to add it. Until then `hyp query team-graph`
-is an unknown command, and your agent uses the existing remote tools
-(`hyp query grep`, `hyp query sql` and `hyp query graph neighbors` with
-`--remote`) and tells you once that rerunning `hyp setup` enables team-graph
-exploration. The agent never runs `hyp setup` for you.
+Team retrieval needs no replicated graph or additional client plugin. The
+server maintains the graph. This machine's own capture graph remains available
+for local activity questions. If remote graph data is unavailable, use remote
+message searches and disclose that coverage limit.
 
 ## Connect an MCP client
 

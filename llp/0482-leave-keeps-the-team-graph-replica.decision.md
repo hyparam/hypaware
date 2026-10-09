@@ -1,7 +1,8 @@
 # LLP 0482: `hyp leave` Keeps the Team Graph Replica
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0491](./0491-team-history-uses-remote-graph-and-agent-guidance.spec.md) (client replication and its commands; shared kernel utilities remain)
 **Systems:** CLI, Privacy, Daemon
 **Author:** HypForge designer
 **Date:** 2026-10-09

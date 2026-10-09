@@ -41,8 +41,6 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
   '@hypaware/format-iceberg',
   '@hypaware/context-graph',
   '@hypaware/ai-gateway-graph',
-  // @ref LLP 0480#enablement [implements]: the enabling task (LLP 0481 T14) ships the team graph commands and replica source on by default
-  '@hypaware/fastask',
 ]))
 
 /**

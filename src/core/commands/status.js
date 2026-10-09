@@ -785,14 +785,12 @@ function sourceHealthJson(health) {
 /**
  * A source's own one-line summary (`details.summary_line`), when it publishes
  * one and is running. Unlike the health line, it prints in every state,
- * healthy included: the first publisher is the team graph replica, whose
- * data's age a person needs to see even when nothing is wrong. Any source may
- * publish one. A source that is not running is skipped, because its line was
+ * healthy included. Any source may publish one. A source that is not running is skipped, because its line was
  * written by a run that is gone and would describe a past state as current.
  *
  * @param {{ state?: string, details?: object }} source
  * @returns {string | undefined} the raw recorded line, for --json
- * @ref LLP 0480#status-line [implements]: a generic summary line, printed in every state; extends LLP 0394's quiet-when-healthy for this one line
+ * @ref LLP 0491#scope [implements]: keep the generic source summary independent of graph replication
  */
 function summaryLineOf(source) {
   if (source.state !== 'started') return undefined

@@ -374,7 +374,6 @@ function goldenConfig(hypHome) {
       { name: '@hypaware/claude' },
       { name: '@hypaware/context-graph' },
       { name: '@hypaware/ai-gateway-graph' },
-      { name: '@hypaware/fastask' },
     ],
     sinks: {
       local: {

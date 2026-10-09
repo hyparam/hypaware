@@ -1,7 +1,9 @@
 # LLP 0486: Fastask Stress Thresholds After Measurement
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
+**Superseded-by:** [LLP 0491](./0491-team-history-uses-remote-graph-and-agent-guidance.spec.md) (client replication and its commands; shared kernel utilities remain)
+**Extended-by:** [LLP 0490](./0490-connected-clients-get-graph-cache-with-isolated-indexes.decision.md)
 **Systems:** Daemon, Graph
 **Author:** HypForge designer
 **Date:** 2026-10-09
