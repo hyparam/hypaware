@@ -111,6 +111,8 @@ export interface GraphIndex {
   bytes: number
 
   nodeIds: Map<string, number>
+  /** The node id at each dense index (the same strings as `nodeIds`' keys). */
+  nodeIdOf: string[]
   /** Interned node type names; `nodeType[i]` indexes this. */
   nodeTypes: string[]
   /** Real (non-placeholder) nodes per entry of `nodeTypes`. */
@@ -173,6 +175,8 @@ export type AnchorMatch = 'exact' | 'absolute' | 'suffix' | 'basename' | 'stem'
 
 export interface Anchor {
   node: number
+  /** The File's node id, which `query team-graph neighbors` takes. */
+  node_id: string
   key: string
   term: string
   match: AnchorMatch
@@ -183,7 +187,12 @@ export interface Anchor {
 }
 
 export interface DiscoveryInput {
+  /** The question terms are extracted from, unless `terms` is given. */
   question: string
+  /** Explicit terms, used as written (no extraction); at most 12 are used. */
+  terms?: string[]
+  /** Leads to skip, for paging; `leads` is the page size. */
+  offset?: number
   /** The caller's `owner/repo`, when known. */
   repo?: string | null
   /** The caller's repository root, to turn an absolute `--file` into a repository path. */
@@ -195,7 +204,7 @@ export interface DiscoveryInput {
 }
 
 export interface LeadReason {
-  anchor: { type: 'File', key: string, match: AnchorMatch, proven: boolean, in_repo: boolean }
+  anchor: { type: 'File', node_id: string, key: string, match: AnchorMatch, proven: boolean, in_repo: boolean }
   term: string
   edge: string
   touched_at: string | null
@@ -203,6 +212,8 @@ export interface LeadReason {
 
 export interface Lead {
   session_id: string
+  /** The Session's node id, which `query team-graph neighbors` takes. */
+  node_id: string
   rank: number
   score: number
   group: string
@@ -236,6 +247,8 @@ export interface DiscoveryResult {
   no_anchor: boolean
   /** The graph cannot answer: the caller uses the `team_server` source with this reason. */
   fallback: { reason: 'vocabulary_mismatch', edge_types: Record<string, number> } | null
+  /** Which slice of the ranked sessions `leads` is; `next_offset` is null on the last page. */
+  page: { offset: number, limit: number, next_offset: number | null }
   coverage: {
     visits: number
     truncated: boolean
@@ -494,4 +507,102 @@ export interface FastaskOutput {
     partial: boolean
   }
   timings_ms: FastaskTimings
+}
+
+// ---------------------------------------------------------------------------
+// Agent-callable traversal (LLP 0487#decision): one hop from given nodes.
+// ---------------------------------------------------------------------------
+
+export type NeighborDirection = 'in' | 'out' | 'both'
+
+export interface NeighborsInput {
+  /** Start nodes by node id. */
+  ids?: string[]
+  /** Start nodes by natural key (a File key, a session id, `owner/repo`, ...). */
+  keys?: string[]
+  direction?: NeighborDirection
+  /** Only these edge types; all when absent or empty. */
+  edgeTypes?: string[]
+  /** Neighbors to return. */
+  limit?: number
+  maxVisits?: number
+}
+
+export interface NeighborNode {
+  node_id: string
+  type: string
+  /** Null for a placeholder: an endpoint the node file does not carry. */
+  key: string | null
+  label: string | null
+  placeholder: boolean
+  /** Session props, for a Session neighbor. */
+  session?: SessionProps & { first_seen: string | null }
+}
+
+export interface Neighbor {
+  /** The start node's id. */
+  from: string
+  direction: 'in' | 'out'
+  edge_type: string
+  first_seen: string | null
+  exemplar: Exemplar | null
+  node: NeighborNode
+}
+
+export interface NeighborsStart {
+  /** What the caller passed. */
+  input: string
+  by: 'id' | 'key'
+  found: boolean
+  node_id: string | null
+  type: string | null
+  key: string | null
+}
+
+export interface NeighborsResult {
+  starts: NeighborsStart[]
+  neighbors: Neighbor[]
+  coverage: {
+    visits: number
+    /** The visit budget ended the walk before every edge was read. */
+    truncated: boolean
+    /** More neighbors matched than `limit`. */
+    results_truncated: boolean
+    /** Neighbors that are placeholders (absent from the node file). */
+    unresolved_met: number
+    starts_dropped: number
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent-callable text search inside candidate sessions (LLP 0487#decision).
+// ---------------------------------------------------------------------------
+
+export interface SearchHit {
+  message_id: string | null
+  part_id: string | null
+  role: string | null
+  message_created_at: string | null
+  /** The given terms this part contains. */
+  matched_terms: string[]
+  /** Up to the per-hit cap of text around the first match. */
+  excerpt: string
+  text_truncated: boolean
+  /** A `query evidence` entry for the conversation around this hit. */
+  read: { session_id: string, from: string, to: string, order: 'asc' } | { session_id: string, message_ids: string[] }
+}
+
+export interface SearchSession {
+  session_id: string
+  hits: SearchHit[]
+  /** More parts matched than the per-session hit budget. */
+  truncated: boolean
+  /** The query for this session failed; other sessions still answered. */
+  error: string | null
+}
+
+export interface SearchResult {
+  terms: string[]
+  sessions: SearchSession[]
+  coverage: { sessions_asked: number, sessions_dropped: number, terms_dropped: number, hits: number }
 }

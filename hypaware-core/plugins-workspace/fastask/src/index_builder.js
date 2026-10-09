@@ -144,6 +144,8 @@ export function createIndexBuilder(opts = {}) {
 
   /** @type {Map<string, number>} */
   const nodeIds = new Map()
+  /** @type {string[]} the node id of each dense index, so results can name nodes */
+  const nodeIdOf = []
   /** @type {string[]} */
   const nodeTypes = []
   /** @type {number[]} real (non-placeholder) nodes per interned type */
@@ -281,11 +283,12 @@ export function createIndexBuilder(opts = {}) {
     if (nodeCount === nodeCap) growNodes()
     const i = nodeCount++
     nodeIds.set(id, i)
+    nodeIdOf.push(id)
     nodeType[i] = internNodeType(type)
     nodeFirstSeen[i] = NaN
     naturalKey.push(null)
     label.push(null)
-    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + id.length + 2 * ARRAY_SLOT_BYTES
+    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + id.length + 3 * ARRAY_SLOT_BYTES
     return i
   }
 
@@ -422,6 +425,7 @@ export function createIndexBuilder(opts = {}) {
         unresolvedEdges,
         bytes: estimate(),
         nodeIds,
+        nodeIdOf,
         nodeTypes,
         nodeTypeCounts,
         nodeType,

@@ -242,13 +242,14 @@ test('on the pinned fixture, discovery walks touched edges to the session, from 
   assert.equal(result.coverage.unresolved_edges_met, 1)
   assert.deepEqual(result.leads, [{
     session_id: 'fx-session-0001',
+    node_id: '064cdf336fa1a22c8057df70',
     rank: 1,
     score: 6,
     // Equal weights: the lead's group is its earliest anchor's term.
     group: 'app.js',
     why: [
-      { anchor: { type: 'File', key: '/work/fx-repo/docs/café-日本-🚀.md', match: 'basename', proven: false, in_repo: false }, term: 'café-日本-🚀.md', edge: 'touched', touched_at: '2026-09-02T10:15:30.001Z' },
-      { anchor: { type: 'File', key: '/work/fx-repo/src/app.js', match: 'basename', proven: false, in_repo: false }, term: 'app.js', edge: 'touched', touched_at: '2026-08-31T22:36:02.500Z' },
+      { anchor: { type: 'File', node_id: 'b9ed4fa6dc7e6e60fda8964f', key: '/work/fx-repo/docs/café-日本-🚀.md', match: 'basename', proven: false, in_repo: false }, term: 'café-日本-🚀.md', edge: 'touched', touched_at: '2026-09-02T10:15:30.001Z' },
+      { anchor: { type: 'File', node_id: 'daed8234d97ecd3c21815e80', key: '/work/fx-repo/src/app.js', match: 'basename', proven: false, in_repo: false }, term: 'app.js', edge: 'touched', touched_at: '2026-08-31T22:36:02.500Z' },
     ],
     touched_at: '2026-09-02T10:15:30.001Z',
     exemplar: { message_id: 'fx-msg-0003', part_id: null },

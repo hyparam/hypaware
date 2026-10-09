@@ -61,10 +61,11 @@ const CORPUS = (() => {
 function lead(sessionId, touchedAt, extra = {}) {
   return {
     session_id: sessionId,
+    node_id: `node-${sessionId}`,
     rank: 1,
     score: 1,
     group: 'login.js',
-    why: [{ anchor: { type: 'File', key: 'acme/app:src/login.js', match: 'basename', proven: true, in_repo: true }, term: 'login', edge: 'touched', touched_at: touchedAt }],
+    why: [{ anchor: { type: 'File', node_id: 'node-login-js', key: 'acme/app:src/login.js', match: 'basename', proven: true, in_repo: true }, term: 'login', edge: 'touched', touched_at: touchedAt }],
     touched_at: touchedAt,
     exemplar: null,
     session: { first_seen: '2026-08-31T09:59:00.000Z', cwd: '/repo', git_branch: 'main', client_name: 'claude-code', user_id: 'fx-user-1' },
@@ -428,6 +429,7 @@ function discoveryOf(leads, extra = {}) {
   return {
     terms: [{ text: "login's", kind: /** @type {any} */ ('word') }, { text: 'poll', kind: /** @type {any} */ ('word') }],
     anchors: [], leads, ambiguous: true, groups: [], no_anchor: false, fallback: null,
+    page: { offset: 0, limit: 8, next_offset: null },
     coverage: { visits: 1840, truncated: false, anchors_truncated: 0, unresolved_edges_met: 2, sessions_considered: 9 },
     ...extra,
   }

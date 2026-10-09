@@ -3,7 +3,7 @@
 import { PLACEHOLDER, basenameOf, isAbsolute, lastSegments, repoOfKey } from './index_builder.js'
 
 /**
- * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Term, VocabularyMismatch } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Neighbor, NeighborNode, NeighborsInput, NeighborsResult, NeighborsStart, Term, VocabularyMismatch } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 /**
@@ -20,6 +20,10 @@ export const MAX_ANCHORS = 50
 export const MAX_VISITS = 20_000
 export const DEFAULT_LEADS = 8
 export const MAX_LEADS = 40
+export const DEFAULT_NEIGHBORS = 50
+export const MAX_NEIGHBORS = 500
+/** Start nodes one neighbors call takes. */
+export const MAX_STARTS = 50
 
 /** The edge discovery walks from a File back to its sessions. */
 const TOUCH_EDGE = 'touched'
@@ -86,7 +90,7 @@ export function extractTerms(question, max = MAX_TERMS) {
   for (const raw of question.split(/\s+/)) {
     const token = raw.replace(/^[\s"'`([{<]+|[\s"'`)\]}>,;:!?.]+$/g, '')
     if (!token) continue
-    if (/[\\/]/.test(token) || /^\S*\.[\p{L}\p{N}]{1,8}$/u.test(token)) {
+    if (isPathLike(token)) {
       paths.push({ text: token, kind: 'path' })
       continue
     }
@@ -108,6 +112,39 @@ export function extractTerms(question, max = MAX_TERMS) {
     if (terms.length === max) break
   }
   return terms
+}
+
+/**
+ * Terms an agent chose, used as written: no splitting and no stopwords, only
+ * trimmed, deduplicated case-insensitively and capped at `max`. A path-like
+ * term resolves like a relative `--file`; any other matches basenames and
+ * stems.
+ *
+ * @param {string[]} given
+ * @param {number} [max]
+ * @returns {Term[]}
+ */
+export function explicitTerms(given, max = MAX_TERMS) {
+  /** @type {Term[]} */
+  const terms = []
+  const seen = new Set()
+  for (const raw of given) {
+    const text = raw.trim()
+    const key = text.toLowerCase()
+    if (!text || seen.has(key)) continue
+    seen.add(key)
+    terms.push({ text, kind: isPathLike(text) ? 'path' : 'word' })
+    if (terms.length === max) break
+  }
+  return terms
+}
+
+/**
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isPathLike(token) {
+  return /[\\/]/.test(token) || /^\S*\.[\p{L}\p{N}]{1,8}$/u.test(token)
 }
 
 /**
@@ -133,7 +170,9 @@ export function discover(index, input) {
   const maxAnchors = input.maxAnchors ?? MAX_ANCHORS
   const maxVisits = input.maxVisits ?? MAX_VISITS
   const repo = input.repo ? input.repo.toLowerCase() : null
-  const terms = extractTerms(input.question)
+  const offset = Math.max(0, Math.floor(input.offset ?? 0))
+  // @ref LLP 0487#decision [implements]: agent-directed discover takes the agent's own terms, used as written
+  const terms = input.terms ? explicitTerms(input.terms) : extractTerms(input.question)
 
   // Each `--file` and each term is one source of anchors; groups are keyed by it.
   /** @type {Array<{ text: string, candidates: Anchor[][], overflow: number }>} */
@@ -158,6 +197,7 @@ export function discover(index, input) {
       groups: [],
       no_anchor: anchors.length === 0,
       fallback: { reason: mismatch.error_kind, edge_types: mismatch.edge_types },
+      page: { offset, limit: leadsWanted, next_offset: null },
       coverage: { visits: 0, truncated: false, anchors_truncated: dropped, unresolved_edges_met: 0, sessions_considered: 0 },
     }
   }
@@ -210,10 +250,15 @@ export function discover(index, input) {
 
   const ranked = [...sessions.entries()].sort(([s1, r1], [s2, r2]) =>
     r2.score - r1.score || newer(r2.latest, r1.latest) || compareKeys(index.naturalKey[s1], index.naturalKey[s2]))
-  const chosen = ambiguous ? roundRobin(ranked, (entry) => primaryGroup(entry[1], anchors, groupOf), groups, leadsWanted) : ranked.slice(0, leadsWanted)
+  // A page is the same ordering cut at `offset`: the round-robin over
+  // competing groups is computed through the page's end, then sliced.
+  const through = offset + leadsWanted
+  const ordered = ambiguous ? roundRobin(ranked, (entry) => primaryGroup(entry[1], anchors, groupOf), groups, through) : ranked.slice(0, through)
+  const chosen = ordered.slice(offset)
 
   /** @type {Lead[]} */
-  const leads = chosen.map(([s, rec], n) => toLead(index, anchors, s, rec, n + 1, groups[primaryGroup(rec, anchors, groupOf)].key))
+  const leads = chosen.map(([s, rec], n) => toLead(index, anchors, s, rec, offset + n + 1, groups[primaryGroup(rec, anchors, groupOf)].key))
+  const nextOffset = offset + chosen.length
 
   return {
     terms,
@@ -223,6 +268,7 @@ export function discover(index, input) {
     groups,
     no_anchor: anchors.length === 0,
     fallback: null,
+    page: { offset, limit: leadsWanted, next_offset: nextOffset < sessions.size ? nextOffset : null },
     coverage: {
       visits,
       truncated,
@@ -368,6 +414,7 @@ function anchorFor(index, node, term, match, repo) {
   const keyRepo = repoOfKey(key)
   return {
     node,
+    node_id: index.nodeIdOf[node],
     key,
     term,
     match,
@@ -527,7 +574,7 @@ function toLead(index, anchors, s, rec, rank, group) {
   const why = reasons.map(({ anchor: a, edge }) => {
     const anchor = anchors[a]
     return {
-      anchor: { type: 'File', key: anchor.key, match: anchor.match, proven: anchor.proven, in_repo: anchor.in_repo },
+      anchor: { type: 'File', node_id: anchor.node_id, key: anchor.key, match: anchor.match, proven: anchor.proven, in_repo: anchor.in_repo },
       term: anchor.term,
       edge: index.edgeTypes[index.edgeType[edge]],
       touched_at: iso(index.edgeFirstSeen[edge]),
@@ -536,6 +583,7 @@ function toLead(index, anchors, s, rec, rank, group) {
   const props = index.sessionProps.get(s)
   return {
     session_id: /** @type {string} */ (index.naturalKey[s]),
+    node_id: index.nodeIdOf[s],
     rank,
     score: rec.score,
     group,
@@ -613,4 +661,110 @@ function relativeTo(root, path) {
   if (!root) return null
   const r = root.replace(/\\/g, '/').replace(/\/+$/, '')
   return path.startsWith(`${r}/`) ? normalizeRel(path.slice(r.length + 1)) : null
+}
+
+/**
+ * One hop from the given nodes (LLP 0487#decision `neighbors`): their edges
+ * in the chosen direction, newest first, optionally only some edge types.
+ * Bounded like discovery: at most `MAX_STARTS` start nodes, a visit budget
+ * (20,000) shared fairly across them, and at most `limit` neighbors returned;
+ * both truncations are reported. Keys resolve in one pass over the node table
+ * however many are asked for. Placeholder neighbors are returned and counted,
+ * not dropped.
+ *
+ * @ref LLP 0487#decision [implements]: neighbors walks the index's CSR adjacency within the same 20,000-visit budget
+ * @param {GraphIndex} index
+ * @param {NeighborsInput} input
+ * @returns {NeighborsResult}
+ */
+export function neighbors(index, input) {
+  const direction = input.direction ?? 'both'
+  const limit = Math.min(Math.max(1, Math.floor(input.limit ?? DEFAULT_NEIGHBORS)), MAX_NEIGHBORS)
+  const maxVisits = Math.min(Math.max(1, Math.floor(input.maxVisits ?? MAX_VISITS)), MAX_VISITS)
+  const wanted = input.edgeTypes?.length ? new Set(input.edgeTypes.map((t) => index.edgeTypes.indexOf(t)).filter((t) => t !== -1)) : null
+
+  /** @type {NeighborsStart[]} */
+  const starts = []
+  /** @type {number[]} */
+  const nodes = []
+  const asked = [...(input.ids ?? []).map((v) => ({ input: v, by: /** @type {const} */ ('id') })), ...(input.keys ?? []).map((v) => ({ input: v, by: /** @type {const} */ ('key') }))]
+  const startsDropped = Math.max(0, asked.length - MAX_STARTS)
+  const kept = asked.slice(0, MAX_STARTS)
+  /** @type {Map<string, number[]>} */
+  const byKey = new Map(kept.filter((a) => a.by === 'key').map((a) => [a.input, []]))
+  if (byKey.size > 0) {
+    for (let i = 0; i < index.nodeCount; i++) {
+      const key = index.naturalKey[i]
+      if (key !== null) byKey.get(key)?.push(i)
+    }
+  }
+  for (const a of kept) {
+    const found = a.by === 'id' ? (index.nodeIds.has(a.input) ? [/** @type {number} */ (index.nodeIds.get(a.input))] : []) : /** @type {number[]} */ (byKey.get(a.input))
+    if (found.length === 0) starts.push({ input: a.input, by: a.by, found: false, node_id: null, type: null, key: null })
+    for (const n of found) {
+      starts.push({ input: a.input, by: a.by, found: true, node_id: index.nodeIdOf[n], type: index.nodeTypes[index.nodeType[n]], key: index.naturalKey[n] })
+      nodes.push(n)
+    }
+  }
+
+  /** @type {Neighbor[]} */
+  const out = []
+  let visits = 0
+  let truncated = false
+  let resultsTruncated = false
+  let unresolved = 0
+  const directions = direction === 'both' ? /** @type {const} */ (['out', 'in']) : [direction]
+  walk: for (let k = 0; k < nodes.length; k++) {
+    const n = nodes[k]
+    let share = Math.ceil((maxVisits - visits) / (nodes.length - k))
+    for (const dir of directions) {
+      const offsets = dir === 'out' ? index.outOffsets : index.inOffsets
+      const edges = dir === 'out' ? index.outEdges : index.inEdges
+      for (let p = offsets[n]; p < offsets[n + 1]; p++) {
+        if (share === 0) {
+          truncated = true
+          break
+        }
+        share--
+        visits++
+        const e = edges[p]
+        if (wanted && !wanted.has(index.edgeType[e])) continue
+        if (out.length === limit) {
+          resultsTruncated = true
+          break walk
+        }
+        const other = dir === 'out' ? index.edgeDst[e] : index.edgeSrc[e]
+        const node = neighborNode(index, other)
+        if (node.placeholder) unresolved++
+        out.push({
+          from: index.nodeIdOf[n],
+          direction: dir,
+          edge_type: index.edgeTypes[index.edgeType[e]],
+          first_seen: iso(index.edgeFirstSeen[e]),
+          exemplar: index.exemplars.get(e) ?? null,
+          node,
+        })
+      }
+    }
+  }
+  return {
+    starts,
+    neighbors: out,
+    coverage: { visits, truncated, results_truncated: resultsTruncated, unresolved_met: unresolved, starts_dropped: startsDropped },
+  }
+}
+
+/**
+ * @param {GraphIndex} index
+ * @param {number} n
+ * @returns {NeighborNode}
+ */
+function neighborNode(index, n) {
+  const placeholder = (index.nodeFlags[n] & PLACEHOLDER) !== 0
+  const key = index.naturalKey[n]
+  /** @type {NeighborNode} */
+  const node = { node_id: index.nodeIdOf[n], type: index.nodeTypes[index.nodeType[n]], key, label: index.label[n] ?? key, placeholder }
+  const props = index.sessionProps.get(n)
+  if (props) node.session = { first_seen: iso(index.nodeFirstSeen[n]), ...props }
+  return node
 }
