@@ -13,7 +13,7 @@ import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { discover } from './discovery.js'
 import { createEvidenceForwarder } from './evidence_forwarder.js'
-import { buildIndexFromSnapshot } from './index_builder.js'
+import { IndexBuildError, buildIndexFromSnapshot } from './index_builder.js'
 import { createReplicaSync } from './replica_sync.js'
 import { createDefaultTargetResolver } from './replica_target.js'
 import { summaryLine } from './summary_line.js'
@@ -126,7 +126,19 @@ export function createReplicaSource(deps = {}) {
         // LLP 0480#sync step 6: the index is built before activation, so a
         // failed or refused build keeps the old generation active.
         async beforeActivate(dir, manifest) {
-          staged = await build(dir, manifest)
+          try {
+            staged = await build(dir, manifest)
+          } catch (err) {
+            // The sync keeps the old generation (and this source its index);
+            // status names why the new one was rejected until one activates.
+            // @ref LLP 0483#accepted [implements]: a generation whose rows break the contract is rejected with a typed reason, the old one stays
+            if (!stop.signal.aborted) {
+              const kind = err instanceof IndexBuildError ? err.code : 'index_failed'
+              indexError = `generation ${manifest.generation} rejected (${kind}): ${messageOf(err)}`
+              ctx.log.warn('fastask.generation_rejected', { generation: manifest.generation, error_kind: kind, error: messageOf(err) })
+            }
+            throw err
+          }
         },
         async afterActivate(dir, manifest) {
           if (staged?.generation === manifest.generation) {

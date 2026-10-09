@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { gunzipSync, gzipSync } from 'node:zlib'
 
 import { DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
 import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
@@ -25,6 +26,7 @@ import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
 import { credentialFingerprint } from '../../hypaware-core/plugins-workspace/fastask/src/replica_sync.js'
 import { canonicalOrigin } from '../../src/core/remote/builtin_remotes.js'
+import { measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
 
 /**
  * @import { TestContext } from 'node:test'
@@ -329,6 +331,39 @@ test('a new generation is indexed, swapped in, and the old files removed', async
   assert.deepEqual(fs.readdirSync(paths().generations), ['1760002000000-1'])
   const ok = await call(port, DISCOVER_ROUTE, { question: 'anything', scope }, { token })
   assert.equal(ok.body.replica.generation, '1760002000000-1')
+})
+
+test('a generation whose rows break the contract is rejected: the old one and its index stay, status says why', async (t) => {
+  // The review's probe (HYP-111 r1 F5): digests valid over rows whose node_id
+  // column is renamed. Before the per-line check it activated an empty index.
+  const { source, server, port, token, paths, logs, scope } = await setup(t)
+  const before = await details(source)
+  const bad = await generatedGeneration({ generation: '1760000000000-99', nodeCount: 3, edgeCount: 0 })
+  const rows = gunzipSync(bad.files.nodes).toString('utf8').trim().split('\n').map((l) => JSON.parse(l))
+  for (const row of rows) {
+    row.renamed_node_id = row.node_id
+    delete row.node_id
+  }
+  bad.files.nodes = gzipSync(rows.map((r) => `${JSON.stringify(r)}\n`).join(''))
+  bad.manifest.files.nodes = { path: bad.manifest.files.nodes.path, ...(await measureFile(bad.files.nodes)).facts }
+  server.publish(bad)
+  await call(port, REFRESH_ROUTE, {}, { token })
+  await waitFor(() => logs.includes('fastask.generation_rejected'))
+  await waitFor(async () => !(await details(source)).refresh_in_progress)
+
+  const after = await details(source)
+  assert.equal(after.generation, before.generation, 'the previous generation stays active')
+  assert.equal(after.index_generation, before.index_generation)
+  assert.equal(after.index_bytes, before.index_bytes, 'the index is unchanged')
+  assert.match(after.index_error, /^generation 1760000000000-99 rejected \(schema_violation\): nodes line 1: column 1 is "node_type", expected node_id$/)
+  const status = await source.status?.()
+  assert.equal(status?.state, 'degraded')
+  assert.match(status?.lastError ?? '', /schema_violation/)
+  assert.deepEqual(fs.readdirSync(paths().generations), [before.generation])
+  assert.deepEqual(fs.readdirSync(paths().staging), [])
+  const ok = await call(port, DISCOVER_ROUTE, { question: 'app.js', scope }, { token })
+  assert.equal(ok.status, 200, 'discover still answers from the previous index')
+  assert.equal(ok.body.replica.generation, before.generation)
 })
 
 test('a withdrawal drops the index: discover answers 503 with the state', async (t) => {
