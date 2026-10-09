@@ -13,6 +13,7 @@ import { defaultConfigPath, prepareLocalConfigWrite } from '../../../../src/core
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
+import { booleanFlagValue } from '../../../../src/core/cli/verb_codec.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -615,27 +616,29 @@ function firstNonEmpty(...values) {
 /**
  * Read a boolean flag out of a preset's raw argv the way the CLI codec
  * reads one: a bare `--flag` is true, `--flag=true` / `--flag=false`
- * carry their value. A preset is dispatched before flag parsing
- * (src/core/commands/init.js), so it reads argv itself, and a plain
- * `argv.includes('--dry-run')` silently drops `--dry-run=true`: a
- * spelling the CLI accepts everywhere else. Same class as
- * src/core/cli/remote_commands.js's `--no-forward=true`.
+ * carry their value, and any other inline value is a usage error. A
+ * preset is dispatched before flag parsing (src/core/commands/init.js),
+ * so it reads argv itself, and a plain `argv.includes('--dry-run')`
+ * silently drops `--dry-run=true`: a spelling the CLI accepts everywhere
+ * else. Same class as src/core/cli/remote_commands.js's `--no-forward=true`.
+ * Reading `--dry-run=TRUE` as false here wrote the config the operator
+ * asked only to preview (issue #2440), so a malformed value refuses.
  *
  * @param {string[]} argv
  * @param {string} name flag name without the leading dashes
+ * @returns {{ ok: true, value: boolean } | { ok: false, error: string }}
  */
 function booleanFlag(argv, name) {
   const bare = `--${name}`
   const prefix = `${bare}=`
-  let value = false
+  /** @type {{ ok: true, value: boolean } | { ok: false, error: string }} */
+  let read = { ok: true, value: false }
   for (const token of argv) {
-    if (token === bare) {
-      value = true
-    } else if (token.startsWith(prefix)) {
-      value = token.slice(prefix.length) === 'true'
-    }
+    if (token !== bare && !token.startsWith(prefix)) continue
+    read = booleanFlagValue(name, token === bare ? undefined : token.slice(prefix.length))
+    if (!read.ok) return read
   }
-  return value
+  return read
 }
 
 /**
@@ -652,17 +655,27 @@ function booleanFlag(argv, name) {
  * to `hypaware-config.json.bak-<ts>` first. `--dry-run` reports the path
  * the preset would write and writes nothing, refusing on an existing
  * config exactly as a real run would. Both flags are read the way the CLI
- * codec reads a boolean for the `true` / `false` spellings, so
- * `--force=true` / `--dry-run=true` and `--force=false` / `--dry-run=false`
- * work as well as the bare flags. Any other inline value reads as false
- * here instead of being refused like the codec does (issue #2440).
+ * codec reads a boolean, so `--force=true` / `--dry-run=true` and
+ * `--force=false` / `--dry-run=false` work as well as the bare flags, and
+ * any other inline value (`--dry-run=TRUE`, `--force=1`) exits 2 before
+ * anything is written, as it does on the no-preset form (issue #2440).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
-  const force = booleanFlag(argv, 'force')
-  const dryRun = booleanFlag(argv, 'dry-run')
+  const dryRunFlag = booleanFlag(argv, 'dry-run')
+  if (!dryRunFlag.ok) {
+    ctx.stderr.write(`hyp setup: ${dryRunFlag.error}\n`)
+    return 2
+  }
+  const forceFlag = booleanFlag(argv, 'force')
+  if (!forceFlag.ok) {
+    ctx.stderr.write(`hyp setup: ${forceFlag.error}\n`)
+    return 2
+  }
+  const dryRun = dryRunFlag.value
+  const force = forceFlag.value
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   const configPath = ctx.env.HYP_CONFIG
