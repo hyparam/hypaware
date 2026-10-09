@@ -106,7 +106,10 @@ by default; those checks do not send recordings. Separately configured remote
 destinations and diagnostic exporters can also send data.
 
 HypAware Cloud operators can read synced data across every org, and each
-such read is recorded in that org's audit trail.
+such read is recorded in that org's audit trail. For support, they can also
+view a member's dashboard as that member sees it, read-only and for at most
+an hour at a time. Each such session is recorded in that org's audit trail
+under the operator's name, with the reason they gave.
 
 Enrollment also enables [product telemetry](#product-telemetry) for the
 organization unless you saved a preference. It is separate from session recordings.
