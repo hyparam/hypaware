@@ -1,7 +1,7 @@
 # LLP 0479: Fastask With a Local Team Graph and Remote Evidence
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Accepted
 **Systems:** CLI, Graph, Query, MCP, Daemon, Clients
 **Author:** Phil (issue) / HypForge designer
 **Date:** 2026-10-09

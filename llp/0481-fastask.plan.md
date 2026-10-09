@@ -1,7 +1,7 @@
 # LLP 0481: Fastask - Plan
 
 **Type:** Plan
-**Status:** Draft
+**Status:** Accepted
 **Systems:** CLI, Graph, Query, MCP, Daemon, Plugins, Privacy
 **Author:** HypForge designer
 **Date:** 2026-10-09
