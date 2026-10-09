@@ -484,7 +484,6 @@ test('discover and evidence require the caller\'s scope, and refuse another remo
     [{ ...scope, target: 'other' }, 'remote'],
     [{ ...scope, origin: 'http://127.0.0.1:1' }, 'remote'],
     [{ ...scope, org: 'bravo' }, 'org'],
-    [{ ...scope, org: null }, 'org'],
     [{ ...scope, credential_fp: 'f'.repeat(16) }, 'login'],
     [{ ...scope, credential_fp: null }, 'login'],
   ]
@@ -497,6 +496,8 @@ test('discover and evidence require the caller\'s scope, and refuse another remo
   }
   assert.equal(mcp.calls, 0, 'no evidence call reached the remote for a scope that does not match')
   assert.equal((await call(port, DISCOVER_ROUTE, { ...body, scope }, { token })).status, 200)
+  // A static or env token names no org: the server-confirmed org stands, bound by the fingerprint.
+  assert.equal((await call(port, DISCOVER_ROUTE, { ...body, scope: { ...scope, org: null } }, { token })).status, 200)
   assert.equal((await call(port, EVIDENCE_ROUTE, { ...body, scope }, { token })).body.ok, true)
 })
 

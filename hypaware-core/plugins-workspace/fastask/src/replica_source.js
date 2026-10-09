@@ -376,9 +376,11 @@ function replicaView(r) {
  * remote target, its canonical origin, the login's org and the credential
  * fingerprint (`credentialFingerprint`). It is compared with the replica's
  * record, not a fresh login read, so a new login the sync loop has not yet
- * re-confirmed is refused, as on the cold path. Org compares exactly (null
- * for static and environment tokens on both sides); a missing fingerprint on
- * either side fails closed.
+ * re-confirmed is refused, as on the cold path. The record's org is the one
+ * the server confirmed; a login that names an org must name that one, while
+ * a static or environment token names none and is bound by its fingerprint
+ * alone (as `readLocalReplica` does). A missing fingerprint on either side
+ * fails closed.
  *
  * @ref LLP 0483#credential-change [implements]: the warm path answers only for the remote, org and login the replica was confirmed for
  * @param {any} scope
@@ -387,7 +389,7 @@ function replicaView(r) {
  */
 export function scopeMismatch(scope, status) {
   if (scope.target !== status.target || scope.origin !== status.origin) return 'remote'
-  if ((scope.org ?? null) !== (status.org ?? null)) return 'org'
+  if (typeof scope.org === 'string' && scope.org !== status.org) return 'org'
   if (typeof scope.credential_fp !== 'string' || typeof status.credential_fp !== 'string' || scope.credential_fp !== status.credential_fp) return 'login'
   return null
 }
