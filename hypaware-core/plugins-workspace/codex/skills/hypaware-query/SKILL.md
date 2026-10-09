@@ -84,6 +84,8 @@ Before summing token volumes, check usage-bearing records for repeated provider 
 
 Read usage from `attributes.usage`, not `raw_frame`. `input_tokens` is net of cache. Keep input, output, cache read, and cache write separate; reasoning may already be included in output. Missing usage is not zero consumption.
 
+To scope a question to one agent or machine, find its gateway from facts the user knows rather than asking for an id. A gateway is one HypAware install: a person's machine or an autonomous agent's runtime. Discriminate on `git_remote` for the repository it works in, on a `cwd` pattern for where it runs (an agent in containers has paths like `/work/...` that no laptop has), or on its name in `system_text`; count distinct sessions per `gateway_id` for each candidate, confirm with a bounded sample, then filter on `gateway_id`. A name match alone is not enough: people working on an agent's repository mention it too.
+
 Run `hyp query schema ai_gateway_messages` for the full column list. For OpenClaw activity, read [openclaw.md](openclaw.md) before choosing a source filter.
 
 ## Activity graph: `node` / `edge`
