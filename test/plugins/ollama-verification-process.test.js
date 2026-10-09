@@ -43,7 +43,9 @@ function alive(pid) {
  * throw then skips the teardown, leaving the daemon and its processor alive
  * to hold the runner open. One hook therefore does both, in order: stop every
  * daemon started in the home (newest first) and wait for each processor, then
- * remove the home whatever happened.
+ * remove the home whatever happened. A failed stop (a processor that outlived
+ * its daemon) is thrown only after all of that, so it fails the test without
+ * leaving anything running.
  * @param {TestContext} t
  */
 function testHome(t) {
@@ -60,7 +62,8 @@ function testHome(t) {
     } finally {
       removeTemporaryDirectory(home)
     }
-    if (errors.length) throw errors[0]
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, `${errors.length} daemon teardowns failed`)
   })
   return { home, stops }
 }
@@ -119,21 +122,26 @@ process.send?.('ready')
   /** @type {number | undefined} */
   let processor
   owner.stops.push(async () => {
+    /** @type {number[]} */
+    const survivors = []
+    let ended = 'stop'
     try {
       // The processor seen at start-up and the one of record now (a home's
       // status file is shared with a later daemon started in it).
       const processors = new Set([processor, readStatusFile(state)?.processes?.processing?.pid])
       if (!exited && child.connected) child.send('stop')
+      else if (exited) ended = 'the test'
       try { await waitFor(() => exited, 6000) } catch {
+        ended = 'SIGKILL'
         child.kill('SIGKILL')
         await waitFor(() => exited)
       }
       for (const pid of processors) {
         if (!pid || pid === process.pid || !alive(pid)) continue
         try { await waitFor(() => !alive(pid), 3000) } catch {
-          // The daemon's stop path should have ended it; say so where CI
-          // shows it rather than leaving it to hold the runner open.
-          console.error(`ollama-verification-process: processor ${pid} outlived its daemon; killing it`)
+          // Bounded cleanup first, so nothing is left to hold the runner
+          // open; the survivor still fails the test below.
+          survivors.push(pid)
           process.kill(pid, 'SIGKILL')
           await waitFor(() => !alive(pid))
         }
@@ -141,6 +149,11 @@ process.send?.('ready')
     } finally {
       upstream.closeAllConnections()
       await new Promise(resolve => upstream.close(() => resolve(undefined)))
+    }
+    // A processor alive 3 s after its daemon ended is a product orphan, not a
+    // teardown detail: fail the test, after the cleanup above has finished.
+    if (survivors.length) {
+      throw new Error(`processor ${survivors.join(', ')} outlived its daemon (daemon ended by ${ended}); killed during teardown`)
     }
   })
   const status = await waitFor(() => {
