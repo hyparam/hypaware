@@ -1,5 +1,7 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
+
 import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
 import { createUsagePolicyResolver, isEqualOrDescendant, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
@@ -206,7 +208,11 @@ export function createCodexExchangeProjector(opts = {}) {
 
       const responseBody = parseMaybeJson(input.response_body)
       const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
-      const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
+      const baseInstructions = resolveBaseInstructions(reqBody,
+        Boolean(codexContext) && !isOpenAiChatPath(path) && !Array.isArray(reqBody.messages),
+        codexContext?.thread_id)
+      const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents,
+        skipInputIndex: baseInstructions.skipInputIndex })
       if (messages.length === 0) return undefined
 
       const recordedContext = resolveRecordedContext(reqBody, codexContext, cwd)
@@ -246,7 +252,7 @@ export function createCodexExchangeProjector(opts = {}) {
         request_id: resolveRequestId(input),
         prompt_id: codexContext?.turn_id,
         model: resolveModel(reqBody, responseBody),
-        system_text: extractSystemText(reqBody.system ?? reqBody.instructions),
+        system_text: baseInstructions.systemText,
         tools: /** @type {any} */ (reqBody.tools),
         attributes: projectionAttributes,
         messages,
@@ -384,6 +390,7 @@ function isCodexNamespacePath(path) {
  *   reqBody: Record<string, unknown>,
  *   responseBody: unknown,
  *   streamEvents: Array<{ event: string, data: string }>,
+ *   skipInputIndex: number,
  * }} ctx
  * @returns {AiGatewayProjectedMessage[]}
  */
@@ -395,7 +402,7 @@ function messagesForTransport(ctx) {
   if (isOpenAiChatPath(ctx.path) || Array.isArray(ctx.reqBody.messages)) {
     return openAiChatMessages(ctx.reqBody, ctx.responseBody)
   }
-  return openAiResponsesMessages(ctx.reqBody, ctx.responseBody, ctx.streamEvents)
+  return openAiResponsesMessages(ctx.reqBody, ctx.responseBody, ctx.streamEvents, ctx.skipInputIndex)
 }
 
 /**
@@ -474,11 +481,12 @@ function openAiChatMessageToProjected(message) {
  * @param {Record<string, unknown>} reqBody
  * @param {unknown} responseBody
  * @param {Array<{ event: string, data: string }>} streamEvents
+ * @param {number} skipInputIndex
  * @returns {AiGatewayProjectedMessage[]}
  */
-function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
+function openAiResponsesMessages(reqBody, responseBody, streamEvents, skipInputIndex) {
   /** @type {AiGatewayProjectedMessage[]} */
-  const messages = responsesInputMessages(reqBody.input)
+  const messages = responsesInputMessages(reqBody.input, skipInputIndex)
   let assistant = responsesAssistantMessagesFromBody(responseBody)
   if (assistant.length === 0) assistant = responsesAssistantMessagesFromStream(streamEvents)
   const usageAttributes = openAiUsageAttributes(
@@ -497,9 +505,10 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
  * backfilled session.
  *
  * @param {unknown} input
+ * @param {number} [skipInputIndex]
  * @returns {AiGatewayProjectedMessage[]}
  */
-function responsesInputMessages(input) {
+function responsesInputMessages(input, skipInputIndex = -1) {
   if (typeof input === 'string') {
     if (input.length === 0) return []
     return [{ role: 'user', content: [{ type: 'text', text: input }] }]
@@ -507,7 +516,9 @@ function responsesInputMessages(input) {
   if (!Array.isArray(input)) return []
   /** @type {AiGatewayProjectedMessage[]} */
   const out = []
-  for (const item of input) {
+  for (let index = 0; index < input.length; index++) {
+    if (index === skipInputIndex) continue
+    const item = input[index]
     if (!isPlainObject(item)) continue
     const itemType = stringValue(item.type)
     if (itemType === 'function_call' || itemType === 'custom_tool_call') {
@@ -1496,10 +1507,9 @@ function resolveModel(reqBody, responseBody) {
 }
 
 /**
- * Accepts the Chat Completions `system` field (string or content blocks)
- * or the Responses API top-level `instructions` string. Codex traffic
- * uses the latter, so without it `system_text` is empty for every
- * Responses-shaped exchange.
+ * Accepts the legacy top-level `system` (string or content blocks) and
+ * Responses `instructions` fields. New Codex request prefixes are handled
+ * separately by resolveBaseInstructions.
  *
  * @param {unknown} system
  */
@@ -1513,6 +1523,58 @@ function extractSystemText(system) {
     if (parts.length > 0) return parts.join('\n')
   }
   return undefined
+}
+
+/**
+ * Codex rust-v0.162.0 core/src/client.rs prepends base instructions, after an
+ * optional additional_tools item. Providers may strip content_item_kinds, but
+ * the msg_ UUIDv5 survives: its namespace is UUIDv5(OID, thread_id), and its
+ * name is the exact, untrimmed base-instruction text. Check only that prefix,
+ * never historical developer messages. Unknown shapes remain captured.
+ *
+ * @param {Record<string, unknown>} reqBody
+ * @param {boolean} codexResponses
+ * @param {string | undefined} threadId
+ * @returns {{ systemText: string | undefined, skipInputIndex: number }}
+ */
+// @ref LLP 0429#content [constrained-by]: base instructions belong in system_text; ordinary developer instructions remain messages
+function resolveBaseInstructions(reqBody, codexResponses, threadId) {
+  const systemText = extractSystemText(reqBody.system ?? reqBody.instructions)
+  const unchanged = { systemText, skipInputIndex: -1 }
+  if (!codexResponses || !Array.isArray(reqBody.input)) return unchanged
+  const first = reqBody.input[0]
+  const index = isPlainObject(first) && first.type === 'additional_tools' && first.role === 'developer' ? 1 : 0
+  const item = reqBody.input[index]
+  if (!isPlainObject(item) || item.type !== 'message' || item.role !== 'developer' ||
+      !Array.isArray(item.content) || item.content.length !== 1) return unchanged
+  const block = item.content[0]
+  if (!isPlainObject(block) || block.type !== 'input_text' ||
+      typeof block.text !== 'string' || block.text.length === 0) return unchanged
+  const text = block.text
+  if (systemText && systemText !== text) return unchanged
+  const kinds = readKey(item.internal_chat_message_metadata_passthrough, 'content_item_kinds')
+  if (kinds != null) {
+    if (!Array.isArray(kinds) || kinds.length !== 1 || kinds[0] !== 'model.base_instructions') return unchanged
+  } else {
+    // @ref LLP 0151#body-is-authority [constrained-by]: use the resolved thread, never substitute the session container or a synthetic conversation id
+    if (!threadId || typeof item.id !== 'string' ||
+        !/^msg_[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(item.id)) return unchanged
+    const namespace = uuidV5Bytes(CODEX_PREFIX_OID_NAMESPACE, threadId)
+    const hex = uuidV5Bytes(namespace, text).toString('hex')
+    const expectedId = `msg_${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+    if (item.id !== expectedId) return unchanged
+  }
+  return { systemText: systemText || text, skipInputIndex: index }
+}
+
+const CODEX_PREFIX_OID_NAMESPACE = Buffer.from('6ba7b8129dad11d180b400c04fd430c8', 'hex')
+
+/** @param {Buffer} namespace @param {string} name */
+function uuidV5Bytes(namespace, name) {
+  const bytes = createHash('sha1').update(namespace).update(name, 'utf8').digest().subarray(0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  return bytes
 }
 
 // ---------------------------------------------------------------------

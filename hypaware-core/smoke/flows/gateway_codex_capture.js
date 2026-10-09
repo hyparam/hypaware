@@ -135,12 +135,20 @@ export async function run({ harness, expect }) {
   const codexThreadId = `thread-${harness.devRunId}`
   const codexSessionId = `session-${harness.devRunId}`
   const codexTurnId = `turn-${harness.devRunId}`
+  const codexBaseInstructions = 'You are Codex, a coding agent.'
   // @ref LLP 0151#body-is-authority: Codex states its lineage in the body's flat
   // `client_metadata` map on every request kind, so the fixture carries it there
   // and NOT under the `thread-id` / `session-id` header names Codex never emits.
   const responsesBody = JSON.stringify({
     model: 'gpt-5-codex',
-    input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
+    input: [
+      {
+        type: 'message', role: 'developer',
+        content: [{ type: 'input_text', text: codexBaseInstructions }],
+        internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] },
+      },
+      { role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] },
+    ],
     stream: true,
     client_metadata: {
       'x-codex-installation-id': `install-${harness.devRunId}`,
@@ -220,6 +228,7 @@ export async function run({ harness, expect }) {
       model,
       role,
       content_text,
+      system_text,
       conversation_id,
       cwd,
       client_name,
@@ -260,6 +269,11 @@ export async function run({ harness, expect }) {
 
   const chatRows = rows.filter((r) => r.path === '/v1/chat/completions')
   const responseRows = rows.filter((r) => r.path === '/backend-api/codex/responses')
+  expect.that(
+    'query: Codex 0.162 base instructions populate system_text without an extra developer row',
+    responseRows,
+    (v) => v.length === 2 && v.every((r) => r.system_text === codexBaseInstructions && r.role !== 'developer'),
+  )
   expect.that(
     'query: /v1/chat/completions rows carry provider=openai',
     chatRows.map((r) => r.provider),

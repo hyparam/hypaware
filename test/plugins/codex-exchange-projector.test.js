@@ -604,6 +604,133 @@ test('OpenAI Responses captures top-level instructions into system_text', () => 
   assert.equal(projection.system_text, 'You are Codex, a coding agent.')
 })
 
+// UUIDs generated independently with Python uuid.uuid5(uuid.uuid5(uuid.NAMESPACE_OID,
+// threadId), text), matching Codex rust-v0.162.0 core/src/client.rs.
+const baseInstructionThread = '019a1234-5678-7890-abcd-0123456789ab'
+const baseInstructionText = 'You are Codex, a coding agent.'
+const baseInstructionId = 'msg_e009442f-0c3d-5772-a0f8-bcabf51c1e2b'
+
+/** @param {Record<string, unknown>} [overrides] */
+function baseInstructionMessage(overrides = {}) {
+  return {
+    type: 'message', role: 'developer', id: baseInstructionId,
+    content: [{ type: 'input_text', text: baseInstructionText }],
+    ...overrides,
+  }
+}
+
+/** @param {Record<string, unknown>} [overrides] */
+function baseInstructionRequest(overrides = {}) {
+  return {
+    model: 'gpt-5-codex',
+    client_metadata: {
+      'x-codex-installation-id': 'install-test',
+      session_id: 'parent-session', thread_id: baseInstructionThread,
+    },
+    input: [baseInstructionMessage(), { role: 'user', content: 'hello' }],
+    ...overrides,
+  }
+}
+
+/** @param {Record<string, unknown>} body */
+function projectBaseInstructions(body) {
+  return /** @type {any} */ (createCodexExchangeProjector().project(exchange({
+    path: '/v1/responses',
+    request_body: JSON.stringify(body),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+}
+
+test('Codex base instructions use the thread-derived ID when classification is stripped', () => {
+  const projection = projectBaseInstructions(baseInstructionRequest())
+  assert.equal(projection.system_text, baseInstructionText)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['user', 'assistant'])
+  assert.equal(projection.session_id, 'parent-session')
+  assert.equal(projection.conversation_id, baseInstructionThread)
+})
+
+test('Codex base instructions preserve exact Unicode and whitespace in ID matching', () => {
+  const text = '  café 🦀\n\n'
+  const projection = projectBaseInstructions(baseInstructionRequest({ input: [baseInstructionMessage({
+    id: 'msg_aada349b-5441-5ccf-97f9-3ccd06781f87',
+    content: [{ type: 'input_text', text }],
+  })] }))
+  assert.equal(projection.system_text, text)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['assistant'])
+})
+
+test('Codex explicit base-instruction classification needs no thread ID and allows the tools prefix', () => {
+  const projection = projectBaseInstructions(baseInstructionRequest({
+    client_metadata: { 'x-codex-installation-id': 'install-test' },
+    input: [
+      { type: 'additional_tools', role: 'developer', tools: [] },
+      baseInstructionMessage({
+        id: undefined,
+        internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] },
+      }),
+      { role: 'developer', content: 'Follow AGENTS.md' },
+    ],
+  }))
+  assert.equal(projection.system_text, baseInstructionText)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['developer', 'assistant'])
+  assert.equal(projection.messages[0].content[0].text, 'Follow AGENTS.md')
+})
+
+test('Codex base instructions retain top-level precedence and preserve conflicts', () => {
+  for (const instructions of [baseInstructionText, 'different instructions', '']) {
+    const projection = projectBaseInstructions(baseInstructionRequest({ instructions }))
+    const conflict = instructions === 'different instructions'
+    assert.equal(projection.system_text, instructions || baseInstructionText)
+    assert.deepEqual(projection.messages.map((m) => m.role), conflict
+      ? ['developer', 'user', 'assistant'] : ['user', 'assistant'])
+  }
+  const projection = projectBaseInstructions(baseInstructionRequest({ system: 'system wins', instructions: baseInstructionText }))
+  assert.equal(projection.system_text, 'system wins')
+  assert.equal(projection.messages[0].role, 'developer')
+})
+
+test('Codex base-instruction recognition preserves ambiguous and ordinary developer items', () => {
+  const cases = [
+    ['ordinary ID', { input: [baseInstructionMessage({ id: 'msg_other' })] }],
+    ['missing ID', { input: [baseInstructionMessage({ id: undefined })] }],
+    ['modified text', { input: [baseInstructionMessage({ content: [{ type: 'input_text', text: 'different' }] })] }],
+    ['wrong role', { input: [baseInstructionMessage({ role: 'user' })] }],
+    ['wrong type', { input: [baseInstructionMessage({ type: 'other' })] }],
+    ['mixed content', { input: [baseInstructionMessage({ content: [{ type: 'input_text', text: baseInstructionText }, { type: 'input_image', image_url: 'https://example.test/image' }] })] }],
+    ['explicit other kind', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: ['developer.instructions'] } })] }],
+    ['malformed kind', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: 'model.base_instructions' } })] }],
+    ['multiple kinds', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions', 'developer.instructions'] } })] }],
+    ['missing thread', { client_metadata: { 'x-codex-installation-id': 'install-test', session_id: baseInstructionThread } }],
+    ['wrong thread', { client_metadata: { 'x-codex-installation-id': 'install-test', thread_id: 'other-thread', session_id: baseInstructionThread } }],
+    ['unrelated Responses client', { client_metadata: { thread_id: baseInstructionThread, session_id: 'parent-session' } }],
+    ['historical message', { input: [{ role: 'user', content: 'earlier' }, baseInstructionMessage()] }],
+  ]
+  for (const [name, overrides] of cases) {
+    const body = baseInstructionRequest(/** @type {Record<string, unknown>} */ (overrides))
+    const projection = projectBaseInstructions(body)
+    assert.equal(projection.system_text, undefined, String(name))
+    assert.equal(projection.messages.length, /** @type {unknown[]} */ (body.input).length + 1, String(name))
+  }
+})
+
+test('Codex prefix removal preserves materialized identities, usage and replay dedupe', async () => {
+  const projector = createCodexExchangeProjector()
+  const makeDispatcher = () => createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+  const legacyBody = baseInstructionRequest({ instructions: baseInstructionText, input: [{ role: 'user', content: 'hello' }] })
+  const input = exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify(legacyBody),
+    response_body: JSON.stringify({ output_text: 'done', usage: { input_tokens: 20, output_tokens: 3, total_tokens: 23 } }),
+  })
+  const before = await makeDispatcher().projectExchange(input)
+  const dispatcher = makeDispatcher()
+  const after = await dispatcher.projectExchange({ ...input, request_body: JSON.stringify(baseInstructionRequest()) })
+  assert.deepEqual(after, before)
+  assert.equal(after.length, 2)
+  assert.deepEqual(await dispatcher.projectExchange(input), [])
+  assert.deepEqual(await dispatcher.projectExchange({ ...input, request_body: JSON.stringify(baseInstructionRequest()) }), [])
+})
+
 test('OpenAI Chat system field still wins over instructions', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
