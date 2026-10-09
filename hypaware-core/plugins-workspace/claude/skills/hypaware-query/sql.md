@@ -2,7 +2,7 @@
 
 The engine is SELECT-only with a deliberately small SQL surface.
 
-- SELECT-only: `SHOW`, `DESCRIBE`, DDL, and `information_schema` are parse errors. Discover a table's columns with `hyp query schema <table>` or `SELECT * FROM <table> LIMIT 1`, never introspection statements. Dataset names come from `hyp cache status` (on a standard install: `ai_gateway_messages`, `node`, `edge`); never guess a table name.
+- SELECT-only: `SHOW`, `DESCRIBE`, DDL, and `information_schema` are parse errors. Discover a table's columns with `hyp query schema <table>` or `SELECT * FROM <table> LIMIT 1`, never introspection statements. The datasets are `ai_gateway_messages`, `node`, and `edge`; other names exist only if `hyp cache status` lists them.
 - Boolean predicates: `IS NOT TRUE` / `IS TRUE` are not parsed (`NOT` must be followed by `NULL`). Compare directly: `col = true`, `col = false`, or `col IS NULL`.
 - Cast types are STRING/VARCHAR/TEXT, INT, BIGINT, FLOAT/REAL/DOUBLE, BOOL, and TIMESTAMP; `TRY_CAST` and `TIMESTAMP '...'` literals parse too. Time ranges compare directly against the TIMESTAMP event-time column, `message_created_at` (there is no `timestamp` column): a bare string bound is typed against the column before the query runs, so `message_created_at >= '2026-08-18T21:00:00Z'` selects the rows it names. Keep the trailing `Z`, or a zone-less instant reads as the host's local time. The STRING `date` column still filters whole days (`date >= 'YYYY-MM-DD'`) and prunes partitions.
 - `ANY_VALUE` and `REGEXP_LIKE` do exist (`MAX`/`MIN` and `REGEXP_MATCHES` are equivalents, not workarounds), as do `REGEXP_SUBSTR` to extract and plain `LIKE`. `LIKE ... ESCAPE` is not parsed.

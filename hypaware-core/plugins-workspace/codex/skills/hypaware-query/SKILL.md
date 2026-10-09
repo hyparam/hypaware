@@ -16,7 +16,7 @@ Use local queries for this machine's activity. Use a configured remote for a tea
 
 ## Workflow
 
-1. Use known dataset names. Run `hyp cache status` to discover additional local datasets when needed. To check a remote dataset, run `hyp query sql "SELECT 1 FROM <dataset> LIMIT 1" --remote <target>`.
+1. The datasets are `ai_gateway_messages`, `node`, and `edge`. Query them directly; run `hyp cache status` only for a dataset beyond these or after an unknown-table error. To check a remote dataset, run `hyp query sql "SELECT 1 FROM <dataset> LIMIT 1" --remote <target>`.
 2. Use the default refresh mode for most local SQL queries. Use `--refresh always` when the answer needs the newest captured rows; the default may leave pending rows out for up to two minutes after the last successful cache flush. Automatic refresh failures return committed data with a warning; forced refresh failures fail the query.
    For cache-write permission failures in Codex, read [troubleshooting.md](troubleshooting.md).
 3. Check the exit code and stderr before interpreting empty output as zero matching rows. Never discard or merge stderr (`2>/dev/null`, `2>&1`) or cut output with `| head`/`| tail`: merged notices break `--format json`, and a pager cuts rows silently. Bound output with `--max-bytes <n>` or `--output <file>` instead.
@@ -26,7 +26,6 @@ Use local queries for this machine's activity. Use a configured remote for a tea
 ## Common Commands
 
 ```bash
-hyp cache status
 hyp query schema <table>
 hyp query sql "<sql>" --format json
 hyp query grep "<text>" --format json
