@@ -12,6 +12,12 @@ Every `--json` result has a `source` object:
 
 `hyp graph replica status` prints the same state; `hyp graph replica refresh` asks the daemon to check now.
 
+## Server tools without the team-graph commands
+
+Keep the same file-first process when using remote SQL and graph tools. Search `node` with `node_type = 'File'` for path terms; select compact fields such as `node_id`, `natural_key` and `label`. Traverse selected files through `edge` or `graph_neighbors`. Inspect the candidates before fetching conversation text. PR descriptions and file contents require separate source reads; they are not part of the filename search.
+
+For session searches, use `session_id`, `part_type = 'text'`, roles `user`/`assistant`, and main-thread filters `(agent_id IS NULL OR agent_id = '') AND (is_sidechain IS NULL OR is_sidechain = false)`. Return distinct message identifiers, timestamps, roles and bounded excerpts, newest first, with a separate allowance per session. Start with 5 hits of about 600 characters per session and at most two concurrent requests. Read the full relevant window after finding a hit. If captured boilerplate dominates, refine the search or exclude the observed boilerplate for discovery, then verify the original rows. Inspect truncation and coverage rather than treating a capped result as complete.
+
 ## `hyp query team-graph discover <term>...`
 
 - Inputs: up to 12 terms (positional or `--term`), `--file <path>` anchors, `--repo <path>` (default: this repository), `--limit` 1 to 40 sessions (default 8), `--offset` for the next page.
