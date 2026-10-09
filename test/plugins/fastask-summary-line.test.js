@@ -46,15 +46,15 @@ test('each state reads as the guardian wrote it', () => {
   const twoDays = '2026-10-07T16:00:00.000Z'
   assert.equal(line({}), 'team graph: synced, data as of 14 h ago (acme), 52 MB')
   assert.equal(line({ state: 'stale', reason: 'outage', watermark: twoDays }),
-    'team graph: stale, server unreachable since 09:12, data as of 2 d ago, usable until Oct 12 09:00')
+    'team graph: stale, server unreachable since 09:12 UTC, data as of 2 d ago, usable until Oct 12 09:00 UTC')
   assert.equal(line({ state: 'stale', reason: 'credential', watermark: twoDays }),
-    'team graph: stale, sign in again (hyp remote login), data as of 2 d ago, usable until Oct 12 09:00')
+    'team graph: stale, sign in again (hyp remote login), data as of 2 d ago, usable until Oct 12 09:00 UTC')
   assert.equal(line({ state: 'expired', generation: null, servable: false }), 'team graph: expired, not used; reconnect to refresh')
   assert.equal(line({ state: 'withdrawn', generation: null, servable: false }), 'team graph: removed, access to acme was withdrawn')
   assert.equal(line({ state: 'unsupported', reason: 'protocol', generation: null, servable: false }),
     'team graph: unsupported, upgrade hypaware (or the server is older than this feature)')
   assert.equal(line({ state: 'unsupported', reason: 'format', watermark: twoDays }),
-    'team graph: unsupported, upgrade hypaware; still using data as of 2 d ago until Oct 12 09:00')
+    'team graph: unsupported, upgrade hypaware; still using data as of 2 d ago until Oct 12 09:00 UTC')
   assert.equal(line({ state: 'unavailable', reason: 'pending', generation: null, servable: false, watermark: null }),
     'team graph: not available yet (server has not published one)')
 })
@@ -63,7 +63,7 @@ test('reasons without a guardian line still say what to do, and stale always car
   assert.match(line({ state: 'unavailable', reason: 'no_login', generation: null, servable: false }), /hyp remote login/)
   assert.match(line({ state: 'unavailable', reason: 'disabled', generation: null, servable: false }), /not turned team graph snapshots on/)
   for (const reason of ['pending', 'verify_failed', 'activate_failed', 'disk_full', 'replica_too_large']) {
-    assert.match(line({ state: 'stale', reason }), /, data as of 14 h ago, usable until Oct 12 09:00$/, reason)
+    assert.match(line({ state: 'stale', reason }), /, data as of 14 h ago, usable until Oct 12 09:00 UTC$/, reason)
   }
   assert.ok(!line({ state: 'stale', reason: 'outage' }).includes('leave'), 'the leave line is not used (LLP 0482)')
 })

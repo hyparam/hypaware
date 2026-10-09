@@ -11,12 +11,15 @@
  * LLP 0480#status-line; the leave line is not used (LLP 0482).
  *
  *   team graph: synced, data as of 14 h ago (acme), 52 MB
- *   team graph: stale, server unreachable since 09:12, data as of 2 d ago, usable until Oct 12 09:00
- *   team graph: stale, sign in again (hyp remote login), data as of 2 d ago, usable until Oct 12 09:00
+ *   team graph: stale, server unreachable since 09:12 PDT, data as of 2 d ago, usable until Oct 12 09:00 PDT
+ *   team graph: stale, sign in again (hyp remote login), data as of 2 d ago, usable until Oct 12 09:00 PDT
  *   team graph: expired, not used; reconnect to refresh
  *   team graph: removed, access to acme was withdrawn
  *   team graph: unsupported, upgrade hypaware (or the server is older than this feature)
- *   team graph: unsupported, upgrade hypaware; still using data as of 2 d ago until Oct 12 09:00
+ *   team graph: unsupported, upgrade hypaware; still using data as of 2 d ago until Oct 12 09:00 PDT
+ *
+ * Clock times are the reader's local time with the zone named, as the
+ * first-sync deadline does (LLP 0100): "09:00" alone does not say whose.
  *   team graph: not available yet (server has not published one)
  *
  * @ref LLP 0480#status-line [implements]: one line in every state, always with the data's age where data is held
@@ -26,8 +29,8 @@
  */
 export function summaryLine(status, opts = {}) {
   const now = opts.now ?? Date.now()
-  const clock = (/** @type {string | null} */ iso) => formatClock(iso, opts.timeZone)
-  const until = (/** @type {string | null} */ iso) => formatDay(iso, opts.timeZone)
+  const clock = (/** @type {string | null} */ iso) => formatLocalTime(iso, { day: false, timeZone: opts.timeZone })
+  const until = (/** @type {string | null} */ iso) => formatLocalTime(iso, { day: true, timeZone: opts.timeZone })
   const age = `data as of ${formatAge(status.watermark, now)}`
   const held = status.generation !== null
 
@@ -108,24 +111,23 @@ function formatSize(bytes) {
 }
 
 /**
+ * A clock time in the reader's zone, with the zone named: `09:12 PDT`, or
+ * with `day`, `Oct 12 09:00 PDT`. The one place this module asks the host
+ * how to present; month names are English like the rest of the line.
+ *
  * @param {string | null} iso
- * @param {string | undefined} timeZone
+ * @param {{ day: boolean, timeZone: string | undefined }} opts `timeZone` for tests; the host's zone otherwise
  */
-function formatClock(iso, timeZone) {
+export function formatLocalTime(iso, { day, timeZone }) {
   const at = iso ? new Date(iso) : null
   if (!at || Number.isNaN(at.getTime())) return 'an unknown time'
-  return new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone }).format(at)
-}
-
-/**
- * @param {string | null} iso
- * @param {string | undefined} timeZone
- */
-function formatDay(iso, timeZone) {
-  const at = iso ? new Date(iso) : null
-  if (!at || Number.isNaN(at.getTime())) return 'an unknown time'
-  const parts = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone }).formatToParts(at)
+  const parts = new Intl.DateTimeFormat('en-US', {
+    ...(day ? { month: 'short', day: 'numeric' } : {}),
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'short', timeZone,
+  }).formatToParts(at)
   /** @param {string} type */
   const part = (type) => parts.find((p) => p.type === type)?.value ?? ''
-  return `${part('month')} ${part('day')} ${part('hour')}:${part('minute')}`
+  const zone = part('timeZoneName')
+  const time = `${part('hour')}:${part('minute')}${zone ? ` ${zone}` : ''}`
+  return day ? `${part('month')} ${part('day')} ${time}` : time
 }
