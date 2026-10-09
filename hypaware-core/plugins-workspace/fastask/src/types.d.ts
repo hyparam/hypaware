@@ -342,7 +342,34 @@ export interface ReplicaSyncHooks {
   afterActivate?(generationDir: string, manifest: any): Promise<void>
   /** Runs after replica files were deleted, with the reason. */
   onDelete?(reason: string): Promise<void> | void
+  /** Runs after every pass with the status it ended in, inside the coalesced pass. */
+  afterPass?(status: ReplicaStatus): Promise<void> | void
 }
+
+// ---------------------------------------------------------------------------
+// The daemon source (LLP 0481 T8): warm evidence forwarding and control routes.
+// ---------------------------------------------------------------------------
+
+/** What the daemon knows about one remote's MCP session, as status shows it. */
+export interface EvidenceSessionRecord {
+  endpoint: string
+  /** `'present'` while a session id is held; the id itself is not shown. */
+  session_id: string | null
+  server_version: string | null
+  /** Whether `tools/list` offered `session_evidence` with the v1 contract; null before the first handshake. */
+  supports_evidence: boolean | null
+  contracts: string[]
+  /** The server refused session reuse, so every call initializes first. */
+  per_call: boolean
+  initializes: number
+  /** The last call's round trip minus the server's own `elapsed_ms`. */
+  last_round_trip_ms: number | null
+}
+
+export type EvidenceForwardResult =
+  | { ok: true, result: any, round_trip_ms: number, reused: boolean, session: EvidenceSessionRecord }
+  | { ok: false, kind: 'unsupported' | 'credential' | 'network' | 'capacity', message: string, session: EvidenceSessionRecord }
+  | { ok: false, kind: 'rpc', code: number, message: string, session: EvidenceSessionRecord }
 
 /** One `sessions` entry of a session_evidence request, before JSON encoding (server LLP 0557). */
 export interface EvidenceEntry {

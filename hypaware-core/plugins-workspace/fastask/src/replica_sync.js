@@ -113,7 +113,14 @@ export function createReplicaSync(opts) {
    */
   function syncOnce() {
     if (inFlight) return inFlight
-    inFlight = runPass().finally(() => { inFlight = null })
+    inFlight = runPass()
+      .then(async (result) => {
+        // Inside the coalesced pass, so a refresh resolves only once the
+        // caller's follow-up (the index build) has seen the new state.
+        await hooks.afterPass?.(result.status)
+        return result
+      })
+      .finally(() => { inFlight = null })
     return inFlight
   }
 

@@ -511,6 +511,8 @@ async function shippedModules() {
 const HOST_FORMATTING_ALLOWED = {
   'src/core/usage-policy/first_sync_hold.js':
     'formatFirstSyncDeadline renders the hold deadline in the zone the reader is in, and names that zone (LLP 0100)',
+  'hypaware-core/plugins-workspace/fastask/src/summary_line.js':
+    'formatLocalTime renders the team graph\'s lease end and last contact in the zone the reader is in, and names that zone (LLP 0480#status-line, as LLP 0100)',
 }
 
 test('the only shipped module that asks the host how to format is the one that means to', async () => {

@@ -113,6 +113,12 @@ export async function startSnapshotServer(opts = {}) {
      * @type {((req: http.IncomingMessage, res: http.ServerResponse, info: { generation: string, name: 'nodes' | 'edges', bytes: Buffer }) => boolean) | null}
      */
     onData: null,
+    /**
+     * Handler for `POST /v1/mcp` (the evidence path's MCP endpoint), given the
+     * parsed JSON-RPC message. Unset answers 404.
+     * @type {((req: http.IncomingMessage, res: http.ServerResponse, message: any) => void) | null}
+     */
+    onMcp: null,
     acceptedToken: token,
   }
 
@@ -125,6 +131,15 @@ export async function startSnapshotServer(opts = {}) {
       authorization: req.headers.authorization ?? null,
     })
     if (req.headers.authorization !== `Bearer ${state.acceptedToken}`) return sendFixture(res, '401-unauthorized')
+
+    if (url.pathname === '/v1/mcp' && req.method === 'POST' && state.onMcp) {
+      const onMcp = state.onMcp
+      /** @type {Buffer[]} */
+      const chunks = []
+      req.on('data', (chunk) => chunks.push(chunk))
+      req.on('end', () => onMcp(req, res, JSON.parse(Buffer.concat(chunks).toString('utf8'))))
+      return
+    }
 
     if (url.pathname === '/v1/graph/snapshot') {
       const answer = typeof state.answer === 'function' ? state.answer() : state.answer
