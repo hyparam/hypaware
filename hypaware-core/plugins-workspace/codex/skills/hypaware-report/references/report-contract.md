@@ -92,6 +92,19 @@ tradeoffs. The proposal must be usable:
   Proposed thresholds are choices, not measured facts. "Measure more" is not
   enough without the decision that measurement enables.
 
+A page is read at a glance first and in full second, so lay it out in that
+order. Under the title and thesis, open with `## At a glance`: exactly four
+bullets, one sentence each, in this order and with a bold lead-in: **What we
+saw** with its headline figure, **What it costs**, **The fix** in one clause,
+and **Expected effect**. Then one `##` section per topic in the same order
+(What we saw, What it costs, The fix, Expected effect and the case against it),
+followed by Evidence, Query, and Check before applying. One claim per sentence,
+the figure first; state each figure once in the glance and once in its section,
+never only mid-paragraph. A diff or artifact sits under The fix, not before the
+sections. Scope, dates, and deduplication rules go under Evidence, not in the
+opening. A reader who stops after the four bullets must know what to do; the
+sections are there to prove it.
+
 Cite 1 to 3 verified turns using page-local evidence headings, locators, and
 short excerpts. Include query labels and exact bounded SQL for supporting
 figures, or link to their single definition elsewhere in the report. End with
