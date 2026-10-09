@@ -9,7 +9,7 @@ import { configRecordsPickAnswer, defaultConfigPath, loadConfigFile } from '../c
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
 import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../config/client_detach_disk.js'
-import { endpointFromListen } from '../config/gateway_endpoint.js'
+import { endpointFromListen, configuredGatewayEndpoint, DEFAULT_GATEWAY_ENDPOINT } from '../config/gateway_endpoint.js'
 import { readAttachPolicy, readCodexCaptureMode } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
 import { isEntryRecording } from '../config/client_recording.js'
@@ -72,7 +72,7 @@ import {
  * @import { HypAwareV2Config, PluginConfigInstance, SourceContribution, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, OllamaCaptureStatus, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
@@ -1072,6 +1072,68 @@ export function daemonHeartbeatAgeMs(status, nowMs) {
  */
 function attachWritesNoMarker(clientName, config) {
   return clientName === 'codex' && readCodexCaptureMode(config?.plugins) === 'transcript'
+}
+
+/**
+ * Saved config and finite source snapshots are separate facts. A current route
+ * needs the exact daemon generation, fresh heartbeat and resolved alias.
+ * @ref LLP 0474#diagnostics [implements]: cheap capture evidence never queries datasets or treats retained stamps as current health
+ * @param {HypAwareV2Config | null} config
+ * @param {DaemonStatus | null | undefined} status
+ * @param {ReturnType<typeof readPidFile>} pid
+ * @returns {OllamaCaptureStatus}
+ */
+export function ollamaCaptureFromSnapshot(config, status, pid) {
+  const plugin = config?.plugins?.find(p => p.name === '@hypaware/ollama' && p.enabled !== false)
+  const gateway = config?.plugins?.find(p => p.name === '@hypaware/ai-gateway' && p.enabled !== false)
+  const upstreams = gateway?.config?.upstreams
+  const upstream = Array.isArray(upstreams) ? upstreams.find(u => isPlainObject(u) && u.name === 'ollama') : undefined
+  const direct = isPlainObject(upstream) && typeof upstream.base_url === 'string' ? upstream.base_url : 'http://127.0.0.1:11434'
+  const configuredRoot = (configuredGatewayEndpoint(config ?? { version: 2 }) ?? DEFAULT_GATEWAY_ENDPOINT).replace(/\/+$/, '') + '/ollama'
+  const age = daemonHeartbeatAgeMs(status, Date.now())
+  const current = !!pid && processIsAlive(pid.pid) && status?.pid === pid.pid && status.runId === pid.runId
+    && status.startedAt === pid.startedAt && ['healthy', 'degraded'].includes(status.state)
+    && age !== null && age >= 0 && age <= DAEMON_HEARTBEAT_STALE_MS
+  const source = Array.isArray(status?.sources) ? status.sources.slice(0, 128).find(s => s && s.name === 'ai-gateway' && s.state === 'started') : undefined
+  const details = isPlainObject(source?.details) ? source.details : {}
+  const bound = current && details.listening !== false ? gatewaySourceDetails(source ? [source] : []) : undefined
+  const captureRoot = bound ? endpointFromListen(`${bound.host}:${bound.port}`) + '/ollama' : null
+  const aliases = Array.isArray(details.upstream_aliases) ? details.upstream_aliases.slice(0, 32) : []
+  let routeConfirmed = false
+  try {
+    const directUrl = new URL(direct)
+    routeConfirmed = !!captureRoot && !directUrl.username && !directUrl.password && !directUrl.search && !directUrl.hash
+      && aliases.some(a => isPlainObject(a) && a.name === 'ollama-native' && a.canonical === 'ollama' && a.path_prefix === '/ollama' && a.base_url === directUrl.href)
+  } catch { /* Invalid saved transport is unconfirmed, never echoed. */ }
+  const processorReady = current && details.capture_ready === true && details.recording_enabled === true
+    && Array.isArray(details.projectors) && details.projectors.slice(0, 32).includes('ollama-native-chat')
+  const outcomes = Array.isArray(details.capture_outcomes) ? details.capture_outcomes.slice(0, 32)
+    .filter(o => isPlainObject(o) && typeof o.route === 'string' && ['ollama', 'ollama-native'].includes(o.route)) : []
+  const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T[0-9:.]{12}Z$/.test(value) && Number.isFinite(Date.parse(value)) ? value : null
+  const newest = key => outcomes.reduce((last, o) => { const at = timestamp(o[key]); return at && (!last || at > last) ? at : last }, null)
+  const recent = Array.isArray(details.recent_entrypoints) ? details.recent_entrypoints.slice(0, 32) : []
+  const entrypointStamp = recent.reduce((last, e) => {
+    const at = isPlainObject(e) && e.client_name === 'ollama' ? timestamp(e.last_seen) : null
+    return at && (!last || at > last) ? at : last
+  }, null)
+  const lastPersisted = newest('last_persisted') ?? entrypointStamp
+  const lastFailed = newest('last_failed')
+  const failures = ['invalid_request', 'unsupported_shape', 'invalid_response', 'malformed_stream', 'trailing_record', 'missing_terminal', 'transport_error', 'upstream_unavailable', 'http_error', 'capture_limit', 'processor_unavailable', 'append_failure', 'policy_unreadable', 'recording_barrier_unconfirmed']
+  const failed = outcomes.find(o => timestamp(o.last_failed) === lastFailed && failures.includes(o.reason))
+  const reason = failed && typeof failed.reason === 'string' ? failed.reason : null
+  const historical = !current || !plugin || plugin.recording === false
+  const state = !plugin || plugin.recording === false ? 'disabled'
+    : !routeConfirmed || !processorReady ? 'unconfirmed'
+    : lastFailed && (!lastPersisted || lastFailed >= lastPersisted) ? 'failed'
+    : outcomes.some(o => timestamp(o.last_observed) && (!timestamp(o.last_outcome) || o.last_observed > o.last_outcome)) ? 'observed'
+    : lastPersisted ? 'persisted' : 'ready'
+  const next = state === 'disabled' ? 'hyp client attach ollama'
+    : state === 'unconfirmed' ? 'hyp daemon restart; hyp ollama setup'
+    : state === 'failed' ? (reason === 'upstream_unavailable' || reason === 'http_error' ? 'Check the direct service with hyp ollama setup, then rerun hyp ollama verify --model <installed-model>'
+      : reason === 'unsupported_shape' ? 'Use supported native chat/generate with think:false, then rerun hyp ollama verify --model <installed-model>'
+        : 'Check hyp status --verbose and the daemon log, then rerun hyp ollama verify --model <installed-model>')
+    : 'Route a client using the capture root, or run hyp ollama verify --model <installed-model>'
+  return { state, configuredRoot, captureRoot, routeConfirmed, processorReady, lastPersisted, lastFailed, historical, reason, next }
 }
 
 /**
@@ -2145,6 +2207,8 @@ export async function collectHypAwareStatus(opts = {}) {
   /** @type {CaptureHealthReport[]} */
   const captureHealth = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
+  let capturePid
+  try { capturePid = readPidFile(stateRoot) } catch { /* Unreadable identity stays unconfirmed. */ }
   for (const [clientName, descriptor] of clientDescriptors) {
     const configured = activePlugins.includes(descriptor.plugin)
     // One state per client: recording, or not. A detached client
@@ -2189,6 +2253,7 @@ export async function collectHypAwareStatus(opts = {}) {
       recording,
       attachable,
       attached: probe.attached,
+      ...(clientName === 'ollama' && configured ? { capture: ollamaCaptureFromSnapshot(config, daemonStatusFile, capturePid) } : {}),
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
       ...(probe.version !== undefined ? { version: probe.version } : {}),
       ...(probe.port !== undefined ? { port: probe.port } : {}),

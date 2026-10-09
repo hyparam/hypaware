@@ -8,6 +8,9 @@ import path from 'node:path'
 import { runGatewayDaemon } from '../../../src/core/daemon/gateway.js'
 import { gatewaySourceDetails } from '../../../src/core/daemon/status.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
+import { runWizardPick } from '../../../src/core/cli/wizard/pick.js'
+import { discoverBundledPlugins } from '../../../src/core/runtime/bundled.js'
+import { buildPluginCatalog } from '../../../src/core/plugin_catalog.js'
 import { getLogger, installObservability } from '../../../src/core/observability/index.js'
 import { SPOOL_DIR } from '../../../src/core/cache/spool.js'
 import { CAPTURE_BYTES } from '../../plugins-workspace/ai-gateway/src/process_transport.js'
@@ -32,19 +35,43 @@ const contextMessages = [{ role: 'system', content: '' }, { role: 'user', conten
 
 /**
  * Actual gateway and processing child, local fixture only. The adapter is
- * loaded from ordinary explicit config, never an in-process fake projector.
- * @ref LLP 0470#t2 [tests]: faithful native wire, persisted snapshots, actual JSONL reasons and reversible collector lifecycle
+ * loaded through ordinary setup/config, never an in-process fake projector.
+ * @ref LLP 0475#t5 [tests]: normal setup, faithful native wire, committed verification and reversible collector lifecycle remain one existing flow
  * @param {{ harness: any, expect: any }} args
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   const log = getLogger('smoke')
   const step = smoke_step => log.info('smoke.step', { dev_run_id: harness.devRunId, smoke_name: harness.smokeName, smoke_step })
+  /** @type {Map<string, http.ServerResponse>} */
+  const held = new Map()
   const upstream = http.createServer((req, res) => {
-    req.resume()
+    let requestBody = ''
+    if (req.url?.endsWith('/api/generate')) req.on('data', chunk => { if (requestBody.length < 1024 * 1024) requestBody += chunk })
+    else req.resume()
     req.on('end', () => {
+      const route = req.url?.replace(/^\/service/, '')
+      if (route === '/api/version') { res.end('{"version":"0.35.1"}'); return }
+      if (route === '/api/tags') { res.end('{"models":[{"name":"smoke-ollama"}]}'); return }
+      if (route === '/v1/messages') {
+        res.end(JSON.stringify({ id: 'msg-smoke-other', type: 'message', role: 'assistant', model: 'smoke-claude', content: [{ type: 'text', text: 'other client answer' }], stop_reason: 'end_turn', usage: { input_tokens: 3, output_tokens: 2 } }))
+        return
+      }
+      if (route === '/api/generate') {
+        const request = JSON.parse(requestBody)
+        const records = request.stream === false
+          ? [{ model: 'smoke-ollama', response: 'generated answer', done: true, done_reason: 'stop', eval_count: 2 }]
+          : [{ model: 'smoke-ollama', response: 'generated ', done: false }, { model: 'smoke-ollama', response: 'answer', done: true, done_reason: 'stop', eval_count: 2 }]
+        res.setHeader('content-type', request.stream === false ? 'application/json' : 'application/x-ndjson')
+        res.end(records.map(record => JSON.stringify(record)).join('\n'))
+        return
+      }
       const which = req.headers['x-smoke-case']
-      if (which === 'error') {
+      if (typeof which === 'string' && which.startsWith('held_')) {
+        res.writeHead(200, { 'content-type': 'application/x-ndjson' })
+        res.write(JSON.stringify(message('held answer')) + '\n')
+        held.set(which, res)
+      } else if (which === 'error') {
         res.writeHead(503, { 'content-type': 'application/json' })
         res.end('{"error":"SECRET upstream message"}')
       } else if (which === 'abort') {
@@ -82,12 +109,57 @@ export async function run({ harness, expect }) {
   try {
     step('fixture_start')
     await new Promise((resolve, reject) => { upstream.once('error', reject); upstream.listen(0, '127.0.0.1', () => resolve(undefined)) })
-    const direct = `http://127.0.0.1:${/** @type {AddressInfo} */ (upstream.address()).port}`
-    /** @param {string} base */
-    const configure = base => fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, query: { cache: { maintenance: { enabled: false } } }, plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url: base, path_prefix: '/api/chat', provider: 'ollama' }] } },
-      { name: '@hypaware/ollama' },
-    ] }))
+    const direct = `http://127.0.0.1:${/** @type {AddressInfo} */ (upstream.address()).port}/service/`
+    /** @param {string[]} argv */
+    const command = async argv => {
+      let output = ''
+      let errors = ''
+      const code = await dispatch(argv, { env, cwd: harness.tmpDir, stdout: { write: value => { output += value; return true } }, stderr: { write: value => { errors += value; return true } } })
+      assert.equal(code, 0, errors + output)
+      return { output, errors }
+    }
+    // @ref LLP 0474#setup [tests]: normal picker command paths retain existing client/upstream settings and do not perform unattended inference
+    step('fresh_picker')
+    const bundled = await discoverBundledPlugins()
+    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+    const picked = await runWizardPick({ env, catalog, stdout: { write: () => true }, stderr: { write: () => true },
+      prompt: async question => {
+        assert.ok(question.options.some(option => option.value === 'ollama'), 'normal picker omitted Ollama')
+        return ['ollama']
+      },
+    })
+    assert.equal(picked.exitCode, 0)
+    assert.ok(picked.sourcesPicked?.includes('ollama'))
+    step('fresh_setup')
+    const setupFlags = ['--no-daemon', '--no-backfill', '--force']
+    await command(['setup', '--source', 'ollama', '--export', 'keep-local', '--retention-days', '17', ...setupFlags])
+    const selected = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    assert.ok(selected.plugins.some(entry => entry.name === '@hypaware/ollama'))
+    const gateway = selected.plugins.find(entry => entry.name === '@hypaware/ai-gateway')
+    gateway.config.listen = '127.0.0.1:0'
+    gateway.config.upstreams.find(entry => entry.name === 'ollama').base_url = direct
+    gateway.config.upstreams.push({ name: 'echo-anthropic', base_url: direct, path_prefix: '/v1/messages', priority: 1000 })
+    selected.plugins.push({ name: '@hypaware/claude', config: { telemetry: { listen_host: '127.0.0.1', listen_port: 0 } } })
+    selected.auto_update = false
+    selected.query.cache.maintenance = { enabled: false }
+    await fs.writeFile(configPath, JSON.stringify(selected))
+    step('repeat_setup_preserves_other_client_and_custom_upstream')
+    await command(['setup', '--source', 'ollama', ...setupFlags])
+    const repeated = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    assert.ok(repeated.plugins.some(entry => entry.name === '@hypaware/claude'))
+    assert.deepEqual(repeated.plugins.find(entry => entry.name === '@hypaware/ai-gateway').config.upstreams, gateway.config.upstreams)
+    assert.equal(repeated.query.cache.retention.default_days, 17)
+    const discovered = JSON.parse((await command(['ollama', 'setup', '--json'])).output)
+    assert.equal(discovered.direct_root, direct)
+    assert.equal(discovered.confirmed, false)
+    assert.equal(discovered.service, 'ready')
+    assert.deepEqual(discovered.models, ['smoke-ollama'])
+    /** @param {string} directRoot */
+    const configure = async directRoot => {
+      const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+      config.plugins.find(entry => entry.name === '@hypaware/ai-gateway').config.upstreams.find(entry => entry.name === 'ollama').base_url = directRoot
+      await fs.writeFile(configPath, JSON.stringify(config))
+    }
     /** @returns {Promise<string>} */
     const boot = async () => {
       handle = await runGatewayDaemon({ hypHome: harness.hypHome, configPath, env, runId: harness.devRunId, tickIntervalMs: 100, installSignalHandlers: false })
@@ -103,7 +175,7 @@ export async function run({ harness, expect }) {
     const processorPid = handle?.snapshot().processes?.processing.pid
     const body = JSON.stringify({ model: 'smoke-ollama', messages: contextMessages, stream: false })
     /** @param {string} target @param {string} which @param {string} payload */
-    const post = (target, which, payload) => fetch(`${target}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-hyp-dev-run-id': harness.devRunId, 'x-smoke-case': which }, body: payload })
+    const post = (target, which, payload) => fetch(`${target.replace(/\/+$/, '')}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-hyp-dev-run-id': harness.devRunId, 'x-smoke-case': which }, body: payload })
     const processed = async () => (await expect.logs()).filter(record => record.body === 'aigw.exchange')
     const diagnostic = async event => (await expect.logs()).filter(record => record.body === event)
     const waitExchanges = count => until(async () => (await processed()).length >= count, `processed exchanges ${count}`)
@@ -118,6 +190,8 @@ export async function run({ harness, expect }) {
     assert.equal(failedWrite.status, 200)
     assert.equal(await failedWrite.text(), jsonResponse)
     await until(async () => (await diagnostic('aigw.exchange_write_failed')).length === 1, 'actual source write diagnostic')
+    await until(() => /** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.capture_outcomes?.some(entry => entry.reason === 'append_failure'), 'default append failure summary')
+    assert.match((await command(['client', 'status', 'ollama', '--json'])).output, /append_failure/)
     await fs.rmdir(blockedFile)
 
     step('json_snapshots')
@@ -139,9 +213,12 @@ export async function run({ harness, expect }) {
     assert.ok((await usage.text()).includes('invalid counter'))
     await waitExchanges(4)
     await until(async () => (await diagnostic('plugin.ollama.invalid_usage')).length === 1, 'actual adapter counter diagnostic')
+    const projected = await diagnostic('plugin.ollama.capture_projected')
+    assert.equal(projected.length, 5, 'projection includes the failed append, so it cannot claim persistence')
+    assert.ok(projected.every(record => record.attributes.status === 'ok' && record.attributes.reason === 'text'))
 
     step('unsupported_and_failed')
-    const unsupported = await post(base, 'json', JSON.stringify({ model: 'smoke-ollama', messages: [{ role: 'user', content: 'SECRET unsupported', images: ['SECRET image'] }], stream: false }))
+    const unsupported = await post(base, 'json', JSON.stringify({ model: 'smoke-ollama', messages: [{ role: 'user', content: 'SECRET unsupported', tool_calls: [{ function: { name: 'SECRET tool' } }] }], stream: false }))
     assert.equal(unsupported.status, 200)
     assert.equal(await unsupported.text(), jsonResponse)
     const malformed = await post(base, 'malformed', streamingBody)
@@ -187,7 +264,7 @@ export async function run({ harness, expect }) {
       let output = ''
       let errors = ''
       const sql = "select session_id, request_id, message_id, previous_message_id, message_index, part_index, content_text, role, provider, model, cwd, repo_root, attributes, raw_frame, status from ai_gateway_messages order by request_id, message_index, part_index"
-      const code = await dispatch(['query', 'sql', sql, '--refresh', 'always', '--format', 'json'], { env, stdout: { write: value => { output += value; return true } }, stderr: { write: value => { errors += value; return true } } })
+      const code = await dispatch(['query', 'sql', sql, '--refresh', 'always', '--format', 'json', '--max-bytes', '262144'], { env, stdout: { write: value => { output += value; return true } }, stderr: { write: value => { errors += value; return true } } })
       assert.equal(code, 0, errors)
       assert.equal(errors, '')
       return JSON.parse(output)
@@ -252,8 +329,126 @@ export async function run({ harness, expect }) {
     assert.equal(directResult.status, 200)
     assert.equal(await directResult.text(), jsonResponse)
     assert.deepEqual(await query(), saved, 'direct request after stop was captured')
+
+    // @ref LLP 0475#t3 [tests]: real CLI, gateway HTTP, processing child generation and persisted cache across detach/attach/restart
+    step('recording_held_off')
+    base = await boot()
+    const lifecycleBody = JSON.stringify({ model: 'smoke-ollama', messages: [{ role: 'user', content: 'lifecycle question' }] })
+    /** @param {'attach' | 'detach'} action */
+    const client = async action => {
+      let output = ''
+      let errors = ''
+      const code = await dispatch(['client', action, 'ollama', '--json'], { env, stdout: { write: value => { output += value; return true } }, stderr: { write: value => { errors += value; return true } } })
+      assert.equal(code, 0, errors + output)
+      const receipt = JSON.parse(output)
+      assert.equal(receipt.status, 'ok')
+      return receipt
+    }
+    const heldOff = await post(base, 'held_off', lifecycleBody)
+    await until(() => held.has('held_off'), 'held stream before off')
+    await client('detach')
+    held.get('held_off')?.end(JSON.stringify(message('', true)) + '\n')
+    assert.match(await heldOff.text(), /held answer/)
+    for (const route of ['/api/chat', '/ollama/api/chat']) {
+      const passthrough = await fetch(base + route, { method: 'POST', body: lifecycleBody })
+      assert.equal(passthrough.status, 200)
+      assert.equal(await passthrough.text(), jsonResponse)
+    }
+    await client('detach')
+    await handle?.stop()
+    await handle?.done
+    assert.deepEqual(await query(), saved, 'off receipt admitted late history')
+    assert.equal(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins.find(entry => entry.name === '@hypaware/ollama').recording, false)
+
+    step('recording_restart_off')
+    base = await boot()
+    assert.equal(/** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.recording_enabled, false)
+    const restartOff = await post(base, 'json', lifecycleBody)
+    assert.equal(await restartOff.text(), jsonResponse)
+    await client('attach')
+    step('recording_held_reattach')
+    const heldAttach = await fetch(base + '/ollama/api/chat', { method: 'POST', body: lifecycleBody, headers: { 'x-smoke-case': 'held_reattach' } })
+    await until(() => held.has('held_reattach'), 'held stream before reattach')
+    await client('detach')
+    await client('attach')
+    held.get('held_reattach')?.end(JSON.stringify(message('', true)) + '\n')
+    assert.match(await heldAttach.text(), /held answer/)
+    const fresh = await post(base, 'json', lifecycleBody)
+    assert.equal(await fresh.text(), jsonResponse)
+    await until(async () => (await diagnostic('plugin.ollama.capture_projected')).length >= projected.length + 1, 'fresh generation projected')
+    await client('detach')
+    await until(() => /** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.capture_outcomes?.some(entry => entry.last_persisted && entry.persisted_id), 'processor persistence summary reached gateway status')
+    const outcomes = /** @type {any[]} */ (/** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.capture_outcomes ?? [])
+    assert.ok(outcomes.length <= 32)
+    assert.ok(outcomes.some(entry => entry.last_persisted && entry.persisted_id))
+    await handle?.stop()
+    await handle?.done
+    const afterLifecycle = await query()
+    assert.equal(afterLifecycle.length, saved.length + 2)
+    const newRows = afterLifecycle.filter(row => !saved.some(old => old.message_id === row.message_id))
+    assert.deepEqual(newRows.map(row => row.content_text), ['lifecycle question', null])
+    assert.ok(afterLifecycle.every(row => row.content_text !== 'held answer'))
+    step('recording_complete')
+
+    // @ref LLP 0476#confirmation [tests]: tiny fresh capture without sinks proves service settlement and policy-visible committed verification
+    step('live_setup_and_fresh_verify')
+    base = await boot()
+    await client('attach')
+    const live = JSON.parse((await command(['ollama', 'setup', '--json'])).output)
+    assert.equal(live.confirmed, true)
+    assert.equal(live.capture_root, base + '/ollama')
+    assert.equal(live.direct_root, direct)
+    await until(() => /** @type {any} */ (handle?.snapshot().sources.find(source => source.name === 'ai-gateway')?.details)?.recording_enabled === true, 'recording status after attach')
+    const verified = await command(['ollama', 'verify', '--model', 'smoke-ollama', '--json'])
+    assert.match(verified.errors, /fixed prompt.*Configured sinks.*earlier and other-client/)
+    const check = JSON.parse(verified.output)
+    assert.equal(check.status, 'persisted')
+    const confirmedRows = await query()
+    const pair = confirmedRows.filter(row => row.request_id === check.request_id)
+    assert.equal(pair.length, 2)
+    assert.deepEqual(pair.map(row => row.role), ['user', 'assistant'])
+    assert.equal(pair[0].content_text, 'Reply with OK. This is a HypAware capture check.')
+    assert.match(asJson(pair[0].attributes).dev_run_id, /^ollama-check-/)
+
+    step('native_generate_stream_and_nonstream')
+    for (const stream of [false, true]) {
+      const generated = await fetch(live.capture_root + '/api/generate', { method: 'POST', headers: { 'content-type': 'application/json', 'x-hyp-dev-run-id': harness.devRunId }, body: JSON.stringify({ model: 'smoke-ollama', prompt: `generate ${stream}`, think: false, stream }) })
+      assert.equal(generated.status, 200)
+      assert.match(await generated.text(), /generated/)
+    }
+    await client('detach')
+    const generatedRows = await query()
+    assert.equal(generatedRows.length, confirmedRows.length + 4)
+    assert.equal(generatedRows.filter(row => row.content_text === 'generated answer').length, 2)
+
+    step('other_client_records_while_ollama_off')
+    const other = await fetch(base + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', 'user-agent': 'claude-cli/1.0', 'x-hyp-dev-run-id': harness.devRunId }, body: JSON.stringify({ model: 'smoke-claude', messages: [{ role: 'user', content: 'other client question' }], max_tokens: 16, stream: false }) })
+    assert.equal(other.status, 200)
+    await other.text()
+    await until(async () => (await diagnostic('aigw.exchange')).some(record => record.attributes.upstream === 'echo-anthropic'), 'other client processed while Ollama off')
+    await handle?.stop()
+    await handle?.done
+    const withOther = await query()
+    assert.deepEqual(withOther.filter(row => row.provider === 'ollama'), generatedRows)
+    assert.ok(withOther.some(row => row.content_text === 'other client answer'))
+
+    step('verified_history_survives_restart_without_growth')
+    await boot()
+    await handle?.stop()
+    await handle?.done
+    assert.deepEqual(await query(), withOther)
+    step('direct_custom_host_after_final_stop')
+    const recovered = await post(direct, 'json', body)
+    assert.equal(recovered.status, 200)
+    assert.equal(await recovered.text(), jsonResponse)
+    assert.deepEqual(await query(), withOther)
     step('complete')
     await obs.shutdown()
+    expect.that('native alias route reached real projector and append', await expect.logs(), records => records.some(record => record.body === 'aigw.exchange' && record.attributes.upstream === 'ollama-native' && record.attributes.path === '/ollama/api/generate' && record.attributes.rows_written === 2 && record.attributes.dev_run_id === harness.devRunId))
+    expect.that('fresh verify records its exact committed exchange', await expect.logs(), records => records.some(record => record.body === 'plugin.ollama.verify' && record.attributes.reason === 'persisted' && record.attributes.exchange_id === check.request_id))
+    expect.that('actual barriers suppress off and old-generation capture', await expect.logs(), records => ['recording_disabled', 'stale_generation'].every(reason => records.some(record => record.body === 'aigw.capture_outcome' && record.attributes.reason === reason && record.attributes.dev_run_id === harness.devRunId)))
+    expect.that('ordinary cache append completed', await expect.traces(), records => records.some(record => record.name === 'cache.append' && record.attributes.hyp_dataset === 'ai_gateway_messages' && record.attributes.status === 'ok'))
+    expect.that('smoke proves ordinary setup, fresh verification and another client preserved', await expect.logs(), records => ['fresh_picker', 'fresh_setup', 'live_setup_and_fresh_verify', 'other_client_records_while_ollama_off', 'verified_history_survives_restart_without_growth'].every(step => records.some(record => record.body === 'smoke.step' && record.attributes.smoke_step === step)))
     expect.that('smoke records split lifecycle and completed direct request step', await expect.logs(), records => records.some(record => record.body === 'smoke.step' && record.attributes.smoke_step === 'direct_after_stop' && record.attributes.smoke_name === harness.smokeName))
   } finally {
     abort.abort()

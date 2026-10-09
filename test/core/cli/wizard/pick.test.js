@@ -75,6 +75,39 @@ async function mkTmp() {
   return temporaryDirectory('hypaware-wizard-pick-')
 }
 
+test('unattended source-based Ollama add/repeat preserves unrelated config, custom upstream and recording false', async () => {
+  const tmp = await mkTmp()
+  const env = hermeticEnv(tmp)
+  const catalog = await realCatalog()
+  const initial = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env, catalog,
+    picks: { sources: ['otel'], exportChoice: 'keep-local', retentionDays: 17 },
+  }))
+  const original = JSON.parse(await fs.readFile(initial.configPath, 'utf8'))
+  original.plugins.push({ name: '@hypaware/ollama', recording: false }, { name: '@hypaware/ai-gateway', config: {
+    listen: '127.0.0.1:21522', upstreams: [{ name: 'ollama', base_url: 'http://localhost:21500/service/', path_prefix: '/api/chat', priority: 7 }, { name: 'operator', base_url: 'http://localhost:21501', path_prefix: '/operator' }],
+  } })
+  original.auto_update = false
+  await fs.writeFile(initial.configPath, JSON.stringify(original))
+  for (let i = 0; i < 2; i++) {
+    const result = await runWizardPick(/** @type {any} */ ({
+      stdout: makeBuf(), stderr: makeBuf(), env, catalog, force: true,
+      detect() { throw new Error('unattended detection') }, prompt() { throw new Error('unattended prompt') },
+      picks: { sources: ['ollama'], exportChoice: 'local-parquet', retentionDays: 90 },
+    }))
+    assert.equal(result.exitCode, 0)
+    assert.deepEqual(new Set(result.sourcesPicked), new Set(['otel', 'ollama']))
+    assert.equal(result.retentionDays, 17)
+    assert.equal(result.exportPicked, 'keep-local')
+    const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+    assert.equal(written.auto_update, false)
+    assert.equal(written.plugins.find(p => p.name === '@hypaware/ollama').recording, false)
+    const gateway = written.plugins.find(p => p.name === '@hypaware/ai-gateway')
+    assert.equal(gateway.config.listen, '127.0.0.1:21522')
+    assert.deepEqual(gateway.config.upstreams, original.plugins.find(p => p.name === '@hypaware/ai-gateway').config.upstreams)
+  }
+})
+
 /**
  * The real catalog with Desktop temporarily shaped as a generic needs-setup
  * row for the kernel-level rendering tests below.
@@ -735,7 +768,7 @@ test('derivePickedClients: the derived set over every bundled picker row is pinn
     catalog.pickerDescriptors,
     catalog.clientDescriptors
   )
-  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'cursor', 'openclaw', 'opencode', 'pi'])
+  assert.deepEqual([...derived].sort(), ['claude', 'claude-desktop', 'codex', 'cursor', 'ollama', 'openclaw', 'opencode', 'pi'])
 })
 
 // --- reconfigure: the existing config, not detection, is the starting state ---

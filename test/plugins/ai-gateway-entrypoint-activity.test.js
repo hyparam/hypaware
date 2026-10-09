@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createEntrypointActivity } from '../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js'
+/** @import { AiGatewayCaptureReason } from '../../hypaware-plugin-kernel-types.js' */
 
 // The gateway's half of "hyp status names recent client surfaces": count and
 // timestamp whatever the projector wrote into `entrypoint`, interpret none of
@@ -190,4 +191,107 @@ test('clamping an astral entrypoint leaves a well-formed string', () => {
   assert.equal(entry.entrypoint.isWellFormed(), true)
   // The marker is inside the ceiling, not bolted on past it.
   assert.ok(entry.entrypoint.length <= 120, `length ${entry.entrypoint.length}`)
+})
+
+// @ref LLP 0474#diagnostics [tests]: every reason remains finite, append failure cannot stamp persistence, and default stderr does not need telemetry
+test('capture evidence retains only known routes and reasons, capped scalar summaries and coalesced default stderr', async t => {
+  const { createCaptureOutcomes, CAPTURE_REASONS, mergeCaptureOutcomes } = await import('../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js')
+  let at = Date.parse('2026-10-07T10:00:00Z')
+  t.mock.method(Date, 'now', () => at)
+  let stderr = ''
+  t.mock.method(process.stderr, 'write', chunk => { stderr += chunk; return true })
+  const tracker = createCaptureOutcomes(Array.from({ length: 100 }, (_, index) => 'route-' + index))
+  assert.equal(tracker.snapshot().length, 32)
+  tracker.record('arbitrary-SECRET', 'append_failure', 'SECRET invalid\nID')
+  for (const reason of CAPTURE_REASONS) tracker.record('route-0', /** @type {AiGatewayCaptureReason} */ (reason), 'safe:1')
+  let entry = tracker.snapshot()[0]
+  assert.equal(Object.keys(entry.reasons).length, CAPTURE_REASONS.length)
+  assert.equal(entry.persisted, 0)
+  assert.equal(entry.last_persisted, undefined)
+  tracker.record('route-0', 'text', 'safe:2')
+  assert.equal(tracker.snapshot()[0].last_persisted, undefined, 'projection alone is not persistence')
+  at += 30_000
+  tracker.record('route-0', 'text', 'safe:2', true)
+  entry = tracker.snapshot()[0]
+  assert.equal(entry.persisted, 1)
+  const stamp = entry.last_persisted
+  const id = entry.persisted_id
+  at += 30_000
+  tracker.record('route-0', 'append_failure', 'safe:3')
+  for (let index = 0; index < 100; index++) tracker.record('route-0', 'append_failure', 'safe:3')
+  entry = tracker.snapshot()[0]
+  assert.equal(entry.last_persisted, stamp)
+  assert.equal(entry.persisted_id, id)
+  assert.equal(entry.failed_id, 'safe:3')
+  assert.equal(stderr.split('\n').filter(Boolean).length, 3)
+  assert.match(stderr, /WARN.*append_failure/)
+  assert.match(stderr, /INFO.*text/)
+  assert.doesNotMatch(stderr, /SECRET|invalid/)
+  at += 1 // A recovery must be strictly newer than the preceding failure.
+  tracker.record('route-0', 'text', 'safe:4', true)
+  at += 30_000
+  tracker.snapshot()
+  assert.equal(stderr.split('\n').filter(Boolean).length, 4, 'periodic status flushes a coalesced recovery without requiring more traffic')
+  const merged = mergeCaptureOutcomes(tracker.snapshot(), [{ route: 'route-0', observed: Infinity, failed: NaN, persisted: -1, reasons: { text: 9e99, append_failure: NaN, arbitrary: 200 }, reason: 'arbitrary', prompt: 'SECRET' }])
+  const summary = /** @type {any} */ (merged[0])
+  assert.equal(summary.observed, 0x7fffffff)
+  assert.ok(summary.persisted >= 1)
+  assert.equal(summary.reasons.text, 0x7fffffff)
+  assert.ok(Number.isFinite(summary.reasons.append_failure))
+  assert.equal(summary.reasons.arbitrary, undefined)
+  assert.doesNotMatch(JSON.stringify(merged), /SECRET|prompt|NaN|Infinity/)
+  assert.equal(mergeCaptureOutcomes(tracker.snapshot(), Array.from({ length: 40 }, (_, index) => ({ route: 'more-' + index }))).length, 32)
+})
+
+// @ref LLP 0474#diagnostics [tests]: one bounded terminal reason survives benign observations; equal timestamp persistence is conservative failure
+test('capture reason preserves actionable failure until strictly newer append persistence', async t => {
+  const { createCaptureOutcomes } = await import('../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js')
+  let at = Date.parse('2026-10-08T04:00:00Z')
+  t.mock.method(Date, 'now', () => at)
+  const tracker = createCaptureOutcomes(['ollama-native'])
+  tracker.record('ollama-native', 'unsupported_shape', 'failure:1')
+  const failed = tracker.snapshot()[0]
+  tracker.record('ollama-native', 'text', 'same-stamp', true)
+  assert.equal(tracker.snapshot()[0].reason, 'unsupported_shape')
+  for (let i = 0; i < 1000; i++) {
+    at++
+    tracker.record('ollama-native', 'observed')
+    tracker.record('ollama-native', 'load_unload', 'benign')
+    tracker.record('ollama-native', 'session_ignored', 'benign')
+  }
+  const benign = tracker.snapshot()[0]
+  assert.equal(benign.reason, 'unsupported_shape')
+  assert.equal(benign.last_failed, failed.last_failed)
+  assert.equal(benign.last_outcome, failed.last_outcome)
+  assert.equal(benign.failed_id, 'failure:1')
+  assert.equal(benign.reasons.load_unload, 1000)
+  assert.equal(benign.observed, 1000)
+  assert.equal(tracker.snapshot().length, 1)
+  at++
+  tracker.record('ollama-native', 'text', 'success:1', true)
+  const recovered = tracker.snapshot()[0]
+  assert.equal(recovered.reason, 'text')
+  assert.ok(recovered.last_persisted && failed.last_failed && recovered.last_persisted > failed.last_failed)
+  at++
+  tracker.record('ollama-native', 'append_failure', 'failure:2')
+  assert.equal(tracker.snapshot()[0].reason, 'append_failure')
+  assert.equal(tracker.snapshot()[0].failed_id, 'failure:2')
+})
+
+test('split capture merge uses terminal failure and persistence stamps instead of benign traffic', async () => {
+  const { mergeCaptureOutcomes } = await import('../../hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js')
+  const failure = { route: 'ollama-native', failed: 1, last_failed: '2026-10-08T04:00:01.000Z', last_outcome: '2026-10-08T04:00:01.000Z', reason: 'unsupported_shape', failed_id: 'bad:1', reasons: { unsupported_shape: 1 } }
+  const benign = { route: 'ollama-native', last_outcome: '2026-10-08T04:00:02.000Z', reason: 'load_unload', reasons: { load_unload: 1 } }
+  for (const [a, b] of [[failure, benign], [benign, failure]]) {
+    const [entry] = mergeCaptureOutcomes([a], [b])
+    assert.equal(entry.reason, 'unsupported_shape')
+    assert.equal(entry.last_outcome, failure.last_outcome)
+    assert.equal(entry.failed_id, failure.failed_id)
+  }
+  for (const stamp of ['2026-10-08T04:00:01.000Z', '2026-10-08T04:00:03.000Z']) {
+    const persisted = { route: 'ollama-native', persisted: 1, last_persisted: stamp, last_outcome: stamp, reason: 'text', persisted_id: 'good:1' }
+    for (const [a, b] of [[failure, persisted], [persisted, failure]]) {
+      assert.equal(mergeCaptureOutcomes([a], [b])[0].reason, stamp === failure.last_failed ? 'unsupported_shape' : 'text')
+    }
+  }
 })

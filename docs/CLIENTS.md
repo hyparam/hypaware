@@ -5,9 +5,12 @@
 # Manage clients and import history
 
 Use `hyp setup` to choose which AI clients to record. Setup configures those
-clients and imports supported session history. You can also run
+clients and imports supported session history. Ollama records explicitly routed
+new requests and has no history import. You can also run
 `hyp attach <client>` to configure a client and `hyp backfill <provider>` to
-import history.
+import history. Ollama attach enables recording and prints
+[explicit host recipes](#route-a-cli-or-sdk-client); it does not edit client files
+or the calling shell's or service's `OLLAMA_HOST`.
 
 ## Contents
 
@@ -17,7 +20,7 @@ import history.
 - [Stop capture or keep it local](#stop-capture-or-keep-it-local)
 - [Collect GitHub activity](#collect-github-activity)
 - [Install client skills](#install-client-skills)
-- [Direct Ollama API text capture](#direct-ollama-api-text-capture)
+- [Record Ollama](#record-ollama)
 
 ## Choose and check a client
 
@@ -39,6 +42,7 @@ choices are locked; local additions remain yours to configure.
 | OpenClaw (`openclaw`) | Gateway routing plus scheduled transcript recovery. |
 | Cursor (`cursor`) | Native session recovery for the Cursor editor and CLI, including the file contents and command output its tools see. Token usage is not available. |
 | Hermes Agent (`hermes`) | Reads Hermes's local state database read-only: a backfill plus ongoing polling. Makes no changes to Hermes. |
+| Ollama (`ollama`) | Native CLI/SDK chat and generate through an explicit capture host. No transcript import. |
 | Pi (`pi`) | A managed Pi extension plus bounded recovery of native sessions, including recent history. |
 
 Available integrations depend on active plugins and the installed version.
@@ -61,6 +65,8 @@ Attach is safe to repeat and preserves unrelated client settings. Start a new
 client process so it reads the updated configuration, complete a short turn,
 then check `hyp query overview` or search for a distinctive phrase with
 `hyp query grep`. Capture and cache visibility can take time to settle.
+For Ollama, starting a new process alone does not route it through capture:
+use the [printed CLI host or SDK constructor](#route-a-cli-or-sdk-client).
 
 For missing recordings, see [troubleshooting](TROUBLESHOOTING.md#no-new-recordings).
 
@@ -104,7 +110,9 @@ hyp detach codex
 
 Detach stops recording this client: no new sessions from it reach the cache,
 including the scheduled transcript imports, and the running daemon picks this
-up without a restart. Detach also reverses the client's managed settings.
+up without a restart. Detach also reverses the client's managed settings where supported. For Ollama,
+[verified detach](#stop-and-resume-ollama-recording) keeps the running capture host
+forwarding without recording; it does not change a client's host.
 Recorded history is kept; [`hyp privacy purge`](PRIVACY.md) deletes it.
 `hyp status` then shows the client as "Not recording". Run `hyp attach codex`
 to record it again. If team policy requires the integration, detach refuses
@@ -145,209 +153,209 @@ hyp client skills install
 This installs skills for all eligible clients. For launching an agent on a
 question, see [queries](QUERYING.md#explore-recordings-with-your-agent).
 
-## Direct Ollama API text capture
+## Record Ollama
 
-This opt-in adapter records native text `POST /api/chat`, JSON (`stream: false`)
-and NDJSON (`stream: true` or omitted), through a request URL you choose.
-It captures ordered system/user/assistant text context and the new assistant
-response. It does not attach a client, capture `ollama` CLI history, import
-transcripts, or cover `/api/generate`, OpenAI-compatible endpoints, tools, images,
-audio or thinking. Use an installed model producing supported text responses.
-Unsupported shapes are forwarded but omitted from capture as a whole exchange.
+<!-- @ref LLP 0474#setup [implements]: attended setup discovers the direct service and supplies explicit next-client routes without loading a model -->
+<!-- @ref LLP 0475#t5 [implements]: installed client commands replace the disposable developer configuration as the ordinary path -->
 
-Admission is strict: request keys are limited to `model`, `messages`, `stream`,
-`format`, `options`, `keep_alive` and an empty `tools` array (the official
-Python client sends `tools: []` on every chat). Message keys are only `role` and `content`,
-with system/user/assistant roles and string content (including empty strings).
-Response-record keys are limited to `model`, `created_at`, `message`, `done`,
-`done_reason`, `total_duration`, `load_duration`, `prompt_eval_count`,
-`prompt_eval_cached_count`, `prompt_eval_duration`, `eval_count` and `eval_duration`.
-An extra key in any of these objects drops the whole exchange with
-`unsupported_shape`, even when the response would otherwise be text. For example,
-the request control `think: false` is not admitted. This does not restrict nested
-keys inside the admitted `options` or `format` values.
-
-Each request is a **context snapshot**, identified by its gateway exchange ID.
-Earlier context submitted again appears again in the next snapshot. Equal text
-at different positions and repeated real requests remain distinct. Empty text
-positions also retain rows and links; their `content_text` is null under the
-existing empty-value convention. Only the newly generated response has usage.
-Submitted historical assistant text has no new usage or inferred historical
-model/timestamp. Rows carry the responding model for this exchange; the request
-model is a fallback only when the response reports no model.
-
-### Create a disposable collector
-
-Run from the candidate checkout root with its installed dependencies, using its
-binary throughout. This recipe uses a separate home and no export sinks. It
-does not change the existing Ollama service or your normal HypAware install.
-Choose a free explicit loopback port, then keep these variables in this shell:
+Choose **Ollama** in `hyp setup`. On an existing installation, choose
+**Reconfigure** to add it beside your current clients. For a fresh unattended
+installation that keeps recordings local:
 
 ```sh
-HYP_BIN="$PWD/bin/hypaware.js"
-PILOT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hyp-ollama.XXXXXX")
-export HYP_HOME="$PILOT_ROOT/hyp-home"
-export HYP_CONFIG="$HYP_HOME/hypaware-config.json"
-export HYP_DEV_TELEMETRY=1
-export DEV_RUN_ID="ollama-pilot-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-DIRECT_URL=http://127.0.0.1:11434
-CAPTURE_URL=http://127.0.0.1:18741
-MODEL=gemma3:4b
-mkdir -p "$HYP_HOME"
-cat > "$HYP_CONFIG" <<'JSON'
-{
-  "version": 2,
-  "auto_update": false,
-  "plugins": [
-    { "name": "@hypaware/ai-gateway", "config": { "listen": "127.0.0.1:18741" } },
-    { "name": "@hypaware/ollama" }
-  ]
-}
-JSON
-node "$HYP_BIN" config validate --path "$HYP_CONFIG"
-curl --fail --silent --show-error "$DIRECT_URL/api/tags"
+hyp setup --source ollama --export keep-local
+hyp ollama setup
+hyp client status ollama
 ```
 
-Confirm the tags include `$MODEL`; otherwise select an installed model producing
-supported text responses. Do not download a model for this check. The upstream defaults
-to `127.0.0.1:11434`. If your local service uses a different address, use the
-gateway's existing `upstreams` setting with name `ollama`, `base_url` set to that
-address and `path_prefix: "/api/chat"`. Keep `DIRECT_URL` consistent.
+To add Ollama on an existing installation while preserving its export choice,
+run `hyp setup --source ollama` without `--export`. An explicit `--export` changes
+that choice. Other clients are preserved; check `hyp status` to see your sinks. Recorded local inference can leave the machine through configured sinks.
+Setup checks the service and model inventory without starting Ollama, downloading
+or loading a model, or sending inference. Missing executable, unavailable service
+and empty model inventory are separate results. SDK use does not need the CLI
+executable. Configure or start your direct Ollama service yourself if necessary.
 
-Launch the foreground daemon in a shell job whose PID you retain. The processing
-child inherits dev telemetry and the stable run ID. This does not install a service:
+The direct service defaults to `http://127.0.0.1:11434`. To use a custom service:
 
 ```sh
-node "$HYP_BIN" daemon run --foreground > "$PILOT_ROOT/collector.log" 2>&1 &
-PILOT_PID=$!
-node "$HYP_BIN" status --json
+hyp ollama setup --upstream http://127.0.0.1:21434
+hyp ollama setup
 ```
 
-Wait for status to show a healthy gateway on the configured endpoint and a
-healthy processing child before sending a request. Inspect
-`$PILOT_ROOT/collector.log` if startup fails. An occupied explicit port fails
-loudly; select another free port in the config and `CAPTURE_URL`, validate again,
-and relaunch. A successful curl response alone does not prove capture.
+This preserves the other upstreams and recording choice. If an endpoint was
+saved but its restart or live route is unconfirmed, run `hyp daemon restart`, then
+`hyp ollama setup` again. Organization-owned settings can prevent local changes.
+Do not point the direct upstream at the collector's own capture host.
 
-### Send and query a snapshot
+### Route a CLI or SDK client
+
+Use the **Capture root (live)** printed by `hyp ollama setup`, including its
+`/ollama` suffix. The examples below assume that output is
+`http://127.0.0.1:18521/ollama`; replace it with your actual live root.
+The supported client versions are **Ollama CLI 0.35.1** and **official Python SDK
+0.6.1**. Other versions require checking their request shapes. Native heartbeat,
+version, tags, model show, chat and generate calls are forwarded. OpenAI-compatible
+routes and model-management commands are outside this capture route.
+
+Replace `gemma3:4b` in every CLI, SDK, verify and direct-recovery example below
+with the exact installed model name listed by setup. Start a new CLI at the
+printed host:
 
 ```sh
-cat > "$PILOT_ROOT/request.json" <<JSON
-{"model":"$MODEL","messages":[{"role":"system","content":"Answer briefly."},{"role":"user","content":"Say hello in one sentence."}],"stream":false}
-JSON
-curl --fail --silent --show-error "$CAPTURE_URL/api/chat" \
-  -H 'Content-Type: application/json' -H "x-hyp-dev-run-id: $DEV_RUN_ID" \
-  --data-binary "@$PILOT_ROOT/request.json" > "$PILOT_ROOT/response.json"
-cat "$PILOT_ROOT/response.json"
-node "$HYP_BIN" query schema ai_gateway_messages
-QUERY_DEADLINE=$(($(date +%s) + 30))
-SNAPSHOT_READY=0
-while [ "$(date +%s)" -lt "$QUERY_DEADLINE" ]; do
-  node "$HYP_BIN" query sql "select request_id, message_index, role, content_text, model
-    from ai_gateway_messages where provider = 'ollama'
-    order by message_created_at desc, message_index limit 30" --refresh always --format json \
-    > "$PILOT_ROOT/snapshot.json" || break
-  if node -e 'const rows = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.exit(rows.some(row => Number(row.message_index) === 2 && row.role === "assistant") ? 0 : 1)' "$PILOT_ROOT/snapshot.json"; then
-    SNAPSHOT_READY=1
-    break
-  fi
-  sleep 1
-done
-cat "$PILOT_ROOT/snapshot.json"
-test "$SNAPSHOT_READY" = 1
+OLLAMA_HOST=http://127.0.0.1:18521/ollama ollama run gemma3:4b --think=false
+# Or send one prompt:
+OLLAMA_HOST=http://127.0.0.1:18521/ollama ollama run gemma3:4b --think=false 'Reply briefly with hello.'
 ```
 
-Capture and JSONL export are asynchronous. The bounded retry above waits for the
-initial disposable request's new assistant row; `--refresh always` only settles
-data already appended, and does not wait for pending processor work. If the
-deadline expires or a query fails, preserve the output and inspect the run's
-diagnostics below before declaring missing capture. For later requests, retry
-their correlated query on the same 30-second deadline until all expected
-positions, including the new response, arrive.
+Construct the SDK with an explicit host; changing an environment variable does
+not reroute an already constructed object:
 
-Take the generated response's `request_id` from the output. Set `EXCHANGE_ID`
-to that opaque ID, then inspect exactly that snapshot:
+```python
+from ollama import Client
+
+client = Client(host='http://127.0.0.1:18521/ollama')
+response = client.chat(
+    model='gemma3:4b',
+    messages=[{'role': 'user', 'content': 'Reply briefly with hello.'}],
+    think=False,
+    stream=False,
+)
+print(response.message.content)
+```
+
+`client.generate(model=..., prompt=..., think=False, stream=False)` also records
+text. Set `stream=True` for either method and consume the iterator through its
+completed response. Setup does not change existing client processes or SDK
+objects. Keep the printed **Direct upstream** for recovery if the collector stops.
+
+### Confirm the first saved request
+
+<!-- @ref LLP 0474#diagnostics [implements]: success requires the fresh correlated policy-visible committed request and completed new response -->
+<!-- @ref LLP 0476#confirmation [implements]: the bounded read-only reader cannot use receipt, spool or retained status as saved-row proof -->
 
 ```sh
-EXCHANGE_ID='paste-the-request-id'
-node "$HYP_BIN" query sql "select request_id, session_id, message_id,
-  previous_message_id, message_index, part_index, role, content_text, provider,
-  model, cwd, repo_root, attributes, raw_frame, status
-  from ai_gateway_messages where request_id = '$EXCHANGE_ID'
-  order by message_index, part_index" --refresh always --format json
+hyp ollama verify --model gemma3:4b
+hyp client status ollama
+hyp status
 ```
 
-`attributes.gateway.exchange_id` equals `request_id` and `session_id`.
-Each row links to its immediate predecessor; the first has an empty link array.
-Structured JSON fields may print as objects or serialized JSON, so inspect the
-schema/output before writing JSON extraction SQL. The response's observed native
-counts and `done_reason` are in `raw_frame`; canonical accounting uses
-`attributes.usage`. Net `input_tokens` is prompt count minus observed cache count.
-Missing cache count leaves net input unknown, even with a gross prompt count.
-Observed zero remains zero. Invalid counts are omitted, valid independent counts
-can remain, and no total is invented. `status.finish_reason` retains a token-limit
-`length` reason rather than calling it a natural stop.
-
-For streaming, send the same ordered context with `stream: true` (or omit
-`stream`). Use `curl --no-buffer` and save the NDJSON. Capture requires one valid
-`done: true` terminal as the last nonblank record, including its content.
-Malformed, truncated, error or trailing records drop the whole exchange.
-For a second turn, build `messages` with your previous user text, the actual
-assistant text from the first response, and the new user question. Query the new
-exchange separately; previous context has no usage on that exchange.
-
-### Diagnose missing capture
-
-Failed, interrupted and unsupported exchanges produce no prompt/partial-response
-rows, even when forwarding succeeds. In this recipe, read the actual local
-diagnostics across **all processor PID files**, including after restart:
+The explicit check discloses and sends the fixed prompt
+`Reply with OK. This is a HypAware capture check.` and records its response.
+Configured sinks may export both. A **persisted** result names the `request_id`
+of a fresh, linked request and completed assistant response visible under your
+current query policy. HTTP success or an earlier saved stamp alone cannot pass.
+To inspect that check, substitute the returned opaque ID:
 
 ```sh
-rg 'plugin\.ollama\.(capture_dropped|invalid_usage)|aigw\.exchange_write_failed' \
-  "$HYP_HOME/hypaware/dev-telemetry" -g 'logs-*.jsonl'
+hyp query sql "select request_id, message_index, part_index, role, content_text, model
+  from ai_gateway_messages where request_id = 'paste-the-request-id'
+  order by message_index, part_index" --refresh never --format json
 ```
 
-Adapter diagnostics carry an exchange ID and bounded reason, without prompts,
-response text or credentials. Allow up to 30 seconds for processor/exporter
-arrival, checking these files once per second for the expected run/exchange and
-reason. A missing diagnostic at that deadline is unresolved evidence, not proof
-that an exchange was dropped. For failed-exchange checks, first obtain its
-expected diagnostic, then refresh and compare rows against a baseline whose
-prior successful snapshots have all arrived.
-These JSONL files differ from gateway and processing
-`logs/daemon.log`. Transport drops use `gateway.capture_dropped` in the gateway
-daemon log and capture-drop counts in status. Without dev telemetry or an existing
-configured OTel exporter, adapter-specific reasons are not automatically visible
-in daemon.log or default status. This is a diagnostic limitation of the adapter.
+<!-- @ref LLP 0476#cohort [constrained-by]: verification uses ordinary full refresh of the shared current gateway spool and retains its existing hooks/backlog cost -->
 
-The split daemon abandons capture copies on budgets, timeouts or processor
-outage while forwarding continues: 16 MiB per exchange, 32 active/finishing
-captures, 32 MiB retained raw bytes in the receiver, 4 MiB/256 pending IPC frames,
-64 KiB chunk frames and a 30-minute capture lifetime. Decoding and row allocations
-add memory; these are raw-copy limits, not a total RSS ceiling. No history replay
-recovers exchanges lost before append. Unknown cwd/repository stays null, so
-directory-based exclusions cannot protect this directory-blind API lane.
-Local inference can still be exported in installations with configured sinks;
-this recipe stays local because it has no sinks.
+Verification requests an ordinary full refresh of the shared gateway spool.
+It can process earlier pending rows and other clients' pending rows, and runs
+normal storage and sink hooks. Work and memory use depend on that backlog.
+Inference has a 30-second limit, followed by a separate total 30-second storage
+confirmation limit including startup and at most six serialized reads/settlement
+attempts. Its query worker reads committed data without refreshing or migrating
+legacy query configuration; normal policy visibility still applies.
 
-### Restart and stop only this collector
+<!-- @ref LLP 0476#lifecycle [implements]: caller timeout leaves live service ownership intact while actual collector stop may interrupt confirmation -->
 
-Before saving IDs/counts, use the bounded correlated queries above to settle
-every prior successful request. Restore your test client's direct URL **first**, then
-stop only the process you launched, leaving the Ollama service running:
+If inference completed but storage confirmation timed out, settings are unchanged
+and live collector work may finish. A retry can report busy while that work is
+still running. No automatic inference retry occurs. Stopping HypAware or losing
+its processor can interrupt confirmation; an unconfirmed check is not proof of
+saved data. Resolve the [reported reason](TROUBLESHOOTING.md#ollama-capture-is-unconfirmed),
+then explicitly retry when ready.
+
+Status distinguishes a live ready route with no observed traffic, observed work
+awaiting persistence, append-resolved persistence evidence, a finite failure
+reason, and off/unconfirmed states. A saved timestamp in an off or stopped
+installation is historical; it does not establish current recording or that a
+particular response is queryable. Use verify for the fresh committed-pair check.
+
+### Stop and resume Ollama recording
+
+<!-- @ref LLP 0474#recording [implements]: an acknowledged live barrier suppresses old-generation capture while preserving forwarding and other clients -->
 
 ```sh
-REQUEST_URL="$DIRECT_URL"
-kill -TERM "$PILOT_PID"
-wait "$PILOT_PID"
-node "$HYP_BIN" query sql "select request_id, message_id from ai_gateway_messages
-  where provider = 'ollama' order by request_id, message_index, part_index" --refresh always --format json
-curl --fail --silent --show-error "$REQUEST_URL/api/chat" \
-  -H 'Content-Type: application/json' --data-binary "@$PILOT_ROOT/request.json"
+hyp client detach ollama
+hyp client status ollama
 ```
 
-Saved rows remain queryable after stop. To test retention, relaunch the same
-foreground command with the **same** `HYP_HOME`/config, retain its new PID, wait
-for both processes to be healthy, and compare IDs/counts before sending another
-request. Restart alone must add no rows. New real submissions are new snapshots.
-Select the direct URL again before stopping the relaunched collector.
+Wait for successful live confirmation. The same running CLI session or SDK object
+can keep using the unchanged capture host: inference continues, new Ollama requests
+are unrecorded, and saved history remains. Other attached clients keep recording.
+An unconfirmed detach is not a completed stop barrier. Follow its recovery message
+and retry detach; do not treat a saved preference alone as live confirmation.
+Organization policy can refuse detach without changing settings.
+
+To resume explicitly:
+
+```sh
+hyp client attach ollama
+hyp ollama setup
+```
+
+Successful attach starts a new recording generation. Only new requests can be
+captured; an older response finishing after detach or reattach is not resumed
+history. There is no import of CLI chat history or replay of capture lost during
+an outage.
+
+If HypAware itself stops, its capture host stops forwarding. Launch a CLI with
+the preserved direct upstream, or create a new SDK object using that root:
+
+```sh
+OLLAMA_HOST=http://127.0.0.1:21434 ollama run gemma3:4b --think=false
+```
+
+```python
+from ollama import Client
+client = Client(host='http://127.0.0.1:21434')
+```
+
+Replace `21434` with the exact **Direct upstream** printed for your installation,
+including a custom path if present. Direct requests are not recorded. This does
+not require stopping Ollama or changing its service configuration.
+
+### Text, media and privacy limits
+
+<!-- @ref LLP 0474#projection [implements]: each request is an ordered snapshot and omitted media keeps positional markers without media payloads -->
+
+Chat saves ordered system/user/assistant text plus the newly completed assistant
+response. Generate saves explicit system text when present, its prompt and the
+new response. Each request is a separate context snapshot: submitted earlier
+context appears again, and equal text at different positions remains distinct.
+Generate token context is not decoded into invented earlier conversation.
+Empty text retains its position with null `content_text`. Only the newly generated
+response has usage; model identity comes from this exchange's response when present.
+
+Image bytes, URLs, names and MIME guesses are omitted. Each native image position
+becomes an ordered empty image marker after that message's surviving text.
+`think=False`, null defaults, empty thinking and empty tools are supported.
+Nonempty thinking, tool calls, unknown request/response fields, unsupported audio,
+malformed/truncated streams and failed exchanges omit the whole exchange, including
+partial text. Unsupported requests can still be forwarded. Load/unload control
+traffic is not a saved conversation.
+
+Native observed counts appear in `raw_frame`; normalized usage is in
+`attributes.usage` on the new response only. Net input is known only when both
+prompt and cache counts are observed. Missing counts remain unknown; zero remains
+zero. Invalid counts are omitted without inventing totals.
+
+<!-- @ref LLP 0474#resources [constrained-by]: bounded capture copies and expansion do not establish a process RSS ceiling -->
+
+Capture has byte, concurrency, lifetime and projected-position limits, so a large
+or interrupted exchange may be omitted while forwarding continues. These limits
+bound capture copies, not total process memory. Check ordinary status and logs for
+actionable reasons; [troubleshooting](TROUBLESHOOTING.md#ollama-capture-is-unconfirmed)
+explains the next step.
+
+This API supplies no reliable working directory or repository. Those fields stay
+unknown, so directory-based exclusions cannot protect this lane. Normal local-only
+and session-purge query visibility still applies. Review privacy settings and
+configured exports before routing sensitive requests.

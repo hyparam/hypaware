@@ -64,6 +64,8 @@ export async function runConfigurePhase(picked, opts) {
   const descriptors = (picked?.descriptors ?? []).filter(
     (d) => !!d && d.needsSetup === true && typeof d.configureCommand === 'string' && d.configureCommand.length > 0
       && !carried.has(d.id)
+      // @ref LLP 0474#setup [constrained-by]: setup never acts on a detached Ollama row
+      && !(d.id === 'ollama' && picked.config?.plugins?.some(p => p.name === '@hypaware/ollama' && p.recording === false))
   )
 
   /** @type {ConfigurePhaseEntryResult[]} */

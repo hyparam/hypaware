@@ -853,6 +853,7 @@ function composerManagedPlugins(descriptors, composeWith) {
  * @ref LLP 0183#carry-forward [implements]: a reconfigure keeps what the composer does not own; only the picked set is recomposed
  */
 function carryForwardExistingConfig(composed, existing, descriptors, composeWith) {
+  preserveOllamaUpstreams(composed, existing, descriptors)
   const existingPlugins = existing.plugins ?? []
   const existingSinks = existing.sinks ?? {}
   const composedSinks = composed.sinks ?? {}
@@ -920,6 +921,39 @@ function carryForwardExistingConfig(composed, existing, descriptors, composeWith
   if (Object.keys(sinks).length > 0) merged.sinks = sinks
   else delete merged.sinks
   return merged
+}
+
+// @ref LLP 0474#setup [implements]: the Ollama extension preserves its transport and unmanaged entries, not every preset's list
+/**
+ * @param {HypAwareV2Config} composed
+ * @param {HypAwareV2Config} existing
+ * @param {Map<string, PickerDescriptor>} descriptors
+ */
+function preserveOllamaUpstreams(composed, existing, descriptors) {
+  const hasOllama = (/** @type {HypAwareV2Config} */ config) => config.plugins?.some(p => p.name === '@hypaware/ollama')
+  if (!hasOllama(composed) && !hasOllama(existing)) return
+  const prior = existing.plugins?.find(p => p.name === GATEWAY_PLUGIN)
+  if (!Array.isArray(prior?.config?.upstreams)) return
+  const owned = new Set([...descriptors.values()].flatMap(d => d.compose ? requestedUpstreams(d.compose).map(u => u.name) : []))
+  let gateway = composed.plugins?.find(p => p.name === GATEWAY_PLUGIN)
+  const fresh = Array.isArray(gateway?.config?.upstreams) ? gateway.config.upstreams : []
+  const old = prior.config.upstreams
+  const upstreams = fresh.map(u => {
+    if (u && typeof u === 'object' && !Array.isArray(u) && u.name === 'ollama') {
+      return old.find(p => p && typeof p === 'object' && !Array.isArray(p) && p.name === 'ollama') ?? u
+    }
+    return u
+  })
+  for (const u of old) {
+    if (u && typeof u === 'object' && !Array.isArray(u) && typeof u.name === 'string' && !owned.has(u.name)
+      && !upstreams.some(p => p && typeof p === 'object' && !Array.isArray(p) && p.name === u.name)) upstreams.push(u)
+  }
+  if (!gateway && upstreams.length > 0) {
+    gateway = { name: GATEWAY_PLUGIN }
+    composed.plugins ??= []
+    composed.plugins.unshift(gateway)
+  }
+  if (gateway) gateway.config = { ...gateway.config, upstreams }
 }
 
 /**
@@ -1531,6 +1565,12 @@ export async function runPickerFinale(args) {
         if (dryRun) {
           summary.attach.push({ client, dryRun, ok: true })
         } else {
+          // @ref LLP 0474#routes [implements]: a probe-less Ollama attach is a next-launch recipe, not a changed running client
+          if (client === 'ollama') {
+            stdout.write(report)
+            summary.attach.push({ client, dryRun, ok: true })
+            continue
+          }
           const outcome = attachReportOutcome(report)
           summary.attach.push({ client, dryRun, ok: outcome.applied })
           const name = label(client)

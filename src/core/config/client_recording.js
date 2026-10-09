@@ -2,6 +2,7 @@
 
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
+import path from 'node:path'
 
 import { readObservabilityEnv } from '../observability/env.js'
 import { resolveConfigPath } from '../runtime/boot.js'
@@ -68,6 +69,89 @@ export function readRecordingStateFromDiskSync({ env }) {
 }
 
 /**
+ * A strict owner-policy reader for live capture. Stat both layers fresh, but
+ * parse only changed files. Retain two bounded plugin lists, never payloads.
+ * The older detached-set readers deliberately keep their existing fallback.
+ * @ref LLP 0474#recording [implements]: missing, disabled or unreadable Ollama policy closes capture without changing unrelated clients
+ * @param {{ env: NodeJS.ProcessEnv, plugin: string }} args
+ */
+export function createClientRecordingPolicyReader({ env, plugin }) {
+  const { stateDir, hypHome } = readObservabilityEnv(env)
+  const localPath = resolveConfigPath({ env, hypHome })
+  /** @type {Map<string, { signature: string, entries?: RawPluginEntry[], absent?: boolean }>} */
+  const cache = new Map()
+  /** @param {string | null | undefined} filePath @returns {{ signature?: string, entries?: RawPluginEntry[], absent?: boolean }} */
+  function read(filePath) {
+    if (!filePath) return { absent: true }
+    try {
+      const stat = fsSync.statSync(filePath)
+      const signature = `${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`
+      const previous = cache.get(filePath)
+      if (previous?.signature === signature) return previous
+      if (!stat.isFile() || stat.size > 4 * 1024 * 1024) return { signature }
+      let entries
+      let fd
+      try {
+        fd = fsSync.openSync(filePath, 'r')
+        const actual = fsSync.fstatSync(fd)
+        if (actual.isFile() && actual.size <= 4 * 1024 * 1024) {
+          const buffer = Buffer.alloc(actual.size + 1)
+          let bytes = 0
+          let chunk
+          do {
+            chunk = fsSync.readSync(fd, buffer, bytes, buffer.length - bytes, null)
+            bytes += chunk
+          } while (chunk && bytes < buffer.length)
+          if (bytes <= actual.size) {
+            const parsed = JSON.parse(buffer.subarray(0, bytes).toString('utf8'))
+            if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.plugins)) {
+              entries = []
+              for (const entry of parsed.plugins) if (entry && typeof entry === 'object' && entry.name === plugin) {
+                entries.push({ name: entry.name, enabled: entry.enabled, recording: entry.recording })
+                if (entries.length === 2) break
+              }
+            }
+          }
+        }
+      } catch { /* Cache an invalid layer too, avoiding repeated failed parsing. */ }
+      finally { if (fd !== undefined) fsSync.closeSync(fd) }
+      const result = { signature, entries }
+      cache.set(filePath, result)
+      return result
+    } catch (err) {
+      cache.delete(filePath)
+      return { absent: /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT' }
+    }
+  }
+  return () => {
+    // Enrollment and A/B slot flips are live policy changes too. Probe only
+    // the four known names when resolution fails, never a directory listing.
+    const centralPath = resolveCentralLayerPath({ stateRoot: stateDir })
+    for (const key of cache.keys()) if (key !== localPath && key !== centralPath) cache.delete(key)
+    if (!centralPath) for (const name of ['active', 'seed.json', 'config.a.json', 'config.b.json']) {
+      try {
+        fsSync.lstatSync(path.join(stateDir, 'config-control', name))
+        return { recording: false, reason: 'policy_unreadable' }
+      } catch (err) {
+        if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') return { recording: false, reason: 'policy_unreadable' }
+      }
+    }
+    const central = read(centralPath)
+    if (!central.absent && !central.entries) return { recording: false, reason: 'policy_unreadable' }
+    const centralOwners = central.entries ?? []
+    const local = centralOwners.length ? undefined : read(localPath)
+    if (local && !local.absent && !local.entries) return { recording: false, reason: 'policy_unreadable' }
+    const owners = centralOwners.length ? centralOwners : local?.entries ?? []
+    if (owners.length !== 1) return { recording: false, reason: 'owner_absent' }
+    const owner = owners[0]
+    if ((owner.enabled !== undefined && typeof owner.enabled !== 'boolean') ||
+        (owner.recording !== undefined && typeof owner.recording !== 'boolean')) return { recording: false, reason: 'policy_unreadable' }
+    if (owner.enabled === false) return { recording: false, reason: 'owner_disabled' }
+    return { recording: owner.recording !== false, reason: owner.recording === false ? 'recording_disabled' : 'recording_enabled' }
+  }
+}
+
+/**
  * @param {RawPluginEntry[]} local
  * @param {RawPluginEntry[]} central
  * @returns {RecordingState}
@@ -106,6 +190,9 @@ function recordingState(local, central) {
 export async function writeClientRecording({ env, plugin, recording, dryRun = false }) {
   const { stateDir, hypHome } = readObservabilityEnv(env)
   const configPath = resolveConfigPath({ env, hypHome })
+  if (plugin === '@hypaware/ollama' && createClientRecordingPolicyReader({ env, plugin })().reason === 'policy_unreadable') {
+    return { status: 'failed', configPath, message: 'Ollama recording policy is unreadable; restore the owning config before changing recording.' }
+  }
   const centralPath = resolveCentralLayerPath({ stateRoot: stateDir })
   const centralEntry = centralPath
     ? (await readRawPlugins(centralPath)).find((entry) => entry.name === plugin)

@@ -1,17 +1,38 @@
 import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
 import type {
   AiGatewayClientRegistration,
+  AiGatewayCaptureReason,
   AiGatewayExchangeProjector,
   AiGatewayRouteInput,
   AiGatewaySettlementEnricher,
   AiGatewayUpstreamPathRewrite,
   AiGatewayUpstreamPreset,
+  AiGatewayUpstreamAliasRoute,
   PluginActivationContext,
 } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { Exchange, createNullExchange } from './recorder.js'
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
 
+export interface CaptureOutcomeEntry {
+  route: string
+  observed: number
+  persisted: number
+  failed: number
+  reasons: Partial<Record<AiGatewayCaptureReason, number>>
+  reason?: AiGatewayCaptureReason
+  last_outcome?: string
+  last_observed?: string
+  last_persisted?: string
+  last_failed?: string
+  persisted_id?: string
+  failed_id?: string
+  reported_at: number
+  reported_reason?: AiGatewayCaptureReason
+}
+
 export interface ExchangeInit {
+  recordingGeneration?: string
+  captureLimit?: number
   upstream: string
   provider: string | undefined
   method: string | undefined
@@ -39,12 +60,16 @@ export interface RecorderOptions {
 export interface GatewayProcessTransport {
   role: 'gateway' | 'processing'
   configure?(redactHeaders: readonly string[]): void
+  observeCapture?(callback: (route: string, reason: AiGatewayCaptureReason, id?: string) => void): void
   recorder?: {
     startExchange(init: ExchangeInit): Exchange
     drain(timeoutMs?: number): Promise<void>
   }
   finish?(exchange: Exchange, ignoredSessions: Set<string>): void
-  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>): () => Promise<void>
+  generation?: string
+  refreshRecording?(recording: boolean, generation: string, signal: AbortSignal): Promise<unknown>
+  settleVerification?(generation: string, signal: AbortSignal): Promise<unknown>
+  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>, refresh?: (recording: boolean, signal: AbortSignal, generation: string) => Promise<unknown>, settleVerification?: (generation: string, signal: AbortSignal) => Promise<unknown>): () => Promise<void>
   endpoint?: { host: string; port: number }
   snapshot?(): Record<string, number | boolean>
 }
@@ -109,6 +134,9 @@ export interface UpstreamConfig {
    * (LLP 0234); never a routing input.
    */
   record_prefix?: string
+  /** Runtime-only alias metadata; never compiled from persisted config. */
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface AiGatewayConfig {
@@ -149,6 +177,8 @@ export interface CompiledUpstream {
   match: ((input: AiGatewayRouteInput) => boolean) | undefined
   /** Validated outbound path-prefix swap, applied when the request is forwarded (LLP 0313). */
   rewrite?: AiGatewayUpstreamPathRewrite
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface ProxyOptions {
@@ -156,6 +186,8 @@ export interface ProxyOptions {
   upstreams: UpstreamConfig[]
   onExchangeFinished(exchange: Exchange): void | Promise<void>
   startExchange(init: {
+    recordingGeneration?: string
+    captureLimit?: number
     upstream: string
     provider: string | undefined
     method: string | undefined
@@ -201,6 +233,7 @@ export interface ProxyOptions {
 }
 
 export interface StartedProxy {
+  recordingDetails?(): Record<string, unknown>
   host: string
   port: number
   /**
@@ -245,6 +278,8 @@ export interface ThreadChain {
  */
 export interface GatewayState {
   presets: Map<string, AiGatewayUpstreamPreset>
+  aliases: Map<string, { canonicalName: string, route: AiGatewayUpstreamAliasRoute }>
+  aliasRoutes: { name: string, canonical: string, path_prefix: string, base_url: string }[]
   clients: Map<string, AiGatewayClientRegistration>
   projectors: RegisteredProjector[]
   enrichers: Map<string, AiGatewaySettlementEnricher>
