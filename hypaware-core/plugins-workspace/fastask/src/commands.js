@@ -460,7 +460,7 @@ async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, ti
 }
 
 /** @param {unknown} reason why the daemon's replica does not match this call */
-function scopeReason(reason) {
+export function scopeReason(reason) {
   const what = reason === 'org' ? 'organization' : reason === 'login' ? 'login' : 'remote'
   return `the running daemon's team graph belongs to another ${what}`
 }
@@ -469,7 +469,7 @@ function scopeReason(reason) {
  * @param {string} target @param {'warm' | 'cold'} pathKind @param {any} view @param {string | null} note
  * @returns {FastaskSource}
  */
-function replicaSource(target, pathKind, view, note) {
+export function replicaSource(target, pathKind, view, note) {
   const watermarkMs = view?.watermark ? Date.parse(view.watermark) : NaN
   return {
     kind: 'team_replica',
@@ -485,7 +485,7 @@ function replicaSource(target, pathKind, view, note) {
 }
 
 /** @param {any} view */
-function unusableReason(view) {
+export function unusableReason(view) {
   const state = view?.state
   if (state === 'expired') return 'the team graph lease expired'
   if (state === 'withdrawn') return 'access to the team graph was withdrawn'
@@ -539,7 +539,7 @@ function failure(leadCount, message) {
  * @param {EvidenceMcpClient} client @param {string} sql
  * @returns {Promise<Record<string, unknown>[]>}
  */
-async function remoteSql(client, sql) {
+export async function remoteSql(client, sql) {
   const res = await client.callTool('query_sql', { sql })
   const text = Array.isArray(res?.content) ? res.content.find((/** @type {any} */ c) => c?.type === 'text')?.text : undefined
   if (res?.isError) throw new Error(typeof text === 'string' ? text : 'query_sql failed')
@@ -591,7 +591,7 @@ async function localEvidence(ctx, discovery, run) {
 }
 
 /** @param {CommandRunContext} ctx @param {string} sql */
-async function localSql(ctx, sql) {
+export async function localSql(ctx, sql) {
   const out = await executeQuerySql({
     query: sql,
     registry: ctx.query,
@@ -604,7 +604,7 @@ async function localSql(ctx, sql) {
 }
 
 /** @param {string} pluginDir */
-function readToken(pluginDir) {
+export function readToken(pluginDir) {
   try {
     const token = fs.readFileSync(path.join(pluginDir, TOKEN_FILE), 'utf8').trim()
     return token || null
@@ -906,6 +906,6 @@ export function renderEvidenceText(body) {
 }
 
 /** @param {unknown} err */
-function messageOf(err) {
+export function messageOf(err) {
   return err instanceof Error ? err.message : String(err)
 }

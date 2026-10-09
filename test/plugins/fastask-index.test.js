@@ -111,7 +111,7 @@ test('the pinned graph fixture verifies, then indexes with placeholders matching
 
   // Non-ASCII (outside the BMP) File keys reach the lookups.
   assert.ok(index.fileByBasename.has('café-日本-🚀.md'))
-  assert.ok(index.fileByStem.has('café-日本-🚀'))
+  assert.ok(index.tokenIds.has('café'), 'path tokens include non-ASCII parts')
   assert.ok(index.fileBySuffix.has('fx-repo/docs/café-日本-🚀.md'))
   assert.equal(index.fileByRepo.size, 0, 'absolute-path keys name no repository')
 
@@ -151,13 +151,15 @@ test('Session props are kept for the fields fastask shows, interned across sessi
   assert.equal(index.nodeFirstSeen[s1], Date.UTC(2026, 9, 1, 1))
 })
 
-test('bridged File keys index basename, stem and repository; a root-level path keeps its own basename', async () => {
+test('bridged File keys index basename, path tokens and repository; a root-level path keeps its own basename', async () => {
   const builder = createIndexBuilder()
   builder.addNode({ node_id: 'f1', node_type: 'File', natural_key: 'acme/app:src/Login.js', label: 'Login.js' })
   builder.addNode({ node_id: 'f2', node_type: 'File', natural_key: 'acme/app:README.md', label: 'README.md' })
   const index = await builder.finish()
   assert.deepEqual(index.fileByBasename.get('login.js'), 0)
-  assert.deepEqual(index.fileByStem.get('login'), 0)
+  // Tokens of the relative path: 'src' from the directory, 'login' from the
+  // basename (camelCase-free here); 'js' and 'md' are under 3 characters.
+  assert.deepEqual([...index.tokenIds.keys()].sort(), ['login', 'readme', 'src'])
   assert.deepEqual(index.fileByBasename.get('readme.md'), 1)
   assert.deepEqual(index.fileByRepo.get('acme/app'), [0, 1])
   assert.equal(index.fileBySuffix.size, 0)
@@ -178,9 +180,9 @@ test('a node arriving after its edge fills the placeholder in (interleaved local
   assert.ok(index.fileByBasename.has('a.js'))
 })
 
-test('the ceiling is 256 MB and the up-front check allows 100 bytes per manifest row', () => {
+test('the ceiling is 256 MB and the up-front check allows 110 bytes per manifest row', () => {
   assert.equal(MAX_INDEX_BYTES, 256 * 1024 * 1024)
-  assert.equal(BYTES_PER_ROW, 100)
+  assert.equal(BYTES_PER_ROW, 110)
   const fits = Math.floor(MAX_INDEX_BYTES / BYTES_PER_ROW)
   assert.doesNotThrow(() => assertManifestFits({ files: { nodes: { rows: 1 }, edges: { rows: fits - 1 } } }))
   assert.throws(() => assertManifestFits({ files: { nodes: { rows: 1 }, edges: { rows: fits } } }),
@@ -214,7 +216,7 @@ for (const distinct of [MAX_TYPES - 1, MAX_TYPES, 600]) {
 
 test('a manifest past the up-front bound is refused before anything is read', async () => {
   // About 2.7M rows: the running estimate would admit the first part of this
-  // build, but at 100 bytes per row it is past 256 MB before a byte is read.
+  // build, but at 110 bytes per row it is past 256 MB before a byte is read.
   const huge = { files: { nodes: { rows: 1_000_000 }, edges: { rows: 1_700_000 } } }
   const untouchable = {
     [Symbol.asyncIterator]() { throw new Error('the source must not be read') },

@@ -12,7 +12,7 @@ import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../../../../src
 import { canonicalOrigin } from '../../../../src/core/remote/builtin_remotes.js'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
-import { discover } from './discovery.js'
+import { discover, neighbors } from './discovery.js'
 import { createEvidenceForwarder } from './evidence_forwarder.js'
 import { IndexBuildError, buildIndexFromSnapshot } from './index_builder.js'
 import { createReplicaSync, credentialFingerprint } from './replica_sync.js'
@@ -31,6 +31,8 @@ export const DISCOVER_ROUTE = 'fastask/discover'
 export const EVIDENCE_ROUTE = 'fastask/evidence'
 /** `graph replica refresh`: start a check now, coalesced with any in flight. */
 export const REFRESH_ROUTE = 'fastask/refresh'
+/** `query team-graph neighbors`: one hop over the warm index (LLP 0487#decision). */
+export const NEIGHBORS_ROUTE = 'fastask/neighbors'
 /** The per-boot bearer, mode 0600, in the plugin state directory (the trust boundary). */
 export const TOKEN_FILE = 'control-token'
 /** A discover request is a question and a few paths. */
@@ -219,16 +221,18 @@ export function createReplicaSource(deps = {}) {
       if (!url) return reject(req, res, 400, 'invalid_request')
       const route = url.pathname === `/_hypaware/${DISCOVER_ROUTE}` ? DISCOVER_ROUTE
         : url.pathname === `/_hypaware/${EVIDENCE_ROUTE}` ? EVIDENCE_ROUTE
-          : url.pathname === `/_hypaware/${REFRESH_ROUTE}` ? REFRESH_ROUTE : null
+          : url.pathname === `/_hypaware/${REFRESH_ROUTE}` ? REFRESH_ROUTE
+            : url.pathname === `/_hypaware/${NEIGHBORS_ROUTE}` ? NEIGHBORS_ROUTE : null
       if (!route) return reject(req, res, 404, 'not_found')
       if (!authorized(req.headers.authorization)) return reject(req, res, 401, 'unauthorized')
       if (req.method !== 'POST') return reject(req, res, 405, 'method_not_allowed')
       if ((req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') {
         return reject(req, res, 415, 'content_type')
       }
-      const body = await readJson(req, res, route === DISCOVER_ROUTE ? DISCOVER_BODY_CAP : EVIDENCE_BODY_CAP)
+      const body = await readJson(req, res, route === DISCOVER_ROUTE || route === NEIGHBORS_ROUTE ? DISCOVER_BODY_CAP : EVIDENCE_BODY_CAP)
       if (body === undefined) return
       if (route === DISCOVER_ROUTE) return answerDiscover(res, body)
+      if (route === NEIGHBORS_ROUTE) return answerNeighbors(res, body)
       if (route === REFRESH_ROUTE) {
         // @ref LLP 0480#sync [implements]: graph replica refresh starts a pass now, coalesced with any check in flight; the command does not wait for it
         void sync.refresh().catch(() => {})
@@ -254,6 +258,37 @@ export function createReplicaSource(deps = {}) {
         repoRoot: typeof body.repoRoot === 'string' ? body.repoRoot : null,
         files: Array.isArray(body.files) ? body.files.filter((/** @type {unknown} */ f) => typeof f === 'string') : [],
         ...(Number.isInteger(body.leads) ? { leads: body.leads } : {}),
+        // `query team-graph discover`: the agent's own terms and a page offset.
+        ...(Array.isArray(body.terms) ? { terms: strings(body.terms) } : {}),
+        ...(Number.isInteger(body.offset) && body.offset >= 0 ? { offset: body.offset } : {}),
+      })
+      send(res, 200, { source: 'team_replica', replica: replicaView(ready.status), result })
+    }
+
+    /**
+     * `query team-graph neighbors` on the warm path: one bounded hop over the
+     * in-memory index, under the same token, scope and servability rules as
+     * discover.
+     *
+     * @ref LLP 0487#decision [implements]: one daemon control route beside discover answers neighbors from the warm index
+     * @param {http.ServerResponse} res
+     * @param {any} body
+     */
+    function answerNeighbors(res, body) {
+      if (!validScope(body?.scope)) return send(res, 400, { error: 'invalid_request', message: 'scope (target, origin, org, credential_fp) is required' })
+      const direction = body.direction ?? 'both'
+      if (direction !== 'in' && direction !== 'out' && direction !== 'both') return send(res, 400, { error: 'invalid_request', message: 'direction must be in, out or both' })
+      const ready = servable()
+      if (!ready) return send(res, 503, { error: 'replica_unavailable', replica: replicaView(sync.status()) })
+      const mismatch = scopeMismatch(body.scope, ready.status)
+      if (mismatch) return send(res, 409, { error: 'scope_mismatch', reason: mismatch })
+      const result = neighbors(ready.index, {
+        ids: Array.isArray(body.ids) ? strings(body.ids) : [],
+        keys: Array.isArray(body.keys) ? strings(body.keys) : [],
+        direction,
+        edgeTypes: Array.isArray(body.edgeTypes) ? strings(body.edgeTypes) : [],
+        ...(Number.isInteger(body.limit) ? { limit: body.limit } : {}),
+        ...(Number.isInteger(body.maxVisits) ? { maxVisits: body.maxVisits } : {}),
       })
       send(res, 200, { source: 'team_replica', replica: replicaView(ready.status), result })
     }
@@ -326,7 +361,7 @@ export function createReplicaSource(deps = {}) {
             summary_line: line,
             listen_host: bound.host,
             listen_port: bound.port,
-            control_routes: [DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE],
+            control_routes: [DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE, NEIGHBORS_ROUTE],
             evidence: forwarder.status(),
           }),
         }
@@ -490,6 +525,11 @@ function send(res, status, body) {
   if (res.headersSent || res.destroyed) return
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
   res.end(JSON.stringify(body))
+}
+
+/** @param {unknown[]} list @returns {string[]} */
+function strings(list) {
+  return list.filter((/** @type {unknown} */ v) => typeof v === 'string')
 }
 
 /** @param {unknown} err */

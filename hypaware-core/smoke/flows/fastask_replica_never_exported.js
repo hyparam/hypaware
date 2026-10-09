@@ -16,7 +16,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 import { createReplicaSource } from '../../plugins-workspace/fastask/src/replica_source.js'
-import { QUESTION, REPLICA_MARKER, REPO, TOKEN, makeBuf, startFastaskServer, waitFor } from '../lib/fastask_fixture.js'
+import { REPLICA_MARKER, REPO, TOKEN, makeBuf, shellSplit, startFastaskServer, waitFor } from '../lib/fastask_fixture.js'
 
 /**
  * @import { ActivePlugin, ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
@@ -146,12 +146,26 @@ export async function run({ harness, expect }) {
       const repo = path.join(harness.tmpDir, 'fx-repo')
       await fs.mkdir(path.join(repo, '.git'), { recursive: true })
       await fs.writeFile(path.join(repo, '.git', 'config'), `[remote "origin"]\n\turl = git@github.com:${REPO}.git\n`)
-      const stdout = makeBuf()
-      const stderr = makeBuf()
-      const code = await dispatch(['fastask', QUESTION], { stdout, stderr, cwd: repo, env: { ...process.env, HYP_CONFIG: configPath, HYP_REMOTE_TOKEN_FX: TOKEN } })
-      expect.that('read_evidence: hyp fastask exits 0', { code, err: stderr.text() }, (v) => v.code === 0)
-      expect.that('read_evidence: answered from the replica', stdout.text(), (s) => s.startsWith('source: team_replica (cold) on fx'))
-      expect.that('read_evidence: teammates\' text was printed', stdout.text(), (s) => s.includes(REPLICA_MARKER))
+      const readEnv = { ...process.env, HYP_CONFIG: configPath, HYP_REMOTE_TOKEN_FX: TOKEN }
+      /** @param {string[]} argv */
+      const hyp = async (argv) => {
+        const stdout = makeBuf()
+        const stderr = makeBuf()
+        const code = await dispatch(argv, { stdout, stderr, cwd: repo, env: readEnv })
+        return { code, out: stdout.text(), err: stderr.text() }
+      }
+      // The agent path (LLP 0487): discover on the replica, search the
+      // sessions it found, then read the evidence a hit points at.
+      const found = await hyp(['query', 'team-graph', 'discover', 'login.js', '--json'])
+      expect.that('read_evidence: discover exits 0', { code: found.code, err: found.err }, (v) => v.code === 0)
+      const doc = JSON.parse(found.out)
+      expect.that('read_evidence: answered from the replica', [doc.source.kind, doc.source.path], (v) => v[0] === 'team_replica' && v[1] === 'cold')
+      const searched = await hyp(shellSplit(doc.next.search).slice(1))
+      expect.that('read_evidence: search exits 0', { code: searched.code, err: searched.err }, (v) => v.code === 0)
+      const read = JSON.parse(searched.out).sessions.flatMap((/** @type {any} */ x) => x.hits)[0]?.read_command
+      const evidence = await hyp(shellSplit(read).slice(1))
+      expect.that('read_evidence: query evidence exits 0', { code: evidence.code, err: evidence.err }, (v) => v.code === 0)
+      expect.that('read_evidence: teammates\' text was printed', evidence.out + searched.out, (s) => s.includes(REPLICA_MARKER))
     })
 
     // ----- smoke_step: export_tick -----
@@ -187,7 +201,7 @@ export async function run({ harness, expect }) {
   const steps = new Set(traces.filter((t) => t.name?.startsWith('smoke.step.')).map((t) => t.attributes?.smoke_step))
   expect.that('telemetry: every smoke_step ran', [...steps].sort().join(','), (v) => v === 'assert_withheld,export_tick,read_evidence,setup')
   expect.that('telemetry: the replica was activated', traces.some((t) => t.name === 'replica.activate'), (v) => v === true)
-  expect.that('telemetry: fastask read evidence on the cold path', traces.filter((t) => t.name === 'fastask.run').map((t) => t.attributes?.source_path), (p) => p.includes('cold'))
+  expect.that('telemetry: discover read the replica on the cold path', traces.filter((t) => t.name === 'fastask.team_graph.discover').map((t) => t.attributes?.source_path), (p) => p.includes('cold'))
   expect.that('telemetry: no marker in any span', JSON.stringify(traces), (s) => !s.includes(REPLICA_MARKER))
 }
 

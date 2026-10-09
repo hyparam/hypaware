@@ -1,9 +1,10 @@
 // @ts-check
 
-import { PLACEHOLDER, basenameOf, isAbsolute, lastSegments, repoOfKey } from './index_builder.js'
+import { compareStrings } from '../../../../src/core/util/compare_strings.js'
+import { MIN_TOKEN, PLACEHOLDER, basenameOf, isAbsolute, lastSegments, repoOfKey, splitTokens } from './index_builder.js'
 
 /**
- * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Term, VocabularyMismatch } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Neighbor, NeighborNode, NeighborsInput, NeighborsResult, NeighborsStart, Term, VocabularyMismatch } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 /**
@@ -16,10 +17,24 @@ import { PLACEHOLDER, basenameOf, isAbsolute, lastSegments, repoOfKey } from './
  */
 
 export const MAX_TERMS = 12
+/** Postings one discover call examines at most (LLP 0488#path-tokens). */
+export const MAX_POSTINGS = 60_000
+/** A token in more files than this only scores candidates found through rarer tokens. */
+export const SEED_MAX_FILES = 5_000
+/** Terms this long or longer also match tokens that start with them. */
+const PREFIX_MIN = 4
+/** Term parts one call matches; parts past this are dropped. */
+const MAX_PAIRS = 24
+/** Tokens one prefix expands to. */
+const MAX_PREFIX_TOKENS = 5_000
 export const MAX_ANCHORS = 50
 export const MAX_VISITS = 20_000
 export const DEFAULT_LEADS = 8
 export const MAX_LEADS = 40
+export const DEFAULT_NEIGHBORS = 50
+export const MAX_NEIGHBORS = 500
+/** Start nodes one neighbors call takes. */
+export const MAX_STARTS = 50
 
 /** The edge discovery walks from a File back to its sessions. */
 const TOUCH_EDGE = 'touched'
@@ -86,7 +101,7 @@ export function extractTerms(question, max = MAX_TERMS) {
   for (const raw of question.split(/\s+/)) {
     const token = raw.replace(/^[\s"'`([{<]+|[\s"'`)\]}>,;:!?.]+$/g, '')
     if (!token) continue
-    if (/[\\/]/.test(token) || /^\S*\.[\p{L}\p{N}]{1,8}$/u.test(token)) {
+    if (isPathLike(token)) {
       paths.push({ text: token, kind: 'path' })
       continue
     }
@@ -108,6 +123,39 @@ export function extractTerms(question, max = MAX_TERMS) {
     if (terms.length === max) break
   }
   return terms
+}
+
+/**
+ * Terms an agent chose, used as written: no splitting and no stopwords, only
+ * trimmed, deduplicated case-insensitively and capped at `max`. A path-like
+ * term resolves like a relative `--file`; any other matches basenames and
+ * stems.
+ *
+ * @param {string[]} given
+ * @param {number} [max]
+ * @returns {Term[]}
+ */
+export function explicitTerms(given, max = MAX_TERMS) {
+  /** @type {Term[]} */
+  const terms = []
+  const seen = new Set()
+  for (const raw of given) {
+    const text = raw.trim()
+    const key = text.toLowerCase()
+    if (!text || seen.has(key)) continue
+    seen.add(key)
+    terms.push({ text, kind: isPathLike(text) ? 'path' : 'word' })
+    if (terms.length === max) break
+  }
+  return terms
+}
+
+/**
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isPathLike(token) {
+  return /[\\/]/.test(token) || /^\S*\.[\p{L}\p{N}]{1,8}$/u.test(token)
 }
 
 /**
@@ -133,18 +181,25 @@ export function discover(index, input) {
   const maxAnchors = input.maxAnchors ?? MAX_ANCHORS
   const maxVisits = input.maxVisits ?? MAX_VISITS
   const repo = input.repo ? input.repo.toLowerCase() : null
-  const terms = extractTerms(input.question)
+  const offset = Math.max(0, Math.floor(input.offset ?? 0))
+  // @ref LLP 0487#decision [implements]: agent-directed discover takes the agent's own terms, used as written
+  const terms = input.terms ? explicitTerms(input.terms) : extractTerms(input.question)
 
-  // Each `--file` and each term is one source of anchors; groups are keyed by it.
+  // `--file` anchors resolve exactly or by suffix; terms match path tokens
+  // (LLP 0488#path-tokens). Each anchor records which terms (or which --file)
+  // it covers, for scoring sessions by distinct terms.
   /** @type {Array<{ text: string, candidates: Anchor[][], overflow: number }>} */
   const sources = []
   for (const file of input.files ?? []) {
     sources.push(fileCandidates(index, file, repo, input.repoRoot ?? null, maxAnchors))
   }
-  for (const term of terms) sources.push(termCandidates(index, term, repo, maxAnchors))
-
-  const { anchors, dropped } = pickAnchors(sources, maxAnchors)
-  const sourceOf = new Map(sources.map((s, n) => [s.text, n]))
+  const fileSide = pickAnchors(sources, maxAnchors)
+  const fileIndex = new Map(sources.map((src, n) => [src.text, terms.length + n]))
+  const tokenSide = tokenAnchors(index, terms, repo, input.repoRoot ?? null, maxAnchors - fileSide.anchors.length, new Set(fileSide.anchors.map((a) => a.node)), Math.min(input.maxPostings ?? MAX_POSTINGS, MAX_POSTINGS))
+  const anchors = [...fileSide.anchors, ...tokenSide.anchors]
+  /** @type {number[][]} */
+  const anchorTerms = [...fileSide.anchors.map((a) => [/** @type {number} */ (fileIndex.get(a.term))]), ...tokenSide.terms]
+  const dropped = fileSide.dropped + tokenSide.dropped
 
   // Anchors still resolve (they say what the question named); the walk would
   // find nothing, so the caller is told to ask the team server instead.
@@ -158,7 +213,8 @@ export function discover(index, input) {
       groups: [],
       no_anchor: anchors.length === 0,
       fallback: { reason: mismatch.error_kind, edge_types: mismatch.edge_types },
-      coverage: { visits: 0, truncated: false, anchors_truncated: dropped, unresolved_edges_met: 0, sessions_considered: 0 },
+      page: { offset, limit: leadsWanted, next_offset: null },
+      coverage: { visits: 0, truncated: false, anchors_truncated: dropped, unresolved_edges_met: 0, sessions_considered: 0, postings_examined: tokenSide.examined },
     }
   }
 
@@ -194,8 +250,8 @@ export function discover(index, input) {
       }
       rec.reasons.push({ anchor: a, edge: e })
       rec.score += weightOf(anchor)
-      const n = /** @type {number} */ (sourceOf.get(anchor.term))
-      if (!rec.sources.includes(n)) {
+      for (const n of anchorTerms[a]) {
+        if (rec.sources.includes(n)) continue
         rec.sources.push(n)
         rec.score += WEIGHT_TERM
       }
@@ -210,10 +266,15 @@ export function discover(index, input) {
 
   const ranked = [...sessions.entries()].sort(([s1, r1], [s2, r2]) =>
     r2.score - r1.score || newer(r2.latest, r1.latest) || compareKeys(index.naturalKey[s1], index.naturalKey[s2]))
-  const chosen = ambiguous ? roundRobin(ranked, (entry) => primaryGroup(entry[1], anchors, groupOf), groups, leadsWanted) : ranked.slice(0, leadsWanted)
+  // A page is the same ordering cut at `offset`: the round-robin over
+  // competing groups is computed through the page's end, then sliced.
+  const through = offset + leadsWanted
+  const ordered = ambiguous ? roundRobin(ranked, (entry) => primaryGroup(entry[1], anchors, groupOf), groups, through) : ranked.slice(0, through)
+  const chosen = ordered.slice(offset)
 
   /** @type {Lead[]} */
-  const leads = chosen.map(([s, rec], n) => toLead(index, anchors, s, rec, n + 1, groups[primaryGroup(rec, anchors, groupOf)].key))
+  const leads = chosen.map(([s, rec], n) => toLead(index, anchors, s, rec, offset + n + 1, groups[primaryGroup(rec, anchors, groupOf)].key))
+  const nextOffset = offset + chosen.length
 
   return {
     terms,
@@ -223,12 +284,14 @@ export function discover(index, input) {
     groups,
     no_anchor: anchors.length === 0,
     fallback: null,
+    page: { offset, limit: leadsWanted, next_offset: nextOffset < sessions.size ? nextOffset : null },
     coverage: {
       visits,
       truncated,
       anchors_truncated: dropped,
       unresolved_edges_met: unresolvedMet,
       sessions_considered: sessions.size,
+      postings_examined: tokenSide.examined,
     },
   }
 }
@@ -300,29 +363,218 @@ function fileCandidates(index, file, repo, repoRoot, cap) {
 }
 
 /**
- * Candidate anchors for one question term: a path-like term resolves like a
- * relative `--file`; any term matches File basenames and stems.
+ * Anchors for the question's terms by path tokens (LLP 0488#path-tokens).
+ * Each term is tokenized by the index's own rule; parts under 3 characters
+ * are dropped, and a term matches a file only when every part matches one of
+ * its tokens (equal, or a prefix for parts of 4 or more characters). Postings
+ * are read rarest token first, at most `MAX_POSTINGS` of them; a token in more
+ * than `SEED_MAX_FILES` files never seeds a candidate, only scores the ones
+ * rarer tokens found (a binary search in its sorted postings). Files rank by
+ * the caller's repository first, then distinct terms matched, then a weight
+ * (basename over directory, exact over prefix, rarer over common; a compound
+ * term counts once and takes its rarest part's rarity), then the most recent
+ * touch. Files elsewhere stay as candidates, ranked below, unproven.
  *
+ * Work per call: at most `MAX_POSTINGS` postings plus one binary search per
+ * candidate and common token; memory, two small arrays per candidate.
+ *
+ * @ref LLP 0488#path-tokens [implements]: terms match path tokens (equal, or prefix from 4 characters), rarest first, bounded postings, common tokens only score, caller repository first
  * @param {GraphIndex} index
- * @param {Term} term
- * @param {string | null} repo
- * @param {number} cap
+ * @param {Term[]} terms
+ * @param {string | null} repo lowercased `owner/repo`
+ * @param {string | null} repoRoot
+ * @param {number} max anchors wanted
+ * @param {Set<number>} taken nodes already anchored by `--file`
+ * @param {number} maxPostings
+ * @returns {{ anchors: Anchor[], terms: number[][], dropped: number, examined: number }}
  */
-function termCandidates(index, term, repo, cap) {
-  if (term.kind === 'path' && /[\\/]/.test(term.text)) {
-    return fileCandidates(index, term.text, repo, null, cap)
+function tokenAnchors(index, terms, repo, repoRoot, max, taken, maxPostings) {
+  /** @type {Array<{ term: number, part: string }>} */
+  const pairs = []
+  /** @type {number[][]} */
+  const pairsOf = terms.map(() => [])
+  terms.forEach((term, t) => {
+    for (const part of new Set(splitTokens(term.text).filter((p) => p.length >= MIN_TOKEN))) {
+      if (pairs.length === MAX_PAIRS) break
+      pairsOf[t].push(pairs.length)
+      pairs.push({ term: t, part })
+    }
+  })
+  const P = pairs.length
+  if (P === 0 || max <= 0) return { anchors: [], terms: [], dropped: 0, examined: 0 }
+  const fileType = index.nodeTypes.indexOf('File')
+  const fileTotal = Math.max(1, fileType === -1 ? 0 : index.nodeTypeCounts[fileType])
+
+  /** @type {Array<{ pair: number, tok: number, exact: boolean, count: number }>} */
+  const seeds = []
+  /** @type {Array<Array<{ tok: number, exact: boolean, count: number }>>} */
+  const common = pairs.map(() => [])
+  pairs.forEach(({ part }, k) => {
+    for (const tok of matchingTokens(index, part)) {
+      const count = index.tokenOffsets[tok + 1] - index.tokenOffsets[tok]
+      const entry = { tok, exact: index.tokenNames[tok] === part, count }
+      if (count > SEED_MAX_FILES) common[k].push(entry)
+      else seeds.push({ pair: k, ...entry })
+    }
+  })
+  seeds.sort((a, b) => a.count - b.count)
+
+  /** @type {Map<number, number>} */
+  const ordOf = new Map()
+  /** @type {number[]} */
+  const nodes = []
+  let grades = new Uint8Array(64 * P)
+  let weights = new Float32Array(64 * P)
+  /** @param {number} node */
+  const ordFor = (node) => {
+    let ord = ordOf.get(node)
+    if (ord !== undefined) return ord
+    ord = nodes.length
+    nodes.push(node)
+    ordOf.set(node, ord)
+    if ((ord + 1) * P > grades.length) {
+      const g = new Uint8Array(grades.length * 2)
+      g.set(grades)
+      grades = g
+      const w = new Float32Array(weights.length * 2)
+      w.set(weights)
+      weights = w
+    }
+    return ord
   }
-  const source = newSource(term.text)
-  const word = term.text.toLowerCase()
-  const seen = new Set()
-  for (const [map, match] of /** @type {const} */ ([[index.fileByBasename, 'basename'], [index.fileByStem, 'stem']])) {
-    for (const node of all(map.get(word))) {
-      if (seen.has(node)) continue
-      seen.add(node)
-      add(source, anchorFor(index, node, term.text, match, repo), cap)
+  /** @param {number} idx @param {number} base @param {boolean} exact @param {number} count */
+  const record = (idx, base, exact, count) => {
+    const grade = base ? (exact ? 4 : 3) : (exact ? 2 : 1)
+    const weight = Math.log(1 + fileTotal / count)
+    if (grade > grades[idx] || (grade === grades[idx] && weight > weights[idx])) {
+      grades[idx] = grade
+      weights[idx] = weight
     }
   }
-  return source
+
+  let examined = 0
+  let truncated = false
+  seed: for (const entry of seeds) {
+    for (let q = index.tokenOffsets[entry.tok]; q < index.tokenOffsets[entry.tok + 1]; q++) {
+      if (examined === maxPostings) {
+        truncated = true
+        break seed
+      }
+      examined++
+      const packed = index.tokenPostings[q]
+      record(ordFor(packed >>> 1) * P + entry.pair, packed & 1, entry.exact, entry.count)
+    }
+  }
+  for (let ord = 0; ord < nodes.length; ord++) {
+    for (let k = 0; k < P; k++) {
+      for (const entry of common[k]) {
+        const base = member(index, entry.tok, nodes[ord])
+        if (base !== -1) record(ord * P + k, base, entry.exact, entry.count)
+      }
+    }
+  }
+
+  /** @type {Array<{ node: number, inRepo: boolean, matched: number[], weight: number, allExact: boolean, recent: number }>} */
+  const ranked = []
+  const root = repoRoot ? repoRoot.replace(/\\/g, '/').replace(/\/+$/, '') : null
+  for (let ord = 0; ord < nodes.length; ord++) {
+    const node = nodes[ord]
+    if (taken.has(node)) continue
+    /** @type {number[]} */
+    const matched = []
+    let weight = 0
+    let allExact = true
+    for (let t = 0; t < terms.length; t++) {
+      const ks = pairsOf[t]
+      if (ks.length === 0) continue
+      let grade = 4
+      let rarity = 0
+      for (const k of ks) {
+        const g = grades[ord * P + k]
+        if (g < grade) grade = g
+        if (weights[ord * P + k] > rarity) rarity = weights[ord * P + k]
+        if (g === 1 || g === 3) allExact = false
+      }
+      if (grade === 0) continue
+      matched.push(t)
+      weight += grade * rarity
+    }
+    if (matched.length === 0) continue
+    const key = /** @type {string} */ (index.naturalKey[node])
+    const keyRepo = repoOfKey(key)
+    const inRepo = keyRepo !== null ? repo !== null && keyRepo.toLowerCase() === repo : root !== null && key.replace(/\\/g, '/').startsWith(`${root}/`)
+    const first = index.inOffsets[node]
+    const recent = first < index.inOffsets[node + 1] ? index.edgeFirstSeen[index.inEdges[first]] : NaN
+    ranked.push({ node, inRepo, matched, weight, allExact, recent })
+  }
+  ranked.sort((a, b) => Number(b.inRepo) - Number(a.inRepo) || b.matched.length - a.matched.length || b.weight - a.weight
+    || newer(b.recent, a.recent) || compareKeys(index.naturalKey[a.node], index.naturalKey[b.node]))
+  const kept = ranked.slice(0, max)
+  return {
+    anchors: kept.map((r) => ({
+      node: r.node,
+      node_id: index.nodeIdOf[r.node],
+      key: /** @type {string} */ (index.naturalKey[r.node]),
+      term: r.matched.map((t) => terms[t].text).join(' + '),
+      match: r.allExact ? 'token' : 'token_prefix',
+      proven: r.inRepo,
+      in_repo: r.inRepo,
+    })),
+    terms: kept.map((r) => r.matched),
+    dropped: ranked.length - kept.length + (truncated && ranked.length <= kept.length ? 1 : 0),
+    examined,
+  }
+}
+
+/**
+ * The tokens a term part matches: itself, and for parts of `PREFIX_MIN` or
+ * more characters every token that starts with it (a range of the sorted
+ * token list), at most `MAX_PREFIX_TOKENS`.
+ *
+ * @param {GraphIndex} index
+ * @param {string} part
+ * @returns {number[]}
+ */
+function matchingTokens(index, part) {
+  if (part.length < PREFIX_MIN) {
+    const exact = index.tokenIds.get(part)
+    return exact === undefined ? [] : [exact]
+  }
+  const sorted = index.sortedTokenIds
+  let lo = 0
+  let hi = sorted.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (index.tokenNames[sorted[mid]] < part) lo = mid + 1
+    else hi = mid
+  }
+  /** @type {number[]} */
+  const out = []
+  for (let i = lo; i < sorted.length && out.length < MAX_PREFIX_TOKENS && index.tokenNames[sorted[i]].startsWith(part); i++) out.push(sorted[i])
+  return out
+}
+
+/**
+ * Whether `node` carries token `tok`: -1 if not, else 1 when the token is in
+ * its basename and 0 when only in a directory. A binary search in the
+ * token's ascending postings.
+ *
+ * @param {GraphIndex} index
+ * @param {number} tok
+ * @param {number} node
+ * @returns {number}
+ */
+function member(index, tok, node) {
+  let lo = index.tokenOffsets[tok]
+  let hi = index.tokenOffsets[tok + 1]
+  const want = node * 2
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (index.tokenPostings[mid] < want) lo = mid + 1
+    else hi = mid
+  }
+  const packed = lo < index.tokenOffsets[tok + 1] ? index.tokenPostings[lo] : -1
+  return packed !== -1 && packed >>> 1 === node ? packed & 1 : -1
 }
 
 /**
@@ -368,6 +620,7 @@ function anchorFor(index, node, term, match, repo) {
   const keyRepo = repoOfKey(key)
   return {
     node,
+    node_id: index.nodeIdOf[node],
     key,
     term,
     match,
@@ -527,7 +780,7 @@ function toLead(index, anchors, s, rec, rank, group) {
   const why = reasons.map(({ anchor: a, edge }) => {
     const anchor = anchors[a]
     return {
-      anchor: { type: 'File', key: anchor.key, match: anchor.match, proven: anchor.proven, in_repo: anchor.in_repo },
+      anchor: { type: 'File', node_id: anchor.node_id, key: anchor.key, match: anchor.match, proven: anchor.proven, in_repo: anchor.in_repo },
       term: anchor.term,
       edge: index.edgeTypes[index.edgeType[edge]],
       touched_at: iso(index.edgeFirstSeen[edge]),
@@ -536,6 +789,7 @@ function toLead(index, anchors, s, rec, rank, group) {
   const props = index.sessionProps.get(s)
   return {
     session_id: /** @type {string} */ (index.naturalKey[s]),
+    node_id: index.nodeIdOf[s],
     rank,
     score: rec.score,
     group,
@@ -572,7 +826,7 @@ function newer(a, b) {
  * @returns {number}
  */
 function compareKeys(a, b) {
-  return (a ?? '') < (b ?? '') ? -1 : (a ?? '') > (b ?? '') ? 1 : 0
+  return compareStrings(a ?? '', b ?? '')
 }
 
 /**
@@ -613,4 +867,110 @@ function relativeTo(root, path) {
   if (!root) return null
   const r = root.replace(/\\/g, '/').replace(/\/+$/, '')
   return path.startsWith(`${r}/`) ? normalizeRel(path.slice(r.length + 1)) : null
+}
+
+/**
+ * One hop from the given nodes (LLP 0487#decision `neighbors`): their edges
+ * in the chosen direction, newest first, optionally only some edge types.
+ * Bounded like discovery: at most `MAX_STARTS` start nodes, a visit budget
+ * (20,000) shared fairly across them, and at most `limit` neighbors returned;
+ * both truncations are reported. Keys resolve in one pass over the node table
+ * however many are asked for. Placeholder neighbors are returned and counted,
+ * not dropped.
+ *
+ * @ref LLP 0487#decision [implements]: neighbors walks the index's CSR adjacency within the same 20,000-visit budget
+ * @param {GraphIndex} index
+ * @param {NeighborsInput} input
+ * @returns {NeighborsResult}
+ */
+export function neighbors(index, input) {
+  const direction = input.direction ?? 'both'
+  const limit = Math.min(Math.max(1, Math.floor(input.limit ?? DEFAULT_NEIGHBORS)), MAX_NEIGHBORS)
+  const maxVisits = Math.min(Math.max(1, Math.floor(input.maxVisits ?? MAX_VISITS)), MAX_VISITS)
+  const wanted = input.edgeTypes?.length ? new Set(input.edgeTypes.map((t) => index.edgeTypes.indexOf(t)).filter((t) => t !== -1)) : null
+
+  /** @type {NeighborsStart[]} */
+  const starts = []
+  /** @type {number[]} */
+  const nodes = []
+  const asked = [...(input.ids ?? []).map((v) => ({ input: v, by: /** @type {const} */ ('id') })), ...(input.keys ?? []).map((v) => ({ input: v, by: /** @type {const} */ ('key') }))]
+  const startsDropped = Math.max(0, asked.length - MAX_STARTS)
+  const kept = asked.slice(0, MAX_STARTS)
+  /** @type {Map<string, number[]>} */
+  const byKey = new Map(kept.filter((a) => a.by === 'key').map((a) => [a.input, []]))
+  if (byKey.size > 0) {
+    for (let i = 0; i < index.nodeCount; i++) {
+      const key = index.naturalKey[i]
+      if (key !== null) byKey.get(key)?.push(i)
+    }
+  }
+  for (const a of kept) {
+    const found = a.by === 'id' ? (index.nodeIds.has(a.input) ? [/** @type {number} */ (index.nodeIds.get(a.input))] : []) : /** @type {number[]} */ (byKey.get(a.input))
+    if (found.length === 0) starts.push({ input: a.input, by: a.by, found: false, node_id: null, type: null, key: null })
+    for (const n of found) {
+      starts.push({ input: a.input, by: a.by, found: true, node_id: index.nodeIdOf[n], type: index.nodeTypes[index.nodeType[n]], key: index.naturalKey[n] })
+      nodes.push(n)
+    }
+  }
+
+  /** @type {Neighbor[]} */
+  const out = []
+  let visits = 0
+  let truncated = false
+  let resultsTruncated = false
+  let unresolved = 0
+  const directions = direction === 'both' ? /** @type {const} */ (['out', 'in']) : [direction]
+  walk: for (let k = 0; k < nodes.length; k++) {
+    const n = nodes[k]
+    let share = Math.ceil((maxVisits - visits) / (nodes.length - k))
+    for (const dir of directions) {
+      const offsets = dir === 'out' ? index.outOffsets : index.inOffsets
+      const edges = dir === 'out' ? index.outEdges : index.inEdges
+      for (let p = offsets[n]; p < offsets[n + 1]; p++) {
+        if (share === 0) {
+          truncated = true
+          break
+        }
+        share--
+        visits++
+        const e = edges[p]
+        if (wanted && !wanted.has(index.edgeType[e])) continue
+        if (out.length === limit) {
+          resultsTruncated = true
+          break walk
+        }
+        const other = dir === 'out' ? index.edgeDst[e] : index.edgeSrc[e]
+        const node = neighborNode(index, other)
+        if (node.placeholder) unresolved++
+        out.push({
+          from: index.nodeIdOf[n],
+          direction: dir,
+          edge_type: index.edgeTypes[index.edgeType[e]],
+          first_seen: iso(index.edgeFirstSeen[e]),
+          exemplar: index.exemplars.get(e) ?? null,
+          node,
+        })
+      }
+    }
+  }
+  return {
+    starts,
+    neighbors: out,
+    coverage: { visits, truncated, results_truncated: resultsTruncated, unresolved_met: unresolved, starts_dropped: startsDropped },
+  }
+}
+
+/**
+ * @param {GraphIndex} index
+ * @param {number} n
+ * @returns {NeighborNode}
+ */
+function neighborNode(index, n) {
+  const placeholder = (index.nodeFlags[n] & PLACEHOLDER) !== 0
+  const key = index.naturalKey[n]
+  /** @type {NeighborNode} */
+  const node = { node_id: index.nodeIdOf[n], type: index.nodeTypes[index.nodeType[n]], key, label: index.label[n] ?? key, placeholder }
+  const props = index.sessionProps.get(n)
+  if (props) node.session = { first_seen: iso(index.nodeFirstSeen[n]), ...props }
+  return node
 }
