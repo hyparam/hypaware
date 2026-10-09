@@ -6,8 +6,11 @@ import { EVIDENCE_MAX_RESPONSE_BYTES, EVIDENCE_TOOL } from './evidence.js'
 import { EVIDENCE_ROUTE } from './replica_source.js'
 
 /**
- * @import { EvidenceForwardResult, EvidenceMcpClient } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { EvidenceForwardResult, EvidenceMcpClient, WarmScope } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
+
+/** The prefix of the error a scope refusal raises; the command reads the server instead. */
+export const SCOPE_MISMATCH = 'scope_mismatch'
 
 /**
  * The command side of the warm evidence path: an `EvidenceMcpClient` (the
@@ -29,7 +32,8 @@ import { EVIDENCE_ROUTE } from './replica_source.js'
  * daemon, which aborts the upstream call.
  *
  * @ref LLP 0480#warm-connection [implements]: the warm path sends the evidence request to the daemon's control route
- * @param {{ endpoint: string, token: string, signal?: AbortSignal, fetchImpl?: typeof fetch }} opts
+ * @param {{ endpoint: string, token: string, scope: WarmScope, signal?: AbortSignal, fetchImpl?: typeof fetch }} opts
+ *   `scope` is the caller's resolved remote, org and login; the daemon refuses a mismatch (`scope_mismatch`)
  *   `endpoint` is the daemon listener's base URL, as status advertises it
  * @returns {EvidenceMcpClient & { lastRoundTripMs: number | null }}
  */
@@ -48,10 +52,16 @@ export function createWarmEvidenceClient(opts) {
       const res = await fetchImpl(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${opts.token}` },
-        body: JSON.stringify({ arguments: args ?? {} }),
+        body: JSON.stringify({ arguments: args ?? {}, scope: opts.scope }),
         redirect: 'error',
         signal: opts.signal,
       })
+      if (res.status === 409) {
+        const refusal = /** @type {any} */ (await res.json().catch(() => null))
+        if (refusal?.error === 'scope_mismatch') {
+          throw Object.assign(new Error(`${SCOPE_MISMATCH}: the daemon's replica belongs to another ${refusal.reason ?? 'remote'}`), { code: SCOPE_MISMATCH })
+        }
+      }
       if (!res.ok) {
         await res.body?.cancel().catch(() => {})
         throw new Error(`the daemon's evidence route answered HTTP ${res.status}`)

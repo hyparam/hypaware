@@ -127,6 +127,72 @@ test('framing faults are reported', async () => {
   assert.ok((await measureFile(graphFile('edges.ndjson'))).problems.some((p) => p.startsWith('not a readable gzip stream')))
 })
 
+test('a line hashed across many decompressed chunks digests the same as the whole line', async () => {
+  // Each line is far longer than one gunzip output chunk (16 KiB).
+  const lines = ['a', 'b', 'c'].map((ch, i) => ch.repeat(300 * 1024 + i))
+  const reference = createSetDigest()
+  for (const line of lines) reference.add(line)
+  const { facts, problems, refused } = await measureFile(gzipSync(lines.map((l) => `${l}\n`).join('')))
+  assert.deepEqual(problems, [])
+  assert.equal(refused, null)
+  assert.equal(facts.rows, 3)
+  assert.equal(facts.set_digest, reference.hex())
+  const unterminated = await measureFile(gzipSync(`${lines[0]}\n${lines[1]}`))
+  assert.ok(unterminated.problems.includes('last line has no trailing newline'))
+  assert.equal(unterminated.facts.set_digest, (() => { const d = createSetDigest(); d.add(lines[0]); d.add(lines[1]); return d.hex() })())
+})
+
+test('a line past maxLineBytes is refused while it is read, and the other file is not read (review r1 F6)', async () => {
+  const ceiling = 1024 * 1024
+  const big = gzipSync(`${'{"a":1}\n'.repeat(4)}${'x'.repeat(8 * ceiling)}\n`)
+  const measured = await measureFile(big, { maxLineBytes: ceiling })
+  assert.equal(measured.refused, 'line_too_large')
+  assert.deepEqual(measured.problems, [`line 5 is longer than the ${ceiling}-byte line ceiling`])
+  assert.equal(measured.facts.rows, 4)
+  // Decompression stopped within one output chunk of the ceiling, not at 8 MiB.
+  assert.ok(measured.facts.uncompressed_bytes <= ceiling + 64 * 1024, `read ${measured.facts.uncompressed_bytes} bytes`)
+
+  const exact = await measureFile(gzipSync(`${'x'.repeat(ceiling)}\n`), { maxLineBytes: ceiling })
+  assert.equal(exact.refused, null, 'a line exactly at the ceiling is accepted')
+  assert.deepEqual(exact.problems, [])
+
+  const manifest = graphJson('manifest.json')
+  let edgesRead = false
+  async function* edges() { edgesRead = true; yield gz.edges }
+  const verified = await verifyManifest({ manifest, nodes: big, edges: edges() }, { maxLineBytes: ceiling })
+  assert.equal(verified.ok, false)
+  assert.equal(verified.refused, 'line_too_large')
+  assert.equal(edgesRead, false)
+  assert.equal(verified.observed.edges, undefined)
+  // Without options the verifier is unchanged.
+  assert.equal((await verifyManifest({ manifest, ...gz })).refused, null)
+})
+
+test('the work budget and abort reach the decompressed work, not only the compressed reads (review r1 F6)', async () => {
+  // One compressed chunk that inflates to 50,000 lines.
+  const many = gzipSync('{"a":1}\n'.repeat(50_000))
+  let ticks = 0
+  const { facts } = await measureFile([many], { tick: () => { ticks++; return undefined } })
+  assert.equal(facts.rows, 50_000)
+  assert.ok(ticks >= 50_000, `ticked ${ticks} times for one compressed chunk`)
+
+  const stop = new AbortController()
+  const reason = new Error('shutting down')
+  let seen = 0
+  await assert.rejects(measureFile([many], {
+    signal: stop.signal,
+    tick: () => {
+      if (++seen === 1000) stop.abort(reason)
+      return seen >= 1000 ? Promise.reject(stop.signal.reason) : undefined
+    },
+  }), (err) => err === reason)
+  assert.equal(seen, 1000, 'no line was read after the abort')
+
+  // An abort that surfaces only through the budget is still an abort, not a format problem.
+  const budgetStop = new Error('budget aborted')
+  await assert.rejects(measureFile([many], { tick: () => Promise.reject(budgetStop) }), (err) => err === budgetStop)
+})
+
 test('the ported line encoding reproduces every pinned line', () => {
   for (const [name, columns] of /** @type {const} */ ([['nodes', NODE_COLUMNS], ['edges', EDGE_COLUMNS]])) {
     const text = graphFile(`${name}.ndjson`).toString('utf8')
