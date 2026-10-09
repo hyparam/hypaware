@@ -457,7 +457,7 @@ export async function buildIndexFromSnapshot(input) {
   // @ref LLP 0480#index [implements]: a generation past MAX_INDEX_BYTES is refused with replica_too_large instead of growing
   assertManifestFits(input.manifest, maxBytes)
   const { signal } = input
-  const budget = createWorkBudget({ duty: input.duty, signal, now: input.now })
+  const budget = createWorkBudget({ duty: input.duty, signal, cpuNow: input.cpuNow })
   const builder = createIndexBuilder({ maxBytes, expectedNodes, expectedEdges })
   try {
     await forEachLine(input.nodes, 'nodes', (row) => builder.addNode(row), builder, maxBytes, budget, signal)
