@@ -47,8 +47,8 @@ one fix, "give me a recommendation about X"), take this lighter path. It feeds
   contract's recommendation-page rules: H1 title, bold thesis, scope and dates,
   the figures with locators, the fix as a usable artifact, and the case against
   it. No `report.md`, weekly tables, or supporting pages.
-- Answer in chat with the page path and four lines: what was seen with its
-  figures, what it costs, the fix, and the expected effect.
+- Answer in chat with the page path and the page's four At a glance bullets,
+  unchanged.
 - `hyp report save` admits only a report folder, so the page stays where it was
   written. Publish it only when asked, with `hyp report recommend <page>.md
   --remote <target>` (see publishing.md); the receipt prints the minted

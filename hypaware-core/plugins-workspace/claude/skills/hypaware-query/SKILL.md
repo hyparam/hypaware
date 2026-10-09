@@ -124,8 +124,8 @@ could change the proposal. Do not survey the period. Write one
 one-sentence thesis, the scope and absolute dates, the figures with the
 queries that produced them, the proposed change as a usable artifact, and the
 case against it. The page rules are the report skill's recommendation-page
-contract. Answer in chat with the page path and four lines: what was seen,
-what it costs, the fix, and the expected effect.
+contract, including its At a glance block. Answer in chat with the page path
+and those four bullets, unchanged.
 
 Upload it only when the user asks, with `hyp report recommend <page>.md
 --remote <target>`, taking the target from `hyp remote list`. The receipt
