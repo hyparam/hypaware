@@ -78,8 +78,8 @@ async function assertYieldThenSleep(timers, wait, sleepMs) {
   assert.equal(state.error, undefined)
 }
 
-test('defaults are the design values: 8 ms of CPU, 4,096 rows, duty 0.2, sleeps of at most 2 s', () => {
-  assert.equal(DEFAULT_SLICE_MS, 8)
+test('defaults are the design values: 4 ms of CPU, 4,096 rows, duty 0.2, sleeps of at most 2 s', () => {
+  assert.equal(DEFAULT_SLICE_MS, 4)
   assert.equal(DEFAULT_SLICE_ROWS, 4_096)
   assert.equal(DEFAULT_DUTY, 0.2)
   assert.equal(MAX_SLEEP_MS, 2_000)

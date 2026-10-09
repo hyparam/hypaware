@@ -4,8 +4,8 @@
 // timers (which patch this object) can drive the yield and the sleep in tests.
 import timersPromises from 'node:timers/promises'
 
-/** Default slice length in milliseconds of process CPU. */
-export const DEFAULT_SLICE_MS = 8
+/** Default slice length in milliseconds of process CPU (LLP 0486#decision; was 8). */
+export const DEFAULT_SLICE_MS = 4
 
 /** Default row budget of one slice. */
 export const DEFAULT_SLICE_ROWS = 4_096
@@ -76,6 +76,7 @@ export function processCpuMs() {
  *
  * @ref LLP 0480#cooperative [implements]: slice, yield a turn, then sleep to hold the duty cycle; the cold path runs without the sleep
  * @ref LLP 0485#decision [implements]: the clock is whole-process CPU, every CPU millisecond is charged once, sleeps are capped at 2 s, duty 0.2
+ * @ref LLP 0486#decision [implements]: 4 ms slices, so a foreground request in the same process waits at most about that long for one to end
  * @param {{ sliceMs?: number, sliceRows?: number, duty?: number, signal?: AbortSignal, cpuNow?: () => number }} [opts]
  *   `cpuNow` is a monotonic process-CPU clock in milliseconds, `processCpuMs` unless a test supplies one
  * @returns {{ tick: (rows?: number) => Promise<void> | undefined }}
