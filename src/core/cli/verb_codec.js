@@ -180,13 +180,9 @@ export function argvToParams(inputSchema, argv, opts = {}) {
       return { ok: false, error: `unknown flag --${flag}` }
     }
     if (prop.type === 'boolean') {
-      if (inlineVal === undefined) {
-        params[propName] = true
-      } else if (inlineVal === 'true' || inlineVal === 'false') {
-        params[propName] = inlineVal === 'true'
-      } else {
-        return { ok: false, error: `--${flag} expects true|false (got ${inlineVal})` }
-      }
+      const read = booleanFlagValue(flag, inlineVal)
+      if (!read.ok) return read
+      params[propName] = read.value
       continue
     }
     let value = inlineVal
@@ -223,6 +219,23 @@ export function argvToParams(inputSchema, argv, opts = {}) {
   if (missing) return { ok: false, error: `missing required ${missing}` }
 
   return { ok: true, params }
+}
+
+/**
+ * Read one boolean flag the way the codec does: a bare `--flag` is true,
+ * `--flag=true` / `--flag=false` carry their value, and any other inline
+ * value is a usage error. Exported for argv readers that cannot run the
+ * whole codec, so a malformed value refuses there too instead of reading
+ * as false (issue #2440).
+ *
+ * @param {string} flag flag name as typed, without the leading dashes
+ * @param {string | undefined} inlineVal the text after `=`, or undefined for a bare flag
+ * @returns {{ ok: true, value: boolean } | { ok: false, error: string }}
+ */
+export function booleanFlagValue(flag, inlineVal) {
+  if (inlineVal === undefined) return { ok: true, value: true }
+  if (inlineVal === 'true' || inlineVal === 'false') return { ok: true, value: inlineVal === 'true' }
+  return { ok: false, error: `--${flag} expects true|false (got ${inlineVal})` }
 }
 
 /**
