@@ -46,9 +46,11 @@ the protocol, not from local samples.
 ## Options {#options}
 
 1. **64 MiB decoded, fixed (recommended).** The specification's recommended
-   server default, and the same figure it recommends clients hold themselves
-   to before compression. A client following the specification never sends a
-   body the server would refuse. The 512-record SDK batch above fits with room
+   server default, and the same default it recommends clients hold themselves
+   to before compression, so a client on the default never sends a body the
+   server would refuse. The specification lets both sides configure a different
+   limit; a client configured above 64 MiB would be refused and lose that
+   batch. The 512-record SDK batch above fits with room
    for records up to about 128 KiB each. Peak memory per accepted request stays
    bounded (about twice the limit in buffers plus the string and parsed
    object), and compression bombs stop at the limit. No configuration key.
@@ -64,7 +66,8 @@ the protocol, not from local samples.
 ## Recommendation {#recommendation}
 
 Option 1. It closes the memory exposure and the specification gap, and it
-refuses nothing a specification-following client would send. If accepted, the
+refuses nothing a client on the specification's default would send; only a
+client configured above 64 MiB is affected. If accepted, the
 implementation keeps PR #2557's mechanism (count decoded bytes, stop the
 decoder at the limit, discard the rest through the shared capped drain, answer
 413) and changes only the constant, with the reviewer's SDK reproduction as an

@@ -24,10 +24,12 @@ const JSON_CT = { 'Content-Type': 'application/json' }
  * runs. Counting wire bytes instead would let a few KiB of gzip inflate to
  * whatever the sender chose inside a daemon that runs for weeks.
  *
- * 64 MiB is the OTLP/HTTP specification's recommended server limit, and the
- * same limit it recommends a client hold itself to before compression, so a
- * client following it never sends a body this refuses. A smaller figure sized
- * from local samples refused a default 512-record SDK batch.
+ * 64 MiB is the OTLP/HTTP specification's recommended default for the server,
+ * and the default it recommends a client hold itself to before compression,
+ * so a client on that default never sends a body this refuses. A client
+ * configured above it can be refused, and loses that batch: a fixed bound is
+ * chosen over a config key (LLP 0478). A smaller figure sized from local
+ * samples refused a default 512-record SDK batch.
  */
 // @ref LLP 0478#limit [implements]: the protocol's recommended limit, after decompression, fixed rather than configurable
 export const MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024
