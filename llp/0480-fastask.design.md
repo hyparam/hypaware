@@ -7,6 +7,7 @@
 **Date:** 2026-10-09
 **Related:** LLP 0479 (request), LLP 0004 (paths and state directories), LLP 0023 (graph identity and provenance), LLP 0033 (remote attach), LLP 0034 (verbs and MCP), LLP 0063 (connection ladder), LLP 0064 (graph query), LLP 0070 and LLP 0105 (export and query seams), LLP 0166 and LLP 0300 (local control trust), LLP 0213 (graph guidance lives in the query skill), LLP 0248 (command tree), LLP 0305 (central eligibility), LLP 0393 (product telemetry vocabulary), LLP 0394 (source health in status), LLP 0430 (no manual acceptance procedures), LLP 0457 and LLP 0458 (skill updates); server LLP 0554 (`hypaware.graph-snapshot/1`), server LLP 0553, LLP 0557, LLP 0558 (`hypaware.session-evidence/1`), server LLP 0555 T11 (server-first command vocabulary)
 **Implemented-by:** [LLP 0481](./0481-fastask.plan.md)
+**Extended-by:** [LLP 0489](./0489-existing-installs-get-a-guarded-skill-not-a-dead-instruction.decision.md) (existing installs: a guarded skill paragraph with fallback to remote tools; new installs via compose_with)
 **Extended-by:** [LLP 0488](./0488-planner-deferred-and-discover-matches-path-tokens.decision.md) (the planner is deferred from the shipped surface; discover matches path tokens)
 **Extended-by:** [LLP 0487](./0487-fastask-teaches-agent-directed-exploration.decision.md) (agent-callable `query team-graph discover|neighbors|search`; the skill teaches agent-directed exploration first; the planner is optional)
 **Extended-by:** [LLP 0486](./0486-t11-stress-thresholds-after-measurement.decision.md) (slice time cap 4 ms; memory plateau and no-growth window)
@@ -64,6 +65,8 @@
   just leads for whoever asked.
 
 ## Packaging and enablement {#enablement}
+
+**Extended-by:** [LLP 0489#decision](./0489-existing-installs-get-a-guarded-skill-not-a-dead-instruction.decision.md#decision): removing the plugin from `V1_EXCLUDED_FROM_DEFAULT` enables nothing on an existing install; the skill paragraph is guarded and falls back to the remote tools, new installs get the plugin through `compose_with` and presets, and a config migration is deferred.
 
 **Extended-by:** [LLP 0488#planner-deferred](./0488-planner-deferred-and-discover-matches-path-tokens.decision.md#planner-deferred): `fastask` is not part of the shipped surface; it is unregistered on the integration branch and its code kept for later evaluation.
 
@@ -474,6 +477,8 @@ used and is executed by the acceptance tests (journey 4): a suggested command
 that does not run is a test failure.
 
 ## Skill guidance {#skill}
+
+**Extended-by:** [LLP 0489#decision](./0489-existing-installs-get-a-guarded-skill-not-a-dead-instruction.decision.md#decision): the routing paragraph carries an availability guard; when `hyp query team-graph` is unknown the agent uses the existing remote tools and tells the user once to rerun `hyp setup`, which it never runs itself.
 
 **Extended-by:** [LLP 0487#decision](./0487-fastask-teaches-agent-directed-exploration.decision.md#decision): the routing paragraph teaches agent-directed exploration first (discover, neighbors, search, evidence); `hyp fastask` is an optional shortcut, never described as benchmark-proven.
 
