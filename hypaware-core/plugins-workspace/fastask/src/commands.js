@@ -8,6 +8,7 @@ import { VerbUsageError } from '../../../../src/core/cli/verb_errors.js'
 import { readStatusFile, resolveLiveControlRouteEndpointsFromStatus } from '../../../../src/core/daemon/status.js'
 import { runRemoteVerb } from '../../../../src/core/mcp/remote_verb.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 import { canonicalOrigin, effectiveDefaultRemote } from '../../../../src/core/remote/builtin_remotes.js'
 import { pluginStateDir } from '../../../../src/core/runtime/paths.js'
@@ -38,6 +39,20 @@ export const EVIDENCE_USAGE = "hyp query evidence --remote <target> --session '<
 
 /** A usage problem: exit 2. */
 class UsageError extends Error {}
+
+/**
+ * A fastask span. Attributes are counts, states and timings only: never the
+ * question, terms, keys or text (LLP 0480#privacy).
+ *
+ * @template T
+ * @param {string} name
+ * @param {Record<string, string | number | boolean>} attrs
+ * @param {(span: { setAttribute(key: string, value: string | number | boolean): unknown }) => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+function span(name, attrs, fn) {
+  return withSpan(name, { [Attr.COMPONENT]: 'fastask', [Attr.OPERATION]: name, [Attr.PLUGIN]: PLUGIN_NAME, ...attrs }, fn, { component: 'fastask' })
+}
 
 /**
  * The parsed `hyp fastask` arguments.
@@ -126,7 +141,9 @@ export async function runFastask(argv, ctx, deps = {}) {
   const timer = setTimeout(() => controller.abort(new Error('fastask budget spent')), args.budgetMs)
   timer.unref?.()
   try {
-    return await runWithin(args, ctx, { ...deps, now, started, deadlineAt, signal: controller.signal })
+    // @ref LLP 0480#observability [implements]: fastask.run carries source kind, path, leads, ambiguity and the timings
+    return await span('fastask.run', { budget_ms: args.budgetMs, json: args.json }, (runSpan) =>
+      runWithin(args, ctx, { ...deps, now, started, deadlineAt, signal: controller.signal, runSpan }))
   } finally {
     clearTimeout(timer)
   }
@@ -135,7 +152,7 @@ export async function runFastask(argv, ctx, deps = {}) {
 /**
  * @param {ReturnType<typeof parseFastaskArgs>} args
  * @param {CommandRunContext} ctx
- * @param {{ pluginDir?: string, now: () => number, started: number, deadlineAt: number, signal: AbortSignal, fetchImpl?: typeof fetch }} run
+ * @param {{ pluginDir?: string, now: () => number, started: number, deadlineAt: number, signal: AbortSignal, fetchImpl?: typeof fetch, runSpan: { setAttribute(key: string, value: string | number | boolean): unknown } }} run
  * @returns {Promise<number>}
  */
 async function runWithin(args, ctx, run) {
@@ -176,7 +193,11 @@ async function runWithin(args, ctx, run) {
   if (target === null) {
     // No remote configured or logged in: this machine's own captures.
     const t0 = now()
-    const local = await localDiscovery(ctx, discoveryInput)
+    const local = await span('fastask.discover', { source_kind: 'local' }, async (s) => {
+      const r = await localDiscovery(ctx, discoveryInput)
+      s.setAttribute('leads', r.result.leads.length)
+      return r
+    })
     timings.discovery = now() - t0
     source = { kind: 'local', path: 'local', remote: null, org: null, generation: null, watermark: null, watermark_age_s: null, replica_state: null, note: local.note }
     discovery = local.result
@@ -189,7 +210,15 @@ async function runWithin(args, ctx, run) {
     if (target !== defaultTarget || !defaultLogin) unusable = `a replica is kept only for the default remote (${defaultTarget})`
     else if (args.org) unusable = 'the replica follows the login org; --org reads the server'
     else {
-      const attempt = await replicaDiscovery({ stateRoot, pluginDir, target, url: defaultLogin.url, input: discoveryInput, timings, now, signal, fetchImpl: run.fetchImpl })
+      const attempt = await span('fastask.discover', { source_kind: 'team_replica' }, async (s) => {
+        const a = await replicaDiscovery({ stateRoot, pluginDir, target, url: defaultLogin.url, input: discoveryInput, timings, now, signal, fetchImpl: run.fetchImpl })
+        s.setAttribute('usable', a.ok)
+        if (a.ok) {
+          s.setAttribute('path', a.source.path)
+          s.setAttribute('leads', a.discovery.leads.length)
+        }
+        return a
+      })
       if (attempt.ok) replica = attempt
       else unusable = attempt.reason
     }
@@ -212,7 +241,13 @@ async function runWithin(args, ctx, run) {
       const client = conn.client
       const t0 = now()
       try {
-        const sqlRun = await discoverBySql({ runSql: (sql) => remoteSql(client, sql), ...discoveryInput })
+        const sqlRun = await span('fastask.discover', { source_kind: 'team_server' }, async (s) => {
+          const r = await discoverBySql({ runSql: (sql) => remoteSql(client, sql), ...discoveryInput })
+          s.setAttribute('queries', r.queries)
+          s.setAttribute('capped', r.capped)
+          s.setAttribute('leads', r.result.leads.length)
+          return r
+        })
         discovery = sqlRun.result
       } catch (err) {
         ctx.stderr.write(`hyp fastask: team graph discovery on '${target}' failed: ${messageOf(err)}\n`)
@@ -230,11 +265,27 @@ async function runWithin(args, ctx, run) {
 
   if (discovery.leads.length > 0 && readEvidence) {
     const t0 = now()
-    evidence = await readEvidence()
+    const read = readEvidence
+    evidence = await span('fastask.evidence', { source_kind: source.kind }, async (s) => {
+      const e = await read()
+      s.setAttribute('entries', e.leads.length)
+      s.setAttribute('path', e.path)
+      s.setAttribute('fallback', e.path === 'query_sql')
+      s.setAttribute('deadline_reached', e.deadline_reached)
+      s.setAttribute('complete', e.complete)
+      for (const status of new Set(e.leads.map((l) => l.status))) s.setAttribute(`status_${status}`, e.leads.filter((l) => l.status === status).length)
+      if (e.failure) s.setAttribute('error_kind', e.failure.code)
+      return e
+    })
     timings.evidence = now() - t0
   }
   timings.total = now() - run.started
   const out = buildFastaskOutput({ question: args.question, source, discovery, evidence, timings })
+  run.runSpan.setAttribute('source_kind', source.kind)
+  run.runSpan.setAttribute('source_path', source.path)
+  run.runSpan.setAttribute('leads', out.leads.length)
+  run.runSpan.setAttribute('ambiguous', out.ambiguous)
+  for (const [phase, ms] of Object.entries(out.timings_ms)) run.runSpan.setAttribute(`timing_${phase}_ms`, ms)
   ctx.stdout.write(args.json ? `${JSON.stringify(out, null, 2)}\n` : renderFastaskText(out))
   // Nothing at all could be read for the leads found: an aggregate failure.
   if (evidence?.failure) {

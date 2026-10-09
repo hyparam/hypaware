@@ -25,6 +25,7 @@ import { collect, executeSql } from 'squirreling'
 
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
+import { TracerProvider } from '../../src/core/observability/runtime.js'
 import { runRemoteRemove } from '../../src/core/cli/remote_commands.js'
 import { canonicalOrigin } from '../../src/core/remote/builtin_remotes.js'
 import { pluginStateDir } from '../../src/core/runtime/paths.js'
@@ -289,6 +290,33 @@ test('cold: the daemon is not running, so the command loads the replica on disk 
   assert.equal(doc.leads[0]?.session_id, LEAD)
   assert.equal(doc.leads[0].evidence.status, 'ok')
   assert.ok(!server.calls.some((c) => c.name === 'query_sql'), 'the replica answered discovery; the server only gave evidence')
+})
+
+test('spans: fastask.run, fastask.discover and fastask.evidence carry counts and timings, never the question', async (t) => {
+  const server = await teamServer(t)
+  const h = home(t, { url: server.url })
+  writeReplica(h, server.url)
+  /** @type {any[]} */
+  const captured = []
+  const provider = new TracerProvider({ resource: { attributes: {} }, exporters: [{ exportBatch(spans) { captured.push(...spans) } }] })
+  provider.register()
+  t.after(() => provider.shutdown())
+  const { ctx } = ctxOf(h)
+  assert.equal(await runFastask([`${QUESTION} private-question-marker`, '--json'], ctx), 0)
+  const byName = (/** @type {string} */ name) => captured.filter((x) => x.name === name)
+  const [run] = byName('fastask.run')
+  assert.ok(run, 'fastask.run')
+  assert.equal(run.attributes.source_kind, 'team_replica')
+  assert.equal(run.attributes.source_path, 'cold')
+  assert.equal(run.attributes.leads, 1)
+  for (const phase of ['load', 'connect', 'discovery', 'evidence', 'total']) assert.equal(typeof run.attributes[`timing_${phase}_ms`], 'number', phase)
+  const [disc] = byName('fastask.discover')
+  assert.equal(disc?.attributes.path, 'cold')
+  const [ev] = byName('fastask.evidence')
+  assert.equal(ev?.attributes.path, 'session_evidence')
+  assert.equal(ev?.attributes.status_ok, 1)
+  assert.equal(ev?.attributes.fallback, false)
+  assert.ok(!JSON.stringify(captured).includes('private-question-marker'), 'no question text in telemetry')
 })
 
 test('an expired replica is not served: team_server answers with the reason', async (t) => {
