@@ -41,6 +41,8 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
   '@hypaware/format-iceberg',
   '@hypaware/context-graph',
   '@hypaware/ai-gateway-graph',
+  // @ref LLP 0480#enablement [implements]: the enabling task (LLP 0481 T14) ships the team graph commands and replica source on by default
+  '@hypaware/fastask',
 ]))
 
 /**
@@ -92,8 +94,6 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/github',
   // @ref LLP 0469#seams [implements]: native Ollama capture requires explicit plugins[] opt-in
   '@hypaware/ollama',
-  // @ref LLP 0480#enablement [implements]: fastask activates only through an explicit plugins[] entry until its enabling task
-  '@hypaware/fastask',
 ]))
 
 /**

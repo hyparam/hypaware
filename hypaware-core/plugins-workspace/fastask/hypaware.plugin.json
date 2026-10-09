@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/fastask",
   "version": "1.0.0",
-  "description": "Team graph replica and fast evidence lookup for agents. Explicit plugins[] opt-in only until enablement.",
+  "description": "Team graph replica and the team graph and evidence commands agents use to explore a team's history.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -11,6 +11,9 @@
     "network",
     "read_state",
     "write_state"
+  ],
+  "compose_with": [
+    "@hypaware/ai-gateway"
   ],
   "contributes": {
     "sources": [

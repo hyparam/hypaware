@@ -24,6 +24,7 @@ to configure a target and sign in.
 - [Save complete results](#save-complete-results)
 - [Query a remote target](#query-a-remote-target)
 - [Follow relationships in the activity graph](#follow-relationships-in-the-activity-graph)
+- [Explore the team's history](#explore-the-teams-history)
 - [Connect an MCP client](#connect-an-mcp-client)
 - [Vector search and graph enrichment](#vector-search-and-graph-enrichment)
 
@@ -199,6 +200,39 @@ skill. A `Session` node's natural key is the `session_id` to use in the SQL
 examples above. The `node` and `edge` datasets are also queryable with SQL.
 Remote graph traversal uses `--remote`; projecting the local graph does not
 refresh the remote's graph.
+
+<!-- @ref LLP 0487#decision: the agent explores the team graph itself; these are the four commands it uses -->
+## Explore the team's history
+
+With a team remote set up, the `@hypaware/fastask` plugin keeps a copy of the
+team's activity graph on this machine (the *team graph*) and adds four
+commands. Your agent uses them for questions about the team's past work, such
+as why a change was made or whether a step was removed on purpose:
+
+```sh
+hyp query team-graph discover setup confirm config      # files whose paths match, and the sessions that touched them
+hyp query team-graph neighbors <node-id>                # follow relationships from a file or a session
+hyp query team-graph search --session <id> confirm      # find the turns inside candidate sessions
+hyp query evidence --remote team --session '{"session_id":"<id>"}'   # read the original conversation
+```
+
+Each result names its source: the local copy kept by the daemon (`warm`), the
+local copy loaded by the command itself when the daemon is stopped (`cold`),
+the server (slower), or this machine's own captures. Results are leads with a
+freshness bound, not a complete history: `watermark_age_s` says how old the
+team graph is, and it usually lags today's work. `hyp graph replica status`
+shows the copy's state; `hyp graph replica refresh` asks the daemon to check
+for a newer one.
+
+The four commands are the shipped surface. A one-shot `hyp fastask
+"<question>"` planner is deferred and not available.
+
+`hyp setup` adds the plugin to a new install. If you set HypAware up before
+this release, rerun `hyp setup` to add it. Until then `hyp query team-graph`
+is an unknown command, and your agent uses the existing remote tools
+(`hyp query grep`, `hyp query sql` and `hyp query graph neighbors` with
+`--remote`) and tells you once that rerunning `hyp setup` enables team-graph
+exploration. The agent never runs `hyp setup` for you.
 
 ## Connect an MCP client
 
