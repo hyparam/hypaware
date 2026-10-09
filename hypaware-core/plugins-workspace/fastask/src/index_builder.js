@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
 
 import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
+import { EDGE_COLUMNS, NODE_COLUMNS } from './contract.js'
 
 /**
  * @import { CompressedSource, Exemplar, GraphEdgeRow, GraphIndex, GraphNodeRow, IndexBuilder, IndexBuilderOptions, SessionProps, SnapshotIndexInput, WorkTicker } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
@@ -40,14 +41,14 @@ const NODE_TYPED_BYTES = 1 + 1 + 8 // type, flags, first seen
 const EDGE_TYPED_BYTES = 4 + 4 + 1 + 8 // src, dst, type, first seen
 const CSR_EDGE_BYTES = 4 + 4 // one slot in each direction
 const CSR_NODE_BYTES = 4 + 4 // one offset in each direction
-// Interned type names fit a Uint8; anything past the table shares the last slot.
-const MAX_TYPES = 255
-const OTHER_TYPE = '(other)'
+// Interned type names fit a Uint8: 254 named slots, then one shared slot.
+export const MAX_TYPES = 255
+export const OTHER_TYPE = '(other)'
 
 /** A build refused or failed; `code` is stable, the message is display text. */
 export class IndexBuildError extends Error {
   /**
-   * @param {'replica_too_large' | 'invalid_line'} code
+   * @param {'replica_too_large' | 'invalid_line' | 'schema_violation'} code
    * @param {string} message
    */
   constructor(code, message) {
@@ -55,6 +56,52 @@ export class IndexBuildError extends Error {
     this.name = 'IndexBuildError'
     this.code = code
   }
+}
+
+/**
+ * What each contract column may hold (server LLP 0554#data-files, nullability
+ * as the context-graph datasets declare it): a string, a string or null, a
+ * parsed JSON object or array or null (never a string holding JSON), an
+ * ISO-8601 UTC timestamp with milliseconds or null, or an integer.
+ *
+ * @type {Record<string, 'string' | 'string?' | 'json?' | 'time?' | 'int'>}
+ */
+const COLUMN_KINDS = {
+  node_id: 'string', node_type: 'string', natural_key: 'string', label: 'string?',
+  edge_id: 'string', edge_type: 'string', src_id: 'string', dst_id: 'string', src_type: 'string', dst_type: 'string',
+  props: 'json?', first_seen: 'time?', source_dataset: 'string', source_keys: 'json?',
+  projector: 'string', projector_version: 'int',
+}
+const ISO_MILLIS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+
+/**
+ * Checks one parsed line against the contract: exactly `columns`, in order,
+ * each holding what its kind allows. Returns the first problem, or null.
+ * Walks the row's own keys in place: no allocation, at most one comparison
+ * and one type check per column (plus one regex test for `first_seen`).
+ *
+ * @ref LLP 0483#accepted [implements]: the per-line column check is the index builder's, so a mismatch fails the build and the old generation stays active
+ * @param {Record<string, unknown>} row
+ * @param {ReadonlyArray<string>} columns
+ * @returns {string | null}
+ */
+export function rowProblem(row, columns) {
+  let i = 0
+  for (const key in row) {
+    if (i === columns.length) return `extra column ${JSON.stringify(key)}`
+    const want = columns[i]
+    if (key !== want) return `column ${i + 1} is ${JSON.stringify(key)}, expected ${want}`
+    const value = row[key]
+    const kind = COLUMN_KINDS[want]
+    const ok = kind === 'string' ? typeof value === 'string'
+      : kind === 'string?' ? value === null || typeof value === 'string'
+        : kind === 'json?' ? value === null || typeof value === 'object'
+          : kind === 'time?' ? value === null || (typeof value === 'string' && ISO_MILLIS.test(value))
+            : Number.isInteger(value)
+    if (!ok) return `${want} holds ${value === null ? 'null' : typeof value}, not ${kind.replace('?', ' or null')}`
+    i++
+  }
+  return i === columns.length ? null : `missing column ${columns[i]}`
 }
 
 /**
@@ -161,30 +208,41 @@ export function createIndexBuilder(opts = {}) {
     }
   }
 
-  /** @param {string} name */
-  function internNodeType(name) {
-    let t = nodeTypeIndex.get(name)
+  /**
+   * A type's small integer in one table. The first `MAX_TYPES - 1` distinct
+   * names get their own slot; the next creates the shared `OTHER_TYPE` slot
+   * in the last position, and every name after that maps to it. Bounded: at
+   * most `MAX_TYPES` entries, one map lookup or two per call, no recursion.
+   *
+   * @param {string[]} names
+   * @param {Map<string, number>} index
+   * @param {number[]} counts
+   * @param {string} name
+   */
+  function internType(names, index, counts, name) {
+    let t = index.get(name)
     if (t !== undefined) return t
-    if (nodeTypes.length === MAX_TYPES - 1) return internNodeType(OTHER_TYPE)
-    t = nodeTypes.length
-    nodeTypes.push(name)
-    nodeTypeCounts.push(0)
-    nodeTypeIndex.set(name, t)
+    if (names.length >= MAX_TYPES - 1) {
+      t = index.get(OTHER_TYPE)
+      if (t !== undefined) return t
+      name = OTHER_TYPE
+    }
+    t = names.length
+    names.push(name)
+    counts.push(0)
+    index.set(name, t)
     heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + name.length
     return t
   }
 
   /** @param {string} name */
+  function internNodeType(name) {
+    return internType(nodeTypes, nodeTypeIndex, nodeTypeCounts, name)
+  }
+
+  /** @param {string} name */
   function internEdgeType(name) {
-    let t = edgeTypeIndex.get(name)
-    if (t !== undefined) return t
-    if (edgeTypes.length === MAX_TYPES - 1) return internEdgeType(OTHER_TYPE)
-    t = edgeTypes.length
-    edgeTypes.push(name)
-    edgeTypeCounts.push(0)
-    edgeTypeIndex.set(name, t)
-    heapBytes += MAP_ENTRY_BYTES + STRING_BYTES + name.length
-    return t
+    return internType(edgeTypes, edgeTypeIndex, edgeTypeCounts, name)
   }
 
   /** @param {string | null} value */
@@ -460,8 +518,8 @@ export async function buildIndexFromSnapshot(input) {
   const budget = createWorkBudget({ duty: input.duty, signal, cpuNow: input.cpuNow })
   const builder = createIndexBuilder({ maxBytes, expectedNodes, expectedEdges })
   try {
-    await forEachLine(input.nodes, 'nodes', (row) => builder.addNode(row), builder, maxBytes, budget, signal)
-    await forEachLine(input.edges, 'edges', (row) => builder.addEdge(row), builder, maxBytes, budget, signal)
+    await forEachLine(input.nodes, 'nodes', NODE_COLUMNS, (row) => builder.addNode(row), builder, maxBytes, budget, signal)
+    await forEachLine(input.edges, 'edges', EDGE_COLUMNS, (row) => builder.addEdge(row), builder, maxBytes, budget, signal)
     return await builder.finish(budget)
   } catch (err) {
     if (signal?.aborted) throw signal.reason
@@ -473,16 +531,19 @@ export async function buildIndexFromSnapshot(input) {
  * Decompresses one file and hands each parsed line to `onRow`, ticking the
  * budget per line. Memory is one chunk plus one partial line, and the partial
  * line counts against the ceiling so a single enormous line cannot grow past it.
+ * Every line is checked against the contract's columns in the same pass; the
+ * first violation fails the build with `schema_violation`.
  *
  * @param {CompressedSource} source
  * @param {'nodes' | 'edges'} name
+ * @param {ReadonlyArray<string>} columns
  * @param {(row: any) => void} onRow
  * @param {IndexBuilder} builder
  * @param {number} maxBytes
  * @param {WorkTicker} budget
  * @param {AbortSignal | undefined} signal
  */
-async function forEachLine(source, name, onRow, builder, maxBytes, budget, signal) {
+async function forEachLine(source, name, columns, onRow, builder, maxBytes, budget, signal) {
   let lineNo = 0
   /** @type {Buffer[]} */
   let pending = []
@@ -497,7 +558,9 @@ async function forEachLine(source, name, onRow, builder, maxBytes, budget, signa
     } catch {
       throw new IndexBuildError('invalid_line', `${name} line ${lineNo} is not JSON`)
     }
-    if (row === null || typeof row !== 'object') throw new IndexBuildError('invalid_line', `${name} line ${lineNo} is not an object`)
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new IndexBuildError('invalid_line', `${name} line ${lineNo} is not an object`)
+    const problem = rowProblem(row, columns)
+    if (problem) throw new IndexBuildError('schema_violation', `${name} line ${lineNo}: ${problem}`)
     onRow(row)
   }
 
