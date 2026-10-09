@@ -121,9 +121,9 @@ they want a recommendation for, hand it off without a report. Query only what
 the finding needs: how often it happens, what it costs, and one contrast that
 could change the proposal. Do not survey the period. Write one
 `recommendation-<slug>.md` in the current directory: an H1 title, a bold
-one-sentence thesis, the scope and absolute dates, the figures with the
-queries that produced them, the proposed change as a usable artifact, and the
-case against it. The page rules are the report skill's recommendation-page
+one-sentence thesis, the figures with the queries that produced them, the
+proposed change as a usable artifact, the case against it, and the scope and
+absolute dates under Evidence. The page rules are the report skill's recommendation-page
 contract, including its At a glance block. Answer in chat with the page path
 and those four bullets, unchanged.
 

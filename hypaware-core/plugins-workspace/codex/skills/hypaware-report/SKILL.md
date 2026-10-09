@@ -44,9 +44,9 @@ one fix, "give me a recommendation about X"), take this lighter path. It feeds
   enumeration: query that issue directly and spend the budget on its
   frequency, its cost, and the contrast.
 - Write one `recommendation-<slug>.md` in the current directory under the
-  contract's recommendation-page rules: H1 title, bold thesis, scope and dates,
-  the figures with locators, the fix as a usable artifact, and the case against
-  it. No `report.md`, weekly tables, or supporting pages.
+  contract's recommendation-page rules: H1 title, bold thesis, the figures
+  with locators, the fix as a usable artifact, the case against it, and scope
+  and dates under Evidence. No `report.md`, weekly tables, or supporting pages.
 - Answer in chat with the page path and the page's four At a glance bullets,
   unchanged.
 - `hyp report save` admits only a report folder, so the page stays where it was
