@@ -19,7 +19,10 @@ import { DEFAULT_LEADS, MAX_LEADS, discover } from './discovery.js'
 import { CURSOR_UNRESOLVABLE_NOTE, EVIDENCE_CONTRACT, EVIDENCE_TOOL, FRESHNESS_UNAVAILABLE_NOTE, NOT_FOUND_NOTE, callEvidence, evidenceSupport, fallbackEvidence, fetchEvidence, planEntries, skippedNote } from './evidence.js'
 import { TEXT_SEARCH_LABEL, buildFastaskOutput, renderFastaskText } from './output.js'
 import { connectRemote } from './remote_connect.js'
-import { DISCOVER_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE } from './replica_source.js'
+import { DISCOVER_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE, warmScope } from './replica_source.js'
+
+// Re-exported for commands that call other warm routes (T15).
+export { warmScope }
 import { createDefaultTargetResolver } from './replica_target.js'
 import { discoverBySql } from './sql_discovery.js'
 import { summaryLine } from './summary_line.js'
@@ -454,19 +457,6 @@ async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, ti
   } catch (err) {
     return { ok: false, reason: `the team graph could not be loaded: ${messageOf(err)}` }
   }
-}
-
-/**
- * What a warm request is for: the daemon answers only when its replica
- * belongs to the same remote, org and login (review r1 F1).
- *
- * @ref LLP 0483#credential-change [implements]: every warm request carries the caller's resolved remote, org and credential fingerprint
- * @param {string} target the remote name
- * @param {ReplicaTarget} login the resolved login for that remote
- * @returns {Promise<WarmScope>}
- */
-export async function warmScope(target, login) {
-  return { target, origin: canonicalOrigin(login.url) ?? '', org: login.org ?? null, credential_fp: await credentialFingerprint(login) }
 }
 
 /** @param {unknown} reason why the daemon's replica does not match this call */
