@@ -1,6 +1,6 @@
 ---
 name: hypaware-report
-description: Investigate local HypAware recordings with analyst workers and produce an evidence-backed Markdown report with actionable recommendations. Use for AI usage or workflow reviews over a reporting period.
+description: Investigate local HypAware recordings with analyst workers and produce an evidence-backed Markdown report with actionable recommendations, or one standalone recommendation page when the user asks for a single recommendation. Use for AI usage or workflow reviews over a reporting period, and for "give me one recommendation about <agent, repo, or user>".
 ---
 
 # Local HypAware report
@@ -28,6 +28,28 @@ Read [analyst-task.md](references/analyst-task.md) when delegating. Read
   and compare per-active-day rates when exposure differs; do not merge quiet
   weeks. Keep a compact ledger of coverage, query labels, evidence locators,
   figures, filters, and denominators outside the publish directory.
+
+## Single recommendation
+
+When the user asks for one recommendation rather than a report (one finding,
+one fix, "give me a recommendation about X"), take this lighter path. It feeds
+`hyp report recommend`, which publishes one page with no report around it.
+
+- Resolve the subject (an agent, gateway, repository, or user) and an inclusive
+  UTC range as above, but default to the 14 days ending yesterday.
+- Spend at most 2 investigations and 10 coordinator queries. Find the one
+  pattern whose measured cost is largest and whose fix is concrete. Still spend
+  a contrast query on any explanation that would change the proposal.
+- Write one `recommendation-<slug>.md` in the current directory under the
+  contract's recommendation-page rules: H1 title, bold thesis, scope and dates,
+  the figures with locators, the fix as a usable artifact, and the case against
+  it. No `report.md`, weekly tables, or supporting pages.
+- Answer in chat with the page path and four lines: what was seen with its
+  figures, what it costs, the fix, and the expected effect.
+- `hyp report save` admits only a report folder, so the page stays where it was
+  written. Publish it only when asked, with `hyp report recommend <page>.md
+  --remote <target>` (see publishing.md); the receipt prints the minted
+  `hyprec-` id.
 
 ## Investigation
 
