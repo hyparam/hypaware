@@ -82,6 +82,7 @@ function unavailableReason(reason) {
     case 'credential': return 'not available yet (sign in again: hyp remote login)'
     case 'replica_too_large': return 'not available (the team graph is larger than this machine\'s limit)'
     case 'outage': return 'not available yet (server unreachable)'
+    case 'login_changed': return 'not used (the login changed since the last check; the daemon re-checks it)'
     case 'pending':
     case 'not_checked':
     default: return 'not available yet (server has not published one)'

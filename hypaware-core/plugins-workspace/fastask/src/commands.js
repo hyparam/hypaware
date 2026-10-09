@@ -13,6 +13,7 @@ import { executeQuerySql } from '../../../../src/core/query/sql.js'
 import { canonicalOrigin, effectiveDefaultRemote } from '../../../../src/core/remote/builtin_remotes.js'
 import { pluginStateDir } from '../../../../src/core/runtime/paths.js'
 import { readLocalReplica, loadColdIndex } from './cold_replica.js'
+import { credentialFingerprint } from './replica_sync.js'
 import { DEFAULT_LEADS, MAX_LEADS, discover } from './discovery.js'
 import { EVIDENCE_CONTRACT, EVIDENCE_TOOL, callEvidence, evidenceSupport, fallbackEvidence, fetchEvidence, planEntries } from './evidence.js'
 import { buildFastaskOutput, renderFastaskText } from './output.js'
@@ -25,7 +26,7 @@ import { createWarmEvidenceClient } from './warm_client.js'
 
 /**
  * @import { CommandRunContext, VerbRegistration } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { DiscoveryResult, EvidenceMcpClient, EvidenceResult, FastaskSource, FastaskTimings, ReplicaStatus } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, EvidenceMcpClient, EvidenceResult, FastaskSource, FastaskTimings, ReplicaStatus, ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
  */
 
 export const PLUGIN_NAME = '@hypaware/fastask'
@@ -211,7 +212,7 @@ async function runWithin(args, ctx, run) {
     else if (args.org) unusable = 'the replica follows the login org; --org reads the server'
     else {
       const attempt = await span('fastask.discover', { source_kind: 'team_replica' }, async (s) => {
-        const a = await replicaDiscovery({ stateRoot, pluginDir, target, url: defaultLogin.url, input: discoveryInput, timings, now, signal, fetchImpl: run.fetchImpl })
+        const a = await replicaDiscovery({ stateRoot, pluginDir, target, login: defaultLogin, input: discoveryInput, timings, now, signal, fetchImpl: run.fetchImpl })
         s.setAttribute('usable', a.ok)
         if (a.ok) {
           s.setAttribute('path', a.source.path)
@@ -298,10 +299,10 @@ async function runWithin(args, ctx, run) {
 /**
  * The replica, warm through the daemon or cold from disk.
  *
- * @param {{ stateRoot: string, pluginDir: string, target: string, url: string, input: any, timings: FastaskTimings, now: () => number, signal: AbortSignal, fetchImpl?: typeof fetch }} args
+ * @param {{ stateRoot: string, pluginDir: string, target: string, login: ReplicaTarget, input: any, timings: FastaskTimings, now: () => number, signal: AbortSignal, fetchImpl?: typeof fetch }} args
  * @returns {Promise<{ ok: true, discovery: DiscoveryResult, source: FastaskSource, endpoint: string | null, token: string | null } | { ok: false, reason: string }>}
  */
-async function replicaDiscovery({ stateRoot, pluginDir, target, url, input, timings, now, signal, fetchImpl }) {
+async function replicaDiscovery({ stateRoot, pluginDir, target, login, input, timings, now, signal, fetchImpl }) {
   const doFetch = fetchImpl ?? globalThis.fetch
   const endpoint = resolveLiveControlRouteEndpointsFromStatus({ stateRoot, route: DISCOVER_ROUTE }).find((e) => e.source === SOURCE_NAME)?.endpoint ?? null
   const token = endpoint ? readToken(pluginDir) : null
@@ -324,8 +325,8 @@ async function replicaDiscovery({ stateRoot, pluginDir, target, url, input, timi
       // The daemon advertised the route but did not answer: read the replica cold.
     }
   }
-  const origin = canonicalOrigin(url)
-  const local = origin ? await readLocalReplica(pluginDir, { target, origin }, Date.now()) : null
+  const origin = canonicalOrigin(login.url)
+  const local = origin ? await readLocalReplica(pluginDir, { target, origin, org: login.org, credential: await credentialFingerprint(login) }, Date.now()) : null
   if (!local) return { ok: false, reason: 'the team graph has not been downloaded yet' }
   if (!local.servable || !local.dir) return { ok: false, reason: unusableReason({ state: local.state, reason: local.reason }) }
   try {
@@ -366,6 +367,7 @@ function unusableReason(view) {
   if (state === 'expired') return 'the team graph lease expired'
   if (state === 'withdrawn') return 'access to the team graph was withdrawn'
   if (state === 'unsupported') return 'the server does not offer team graph snapshots'
+  if (view?.reason === 'login_changed') return 'the login changed since the team graph was last checked; the daemon re-checks it'
   if (state === 'unavailable') return 'the server has not published a team graph'
   return `the team graph is not ready${state ? ` (${state}${view?.reason ? `: ${view.reason}` : ''})` : ''}`
 }
@@ -566,7 +568,7 @@ export async function runReplicaStatus(argv, ctx, deps = {}) {
     return 0
   }
   const origin = canonicalOrigin(target.url)
-  const local = origin ? await readLocalReplica(pluginDir, { target: target.target, origin }, now()) : null
+  const local = origin ? await readLocalReplica(pluginDir, { target: target.target, origin, org: target.org, credential: await credentialFingerprint(target) }, now()) : null
   const daemonNote = live ? '' : ' (daemon not running)'
   if (!local) {
     const line = `team graph: not downloaded yet${daemonNote}`
