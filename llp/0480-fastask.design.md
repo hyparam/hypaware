@@ -7,6 +7,7 @@
 **Date:** 2026-10-09
 **Related:** LLP 0479 (request), LLP 0004 (paths and state directories), LLP 0023 (graph identity and provenance), LLP 0033 (remote attach), LLP 0034 (verbs and MCP), LLP 0063 (connection ladder), LLP 0064 (graph query), LLP 0070 and LLP 0105 (export and query seams), LLP 0166 and LLP 0300 (local control trust), LLP 0213 (graph guidance lives in the query skill), LLP 0248 (command tree), LLP 0305 (central eligibility), LLP 0393 (product telemetry vocabulary), LLP 0394 (source health in status), LLP 0430 (no manual acceptance procedures), LLP 0457 and LLP 0458 (skill updates); server LLP 0554 (`hypaware.graph-snapshot/1`), server LLP 0553, LLP 0557, LLP 0558 (`hypaware.session-evidence/1`), server LLP 0555 T11 (server-first command vocabulary)
 **Implemented-by:** [LLP 0481](./0481-fastask.plan.md)
+**Extended-by:** [LLP 0482](./0482-leave-keeps-the-team-graph-replica.decision.md) (`hyp leave` keeps the replica; the "not kept after leave" status line is not used)
 **Extends:** [LLP 0248](./0248-task-oriented-cli-rollover.decision.md) (adds the top-level `fastask` journey to the canonical tree, [#command-tree](#command-tree)); [LLP 0394](./0394-a-source-reports-its-own-health.decision.md) (a source may publish one always-shown summary line, [#status-line](#status-line))
 
 > The design for [LLP 0479](./0479-fastask.spec.md). A new bundled plugin,
@@ -160,6 +161,7 @@ merges them.
   deletes it at the next pass); `hyp remote remove <target>` (the sync loop
   deletes replicas whose target is gone; the command also removes the
   directory directly so it is immediate); a change of default remote or org.
+  **Extended-by:** [LLP 0482#decision](./0482-leave-keeps-the-team-graph-replica.decision.md#decision): `hyp leave` does not touch the replica; the leave rule below is reverted.
   `hyp leave`: when the central enrollment for the replica's server is
   removed, the source deletes that server's replica (all generations and
   staging) and suspends sync for it until the next successful `hyp remote
@@ -251,7 +253,7 @@ team graph: expired, not used; reconnect to refresh
 team graph: removed, access to acme was withdrawn
 team graph: unsupported, upgrade hypaware (or the server is older than this feature)
 team graph: unsupported, upgrade hypaware; still using data as of 2 d ago until Oct 12 09:00
-team graph: not kept after leave; queries still use your login to <server>
+team graph: not kept after leave; queries still use your login to <server>   (not used, LLP 0482)
 team graph: not available yet (server has not published one)
 ```
 
@@ -540,7 +542,7 @@ assert them with stable `smoke_step` values.
 
 1. Settled with the UX guardian (2026-10-09): `hyp leave` deletes the
    replica and suspends its sync without removing the query login
-   ([#replica](#replica)).
+   ([#replica](#replica)). Extended-by [LLP 0482](./0482-leave-keeps-the-team-graph-replica.decision.md): reverted, `leave` keeps the replica.
 2. Release thresholds for relevance and latency (LLP 0479#completion-gate)
    are set before the final evaluation run; the plan names the run, not the
    numbers.
