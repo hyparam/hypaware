@@ -18,6 +18,8 @@
 
 ## Outcome {#outcome}
 
+**Extended-by:** [LLP 0488#provenance](./0488-planner-deferred-and-discover-matches-path-tokens.decision.md#provenance): for the initial ship, Phil's direction (2026-10-09 07:01:20Z) supersedes "Ship `hyp fastask`": the agent-directed operations ship; the planner is deferred until it is better and independently validated.
+
 Ship `hyp fastask "<question>"` as a fast way to get source-backed historical
 context and useful starting points for deeper queries. A useful result can be
 candidate sessions, files or PRs and a ready-to-run scoped query; it need not

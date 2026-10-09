@@ -6,6 +6,7 @@
 **Author:** HypForge designer
 **Date:** 2026-10-09
 **Extends:** [LLP 0480#command](./0480-fastask.design.md#command) (agent-callable operations), [LLP 0480#skill](./0480-fastask.design.md#skill) (what the skill teaches first), [LLP 0480#command-tree](./0480-fastask.design.md#command-tree) (where the operations sit), and [LLP 0481](./0481-fastask.plan.md) tasks T13 and T14 (what is evaluated and taught)
+**Extended-by:** [LLP 0488](./0488-planner-deferred-and-discover-matches-path-tokens.decision.md) (the planner is deferred, not optional-and-shipped; discover matches path tokens; T13 acceptance case)
 **Related:** LLP 0479#req-interface, LLP 0484 (discovery walks `touched`), LLP 0485 and LLP 0486 (CPU and memory bounds), LLP 0248 (command tree), LLP 0393 (telemetry vocabulary); server LLP 0555 T11 (server-first command names)
 
 > HYP-111 asked for local candidate discovery, bounded neighbor traversal,
