@@ -40,6 +40,9 @@ one fix, "give me a recommendation about X"), take this lighter path. It feeds
 - Spend at most 2 investigations and 10 coordinator queries. Find the one
   pattern whose measured cost is largest and whose fix is concrete. Still spend
   a contrast query on any explanation that would change the proposal.
+- If the user names the issue, skip the coverage plan and the day-by-day
+  enumeration: query that issue directly and spend the budget on its
+  frequency, its cost, and the contrast.
 - Write one `recommendation-<slug>.md` in the current directory under the
   contract's recommendation-page rules: H1 title, bold thesis, scope and dates,
   the figures with locators, the fix as a usable artifact, and the case against
