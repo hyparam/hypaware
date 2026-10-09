@@ -368,7 +368,7 @@ export interface EvidenceSessionRecord {
 
 export type EvidenceForwardResult =
   | { ok: true, result: any, round_trip_ms: number, reused: boolean, session: EvidenceSessionRecord }
-  | { ok: false, kind: 'unsupported' | 'credential' | 'network', message: string, session: EvidenceSessionRecord }
+  | { ok: false, kind: 'unsupported' | 'credential' | 'network' | 'capacity', message: string, session: EvidenceSessionRecord }
   | { ok: false, kind: 'rpc', code: number, message: string, session: EvidenceSessionRecord }
 
 /** One `sessions` entry of a session_evidence request, before JSON encoding (server LLP 0557). */

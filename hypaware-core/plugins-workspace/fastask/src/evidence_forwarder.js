@@ -99,6 +99,12 @@ export function createEvidenceForwarder(opts = {}) {
       await discardBody(res)
       throw Object.assign(new Error(`MCP ${method}: HTTP ${res.status}`), { status: res.status })
     }
+    if (res.status === 429) {
+      // The org's read capacity is in use (server LLP 0562): the session is
+      // fine, the caller decides whether to retry.
+      await discardBody(res)
+      throw Object.assign(new Error('server busy: the organization read capacity is in use'), { status: 429 })
+    }
     if (sentSession && (res.status === 404 || res.status === 400)) {
       await discardBody(res)
       throw new SessionRejected(res.status)
@@ -204,6 +210,7 @@ export function createEvidenceForwarder(opts = {}) {
           return { ok: false, kind: 'rpc', code: err.rpcCode, message: err.rpcMessage, session: record(s) }
         }
         const status = /** @type {any} */ (err)?.status
+        if (status === 429) return { ok: false, kind: 'capacity', message: messageOf(err), session: record(s) }
         if (status === 401 || status === 403) return { ok: false, kind: 'credential', message: messageOf(err), session: record(s) }
         s.ready = false
         return { ok: false, kind: 'network', message: messageOf(err), session: record(s) }

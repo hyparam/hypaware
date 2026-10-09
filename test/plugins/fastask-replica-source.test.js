@@ -18,6 +18,8 @@ import { DISCOVER_ROUTE, EVIDENCE_ROUTE, TOKEN_FILE, createReplicaSource } from 
 import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
 import { generatedGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
 import { writeSession } from '../../src/core/remote/credentials.js'
+import { callEvidence } from '../../hypaware-core/plugins-workspace/fastask/src/evidence.js'
+import { createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/fastask/src/warm_client.js'
 
 /**
  * @import { TestContext } from 'node:test'
@@ -42,6 +44,10 @@ function fakeMcp() {
     failNext: null,
     hang: false,
     aborted: 0,
+    /** HTTP 429 answers still to give (the org read capacity, server LLP 0562). */
+    capacity: 0,
+    /** A tool error result for the next call. */
+    toolErrorNext: /** @type {string | null} */ (null),
     /** @type {Set<string>} */
     used: new Set(),
   }
@@ -73,6 +79,12 @@ function fakeMcp() {
       if (mcp.refuseReuse && mcp.used.has(sid)) { mcp.sessions.delete(sid); res.writeHead(404); res.end(); return }
       mcp.used.add(sid)
       mcp.calls++
+      if (mcp.capacity > 0) { mcp.capacity--; res.writeHead(429); res.end(); return }
+      if (mcp.toolErrorNext !== null) {
+        const text = mcp.toolErrorNext
+        mcp.toolErrorNext = null
+        return reply({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text }] } })
+      }
       if (mcp.failNext !== null) {
         const code = mcp.failNext
         mcp.failNext = null
@@ -322,6 +334,55 @@ test('a withdrawal drops the index: discover answers 503 with the state', async 
   assert.equal(status?.state, 'degraded')
   assert.equal(/** @type {any} */ (status?.details).summary_line, 'team graph: removed, access to acme was withdrawn')
   assert.equal(/** @type {any} */ (status?.details).index_generation, null)
+})
+
+test('T7\'s evidence client reads through the warm path exactly as through a direct MCP client', async (t) => {
+  const { port, token, mcp } = await setup(t)
+  const planned = OK_EVIDENCE.request.sessions.map((/** @type {string} */ text, /** @type {number} */ i) => ({ lead: i, kind: /** @type {const} */ ('window'), entry: JSON.parse(text) }))
+  const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token })
+  const read = () => callEvidence({ client, planned, leadCount: planned.length, deadlineAt: performance.now() + 2000, sleep: async () => {} })
+
+  const ok = await read()
+  assert.ok(ok !== 'fallback')
+  assert.equal(ok.path, 'session_evidence')
+  assert.equal(ok.failure, null)
+  assert.equal(ok.leads.length, planned.length)
+  assert.equal(typeof client.lastRoundTripMs, 'number', 'the daemon\'s round trip comes back for the next deadline')
+
+  mcp.failNext = -32601
+  assert.equal(await read(), 'fallback', '-32601 falls back to query_sql')
+  mcp.failNext = -32602
+  const defect = await read()
+  assert.ok(defect !== 'fallback' && defect.failure?.code === 'invalid_request', '-32602 is a reported client defect')
+
+  mcp.toolErrorNext = 'invalid_request: sessions[0] is not a JSON object'
+  const toolError = await read()
+  assert.ok(toolError !== 'fallback' && toolError.failure?.code === 'invalid_request', 'a tool error result passes through as is')
+
+  mcp.capacity = 1
+  const retried = await read()
+  assert.ok(retried !== 'fallback' && retried.failure === null && retried.retries === 1, 'one capacity retry, then success')
+  mcp.capacity = 2
+  const busy = await read()
+  assert.ok(busy !== 'fallback' && busy.failure?.code === 'server_busy', 'capacity twice is server busy')
+
+  await assert.rejects(client.callTool('query_sql', {}), /forwards session_evidence only/)
+})
+
+test('a server without the verb falls back through the warm path too', async (t) => {
+  const { port, token, server } = await setup(t)
+  const { handle } = fakeMcp()
+  server.state.onMcp = (req, res, msg) => {
+    if (msg.method === 'tools/list') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'query_sql' }] } }))
+      return
+    }
+    handle(req, res, msg)
+  }
+  const planned = [{ lead: 0, kind: /** @type {const} */ ('window'), entry: JSON.parse(OK_EVIDENCE.request.sessions[0]) }]
+  const client = createWarmEvidenceClient({ endpoint: `http://127.0.0.1:${port}`, token })
+  assert.equal(await callEvidence({ client, planned, leadCount: 1, deadlineAt: performance.now() + 2000 }), 'fallback')
 })
 
 test('the real resolver reads the hyp status config, shows its path and target, and follows a reload', async (t) => {
