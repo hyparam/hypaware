@@ -1,0 +1,85 @@
+{
+  "protocol": "hypaware.graph-snapshot/1",
+  "server": {
+    "origin": "https://hypaware.example",
+    "version": "1.40.0"
+  },
+  "org": "acme",
+  "scope": "org",
+  "generation": "1760000000000-7",
+  "published_at": "2026-10-09T02:00:00.000Z",
+  "projection": {
+    "watermark": "2026-10-09T01:45:00.000Z",
+    "watermark_kind": "source_committed_before",
+    "projectors": [
+      {
+        "name": "ai-gateway.t0",
+        "max_version": 2
+      },
+      {
+        "name": "github.t0",
+        "max_version": 1
+      }
+    ]
+  },
+  "schema": {
+    "schema_version": 1,
+    "id_recipe": "sha256-trunc24/v1",
+    "node_columns": [
+      "node_id",
+      "node_type",
+      "natural_key",
+      "label",
+      "props",
+      "first_seen",
+      "source_dataset",
+      "source_keys",
+      "projector",
+      "projector_version"
+    ],
+    "edge_columns": [
+      "edge_id",
+      "edge_type",
+      "src_id",
+      "dst_id",
+      "src_type",
+      "dst_type",
+      "props",
+      "first_seen",
+      "source_dataset",
+      "source_keys",
+      "projector",
+      "projector_version"
+    ]
+  },
+  "files": {
+    "nodes": {
+      "path": "generations/1760000000000-7/nodes.ndjson.gz",
+      "rows": 5,
+      "bytes": 636,
+      "uncompressed_bytes": 1683,
+      "sha256": "e52e795d0078dd18d94bcdd656ac5d904da5a91584314bfdf0b73205696dc082",
+      "set_digest": "a765e47f8030c58fd5c6fad0455e6c350c312bc77d12c0f396de4b0c8191ef8b"
+    },
+    "edges": {
+      "path": "generations/1760000000000-7/edges.ndjson.gz",
+      "rows": 5,
+      "bytes": 571,
+      "uncompressed_bytes": 1873,
+      "sha256": "61b26ee74d1de0a876672b0a5d3476d3a44e32d1b34fe0b2203a530540a90fa9",
+      "set_digest": "24bcaab643786ea64b91f13e7eba179bd3f4fc08d982b0f11380938dd4807b45"
+    }
+  },
+  "unresolved": {
+    "edges": 3,
+    "endpoint_ids": 2
+  },
+  "lease": {
+    "duration_seconds": 259200
+  },
+  "poll": {
+    "interval_seconds": 900,
+    "jitter_seconds": 300
+  },
+  "retained_until": null
+}

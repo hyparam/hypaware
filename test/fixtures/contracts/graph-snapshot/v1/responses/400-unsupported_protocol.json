@@ -1,0 +1,13 @@
+{
+  "status": 400,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": "unsupported_protocol",
+    "message": "This server speaks graph snapshot protocol 1 only.",
+    "supported": [
+      1
+    ]
+  }
+}

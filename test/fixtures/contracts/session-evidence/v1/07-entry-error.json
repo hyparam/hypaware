@@ -1,0 +1,33 @@
+{
+  "case": "error",
+  "summary": "This entry failed; error.code and error.message say why. Other entries of the request are unaffected. The entry has no read result, so window and coverage are null.",
+  "request": {
+    "contract": "hypaware.session-evidence/1",
+    "sessions": [
+      "{\"session_id\":\"fx-session-gamma\",\"chain_id\":null,\"from\":\"2026-08-31T09:59:00.000Z\",\"to\":\"2026-08-31T10:02:00.000Z\",\"message_ids\":null,\"order\":\"asc\",\"max_parts\":200,\"cursor\":null}"
+    ]
+  },
+  "response": {
+    "contract": "hypaware.session-evidence/1",
+    "server_version": "1.40.0",
+    "complete": false,
+    "deadline_reached": false,
+    "elapsed_ms": 8,
+    "sessions": [
+      {
+        "request_index": 0,
+        "session_id": "fx-session-gamma",
+        "status": "error",
+        "parts": [],
+        "truncated": false,
+        "next_cursor": null,
+        "window": null,
+        "coverage": null,
+        "error": {
+          "code": "storage_unavailable",
+          "message": "the storage backing this session could not be read"
+        }
+      }
+    ]
+  }
+}

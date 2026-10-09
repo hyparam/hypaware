@@ -1,0 +1,10 @@
+{
+  "status": 400,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": "snapshot_scope_unsupported",
+    "message": "Graph snapshots are published per org; org=* and the deployment scope are not supported."
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "status": 404,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": "graph_snapshots_disabled",
+    "message": "Graph snapshots are not enabled on this server."
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "status": 403,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": "snapshot_access_withdrawn",
+    "message": "You are no longer a member of this org. Delete the local graph replica.",
+    "replica": "delete"
+  }
+}
