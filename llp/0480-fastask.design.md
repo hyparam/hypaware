@@ -99,7 +99,9 @@ carries an `Extended-by` line pointing here.
 `hyp fastask` flags: `--remote <target>` (default: the default remote),
 `--org <label>` (as elsewhere), `--repo <path>` (default: the caller's
 repository), `--file <path>` (repeatable anchors), `--budget-ms <n>`
-(default 2500, the user-facing time budget), `--leads <n>` (default 8,
+(default 2000, the user-facing time budget: the RFC's target is useful
+partial results at two seconds, and tuning is judged against that target,
+not by loosening it), `--leads <n>` (default 8,
 maximum 40), `--json`. Exit 0 when leads or an explicit "no leads" result was
 produced, 1 on an aggregate failure (nothing could be read), 2 on usage.
 
@@ -244,9 +246,12 @@ data's age:
 ```
 team graph: synced, data as of 14 h ago (acme), 52 MB
 team graph: stale, server unreachable since 09:12, data as of 2 d ago, usable until Oct 12 09:00
+team graph: stale, sign in again (hyp remote login), data as of 2 d ago, usable until Oct 12 09:00
 team graph: expired, not used; reconnect to refresh
 team graph: removed, access to acme was withdrawn
 team graph: unsupported, upgrade hypaware (or the server is older than this feature)
+team graph: unsupported, upgrade hypaware; still using data as of 2 d ago until Oct 12 09:00
+team graph: not kept after leave; queries still use your login to <server>
 team graph: not available yet (server has not published one)
 ```
 
@@ -349,18 +354,33 @@ LLP 0558):
   divides a per-call allowance (default 240 parts) evenly. `roles` is
   `["user", "assistant"]`, `part_types` is `["text"]`, `max_text_chars` is
   2,000.
+- <a id="warm-connection"></a>**One round trip on the warm path.** A fresh
+  MCP `initialize` plus `tools/list` per command would spend much of a
+  two-second budget before the evidence call starts (remote calls measured
+  about 0.8 to 1.3 s in the RFC). So on the warm path the command sends the
+  evidence request to the daemon's control route, and the daemon forwards it
+  over an MCP session it keeps per remote: initialized once, with
+  `session_evidence` support and the `contract` enum recorded per remote and
+  server version, kept alive between calls, and re-initialized only when the
+  server rejects the session, answers `-32601` or `-32602`, or the server
+  version changes. The command's abort travels to the daemon, which aborts
+  the upstream request. If the server does not accept a reused session, the
+  daemon initializes per call and the plan records it (LLP 0481 T8). The cold
+  and `team_server` paths connect from the command and time the handshake as
+  its own phase (`connect` in `timings_ms`).
 - **Deadline.** `deadline_ms` is the remaining budget after discovery minus
-  the measured round trip of the MCP `initialize` on this call (server
-  LLP 0553#deadline, LLP 0558 item 7), with a floor of 250 ms. The MCP
+  the measured round trip to the server (the daemon's last measured round
+  trip on the warm path, the handshake on a cold connection), per server
+  LLP 0553#deadline and LLP 0558 item 7, with a floor of 250 ms. The MCP
   client gains an optional `AbortSignal` (`createHttpMcpClient`) so the
-  command aborts the request at its own budget; the server sees the
+  request is aborted at the command's own budget; the server sees the
   disconnect and stops (LLP 0418 on the server).
-- **Discovery of support.** The command reads `tools/list` once per
-  invocation (the same `initialize` round trip), checks `session_evidence`
-  and that `hypaware.session-evidence/1` is in the `contract` enum, and
-  otherwise uses per-session `query_sql --remote` with the same window and a
-  `LIMIT`, labeled "server without evidence index support" (slower, same
-  rows).
+- **Discovery of support.** `session_evidence` support is known from the
+  daemon's record on the warm path, and from `tools/list` on a cold
+  connection: the tool must be present with `hypaware.session-evidence/1` in
+  its `contract` enum. Otherwise the command uses per-session `query_sql
+  --remote` with the same window and a `LIMIT`, labeled "server without
+  evidence index support" (slower, same rows).
 - **Statuses.** Per entry, as the server reports them (server LLP 0558): a
   `not_found` lead is shown as "no readable text (purged, deleted or outside
   your access)", never "this session does not exist" (UX guardian). `partial`
@@ -418,9 +438,14 @@ through <time>"). Leads, not an answer (journey 4).
     { "why": "search beyond the graph", "command": "hyp query grep --remote hyperparam \"login poll\"" }
   ],
   "coverage": { "graph_visits": 1840, "graph_truncated": false, "unresolved_edges_met": 0, "evidence_received_through": "2026-10-09T02:20:00.000Z", "evidence_read_path": "indexed", "partial": true },
-  "timings_ms": { "discovery": 4, "evidence": 812, "total": 1033 }
+  "timings_ms": { "load": 0, "connect": 0, "discovery": 4, "evidence": 812, "total": 1033 }
 }
 ```
+
+`timings_ms` separates `load` (cold index build, 0 on the warm path),
+`connect` (handshake on a cold connection, 0 when the daemon's session was
+reused), `discovery`, `evidence` and `total`, so cold start is never
+reported as query time (LLP 0479).
 
 Every follow-up command is generated from the same arguments the command
 used and is executed by the acceptance tests (journey 4): a suggested command
@@ -519,5 +544,6 @@ assert them with stable `smoke_step` values.
 2. Release thresholds for relevance and latency (LLP 0479#completion-gate)
    are set before the final evaluation run; the plan names the run, not the
    numbers.
-3. Default `--budget-ms` 2500 and lead and evidence allowances are proposals
-   to be tuned by the evaluation matrix.
+3. Default `--budget-ms` 2000 and lead and evidence allowances are proposals
+   tuned by the evaluation matrix, judged against the two-second user
+   target (UX guardian).
