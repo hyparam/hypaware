@@ -15,7 +15,7 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
-import { createReplicaSource } from '../../plugins-workspace/fastask/src/replica_source.js'
+import { createReplicaSource } from '../../plugins-workspace/graph-cache/src/replica_source.js'
 import { REPLICA_MARKER, REPO, TOKEN, makeBuf, shellSplit, startFastaskServer, waitFor } from '../lib/fastask_fixture.js'
 
 /**
@@ -64,7 +64,7 @@ export async function run({ harness, expect }) {
 
   const team = await startFastaskServer()
   const ingest = await startFakeIngest()
-  const fastaskStateDir = path.join(harness.stateDir, 'plugins', '@hypaware/fastask')
+  const fastaskStateDir = path.join(harness.stateDir, 'plugins', '@hypaware/graph-cache')
   /** @type {import('../../../hypaware-plugin-kernel-types.js').StartedSource | undefined} */
   let source
   try {
@@ -78,7 +78,7 @@ export async function run({ harness, expect }) {
       await writeFixturePlugin(fixtureDir)
       const workspace = path.resolve(import.meta.dirname, '..', '..', 'plugins-workspace')
       const centralDir = path.join(workspace, 'central')
-      const fastaskDir = path.join(workspace, 'fastask')
+      const fastaskDir = path.join(workspace, 'graph-cache')
       const tmpRoot = path.join(harness.tmpDir, 'plugin-temp')
       await fs.mkdir(tmpRoot, { recursive: true })
       const { loaded, failed } = await loadManifests([fixtureDir, centralDir, fastaskDir])
@@ -140,7 +140,7 @@ export async function run({ harness, expect }) {
     await step('read_evidence', async () => {
       const configPath = path.join(harness.hypHome, 'fastask-config.json')
       await fs.writeFile(configPath, JSON.stringify({
-        version: 2, auto_update: false, plugins: [{ name: '@hypaware/fastask' }],
+        version: 2, auto_update: false, plugins: [{ name: '@hypaware/graph-cache' }],
         query: { default_remote: 'fx', remotes: { fx: { url: team.url } } },
       }))
       const repo = path.join(harness.tmpDir, 'fx-repo')
@@ -186,7 +186,7 @@ export async function run({ harness, expect }) {
       const everything = ingest.received.map((r) => `${r.path}\n${r.body}`).join('\n')
       expect.that('assert_withheld: nothing of it reached the server on any route', everything, (s) => !s.includes(REPLICA_MARKER))
       const datasets = kernel.query.listDatasets()
-      expect.that('assert_withheld: fastask registers no dataset', datasets.filter((d) => d.plugin === '@hypaware/fastask').map((d) => d.name), (v) => v.length === 0)
+      expect.that('assert_withheld: fastask registers no dataset', datasets.filter((d) => d.plugin === '@hypaware/graph-cache').map((d) => d.name), (v) => v.length === 0)
       expect.that('assert_withheld: the fixture dataset is the one the sink saw', datasets.map((d) => d.name), (v) => v.includes(DATASET))
     })
   } finally {

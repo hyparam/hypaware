@@ -16,9 +16,9 @@ import path from 'node:path'
 import v8 from 'node:v8'
 import { runInNewContext } from 'node:vm'
 
-import { measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
-import { createReplicaSync } from '../../hypaware-core/plugins-workspace/fastask/src/replica_sync.js'
-import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
+import { measureFile } from '../../hypaware-core/plugins-workspace/graph-cache/src/contract.js'
+import { createReplicaSync } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_sync.js'
+import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_store.js'
 import { largeRowGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
 
 const FIELD_BYTES = 64 * 1024 * 1024

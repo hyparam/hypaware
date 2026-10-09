@@ -23,7 +23,7 @@ import {
   manifestEtag,
   measureFile,
   verifyManifest,
-} from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
+} from '../../hypaware-core/plugins-workspace/graph-cache/src/contract.js'
 
 const CONTRACTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'contracts')
 const GRAPH = path.join(CONTRACTS, 'graph-snapshot', 'v1')

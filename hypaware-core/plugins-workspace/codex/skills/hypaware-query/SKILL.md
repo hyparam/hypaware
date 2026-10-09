@@ -23,7 +23,7 @@ For a question about the team's past work (why something changed, what was decid
 3. `hyp query team-graph search --session <id>... <term>...`: find the turns inside candidate sessions. Each hit prints the `hyp query evidence` command that reads around it.
 4. `hyp query evidence --remote <target> --session '<entry json>'`: read the original conversation around the hits. Quote what the person actually asked for, and check later sessions on the same files for a reversal before answering.
 
-If `hyp query team-graph` is not a known command on this machine, team-graph exploration is not enabled here. Use the existing remote tools instead: `hyp query grep --remote`, `hyp query sql --remote` and `hyp query graph neighbors --remote`. Tell the user once that rerunning `hyp setup` enables team-graph exploration; do not run `hyp setup` yourself.
+If `hyp query team-graph` is not a known command on this machine, team-graph exploration is not enabled here. Use the existing remote tools instead: `hyp query grep --remote`, `hyp query sql --remote` and `hyp query graph neighbors --remote`. Connected installs enable `graph-cache` automatically on upgrade unless it was explicitly disabled. If the command is missing, report that fact; do not run `hyp setup` yourself or override a disable.
 
 The results are leads with a freshness bound, not a complete history: say how old the team graph is (`watermark_age_s`) and what you did not check. See [fastask.md](fastask.md) for each command's inputs, outputs, limits and source states.
 

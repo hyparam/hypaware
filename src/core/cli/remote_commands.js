@@ -1341,7 +1341,7 @@ export async function runRemoteRemove(argv, ctx) {
 }
 
 /**
- * Delete the team graph replica kept for `target` (`@hypaware/fastask`), at
+ * Delete the team graph replica kept for `target` (`@hypaware/graph-cache`), at
  * once rather than at the daemon's next sync pass. Each replica directory
  * records its target in `replica.json`. Best effort: the sync loop also
  * deletes replicas whose target is gone, so a failure here leaves nothing
@@ -1353,19 +1353,22 @@ export async function runRemoteRemove(argv, ctx) {
  * @returns {Promise<boolean>} whether a replica was removed
  */
 async function removeTeamGraphReplicas(stateDir, target) {
-  const root = path.join(pluginStateDir(stateDir, '@hypaware/fastask'), 'replicas')
   let removed = false
-  let names = []
-  try { names = await fs.readdir(root) } catch { return false }
-  for (const name of names) {
-    const dir = path.join(root, name)
-    try {
-      const record = JSON.parse(await fs.readFile(path.join(dir, 'replica.json'), 'utf8'))
-      if (record?.target !== target) continue
-      await fs.rm(dir, { recursive: true, force: true })
-      removed = true
-    } catch {
-      // Unreadable or already gone: the sync loop settles it.
+  // @ref LLP 0490#activation [implements]: renaming the pre-release plugin must not strand its cached teammate data on remote removal
+  for (const plugin of ['@hypaware/graph-cache', '@hypaware/fastask']) {
+    const root = path.join(pluginStateDir(stateDir, plugin), 'replicas')
+    let names = []
+    try { names = await fs.readdir(root) } catch { continue }
+    for (const name of names) {
+      const dir = path.join(root, name)
+      try {
+        const record = JSON.parse(await fs.readFile(path.join(dir, 'replica.json'), 'utf8'))
+        if (record?.target !== target) continue
+        await fs.rm(dir, { recursive: true, force: true })
+        removed = true
+      } catch {
+        // Unreadable or already gone: the sync loop settles it.
+      }
     }
   }
   return removed

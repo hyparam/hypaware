@@ -5,7 +5,7 @@
 // LLP 0486#decision; whole-process CPU as server LLP 0564#decision counts it).
 //
 // Runs `hyp daemon run` (gateway plus processing child) in a disposable HOME
-// with @hypaware/fastask enabled through plugins[], the default remote
+// with @hypaware/graph-cache enabled through plugins[], the default remote
 // pointing at a loopback snapshot server in its own process (server.mjs), and
 // a measurement probe (probe.mjs) preloaded into both daemon processes. While
 // foreground load runs against the same daemon (gateway capture through
@@ -28,6 +28,8 @@
 //     [--refreshes 20] [--idle-seconds 30] [--settle-seconds 60] [--scale 4]
 //     [--smokes a,b] [--keep]
 
+import { createHash } from 'node:crypto'
+import { sampleProcessTree } from './process-tree.mjs'
 import { spawn, fork } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -38,7 +40,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { readStatusFile } from '../../src/core/daemon/status.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
-import { MAX_INDEX_BYTES } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
+import { MAX_INDEX_BYTES } from '../../hypaware-core/plugins-workspace/graph-cache/src/index_builder.js'
 import { DEFAULT_DUTY } from '../../src/core/util/work_budget.js'
 import { MEASURED_EDGES, MEASURED_NODES, generate } from './generate.mjs'
 
@@ -53,6 +55,9 @@ const MB = 1024 * 1024
 const TOKEN = 'stress-token'
 const TARGET = 'stress'
 const SOURCE = 'team-graph-replica'
+
+/** @type {ReturnType<typeof sampleProcessTree>} */
+let tree
 
 const opts = parseArgs(process.argv.slice(2))
 const scaleLarge = Number(opts.scale ?? 4)
@@ -98,7 +103,14 @@ const report = {
 }
 
 try {
-  await main()
+  if (opts.analyze) {
+    const saved = JSON.parse(fs.readFileSync(opts.analyze, 'utf8'))
+    recomputeSteadyMemory(saved)
+    saved.verdict = verdict(saved)
+    const text = JSON.stringify(saved, null, 2) + '\n'
+    if (opts.out) fs.writeFileSync(opts.out, text)
+    process.stdout.write(text)
+  } else await main()
 } finally {
   for (const fn of cleanups.reverse()) {
     try { await fn() } catch { /* best effort */ }
@@ -129,15 +141,17 @@ async function main() {
   const daemon = startDaemon(configPath)
   const up = await waitForDaemon()
   const pids = { gateway: /** @type {number} */ (daemon.pid), processing: up.processing }
+  tree = sampleProcessTree(pids.processing)
+  cleanups.push(() => tree.stop())
   log(`daemon up: gateway ${pids.gateway}, processing ${pids.processing}`)
   report.daemon = { gateway_pid: pids.gateway, processing_pid: pids.processing }
-  const control = controlClient(up.details.listen_port)
+  const control = controlClient(up.details.listen_port, server.url)
   const ports = daemonPorts()
   const load = foregroundLoad(ports, control, questions)
   const smokeLoop = smokeRunner(smokes)
   cleanups.push(() => load.stop())
   cleanups.push(() => smokeLoop.kill())
-  const disk = diskSampler(path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'fastask'))
+  const disk = diskSampler(path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'graph-cache'))
   cleanups.push(() => disk.stop())
   let serial = 0
   const nextGeneration = () => `${1760000000000 + ++serial}-${serial}`
@@ -182,6 +196,8 @@ async function main() {
     const r0 = Date.now()
     await control.refresh()
     await waitIndex(control, generation, 300_000)
+    // Sample after activation has awaited the retired process, not just before.
+    await tree.capture()
     builds.push({ generation, t0: r0, t1: Date.now(), wall_ms: Date.now() - r0 })
   }
   t1 = Date.now()
@@ -189,7 +205,7 @@ async function main() {
   // Each build against the RSS just before it (the old index is still live: swap overlap).
   for (const b of builds) {
     const m = measure(pids, b.t0, b.t1, idleCores)
-    Object.assign(b, { rss_before_mb: m.rss_mb.processing?.before, peak_increase_mb: m.rss_mb.processing?.peak_increase, rss_after_mb: rssAfter(pids.processing, b.t1), ...heapAfter(pids.processing, b.t1), background_cores: m.cpu.processing?.background_cores_mean })
+    Object.assign(b, { rss_before_mb: m.rss_mb.processing?.before, peak_increase_mb: m.rss_mb.processing?.peak_increase, rss_after_mb: m.rss_mb.processing?.after, ...heapAfter(pids.processing, b.t1), background_cores: m.cpu.processing?.background_cores_mean })
   }
   report.phases.refresh = { builds, ...measure(pids, t0, t1, idleCores), foreground: load.summary(t0, t1, report.phases.idle.foreground) }
   log(`refresh: ${JSON.stringify(report.phases.refresh.summary)}`)
@@ -219,8 +235,8 @@ async function main() {
   const settleLines = probeLines(pids.processing).filter((l) => l.t > t0 && l.t <= t1 + 1000)
   report.phases.settle = {
     ...measure(pids, t0, t1, idleCores),
-    rss_mb_every_10s: settleLines.filter((_, i) => i % 10 === 0).map((l) => round1(l.rss / MB)),
-    rss_mb_end: round1((settleLines.at(-1)?.rss ?? NaN) / MB),
+    rss_mb_every_10s: tree.samples.filter(l => l.t > t0 && l.t <= t1).filter((_, i) => i % 40 === 0).map(l => round1(l.rss / MB)),
+    rss_mb_end: round1(tree.measure(t0, t1).after),
     foreground: load.summary(t0, t1, report.phases.idle.foreground),
     index_bytes_live_mb: round1(report.phases.large.index.index_bytes / MB),
   }
@@ -263,9 +279,12 @@ async function main() {
   const building = (await control.replica()).replica
   await load.stop()
   const s0 = Date.now()
+  const ownerPids = tree.pids().filter(pid => pid !== pids.processing)
   daemon.kill('SIGTERM')
   const exits = await Promise.all([waitExit(pids.gateway, 30_000), waitExit(pids.processing, 30_000)])
+  const ownerExits = await Promise.all(ownerPids.map(async pid => ({ pid, exited: await waitExit(pid, 1000) !== null })))
   report.phases.shutdown = {
+    owners_exited: ownerExits.every(x => x.exited),
     during_build: Boolean(building?.refresh_in_progress) && building?.generation !== last,
     gateway_exit_ms: exits[0] === null ? null : exits[0] - s0,
     processing_exit_ms: exits[1] === null ? null : exits[1] - s0,
@@ -275,7 +294,9 @@ async function main() {
   report.foreground_series = { since: new Date(seriesSince).toISOString(), bucket_s: 10, phase_starts_s: Object.fromEntries(Object.entries(phaseStarts).map(([k, v]) => [k, Math.round((v - seriesSince) / 1000)])), ...load.series(seriesSince) }
   report.disk_peak_bytes = disk.peak(0, Date.now())
   report.foreground_change = foregroundChange(report.foreground_series)
+  report.resource_accounting = 'Processing RSS/CPU includes all descendant index owners, externally sampled every 250 ms; a retired process CPU tail shorter than one sample may be missed.'
   report.verdict = verdict(report)
+  report.process_tree_samples = tree.samples
   const text = `${JSON.stringify(report, null, 2)}\n`
   if (opts.out) fs.writeFileSync(opts.out, text)
   process.stdout.write(text)
@@ -338,7 +359,7 @@ function writeConfig(serverUrl, upstreamUrl) {
     plugins: [
       { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:0', upstreams: [{ name: 'stress-upstream', base_url: upstreamUrl, path_prefix: '/v1/messages', priority: 100 }] } },
       { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 0 } },
-      { name: '@hypaware/fastask' },
+      { name: '@hypaware/graph-cache' },
     ],
     query: { default_remote: TARGET, remotes: { [TARGET]: { url: serverUrl } } },
   }, null, 2))
@@ -385,8 +406,9 @@ async function waitForDaemon() {
 // Driving the daemon
 
 /** @param {number} port the fastask control listener */
-function controlClient(port) {
-  const tokenPath = path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'fastask', 'control-token')
+function controlClient(port, origin) {
+  const scope = { target: TARGET, origin, org: 'acme', credential_fp: createHash('sha256').update(TOKEN).digest('hex').slice(0, 16) }
+  const tokenPath = path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'graph-cache', 'control-token')
   const headers = () => ({ authorization: `Bearer ${fs.readFileSync(tokenPath, 'utf8')}`, 'content-type': 'application/json' })
   const base = `http://127.0.0.1:${port}/_hypaware`
   return {
@@ -401,13 +423,13 @@ function controlClient(port) {
      * (The status file trails by up to a daemon tick.)
      */
     async replica() {
-      const res = await fetch(`${base}/fastask/discover`, { method: 'POST', headers: headers(), body: JSON.stringify({ question: 'readiness' }) })
+      const res = await fetch(`${base}/fastask/discover`, { method: 'POST', headers: headers(), body: JSON.stringify({ question: 'readiness', scope }) })
       const body = /** @type {any} */ (await res.json())
       return { indexed: res.status === 200, replica: body.replica }
     },
     /** @param {{ question: string, repo: string | null }} q */
     async discover(q) {
-      const res = await fetch(`${base}/fastask/discover`, { method: 'POST', headers: headers(), body: JSON.stringify(q) })
+      const res = await fetch(`${base}/fastask/discover`, { method: 'POST', headers: headers(), body: JSON.stringify({ ...q, scope }) })
       await res.arrayBuffer()
       return res.status
     },
@@ -703,6 +725,13 @@ function measure(pids, t0, t1, idleCores) {
     const peak = Math.max(...inside.map((l) => l.rss_peak))
     out.rss_mb[role] = { before: round1(base.rss / MB), peak: round1(peak / MB), peak_increase: round1((peak - base.rss) / MB), after: round1(lastLine.rss / MB) }
   }
+  // Include old/new index owners in resource bounds, not just the daemon.
+  const aggregate = tree.measure(t0, t1)
+  out.processing_process_only = { rss: out.rss_mb.processing, cpu: out.cpu.processing }
+  out.rss_mb.processing = Object.fromEntries(['before', 'peak', 'after', 'peak_increase'].map(k => [k, round1(aggregate[k])]))
+  out.cpu.processing = { cores_mean: round3(aggregate.cores_mean),
+    ...(idleCores !== undefined ? { background_cores_mean: round3(aggregate.cores_mean - idleCores), background_cores_10s_max: round3(aggregate.cores_10s_max - idleCores) } : {}) }
+  out.index_owners_max = aggregate.max_children
   out.summary = {
     s: out.window_s,
     cpu: out.cpu.processing?.background_cores_mean ?? out.cpu.processing?.cores_mean,
@@ -750,6 +779,8 @@ function verdict(r) {
     const added = r.foreground_change.otlp?.[`${phase}_added_ms`]
     add(`${phase} otlp added median latency (ms)`, added, b.otlp_added_median_ms, added <= b.otlp_added_median_ms)
   }
+  add('shutdown: all index owners exit', r.phases.shutdown.owners_exited, true, r.phases.shutdown.owners_exited === true)
+  for (const phase of ['initial', 'refresh', 'large']) add(`${phase}: at most two graph helpers`, p[phase].index_owners_max, 2, p[phase].index_owners_max <= 2)
   add('shutdown during a build', r.phases.shutdown.during_build, true, r.phases.shutdown.during_build === true)
   add('shutdown: processing child exits (ms)', r.phases.shutdown.processing_exit_ms, b.shutdown_ms, r.phases.shutdown.processing_exit_ms !== null && r.phases.shutdown.processing_exit_ms <= b.shutdown_ms)
   add('capture smokes beside the daemon all pass', r.smokes.failed.length, 0, r.smokes.runs > 0 && r.smokes.failed.length === 0)
@@ -864,4 +895,25 @@ function parseArgs(argv) {
     else out[a.slice(2)] = argv[++i]
   }
   return out
+}
+
+/**
+ * Reanalyze raw samples from the original external-sampler run. That runner's
+ * last sample before readiness could still include the retiring old owner.
+ * Use the first sample after readiness, before the next build, and fail rather
+ * than infer a settled measurement when that gap was not sampled.
+ * @param {any} saved
+ */
+function recomputeSteadyMemory(saved) {
+  const builds = saved.phases.refresh.builds
+  for (let i = 0; i < builds.length; i++) {
+    const build = builds[i]
+    const nextStart = builds[i + 1]?.t0 ?? build.t1 + 1000
+    const sample = saved.process_tree_samples.find(s => s.t > build.t1 && s.t < nextStart && s.children === 1)
+    if (!sample) throw new Error(`no settled sample for ${build.generation}`)
+    build.rss_after_sample_t = sample.t
+    build.rss_after_mb = round1(sample.rss / MB)
+  }
+  saved.phases.settle.rss_mb_end = saved.phases.settle.rss_mb.processing.after
+  saved.measurement_correction = 'Post-refresh RSS uses the first raw sample after readiness and before the next build, with exactly one owner. The former last-before-readiness sample could include the retiring owner. Peak and CPU measurements are unchanged.'
 }

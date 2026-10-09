@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { remoteTokenEnvVar, writeSession, writeToken } from '../../src/core/remote/credentials.js'
-import { createDefaultTargetResolver } from '../../hypaware-core/plugins-workspace/fastask/src/replica_target.js'
+import { createDefaultTargetResolver } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_target.js'
 
 /**
  * @import { TestContext } from 'node:test'

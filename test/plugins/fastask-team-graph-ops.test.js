@@ -9,18 +9,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { MAX_POSTINGS, MAX_STARTS, MAX_VISITS, SEED_MAX_FILES, discover, explicitTerms, neighbors } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
+import { MAX_POSTINGS, MAX_STARTS, MAX_VISITS, SEED_MAX_FILES, discover, explicitTerms, neighbors } from '../../hypaware-core/plugins-workspace/graph-cache/src/discovery.js'
 import { collect, executeSql } from 'squirreling'
 
 import { compareStrings } from '../../src/core/util/compare_strings.js'
 import { createWorkBudget } from '../../src/core/util/work_budget.js'
-import { createIndexBuilder, sortTokenIds, splitTokens } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
-import { discoverBySql } from '../../hypaware-core/plugins-workspace/fastask/src/sql_discovery.js'
-import { discoverOutput } from '../../hypaware-core/plugins-workspace/fastask/src/team_graph.js'
-import { MAX_SEARCH_SESSIONS, SEARCH_CONCURRENCY, searchSessions, sessionSql } from '../../hypaware-core/plugins-workspace/fastask/src/team_search.js'
+import { createIndexBuilder, sortTokenIds, splitTokens } from '../../hypaware-core/plugins-workspace/graph-cache/src/index_builder.js'
+import { discoverBySql } from '../../hypaware-core/plugins-workspace/graph-cache/src/sql_discovery.js'
+import { discoverOutput } from '../../hypaware-core/plugins-workspace/graph-cache/src/team_graph.js'
+import { MAX_SEARCH_SESSIONS, SEARCH_CONCURRENCY, searchSessions, sessionSql } from '../../hypaware-core/plugins-workspace/graph-cache/src/team_search.js'
 
 /**
- * @import { GraphIndex } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { GraphIndex } from '../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 const T0 = Date.UTC(2026, 8, 1)

@@ -204,7 +204,7 @@ refresh the remote's graph.
 <!-- @ref LLP 0487#decision: the agent explores the team graph itself; these are the four commands it uses -->
 ## Explore the team's history
 
-With a team remote set up, the `@hypaware/fastask` plugin keeps a copy of the
+With a team remote set up, the `@hypaware/graph-cache` plugin keeps a copy of the
 team's activity graph on this machine (the *team graph*) and adds four
 commands. Your agent uses them for questions about the team's past work, such
 as why a change was made or whether a step was removed on purpose:
@@ -227,12 +227,15 @@ for a newer one.
 The four commands are the shipped surface. A one-shot `hyp fastask
 "<question>"` planner is deferred and not available.
 
-`hyp setup` adds the plugin to a new install. If you set HypAware up before
-this release, rerun `hyp setup` to add it. Until then `hyp query team-graph`
-is an unknown command, and your agent uses the existing remote tools
+Choosing a remote server during setup enables `@hypaware/graph-cache`
+automatically. Existing central-server installations gain it on their next
+client boot or daemon reload after upgrading. An explicit plugin disable in
+either config layer is respected. Local-only and query-only remote installs
+do not gain a background replica automatically.
+
+If the commands are unavailable, the agent uses the existing remote tools
 (`hyp query grep`, `hyp query sql` and `hyp query graph neighbors` with
-`--remote`) and tells you once that rerunning `hyp setup` enables team-graph
-exploration. The agent never runs `hyp setup` for you.
+`--remote`). It does not run setup or override a disable.
 
 ## Connect an MCP client
 

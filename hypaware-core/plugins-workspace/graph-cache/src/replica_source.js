@@ -12,20 +12,20 @@ import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../../../../src
 import { canonicalOrigin } from '../../../../src/core/remote/builtin_remotes.js'
 import { atomicWriteFile } from '../../../../src/core/util/fs_atomic.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
-import { discover, neighbors } from './discovery.js'
 import { createEvidenceForwarder } from './evidence_forwarder.js'
-import { IndexBuildError, buildIndexFromSnapshot } from './index_builder.js'
+import { IndexBuildError } from './index_builder.js'
+import { startIndexProcess, verifySnapshotInProcess } from './index_process.js'
 import { createReplicaSync, credentialFingerprint } from './replica_sync.js'
 import { createDefaultTargetResolver } from './replica_target.js'
 import { summaryLine } from './summary_line.js'
 
 /**
  * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { GraphIndex, ReplicaStatus, ReplicaTarget, WarmScope } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { IndexProcess, ReplicaStatus, ReplicaTarget, WarmScope } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 export const SOURCE_NAME = 'team-graph-replica'
-const PLUGIN = '@hypaware/fastask'
+const PLUGIN = '@hypaware/graph-cache'
 /** Control routes under the reserved `/_hypaware/` prefix, advertised in status details. */
 export const DISCOVER_ROUTE = 'fastask/discover'
 export const EVIDENCE_ROUTE = 'fastask/evidence'
@@ -85,9 +85,9 @@ export function createReplicaSource(deps = {}) {
     const resolveTarget = () => (deps.resolveTarget ?? resolveTargetFromDisk)(ctx, seen)
     const forwarder = createEvidenceForwarder({ fetchImpl: deps.fetchImpl })
 
-    /** @type {{ generation: string, index: GraphIndex, buildMs: number } | null} */
+    /** @type {{ generation: string, index: IndexProcess, buildMs: number } | null} */
     let active = null
-    /** @type {{ generation: string, index: GraphIndex, buildMs: number } | null} */
+    /** @type {{ generation: string, index: IndexProcess, buildMs: number } | null} */
     let staged = null
     /** @type {string | null} */
     let indexError = null
@@ -102,10 +102,8 @@ export function createReplicaSource(deps = {}) {
         rows: (manifest?.files?.nodes?.rows ?? 0) + (manifest?.files?.edges?.rows ?? 0),
       }, async (span) => {
         const started = performance.now()
-        const index = await buildIndexFromSnapshot({
-          manifest,
-          nodes: fs.createReadStream(path.join(dir, 'nodes.ndjson.gz')),
-          edges: fs.createReadStream(path.join(dir, 'edges.ndjson.gz')),
+        const index = await startIndexProcess({
+          dir, manifest,
           signal: stop.signal,
           ...(deps.duty !== undefined ? { duty: deps.duty } : {}),
           ...(deps.maxIndexBytes !== undefined ? { maxBytes: deps.maxIndexBytes } : {}),
@@ -113,6 +111,8 @@ export function createReplicaSource(deps = {}) {
         const buildMs = Math.round(performance.now() - started)
         span.setAttribute('ms', buildMs)
         span.setAttribute('bytes', index.bytes)
+        span.setAttribute('index_pid', index.pid)
+        span.setAttribute('index_rss', index.buildRss)
         return { generation: manifest.generation, index, buildMs }
       }, { component: 'fastask' })
     }
@@ -125,11 +125,14 @@ export function createReplicaSource(deps = {}) {
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
       ...(deps.maxIndexBytes !== undefined ? { maxIndexBytes: deps.maxIndexBytes } : {}),
       ...deps.syncOpts,
+      verifySnapshot: verifySnapshotInProcess,
       hooks: {
         // LLP 0480#sync step 6: the index is built before activation, so a
         // failed or refused build keeps the old generation active.
         async beforeActivate(dir, manifest) {
           try {
+            await staged?.index.close()
+            staged = null
             staged = await build(dir, manifest)
           } catch (err) {
             // The sync keeps the old generation (and this source its index);
@@ -146,14 +149,18 @@ export function createReplicaSource(deps = {}) {
         async afterActivate(dir, manifest) {
           if (staged?.generation === manifest.generation) {
             // Swap, and drop the old index before the old files go.
+            const previous = active
             active = staged
             staged = null
+            await previous?.index.close()
             indexError = null
           }
         },
-        onDelete() {
+        async onDelete() {
+          const previous = [active, staged]
           active = null
           staged = null
+          await Promise.all(previous.map(item => item?.index.close()))
         },
         async afterPass(status) {
           await alignIndex(status)
@@ -169,17 +176,26 @@ export function createReplicaSource(deps = {}) {
      * @param {ReplicaStatus} status
      */
     async function alignIndex(status) {
+      // A staged owner whose activation failed must not survive the pass.
+      await staged?.index.close()
+      staged = null
       if (!status.servable || !status.generation_dir) {
+        const previous = active
         active = null
+        await previous?.index.close()
         return
       }
-      if (active?.generation === status.generation) return
+      if (active?.generation === status.generation && active.index.alive) return
       try {
         const manifest = JSON.parse(await fs.promises.readFile(path.join(status.generation_dir, 'manifest.json'), 'utf8'))
-        active = await build(status.generation_dir, manifest)
+        const replacement = await build(status.generation_dir, manifest)
+        const previous = active
+        active = replacement
+        await previous?.index.close()
         indexError = null
       } catch (err) {
         if (stop.signal.aborted) return
+        await active?.index.close()
         active = null
         indexError = messageOf(err)
         ctx.log.warn('fastask.index_failed', { generation: status.generation, error: indexError })
@@ -189,7 +205,7 @@ export function createReplicaSource(deps = {}) {
     /** The index for the generation that may be served right now, or null. */
     function servable() {
       const status = sync.status()
-      if (!status.servable || !active || active.generation !== status.generation) return null
+      if (!status.servable || !active?.index.alive || active.generation !== status.generation) return null
       return { status, index: active.index }
     }
 
@@ -245,14 +261,14 @@ export function createReplicaSource(deps = {}) {
      * @param {http.ServerResponse} res
      * @param {any} body
      */
-    function answerDiscover(res, body) {
+    async function answerDiscover(res, body) {
       if (typeof body?.question !== 'string') return send(res, 400, { error: 'invalid_request', message: 'question must be a string' })
       if (!validScope(body.scope)) return send(res, 400, { error: 'invalid_request', message: 'scope (target, origin, org, credential_fp) is required' })
       const ready = servable()
       if (!ready) return send(res, 503, { error: 'replica_unavailable', replica: replicaView(sync.status()) })
       const mismatch = scopeMismatch(body.scope, ready.status)
       if (mismatch) return send(res, 409, { error: 'scope_mismatch', reason: mismatch })
-      const result = discover(ready.index, {
+      const result = await ready.index.discover({
         question: body.question,
         repo: typeof body.repo === 'string' ? body.repo : null,
         repoRoot: typeof body.repoRoot === 'string' ? body.repoRoot : null,
@@ -262,7 +278,9 @@ export function createReplicaSource(deps = {}) {
         ...(Array.isArray(body.terms) ? { terms: strings(body.terms) } : {}),
         ...(Number.isInteger(body.offset) && body.offset >= 0 ? { offset: body.offset } : {}),
       })
-      send(res, 200, { source: 'team_replica', replica: replicaView(ready.status), result })
+      // Awaiting IPC permits a withdrawal, lease expiry or generation swap.
+      if (servable()?.index !== ready.index) return send(res, 503, { error: 'replica_unavailable', replica: replicaView(sync.status()) })
+      sendGraphResult(res, ready.status, result)
     }
 
     /**
@@ -274,7 +292,7 @@ export function createReplicaSource(deps = {}) {
      * @param {http.ServerResponse} res
      * @param {any} body
      */
-    function answerNeighbors(res, body) {
+    async function answerNeighbors(res, body) {
       if (!validScope(body?.scope)) return send(res, 400, { error: 'invalid_request', message: 'scope (target, origin, org, credential_fp) is required' })
       const direction = body.direction ?? 'both'
       if (direction !== 'in' && direction !== 'out' && direction !== 'both') return send(res, 400, { error: 'invalid_request', message: 'direction must be in, out or both' })
@@ -282,7 +300,7 @@ export function createReplicaSource(deps = {}) {
       if (!ready) return send(res, 503, { error: 'replica_unavailable', replica: replicaView(sync.status()) })
       const mismatch = scopeMismatch(body.scope, ready.status)
       if (mismatch) return send(res, 409, { error: 'scope_mismatch', reason: mismatch })
-      const result = neighbors(ready.index, {
+      const result = await ready.index.neighbors({
         ids: Array.isArray(body.ids) ? strings(body.ids) : [],
         keys: Array.isArray(body.keys) ? strings(body.keys) : [],
         direction,
@@ -290,7 +308,9 @@ export function createReplicaSource(deps = {}) {
         ...(Number.isInteger(body.limit) ? { limit: body.limit } : {}),
         ...(Number.isInteger(body.maxVisits) ? { maxVisits: body.maxVisits } : {}),
       })
-      send(res, 200, { source: 'team_replica', replica: replicaView(ready.status), result })
+      // Awaiting IPC permits a withdrawal, lease expiry or generation swap.
+      if (servable()?.index !== ready.index) return send(res, 503, { error: 'replica_unavailable', replica: replicaView(sync.status()) })
+      sendGraphResult(res, ready.status, result)
     }
 
     /**
@@ -345,18 +365,21 @@ export function createReplicaSource(deps = {}) {
       async status() {
         const r = sync.status()
         const line = summaryLine(r, { now: now(), ...(deps.timeZone ? { timeZone: deps.timeZone } : {}) })
+        const failure = indexError ?? (active && !active.index.alive ? 'index process exited; refresh to rebuild' : null)
         const troubled = r.state === 'stale' || r.state === 'expired' || r.state === 'withdrawn' || r.state === 'unsupported'
         /** @type {SourceStatus} */
         const status = {
-          state: troubled || indexError ? 'degraded' : 'ready',
+          state: troubled || failure ? 'degraded' : 'ready',
           message: line,
-          ...(indexError ? { lastError: `team graph index failed: ${indexError}` } : {}),
+          ...(failure ? { lastError: `team graph index failed: ${failure}` } : {}),
           details: /** @type {any} */ ({
             ...replicaView(r),
             index_generation: active?.generation ?? null,
-            index_bytes: active?.index.bytes ?? 0,
+            index_bytes: active?.index.alive ? active.index.bytes : 0,
+            index_pid: active?.index.alive ? active.index.pid : null,
+            index_build_rss: active?.index.buildRss ?? null,
             index_build_ms: active?.buildMs ?? null,
-            index_error: indexError,
+            index_error: failure,
             config_path: seen.config_path,
             summary_line: line,
             listen_host: bound.host,
@@ -385,6 +408,7 @@ export function createReplicaSource(deps = {}) {
         })
         await Promise.allSettled([...inFlight])
         await sync.close()
+        await Promise.all([active?.index.close(), staged?.index.close()])
         active = null
         staged = null
         await fs.promises.rm(tokenPath, { force: true })
@@ -535,4 +559,18 @@ function strings(list) {
 /** @param {unknown} err */
 function messageOf(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * @ref LLP 0490#memory [implements]: only the short replica envelope is encoded in the daemon; the helper already encoded the bounded result
+ * @param {http.ServerResponse} res
+ * @param {ReplicaStatus} status
+ * @param {string} resultJson
+ */
+function sendGraphResult(res, status, resultJson) {
+  if (res.headersSent || res.destroyed) return
+  res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+  const envelope = JSON.stringify({ source: 'team_replica', replica: replicaView(status) })
+  res.write(envelope.slice(0, -1) + ',"result":')
+  res.end(resultJson + '}')
 }

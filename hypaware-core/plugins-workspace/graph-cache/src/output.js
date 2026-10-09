@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { DiscoveryResult, EvidenceEntry, EvidenceResult, FastaskFollowup, FastaskOutput, FastaskOutputLead, FastaskSource, FastaskTextSearch, FastaskTimings, LeadEvidence } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, EvidenceEntry, EvidenceResult, FastaskFollowup, FastaskOutput, FastaskOutputLead, FastaskSource, FastaskTextSearch, FastaskTimings, LeadEvidence } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

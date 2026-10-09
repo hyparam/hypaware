@@ -12,7 +12,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
 
-import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, verifyManifest } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
+import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, verifyManifest } from '../../hypaware-core/plugins-workspace/graph-cache/src/contract.js'
 import {
   BYTES_PER_ROW,
   IndexBuildError,
@@ -24,10 +24,10 @@ import {
   buildIndexFromSnapshot,
   createIndexBuilder,
   rowProblem,
-} from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
+} from '../../hypaware-core/plugins-workspace/graph-cache/src/index_builder.js'
 
 /**
- * @import { GraphIndex } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { GraphIndex } from '../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 const GRAPH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'contracts', 'graph-snapshot', 'v1')

@@ -5,7 +5,7 @@ import http from 'node:http'
 import { gzipSync } from 'node:zlib'
 import { collect, executeSql } from 'squirreling'
 
-import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../../plugins-workspace/fastask/src/contract.js'
+import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../../plugins-workspace/graph-cache/src/contract.js'
 
 /**
  * @import { AddressInfo } from 'node:net'

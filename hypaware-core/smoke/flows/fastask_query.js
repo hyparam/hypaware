@@ -49,7 +49,7 @@ export async function run({ harness, expect }) {
   await fs.writeFile(configPath, JSON.stringify({
     version: 2,
     auto_update: false,
-    plugins: [{ name: '@hypaware/fastask' }],
+    plugins: [{ name: '@hypaware/graph-cache' }],
     query: { default_remote: 'fx', remotes: { fx: { url: server.url }, fx2: { url: server.url } } },
   }))
   const repo = path.join(harness.tmpDir, 'fx-repo')
@@ -161,7 +161,7 @@ export async function run({ harness, expect }) {
     // ----- smoke_step: local -----
     await step('local', async () => {
       const localConfig = path.join(harness.hypHome, 'fastask-local-config.json')
-      await fs.writeFile(localConfig, JSON.stringify({ version: 2, auto_update: false, plugins: [{ name: '@hypaware/fastask' }] }))
+      await fs.writeFile(localConfig, JSON.stringify({ version: 2, auto_update: false, plugins: [{ name: '@hypaware/graph-cache' }] }))
       /** @type {NodeJS.ProcessEnv} */
       const localEnv = { ...process.env, HYP_CONFIG: localConfig }
       delete localEnv.HYP_REMOTE_TOKEN_FX

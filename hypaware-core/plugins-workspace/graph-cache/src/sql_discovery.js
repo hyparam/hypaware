@@ -4,7 +4,7 @@ import { discover, explicitTerms, extractTerms } from './discovery.js'
 import { MIN_TOKEN, basenameOf, createIndexBuilder, splitTokens } from './index_builder.js'
 
 /**
- * @import { DiscoveryResult } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

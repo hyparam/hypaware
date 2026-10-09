@@ -21,7 +21,7 @@ import { MAX_TEXT_CHARS } from './evidence.js'
 
 /**
  * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { DiscoveryResult, FastaskSource, GraphIndex, Neighbor, NeighborsResult, NeighborsStart, ReplicaTarget, SearchResult, TeamGraphArgs } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, FastaskSource, GraphIndex, Neighbor, NeighborsResult, NeighborsStart, ReplicaTarget, SearchResult, TeamGraphArgs } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

@@ -23,8 +23,8 @@ import { createGzip } from 'node:zlib'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 
-import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../hypaware-core/plugins-workspace/fastask/src/contract.js'
-import { createReplicaSync } from '../hypaware-core/plugins-workspace/fastask/src/replica_sync.js'
+import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../hypaware-core/plugins-workspace/graph-cache/src/contract.js'
+import { createReplicaSync } from '../hypaware-core/plugins-workspace/graph-cache/src/replica_sync.js'
 
 const SELF = fileURLToPath(import.meta.url)
 const FIXTURES = path.resolve(path.dirname(SELF), '..', 'test', 'fixtures', 'contracts', 'graph-snapshot', 'v1')

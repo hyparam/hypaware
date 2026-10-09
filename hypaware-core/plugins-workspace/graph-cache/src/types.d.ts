@@ -681,3 +681,24 @@ export interface TeamGraphArgs {
   values: Record<string, string>
   numbers: Record<string, number>
 }
+
+/** One generation's isolated warm index. Graph objects never cross IPC. */
+export interface IndexProcess {
+  pid: number
+  bytes: number
+  buildRss: number
+  verification?: SnapshotVerification
+  readonly alive: boolean
+  /** JSON encoded result for the warm HTTP response; the daemon does not parse it. */
+  discover(input: DiscoveryInput): Promise<string>
+  neighbors(input: NeighborsInput): Promise<string>
+  close(): Promise<void>
+}
+
+export interface DirectoryVerificationInput {
+  dir: string
+  manifest: any
+  maxLineBytes: number
+  signal?: AbortSignal
+  budget?: { sliceMs?: number, sliceRows?: number, duty?: number }
+}

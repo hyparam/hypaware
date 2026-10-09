@@ -6,7 +6,7 @@ import { EVIDENCE_MAX_RESPONSE_BYTES, EVIDENCE_TOOL } from './evidence.js'
 import { EVIDENCE_ROUTE } from './replica_source.js'
 
 /**
- * @import { EvidenceForwardResult, EvidenceMcpClient, WarmScope } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { EvidenceForwardResult, EvidenceMcpClient, WarmScope } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /** The prefix of the error a scope refusal raises; the command reads the server instead. */

@@ -1,12 +1,15 @@
 // @ts-check
 
+import fs from 'node:fs'
+import path from 'node:path'
+import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
 import { createHash } from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
 
 /**
  * @import { Hash } from 'node:crypto'
- * @import { CompressedSource, MeasureOptions, MeasuredFile, SetDigest, SnapshotFileFacts, SnapshotFiles, SnapshotVerification } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DirectoryVerificationInput, CompressedSource, MeasureOptions, MeasuredFile, SetDigest, SnapshotFileFacts, SnapshotFiles, SnapshotVerification } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**
@@ -357,4 +360,27 @@ export function manifestEtag(generation) {
  */
 export function dataFileEtag(sha256) {
   return `"sha256:${sha256}"`
+}
+
+/**
+ * Client-side file adapter shared by sync and its isolated verifier. The
+ * streaming digest checks and CPU budget are identical in either process.
+ *
+ * @ref LLP 0490#memory [implements]: verification can exit with its native allocations instead of retaining them in the daemon
+ * @param {DirectoryVerificationInput} opts
+ */
+export async function verifySnapshotDirectory({ dir, manifest, maxLineBytes, signal, budget }) {
+  const work = createWorkBudget({ ...budget, signal })
+  /** @param {string} name */
+  async function* budgeted(name) {
+    for await (const chunk of fs.createReadStream(path.join(dir, `${name}.ndjson.gz`), { highWaterMark: 64 * 1024 })) {
+      const wait = work.tick(1)
+      if (wait) await wait
+      yield /** @type {Buffer} */ (chunk)
+    }
+  }
+  return verifyManifest(
+    { manifest, nodes: budgeted('nodes'), edges: budgeted('edges') },
+    { maxLineBytes, signal, tick: work.tick },
+  )
 }

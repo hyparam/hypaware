@@ -8,7 +8,7 @@ import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
 import { EDGE_COLUMNS, NODE_COLUMNS } from './contract.js'
 
 /**
- * @import { CompressedSource, Exemplar, GraphEdgeRow, GraphIndex, GraphNodeRow, IndexBuilder, IndexBuilderOptions, SessionProps, SnapshotIndexInput, WorkTicker } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { CompressedSource, Exemplar, GraphEdgeRow, GraphIndex, GraphNodeRow, IndexBuilder, IndexBuilderOptions, SessionProps, SnapshotIndexInput, WorkTicker } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

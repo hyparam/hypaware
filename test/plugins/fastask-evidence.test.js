@@ -12,7 +12,7 @@
  * @import { TestContext } from 'node:test'
  * @import { ServerResponse } from 'node:http'
  * @import { AddressInfo } from 'node:net'
- * @import { DiscoveryResult, EvidenceMcpClient, Lead, PlannedEntry } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, EvidenceMcpClient, Lead, PlannedEntry } from '../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 import test from 'node:test'
@@ -30,9 +30,9 @@ import {
   CALL_ALLOWANCE_PARTS, CAPACITY_RETRY_MS, CURSOR_UNRESOLVABLE_NOTE, DEADLINE_FLOOR_MS, EVIDENCE_CONTRACT, EVIDENCE_MAX_RESPONSE_BYTES, FALLBACK_LABEL, FRESHNESS_UNAVAILABLE_NOTE, MAX_ENTRIES, MAX_FOLLOWS_PER_ENTRY,
   MAX_TEXT_CHARS, NOT_FOUND_NOTE, WINDOW_MS, callEvidence, evidenceDeadlineMs, evidenceRequest, evidenceSupport,
   fallbackSql, fetchEvidence, planEntries, skippedNote,
-} from '../../hypaware-core/plugins-workspace/fastask/src/evidence.js'
-import { buildFastaskOutput, evidenceCommand, renderFastaskText, shellQuote } from '../../hypaware-core/plugins-workspace/fastask/src/output.js'
-import { createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/fastask/src/warm_client.js'
+} from '../../hypaware-core/plugins-workspace/graph-cache/src/evidence.js'
+import { buildFastaskOutput, evidenceCommand, renderFastaskText, shellQuote } from '../../hypaware-core/plugins-workspace/graph-cache/src/output.js'
+import { createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/graph-cache/src/warm_client.js'
 
 const FIXTURE_DIR = path.join(import.meta.dirname, '..', 'fixtures', 'contracts', 'session-evidence', 'v1')
 const FIXTURES = fs.readdirSync(FIXTURE_DIR).filter((f) => f.endsWith('.json')).sort()

@@ -30,10 +30,10 @@ import { SCOPE_MISMATCH, createWarmEvidenceClient } from './warm_client.js'
 
 /**
  * @import { CommandRunContext, VerbRegistration } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { DiscoveryResult, EvidenceMcpClient, EvidenceResult, FastaskSource, FastaskTextHit, FastaskTextSearch, FastaskTimings, ReplicaStatus, ReplicaTarget, WarmScope } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DiscoveryResult, EvidenceMcpClient, EvidenceResult, FastaskSource, FastaskTextHit, FastaskTextSearch, FastaskTimings, ReplicaStatus, ReplicaTarget, WarmScope } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
-export const PLUGIN_NAME = '@hypaware/fastask'
+export const PLUGIN_NAME = '@hypaware/graph-cache'
 /** Question terms a no-anchor text search looks for, one search each. */
 export const TEXT_SEARCH_TERMS = 3
 /** Hits asked for per term, and kept in all. */
@@ -798,7 +798,7 @@ export const queryEvidenceVerb = {
   audience: 'everyday',
   tool: EVIDENCE_TOOL,
   exposure: 'cli-only',
-  summary: 'Read original session text from a team server (session_evidence); used by fastask follow-ups',
+  summary: 'Read original session text from a team server (session_evidence)',
   authClass: 'read',
   inputSchema: {
     type: 'object',

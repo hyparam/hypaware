@@ -7,7 +7,7 @@ import { buildIndexFromSnapshot } from './index_builder.js'
 import { readRecord, replicaPaths, replicasRoot } from './replica_store.js'
 
 /**
- * @import { GraphIndex, ReplicaRecord, ReplicaState } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { GraphIndex, ReplicaRecord, ReplicaState } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

@@ -7,8 +7,7 @@ import path from 'node:path'
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { canonicalOrigin } from '../../../../src/core/remote/builtin_remotes.js'
 import { RETRY_BACKOFF_SECONDS, abortableSleep } from '../../../../src/core/util/backoff.js'
-import { createWorkBudget } from '../../../../src/core/util/work_budget.js'
-import { EDGE_COLUMNS, ID_RECIPE, NODE_COLUMNS, PROTOCOL, SCHEMA_VERSION, verifyManifest } from './contract.js'
+import { EDGE_COLUMNS, ID_RECIPE, NODE_COLUMNS, PROTOCOL, SCHEMA_VERSION, verifySnapshotDirectory } from './contract.js'
 import { IndexBuildError, MAX_INDEX_BYTES, assertManifestFits } from './index_builder.js'
 import {
   REPLICA_FORMAT,
@@ -28,7 +27,7 @@ import { checkSnapshot, deriveSnapshotEndpoint, downloadFile } from './snapshot_
 
 /**
  * @import { PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { ReplicaPassResult, ReplicaRecord, ReplicaState, ReplicaStatus, ReplicaSyncHooks, ReplicaTarget, SnapshotAnswer } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DirectoryVerificationInput, SnapshotVerification, ReplicaPassResult, ReplicaRecord, ReplicaState, ReplicaStatus, ReplicaSyncHooks, ReplicaTarget, SnapshotAnswer } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /** A manifest whose two files together exceed this is refused (`replica_too_large`). */
@@ -44,7 +43,7 @@ export const MAX_POLL_SECONDS = 6 * 3600
 const DEFAULT_POLL = Object.freeze({ interval_seconds: 900, jitter_seconds: 300 })
 const FILE_NAMES = /** @type {const} */ (['nodes', 'edges'])
 const COMPONENT = 'fastask'
-const PLUGIN = '@hypaware/fastask'
+const PLUGIN = '@hypaware/graph-cache'
 
 /**
  * The team graph replica sync loop (LLP 0480#sync). One instance owns every
@@ -76,6 +75,7 @@ const PLUGIN = '@hypaware/fastask'
  *   maxIndexBytes?: number,
  *   budget?: { sliceMs?: number, sliceRows?: number, duty?: number },
  *   createWriteStream?: typeof fs.createWriteStream,
+ *   verifySnapshot?: (input: DirectoryVerificationInput) => Promise<SnapshotVerification>,
  * }} opts
  */
 export function createReplicaSync(opts) {
@@ -446,19 +446,9 @@ export function createReplicaSync(opts) {
    * @param {any} manifest
    */
   async function verifyStaged(staged, manifest) {
-    const work = createWorkBudget({ ...budget, signal: stop.signal })
-    /** @param {string} name */
-    async function* budgeted(name) {
-      for await (const chunk of fs.createReadStream(path.join(staged, `${name}.ndjson.gz`), { highWaterMark: 64 * 1024 })) {
-        const wait = work.tick(1)
-        if (wait) await wait
-        yield /** @type {Buffer} */ (chunk)
-      }
-    }
-    return verifyManifest(
-      { manifest, nodes: budgeted('nodes'), edges: budgeted('edges') },
-      { maxLineBytes: maxIndexBytes, signal: stop.signal, tick: work.tick },
-    )
+    return (opts.verifySnapshot ?? verifySnapshotDirectory)({
+      dir: staged, manifest, maxLineBytes: maxIndexBytes, signal: stop.signal, budget,
+    })
   }
 
   /**

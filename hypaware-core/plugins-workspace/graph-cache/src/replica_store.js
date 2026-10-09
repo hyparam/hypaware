@@ -8,7 +8,7 @@ import { atomicWriteJson, readJsonIfExists } from '../../../../src/core/util/fs_
 
 /**
  * @import { Dirent } from 'node:fs'
- * @import { ReplicaRecord } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { ReplicaRecord } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

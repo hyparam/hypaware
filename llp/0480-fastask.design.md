@@ -70,7 +70,7 @@
 
 **Extended-by:** [LLP 0488#planner-deferred](./0488-planner-deferred-and-discover-matches-path-tokens.decision.md#planner-deferred): `fastask` is not part of the shipped surface; it is unregistered on the integration branch and its code kept for later evaluation.
 
-- One new bundled plugin, `hypaware-core/plugins-workspace/fastask`
+- One new bundled plugin, `hypaware-core/plugins-workspace/graph-cache`
   (`@hypaware/fastask`), listed in `V1_EXCLUDED_FROM_DEFAULT`
   (`src/core/runtime/bundled.js`). It activates only through an explicit
   `plugins[]` entry, which is how a tester enables it before release.

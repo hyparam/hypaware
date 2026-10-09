@@ -16,7 +16,7 @@ to the server repository.
 - Pinned for: LLP 0481 T1 (HYP-111), 2026-10-09
 - Re-pinned: 2026-10-09 for LLP 0484#edge-kinds. Edge kinds are now `touched` (server LLP 0556 T1 follow-up `0a001870`), so the edges file, its manifest entry, its ETag and the README changed. The nodes file and the responses did not change, and the server's `src/graph/snapshot-contract.js` is unchanged since `63cba477`, the first pin.
 
-The reference verifier `src/graph/snapshot-contract.js` at the same commit is ported, function bodies unchanged, to `hypaware-core/plugins-workspace/fastask/src/contract.js`.
+The reference verifier `src/graph/snapshot-contract.js` at the same commit is ported, function bodies unchanged, to `hypaware-core/plugins-workspace/graph-cache/src/contract.js`.
 
 The branch is a HypForge integration branch, not yet merged to the server's
 master. Before release (LLP 0481 T13), re-pin from the merged server commit

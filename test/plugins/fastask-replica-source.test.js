@@ -15,23 +15,23 @@ import os from 'node:os'
 import path from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
-import { DISCOVER_ROUTE, EVIDENCE_ROUTE, NEIGHBORS_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
-import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
+import { DISCOVER_ROUTE, EVIDENCE_ROUTE, NEIGHBORS_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE, createReplicaSource } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_source.js'
+import { replicaKey, replicaPaths } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_store.js'
 import { generatedGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
 import { writeSession } from '../../src/core/remote/credentials.js'
-import { callEvidence } from '../../hypaware-core/plugins-workspace/fastask/src/evidence.js'
-import { SCOPE_MISMATCH, createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/fastask/src/warm_client.js'
-import { runFastask } from '../../hypaware-core/plugins-workspace/fastask/src/commands.js'
+import { callEvidence } from '../../hypaware-core/plugins-workspace/graph-cache/src/evidence.js'
+import { SCOPE_MISMATCH, createWarmEvidenceClient } from '../../hypaware-core/plugins-workspace/graph-cache/src/warm_client.js'
+import { runFastask } from '../../hypaware-core/plugins-workspace/graph-cache/src/commands.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
-import { credentialFingerprint } from '../../hypaware-core/plugins-workspace/fastask/src/replica_sync.js'
+import { credentialFingerprint } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_sync.js'
 import { canonicalOrigin } from '../../src/core/remote/builtin_remotes.js'
-import { measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
+import { measureFile } from '../../hypaware-core/plugins-workspace/graph-cache/src/contract.js'
 
 /**
  * @import { TestContext } from 'node:test'
  * @import { PluginActivationContext, StartedSource } from '../../hypaware-plugin-kernel-types.js'
- * @import { ReplicaTarget, WarmScope } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { ReplicaTarget, WarmScope } from '../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 const OK_EVIDENCE = JSON.parse(fs.readFileSync(new URL('../fixtures/contracts/session-evidence/v1/01-ok-minimal.json', import.meta.url), 'utf8'))
@@ -326,10 +326,13 @@ test('evidence without a tool that supports the contract says so instead of call
 
 test('a new generation is indexed, swapped in, and the old files removed', async (t) => {
   const { source, server, port, token, paths, scope } = await setup(t)
+  const oldPid = (await details(source)).index_pid
   server.publish(await generatedGeneration({ generation: '1760002000000-1' }))
   await source.reload?.(/** @type {any} */ ({}))
   await waitFor(async () => { const d = await details(source); return d.index_generation === '1760002000000-1' && !d.refresh_in_progress })
   assert.deepEqual(fs.readdirSync(paths().generations), ['1760002000000-1'])
+  assert.notEqual((await details(source)).index_pid, oldPid)
+  assert.throws(() => process.kill(oldPid, 0), { code: 'ESRCH' })
   const ok = await call(port, DISCOVER_ROUTE, { question: 'anything', scope }, { token })
   assert.equal(ok.body.replica.generation, '1760002000000-1')
 })
@@ -369,12 +372,14 @@ test('a generation whose rows break the contract is rejected: the old one and it
 
 test('a withdrawal drops the index: discover answers 503 with the state', async (t) => {
   const { source, server, port, token, scope } = await setup(t)
+  const oldPid = (await details(source)).index_pid
   server.state.answer = '403-snapshot_access_withdrawn'
   await source.reload?.(/** @type {any} */ ({}))
   await waitFor(async () => { const d = await details(source); return d.state === 'withdrawn' && !d.refresh_in_progress })
   const r = await call(port, DISCOVER_ROUTE, { question: 'app.js', scope }, { token })
   assert.equal(r.status, 503)
   assert.equal(r.body.replica.state, 'withdrawn')
+  assert.throws(() => process.kill(oldPid, 0), { code: 'ESRCH' })
   const status = await source.status?.()
   assert.equal(status?.state, 'degraded')
   assert.equal(/** @type {any} */ (status?.details).summary_line, 'team graph: removed, access to acme was withdrawn')
@@ -442,7 +447,7 @@ test('the real resolver reads the hyp status config, shows its path and target, 
   /** @param {string} name */
   const writeConfig = (name) => fs.writeFileSync(configPath, JSON.stringify({
     version: 2,
-    plugins: [{ name: '@hypaware/fastask' }],
+    plugins: [{ name: '@hypaware/graph-cache' }],
     query: { default_remote: name, remotes: { one: { url: first.url }, two: { url: second.url } } },
   }))
   writeConfig('one')
@@ -614,7 +619,7 @@ async function commandOver(t, a, opts) {
   const stateRoot = path.join(hypHome, 'hypaware')
   const at = new Date().toISOString()
   writePidFile(stateRoot, { pid: process.pid, startedAt: at, runId: 'scope', mode: 'foreground' })
-  writeStatusFile(stateRoot, /** @type {any} */ ({ state: 'healthy', pid: process.pid, startedAt: at, healthyAt: at, uptimeMs: 1, runId: 'scope', mode: 'foreground', sinks: [], sources: [{ name: SOURCE_NAME, plugin: '@hypaware/fastask', state: 'running', details: await details(a.source) }] }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({ state: 'healthy', pid: process.pid, startedAt: at, healthyAt: at, uptimeMs: 1, runId: 'scope', mode: 'foreground', sinks: [], sources: [{ name: SOURCE_NAME, plugin: '@hypaware/graph-cache', state: 'running', details: await details(a.source) }] }))
   /** @type {string[]} */
   const out = []
   /** @type {string[]} */
@@ -669,4 +674,21 @@ test('the same remote name and URL with another login is refused too, and reads 
   assert.match(answer.source.note, /belongs to another (login|organization)/)
   assert.deepEqual(answer.leads, [])
   assert.equal(a.mcp.calls, 0, 'the daemon forwarded nothing for the other login')
+})
+
+
+test('an exited owner refuses warm reads and a refresh rebuilds the same generation', async t => {
+  const { source, port, token, scope } = await setup(t)
+  const before = await details(source)
+  process.kill(before.index_pid, 'SIGKILL')
+  await waitFor(async () => (await details(source)).index_pid === null)
+  assert.match((await details(source)).index_error, /process exited/)
+  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'app.js', scope }, { token })).status, 503)
+  await source.reload?.(/** @type {any} */ ({}))
+  await waitFor(async () => { const d = await details(source); return d.index_pid !== null && !d.refresh_in_progress })
+  const after = await details(source)
+  assert.equal(after.index_generation, before.index_generation)
+  assert.notEqual(after.index_pid, before.index_pid)
+  assert.equal(after.index_error, null)
+  assert.equal((await call(port, DISCOVER_ROUTE, { question: 'app.js', scope }, { token })).status, 200)
 })

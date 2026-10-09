@@ -7,10 +7,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { formatAge, summaryLine } from '../../hypaware-core/plugins-workspace/fastask/src/summary_line.js'
+import { formatAge, summaryLine } from '../../hypaware-core/plugins-workspace/graph-cache/src/summary_line.js'
 
 /**
- * @import { ReplicaStatus } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { ReplicaStatus } from '../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 const NOW = Date.parse('2026-10-09T16:00:00.000Z')

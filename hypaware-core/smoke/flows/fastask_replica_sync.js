@@ -4,8 +4,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, getLogger, installObservability, runRoot } from '../../../src/core/observability/index.js'
-import { createReplicaSource } from '../../plugins-workspace/fastask/src/replica_source.js'
-import { REFRESH_ROUTE, TOKEN_FILE } from '../../plugins-workspace/fastask/src/replica_source.js'
+import { createReplicaSource } from '../../plugins-workspace/graph-cache/src/replica_source.js'
+import { REFRESH_ROUTE, TOKEN_FILE } from '../../plugins-workspace/graph-cache/src/replica_source.js'
 import { TOKEN, startFastaskServer, waitFor } from '../lib/fastask_fixture.js'
 
 /**
@@ -49,7 +49,7 @@ export async function run({ harness, expect }) {
   const step = (name, fn) => runRoot(`smoke.step.${name}`, stepBag(name), fn)
 
   const server = await startFastaskServer()
-  const stateDir = path.join(harness.stateDir, 'plugins', '@hypaware/fastask')
+  const stateDir = path.join(harness.stateDir, 'plugins', '@hypaware/graph-cache')
   /** @type {import('../../../hypaware-plugin-kernel-types.js').StartedSource | undefined} */
   let source
   try {
@@ -134,6 +134,7 @@ export async function run({ harness, expect }) {
   expect.that('telemetry: two generations activated', traces.filter((t) => t.name === 'replica.activate').length, (n) => n === 2)
   expect.that('telemetry: four files downloaded and verified', [traces.filter((t) => t.name === 'replica.download').length, traces.filter((t) => t.name === 'replica.verify').length], (v) => v[0] === 4 && v[1] === 2)
   expect.that('telemetry: replica.index built both generations', traces.filter((t) => t.name === 'replica.index').length, (n) => n >= 2)
+  expect.that('telemetry: index ownership and memory were recorded', traces.filter((t) => t.name === 'replica.index'), (rows) => rows.every(t => t.attributes?.index_pid > 0 && t.attributes?.index_rss > t.attributes?.bytes))
   expect.that('telemetry: the delete names its reason', traces.filter((t) => t.name === 'replica.delete').map((t) => t.attributes?.reason), (r) => r.includes('withdrawn'))
   const logs = /** @type {any[]} */ (await expect.logs())
   expect.that('telemetry: the source logged its start', logs.some((l) => l.body === 'fastask.source_started' || l.attributes?.event === 'fastask.source_started' || JSON.stringify(l).includes('fastask.source_started')), (v) => v === true)

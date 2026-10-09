@@ -5,7 +5,7 @@ import { abortableSleep } from '../../../../src/core/util/backoff.js'
 import { compareStrings } from '../../../../src/core/util/compare_strings.js'
 
 /**
- * @import { EvidenceEntry, EvidenceMcpClient, EvidencePart, EvidenceResult, EvidenceStatus, Lead, LeadEvidence, PlannedEntry } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { EvidenceEntry, EvidenceMcpClient, EvidencePart, EvidenceResult, EvidenceStatus, Lead, LeadEvidence, PlannedEntry } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

@@ -37,7 +37,7 @@ async function report(t, { live, line = LINE }) {
     healthyAt: new Date().toISOString(),
     uptimeMs: 0,
     sources: [
-      { name: 'team-graph-replica', plugin: '@hypaware/fastask', state: 'started', details: { summary_line: line, listen_port: 1 }, health: { state: 'ready', message: String(line) } },
+      { name: 'team-graph-replica', plugin: '@hypaware/graph-cache', state: 'started', details: { summary_line: line, listen_port: 1 }, health: { state: 'ready', message: String(line) } },
       { name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started', details: { listen_port: 2 } },
     ],
     sinks: [],

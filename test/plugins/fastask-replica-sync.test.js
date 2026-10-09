@@ -14,9 +14,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { Writable } from 'node:stream'
 
-import { MAX_POLL_SECONDS, createReplicaSync, manifestProblem, pollDelayMs } from '../../hypaware-core/plugins-workspace/fastask/src/replica_sync.js'
-import { replicaKey, replicaPaths, replicasRoot } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
-import { deriveSnapshotEndpoint } from '../../hypaware-core/plugins-workspace/fastask/src/snapshot_client.js'
+import { MAX_POLL_SECONDS, createReplicaSync, manifestProblem, pollDelayMs } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_sync.js'
+import { replicaKey, replicaPaths, replicasRoot } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_store.js'
+import { deriveSnapshotEndpoint } from '../../hypaware-core/plugins-workspace/graph-cache/src/snapshot_client.js'
 import { generatedGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
 
 /**
@@ -597,7 +597,7 @@ test('the snapshot endpoint derives from the registered target URL', () => {
 })
 
 test('leave never touches the replica: the plugin reads no central enrollment (LLP 0482)', () => {
-  const dir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'hypaware-core', 'plugins-workspace', 'fastask', 'src')
+  const dir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'hypaware-core', 'plugins-workspace', 'graph-cache', 'src')
   for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.js'))) {
     const source = fs.readFileSync(path.join(dir, name), 'utf8')
     assert.ok(!/readCentralEnrollment|central\/src/.test(source), `${name} must not consult central enrollment`)

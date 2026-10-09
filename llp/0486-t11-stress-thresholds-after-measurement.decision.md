@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** [LLP 0490](./0490-connected-clients-get-graph-cache-with-isolated-indexes.decision.md)
 **Systems:** Daemon, Graph
 **Author:** HypForge designer
 **Date:** 2026-10-09

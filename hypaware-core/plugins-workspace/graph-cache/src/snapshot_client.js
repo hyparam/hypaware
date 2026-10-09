@@ -11,7 +11,7 @@ import { PROTOCOL_MAJOR } from './contract.js'
 
 /**
  * @import { ReadableStream } from 'node:stream/web'
- * @import { DownloadOutcome, ReplicaTarget, SnapshotAnswer } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { DownloadOutcome, ReplicaTarget, SnapshotAnswer } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /** Manifests are a few kilobytes; anything near this is not a manifest. */

@@ -11,7 +11,7 @@ import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { createGzip } from 'node:zlib'
 
-import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
+import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../../hypaware-core/plugins-workspace/graph-cache/src/contract.js'
 
 /** The measured graph (LLP 0480#index). */
 export const MEASURED_NODES = 142_766

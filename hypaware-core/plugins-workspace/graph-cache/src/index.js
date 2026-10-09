@@ -9,13 +9,11 @@ import { DISCOVER_USAGE, NEIGHBORS_USAGE, SEARCH_USAGE, runTeamGraphDiscover, ru
  */
 
 /**
- * Activate `@hypaware/fastask`: the `team-graph-replica` source that keeps
- * the team graph replica and its warm index in the daemon, and the commands
- * that read it. The plugin stays out of default activation, so all of this
- * exists only behind an explicit `plugins[]` entry until the enabling task;
- * no skill text advertises it yet.
+ * Activate `@hypaware/graph-cache`: keep the team graph locally and expose
+ * the discovery, traversal and session evidence primitives agents choose.
+ * Central-server installs compose this plugin automatically.
  *
- * @ref LLP 0480#enablement [implements]: commands register on the integration branch only behind an explicit plugins[] entry; skills and default activation wait for enablement
+ * @ref LLP 0490#activation [implements]: graph-cache is automatic on connected clients, including upgrades
  * @ref LLP 0480#command-tree [implements]: graph replica sits beside graph project and compact; query evidence and query team-graph under query
  * @param {PluginActivationContext} ctx
  */

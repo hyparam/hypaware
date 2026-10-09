@@ -200,7 +200,8 @@ test('without team-graph commands, the guard routes to tools that exist and neve
     const named = [...guard.matchAll(/`hyp (query [a-z][a-z-]*(?: [a-z][a-z-]*)?)[^`]*`/g)].map((m) => m[1]).filter((name) => name !== 'query team-graph')
     assert.deepEqual(named.sort(), ['query graph neighbors', 'query grep', 'query sql'], `${client}: the guard's fallbacks`)
     for (const name of named) assert.ok(known.has(name), `${client}: ${name} must exist without the plugin`)
-    assert.match(guard, /Tell the user once that rerunning `hyp setup` enables team-graph exploration/)
+    assert.match(guard, /Connected installs enable `graph-cache` automatically on upgrade unless it was explicitly disabled/)
+    assert.match(guard, /do not run `hyp setup` yourself or override a disable/)
   }
 
   // No sentence in any shipped skill has the agent run setup: a mention that

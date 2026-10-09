@@ -5,7 +5,7 @@ import { deriveIdentityBase, readCredentials, remoteTokenEnvVar, resolveAccessJw
 
 /**
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

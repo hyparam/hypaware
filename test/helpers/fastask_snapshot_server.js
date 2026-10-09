@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { pipeline } from 'node:stream/promises'
 import { createGzip, gzipSync } from 'node:zlib'
 
-import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
+import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../../hypaware-core/plugins-workspace/graph-cache/src/contract.js'
 
 /**
  * @import { AddressInfo } from 'node:net'

@@ -4,7 +4,7 @@ import { EVIDENCE_PART_TYPES, EVIDENCE_ROLES, MAX_TEXT_CHARS, WINDOW_MS } from '
 import { MAX_TERMS } from './discovery.js'
 
 /**
- * @import { SearchHit, SearchResult, SearchSession } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { SearchHit, SearchResult, SearchSession } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /** Candidate sessions one search takes (LLP 0487#decision). */

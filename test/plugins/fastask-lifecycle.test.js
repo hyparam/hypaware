@@ -19,12 +19,12 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { runRemoteRemove } from '../../src/core/cli/remote_commands.js'
 import { writeSession, writeToken } from '../../src/core/remote/credentials.js'
 import { pluginStateDir } from '../../src/core/runtime/paths.js'
-import { readLocalReplica } from '../../hypaware-core/plugins-workspace/fastask/src/cold_replica.js'
-import { runReplicaStatus } from '../../hypaware-core/plugins-workspace/fastask/src/commands.js'
-import { createReplicaSource } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
-import { credentialFingerprint } from '../../hypaware-core/plugins-workspace/fastask/src/replica_sync.js'
-import { replicasRoot } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
-import { createDefaultTargetResolver } from '../../hypaware-core/plugins-workspace/fastask/src/replica_target.js'
+import { readLocalReplica } from '../../hypaware-core/plugins-workspace/graph-cache/src/cold_replica.js'
+import { runReplicaStatus } from '../../hypaware-core/plugins-workspace/graph-cache/src/commands.js'
+import { createReplicaSource } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_source.js'
+import { credentialFingerprint } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_sync.js'
+import { replicasRoot } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_store.js'
+import { createDefaultTargetResolver } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_target.js'
 import { generatedGeneration, pinnedGeneration, startSnapshotServer } from '../helpers/fastask_snapshot_server.js'
 
 /**
@@ -48,7 +48,7 @@ async function world(t) {
   const other = await startSnapshotServer()
   team.publish(pinnedGeneration())
   const stateRoot = path.join(hypHome, 'hypaware')
-  const pluginDir = pluginStateDir(stateRoot, '@hypaware/fastask')
+  const pluginDir = pluginStateDir(stateRoot, '@hypaware/graph-cache')
   const configPath = path.join(hypHome, 'hypaware-config.json')
   const env = { HYP_HOME: hypHome, HYP_CONFIG: configPath, HOME: hypHome }
   const clock = { now: T0 }
@@ -59,7 +59,7 @@ async function world(t) {
   const writeConfig = (defaultRemote) => fs.writeFileSync(configPath, JSON.stringify({
     version: 2,
     auto_update: false,
-    plugins: [{ name: '@hypaware/fastask' }],
+    plugins: [{ name: '@hypaware/graph-cache' }],
     query: { default_remote: defaultRemote, remotes: { team: { url: team.url }, other: { url: other.url } } },
   }))
   writeConfig('team')
@@ -231,12 +231,15 @@ test('hyp remote remove deletes the target\'s replica at once, and nothing bring
   await w.daemon()
   await w.stopDaemon()
   assert.equal(w.replicaDirs().length, 1)
+  const legacy = pluginStateDir(w.stateRoot, '@hypaware/fastask')
+  fs.cpSync(w.pluginDir, legacy, { recursive: true })
   /** @type {string[]} */
   const out = []
   const ctx = /** @type {any} */ ({ env: w.env, config: JSON.parse(fs.readFileSync(w.configPath, 'utf8')), stdout: { write: (/** @type {string} */ s) => { out.push(s); return true } }, stderr: { write() { return true } } })
   assert.equal(await runRemoteRemove(['team'], ctx), 0)
   assert.match(out.join(''), /and its team graph replica/)
   assert.deepEqual(w.replicaDirs(), [])
+  assert.deepEqual(fs.readdirSync(path.join(legacy, 'replicas')), [])
   await w.daemon()
   assert.deepEqual(w.replicaDirs(), [], 'no login, no replica')
 })

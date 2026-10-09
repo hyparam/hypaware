@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "@hypaware/fastask",
+  "name": "@hypaware/graph-cache",
   "version": "1.0.0",
   "description": "Team graph replica and the team graph and evidence commands agents use to explore a team's history.",
   "hypaware_api": "^1.0.0",
@@ -11,9 +11,6 @@
     "network",
     "read_state",
     "write_state"
-  ],
-  "compose_with": [
-    "@hypaware/ai-gateway"
   ],
   "contributes": {
     "sources": [
@@ -38,7 +35,7 @@
         "name": "query evidence",
         "category": "explore-share",
         "audience": "everyday",
-        "summary": "Read original session text from a team server (session_evidence); used by fastask follow-ups"
+        "summary": "Read original session text from a team server (session_evidence)"
       },
       {
         "name": "query team-graph discover",

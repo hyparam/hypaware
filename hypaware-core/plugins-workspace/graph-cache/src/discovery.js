@@ -4,7 +4,7 @@ import { compareStrings } from '../../../../src/core/util/compare_strings.js'
 import { MIN_TOKEN, PLACEHOLDER, basenameOf, isAbsolute, lastSegments, repoOfKey, splitTokens } from './index_builder.js'
 
 /**
- * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Neighbor, NeighborNode, NeighborsInput, NeighborsResult, NeighborsStart, Term, VocabularyMismatch } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { Anchor, AnchorMatch, DiscoveryGroup, DiscoveryInput, DiscoveryResult, GraphIndex, Lead, LeadReason, Neighbor, NeighborNode, NeighborsInput, NeighborsResult, NeighborsStart, Term, VocabularyMismatch } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

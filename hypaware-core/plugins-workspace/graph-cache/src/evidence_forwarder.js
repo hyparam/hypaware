@@ -6,7 +6,7 @@ import { discardBody } from '../../../../src/core/util/backoff.js'
 import { EVIDENCE_MAX_RESPONSE_BYTES } from './evidence.js'
 
 /**
- * @import { EvidenceForwardResult, EvidenceSessionRecord, ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { EvidenceForwardResult, EvidenceSessionRecord, ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 const PROTOCOL_VERSION = '2025-06-18'

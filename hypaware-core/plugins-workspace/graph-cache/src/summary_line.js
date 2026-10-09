@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { ReplicaStatus } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { ReplicaStatus } from '../../../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 /**

@@ -46,7 +46,7 @@ export async function run({ harness, expect }) {
   await fs.writeFile(configPath, JSON.stringify({
     version: 2,
     auto_update: false,
-    plugins: [{ name: '@hypaware/fastask' }],
+    plugins: [{ name: '@hypaware/graph-cache' }],
     query: { default_remote: 'fx', remotes: { fx: { url: server.url } } },
   }))
   const repo = path.join(harness.tmpDir, 'fx-repo')

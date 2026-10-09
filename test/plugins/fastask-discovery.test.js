@@ -11,11 +11,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { MAX_ANCHORS, MAX_VISITS, discover, extractTerms, vocabularyMismatch } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
-import { buildIndexFromSnapshot, createIndexBuilder } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
+import { MAX_ANCHORS, MAX_VISITS, discover, extractTerms, vocabularyMismatch } from '../../hypaware-core/plugins-workspace/graph-cache/src/discovery.js'
+import { buildIndexFromSnapshot, createIndexBuilder } from '../../hypaware-core/plugins-workspace/graph-cache/src/index_builder.js'
 
 /**
- * @import { GraphIndex } from '../../hypaware-core/plugins-workspace/fastask/src/types.js'
+ * @import { GraphIndex } from '../../hypaware-core/plugins-workspace/graph-cache/src/types.js'
  */
 
 const GRAPH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'contracts', 'graph-snapshot', 'v1')

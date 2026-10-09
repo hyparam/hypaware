@@ -1092,6 +1092,7 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
     migrateGrep: true,
+    migrateGraphCache: true,
   })
   const selection = selectBootPlugins({
     discovered: bundled,

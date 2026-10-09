@@ -724,10 +724,6 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
       // @ref LLP 0213#d1 [implements]: a config the gateway reaches carries the graph, whichever path wrote it
       { name: '@hypaware/context-graph' },
       { name: '@hypaware/ai-gateway-graph' },
-      // The team graph commands ride the gateway the same way: the shipped
-      // hypaware-query skill teaches them.
-      // @ref LLP 0489#new-installs [implements]: a new install carries the team graph commands its skill teaches
-      { name: '@hypaware/fastask' },
     ],
     sinks: {
       local: {

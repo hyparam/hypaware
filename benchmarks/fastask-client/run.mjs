@@ -19,8 +19,8 @@ import path from 'node:path'
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 
-import { discover } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
-import { IndexBuildError, MAX_INDEX_BYTES, buildIndexFromSnapshot } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
+import { discover } from '../../hypaware-core/plugins-workspace/graph-cache/src/discovery.js'
+import { IndexBuildError, MAX_INDEX_BYTES, buildIndexFromSnapshot } from '../../hypaware-core/plugins-workspace/graph-cache/src/index_builder.js'
 import { MEASURED_EDGES, MEASURED_NODES, generate } from './generate.mjs'
 
 const SELF = fileURLToPath(import.meta.url)

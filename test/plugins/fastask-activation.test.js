@@ -1,8 +1,8 @@
 // @ts-check
 
-// @hypaware/fastask after enablement (LLP 0481 T14, LLP 0480#enablement):
-// bundled in the default set and composed with the gateway it serves (a
-// compose_with rider, LLP 0213), so a set-up config carries it; its entry
+// @hypaware/graph-cache after enablement (LLP 0481 T14, LLP 0480#enablement):
+// bundled in the default set and enabled for connected clients by migration
+// (LLP 0490), preserving explicit entries during setup; its entry
 // registers the source and the commands, the deferred planner stays
 // unregistered (LLP 0488), and the query evidence verb stays off the MCP
 // surface.
@@ -22,24 +22,30 @@ import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 test('fastask is bundled, in default activation, and declares its source and commands', async () => {
   const catalog = await discoverBundledPlugins()
   assert.equal(catalog.failed.length, 0)
-  assert.ok(!V1_EXCLUDED_FROM_DEFAULT.has('@hypaware/fastask'))
-  assert.ok(!catalog.excluded.some((e) => e.manifest.name === '@hypaware/fastask'))
-  const entry = catalog.loaded.find((e) => e.manifest.name === '@hypaware/fastask')
+  assert.ok(!V1_EXCLUDED_FROM_DEFAULT.has('@hypaware/graph-cache'))
+  assert.ok(!catalog.excluded.some((e) => e.manifest.name === '@hypaware/graph-cache'))
+  const entry = catalog.loaded.find((e) => e.manifest.name === '@hypaware/graph-cache')
   assert.ok(entry)
   assert.deepEqual(entry.manifest.contributes?.sources, [{ name: 'team-graph-replica' }])
   assert.deepEqual(entry.manifest.contributes?.commands?.map((c) => c.name), ['graph replica status', 'graph replica refresh', 'query evidence', 'query team-graph discover', 'query team-graph neighbors', 'query team-graph search'])
 })
 
-test('a set-up config composes fastask with the gateway, and not without it', async () => {
+test('local-only setup does not compose graph-cache or override a prior disable', async () => {
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   /** @param {any[]} sources */
   const compose = (sources) => (composePickerConfig({
     sources, descriptors: catalog.pickerDescriptors, exportChoice: 'local-parquet', retentionDays: 30, hypHome: '/home/tester/.hyp', composeWith: catalog.composeWith ?? new Map(),
   }).plugins ?? []).map((p) => p.name)
-  assert.ok(compose(['claude']).includes('@hypaware/fastask'), 'rides the claude gateway pick')
-  assert.ok(compose(['codex']).includes('@hypaware/fastask'), 'rides the codex gateway pick')
-  assert.ok(!compose(['otel']).includes('@hypaware/fastask'), 'not without the gateway')
+  assert.ok(!compose(['claude']).includes('@hypaware/graph-cache'))
+  assert.ok(!compose(['codex']).includes('@hypaware/graph-cache'))
+  assert.equal(catalog.composeWith?.has('@hypaware/graph-cache'), false)
+  const disabled = composePickerConfig({
+    sources: ['claude'], descriptors: catalog.pickerDescriptors, exportChoice: 'local-parquet', retentionDays: 30, hypHome: '/home/tester/.hyp', composeWith: catalog.composeWith,
+    existing: { version: 2, plugins: [{ name: '@hypaware/graph-cache', enabled: false }] },
+  })
+  assert.deepEqual(disabled.plugins?.find(p => p.name === '@hypaware/graph-cache'), { name: '@hypaware/graph-cache', enabled: false })
+  assert.ok(!compose(['otel']).includes('@hypaware/graph-cache'), 'not without the gateway')
 })
 
 test('its config entry registers the source and the commands, without the planner', async (t) => {
@@ -48,12 +54,12 @@ test('its config entry registers the source and the commands, without the planne
   const configPath = path.join(hypHome, 'hypaware-config.json')
   const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath }
 
-  await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, plugins: [{ name: '@hypaware/fastask' }] }))
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, auto_update: false, plugins: [{ name: '@hypaware/graph-cache' }] }))
   const explicit = await bootKernel({ hypHome, configPath, env })
-  const activation = explicit.activations.find((a) => a.plugin.name === '@hypaware/fastask')
+  const activation = explicit.activations.find((a) => a.plugin.name === '@hypaware/graph-cache')
   assert.equal(activation?.ok, true)
   assert.deepEqual(explicit.runtime.sources.list().map((s) => s.name), ['team-graph-replica'])
-  const commands = explicit.runtime.commands.list().filter((c) => c.plugin === '@hypaware/fastask').map((c) => c.name).sort()
+  const commands = explicit.runtime.commands.list().filter((c) => c.plugin === '@hypaware/graph-cache').map((c) => c.name).sort()
   // The planner is deferred (LLP 0488#planner-deferred): not registered.
   assert.deepEqual(commands, ['graph replica refresh', 'graph replica status', 'query evidence', 'query team-graph discover', 'query team-graph neighbors', 'query team-graph search'])
   const verb = explicit.runtime.verbs.list().find((v) => v.name === 'query evidence')

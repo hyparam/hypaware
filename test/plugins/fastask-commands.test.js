@@ -33,11 +33,11 @@ import { canonicalOrigin } from '../../src/core/remote/builtin_remotes.js'
 import { pluginStateDir } from '../../src/core/runtime/paths.js'
 import {
   DEFAULT_BUDGET_MS, EVIDENCE_NEEDS_REMOTE, parseFastaskArgs, renderEvidenceText, runFastask, runQueryEvidence, runReplicaRefresh, runReplicaStatus,
-} from '../../hypaware-core/plugins-workspace/fastask/src/commands.js'
-import { discover } from '../../hypaware-core/plugins-workspace/fastask/src/discovery.js'
-import { createIndexBuilder } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
-import { DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE } from '../../hypaware-core/plugins-workspace/fastask/src/replica_source.js'
-import { replicaKey } from '../../hypaware-core/plugins-workspace/fastask/src/replica_store.js'
+} from '../../hypaware-core/plugins-workspace/graph-cache/src/commands.js'
+import { discover } from '../../hypaware-core/plugins-workspace/graph-cache/src/discovery.js'
+import { createIndexBuilder } from '../../hypaware-core/plugins-workspace/graph-cache/src/index_builder.js'
+import { DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE, SOURCE_NAME, TOKEN_FILE } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_source.js'
+import { replicaKey } from '../../hypaware-core/plugins-workspace/graph-cache/src/replica_store.js'
 
 const FIXTURE = path.join(import.meta.dirname, '..', 'fixtures', 'contracts', 'graph-snapshot', 'v1')
 const readNdjson = (/** @type {string} */ name) => fs.readFileSync(path.join(FIXTURE, name), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
@@ -72,7 +72,7 @@ function home(t, opts = {}) {
   /** @type {NodeJS.ProcessEnv} */
   const env = { HYP_HOME: hypHome, HYP_CONFIG: configPath, ...(opts.url && opts.login !== false ? { HYP_REMOTE_TOKEN_FX: 'fx-token' } : {}) }
   const stateRoot = path.join(hypHome, 'hypaware')
-  const pluginDir = pluginStateDir(stateRoot, '@hypaware/fastask')
+  const pluginDir = pluginStateDir(stateRoot, '@hypaware/graph-cache')
   return { hypHome, configPath, config, env, repo, stateRoot, pluginDir }
 }
 
@@ -230,7 +230,7 @@ async function fakeDaemon(t, h, opts = {}) {
   writePidFile(h.stateRoot, { pid: process.pid, startedAt: new Date().toISOString(), runId: 'fake', mode: 'foreground' })
   writeStatusFile(h.stateRoot, /** @type {any} */ ({
     state: 'healthy', pid: process.pid, startedAt: new Date().toISOString(), healthyAt: new Date().toISOString(), uptimeMs: 1, runId: 'fake', mode: 'foreground', sinks: [],
-    sources: [{ name: SOURCE_NAME, plugin: '@hypaware/fastask', state: 'running', details: {
+    sources: [{ name: SOURCE_NAME, plugin: '@hypaware/graph-cache', state: 'running', details: {
       ...replica, summary_line: 'team graph: synced, data as of 10 min ago, 2 KB', listen_host: '127.0.0.1', listen_port: port,
       control_routes: [DISCOVER_ROUTE, EVIDENCE_ROUTE, REFRESH_ROUTE],
     } }],
