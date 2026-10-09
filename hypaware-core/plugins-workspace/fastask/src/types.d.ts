@@ -370,3 +370,123 @@ export type EvidenceForwardResult =
   | { ok: true, result: any, round_trip_ms: number, reused: boolean, session: EvidenceSessionRecord }
   | { ok: false, kind: 'unsupported' | 'credential' | 'network', message: string, session: EvidenceSessionRecord }
   | { ok: false, kind: 'rpc', code: number, message: string, session: EvidenceSessionRecord }
+
+/** One `sessions` entry of a session_evidence request, before JSON encoding (server LLP 0557). */
+export interface EvidenceEntry {
+  session_id: string
+  from?: string
+  to?: string
+  message_ids?: string[]
+  order: 'asc' | 'desc'
+  max_parts: number
+  cursor?: string
+}
+
+/** A planned entry and the lead it serves. */
+export interface PlannedEntry {
+  lead: number
+  kind: 'window' | 'message'
+  entry: EvidenceEntry
+}
+
+/** One part as fastask keeps it: the fields its output shows. */
+export interface EvidencePart {
+  message_id: string
+  part_id: string
+  role: string
+  message_created_at: string | null
+  content_text: string | null
+  text_truncated: boolean
+}
+
+export type EvidenceStatus = 'ok' | 'partial' | 'deadline' | 'not_found' | 'invalid_cursor' | 'error' | 'not_requested'
+
+/** A lead's evidence after its entries are merged. */
+export interface LeadEvidence {
+  status: EvidenceStatus
+  parts: EvidencePart[]
+  /** The entry to send again for the next page, with its cursor; null when complete. */
+  continuation: EvidenceEntry | null
+  /** Human note for the status, e.g. the not_found wording. */
+  note: string | null
+}
+
+export type EvidenceFailureCode = 'invalid_request' | 'server_busy' | 'deadline' | 'transport'
+
+export interface EvidenceResult {
+  /** How the evidence was read: the verb, or per-session query_sql on a server without it. */
+  path: 'session_evidence' | 'query_sql'
+  /** "server without evidence index support" on the fallback path, else null. */
+  label: string | null
+  leads: LeadEvidence[]
+  /** Every lead read in full (no partial, deadline or error). */
+  complete: boolean
+  deadline_reached: boolean
+  received_through: string | null
+  read_path: string | null
+  /** A whole-request failure; leads then carry no parts. */
+  failure: { code: EvidenceFailureCode, message: string } | null
+  /** Capacity retries spent (at most one). */
+  retries: number
+}
+
+/** The minimal MCP client surface the evidence client uses (createHttpMcpClient or the daemon's forwarder). */
+export interface EvidenceMcpClient {
+  callTool(name: string, args?: Record<string, unknown>): Promise<any>
+}
+
+export interface FastaskTimings {
+  load: number
+  connect: number
+  discovery: number
+  evidence: number
+  total: number
+}
+
+export interface FastaskSource {
+  kind: 'team_replica' | 'team_server' | 'local'
+  path: 'warm' | 'cold' | 'team_server' | 'local'
+  remote: string | null
+  org: string | null
+  generation: string | null
+  watermark: string | null
+  watermark_age_s: number | null
+  replica_state: string | null
+  note: string | null
+}
+
+export interface FastaskOutputLead {
+  session_id: string
+  rank: number
+  group: string
+  why: Array<{ anchor: { type: 'File', key: string, match: string, proven: boolean }, edge: string, touched_at: string | null }>
+  session: SessionProps & { first_seen: string | null }
+  evidence: (Omit<LeadEvidence, 'continuation'> & { continuation: string | null }) | null
+}
+
+export interface FastaskFollowup {
+  why: string
+  command: string
+}
+
+/** The `fastask/1` JSON document (LLP 0480#output). */
+export interface FastaskOutput {
+  contract: 'fastask/1'
+  question: string
+  source: FastaskSource
+  leads: FastaskOutputLead[]
+  ambiguous: boolean
+  followups: FastaskFollowup[]
+  coverage: {
+    graph_visits: number
+    graph_truncated: boolean
+    unresolved_edges_met: number
+    evidence_received_through: string | null
+    evidence_read_path: string | null
+    evidence_path: 'session_evidence' | 'query_sql' | null
+    evidence_label: string | null
+    evidence_failure: { code: EvidenceFailureCode, message: string } | null
+    partial: boolean
+  }
+  timings_ms: FastaskTimings
+}
