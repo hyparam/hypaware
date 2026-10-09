@@ -25,11 +25,12 @@ const JSON_CT = { 'Content-Type': 'application/json' }
  * whatever the sender chose inside a daemon that runs for weeks.
  *
  * 64 MiB is the OTLP/HTTP specification's recommended default for the server,
- * and the default it recommends a client hold itself to before compression,
- * so a client on that default never sends a body this refuses. A client
- * configured above it can be refused, and loses that batch: a fixed bound is
- * chosen over a config key (LLP 0478). A smaller figure sized from local
- * samples refused a default 512-record SDK batch.
+ * and the default it recommends a client hold itself to before compression.
+ * Any request past it is refused and its batch lost, whichever producer sent
+ * it: an SDK whose batches are bounded by record count rather than bytes can
+ * reach it with large records, and a client may be configured above it. A
+ * fixed bound is chosen over a config key (LLP 0478). A smaller figure sized
+ * from local samples refused a default 512-record SDK batch.
  */
 // @ref LLP 0478#limit [implements]: the protocol's recommended limit, after decompression, fixed rather than configurable
 export const MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024

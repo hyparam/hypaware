@@ -19,8 +19,9 @@ chunk, then makes one contiguous copy, a string and the parsed object before
 the handler runs. A sender therefore chooses how much memory the daemon holds:
 on `f6db92db`, 8 KiB of gzip on the wire reached the handler as an 8 MiB body
 with HTTP 200, and a larger ratio is a matter of choosing the input. The
-listener only accepts loopback senders, but it lives in a daemon that runs for
-weeks, so one misbehaving local exporter can grow it without bound.
+listener binds to loopback by default (its `listen_host` can bind it to a
+network address), and it lives in a daemon that runs for weeks, so one
+misbehaving exporter can grow it without bound.
 
 This also falls short of the OTLP/HTTP specification, which says a server
 "MUST limit the size of the request body when parsing it, including after
@@ -47,10 +48,10 @@ the protocol, not from local samples.
 
 1. **64 MiB decoded, fixed (recommended).** The specification's recommended
    server default, and the same default it recommends clients hold themselves
-   to before compression, so a client on the default never sends a body the
-   server would refuse. The specification lets both sides configure a different
-   limit; a client configured above 64 MiB would be refused and lose that
-   batch. The 512-record SDK batch above fits with room
+   to before compression. Any producer that sends more is refused and loses
+   that batch, whether it was configured above the default or uses an SDK that
+   bounds batches by record count rather than bytes (the JavaScript SDK
+   0.223.0 does, so large enough records reach it on defaults). The 512-record SDK batch above fits with room
    for records up to about 128 KiB each. Peak memory per accepted request stays
    bounded (about twice the limit in buffers plus the string and parsed
    object), and compression bombs stop at the limit. No configuration key.
@@ -66,8 +67,8 @@ the protocol, not from local samples.
 ## Recommendation {#recommendation}
 
 Option 1. It closes the memory exposure and the specification gap, and it
-refuses nothing a client on the specification's default would send; only a
-client configured above 64 MiB is affected. If accepted, the
+refuses only requests larger than the specification's recommended default,
+from whichever producer sends them. If accepted, the
 implementation keeps PR #2557's mechanism (count decoded bytes, stop the
 decoder at the limit, discard the rest through the shared capped drain, answer
 413) and changes only the constant, with the reviewer's SDK reproduction as an

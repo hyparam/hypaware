@@ -22,8 +22,7 @@ and the sender gets HTTP 413. The limit is a fixed constant, not a config key.
 - The OTLP/HTTP specification requires a server to limit the request body
   "including after decompression", recommends 64 MiB as the default, and
   requires 413 when it is exceeded. It recommends the same 64 MiB default for
-  what a client sends before compression, so a client on that default never
-  sends a body this limit refuses.
+  what a client sends before compression.
 - 20 MiB, sized from single Claude items, was shown to refuse a default
   OpenTelemetry SDK batch (512 records of 48 KiB, about 24 MiB) that the
   listener accepted before. Limits for a generic OTLP source have to come from
@@ -42,9 +41,10 @@ need him. Phil was told and can overrule. Undoing it is a one-constant change.
 Peak memory for one accepted request is bounded: about twice the limit in
 buffers while the chunks are joined, plus the decoded string and parsed object.
 A body over 64 MiB is refused and, since 413 is not retried, its records are
-lost. A client on the specification's default does not send one, but the
-specification allows a client to be configured with a larger limit, and such a
-client loses any batch over 64 MiB. That is accepted as the compatibility
-boundary: the listener is a local loopback receiver, no known producer needs
+lost, whichever producer sent it: a client configured above the default, or
+one whose SDK bounds batches by record count rather than bytes (the
+JavaScript SDK 0.223.0 does) and sends large enough records. That is accepted
+as the compatibility boundary: the listener binds to loopback by default
+(`listen_host` can bind it to a network address), no known producer needs
 more, and a config key can be added if one does. Limits on
 concurrent requests and slow uploads are not part of this decision.
