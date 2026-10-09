@@ -17,10 +17,13 @@ import {
   BYTES_PER_ROW,
   IndexBuildError,
   MAX_INDEX_BYTES,
+  MAX_TYPES,
+  OTHER_TYPE,
   PLACEHOLDER,
   assertManifestFits,
   buildIndexFromSnapshot,
   createIndexBuilder,
+  rowProblem,
 } from '../../hypaware-core/plugins-workspace/fastask/src/index_builder.js'
 
 /**
@@ -32,12 +35,21 @@ const manifest = JSON.parse(fs.readFileSync(path.join(GRAPH, 'manifest.json'), '
 const nodesGz = fs.readFileSync(path.join(GRAPH, 'nodes.ndjson.gz'))
 const edgesGz = fs.readFileSync(path.join(GRAPH, 'edges.ndjson.gz'))
 
+/** The contract's required columns that tests do not care about. */
+const DEFAULTS = { source_dataset: 'ai_gateway_messages', projector: 'ai-gateway.t0', projector_version: 3 }
+
 /**
+ * Contract lines for `rows`, with the required provenance columns filled in
+ * (and a node's natural key from its id) unless a row sets them.
+ *
  * @param {Array<Record<string, unknown>>} rows
  * @param {ReadonlyArray<string>} columns
  */
 function gz(rows, columns) {
-  return gzipSync(rows.map((row) => `${encodeLine(row, columns)}\n`).join(''))
+  const complete = (/** @type {Record<string, unknown>} */ row) => columns === NODE_COLUMNS
+    ? { natural_key: row.node_id, ...DEFAULTS, ...row }
+    : { edge_id: `${row.src_id}-${row.dst_id}`, ...DEFAULTS, ...row }
+  return gzipSync(rows.map((row) => `${encodeLine(complete(row), columns)}\n`).join(''))
 }
 
 /**
@@ -178,6 +190,28 @@ test('the ceiling is 256 MB and the up-front check allows 100 bytes per manifest
   assert.throws(() => assertManifestFits({ files: { nodes: { rows: 1000 }, edges: { rows: 0 } } }, 99_999))
 })
 
+for (const distinct of [MAX_TYPES - 1, MAX_TYPES, 600]) {
+  test(`${distinct} distinct node and edge types: 254 named slots, then one shared overflow slot`, async () => {
+    const builder = createIndexBuilder()
+    for (let k = 0; k < distinct; k++) {
+      builder.addNode({ node_id: `n${k}`, node_type: `NodeType${k}`, natural_key: `k${k}` })
+      builder.addEdge({ edge_type: `edge_type_${k}`, src_id: `n${k}`, dst_id: 'n0', src_type: `NodeType${k}`, dst_type: 'NodeType0' })
+    }
+    const index = await builder.finish()
+    const named = Math.min(distinct, MAX_TYPES - 1)
+    for (const [names, counts, perType] of /** @type {const} */ ([[index.nodeTypes, index.nodeTypeCounts, index.nodeType], [index.edgeTypes, index.edgeTypeCounts, index.edgeType]])) {
+      assert.equal(names.length, distinct < MAX_TYPES ? distinct : MAX_TYPES)
+      assert.equal(names.includes(OTHER_TYPE), distinct >= MAX_TYPES)
+      if (distinct >= MAX_TYPES) {
+        assert.equal(names[MAX_TYPES - 1], OTHER_TYPE, 'the overflow slot is the last one')
+        assert.equal(counts[MAX_TYPES - 1], distinct - named, 'every type past the table counts there')
+        assert.equal(perType[perType.length - 1], MAX_TYPES - 1)
+      }
+      assert.equal(counts.reduce((a, b) => a + b, 0), distinct)
+    }
+  })
+}
+
 test('a manifest past the up-front bound is refused before anything is read', async () => {
   // About 2.7M rows: the running estimate would admit the first part of this
   // build, but at 100 bytes per row it is past 256 MB before a byte is read.
@@ -231,8 +265,44 @@ test('a single line longer than the ceiling is refused while still partial', asy
 })
 
 test('a line that is not JSON fails the build with invalid_line', async () => {
-  await assert.rejects(buildIndexFromSnapshot({ nodes: gzipSync('{"node_id":"a"}\nnot json\n'), edges: gz([], EDGE_COLUMNS) }),
+  const first = encodeLine({ node_id: 'a', node_type: 'File', natural_key: 'a', ...DEFAULTS }, NODE_COLUMNS)
+  await assert.rejects(buildIndexFromSnapshot({ nodes: gzipSync(`${first}\nnot json\n`), edges: gz([], EDGE_COLUMNS) }),
     (err) => err instanceof IndexBuildError && err.code === 'invalid_line' && /nodes line 2/.test(err.message))
+})
+
+test('every line is checked against the contract columns: names, order and kinds', () => {
+  const node = JSON.parse(fs.readFileSync(path.join(GRAPH, 'nodes.ndjson'), 'utf8').split('\n')[0])
+  const edge = JSON.parse(fs.readFileSync(path.join(GRAPH, 'edges.ndjson'), 'utf8').split('\n')[0])
+  assert.equal(rowProblem(node, NODE_COLUMNS), null)
+  assert.equal(rowProblem(edge, EDGE_COLUMNS), null)
+  // Every pinned line passes, including the one with every optional column null.
+  for (const [file, columns] of /** @type {const} */ ([['nodes.ndjson', NODE_COLUMNS], ['edges.ndjson', EDGE_COLUMNS]])) {
+    for (const line of fs.readFileSync(path.join(GRAPH, file), 'utf8').trim().split('\n')) assert.equal(rowProblem(JSON.parse(line), columns), null, line)
+  }
+  /** @param {(row: Record<string, unknown>) => Record<string, unknown>} change */
+  const with_ = (change) => rowProblem(change({ ...node }), NODE_COLUMNS)
+  const renamed = { ...node, renamed_node_id: node.node_id }
+  delete renamed.node_id
+  assert.equal(rowProblem(renamed, NODE_COLUMNS), 'column 1 is "node_type", expected node_id')
+  const { node_id: id, ...rest } = node
+  assert.equal(rowProblem({ node_type: rest.node_type, node_id: id, ...rest }, NODE_COLUMNS), 'column 1 is "node_type", expected node_id', 'order matters')
+  assert.equal(with_((r) => ({ ...r, extra: 1 })), 'extra column "extra"')
+  const short = { ...node }
+  delete short.projector_version
+  assert.equal(rowProblem(short, NODE_COLUMNS), 'missing column projector_version')
+  assert.equal(with_((r) => ({ ...r, node_id: null })), 'node_id holds null, not string')
+  assert.equal(with_((r) => ({ ...r, props: '{"a":1}' })), 'props holds string, not json or null', 'JSON held as a string is refused')
+  assert.equal(with_((r) => ({ ...r, first_seen: 1760000000000 })), 'first_seen holds number, not time or null')
+  assert.equal(with_((r) => ({ ...r, first_seen: '2026-08-31 22:35:40' })), 'first_seen holds string, not time or null')
+  assert.equal(with_((r) => ({ ...r, projector_version: 2.5 })), 'projector_version holds number, not int')
+  assert.equal(with_((r) => ({ ...r, label: null })), null, 'label may be null')
+})
+
+test('a digest-valid line that breaks the contract fails the build with schema_violation', async () => {
+  const lines = fs.readFileSync(path.join(GRAPH, 'edges.ndjson'), 'utf8').trim().split('\n')
+  lines[2] = lines[2].replace('"edge_type":', '"kind":')
+  await assert.rejects(buildIndexFromSnapshot({ nodes: nodesGz, edges: gzipSync(`${lines.join('\n')}\n`) }),
+    (err) => err instanceof IndexBuildError && err.code === 'schema_violation' && err.message === 'edges line 3: column 2 is "kind", expected edge_type')
 })
 
 test('a truncated gzip stream fails the build instead of yielding a partial index', async () => {
