@@ -405,6 +405,131 @@ test('a static token learns its org from the manifest and drops the replica when
   assert.deepEqual(list(paths().generations), ['1760000500000-1'])
 })
 
+test('a swapped static token gets one unconditional check; same org and generation keeps everything', async (t) => {
+  const { sync, server, tokens } = await setup(t, { org: null })
+  await sync.syncOnce()
+  const downloads = server.dataRequests().length
+  tokens.value = 'tok-rotated'
+  server.state.acceptedToken = 'tok-rotated'
+  const { status } = await sync.syncOnce()
+  assert.equal(server.requests.at(-1)?.ifNoneMatch, null, 'the changed credential is checked unconditionally')
+  assert.equal(status.state, 'synced')
+  assert.equal(status.generation, pinnedGeneration().manifest.generation)
+  assert.equal(server.dataRequests().length, downloads, 'same org and generation: nothing downloaded')
+  await sync.syncOnce()
+  assert.equal(server.requests.at(-1)?.ifNoneMatch, `"${pinnedGeneration().manifest.generation}"`, 'once recorded, checks are conditional again')
+})
+
+test('a token swapped to another org cannot keep the old replica through a colliding generation id', async (t) => {
+  const { sync, server, tokens, paths } = await setup(t, { org: null })
+  await sync.syncOnce()
+  // The other org's current generation happens to carry the same id.
+  const other = await generatedGeneration({ generation: pinnedGeneration().manifest.generation, nodeCount: 4 })
+  other.manifest.org = 'globex'
+  server.publish(other)
+  tokens.value = 'tok-globex'
+  server.state.acceptedToken = 'tok-globex'
+  const { status } = await sync.syncOnce()
+  assert.equal(server.requests.find((r) => r.authorization === 'Bearer tok-globex')?.ifNoneMatch, null)
+  assert.equal(status.org, 'globex')
+  assert.deepEqual(status.rows, { nodes: 4, edges: 2 }, 'the other org\'s generation replaced the old one')
+  assert.ok(fs.existsSync(path.join(paths().generations, pinnedGeneration().manifest.generation, 'manifest.json')))
+  const record = JSON.parse(fs.readFileSync(paths().record, 'utf8'))
+  assert.match(record.credential_fp, /^[0-9a-f]{16}$/)
+  assert.ok(!JSON.stringify(record).includes('tok-globex'), 'the token itself is never written')
+})
+
+test('a 200 this client cannot use does not renew the lease; the old generation expires on schedule', async (t) => {
+  const { sync, server, clock } = await setup(t)
+  await sync.syncOnce()
+  const lease = sync.status().lease_expires_at
+  clock.now += 3600_000
+  const next = await generatedGeneration({ generation: '1760000700000-1' })
+  next.manifest.schema.schema_version = 2
+  server.publish(next)
+  const unusable = await sync.syncOnce()
+  assert.equal(unusable.status.state, 'unsupported')
+  assert.equal(unusable.status.reason, 'format')
+  assert.equal(unusable.status.lease_expires_at, lease, 'lease still runs from the last usable check')
+  assert.equal(unusable.status.servable, true, 'the old generation serves until then')
+  clock.now = Date.parse(/** @type {string} */ (lease)) + 1000
+  const expired = await sync.syncOnce()
+  assert.equal(expired.status.state, 'expired')
+  assert.equal(expired.status.reason, 'format', 'why it could not be refreshed stays visible')
+  assert.equal(expired.status.generation, null)
+})
+
+test('a new generation that cannot be activated leaves the lease unrenewed (LLP 0483#lease-renewal)', async (t) => {
+  /** @type {Array<[string, (ctx: Awaited<ReturnType<typeof setup>>, refuseBuild: { value: boolean }) => void, string]>} */
+  const cases = [
+    ['failed verification', (ctx) => {
+      ctx.server.state.onData = (req, res, info) => {
+        const corrupt = Buffer.from(info.bytes)
+        corrupt[corrupt.length >> 1] ^= 0x01
+        res.writeHead(200, { 'content-length': String(corrupt.length) })
+        res.end(corrupt)
+        return true
+      }
+    }, 'verify_failed'],
+    ['refused index build', (ctx, refuseBuild) => { refuseBuild.value = true }, 'activate_failed'],
+  ]
+  for (const [label, arrange, reason] of cases) {
+    const refuseBuild = { value: false }
+    const ctx = await setup(t, { syncOpts: { hooks: { async beforeActivate() { if (refuseBuild.value) throw new Error('index build refused') } } } })
+    await ctx.sync.syncOnce()
+    const lease = ctx.sync.status().lease_expires_at
+    ctx.clock.now += 3600_000
+    ctx.server.publish(await generatedGeneration({ generation: '1760000800000-1' }))
+    arrange(ctx, refuseBuild)
+    const failed = await ctx.sync.syncOnce()
+    assert.equal(failed.status.state, 'stale', label)
+    assert.equal(failed.status.reason, reason, label)
+    assert.equal(failed.status.lease_expires_at, lease, `${label}: lease not renewed`)
+    ctx.clock.now = Date.parse(/** @type {string} */ (lease)) + 1000
+    const expired = await ctx.sync.syncOnce()
+    assert.equal(expired.status.state, 'expired', `${label}: expires at the old lease end`)
+  }
+})
+
+test('replica_too_large leaves the lease unrenewed', async (t) => {
+  const { sync, server, clock } = await setup(t, { syncOpts: { maxReplicaBytes: 2000 } })
+  await sync.syncOnce()
+  const lease = sync.status().lease_expires_at
+  clock.now += 3600_000
+  server.publish(await generatedGeneration({ generation: '1760000900000-1', nodeCount: 3000 }))
+  const { status } = await sync.syncOnce()
+  assert.equal(status.reason, 'replica_too_large')
+  assert.equal(status.lease_expires_at, lease)
+})
+
+test('an oidc session keeps its fingerprint across hourly JWTs; a new session checks unconditionally once', async (t) => {
+  /** @param {string} sid @param {number} n */
+  const jwt = (sid, n) => ['e30', Buffer.from(JSON.stringify({ sid, n })).toString('base64url'), 'sig'].join('.')
+  const { sync, server, tokens } = await setup(t)
+  tokens.value = jwt('session-1', 1)
+  server.state.acceptedToken = tokens.value
+  await sync.syncOnce()
+  tokens.value = jwt('session-1', 2)
+  server.state.acceptedToken = tokens.value
+  await sync.syncOnce()
+  assert.notEqual(server.requests.at(-1)?.ifNoneMatch, null, 'a re-minted JWT of the same session stays conditional')
+  tokens.value = jwt('session-2', 1)
+  server.state.acceptedToken = tokens.value
+  const relogin = await sync.syncOnce()
+  assert.equal(server.requests.at(-1)?.ifNoneMatch, null, 'a new session is checked unconditionally')
+  assert.equal(relogin.status.state, 'synced')
+})
+
+test('400 unsupported_protocol does not renew the lease either', async (t) => {
+  const { sync, server, clock } = await setup(t)
+  await sync.syncOnce()
+  const lease = sync.status().lease_expires_at
+  clock.now += 3600_000
+  server.state.answer = '400-unsupported_protocol'
+  const { status } = await sync.syncOnce()
+  assert.equal(status.lease_expires_at, lease)
+})
+
 test('overlapping refreshes coalesce into one check', async (t) => {
   const { sync, server } = await setup(t)
   const [a, b, c] = await Promise.all([sync.refresh(), sync.refresh(), sync.syncOnce()])

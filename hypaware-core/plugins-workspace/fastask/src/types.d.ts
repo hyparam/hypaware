@@ -80,6 +80,8 @@ export interface ReplicaRecord {
   lease_seconds: number | null
   lease_expires_at: string | null
   poll: { interval_seconds: number, jitter_seconds: number } | null
+  /** Static or env tokens only: first 16 hex of SHA-256 of the bearer last answered for, never the token. */
+  credential_fp: string | null
   last_check: string | null
   last_success: string | null
   last_error: { code: string, status: number | null, at: string } | null

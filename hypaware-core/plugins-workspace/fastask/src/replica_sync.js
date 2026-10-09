@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -195,12 +196,23 @@ export function createReplicaSync(opts) {
       setOutcome('expired', 'lease_expired')
     }
 
+    // Generation ids are unique only per org, so a token swapped to another
+    // org could match If-None-Match and keep renewing the old org's replica.
+    // The record keeps a fingerprint of the credential that last renewed the
+    // lease; a different one gets one unconditional check, and its answer
+    // decides (client LLP 0483#credential-change).
+    // @ref LLP 0480#replica [implements]: the replica belongs to one login; a changed credential must prove it still speaks for the held org
+    const credential = await credentialFingerprint(target)
+    const credentialChanged = credential !== null && record.generation !== null && record.credential_fp !== credential
+    const ctx = { target, endpoint, paths, credential, credentialChanged }
+
     const pass = await withSpan('replica.check', {
       [Attr.COMPONENT]: COMPONENT, [Attr.OPERATION]: 'replica.check', [Attr.PLUGIN]: PLUGIN,
     }, async (span) => {
-      const answer = await checkSnapshot({ target, endpoint, generation: record?.generation ?? null, fetchImpl, signal: deadline(CHECK_TIMEOUT_MS) })
+      const conditional = credentialChanged ? null : record?.generation ?? null
+      const answer = await checkSnapshot({ target, endpoint, generation: conditional, fetchImpl, signal: deadline(CHECK_TIMEOUT_MS) })
       span.setAttribute('answer', answerLabel(answer))
-      const result = await interpret(answer, { target, endpoint, paths })
+      const result = await interpret(answer, ctx)
       span.setAttribute('state', outcome.state)
       return result
     })
@@ -211,7 +223,7 @@ export function createReplicaSync(opts) {
    * Applies one check answer (server LLP 0554#responses) to the replica.
    *
    * @param {SnapshotAnswer} answer
-   * @param {{ target: ReplicaTarget, endpoint: string, paths: ReturnType<typeof replicaPaths> }} ctx
+   * @param {{ target: ReplicaTarget, endpoint: string, paths: ReturnType<typeof replicaPaths>, credential: string | null, credentialChanged: boolean }} ctx
    * @returns {Promise<ReplicaPassResult>}
    */
   async function interpret(answer, ctx) {
@@ -220,7 +232,7 @@ export function createReplicaSync(opts) {
     rec.last_check = checkedAt
 
     if (answer.kind === 'not_modified') {
-      renewLease(rec, answer.leaseSeconds, null)
+      renewLease(rec, answer.leaseSeconds, null, ctx.credential)
       return succeeded('synced', null)
     }
     if (answer.kind === 'manifest') {
@@ -256,29 +268,37 @@ export function createReplicaSync(opts) {
    *
    * @param {any} manifest
    * @param {number | null} leaseSeconds
-   * @param {{ target: ReplicaTarget, endpoint: string, paths: ReturnType<typeof replicaPaths> }} ctx
+   * @param {{ target: ReplicaTarget, endpoint: string, paths: ReturnType<typeof replicaPaths>, credential: string | null, credentialChanged: boolean }} ctx
    * @param {number} restarts
    * @returns {Promise<ReplicaPassResult>}
    */
   async function acceptManifest(manifest, leaseSeconds, ctx, restarts) {
     const rec = /** @type {ReplicaRecord} */ (record)
+    // Only an answer that confirms what this client serves renews the lease
+    // (client LLP 0483#lease-renewal): a 304 or a 200 naming the active
+    // generation, or the activation of a new one. A generation this client
+    // cannot activate leaves the old one serving only until the lease of the
+    // last renewing answer ends, so rows the server has since purged or
+    // withdrawn cannot linger in the replica for ever.
     const formatProblem = manifestProblem(manifest)
     if (formatProblem) {
-      // Not activated, but the check itself was authorized: the lease renews
-      // and an older generation keeps serving until it ends.
-      renewLease(rec, leaseSeconds, manifest)
       return settled('unsupported', 'format', 200, formatProblem, pollOf(rec))
     }
-    if (typeof manifest.org === 'string' && rec.org !== null && manifest.org !== rec.org) {
-      // A static or env token now speaks for another org: what is held belongs
-      // to the old one.
+    const sameOrg = typeof manifest.org === 'string' && manifest.org === rec.org
+    const keyChanged = (typeof manifest.org === 'string' && rec.org !== null && !sameOrg) ||
+      (ctx.credentialChanged && !(sameOrg && manifest.generation === rec.generation))
+    if (keyChanged && rec.generation !== null) {
+      // A swapped static or env token now speaks for another org, or cannot
+      // show that what is held is still its org's: treat it as a new key.
       await dropGenerations(ctx.paths, 'key_changed')
     }
     if (typeof manifest.org === 'string') rec.org = manifest.org
-    renewLease(rec, leaseSeconds, manifest)
     rec.poll = pollFrom(manifest)
 
-    if (manifest.generation === rec.generation) return succeeded('synced', null)
+    if (manifest.generation === rec.generation) {
+      renewLease(rec, leaseSeconds, manifest, ctx.credential)
+      return succeeded('synced', null)
+    }
 
     const total = Number(manifest.files.nodes.bytes) + Number(manifest.files.edges.bytes)
     if (!(total <= maxReplicaBytes)) {
@@ -323,7 +343,7 @@ export function createReplicaSync(opts) {
       await fs.promises.writeFile(path.join(staged, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 })
 
       await hooks.beforeActivate?.(staged, manifest)
-      await activate(ctx.paths, staged, manifest)
+      await activate(ctx.paths, staged, manifest, (next) => renewLease(next, leaseSeconds, manifest, ctx.credential))
       return succeeded('synced', null)
     } catch (err) {
       await removeTree(staged)
@@ -340,8 +360,9 @@ export function createReplicaSync(opts) {
    * @param {ReturnType<typeof replicaPaths>} paths
    * @param {string} staged
    * @param {any} manifest
+   * @param {(next: ReplicaRecord) => void} renew applied to the record before its commit write: activation is a renewing answer
    */
-  async function activate(paths, staged, manifest) {
+  async function activate(paths, staged, manifest, renew) {
     const rec = /** @type {ReplicaRecord} */ (record)
     const dirName = generationDirName(manifest.generation)
     await withSpan('replica.activate', {
@@ -358,6 +379,7 @@ export function createReplicaSync(opts) {
         published_at: manifest.published_at ?? null,
         rows: { nodes: manifest.files.nodes.rows, edges: manifest.files.edges.rows },
       }
+      renew(next)
       // The record write is the commit point: before it the old generation is
       // active (the promoted directory is pruned as unreferenced next pass),
       // after it the new one is.
@@ -450,7 +472,10 @@ export function createReplicaSync(opts) {
     const rec = /** @type {ReplicaRecord} */ (record)
     failures = 0
     rec.last_error = { code: code ?? reason, status, at: /** @type {string} */ (rec.last_check) }
-    setOutcome(state, reason)
+    // Once the lease has run out and nothing is held, the replica is expired
+    // whatever the server says next; the reason keeps what it said.
+    const keepExpired = state !== 'withdrawn' && rec.generation === null && outcome.state === 'expired'
+    setOutcome(keepExpired ? 'expired' : state, reason)
     return finish(poll)
   }
 
@@ -538,6 +563,45 @@ export function createReplicaSync(opts) {
 }
 
 /**
+ * The first 16 hex of SHA-256 over the credential's identity: enough to
+ * notice a swapped login, never the token itself. A login-session access JWT
+ * is re-minted every hour, so its stable identity is the session (`sid`
+ * claim, read without verification: it only names, never authorizes); any
+ * other bearer is its own identity. Null when no bearer resolves (the check
+ * then reports the credential problem).
+ *
+ * @param {ReplicaTarget} target
+ * @returns {Promise<string | null>}
+ */
+async function credentialFingerprint(target) {
+  try {
+    const resolved = await target.token(false)
+    if (!resolved.ok) return null
+    const sid = sessionId(resolved.token)
+    return createHash('sha256').update(sid === null ? resolved.token : `sid\0${sid}`).digest('hex').slice(0, 16)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The `sid` claim of a JWT-shaped bearer, or null.
+ *
+ * @param {string} token
+ * @returns {string | null}
+ */
+function sessionId(token) {
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
+    return claims && typeof claims.sid === 'string' && claims.sid ? claims.sid : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * @param {ReplicaTarget} target
  * @param {string} origin
  * @param {string} key
@@ -560,6 +624,7 @@ function emptyRecord(target, origin, key) {
     lease_seconds: null,
     lease_expires_at: null,
     poll: null,
+    credential_fp: null,
     last_check: null,
     last_success: null,
     last_error: null,
@@ -576,10 +641,12 @@ function emptyRecord(target, origin, key) {
  * @param {ReplicaRecord} rec
  * @param {number | null} headerSeconds
  * @param {any} manifest
+ * @param {string | null} credential fingerprint of the credential this answer came through
  */
-function renewLease(rec, headerSeconds, manifest) {
+function renewLease(rec, headerSeconds, manifest, credential) {
   const fromManifest = Number.isSafeInteger(manifest?.lease?.duration_seconds) ? manifest.lease.duration_seconds : null
   const seconds = headerSeconds ?? fromManifest ?? rec.lease_seconds
+  if (credential !== null) rec.credential_fp = credential
   if (seconds === null) return
   rec.lease_seconds = seconds
   rec.lease_expires_at = new Date(Date.parse(/** @type {string} */ (rec.last_check)) + seconds * 1000).toISOString()
