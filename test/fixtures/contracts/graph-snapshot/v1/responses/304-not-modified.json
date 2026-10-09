@@ -1,0 +1,10 @@
+{
+  "status": 304,
+  "headers": {
+    "etag": "\"1760000000000-7\"",
+    "cache-control": "private, no-cache",
+    "hyp-snapshot-lease": "259200",
+    "hyp-snapshot-poll": "900"
+  },
+  "body": null
+}

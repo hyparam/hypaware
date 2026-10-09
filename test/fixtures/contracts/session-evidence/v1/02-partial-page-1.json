@@ -1,0 +1,134 @@
+{
+  "case": "partial",
+  "summary": "The per-session allowance (max_parts 4) is reached with more rows left: status partial, truncated true and a next_cursor.",
+  "request": {
+    "contract": "hypaware.session-evidence/1",
+    "sessions": [
+      "{\"session_id\":\"fx-session-alpha\",\"chain_id\":null,\"from\":\"2026-08-31T09:59:00.000Z\",\"to\":\"2026-08-31T10:02:00.000Z\",\"message_ids\":null,\"order\":\"asc\",\"max_parts\":4,\"cursor\":null}"
+    ]
+  },
+  "response": {
+    "contract": "hypaware.session-evidence/1",
+    "server_version": "1.40.0",
+    "complete": false,
+    "deadline_reached": false,
+    "elapsed_ms": 41,
+    "sessions": [
+      {
+        "request_index": 0,
+        "session_id": "fx-session-alpha",
+        "status": "partial",
+        "parts": [
+          {
+            "session_id": "fx-session-alpha",
+            "conversation_id": "fx-conv-alpha",
+            "agent_id": null,
+            "chain_id": "fx-conv-alpha",
+            "is_sidechain": false,
+            "parent_thread_id": null,
+            "message_id": "fx-alpha-m01",
+            "part_id": "fx-alpha-m01#0",
+            "message_index": 0,
+            "part_index": 0,
+            "role": "user",
+            "part_type": "text",
+            "message_created_at": "2026-08-31T10:00:00.000Z",
+            "received_at": "2026-08-31T10:00:01.000Z",
+            "user_id": "fx-user-1",
+            "gateway_id": "fx-gateway-1",
+            "provider": "anthropic",
+            "model": null,
+            "tool_result_for": null,
+            "is_compact_summary": false,
+            "content_text": "Synthetic question one.",
+            "text_truncated": false
+          },
+          {
+            "session_id": "fx-session-alpha",
+            "conversation_id": "fx-conv-alpha",
+            "agent_id": null,
+            "chain_id": "fx-conv-alpha",
+            "is_sidechain": false,
+            "parent_thread_id": null,
+            "message_id": "fx-alpha-m02",
+            "part_id": "fx-alpha-m02#0",
+            "message_index": 1,
+            "part_index": 0,
+            "role": "assistant",
+            "part_type": "text",
+            "message_created_at": "2026-08-31T10:00:05.000Z",
+            "received_at": "2026-08-31T10:00:06.000Z",
+            "user_id": "fx-user-1",
+            "gateway_id": "fx-gateway-1",
+            "provider": "anthropic",
+            "model": "fx-model-1",
+            "tool_result_for": null,
+            "is_compact_summary": false,
+            "content_text": "Synthetic answer one.",
+            "text_truncated": false
+          },
+          {
+            "session_id": "fx-session-alpha",
+            "conversation_id": "fx-conv-alpha",
+            "agent_id": null,
+            "chain_id": "fx-conv-alpha",
+            "is_sidechain": false,
+            "parent_thread_id": null,
+            "message_id": "fx-alpha-m02",
+            "part_id": "fx-alpha-m02#1",
+            "message_index": 1,
+            "part_index": 1,
+            "role": "assistant",
+            "part_type": "tool_use",
+            "message_created_at": "2026-08-31T10:00:05.000Z",
+            "received_at": "2026-08-31T10:00:06.000Z",
+            "user_id": "fx-user-1",
+            "gateway_id": "fx-gateway-1",
+            "provider": "anthropic",
+            "model": "fx-model-1",
+            "tool_result_for": null,
+            "is_compact_summary": false,
+            "content_text": "{\"name\":\"fx_tool\",\"input\":{}}",
+            "text_truncated": false
+          },
+          {
+            "session_id": "fx-session-alpha",
+            "conversation_id": "fx-conv-alpha",
+            "agent_id": null,
+            "chain_id": "fx-conv-alpha",
+            "is_sidechain": false,
+            "parent_thread_id": null,
+            "message_id": "fx-alpha-m03",
+            "part_id": "fx-alpha-m03#0",
+            "message_index": 2,
+            "part_index": 0,
+            "role": "user",
+            "part_type": "tool_result",
+            "message_created_at": "2026-08-31T10:00:07.000Z",
+            "received_at": "2026-08-31T10:00:08.000Z",
+            "user_id": "fx-user-1",
+            "gateway_id": "fx-gateway-1",
+            "provider": "anthropic",
+            "model": null,
+            "tool_result_for": "fx-alpha-m02#1",
+            "is_compact_summary": false,
+            "content_text": "Synthetic tool output.",
+            "text_truncated": false
+          }
+        ],
+        "truncated": true,
+        "next_cursor": "fxcur-alpha-asc-p1",
+        "window": {
+          "from": "2026-08-31T09:59:00.000Z",
+          "to": "2026-08-31T10:02:00.000Z",
+          "bounds_source": "request"
+        },
+        "coverage": {
+          "received_through": "2026-10-09T02:00:00.000Z",
+          "read_path": "indexed",
+          "fallback_reason": null
+        }
+      }
+    ]
+  }
+}

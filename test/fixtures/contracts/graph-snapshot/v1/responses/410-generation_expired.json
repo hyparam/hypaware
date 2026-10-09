@@ -1,0 +1,10 @@
+{
+  "status": 410,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": "generation_expired",
+    "message": "This generation is no longer served. Read the manifest again."
+  }
+}

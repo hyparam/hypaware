@@ -1,0 +1,29 @@
+{
+  "case": "invalid_cursor",
+  "summary": "The cursor does not decode or does not match the entry. The entry is not read, so window and coverage are null.",
+  "request": {
+    "contract": "hypaware.session-evidence/1",
+    "sessions": [
+      "{\"session_id\":\"fx-session-alpha\",\"chain_id\":null,\"from\":\"2026-08-31T09:59:00.000Z\",\"to\":\"2026-08-31T10:02:00.000Z\",\"message_ids\":null,\"order\":\"asc\",\"max_parts\":4,\"cursor\":\"fxcur-not-a-cursor\"}"
+    ]
+  },
+  "response": {
+    "contract": "hypaware.session-evidence/1",
+    "server_version": "1.40.0",
+    "complete": false,
+    "deadline_reached": false,
+    "elapsed_ms": 1,
+    "sessions": [
+      {
+        "request_index": 0,
+        "session_id": "fx-session-alpha",
+        "status": "invalid_cursor",
+        "parts": [],
+        "truncated": false,
+        "next_cursor": null,
+        "window": null,
+        "coverage": null
+      }
+    ]
+  }
+}
