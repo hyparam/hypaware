@@ -409,9 +409,11 @@ export interface LeadEvidence {
   continuation: EvidenceEntry | null
   /** Human note for the status, e.g. the not_found wording. */
   note: string | null
+  /** Parts the server left out as too large to return (server LLP 0566); 0 when none. */
+  skipped_parts: number
 }
 
-export type EvidenceFailureCode = 'invalid_request' | 'server_busy' | 'deadline' | 'transport'
+export type EvidenceFailureCode = 'invalid_request' | 'server_busy' | 'deadline' | 'transport' | 'freshness_unavailable'
 
 export interface EvidenceResult {
   /** How the evidence was read: the verb, or per-session query_sql on a server without it. */
@@ -428,11 +430,13 @@ export interface EvidenceResult {
   failure: { code: EvidenceFailureCode, message: string } | null
   /** Capacity retries spent (at most one). */
   retries: number
+  /** Entries sent again alone after a no-part `partial` (server LLP 0565#client). */
+  resends: number
 }
 
 /** The minimal MCP client surface the evidence client uses (createHttpMcpClient or the daemon's forwarder). */
 export interface EvidenceMcpClient {
-  callTool(name: string, args?: Record<string, unknown>): Promise<any>
+  callTool(name: string, args?: Record<string, unknown>, opts?: { maxBytes?: number }): Promise<any>
 }
 
 export interface FastaskTimings {

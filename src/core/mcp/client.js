@@ -1,6 +1,7 @@
 // @ts-check
 
 import { safeText } from '../http_text.js'
+import { readBodyCapped } from '../util/backoff.js'
 
 /**
  * MCP **client** over Streamable HTTP: the consumer half of remote attach
@@ -47,10 +48,10 @@ export function createHttpMcpClient(opts) {
   /**
    * @param {string} method
    * @param {unknown} [params]
-   * @param {{ notify?: boolean }} [opts]
+   * @param {{ notify?: boolean, maxBytes?: number }} [opts]
    * @returns {Promise<any>}
    */
-  async function rpc(method, params, { notify = false } = {}) {
+  async function rpc(method, params, { notify = false, maxBytes } = {}) {
     const id = notify ? undefined : nextId++
     const body = {
       jsonrpc: '2.0',
@@ -80,7 +81,7 @@ export function createHttpMcpClient(opts) {
       // `status` lets a caller tell a capacity refusal (429) from other failures.
       throw Object.assign(new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`), { status: res.status })
     }
-    const message = await parseRpcResponse(res, id)
+    const message = await parseRpcResponse(res, id, { maxBytes, signal: opts.signal })
     if (message?.error) {
       throw new McpRpcError(method, message.error.code, message.error.message)
     }
@@ -101,9 +102,10 @@ export function createHttpMcpClient(opts) {
     /**
      * @param {string} name
      * @param {Record<string, unknown>} [args]
+     * @param {{ maxBytes?: number }} [callOpts] `maxBytes` bounds how much of the response body is read; past it the call fails
      */
-    async callTool(name, args) {
-      return rpc('tools/call', { name, arguments: args ?? {} })
+    async callTool(name, args, callOpts = {}) {
+      return rpc('tools/call', { name, arguments: args ?? {} }, { maxBytes: callOpts.maxBytes })
     },
     async listTools() {
       return rpc('tools/list', {})
@@ -205,13 +207,25 @@ function authRejectionError(status) {
  * SSE (`text/event-stream`) stream; handle both. Exported so the stdio
  * proxy ([proxy.js](./proxy.js)) shares one parser.
  *
+ * With `maxBytes`, the body is read through `readBodyCapped`: a body past the
+ * bound is cancelled and the call fails, so a caller expecting a bounded
+ * answer never buffers an unbounded one. Without it, reading is unchanged.
+ *
  * @param {any} res
  * @param {string | number | undefined} id
+ * @param {{ maxBytes?: number, signal?: AbortSignal }} [opts]
  * @returns {Promise<any>}
  */
-export async function parseRpcResponse(res, id) {
+export async function parseRpcResponse(res, id, opts = {}) {
   const contentType = res.headers?.get?.('content-type') ?? ''
-  const text = await res.text()
+  let text
+  if (opts.maxBytes !== undefined) {
+    const read = await readBodyCapped(res, opts.maxBytes, opts.signal)
+    if (!read.ok) throw Object.assign(new Error(`remote response exceeds ${opts.maxBytes} bytes`), { code: 'response_too_large' })
+    text = read.body
+  } else {
+    text = await res.text()
+  }
   if (contentType.includes('text/event-stream')) {
     const messages = parseSse(text)
     return pickById(messages, id) ?? messages[messages.length - 1]

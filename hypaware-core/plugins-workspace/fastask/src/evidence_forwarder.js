@@ -3,6 +3,7 @@
 import { McpRpcError, isAuthStatus, mcpRequestHeaders, parseRpcResponse } from '../../../../src/core/mcp/client.js'
 import { deriveMcpEndpoint } from '../../../../src/core/remote/credentials.js'
 import { discardBody } from '../../../../src/core/util/backoff.js'
+import { EVIDENCE_MAX_RESPONSE_BYTES } from './evidence.js'
 
 /**
  * @import { EvidenceForwardResult, EvidenceSessionRecord, ReplicaTarget } from '../../../../hypaware-core/plugins-workspace/fastask/src/types.js'
@@ -118,7 +119,8 @@ export function createEvidenceForwarder(opts = {}) {
       await discardBody(res)
       throw new Error(`MCP ${method}: HTTP ${res.status}`)
     }
-    const message = await parseRpcResponse(res, id)
+    // The daemon never buffers more than the server's capped answer (server LLP 0565#byte-cap).
+    const message = await parseRpcResponse(res, id, { maxBytes: EVIDENCE_MAX_RESPONSE_BYTES, signal })
     if (message?.error) throw new McpRpcError(method, message.error.code, message.error.message)
     return message?.result
   }
