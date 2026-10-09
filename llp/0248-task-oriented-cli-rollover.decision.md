@@ -10,6 +10,7 @@
 **Extended-by:** LLP 0446 (remove backfill planning; use import dry runs)
 **Extended-by:** LLP 0447 (#aliases: the client history import spelling is removed, not deferred)
 **Extended-by:** LLP 0398 (#one-question: `ask` loses its `--list` flag, since one question leaves nothing to list)
+**Extended-by:** LLP 0480 (#command-tree: `fastask` joins the canonical tree as a top-level journey beside `ask`)
 
 ## Context {#context}
 

@@ -1,0 +1,27 @@
+{
+  "manifest_200": {
+    "content-type": "application/json",
+    "etag": "\"1760000000000-7\"",
+    "cache-control": "private, no-cache",
+    "hyp-snapshot-lease": "259200",
+    "hyp-snapshot-poll": "900"
+  },
+  "not_modified_304": {
+    "etag": "\"1760000000000-7\"",
+    "cache-control": "private, no-cache",
+    "hyp-snapshot-lease": "259200",
+    "hyp-snapshot-poll": "900"
+  },
+  "nodes_200": {
+    "content-type": "application/gzip",
+    "content-length": "636",
+    "etag": "\"sha256:e52e795d0078dd18d94bcdd656ac5d904da5a91584314bfdf0b73205696dc082\"",
+    "cache-control": "private, max-age=31536000, immutable"
+  },
+  "edges_200": {
+    "content-type": "application/gzip",
+    "content-length": "548",
+    "etag": "\"sha256:953dcfb7d3ea9bb5e4656b8e266619e1767f72ecfb127df532ccee8faf1af3be\"",
+    "cache-control": "private, max-age=31536000, immutable"
+  }
+}

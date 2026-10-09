@@ -84,6 +84,14 @@ test('hypaware-query description names the natural session-search intents', () =
   }
 })
 
+test('hypaware-query description reaches a team\'s history on a remote', () => {
+  // LLP 0481 T14: the skill body routes team history questions to the team
+  // graph commands; the description has to admit that scope at all.
+  for (const client of CLIENTS) {
+    assert.match(readFrontmatter(client).description.toLowerCase(), /team remote/, `${client}: description does not cover a team remote`)
+  }
+})
+
 test('hypaware-query description keeps its original product vocabulary', () => {
   // Widening the routing surface must not drop the SQL/telemetry triggers the
   // description already carried.

@@ -46,6 +46,9 @@ const NUL = '\0'
  */
 const BINARY_EXTENSIONS = new Set([
   '.png',
+  // Gzip members always carry NULs (header flags and mtime). The pinned server
+  // contract fixtures ship the exact compressed bytes a client verifies.
+  '.gz',
 ])
 
 /**

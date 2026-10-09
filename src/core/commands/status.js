@@ -330,6 +330,10 @@ export function renderStatusSummary({ report, stdout }) {
   stdout.write(`  Sharing    ${report.layered?.hasCentral ? 'Organization sync configured' : 'No organization sync'}\n`)
   renderSharingNotices(report, stdout)
   if (report.selfUpdate?.line) stdout.write(`  ${printable(report.selfUpdate.line, MAX_ERROR_CHARS)}\n`)
+  for (const s of report.sources) {
+    const line = sourceSummaryLine(s)
+    if (line) stdout.write(`  ${line}\n`)
+  }
 
   stdout.write('\n  Clients                 Status                           Data\n')
   if (names.size === 0) stdout.write('    None configured\n')
@@ -533,6 +537,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // @ref LLP 0385#sources-state-is-a-verdict [implements]: --json is a machine rendering of this report, not a second data source with different epistemics
     sources: report.sources.map((s) => {
       const health = sourceHealthJson(sourceHealth(s.health))
+      const summary = summaryLineOf(s)
       return {
         name: s.name,
         plugin: s.plugin,
@@ -542,6 +547,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
           : {}),
         ...(s.error ? { error: s.error } : {}),
         ...(health ? { health } : {}),
+        ...(summary !== undefined ? { summary_line: summary } : {}),
       }
     }),
     sinks: report.sinks.map((s) => ({
@@ -777,6 +783,37 @@ function sourceHealthJson(health) {
 }
 
 /**
+ * A source's own one-line summary (`details.summary_line`), when it publishes
+ * one and is running. Unlike the health line, it prints in every state,
+ * healthy included: the first publisher is the team graph replica, whose
+ * data's age a person needs to see even when nothing is wrong. Any source may
+ * publish one. A source that is not running is skipped, because its line was
+ * written by a run that is gone and would describe a past state as current.
+ *
+ * @param {{ state?: string, details?: object }} source
+ * @returns {string | undefined} the raw recorded line, for --json
+ * @ref LLP 0480#status-line [implements]: a generic summary line, printed in every state; extends LLP 0394's quiet-when-healthy for this one line
+ */
+function summaryLineOf(source) {
+  if (source.state !== 'started') return undefined
+  const details = source.details
+  if (!details || typeof details !== 'object') return undefined
+  const line = /** @type {Record<string, unknown>} */ (details).summary_line
+  return typeof line === 'string' && line.trim() !== '' ? line : undefined
+}
+
+/**
+ * {@link summaryLineOf}, made safe for a terminal.
+ *
+ * @param {{ state?: string, details?: object }} source
+ * @returns {string | undefined}
+ */
+function sourceSummaryLine(source) {
+  const line = summaryLineOf(source)
+  return line === undefined ? undefined : printable(line, MAX_ERROR_CHARS) || undefined
+}
+
+/**
  * The one text line a source's own report earns, or nothing.
  *
  * Only a source saying something is wrong prints: a `lastError`, or a state
@@ -918,6 +955,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   } else {
     for (const s of report.sources) {
       stdout.write(`    - ${printable(s.name)}  (${printable(s.plugin)})  [${printable(s.state)}]${provenanceTag(report.layered, isCentralPlugin(report.layered, s.plugin))}\n`)
+      const summary = sourceSummaryLine(s)
+      if (summary) stdout.write(`        ${summary}\n`)
       const health = sourceHealthLine(sourceHealth(s.health))
       if (health) stdout.write(`        ${health}\n`)
     }
