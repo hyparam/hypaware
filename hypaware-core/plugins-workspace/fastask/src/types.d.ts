@@ -15,6 +15,8 @@ export type CompressedSource = Uint8Array | Iterable<Uint8Array> | AsyncIterable
 
 export interface SetDigest {
   add(line: string | Uint8Array): void
+  /** Adds a line by its SHA-256, for a caller that hashed it in pieces. */
+  addHash(digest: Buffer): void
   readonly rows: number
   hex(): string
 }
@@ -22,6 +24,17 @@ export interface SetDigest {
 export interface MeasuredFile {
   facts: SnapshotFileFacts
   problems: string[]
+  /** Why reading stopped early, when it did: a line passed `maxLineBytes`. */
+  refused: 'line_too_large' | null
+}
+
+/** How `measureFile` and `verifyManifest` read untrusted files. */
+export interface MeasureOptions {
+  /** Longest line accepted, in decompressed bytes; reading stops past it. */
+  maxLineBytes?: number
+  signal?: AbortSignal
+  /** A work-budget tick, called per line and per decompressed chunk. */
+  tick?: (rows?: number) => Promise<void> | undefined
 }
 
 export interface SnapshotFiles {
@@ -34,6 +47,8 @@ export interface SnapshotVerification {
   ok: boolean
   problems: string[]
   observed: Partial<Record<'nodes' | 'edges', SnapshotFileFacts>>
+  /** Set when a file was refused before it was read to the end. */
+  refused: 'line_too_large' | null
 }
 
 // ---------------------------------------------------------------------------

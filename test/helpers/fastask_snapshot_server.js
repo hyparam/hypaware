@@ -1,10 +1,12 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gzipSync } from 'node:zlib'
+import { pipeline } from 'node:stream/promises'
+import { createGzip, gzipSync } from 'node:zlib'
 
 import { EDGE_COLUMNS, NODE_COLUMNS, encodeLine, measureFile } from '../../hypaware-core/plugins-workspace/fastask/src/contract.js'
 
@@ -80,6 +82,66 @@ export async function generatedGeneration({ generation, nodeCount = 3, edgeCount
   for (const name of /** @type {const} */ (['nodes', 'edges'])) {
     const { facts } = await measureFile(files[name])
     manifest.files[name] = { path: `generations/${generation}/${name}.ndjson.gz`, ...facts }
+  }
+  manifest.unresolved = { edges: 0, endpoint_ids: 0 }
+  return { manifest, files }
+}
+
+/**
+ * One valid node row whose `props.blob` is `fieldBytes` of `x`, and no edges:
+ * the review r1 F6 shape (a small gzip that inflates to one enormous line).
+ * The file is compressed as it is produced and its facts are hashed on the
+ * way (one row, so the set digest is that line's SHA-256), so building it
+ * never holds the decompressed line and does not lean on the verifier under
+ * test.
+ *
+ * @param {{ generation: string, fieldBytes: number }} args
+ * @returns {Promise<{ manifest: any, files: { nodes: Buffer, edges: Buffer } }>}
+ */
+export async function largeRowGeneration({ generation, fieldBytes }) {
+  const line = encodeLine({
+    node_id: `a1${'0'.repeat(22)}`, node_type: 'Session', natural_key: `fx-${generation}-0`, label: 'node 0',
+    props: { blob: '<blob>' }, first_seen: 1760000000000, source_dataset: 'ai_gateway_messages',
+    source_keys: { session_id: 'fx-session-0' }, projector: 'ai-gateway.t0', projector_version: 2,
+  }, NODE_COLUMNS)
+  const [head, tail] = line.split('<blob>')
+  const piece = Buffer.alloc(64 * 1024, 'x')
+  const lineHash = createHash('sha256')
+  let uncompressed = 0
+  /** @param {Buffer} bytes */
+  const counted = (bytes) => { uncompressed += bytes.length; return bytes }
+  async function* text() {
+    yield counted(Buffer.from(head))
+    lineHash.update(head)
+    for (let left = fieldBytes; left > 0; left -= piece.length) {
+      const bytes = left >= piece.length ? piece : piece.subarray(0, left)
+      lineHash.update(bytes)
+      yield counted(bytes)
+    }
+    lineHash.update(tail)
+    yield counted(Buffer.from(`${tail}\n`))
+  }
+  /** @type {Buffer[]} */
+  const out = []
+  await pipeline(text, createGzip(), async (/** @type {AsyncIterable<Buffer>} */ chunks) => { for await (const c of chunks) out.push(c) })
+  const files = { nodes: Buffer.concat(out), edges: gzipSync('') }
+  const manifest = fixtureJson('manifest.json')
+  manifest.generation = generation
+  manifest.files.nodes = {
+    path: `generations/${generation}/nodes.ndjson.gz`,
+    rows: 1,
+    bytes: files.nodes.length,
+    uncompressed_bytes: uncompressed,
+    sha256: createHash('sha256').update(files.nodes).digest('hex'),
+    set_digest: lineHash.digest('hex'),
+  }
+  manifest.files.edges = {
+    path: `generations/${generation}/edges.ndjson.gz`,
+    rows: 0,
+    bytes: files.edges.length,
+    uncompressed_bytes: 0,
+    sha256: createHash('sha256').update(files.edges).digest('hex'),
+    set_digest: '0'.repeat(64),
   }
   manifest.unresolved = { edges: 0, endpoint_ids: 0 }
   return { manifest, files }
