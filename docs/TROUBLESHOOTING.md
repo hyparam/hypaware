@@ -290,6 +290,16 @@ other than `localhost` or `127.0.0.1`; point it at one of those instead.
 automatic for enrolled organizations, defaults off on standalone installations,
 and is not the captured conversations or the local diagnostic log.
 
+<!-- @ref LLP 0478#consequences [explains]: a body over the fixed 64 MiB decoded limit is refused with 413 and its records are lost -->
+An OTLP exporter refused with `413 Content Too Large` sent a request whose body
+is larger than 64 MiB after decompression. HypAware keeps none of that
+request's records, and the exporter does not retry it. The daemon log has no
+entry for this refusal, so the error appears only on the sending side. Lower the
+exporter's batch size so each request stays under the limit: SDKs that read the
+standard variables use `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` for logs and
+`OTEL_BSP_MAX_EXPORT_BATCH_SIZE` for traces. The limit is fixed and has no
+configuration setting.
+
 When reporting a problem, include the version, failing command, exit status,
 relevant status repair lines, and a short log excerpt around the failure.
 Review excerpts for credentials, paths, and captured content before sharing.

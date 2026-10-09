@@ -22,6 +22,7 @@ defines command syntax and behavior; the guides explain common workflows.
 - [Manage AI clients](#manage-ai-clients)
 - [Import past client history](#import-past-client-history)
 - [Collect GitHub activity](#collect-github-activity)
+- [Record Ollama](#record-ollama)
 - [Control privacy](#control-privacy)
 - [Connect to or leave HypAware Cloud](#connect-to-or-leave-hypaware-cloud)
 - [Manage the daemon](#manage-the-daemon)
@@ -72,6 +73,7 @@ This reference identifies each plugin-owned family:
   `@hypaware/opencode`, `@hypaware/pi`, or `@hypaware/cursor`.
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
+- `ollama ...`: `@hypaware/ollama`.
 - `client claude-account ...`: `@hypaware/claude-account`.
 - `client claude-desktop ...`: `@hypaware/claude-desktop`.
 - `graph ...` and `query graph neighbors`: `@hypaware/context-graph`.
@@ -1266,6 +1268,34 @@ hyp github sync
 
 Runs one poll immediately, including graph projection. It does not perform the
 full historical import. Capture or projection failures return `1`.
+
+## Record Ollama
+
+<!-- @ref LLP 0474#setup [explains]: setup checks readiness and prints routes without loading a model; verify needs a fresh saved request and response -->
+Plugin: `@hypaware/ollama`, added when you choose **Ollama** in `hyp setup`.
+See [clients and history](CLIENTS.md#record-ollama) for the workflow.
+
+### `hyp ollama setup`
+
+```text
+hyp ollama setup [--upstream URL] [--json]
+```
+
+Checks the direct Ollama service and its model inventory and prints the routes
+to use for your next CLI or SDK launch. It never starts Ollama, downloads or
+loads a model, or sends inference. `--upstream` saves a custom service address
+in place of the default `http://127.0.0.1:11434`. A failure, or a daemon restart
+that failed or could not be confirmed, returns `1`; invalid arguments return `2`.
+
+### `hyp ollama verify`
+
+```text
+hyp ollama verify --model NAME [--json]
+```
+
+Sends one fixed check prompt to the named model. It succeeds only when a fresh
+request and its completed response are saved and visible to your queries; any
+other result returns `1`. A missing or invalid model name returns `2`.
 
 ## Control privacy
 
