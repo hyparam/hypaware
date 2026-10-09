@@ -6,6 +6,7 @@
 **Author:** HypForge designer
 **Date:** 2026-10-09
 **Extends:** [LLP 0481](./0481-fastask.plan.md) task T4 (the helper's semantics change: its clock is process CPU, not elapsed time); [LLP 0480#cooperative](./0480-fastask.design.md#cooperative) (how the duty cycle is measured, and its default) and [LLP 0484#build-memory](./0484-discovery-walks-touched-and-the-build-is-bounded-before-it-starts.decision.md#build-memory) (what the 1x bound covers)
+**Extended-by:** [LLP 0486](./0486-t11-stress-thresholds-after-measurement.decision.md) (no-growth window 10th to 20th refresh; slice time cap 4 ms; absolute OTLP ceiling; the follow-up is a child process, not a worker thread)
 **Related:** LLP 0481 (plan; tasks T4, T5, T6, T11); server LLP 0564 (the server's budget counts whole-process CPU)
 
 > LLP 0480 duty-cycles the replica's background work on elapsed time, at 25
