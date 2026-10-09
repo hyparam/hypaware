@@ -1,13 +1,22 @@
 // @ts-check
 
+import { STRICT_SHORT_FLAGS, argvToParams } from '../../../../src/core/cli/verb_codec.js'
 import { compactGraphTables } from './maintenance.js'
 import { projectGraph } from './project.js'
 import { requireGraphRuntime } from './runtime.js'
 
 /**
- * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, VerbInputSchema } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  */
+
+/** @type {VerbInputSchema} */
+const COMPACT_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    'dry-run': { type: 'boolean', default: false },
+  },
+}
 
 /**
  * `hyp graph project` - run the T0 projection over every registered source
@@ -115,7 +124,16 @@ function parseProjectArgv(argv) {
  * @returns {Promise<number>}
  */
 export async function runGraphCompact(argv, ctx) {
-  const dryRun = argv.includes('--dry-run')
+  // Read argv through the CLI codec: a bare `argv.includes('--dry-run')`
+  // missed `--dry-run=true` and ignored unknown flags, so a preview request
+  // ran the real rewrite (issue #2565). Anything the codec refuses exits 2
+  // before any partition is touched.
+  const parsed = argvToParams(COMPACT_INPUT_SCHEMA, argv, STRICT_SHORT_FLAGS)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp graph compact: ${parsed.error}\n`)
+    return 2
+  }
+  const dryRun = parsed.params['dry-run'] === true
   try {
     const r = await compactGraphTables({
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
