@@ -1,8 +1,10 @@
 # LLP 0477: A request body limit for the OTLP listener
 
 **Type:** RFC
-**Status:** Draft
+**Status:** Accepted
+**Spawned:** LLP 0478 (option 1 decided)
 **Systems:** Sources, Plugins
+**Author:** HypForge steward / Claude
 **Date:** 2026-10-09
 **Related:** LLP 0012, LLP 0256, LLP 0257
 

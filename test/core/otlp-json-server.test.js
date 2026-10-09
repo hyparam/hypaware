@@ -341,6 +341,46 @@ test('a body past the decoded cap is refused with 413 in every encoding, and the
   }
 })
 
+// The shape review used to refuse a 20 MiB limit: an OpenTelemetry SDK's
+// default BatchLogRecordProcessor exports 512 records at a time, and 48 KiB
+// records make that batch about 24 MiB. It has to keep arriving whole.
+// @ref LLP 0478#why [tests]: a default SDK batch fits under the limit
+test('a default 512-record SDK log batch with 48 KiB records still reaches the handler', async () => {
+  const s = await startServer()
+  try {
+    const record = 'x'.repeat(48 * 1024)
+    const batch = {
+      resourceLogs: [{
+        resource: { attributes: [{ key: 'service.name', value: { stringValue: 'sdk-batch' } }] },
+        scopeLogs: [{
+          scope: { name: 'sdk-batch' },
+          logRecords: Array.from({ length: 512 }, (_, i) => ({
+            timeUnixNano: String(1_760_000_000_000_000_000 + i),
+            severityNumber: 9,
+            severityText: 'INFO',
+            body: { stringValue: record },
+            attributes: [{ key: 'seq', value: { intValue: String(i) } }],
+          })),
+        }],
+      }],
+    }
+    const json = JSON.stringify(batch)
+    assert.ok(Buffer.byteLength(json) > 20 * 1024 * 1024, 'the batch is past the limit review refused')
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: zlib.gzipSync(json),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].payloadBytes, Buffer.byteLength(json))
+    const data = /** @type {any} */ (s.seen[0].data)
+    assert.equal(data.resourceLogs[0].scopeLogs[0].logRecords.length, 512)
+  } finally {
+    await s.close()
+  }
+})
+
 test('a body exactly at the decoded cap still reaches the handler', async () => {
   const s = await startServer()
   try {

@@ -24,13 +24,13 @@ const JSON_CT = { 'Content-Type': 'application/json' }
  * runs. Counting wire bytes instead would let a few KiB of gzip inflate to
  * whatever the sender chose inside a daemon that runs for weeks.
  *
- * 20 MiB is the OpenTelemetry Collector's default `max_request_body_size`,
- * the limit OTLP exporters already expect of a receiver. It is far above
- * what this listener carries: Claude Code's raw API bodies travel as files,
- * not inline, and the largest prompt in a local Claude capture measured
- * 576 KB, a whole export batch of ordinary events a fraction of that.
+ * 64 MiB is the OTLP/HTTP specification's recommended server limit, and the
+ * same limit it recommends a client hold itself to before compression, so a
+ * client following it never sends a body this refuses. A smaller figure sized
+ * from local samples refused a default 512-record SDK batch.
  */
-export const MAX_DECODED_BODY_BYTES = 20 * 1024 * 1024
+// @ref LLP 0478#limit [implements]: the protocol's recommended limit, after decompression, fixed rather than configurable
+export const MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024
 
 /**
  * The two wildcard binds, answered to as well when they arrive in `Host`.
