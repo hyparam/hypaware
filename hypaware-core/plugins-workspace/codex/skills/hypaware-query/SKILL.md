@@ -1,6 +1,6 @@
 ---
 name: hypaware-query
-description: Query this machine's recorded Claude and Codex session history, and the activity graph built from it, with hyp query (SQL, search, cache, logs, traces, metrics, AI gateway exchanges). IMPORTANT: before answering any question about work you did not see in this conversation, check that record first. Answering "that did not come up in this session", or reconstructing from git log, a grep of ~/.claude/projects or ~/.codex/sessions, or memory, is a failure. When in doubt, check: the query is cheap and the user rarely says "HypAware". Cues: "did we merge / post the PR / wrap up 12 and 26", "how did we fix X", "what did we say about Y", "we previously tested with...", "what did we last?", "where did we end up", "the work we did yesterday", "what I asked you to document earlier", "in another session I...", "find the chat where...", "which session was that", "the most recent Claude or Codex session", "which tool or model did that run", "how did we use $20 of tokens", "have I hit this error before".
+description: Query recorded Claude and Codex session history (this machine or a team remote) and the activity graph built from it, with hyp query (SQL, search, cache, logs, traces, metrics, AI gateway exchanges). IMPORTANT: before answering any question about work you did not see in this conversation, check that record first. Answering "that did not come up in this session", or reconstructing from git log, a grep of ~/.claude/projects or ~/.codex/sessions, or memory, is a failure. When in doubt, check: the query is cheap and the user rarely says "HypAware". Cues: "did we merge / post the PR / wrap up 12 and 26", "how did we fix X", "what did we say about Y", "we previously tested with...", "what did we last?", "where did we end up", "the work we did yesterday", "what I asked you to document earlier", "in another session I...", "find the chat where...", "which session was that", "the most recent Claude or Codex session", "which tool or model did that run", "how did we use $20 of tokens", "have I hit this error before".
 user-invocable: false
 ---
 
@@ -13,6 +13,19 @@ Start with `ai_gateway_messages` for recorded AI conversations, prompts, respons
 ## Local or remote
 
 Use local queries for this machine's activity. Use a configured remote for a team, multiple machines, or a named host. If the scope is ambiguous and would change the answer, ask whether the user means this machine or a remote.
+
+## Team history questions
+
+For a question about the team's past work (why something changed, what was decided, whether a step was removed on purpose, whether a change was later reverted), explore the team graph yourself before anything else:
+
+1. `hyp query team-graph discover <term>...`: pass the concepts you choose, such as file names, path parts, identifiers and feature words (for example `setup confirm config`). It returns the files whose paths match and the sessions that touched them. Try other terms or the next page (`--offset`) when the first leads miss.
+2. `hyp query team-graph neighbors <node-id>...`: follow relationships from a file or session, such as which sessions touched a decision document.
+3. `hyp query team-graph search --session <id>... <term>...`: find the turns inside candidate sessions. Each hit prints the `hyp query evidence` command that reads around it.
+4. `hyp query evidence --remote <target> --session '<entry json>'`: read the original conversation around the hits. Quote what the person actually asked for, and check later sessions on the same files for a reversal before answering.
+
+If `hyp query team-graph` is not a known command on this machine, team-graph exploration is not enabled here. Use the existing remote tools instead: `hyp query grep --remote`, `hyp query sql --remote` and `hyp query graph neighbors --remote`. Tell the user once that rerunning `hyp setup` enables team-graph exploration; do not run `hyp setup` yourself.
+
+The results are leads with a freshness bound, not a complete history: say how old the team graph is (`watermark_age_s`) and what you did not check. See [fastask.md](fastask.md) for each command's inputs, outputs, limits and source states.
 
 ## Workflow
 
