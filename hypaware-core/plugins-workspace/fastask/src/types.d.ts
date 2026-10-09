@@ -158,7 +158,8 @@ export interface SnapshotIndexInput {
   /** Work-budget duty cycle: the daemon's default, or 1 on a command's cold path. */
   duty?: number
   maxBytes?: number
-  now?: () => number
+  /** Process-CPU clock in ms for the work budget (tests); `process.cpuUsage` by default. */
+  cpuNow?: () => number
 }
 
 export type TermKind = 'path' | 'identifier' | 'word'
