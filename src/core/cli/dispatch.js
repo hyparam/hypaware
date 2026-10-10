@@ -325,6 +325,24 @@ async function dispatchInternal(argv, opts) {
   // its own failures, so running it on a throw cannot replace the exit code or
   // mask the error that got here, and it still deletes only the temp dirs this
   // boot's own activation contexts recorded.
+  //
+  // A termination signal is the other exit that never reaches that `finally`:
+  // the default disposition kills the process where it stands (issue #2482). One
+  // release, guarded, so the signal path and the `finally` can both reach for it
+  // and only the first of them does the work.
+  let released = false
+  const release = async () => {
+    if (released) return
+    released = true
+    await teardownBootOwnedKernel(kernel)
+  }
+  // Only a boot that activated something has anything to release, and gating on
+  // that is what keeps every `{ activate: [] }` command (`hyp daemon run` among
+  // them, which owns its own boot and its own shutdown) on exactly the signal
+  // disposition it has today.
+  const removeSignalTeardown = ownsKernel && kernel.activationContexts.size > 0
+    ? installSignalTeardown(release)
+    : undefined
   try {
     if (sinkPass) {
       const sinkResult = await materializeSinks(kernel, sinkPass.config, {
@@ -633,7 +651,10 @@ async function dispatchInternal(argv, opts) {
       )
     )
   } finally {
-    if (ownsKernel) await teardownBootOwnedKernel(kernel)
+    // A handler outliving the boot it was there to tear down is the same class
+    // of leak as the temp dirs, so it comes off here and not only on the signal.
+    removeSignalTeardown?.()
+    if (ownsKernel) await release()
   }
 }
 
@@ -751,6 +772,103 @@ export function decideBootProfile(argv, registry) {
 }
 
 /**
+ * Every boot-owned kernel in this process that still wants releasing, in the
+ * order the boots happened. Module-level, and deliberately: the handler decides
+ * whether somebody *else* owns the signal by counting process listeners, so a
+ * second owning dispatch in the same process must not add a second pair. It
+ * would make both handlers read a foreign owner, both defer, and the signal be
+ * swallowed by the two halves of one mechanism - with nothing left to take the
+ * default disposition either, so Ctrl-C would stop working outright. The
+ * wizard's sync step is exactly that shape: `runConfiguredSync` re-enters
+ * `dispatch` without passing its kernel (`src/core/cli/wizard/sync_now.js`),
+ * and goes out of its way to keep the terminal delivering Ctrl-C as a signal.
+ * One pair for the process, one release per boot registered against it.
+ *
+ * @type {Set<() => Promise<void>>}
+ */
+const pendingBootReleases = new Set()
+
+/**
+ * Removes the one installed pair while it is installed, and is `undefined`
+ * whenever it is not: it is also the "is a pair installed?" flag.
+ * @type {(() => void) | undefined}
+ */
+let removeInstalledSignalHandlers
+
+/**
+ * Release a boot-owned kernel when this process is interrupted, then let the
+ * signal do what it would have done.
+ *
+ * Three other sites install SIGINT/SIGTERM handlers on this same process
+ * (`src/core/daemon/runtime.js`, `src/core/daemon/gateway.js`, and
+ * `hypaware-core/plugins-workspace/github/src/commands.js`), and `hyp daemon
+ * run` is itself dispatched, so a handler installed here can sit *underneath*
+ * one that owns the shutdown. Whenever any other listener for that signal is
+ * present it is the owner and this one does nothing at all: that is what keeps
+ * the daemon's shutdown ordering and the github device-flow cancel intact, and
+ * it gives up nothing, because a process already carrying a listener for that
+ * signal was never going to take the default disposition either - it keeps
+ * running instead, so the post-boot `finally` is still the thing that releases
+ * the boot.
+ *
+ * When this is the only listener the default disposition *was* the exit, so
+ * dropping the listener and re-raising reproduces it: the parent still sees a
+ * signal-terminated child rather than a `process.exit` standing in for one, and
+ * the conventional 128+N status stays the kernel's to report. Dropping both
+ * before the release also makes a second signal the conventional immediate
+ * give-up.
+ *
+ * @param {() => Promise<void>} release
+ * @returns {() => void} deregister this boot's release, and uninstall the
+ *   handlers once no boot is left wanting one
+ */
+function installSignalTeardown(release) {
+  pendingBootReleases.add(release)
+  if (!removeInstalledSignalHandlers) {
+    /** @type {[NodeJS.Signals, () => void][]} */
+    const installed = []
+    for (const signal of /** @type {NodeJS.Signals[]} */ (['SIGINT', 'SIGTERM'])) {
+      const handler = () => {
+        if (process.listenerCount(signal) > 1) return
+        removeInstalledSignalHandlers?.()
+        // Both arms: the releases swallow their own failures today, and a
+        // process stranded mid-signal is not the way to find out that changed.
+        const reraise = () => { process.kill(process.pid, signal) }
+        releasePendingBoots().then(reraise, reraise)
+      }
+      installed.push([signal, handler])
+      process.on(signal, handler)
+    }
+    removeInstalledSignalHandlers = () => {
+      removeInstalledSignalHandlers = undefined
+      for (const [signal, handler] of installed) process.removeListener(signal, handler)
+    }
+  }
+  return () => {
+    pendingBootReleases.delete(release)
+    if (pendingBootReleases.size === 0) removeInstalledSignalHandlers?.()
+  }
+}
+
+/**
+ * Release every boot still live in this process, innermost first, one at a
+ * time. Each release is already guarded against running twice, so the `finally`
+ * of a boot that outlives the signal finds nothing left to do.
+ *
+ * @returns {Promise<void>}
+ */
+async function releasePendingBoots() {
+  for (const release of [...pendingBootReleases].reverse()) {
+    try {
+      await release()
+    } catch {
+      // Same best-effort contract `teardownBootOwnedKernel` keeps: a boot we
+      // cannot release is a leak, not a reason to strand the signal.
+    }
+  }
+}
+
+/**
  * Release what this dispatch's own kernel boot acquired, in the order it has
  * to come off: the listeners some plugins start during activation, then the
  * per-boot scratch directories activation created.
@@ -759,9 +877,12 @@ export function decideBootProfile(argv, registry) {
  * listening keeps the Node process alive after it has printed its result.
  * The temp dirs after, because that is where `encodePartition` stages a sink's
  * in-flight blob (`src/core/sinks/encoder.js`, read by `@hypaware/local-fs`
- * and `@hypaware/s3`): every call site runs once the command body has
- * resolved, so an export the body drove has already written its destination
- * file and taken its last byte out of the scratch dir (issue #2465).
+ * and `@hypaware/s3`): the return and throw call sites run once the command
+ * body has resolved, so an export the body drove has already written its
+ * destination file and taken its last byte out of the scratch dir (issue
+ * #2465). The signal call site is the one that does not wait for the body, and
+ * does not have to: the re-raise is already ending the process, so a staged
+ * blob nothing will go on to read is exactly what there is to reclaim.
  *
  * Injected kernels belong to callers and are intentionally not cleaned
  * up here; smokes and daemon internals manage their own source
