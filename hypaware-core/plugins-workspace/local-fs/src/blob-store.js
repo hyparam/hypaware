@@ -264,7 +264,10 @@ function byteRange(value, size) {
   const start = first ?? Math.max(0, size - /** @type {number} */ (last))
   const end = first === undefined ? size - 1 : Math.min(last ?? size - 1, size - 1)
   if (start >= size || end < start || size === 0) {
-    throw Object.assign(new Error('local-fs blob-store: unsatisfiable byte range'), { code: 'InvalidRange' })
+    throw Object.assign(new Error('local-fs blob-store: unsatisfiable byte range'), {
+      code: 'InvalidRange',
+      errorKind: 'blob_range_unsatisfiable',
+    })
   }
   return { start, end }
 }
