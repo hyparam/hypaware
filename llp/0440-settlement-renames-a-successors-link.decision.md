@@ -12,7 +12,9 @@ the last consequence of), LLP 0439 (the scope-change relink this completes)
 **Extends:** LLP 0439
 **Extended-by:** LLP 0441 (#select-the-successors: the settle pass now selects
 the in-batch successors of the rows it can rename, so this repair reaches a
-successor that already carried native identity and a cwd)
+successor that already carried native identity and a cwd), LLP 0442 (draft
+request to extend #batch-local for the maintenance lane, whose whole-generation
+rewrite already pays the scan this refused to put on the flush path)
 **Tracker:** hyparam/hypaware#2172
 
 > LLP 0439 re-links a settled row whose agent scope moved, because the link it
