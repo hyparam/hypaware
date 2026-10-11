@@ -1,7 +1,3 @@
-[← All documentation](README.md)
-
----
-
 # Authoring a HypAware plugin
 
 Create a plugin, register its contributions, and check it before enabling it.
@@ -25,18 +21,6 @@ A plugin is two things:
 
 The doctor's most important check is that these two agree: anything you
 declare in the manifest must actually be registered in `activate()`.
-
-## Contents
-
-- [Quickstart](#quickstart)
-- [Manifest](#manifest)
-- [The activate(ctx) contract](#the-activatectx-contract)
-- [Capabilities](#capabilities)
-- [Config sections](#config-sections)
-- [Permissions](#permissions)
-- [Logging and errors](#logging-and-errors)
-- [Troubleshooting (doctor diagnostics)](#troubleshooting-doctor-diagnostics)
-- [See also](#see-also)
 
 ## Quickstart
 

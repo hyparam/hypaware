@@ -1,26 +1,6 @@
-[← All documentation](README.md)
-
----
-
 # Connect to HypAware Cloud and your team
 
 Get an organization in HypAware Cloud, then set up each machine to join it.
-
-## Contents
-
-- [Get an organization](#get-an-organization)
-- [Connect a machine](#connect-a-machine)
-- [Follow the prompts](#follow-the-prompts)
-- [Review before the first upload](#review-before-the-first-upload)
-- [Verify the setup](#verify-the-setup)
-- [Send recordings now](#send-recordings-now)
-- [Manage remote access](#manage-remote-access)
-- [Disconnect a machine](#disconnect-a-machine)
-- [CI and headless deployment](#ci-and-headless-deployment)
-- [One-time: mint a token](#one-time-mint-a-token)
-- [Each run: join, capture, flush](#each-run-join-capture-flush)
-- [GitHub Actions example](#github-actions-example)
-- [Long-lived headless machines](#long-lived-headless-machines)
 
 ## Get an organization
 
@@ -79,8 +59,8 @@ recordings. Review the first-sync behavior below before accepting that prompt.
 
 ## Review before the first upload
 
-Setup asks `Upload now? [Y/n]`. Choose **n** to review your recordings first.
-Pressing Enter chooses Yes and uploads them immediately.
+> **Caution:** Setup asks `Upload now? [Y/n]`. Choose **n** to review your recordings first.
+> Pressing Enter chooses Yes and uploads them immediately.
 
 On your first browser sign-in, HypAware normally pauses uploads until 11:59pm
 local time. If fewer than four hours remain, it waits until 11:59pm the next day.
@@ -99,6 +79,7 @@ set privacy controls before connecting; see [headless setup](#ci-and-headless-de
 
 ## Verify the setup
 
+<!-- agent: Run hyp status and tell me whether recording is active, what is shared with my team versus kept local, and whether a first-sync deadline is pending. -->
 ```sh
 hyp status
 ```
@@ -240,10 +221,10 @@ with `&` alone does not prove capture is ready. Status is a diagnostic snapshot,
 not a command that waits for readiness; adapt the job to check its required
 integration before starting the agent.
 
-The teardown step matters. Sinks export on a schedule, and the most valuable
-rows land when the agent session ends, seconds before the runner dies, so no
-schedule can be trusted to drain the tail. Always run `hyp sync --yes` as the
-final step, including on failed jobs.
+> **Note:** The teardown step matters. Sinks export on a schedule, and the most valuable
+> rows land when the agent session ends, seconds before the runner dies, so no
+> schedule can be trusted to drain the tail. Always run `hyp sync --yes` as the
+> final step, including on failed jobs.
 
 ## GitHub Actions example
 
@@ -274,8 +255,8 @@ jobs:
         run: hyp sync --yes
 ```
 
-`if: always()` runs the flush even when the agent step fails, which is often
-the run you most want recorded. HypAware requires **Node 22.12 or newer**.
+> **Tip:** `if: always()` runs the flush even when the agent step fails, which is often
+> the run you most want recorded. HypAware requires **Node 22.12 or newer**.
 
 ## Long-lived headless machines
 

@@ -1,7 +1,3 @@
-[← All documentation](README.md)
-
----
-
 # HypAware CLI command reference
 
 This reference documents the visible commands shipped with HypAware. It uses
@@ -9,37 +5,6 @@ the canonical `hyp` spelling. The `hypaware` binary accepts the same arguments.
 
 For task guides, start at the [documentation index](README.md). This reference
 defines command syntax and behavior; the guides explain common workflows.
-
-## Contents
-
-- [Read command syntax](#read-command-syntax)
-- [Plugin-owned commands](#plugin-owned-commands)
-- [Set up and inspect HypAware](#set-up-and-inspect-hypaware)
-- [Query recorded data](#query-recorded-data)
-- [Generate and manage reports](#generate-and-manage-reports)
-- [Send data now](#send-data-now)
-- [Control the current session](#control-the-current-session)
-- [Manage AI clients](#manage-ai-clients)
-- [Import past client history](#import-past-client-history)
-- [Collect GitHub activity](#collect-github-activity)
-- [Record Ollama](#record-ollama)
-- [Control privacy](#control-privacy)
-- [Connect to or leave HypAware Cloud](#connect-to-or-leave-hypaware-cloud)
-- [Manage the daemon](#manage-the-daemon)
-- [Validate configuration](#validate-configuration)
-- [Manage the local cache](#manage-the-local-cache)
-- [Maintain exports](#maintain-exports)
-- [Manage plugins](#manage-plugins)
-- [Manage remote query targets](#manage-remote-query-targets)
-- [Serve MCP tools](#serve-mcp-tools)
-- [Build and maintain the activity graph](#build-and-maintain-the-activity-graph)
-- [Inspect vector indexes](#inspect-vector-indexes)
-- [Enrich the activity graph](#enrich-the-activity-graph)
-- [Update HypAware](#update-hypaware)
-- [Control product telemetry](#control-product-telemetry)
-- [Print version information](#print-version-information)
-- [Develop plugins](#develop-plugins)
-- [Use canonical command names](#use-canonical-command-names)
 
 ## Read command syntax
 

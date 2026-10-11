@@ -1,34 +1,40 @@
-[← All documentation](README.md)
-
----
-
 # Troubleshoot a HypAware installation
 
 Check the installation's status and version:
 
+<!-- agent: Run hyp status and hyp version and tell me what needs attention and the exact commands to fix it. -->
 ```sh
 hyp status
 hyp version
+```
+```output
+HypAware · Healthy
+
+  Daemon     Running
+  Storage    37 MB · 90-day retention
+  Sharing    No organization sync
+
+  Clients                 Status                           Data
+  claude                  Recording (otel)                 Local only
+  codex                   Not recording                    Local only
+
+  To record codex again: hyp client attach codex
+
+No issues detected.
+
+More details: hyp status --verbose
+hypaware 1.41.0
+  node:     v26.10.0
+  platform: darwin arm64
 ```
 
 `hyp status` reports the background service, clients, storage, and problems,
 with guidance to help resolve them. Use `hyp status --verbose` for more detail
 or `hyp status --json` for scripts.
 
-## Contents
-
-- [No new recordings](#no-new-recordings)
-- [Ollama capture is unconfirmed](#ollama-capture-is-unconfirmed)
-- [History or search results are missing](#history-or-search-results-are-missing)
-- [An export or team sync is missing](#an-export-or-team-sync-is-missing)
-- [A command is missing or rejects an option](#a-command-is-missing-or-rejects-an-option)
-- [The CLI and daemon run different versions](#the-cli-and-daemon-run-different-versions)
-- [Disk usage or maintenance problems](#disk-usage-or-maintenance-problems)
-- [A query or graph projection refuses for memory](#a-query-or-graph-projection-refuses-for-memory)
-- [Find diagnostic logs](#find-diagnostic-logs)
-
 ## No new recordings
 
+<!-- agent: HypAware is not recording new sessions. Run hyp client status, hyp daemon status, and hyp cache status, work through the checklist on the troubleshooting page, and tell me what is wrong. -->
 ```sh
 hyp client status
 hyp daemon status
@@ -139,6 +145,7 @@ See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
 
 ## An export or team sync is missing
 
+<!-- agent: Run hyp status, hyp sync --dry-run, and hyp remote list, and tell me why my recordings are not reaching HypAware Cloud. -->
 ```sh
 hyp status
 hyp sync --dry-run
@@ -183,6 +190,7 @@ See [team setup](TEAM_SETUP.md) and [privacy controls](PRIVACY.md).
 
 ## A command is missing or rejects an option
 
+<!-- agent: A hyp command or flag from the docs is missing on this machine. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
 ```sh
 hyp version
 hyp --help
@@ -212,6 +220,7 @@ For a missing global binary or broken service definition, follow
 
 ## Disk usage or maintenance problems
 
+<!-- agent: Use HypAware to show cache size and what a maintenance pass would remove, without applying it. -->
 ```sh
 hyp cache status
 hyp cache maintain ai_gateway_messages --dry-run

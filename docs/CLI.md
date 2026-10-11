@@ -1,24 +1,9 @@
-[← All documentation](README.md)
-
----
-
 # Install and maintain HypAware
 
 Install HypAware, check its background service, and keep the installation up to date.
 
 For the syntax and behavior of every command, see the
 [HypAware CLI command reference](./CLI_REFERENCE.md).
-
-## Contents
-
-- [Requirements](#requirements)
-- [Install HypAware](#install-hypaware)
-- [Check the installation](#check-the-installation)
-- [Manage the background service](#manage-the-background-service)
-- [Reconfigure an installation](#reconfigure-an-installation)
-- [Update HypAware](#update-hypaware)
-- [Reinstall or recover the current version](#reinstall-or-recover-the-current-version)
-- [Uninstall](#uninstall)
 
 ## Requirements
 
@@ -66,8 +51,29 @@ HypAware backs up the existing configuration before replacement.
 
 ## Check the installation
 
+<!-- agent: Run hyp status and tell me whether HypAware is installed and recording correctly, and what to fix if not. -->
 ```sh
 hyp status
+```
+```output
+HypAware · Needs attention
+
+  Daemon     Running
+  Storage    37 MB · 90-day retention
+  Sharing    Organization sync configured
+  new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)
+
+  Clients                 Status                           Data
+  claude                  Recording (otel)                 Sync
+  codex                   Recording                        Sync
+
+  Sync = organization sharing policy, not delivery confirmation.
+
+Attention
+  ! remote config "69ace610c747f6bc8c1464f008805b1505464caae09b0830725e02d936ffb2d2" rolled back at 2026-09-07T05:13:27.022Z (probation_expired)
+    Next: fix the central config revision; the gateway re-applies when the served etag changes
+
+More details: hyp status --verbose
 ```
 
 Status reports the background service, clients, storage, and anything that needs
@@ -115,12 +121,12 @@ hyp update
 
 The command installs the latest release and restarts the background service.
 
-`hyp update` and the automatic check both take the registry's latest release
-with no major-version bound, so an update can cross a breaking boundary.
-HypAware has no operator-controlled migration rollback, and the updater's
-boot-failure recovery is not a backup of your data. Before a major version,
-read its release notes and copy `~/.hyp` to a new backup path, then install the
-reviewed version and validate before resuming ordinary use:
+> **Caution:** `hyp update` and the automatic check both take the registry's latest release
+> with no major-version bound, so an update can cross a breaking boundary.
+> HypAware has no operator-controlled migration rollback, and the updater's
+> boot-failure recovery is not a backup of your data. Before a major version,
+> read its release notes and copy `~/.hyp` to a new backup path, then install the
+> reviewed version and validate before resuming ordinary use:
 
 ```sh
 npm install -g hypaware@NEXT_MAJOR_VERSION

@@ -1,21 +1,7 @@
-[← All documentation](README.md)
-
----
-
 # Configure storage, exports, and plugins
 
 Prefer `hyp setup` for routine changes. It composes the required plugins,
 preserves centrally managed settings, and reports the actions it will take.
-
-## Contents
-
-- [Locate and validate configuration](#locate-and-validate-configuration)
-- [Make a repeatable setup](#make-a-repeatable-setup)
-- [Set local retention](#set-local-retention)
-- [Choose an export destination](#choose-an-export-destination)
-- [Maintain the query cache](#maintain-the-query-cache)
-- [Know where data lives](#know-where-data-lives)
-- [Manage optional plugins](#manage-optional-plugins)
 
 ## Locate and validate configuration
 

@@ -1,7 +1,3 @@
-[← All documentation](README.md)
-
----
-
 # Manage clients and import history
 
 Use `hyp setup` to choose which AI clients to record. Setup configures those
@@ -11,16 +7,6 @@ new requests and has no history import. You can also run
 import history. Ollama attach enables recording and prints
 [explicit host recipes](#route-a-cli-or-sdk-client); it does not edit client files
 or the calling shell's or service's `OLLAMA_HOST`.
-
-## Contents
-
-- [Choose and check a client](#choose-and-check-a-client)
-- [Attach and verify new activity](#attach-and-verify-new-activity)
-- [Bring in existing history](#bring-in-existing-history)
-- [Stop capture or keep it local](#stop-capture-or-keep-it-local)
-- [Collect GitHub activity](#collect-github-activity)
-- [Install client skills](#install-client-skills)
-- [Record Ollama](#record-ollama)
 
 ## Choose and check a client
 
@@ -90,9 +76,9 @@ projects without writing, so it previews the result but is not a cheap probe.
 Inspect each provider's output because one provider can fail while others
 succeed.
 
-Import writes the local cache. If exports are configured, eligible imported
-rows can subsequently leave through those sinks. Apply your
-[privacy markings](PRIVACY.md) before importing sensitive history.
+> **Caution:** Import writes the local cache. If exports are configured, eligible imported
+> rows can subsequently leave through those sinks. Apply your
+> [privacy markings](PRIVACY.md) before importing sensitive history.
 
 Some integrations run scheduled recovery automatically. A positive
 `backfill.window_days` limits both join-time backfill and scheduled recovery;

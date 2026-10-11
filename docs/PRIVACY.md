@@ -1,25 +1,8 @@
-[← All documentation](README.md)
-
----
-
 # What HypAware records, and how to control it
 
 HypAware records AI activity on your machine. This page explains what is
 captured, where it goes, and how to control it. If your team is rolling
 HypAware out, read this page before you enroll.
-
-## Contents
-
-- [What gets recorded](#what-gets-recorded)
-- [Where it goes](#where-it-goes)
-- [The three usage classes](#the-three-usage-classes)
-- [Marking directories](#marking-directories)
-- [Control a whole client's sharing](#control-a-whole-clients-sharing)
-- [Pausing a single session](#pausing-a-single-session)
-- [Deleting what was already recorded](#deleting-what-was-already-recorded)
-- [Review before the first Cloud sync](#review-before-the-first-cloud-sync)
-- [The daemon's own telemetry](#the-daemons-own-telemetry)
-- [Product telemetry](#product-telemetry)
 
 ## What gets recorded
 
@@ -100,10 +83,10 @@ still identifies a proxy attach.
   HypAware Cloud, including conversation content. The controls below
   decide which rows that covers.
 
-Local recording does not mean HypAware makes no network requests. Supervised
-global installations check npm for [automatic updates](CLI.md#update-hypaware)
-by default; those checks do not send recordings. Separately configured remote
-destinations and diagnostic exporters can also send data.
+> **Note:** Local recording does not mean HypAware makes no network requests. Supervised
+> global installations check npm for [automatic updates](CLI.md#update-hypaware)
+> by default; those checks do not send recordings. Separately configured remote
+> destinations and diagnostic exporters can also send data.
 
 HypAware Cloud operators can read synced data across every org, and each
 such read is recorded in that org's audit trail.
@@ -175,26 +158,28 @@ names it on an enrolled machine.
 
 Three caveats apply to both surfaces:
 
-- **Prospective only.** A marking gates future recording and syncing.
-  Rows captured before it existed stay in the cache; deleting them is the
-  separate, explicit `hyp privacy purge` step below.
-- **Class resolution needs a working directory.** The client sources
-  (Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, OpenClaw) supply
-  one. Hermes supplies the real one for an interactive session it recorded a
-  cwd for, and scopes a messaging-channel session (Telegram, Discord, Slack,
-  WhatsApp, Signal, email) under a derived `~/.hermes/channels/<source>` path
-  instead; an interactive Hermes session with no recorded cwd has no scope to
-  match and is recorded unconditionally. The `raw-anthropic` / `raw-openai`
-  proxy and OTEL sources never supply one, so directory markings are a no-op
-  for them.
-- **A session is classed by its own directory, not by what it reads.**
-  Local SQL and search normally hide local-only rows from a caller that can
-  sync. If you explicitly include them with `--include-local-only` or copy
-  private content into another session, that session follows its own directory's
-  class. A report-generating conversation in a `sync` folder can therefore sync
-  the private excerpts it quotes. `hyp report generate` uses the directory you
-  type it in and does not change its class. Choose that directory deliberately,
-  or run `hyp session ignore` inside the supported session it starts.
+> **Caution:** **Prospective only.** A marking gates future recording and syncing.
+> Rows captured before it existed stay in the cache; deleting them is the
+> separate, explicit `hyp privacy purge` step below.
+
+**Class resolution needs a working directory.** The client sources
+(Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Pi, OpenClaw) supply
+one. Hermes supplies the real one for an interactive session it recorded a
+cwd for, and scopes a messaging-channel session (Telegram, Discord, Slack,
+WhatsApp, Signal, email) under a derived `~/.hermes/channels/<source>` path
+instead; an interactive Hermes session with no recorded cwd has no scope to
+match and is recorded unconditionally. The `raw-anthropic` / `raw-openai`
+proxy and OTEL sources never supply one, so directory markings are a no-op
+for them.
+
+> **Caution:** **A session is classed by its own directory, not by what it reads.**
+> Local SQL and search normally hide local-only rows from a caller that can
+> sync. If you explicitly include them with `--include-local-only` or copy
+> private content into another session, that session follows its own directory's
+> class. A report-generating conversation in a `sync` folder can therefore sync
+> the private excerpts it quotes. `hyp report generate` uses the directory you
+> type it in and does not change its class. Choose that directory deliberately,
+> or run `hyp session ignore` inside the supported session it starts.
 
 ## Control a whole client's sharing
 
@@ -260,10 +245,10 @@ hyp privacy purge --all           # everything, wholesale
 
 It prompts on a TTY; pass `--yes` for non-interactive use.
 
-A session purge is the only form that reaches beyond this machine. It also
-deletes that session's rows from every configured or signed-in remote and
-every enrolled server, and keeps the session from being recorded again. The
-confirmation prompt names the servers it will contact:
+> **Caution:** A session purge is the only form that reaches beyond this machine. It also
+> deletes that session's rows from every configured or signed-in remote and
+> every enrolled server, and keeps the session from being recorded again. The
+> confirmation prompt names the servers it will contact:
 
 ```sh
 hyp privacy purge --session <id> --remote <target>  # this machine and one server
@@ -293,6 +278,12 @@ your confirmation. A review cannot guarantee it will find every secret, and it
 does not automatically redact all recorded content. You can run it at any time,
 even without Cloud enrollment.
 
+<!-- agent: Run the hypaware-privacy skill: review what this machine has recorded, sample it, and propose which folders to mark local-only or ignore before anything syncs. Do not delete anything without asking me. -->
+```sh
+hyp privacy show
+hyp privacy list
+```
+
 For the enrollment hold, deadline, and unattended behavior, see
 [the first-sync review](TEAM_SETUP.md#review-before-the-first-upload).
 
@@ -321,6 +312,7 @@ already-enrolled machine starts reporting on its next CLI run or daemon start
 after an upgrade, without a new prompt. Standalone installations default to off.
 Check the effective state and destination:
 
+<!-- agent: Use HypAware to tell me whether product telemetry is on, where it goes, and show me the next batch it would send. -->
 ```sh
 hyp telemetry status
 ```
