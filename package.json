@@ -2,7 +2,7 @@
   "name": "hypaware",
   "version": "1.41.0",
   "type": "module",
-  "description": "The improvement loop for your agents.",
+  "description": "The improvement loop for every agent you run.",
   "license": "MIT",
   "homepage": "https://hypaware.ai/?utm_source=npm&utm_medium=package",
   "repository": {
