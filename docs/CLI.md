@@ -64,14 +64,14 @@ HypAware · Needs attention
   new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)
 
   Clients                 Status                           Data
-  claude                  Recording (otel)                 Sync
+  claude                  Telemetry may be interrupted     Sync
   codex                   Recording                        Sync
 
   Sync = organization sharing policy, not delivery confirmation.
 
 Attention
-  ! remote config "69ace610c747f6bc8c1464f008805b1505464caae09b0830725e02d936ffb2d2" rolled back at 2026-09-07T05:13:27.022Z (probation_expired)
-    Next: fix the central config revision; the gateway re-applies when the served etag changes
+  ! claude: transcripts active 1m ago; last telemetry 21m ago.
+    Next: hyp daemon restart
 
 More details: hyp status --verbose
 ```
