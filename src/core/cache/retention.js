@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { parquetReadObjects } from 'hyparquet'
+import { concat } from 'hyparquet/src/utils.js'
 import {
   fileCatalog,
   icebergDelete,
@@ -222,7 +223,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
           )
           if (positions.length === 0) continue
           candidateFileCount++
-          pendingDeletes.push(...positions.map(pos => ({ file_path: filePath, pos })))
+          concat(pendingDeletes, positions.map(pos => ({ file_path: filePath, pos })))
 
           while (pendingDeletes.length >= DELETE_BATCH_SIZE) {
             const batch = pendingDeletes.splice(0, DELETE_BATCH_SIZE)
