@@ -841,13 +841,13 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, icebergDir)
     const declaration = options?.declaration
     const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
+    // Spread first, so every field the reader returned survives the append
+    // (see `appendRowsToPartition` for the loss a field list caused).
     await writeCursor(partitionDir, {
-      epoch: cursor.epoch,
+      ...cursor,
       rowCount: cursor.rowCount + rows.length,
-      compaction: cursor.compaction,
       layout: 'source-table',
       tableDir,
-      retention: cursor.retention,
       ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
@@ -867,9 +867,25 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
 }
 
 /**
- * Append rows into the current epoch's Iceberg table for the resolved
- * partition.  Creates the partition directory and cursor on first
- * write.
+ * Append rows into the live generation of the resolved partition, whichever
+ * layout the cursor names. Creates the partition directory and an
+ * `epoch=0` cursor on first write.
+ *
+ * The entry point is the legacy epoch layout's, but the generation it
+ * appends to is the cursor's, not the caller's. A purge rewrite
+ * (`maintenance.js`, the `purgeRewrite` branch) converts an epoch partition
+ * to a `table-<ms>-<uuid>` source-table generation, and this function used
+ * to append to `epoch=<n>` regardless and rewrite the cursor from a field
+ * list that had no `layout` or `tableDir`. That one write pointed the
+ * partition back at the epoch directory, which held only the rows appended
+ * since the purge, and left the rewritten generation holding every
+ * pre-purge row unreferenced for the orphan sweep to reclaim. The server
+ * ingest mover appends through here, so one session purge on a partition
+ * still receiving rows cost it its history.
+ *
+ * Hence the two rules below: the live directory is resolved from the
+ * cursor's layout, and the cursor is written by spreading the one read, so
+ * no field the reader returned is dropped.
  *
  * @param {string} cacheRoot
  * @param {string} dataset
@@ -893,14 +909,13 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
     if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
     const fallbackAppended = countGatewayFallbackRows(rows)
     const cursor = readCursorForAppend(partitionDir)
-    const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
-    // As above: asked before the append creates the epoch's table.
-    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, epochDir)
-    const result = await appendRowsToTable(epochDir, columns, rows)
+    const liveDir = path.join(partitionDir, cursor.layout === 'source-table' ? cursor.tableDir ?? 'table' : `epoch=${cursor.epoch}`)
+    // As above: asked before the append creates the generation's table.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, liveDir)
+    const result = await appendRowsToTable(liveDir, columns, rows)
     await writeCursor(partitionDir, {
-      epoch: cursor.epoch,
+      ...cursor,
       rowCount: cursor.rowCount + rows.length,
-      compaction: cursor.compaction,
       ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
