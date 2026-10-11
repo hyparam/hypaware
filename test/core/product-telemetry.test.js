@@ -1015,12 +1015,20 @@ test('a custom plugin command is other and whole invocation duration includes wo
   const root = productRoot(env)
   writePolicy(root, 'local')
   const registry = createCommandRegistry()
+  // The work is timed on the clock withProductInvocation reads, not taken as
+  // the 20 ms asked of setTimeout: Node timers can fire a fraction of a
+  // millisecond early, and a loaded CI runner recorded under 20 against `>= 20`.
+  // The invocation window opens before the command starts and closes after
+  // it returns, so it covers the measured work exactly, with no margin.
+  let workMs = 0
   registry.register({
     name: 'customer-private-command',
     summary: '',
     usage: '',
     run: async () => {
+      const workStart = performance.now()
       await new Promise((resolve) => setTimeout(resolve, 20))
+      workMs = performance.now() - workStart
       return 0
     }
   })
@@ -1037,7 +1045,11 @@ test('a custom plugin command is other and whole invocation duration includes wo
     .flatMap((e) => JSON.parse(e.wire).records)
     .find((r) => r.name === 'cli.invocation')
   assert.equal(record.attributes.command, 'other')
-  assert(record.attributes.duration_ms >= 20)
+  assert(workMs > 0)
+  assert(
+    record.attributes.duration_ms >= workMs,
+    `invocation took ${record.attributes.duration_ms} ms, its work ${workMs} ms`
+  )
 })
 
 test('24-hour simulated receiver outage stays bounded and never starts a new retry window', async (t) => {
