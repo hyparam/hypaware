@@ -8,6 +8,8 @@ import path from 'node:path'
 
 import { runDaemon } from '../../src/core/daemon/runtime.js'
 import { collectHypAwareStatus, readStatusFile, writeStatusFile } from '../../src/core/daemon/status.js'
+import { renderStatusText } from '../../src/core/commands/status.js'
+import { runDaemonStatus } from '../../src/core/commands/daemon.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
@@ -168,7 +170,7 @@ async function bootStaged(t, staged, runId) {
   })
   const status = /** @type {any} */ (readStatusFile(staged.stateRoot))
   assert.equal(status.runId, runId, 'ground truth: this boot wrote the file being read')
-  return status
+  return Object.assign(status, { reload: handle.reload })
 }
 
 /**
@@ -253,4 +255,81 @@ test('a boot whose config no longer names the destination drops its row and stil
   const after = await exportWarnings(staged.hypHome)
   assert.deepEqual(after.sinks, [], 'and nothing is left to render as the install\'s shape')
   assert.deepEqual(after.warnings, [], 'a destination the operator removed raises no export warning')
+})
+
+/**
+ * A write sink collecting text, enough of a stream for both renderers.
+ */
+function textSink() {
+  let value = ''
+  return {
+    /** @param {string} chunk */
+    write(chunk) {
+      value += chunk
+      return true
+    },
+    text() {
+      return value
+    },
+  }
+}
+
+// Issue #2494. A boot that registers nothing retains the recovered row with no
+// plugin or kind; once a reload deletes the whole `sinks` key, `hyp status`
+// reaches that row through its status-file fallback. Both text surfaces
+// printed the empty pair as `(, )`; they now omit it, and keep the row.
+test('a retained row with no plugin or kind renders without an empty metadata pair after the sinks key is removed', async (t) => {
+  const staged = await stageInstall({
+    prefix: 'hyp-sink-stamp-blank-pair-',
+    configureSink: true,
+    breakActivation: true,
+  })
+  const status = await bootStaged(t, staged, 'stamp-blank-pair')
+  await fs.writeFile(staged.configPath, JSON.stringify({ version: 2, plugins: [{ name: PLUGIN, config: {} }] }))
+  await status.reload()
+
+  const env = { ...process.env, HYP_HOME: staged.hypHome, HYP_CONFIG: '' }
+  const report = await collectHypAwareStatus({ env, platform: 'darwin', isLaunchAgentInstalled: () => false })
+  assert.deepEqual(
+    report.sinks.map((s) => ({ instance: s.instance, plugin: s.plugin, kind: s.kind })),
+    [{ instance: SINK, plugin: '', kind: '' }],
+    'ground truth: the status-file fallback serves the retained row with its blank pair',
+  )
+  const statusOut = textSink()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: /** @type {any} */ (statusOut), env })
+  const daemonOut = textSink()
+  const code = await runDaemonStatus([], /** @type {any} */ ({ env, stdout: daemonOut, stderr: textSink(), argv: [] }))
+  assert.equal(code, 0)
+
+  const sinkLines = (/** @type {string} */ text) => text.split('\n').filter((line) => line.includes(`- ${SINK}`))
+  assert.deepEqual({ status: sinkLines(statusOut.text()), daemon: sinkLines(daemonOut.text()) }, {
+    status: [`    - ${SINK}`],
+    daemon: [`    - ${SINK}`],
+  }, 'the row stays, and neither surface prints an empty plugin/kind pair')
+})
+
+// The same rule names whichever half is present, with no dangling separator,
+// and leaves a fully described row as it was.
+test('sink rows render whichever of plugin and kind is present', async () => {
+  const sinks = [
+    { instance: 'both', plugin: PLUGIN, kind: 'request' },
+    { instance: 'plugin-only', plugin: PLUGIN, kind: '' },
+    { instance: 'kind-only', plugin: '', kind: 'request' },
+  ]
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sink-pair-'))
+  try {
+    const stateRoot = path.join(hypHome, 'hypaware')
+    writeStatusFile(stateRoot, /** @type {any} */ ({ state: 'stopped', pid: 4242, startedAt: '2026-10-01T00:00:00.000Z', uptimeMs: 1, sources: [], sinks }))
+    const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
+    const full = await collectHypAwareStatus({ env, platform: 'darwin', isLaunchAgentInstalled: () => false })
+    const statusOut = textSink()
+    renderStatusText({ report: { ...full, sinks: /** @type {any} */ (sinks) }, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: /** @type {any} */ (statusOut), env })
+    const daemonOut = textSink()
+    await runDaemonStatus([], /** @type {any} */ ({ env, stdout: daemonOut, stderr: textSink(), argv: [] }))
+    const lines = (/** @type {string} */ text) => text.split('\n').filter((line) => /- (both|plugin-only|kind-only)/.test(line)).map((line) => line.trim())
+    assert.deepEqual(lines(statusOut.text()), [`- both  (${PLUGIN}, request)`, `- plugin-only  (${PLUGIN})`, '- kind-only  (request)'])
+    assert.deepEqual(lines(daemonOut.text()), [`- both (${PLUGIN}, request)`, `- plugin-only (${PLUGIN})`, '- kind-only (request)'])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
 })

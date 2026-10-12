@@ -965,7 +965,10 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write('    (none - keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
-      stdout.write(`    - ${printable(s.instance)}  (${printable(s.plugin)}, ${printable(s.kind)})${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
+      // A row recovered from the status file and backed by no live handle
+      // carries no plugin or kind (issue #2494): name what is known, never `(, )`.
+      const meta = [printable(s.plugin), printable(s.kind)].filter(Boolean).join(', ')
+      stdout.write(`    - ${printable(s.instance)}${meta ? `  (${meta})` : ''}${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
     }
   }
 

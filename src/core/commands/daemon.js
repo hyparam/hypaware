@@ -225,7 +225,9 @@ export async function runDaemonStatus(argv, ctx) {
     ctx.stdout.write('    (none)\n')
   } else {
     for (const sink of sinks) {
-      ctx.stdout.write(`    - ${printable(sink.instance)} (${printable(sink.plugin)}, ${printable(sink.kind)})\n`)
+      // Same rule as `hyp status`: a retained row with no live handle has no plugin or kind (issue #2494).
+      const meta = [printable(sink.plugin), printable(sink.kind)].filter(Boolean).join(', ')
+      ctx.stdout.write(`    - ${printable(sink.instance)}${meta ? ` (${meta})` : ''}\n`)
     }
   }
   return 0
