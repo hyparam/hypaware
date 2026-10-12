@@ -587,6 +587,10 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       finalizeOnce()
     })
     upstreamRes.on('error', (err) => {
+      // pipe() neither ends nor destroys `res` when its source errors, so a
+      // mid-stream upstream drop would leave the client waiting on its own
+      // idle timeout. Destroy it so the client sees the drop and can retry.
+      res.destroy(err)
       exchange.setError(err)
       finalizeOnce()
     })
