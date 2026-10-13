@@ -18,7 +18,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
  * older poll/backfill partitions are retired for this scope only, after commit.
  * @param {{ cacheRoot: string, dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[],
  * scope: { where: Record<string, string>, key: string }, declaration?: CachePartitioningDeclaration,
- * filterRows: (rows: Record<string, unknown>[]) => Record<string, unknown>[], nextSeq: () => Promise<bigint> }} args
+ * filterRows: (rows: Record<string, unknown>[]) => Record<string, unknown>[], reserveSeq: (count: number) => Promise<bigint> }} args
  */
 export async function reconcileCacheRows(args) {
   const { cacheRoot, dataset, columns, scope, declaration } = args
@@ -69,7 +69,7 @@ export async function reconcileCacheRows(args) {
         const cursor = readCursorSync(part)
         const table = part === target && !knownPaths.has(part)
           ? path.join(part, 'table') : resolveIcebergDir(part)
-        const result = await reconcileRowsInTable(table, columns, part === target ? rows : [], scope, args.nextSeq, part === target && declaration ? { declaration } : undefined)
+        const result = await reconcileRowsInTable(table, columns, part === target ? rows : [], scope, args.reserveSeq, part === target && declaration ? { declaration } : undefined)
         rowsWritten += result.rowsWritten
         rowsDeleted += result.rowsDeleted
         if (result.rowsWritten || result.rowsDeleted || result.rowCount !== cursor.rowCount ||

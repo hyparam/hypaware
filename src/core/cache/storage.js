@@ -122,9 +122,13 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     description: 'Rows dropped due to missing required Iceberg partition fields',
   })
   const seqAllocator = createIngestSeqAllocator({ cacheRoot })
+  /** @param {Record<string, unknown>[]} rows */
+  async function stampRows(rows) {
+    const first = await seqAllocator.reserve(rows.length)
+    rows.forEach((row, index) => { row[INGEST_SEQ_COLUMN.name] = first + BigInt(index) })
+  }
   const spool = createCacheSpool({
     cacheRoot,
-    nextSeq: seqAllocator.next,
     async appendChunk(tablePath, columns, rows) {
       const beforePurge = rows.length
       rows = survivingRows(rows)
@@ -190,7 +194,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         }
       }
       let totalBytes = 0
-      const opts = { declaration, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
+      const opts = { declaration, stampRows, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
         const kept = survivingRows(rows)
         const removed = rows.length - kept.length
         droppedCount += removed
@@ -642,7 +646,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
       }
       return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
-        declaration: getDeclaration?.(dataset), filterRows: survivingRows, nextSeq: seqAllocator.next })
+        declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
     discoverCachePartitions(scope) {

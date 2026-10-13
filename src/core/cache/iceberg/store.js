@@ -613,8 +613,8 @@ export async function listLiveDataFiles(tablePath) {
  *   (skipped). A sink passes this once it HAS a durable watermark, so the
  *   pre-upgrade backlog is re-exported exactly once, never on every subsequent
  *   tick (LLP 0040 §6 risk #1). No new null-seq row can appear post-upgrade,
- *   the `decorateRow` chokepoint stamps a real seq on every flushed row, so
- *   excluding legacy rows after the first export is safe.
+ *   the commit path stamps a real seq on every flushed row, so excluding
+ *   legacy rows after the first export is safe.
  *
  * A real seq is yielded iff strictly `> since`. The seq column is force-projected
  * so the predicate can be evaluated even when the caller asked for a narrower
@@ -1035,10 +1035,10 @@ async function scanFileForScopedRows(filePath, resolver, plan, deletedPositions)
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
  * @param {{ where: Record<string, string>, key: string }} scope
- * @param {() => Promise<bigint>} nextSeq
+ * @param {(count: number) => Promise<bigint>} reserveSeq
  * @param {AppendOptions} [options]
  */
-export async function reconcileRowsInTable(tablePath, columns, rows, scope, nextSeq, options) {
+export async function reconcileRowsInTable(tablePath, columns, rows, scope, reserveSeq, options) {
   const records = rowsToIcebergRecords(columns, rows)
   const pending = new Map(records.map(row => [String(row[scope.key]), row]))
   if (pending.size !== rows.length) throw new Error('Duplicate snapshot row identity')
@@ -1102,7 +1102,10 @@ export async function reconcileRowsInTable(tablePath, columns, rows, scope, next
   }
   if (!deletes.length && !pending.size) return { rowsWritten: 0, rowsDeleted: 0, rowCount }
   const writes = [...pending.values()]
-  for (const row of writes) row[INGEST_SEQ_COLUMN.name] = await nextSeq()
+  if (writes.length) {
+    const first = await reserveSeq(writes.length)
+    writes.forEach((row, index) => { row[INGEST_SEQ_COLUMN.name] = first + BigInt(index) })
+  }
   const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
   await icebergTransaction({ catalog, tableUrl: url }, async tx => {
     for (let i = 0; i < deletes.length; i += PURGE_DELETE_BATCH_SIZE) {

@@ -6,10 +6,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 
-import {
-  createIngestSeqAllocator,
-  DEFAULT_SEQ_BLOCK_SIZE,
-} from '../../src/core/cache/ingest-seq.js'
+import { createIngestSeqAllocator } from '../../src/core/cache/ingest-seq.js'
 import {
   INGEST_SEQ_COLUMN,
   INTERNAL_FIELDS,
@@ -30,124 +27,79 @@ async function makeTmpDir() {
 
 const SEQ_FILE = '_hyp_ingest_seq.json'
 
-test('allocator hands out a strictly increasing run from 1', async () => {
+test('reserve hands out contiguous, strictly increasing runs from 1', async () => {
   const dir = await makeTmpDir()
-  const alloc = createIngestSeqAllocator({ cacheRoot: dir, blockSize: 4 })
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
 
-  /** @type {bigint[]} */
-  const seqs = []
-  for (let i = 0; i < 10; i++) seqs.push(await alloc.next())
+  const first = await alloc.reserve(4)
+  const second = await alloc.reserve(1)
+  const third = await alloc.reserve(5)
 
-  assert.deepEqual(seqs, [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 10n])
+  assert.deepEqual([first, second, third], [1n, 5n, 6n])
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('reserve-before-stamp: persisted nextSeq is always ahead of the last issued seq', async () => {
+test('reserve-before-stamp: persisted nextSeq is always ahead of the last reserved seq', async () => {
   const dir = await makeTmpDir()
   const statePath = path.join(dir, SEQ_FILE)
-  const alloc = createIngestSeqAllocator({ cacheRoot: dir, blockSize: 8 })
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
 
-  // After the very first allocation, a whole block must already be durable.
-  const first = await alloc.next()
+  // The whole run is durable before the caller sees its first seq.
+  const first = await alloc.reserve(8)
   assert.equal(first, 1n)
   const persistedAfterFirst = JSON.parse(await fs.readFile(statePath, 'utf8'))
   assert.equal(persistedAfterFirst.v, 1)
-  // Block of 8 reserved up front => nextSeq persisted at 9 while only seq 1 issued.
   assert.equal(persistedAfterFirst.nextSeq, '9')
 
-  // Drain the rest of the block; nextSeq stays at the reserved boundary.
-  for (let i = 0; i < 7; i++) await alloc.next()
-  const persistedAfterBlock = JSON.parse(await fs.readFile(statePath, 'utf8'))
-  assert.equal(persistedAfterBlock.nextSeq, '9')
-
-  // Crossing the block boundary reserves the next block durably *before* use.
-  const ninth = await alloc.next()
+  // Nothing is held back in memory: the next run starts where the file says.
+  const ninth = await alloc.reserve(1)
   assert.equal(ninth, 9n)
   const persistedAfterCross = JSON.parse(await fs.readFile(statePath, 'utf8'))
-  assert.equal(persistedAfterCross.nextSeq, '17')
+  assert.equal(persistedAfterCross.nextSeq, '10')
 
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('allocator never regresses across a restart and skips the abandoned block tail', async () => {
+test('allocator never regresses across a restart', async () => {
   const dir = await makeTmpDir()
 
-  const a = createIngestSeqAllocator({ cacheRoot: dir, blockSize: 100 })
-  const s1 = await a.next()
-  const s2 = await a.next()
-  assert.deepEqual([s1, s2], [1n, 2n])
+  const a = createIngestSeqAllocator({ cacheRoot: dir })
+  const s1 = await a.reserve(100)
+  assert.equal(s1, 1n)
 
-  // Simulate a crash/restart: a brand-new allocator over the same cache root.
-  // The previous in-memory block (3..100) is abandoned; the new one must start
-  // at the persisted watermark (101) and never re-issue 3..100.
-  const b = createIngestSeqAllocator({ cacheRoot: dir, blockSize: 100 })
-  const s3 = await b.next()
-  assert.equal(s3, 101n)
-  assert.ok(s3 > s2)
+  // Simulate a crash/restart: a brand-new allocator over the same cache root
+  // must start past every seq the old one reserved, used or not.
+  const b = createIngestSeqAllocator({ cacheRoot: dir })
+  const s2 = await b.reserve(1)
+  assert.equal(s2, 101n)
 
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('concurrent next() calls never collide (single allocator, parallel flushes)', async () => {
+test('concurrent reserve() calls never collide (single allocator, parallel flushes)', async () => {
   const dir = await makeTmpDir()
-  const alloc = createIngestSeqAllocator({ cacheRoot: dir, blockSize: 3 })
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
 
-  const seqs = await Promise.all(Array.from({ length: 50 }, () => alloc.next()))
-  const sorted = [...seqs].map((s) => s.toString())
-  const unique = new Set(sorted)
-  assert.equal(unique.size, 50, 'every issued seq is unique')
+  const starts = await Promise.all(Array.from({ length: 50 }, () => alloc.reserve(1)))
+  const unique = new Set(starts.map((s) => s.toString()))
+  assert.equal(unique.size, 50, 'every reserved seq is unique')
   // The multiset is exactly 1..50 (no gaps inside a fully-drained run).
-  const asNums = seqs.map((s) => Number(s)).sort((x, y) => x - y)
+  const asNums = starts.map((s) => Number(s)).sort((x, y) => x - y)
   assert.deepEqual(asNums, Array.from({ length: 50 }, (_, i) => i + 1))
 
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('default block size is a positive integer and rejects bad input', async () => {
+test('reserve rejects a non-positive count and a missing cache root', async () => {
   const dir = await makeTmpDir()
-  assert.ok(Number.isInteger(DEFAULT_SEQ_BLOCK_SIZE) && DEFAULT_SEQ_BLOCK_SIZE > 0)
-  assert.throws(() => createIngestSeqAllocator({ cacheRoot: dir, blockSize: 0 }))
+  const alloc = createIngestSeqAllocator({ cacheRoot: dir })
+  await assert.rejects(() => alloc.reserve(0))
+  await assert.rejects(() => alloc.reserve(1.5))
   assert.throws(() => createIngestSeqAllocator({ cacheRoot: '' }))
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('streamFlushFile stamps a monotonic _hyp_ingest_seq and adds the column', async () => {
-  const dir = await makeTmpDir()
-  const filePath = path.join(dir, 'seq.jsonl')
-
-  /** @type {ColumnSpec[]} */
-  const cols = [
-    { name: 'id', type: 'INT64', nullable: false },
-    { name: 'msg', type: 'STRING', nullable: false },
-  ]
-  const lines = []
-  for (let i = 0; i < 5; i++) {
-    lines.push(JSON.stringify({ version: 1, columns: cols, rows: [{ id: i, msg: `r${i}` }] }) + '\n')
-  }
-  await fs.writeFile(filePath, lines.join(''))
-
-  let n = 100n
-  const nextSeq = async () => n++
-
-  /** @type {bigint[]} */
-  const stamped = []
-  for await (const batch of streamFlushFile({ filePath, batchId: 'b1', nextSeq })) {
-    // Chunk columns carry the additive nullable seq column.
-    assert.ok(batch.chunk.columns.some((c) => c.name === '_hyp_ingest_seq' && c.type === 'INT64' && c.nullable === true))
-    for (const row of batch.chunk.rows) {
-      assert.equal(typeof row._hyp_ingest_seq, 'bigint')
-      stamped.push(/** @type {bigint} */ (row._hyp_ingest_seq))
-    }
-  }
-
-  assert.deepEqual(stamped, [100n, 101n, 102n, 103n, 104n])
-  assert.equal(INGEST_SEQ_COLUMN.name, '_hyp_ingest_seq')
-  assert.ok(INTERNAL_FIELDS.includes('_hyp_ingest_seq'))
-
-  await fs.rm(dir, { recursive: true, force: true })
-})
-
-test('streamFlushFile leaves seq null and still declares the column when no allocator is wired', async () => {
+test('streamFlushFile leaves seq null and declares the column; the commit stamps the value', async () => {
   const dir = await makeTmpDir()
   const filePath = path.join(dir, 'noalloc.jsonl')
   /** @type {ColumnSpec[]} */
