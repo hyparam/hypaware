@@ -1,15 +1,44 @@
 ---
 name: hypaware-privacy
-description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync", "what will ship to the server", or "what will sync to the cloud". Surveys this machine's local cache; rows already forwarded are out of scope except where a session purge deletes them.
+description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Also use for "don't record this", "pause logging", or "resume recording"; handle direct recording controls without a full audit. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync", "what will ship to the server", or "what will sync to the cloud". Surveys this machine's local cache; rows already forwarded are out of scope except where a session purge deletes them.
 ---
 
 # HypAware privacy review: audit what was captured, decide what leaves
 
-This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. The six steps run the same way whenever the user asks; only the stakes change.
+This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. For a privacy review, the six steps run the same way; only the stakes change.
 
 The one moment they are time-critical is enrollment. When `hyp remote login` enrolls this machine, the first sync to the org server is **held until a printed deadline** rather than run immediately, and the whole captured history (backfill included) ships at that deadline unless you refine it first. Doing nothing is a valid choice there - at the deadline everything forwards, which is the documented default. On a machine that was never enrolled there is no pending export at all, and the same steps simply bound what gets recorded and what stays in the local cache.
 
-Run the six steps below **in order**. Steps 4 and 5 (explain, then confirm) gate every marking: never mark or purge without first explaining the classes and getting per-item confirmation.
+For an audit, run the six steps below **in order**. Steps 4 and 5 (explain, then confirm) gate audit-driven markings: never mark or purge without first explaining the classes and getting per-item confirmation.
+
+## Direct recording controls
+
+For an explicit recording-control request, perform only the requested action;
+do not start the six-step audit. The six-step requirements above apply to a
+privacy review. Verify the command receipt and report failures accurately.
+
+- Opt a folder out of recording - `hyp privacy ignore <path>` writes a committable
+  `.hypignore`; `hyp privacy set <path> ignore` marks it machine-local instead,
+  with no repo breadcrumb.
+- Stop recording *this conversation* - `hyp session ignore` drops this session's
+  exchanges at every local recorder (the gateway, and the Claude telemetry
+  listener when one is running); `hyp session unignore` resumes, and
+  `hyp session status` reports which it is right now. Each resolves the
+  session id itself (Claude and Codex) and fails closed rather than guessing.
+  The opt-out survives restarts until explicitly unignored and is honored by
+  transcript backfill. Forks (`claude --fork-session`, `codex fork`) need a new
+  exclusion. Ignoring does not purge prior records; unignoring permits older
+  transcript content to be imported again.
+  The managed Claude SessionStart hook exports the ID to Bash commands in
+  attached local Desktop Code sessions. Start or resume after upgrading so it
+  runs. If `CLAUDE_CODE_SESSION_ID` is absent, use an explicitly verified Claude
+  ID or report that opt-out is unconfirmed. A recent transcript or matching cwd
+  cannot establish the current Claude conversation; never substitute a Codex ID
+  from the same folder.
+- Decide what happens in new folders - by default they sync with no
+  question; `hyp privacy folders ask` asks once per new folder instead, and
+  `hyp privacy folders sync` returns to the default. It gates the question
+  only, never an existing class.
 
 ## Scope honesty (say this up front)
 
