@@ -1962,6 +1962,8 @@ export interface VerbRenderControls {
   output?: string
   maxCell: number
   maxBytes: number
+  /** True when stdout is a colour terminal and the render goes there, not to `--output`. */
+  color?: boolean
 }
 
 /** What a verb's `render` returns; the kernel performs the actual IO. */
@@ -2012,7 +2014,7 @@ export interface VerbRegistration {
   /** The shared core. Identical for the CLI and the MCP tool. */
   operation(params: Record<string, unknown>, ctx: VerbOperationContext): Promise<unknown> | unknown
   /** CLI-only: turn a structured result into stdout text + exit code. */
-  render(result: any, controls: VerbRenderControls): VerbRenderResult
+  render(result: any, controls: VerbRenderControls, params?: Record<string, unknown>): VerbRenderResult
 }
 
 export interface VerbRegistry {

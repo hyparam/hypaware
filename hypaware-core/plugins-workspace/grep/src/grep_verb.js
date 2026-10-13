@@ -1,12 +1,13 @@
 // @ts-check
 
+import { ANSI } from '../../../../src/core/cli/style.js'
 import { VerbUsageError } from '../../../../src/core/cli/verb_errors.js'
 import { buildQuerySqlOutput } from '../../../../src/core/query/format.js'
 import { renderLocalOnlyNotice } from '../../../../src/core/query/verb.js'
 // The matcher module is pulled in for its refusal kind alone, and imports
 // nothing beyond the allowlist below, so the boot-path deferral that keeps
 // the Iceberg store out of `hyp --help` is untouched.
-import { GrepQueryError } from '../../../../src/core/search/matcher.js'
+import { GrepQueryError, escapeLiteral } from '../../../../src/core/search/matcher.js'
 import { SEARCHABLE_COLUMNS } from '../../../../src/core/search/searchable_columns.js'
 
 /**
@@ -198,7 +199,7 @@ export const queryGrepVerb = {
     // of the local extras and the render falls back field by field.
     return { ...result, limitCeilingReached: limit >= MAX_LIMIT }
   },
-  render(result, controls) {
+  render(result, controls, params) {
     const r = /** @type {Partial<GrepSearchResult> & { localOnly?: LocalOnlyVisibilityReport, freshnessMessages?: string[], limitCeilingReached?: boolean, indexedFiles?: number, scannedFiles?: number }} */ (result)
     const hits = Array.isArray(r.hits) ? r.hits : []
     // One row per matched column, rg-style: the locator columns lead, the
@@ -215,6 +216,9 @@ export const queryGrepVerb = {
       maxCell: controls.maxCell,
       maxBytes: controls.maxBytes,
     })
+    const stdout = controls.color === true && format === 'table' && typeof params?.query === 'string'
+      ? highlightSnippets(out.stdout, params.query, params.regex === true)
+      : out.stdout
     let stderr = (r.freshnessMessages ?? []).map((m) => `${m}\n`).join('')
     stderr += renderLocalOnlyNotice(r.localOnly)
     // The two completeness signals, on stderr so stdout stays a valid
@@ -256,7 +260,7 @@ export const queryGrepVerb = {
         'or --from/--to excluded every file\n'
     }
     return {
-      stdout: out.stdout,
+      stdout,
       stderr: stderr + out.stderr,
       ...(out.file ? { file: out.file } : {}),
     }
@@ -323,6 +327,42 @@ function dayBound(value, flag) {
     throw new VerbUsageError(`--${flag} expects a day as YYYY-MM-DD (got ${value})`)
   }
   return value
+}
+
+/**
+ * Paint every match in the snippet column of a rendered table, ripgrep
+ * style. Only the snippet column is painted, so a query that happens to
+ * look like a date or a session id does not light up the locators. The
+ * snippet is the last column (see {@link flattenHits}), so its start is
+ * the header's `snippet` offset on every row.
+ *
+ * The matcher is the search's own (case-insensitive, literal or regex), run
+ * over the escaped cell a reader sees. A match the table escaping split (a
+ * query spanning a newline, say) stays unpainted, which costs only colour.
+ *
+ * @param {string} table
+ * @param {string} query
+ * @param {boolean} regex
+ * @returns {string}
+ */
+function highlightSnippets(table, query, regex) {
+  /** @type {RegExp} */
+  let re
+  try {
+    re = new RegExp(regex ? query : escapeLiteral(query), 'gi')
+  } catch {
+    return table
+  }
+  const lines = table.split('\n')
+  const at = lines[0]?.indexOf('snippet') ?? -1
+  if (at < 0) return table
+  for (let i = 2; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (line.length <= at) continue
+    const snippet = line.slice(at).replace(re, (m) => m ? `${ANSI.bold}${ANSI.red}${m}${ANSI.reset}` : m)
+    lines[i] = line.slice(0, at) + snippet
+  }
+  return lines.join('\n')
 }
 
 /**

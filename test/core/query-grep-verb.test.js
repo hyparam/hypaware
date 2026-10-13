@@ -675,3 +675,24 @@ test('an injecting host never loads the local search stack', (t) => {
   assert.ifError(run.error)
   assert.equal(run.status, 0, run.stderr)
 })
+
+test('a colour terminal gets the snippet matches painted; anything else stays plain', () => {
+  const result = {
+    hits: [{
+      date: '2026-08-12', sessionId: 'needle-s', agentId: null, conversationId: null,
+      partId: 'p1', messageId: 'm1', messageCreatedAt: '2026-08-12T00:00:00Z',
+      matches: [{ column: 'content_text', snippet: 'a Needle and a needle' }],
+    }],
+    truncated: false,
+    exhausted: true,
+  }
+  const base = { format: 'table', json: false, maxCell: 200, maxBytes: 32768 }
+  const painted = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: true }), { query: 'needle' }).stdout
+  assert.equal((painted.match(/\x1b\[1m\x1b\[31m/g) ?? []).length, 2, 'both case variants in the snippet are painted')
+  assert.match(painted, /needle-s/, 'the session id locator is not painted')
+  assert.doesNotMatch(painted, /\x1b\[1m\x1b\[31mneedle\x1b\[0m-s/)
+  const plain = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: false }), { query: 'needle' }).stdout
+  assert.doesNotMatch(plain, /\x1b/)
+  const json = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, format: 'json', color: true }), { query: 'needle' }).stdout
+  assert.doesNotMatch(json, /\x1b/, 'a pipeline format is never painted')
+})
