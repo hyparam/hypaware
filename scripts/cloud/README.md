@@ -5,11 +5,14 @@ HypAware. Claude Code cloud sessions run in a fresh Linux VM per session, with
 no systemd or launchd, so `hyp daemon install` cannot work there. Instead:
 
 - the environment's **setup script** (runs once per environment cache, as root,
-  before Claude Code starts) installs a pinned `hypaware`, runs
-  `hyp setup --client claude --no-daemon`, and joins a central server when
-  `HYP_CENTRAL_URL` and `HYP_JOIN_TOKEN` are set;
-- a **SessionStart hook** it registers in `~/.claude/settings.json` starts
-  `hyp daemon run` in every session, including resumed ones. A second start
+  before Claude Code starts) installs a pinned `hypaware` and runs
+  `hyp setup --client claude --no-daemon`;
+- a **SessionStart hook** it registers in `~/.claude/settings.json` joins a
+  central server the first time it runs, when `HYP_CENTRAL_URL` and
+  `HYP_JOIN_TOKEN` are set (the join is done here because a session sees the
+  environment's variables, and a join in the setup script did not take
+  effect), then starts `hyp daemon run` in every session, including resumed
+  ones. A second start
   exits on its own while a daemon is alive. A VM rebuilt after idling keeps
   the old daemon's pid file but restarts pid numbering, so the hook first
   removes that file unless its pid is still a hyp daemon; otherwise an

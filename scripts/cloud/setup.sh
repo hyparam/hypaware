@@ -8,11 +8,14 @@
 # Optional environment variables (set them on the environment):
 #   HYP_CENTRAL_URL  central server to join; omit for local-only capture
 #   HYP_JOIN_TOKEN   join token for HYP_CENTRAL_URL
+# The join happens in the session-start hook, not here: the environment's
+# variables are confirmed visible to sessions, and a join here was not seen
+# to take effect.
 #
 # A setup script that exits non-zero stops the session from starting, so
 # every failure here logs and exits 0: capture is lost, the session is not.
 set -u
-HYP_VERSION=1.41.0
+HYP_VERSION=1.42.0
 
 log() { echo "hypaware-cloud: $*"; }
 
@@ -24,11 +27,6 @@ npm install -g --no-audit --no-fund "hypaware@${HYP_VERSION}" \
 # the VM has no running systemd, so the daemon is started per session below.
 hyp setup --client claude --export keep-local --no-daemon --no-backfill \
   || { log "hyp setup failed; capture disabled"; exit 0; }
-
-if [ -n "${HYP_CENTRAL_URL:-}" ] && [ -n "${HYP_JOIN_TOKEN:-}" ]; then
-  printf %s "$HYP_JOIN_TOKEN" | hyp join "$HYP_CENTRAL_URL" --no-daemon \
-    || log "hyp join failed; capturing locally only"
-fi
 
 # Processes do not survive the snapshot, so a SessionStart hook starts the
 # daemon in every session (including resumed ones). `hyp daemon run` exits
@@ -49,6 +47,16 @@ pid=$(sed -n 's/^ *"pid": *\([0-9]*\).*/\1/p' "$PIDFILE" 2>/dev/null)
 if [ -n "$pid" ] && ! { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null | grep -q 'daemon run'; then
   rm -f "$PIDFILE"
   echo "$(date -u +%FT%TZ) removed stale pid file (pid $pid)" >>"$LOG"
+fi
+# Join a central server once, when the environment supplies one. The seed
+# file `hyp join` writes is kept across sessions, so later starts skip this.
+SEED="$HOME/.hyp/hypaware/config-control/seed.json"
+if [ ! -f "$SEED" ] && [ -n "${HYP_CENTRAL_URL:-}" ] && [ -n "${HYP_JOIN_TOKEN:-}" ]; then
+  if printf %s "$HYP_JOIN_TOKEN" | hyp join "$HYP_CENTRAL_URL" --no-daemon >>"$LOG" 2>&1; then
+    echo "$(date -u +%FT%TZ) joined $HYP_CENTRAL_URL" >>"$LOG"
+  else
+    echo "$(date -u +%FT%TZ) hyp join failed; capturing locally only" >>"$LOG"
+  fi
 fi
 echo "$(date -u +%FT%TZ) session start" >>"$LOG"
 # Exit 75 is the daemon asking to be relaunched (new central config, a
