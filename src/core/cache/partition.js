@@ -841,11 +841,14 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     // Buffered rows must be checked again after waiting behind a purge.
     rows = options?.filterRows ? options.filterRows(rows) : rows
     if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
-    // Seqs are reserved here, under the guard and after the purge re-check,
+    // Seqs are stamped here, under the guard and after the purge re-check,
     // so every row this partition commits carries a seq above every row it
     // committed before, whichever process did the committing. Stamping any
     // earlier (the spool reader once did) let two processes commit out of
-    // seq order and left rows under the sink's watermark (issue #2578).
+    // seq order and left rows under the sink's watermark (issue #2578). A
+    // multi-partition chunk reserves its whole run before this, once every
+    // guard is held, and only hands each partition its slice here.
+    // @ref LLP 0492#reserve-at-commit [implements]: stamp under the partition guard, after the purge re-check
     if (options?.stampRows) await options.stampRows(rows)
     const fallbackAppended = countGatewayFallbackRows(rows)
     const cursor = readCursorForAppend(partitionDir)

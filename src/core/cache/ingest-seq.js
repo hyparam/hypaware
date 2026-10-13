@@ -93,7 +93,9 @@ async function writeNextSeq(statePath, nextSeq) {
  * independent sequences into one partition) would break. Gaps between
  * consecutively-appended rows in one partition are fine.
  *
- * @ref LLP 0040#seq-allocator [implements]: cache-global never-regressing reserve-before-stamp allocator, now reserved per commit under a cross-process guard
+ * @ref LLP 0040#seq-allocator [implements]: cache-global never-regressing reserve-before-stamp allocator
+ * @ref LLP 0492#reserve-at-commit [implements]: reserved per commit under the partition guard, then the counter guard
+ * @ref LLP 0492#contention [implements]: bounded retry on a busy counter, then the chunk waits in the spool
  * @param {{ cacheRoot: string }} opts
  * @returns {IngestSeqAllocator}
  */

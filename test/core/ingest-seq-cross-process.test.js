@@ -9,11 +9,13 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createIngestSeqAllocator } from '../../src/core/cache/ingest-seq.js'
+import { withPartitionMutationLock } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 
 /**
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.d.ts'
- * @import { SinkContinuation } from '../../hypaware-plugin-kernel-types.d.ts'
+ * @import { ChildProcess } from 'node:child_process'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ * @import { SinkContinuation } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @returns {Promise<string>} */
@@ -148,6 +150,158 @@ test('allocators in separate processes reserve disjoint runs with no gap and lea
     assert.equal(persisted.nextSeq, (reserved + 1n).toString(), 'every reserved seq is accounted for and none was reserved twice')
     const leftovers = (await fs.readdir(cacheRoot)).filter((name) => name.includes('mutation-lock'))
     assert.deepEqual(leftovers, [])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+/** Two rows that the storage service files into two partitions, `source=a` and `source=b`. */
+const SPLIT_COLS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'client_name', type: 'STRING', nullable: false },
+]
+const SPLIT_ROWS = [{ id: 1, client_name: 'a' }, { id: 2, client_name: 'b' }]
+
+/**
+ * Spool one two-partition chunk in a real child process and flush it there.
+ * With `pause`, the child stops right after partition `a` publishes its cursor
+ * (so `a` has committed and `b` has not) and reports `a-committed`; it goes on
+ * when it is sent any message. It then reports `{ flushed, errorKind }`.
+ *
+ * @param {string} cacheRoot
+ * @param {boolean} pause
+ */
+function splitWriter(cacheRoot, pause) {
+  const storageUrl = pathToFileURL(path.resolve('src/core/cache/storage.js')).href
+  const child = `
+    import fs from 'node:fs/promises'
+    import path from 'node:path'
+    import { createQueryStorageService } from ${JSON.stringify(storageUrl)}
+    const [cacheRoot, pause] = process.argv.slice(1)
+    const svc = createQueryStorageService({ cacheRoot })
+    const table = svc.cacheTablePath('demo', ['input'])
+    await svc.appendRows(table, ${JSON.stringify(SPLIT_COLS)}, ${JSON.stringify(SPLIT_ROWS)})
+    if (pause) {
+      const cursorA = path.join(svc.cacheTablePath('demo', ['source=a']), 'cursor.json')
+      const rename = fs.rename
+      let paused = false
+      fs.rename = async function (from, to) {
+        await rename.call(this, from, to)
+        if (paused || String(to) !== cursorA) return
+        paused = true
+        process.send('a-committed')
+        await new Promise(resolve => process.once('message', resolve))
+      }
+    }
+    try {
+      await svc.flushTable(table, { force: true })
+      process.send({ flushed: true, errorKind: null })
+    } catch (error) {
+      process.send({ flushed: false, errorKind: error.error_kind ?? error.message })
+    }
+    process.disconnect()
+  `
+  /** @type {ChildProcess} */
+  const proc = spawn(process.execPath, ['--input-type=module', '-e', child, cacheRoot, pause ? '1' : ''], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  /** @type {unknown[]} */
+  const queue = []
+  /** @type {(() => void) | null} */
+  let wake = null
+  proc.on('message', (message) => { queue.push(message); wake?.() })
+  proc.on('exit', (code) => { queue.push({ exit: code }); wake?.() })
+  /** @type {Promise<number | null>} */
+  const exited = new Promise((resolve) => proc.on('exit', resolve))
+  return {
+    proc,
+    exited,
+    /** @returns {Promise<unknown>} */
+    async next() {
+      while (!queue.length) await new Promise((resolve) => { wake = () => { wake = null; resolve(undefined) } })
+      return queue.shift()
+    },
+  }
+}
+
+/**
+ * Hold the seq counter's cross-process guard from this process, the way a
+ * second flushing process does while it reserves.
+ *
+ * @param {string} cacheRoot
+ * @param {() => Promise<unknown>} fn
+ */
+function holdingCounter(cacheRoot, fn) {
+  return withPartitionMutationLock(path.join(cacheRoot, '_hyp_ingest_seq.json'), fn)
+}
+
+// A chunk that fans out to two partitions is checkpointed as a unit, so if
+// `a` commits and the seq reservation for `b` is then refused, the retry
+// replays the chunk and commits `a` again: a duplicate row in the cache, and
+// one the sink exports a second time. Review finding 1 on #2579.
+test('a two-partition chunk reserves its seqs before either partition commits, so counter contention cannot half-commit it', async () => {
+  const cacheRoot = await makeTmpDir()
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const a = svc.cacheTablePath('demo', ['source=a'])
+    const b = svc.cacheTablePath('demo', ['source=b'])
+    const writer = splitWriter(cacheRoot, true)
+    assert.equal(await writer.next(), 'a-committed')
+    // Another process takes the counter just as `a` has committed.
+    const outcome = await holdingCounter(cacheRoot, async () => {
+      writer.proc.send('go')
+      return writer.next()
+    })
+    assert.equal(await writer.exited, 0)
+    const exported = await sinkTick(svc, a, null)
+    // The retry a refused flush gets on the next tick.
+    await createQueryStorageService({ cacheRoot }).flushTable(svc.cacheTablePath('demo', ['input']), { force: true })
+    assert.deepEqual({
+      outcome,
+      exportedBeforeRetry: exported.ids,
+      exportedAfterRetry: (await sinkTick(svc, a, exported.after)).ids,
+      a: (await sinkTick(svc, a, null)).ids,
+      b: (await sinkTick(svc, b, null)).ids,
+    }, {
+      outcome: { flushed: true, errorKind: null },
+      exportedBeforeRetry: [1],
+      exportedAfterRetry: [],
+      a: [1],
+      b: [2],
+    })
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a two-partition chunk refused at the counter commits neither partition, and its retry commits and exports each row once', async () => {
+  const cacheRoot = await makeTmpDir()
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const a = svc.cacheTablePath('demo', ['source=a'])
+    const b = svc.cacheTablePath('demo', ['source=b'])
+    // The counter is held for longer than a reservation waits (about five
+    // seconds), so the flush gives up and leaves the chunk in the spool.
+    const outcome = await holdingCounter(cacheRoot, async () => {
+      const writer = splitWriter(cacheRoot, false)
+      const result = await writer.next()
+      assert.equal(await writer.exited, 0)
+      return result
+    })
+    const beforeA = await sinkTick(svc, a, null)
+    const beforeB = await sinkTick(svc, b, null)
+    await createQueryStorageService({ cacheRoot }).flushTable(svc.cacheTablePath('demo', ['input']), { force: true })
+    assert.deepEqual({
+      outcome,
+      exportedBeforeRetry: [...beforeA.ids, ...beforeB.ids],
+      exportedAfterRetry: [...(await sinkTick(svc, a, beforeA.after)).ids, ...(await sinkTick(svc, b, beforeB.after)).ids],
+      a: (await sinkTick(svc, a, null)).ids,
+      b: (await sinkTick(svc, b, null)).ids,
+    }, {
+      outcome: { flushed: false, errorKind: 'cache_partition_mutation_busy' },
+      exportedBeforeRetry: [],
+      exportedAfterRetry: [1, 2],
+      a: [1],
+      b: [2],
+    })
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
