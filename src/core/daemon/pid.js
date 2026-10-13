@@ -1,5 +1,6 @@
 // @ts-check
 
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -120,6 +121,57 @@ export function processIsAlive(pid) {
     if (code === 'EPERM') return true
     return false
   }
+}
+
+/**
+ * Command line of `pid` as a string, or `null` when it cannot be read
+ * (no such process, no permission, or no supported mechanism). Linux
+ * reads `/proc/<pid>/cmdline`; elsewhere falls back to `ps`.
+ *
+ * @param {number} pid
+ * @returns {string | null}
+ */
+export function readProcessCmdline(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  if (process.platform === 'linux') {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+      return raw.replace(/\0/g, ' ').trim() || null
+    } catch {
+      return null
+    }
+  }
+  try {
+    const out = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const cmd = String(out).trim()
+    return cmd || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether `pid` looks like a hypaware daemon process. `processIsAlive`
+ * only proves *some* process holds the pid: after an unclean shutdown
+ * the pid file survives and pid numbering can restart, so an unrelated
+ * process may hold it (`#2583`). The daemon runs as `hypaware … daemon`,
+ * which an unrelated process will not contain in its command line.
+ *
+ * Returns `null` when identity cannot be established: callers must keep
+ * the old fail-closed behavior (treat as alive).
+ *
+ * @param {number} pid
+ * @returns {boolean | null}
+ */
+export function isDaemonProcess(pid) {
+  const cmd = readProcessCmdline(pid)
+  if (cmd === null) return null
+  const lower = cmd.toLowerCase()
+  return lower.includes('hypaware') && lower.includes('daemon')
 }
 
 /**

@@ -9,7 +9,7 @@ import { bootKernel } from '../runtime/boot.js'
 import { cacheTablePath } from '../cache/paths.js'
 import { installObservability } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { clearPidFile, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
+import { clearPidFile, isDaemonProcess, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
 import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins, recordUnloadableManifests } from './boot_failure.js'
@@ -53,7 +53,17 @@ export async function runGatewayDaemon(opts = {}) {
   const runId = opts.runId ?? `gateway-${process.pid}-${Date.now()}`
   installObservability()
   const previous = readPidFile(stateRoot)
-  if (previous && processIsAlive(previous.pid)) throw new Error(`daemon already running (pid=${previous.pid})`)
+  if (previous && processIsAlive(previous.pid)) {
+    // Liveness alone cannot tell our daemon from a pid reuse after an
+    // unclean shutdown (#2583): only refuse when the holder still looks
+    // like us, and clear the stale file otherwise. Unreadable identity
+    // stays fail-closed (treated as alive, as before).
+    if (isDaemonProcess(previous.pid) === false) {
+      clearPidFile(stateRoot)
+    } else {
+      throw new Error(`daemon already running (pid=${previous.pid})`)
+    }
+  }
   const log = openDaemonLog({ stateRoot, runId, mode: 'foreground' })
   /** @type {ChildProcess | undefined} */
   let child
