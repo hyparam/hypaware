@@ -1470,3 +1470,50 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
   assert.equal(new Set(acked).size, TOTAL, 'every row delivered exactly once across the retry')
   assert.equal(watermarks.record?.continuation.seq, '1000000', 'watermark advances only after the whole partition acks')
 })
+
+// A dropped connection mid-upload (the edge's HTTP/2 GOAWAY, a reset socket)
+// rejects fetch with a TypeError carrying the undici code. The chunk is
+// idempotent by batch id, so it is re-sent instead of failing the partition
+// (issue #2581).
+test('a dropped connection re-sends the same chunk and the export succeeds', async () => {
+  let n = 0
+  const { sink, calls, sleeps } = buildSink({
+    count: 12_000,
+    responder: () => {
+      if (++n === 2) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_INFO', message: 'HTTP/2: "GOAWAY" frame received with code 0' } })
+      return 202
+    },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1)
+  // Three chunks plus one resend of the dropped one, with the same batch id and body.
+  assert.equal(calls.length, 4)
+  assert.equal(calls[2].batchId, calls[1].batchId)
+  assert.deepEqual(calls[2].lines, calls[1].lines)
+  assert.deepEqual(sleeps, [2_000])
+})
+
+test('a connection that keeps dropping fails the chunk with the transport code after bounded resends', async () => {
+  const { sink, calls, sleeps, log } = buildSink({
+    count: 100,
+    responder: () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }) },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.equal(calls.length, 4, 'one attempt plus three resends')
+  assert.deepEqual(sleeps, [2_000, 4_000, 6_000])
+  const failure = log.rows.find((row) => row.message === 'central.forward.failed')
+  assert.match(String(failure?.fields?.error ?? failure?.fields?.message ?? ''), /transport failed: ECONNRESET/)
+})
+
+test('an abort during the upload is not retried as a dropped connection', async () => {
+  const { sink, calls } = buildSink({
+    count: 100,
+    responder: () => { throw Object.assign(new Error('closed'), { name: 'AbortError' }) },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(calls.length, 1)
+})
