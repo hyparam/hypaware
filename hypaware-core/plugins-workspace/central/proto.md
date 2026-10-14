@@ -214,6 +214,16 @@ Headers (request):
   genuinely distinct chunk that merely shares bytes is never dropped
   (server LLP 0001).
 
+Optional compression (LLP 0497): a successful ingest response may advertise
+`Accept-Encoding: gzip`. Until then clients send plain NDJSON. Gzip requests
+carry `Content-Encoding: gzip`, encoded `Content-Length`, and
+`X-Hyp-Uncompressed-Length`. The server rejects missing/invalid/over-limit
+decoded lengths (413), malformed or mismatched compressed bodies (400), and
+unknown encodings (415). Decoding is bounded to the declared length and
+admission charges the larger of encoded and decoded lengths. Ledger hits
+still acknowledge before body decoding and admission. A gzip 415 permits one
+plain retry with the same batch id, for mixed-version deployments.
+
 Row-level dedup complements that ledger for `ai_gateway_messages`: the
 server holds a uniqueness guarantee on `part_id`, keyed by `(org, dataset)`
 rather than by gateway, so it spans the whole org's ingest and survives
@@ -240,8 +250,10 @@ HTTP date) is honored; an absent, unparseable, or **non-positive** value
 client's linear backoff ladder: a zero is never taken as an immediate
 retry.
 
-Response 5xx (other): transient transport failure. Client retries with
-exponential backoff capped at 5 minutes.
+Response 502 / 504: retry the same chunk with the shared transport-error
+budget of three retries at 2, 4, and 6 seconds. All attempts remain inside
+the single 330-second chunk lifetime. Other 5xx fail the partition for the
+driver to retry.
 
 > **Client status:** `429`/`503` are now handled as specified, the sink
 > honors a positive `Retry-After` (falling back to the linear ladder when
@@ -254,12 +266,11 @@ exponential backoff capped at 5 minutes.
 > (server LLP 0001 idempotency ledger). The wait is abortable, so sink
 > `close()` / daemon shutdown is never wedged by a paused chunk.
 >
-> Two gaps remain, tracked as follow-up: poison (`400`/`422`) is still
-> **not** dropped, it throws like any other failure and the driver
-> retries it, and there is no **forward cursor** or proactive client
-> pacing yet, so each tick re-streams the whole partition (the server
-> dedup keeps that correct and, post the ledger-before-backpressure fix,
-> cheap).
+> Poison (`400`/`422`) is still **not** dropped: it throws and the driver
+> retries it. Ordinary progress uses an end-of-partition watermark. After
+> interruption, bounded durable chunk receipts skip exact acknowledged chunks
+> while rereading through current privacy filters (LLP 0497). Source-history
+> replay uses separate receipts and does not change the ordinary watermark.
 
 ### Batch boundaries
 
