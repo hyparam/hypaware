@@ -200,6 +200,13 @@ So a verb being a tool does **not** mean a query-scoped client can call it:
 by whether it was migrated to a verb. The V1 *capability set* a query-scoped MCP
 client sees is decided by per-tool auth class, not by the migration order above.
 
+> Extended-by (Draft, proposed 2026-10-13): [LLP 0494#write-class](./0494-hypaware-mcp-phase-1.design.md#write-class)
+> proposes a third class, `write`, admitted by a named credential scope
+> (`report-publish`), for one recommendation status write on the remote
+> surface (hypaware-server LLP 0598), with tool annotations derived from the
+> class ([LLP 0494#annotations](./0494-hypaware-mcp-phase-1.design.md#annotations)).
+> Removed if Phil declines.
+
 <a id="stdio-stdout-discipline"></a>**stdio constraint:** stdout is the JSON-RPC
 channel, `hyp mcp` must route *all* logs and human text to stderr/file; a stray
 write corrupts the stream. (`@ref` when the code lands.)
