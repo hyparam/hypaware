@@ -279,6 +279,105 @@ export async function removeClientAssets(dests, baseDirs) {
 }
 
 /**
+ * Take a probe-less client's own installed assets off the machine on detach.
+ *
+ * A probe-less client has no attach marker, so the marker-driven removal in
+ * `detachClientViaCore` never reaches it. For a client whose asset directories
+ * belong to it alone (Hermes: `~/.hermes/skills`, shared with no other client),
+ * "removed on detach" is still answerable from HypAware's own install record:
+ * the ledger names every path a materialization wrote under this client, with
+ * the digest of the bytes it wrote. A path is removed only when all of these
+ * hold, which is {@link pruneOneAsset}'s gate with the retirement question
+ * replaced by the detach request:
+ *
+ * 1. this client's ledger record names it;
+ * 2. no other client records it or contributes it now;
+ * 3. it is a direct child of this client's asset directories;
+ * 4. the bytes on disk still match a digest HypAware recorded for that path.
+ *
+ * Everything else under the directory (the client's own files, a user's skill,
+ * a copy the user edited) is never a candidate or is reported and left in
+ * place. The ledger keeps the records for what stayed, so a later detach can
+ * name them again, and drops the ones whose path is gone.
+ *
+ * Returns `undefined` when the client shares an asset directory with another
+ * client: there the ledger key is `(client, dest)` and one physical copy can be
+ * two clients' install, so the probe-less client keeps the LLP 0107 behaviour
+ * of leaving its assets for the client that shares them.
+ *
+ * @param {Omit<MaterializeClientAssetsOptions, 'clients' | 'stateRoot'> & { client: string, stateRoot: string }} options
+ * @returns {Promise<{ removed: ClientAssetRemoval[], withheld: ClientAssetRemoval[] } | undefined>}
+ * @ref LLP 0494#skills [implements]: a Hermes detach removes only the
+ *   marker-owned `~/.hermes/skills/hypaware-*` directories HypAware wrote
+ */
+export async function removeOwnedClientAssets(options) {
+  const { client, descriptors, homeDir, stateRoot, dryRun = false, stdout, stderr } = options
+  const descriptor = descriptors.get(client)
+  if (!descriptor || homeDir.length === 0) return undefined
+  const baseDirs = clientAssetBaseDirs(descriptor, homeDir)
+  if (baseDirs.length === 0) return undefined
+  const ownDirs = new Set(baseDirs.map((dir) => path.resolve(dir)))
+  for (const [name, other] of descriptors) {
+    if (name === client) continue
+    if (clientAssetBaseDirs(other, homeDir).some((dir) => ownDirs.has(path.resolve(dir)))) return undefined
+  }
+
+  const ledger = await readClientAssetLedger(stateRoot)
+  /** @type {Set<string>} */
+  const othersHold = new Set()
+  for (const record of ledger) {
+    if (record.client !== client) othersHold.add(record.dest)
+  }
+  for (const planned of planClientAssets({ ...options, clients: 'all', stderr: undefined })) {
+    if (planned.client !== client) othersHold.add(planned.dest)
+  }
+  /** @type {Map<string, Set<string>>} */
+  const recordedDigests = new Map()
+  for (const record of ledger) {
+    if (!record.digest) continue
+    const known = recordedDigests.get(record.dest)
+    if (known) known.add(record.digest)
+    else recordedDigests.set(record.dest, new Set([record.digest]))
+  }
+
+  /** @type {ClientAssetRemoval[]} */
+  const removed = []
+  /** @type {ClientAssetRemoval[]} */
+  const withheld = []
+  /** @type {ClientAssetLedgerRecord[]} */
+  const next = []
+  for (const record of ledger) {
+    if (record.client !== client || othersHold.has(record.dest)) {
+      next.push(record)
+      continue
+    }
+    // A detach is not a retirement, so the warnings say `installed` and the
+    // progress line is this caller's own.
+    const outcome = await pruneOneAsset({
+      dest: record.dest,
+      record,
+      recorded: recordedDigests.get(record.dest) ?? EMPTY_DIGESTS,
+      client,
+      baseDirs,
+      dryRun,
+      label: 'installed',
+      stdout: undefined,
+      stderr,
+    })
+    if (outcome.carried && !(dryRun && outcome.removed)) next.push(outcome.carried)
+    if (!outcome.removal) continue
+    if (outcome.removed) {
+      removed.push(outcome.removal)
+      stdout?.write(`${dryRun ? '(dry-run) Would remove' : 'removed'} ${record.kind} '${record.name}' → ${record.dest}\n`)
+    } else {
+      withheld.push(outcome.removal)
+    }
+  }
+  if (!dryRun) await writeClientAssetLedger(stateRoot, next)
+  return { removed, withheld }
+}
+
+/**
  * Take off the machine the client assets HypAware installed and this version's
  * plugin set no longer contributes, then re-record what it does contribute.
  *
@@ -503,6 +602,7 @@ async function reconcileClientAssetLedger({ options, installed }) {
  *   client: string,
  *   baseDirs: string[],
  *   dryRun: boolean,
+ *   label?: string,
  *   stdout?: { write(chunk: string): unknown },
  *   stderr?: { write(chunk: string): unknown },
  * }} args
@@ -512,7 +612,7 @@ async function reconcileClientAssetLedger({ options, installed }) {
  *   removal?: ClientAssetRemoval,
  * }>}
  */
-async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun, stdout, stderr }) {
+async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun, label = 'retired', stdout, stderr }) {
   const kind = record?.kind ?? (path.extname(dest) === '.md' ? 'agent' : 'skill')
   const name = record?.name ?? path.basename(dest, kind === 'agent' ? '.md' : '')
   /** @type {ClientAssetRemoval} */
@@ -554,7 +654,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
   const shape = await statShape(dest)
   if (record && shape && shape !== (record.kind === 'agent' ? 'file' : 'dir')) {
     stderr?.write(
-      `warning: retired ${kind} '${name}' at ${dest} is a ${shape === 'dir' ? 'directory' : 'file'} where ` +
+      `warning: ${label} ${kind} '${name}' at ${dest} is a ${shape === 'dir' ? 'directory' : 'file'} where ` +
         `HypAware installed a ${record.kind === 'agent' ? 'file' : 'directory'}; left in place - ` +
         'remove it by hand if you no longer want it\n'
     )
@@ -586,7 +686,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
   //   and kept, never mistaken for absent.
   if (!digest) {
     stderr?.write(
-      `warning: retired ${kind} '${name}' at ${dest} could not be read to check whether the bytes are ` +
+      `warning: ${label} ${kind} '${name}' at ${dest} could not be read to check whether the bytes are ` +
         'still ours; left in place - check its permissions\n'
     )
     getLogger('client-assets').warn('client_assets.prune_withheld', {
@@ -621,7 +721,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
       ? 'changed since HypAware installed it'
       : 'has no recorded content digest, so nothing proves the bytes are ours'
     stderr?.write(
-      `warning: retired ${kind} '${name}' at ${dest} ${reason}; ` +
+      `warning: ${label} ${kind} '${name}' at ${dest} ${reason}; ` +
         'left in place - remove it by hand if you no longer want it\n'
     )
     getLogger('client-assets').warn('client_assets.prune_withheld', {
@@ -636,13 +736,13 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
   }
 
   if (dryRun) {
-    stdout?.write(`(dry-run) Would remove retired ${kind} '${name}' → ${dest}\n`)
+    stdout?.write(`(dry-run) Would remove ${label} ${kind} '${name}' → ${dest}\n`)
     return { carried: record, removed: true, removal }
   }
 
   const { removed, failed } = await removeClientAssets([dest], baseDirs)
   if (removed.length > 0) {
-    stdout?.write(`removed retired ${kind} '${name}' → ${dest}\n`)
+    stdout?.write(`removed ${label} ${kind} '${name}' → ${dest}\n`)
     getLogger('client-assets').info('client_assets.pruned', {
       [Attr.COMPONENT]: 'client-assets',
       [Attr.OPERATION]: 'client_assets.prune',
@@ -657,7 +757,7 @@ async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun,
   // a refusal is worth keeping: it costs nothing but a line, and this ledger is
   // not a `done` marker that a later attach short-circuits on.
   for (const failure of failed) {
-    stderr?.write(`warning: retired ${kind} '${name}' at ${failure.dest} could not be removed: ${failure.reason}\n`)
+    stderr?.write(`warning: ${label} ${kind} '${name}' at ${failure.dest} could not be removed: ${failure.reason}\n`)
   }
   return { carried: record, removed: false, removal }
 }

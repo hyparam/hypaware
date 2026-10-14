@@ -74,6 +74,7 @@ test('activate() registers the hermes source but does not start it (matches clau
     paths: { rootDir: dir, stateDir: dir, cacheDir: dir, tempDir: dir },
     configRegistry: { registerSection() {} },
     backfills: { register() {} },
+    skills: { register() {} },
     sources: {
       register(contribution) { registered.push(contribution.name) },
       async start(name) { started.push(name) },

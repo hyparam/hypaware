@@ -6,7 +6,7 @@
 **Author:** HypForge designer
 **Date:** 2026-10-13
 **Source:** [HYP-128 "HypAware MCP: close the agent access gap"](https://linear.app/hyperparam/issue/HYP-128/hypaware-mcp-close-the-agent-access-gap), Phase 1, at the Linear revisions LLP 0493 cites; Hernan's direction change of 2026-10-13T20:21:14Z and his scope answer of 2026-10-13T20:50Z
-**Extends:** [LLP 0034#tool-auth-class](./0034-mcp-host-intrinsic.decision.md#tool-auth-class) (Phil), [LLP 0298#mint](./0298-ci-tokens-share-one-gateway.decision.md#mint) (Kenny)
+**Extends:** [LLP 0034#tool-auth-class](./0034-mcp-host-intrinsic.decision.md#tool-auth-class) (Phil), [LLP 0298#mint](./0298-ci-tokens-share-one-gateway.decision.md#mint) (Kenny), [LLP 0118#requirements](./0118-hermes-log-forwarding.spec.md#requirements) (Phil)
 **Related:** LLP 0493 (request), LLP 0034#proxy-fallback, #scoped-credential,
 #stdio-stdout-discipline, LLP 0107#every-attach, LLP 0197, LLP 0491#guidance;
 hypaware-server LLP 0602 (request), LLP 0596 (server design), LLP 0597 (the
@@ -528,6 +528,26 @@ client, and some need a paid account. That half is a human check per
 client, through the mayor, listed in #verification. It is not claimed by
 the hermetic suite.
 
+**Hermes (HYP-128 follow-on).** Hermes reads `~/.hermes/skills/<name>/SKILL.md`
+with agentskills.io frontmatter. The hermes plugin gains the client
+descriptor `{ "name": "hermes", "skill_dir": ".hermes/skills" }`, with no
+`attach_probe`, and registers the neutral tree for `hermes` as step 1 does
+for the other four. This **extends [LLP 0118#requirements](./0118-hermes-log-forwarding.spec.md#requirements)**,
+whose R5 says HypAware never modifies anything under `~/.hermes/`:
+
+- R5 governs capture.
+- A user-visible, detachable skill install into `~/.hermes/skills/hypaware-*` is a separate surface.
+- That install never touches `state.db`, `config.yaml` or any non-`hypaware-*` path.
+
+HypAware creates only the four `hypaware-*` directories its install ledger
+records, and `hyp client detach hermes` removes them, leaving any copy that
+changed since install. R8 holds: no hermes config and no LLM traffic is
+touched. Phil consented as the 0118 owner (2026-10-14T18:34:17Z, Slack
+1792002857.742579). With no probe the daemon reconciler never refreshes
+them, as for Claude Desktop ([LLP 0135#no-probe](./0135-install-experience-overhaul.design.md#no-probe)):
+they land through `hyp client attach hermes`, the walkthrough finale and
+`hyp client skills install --client hermes`.
+
 <a id="devin-droid"></a>
 ## Devin and Factory Droid (HYP-135)
 
@@ -684,6 +704,7 @@ cites.
 | HYP-133: "the three commands appear in Claude Code and Cursor connected over stdio and over /v1/mcp." | `prompts/list` returns three; `fix_recommendation` with `report-publish` renders the four steps ending in `set_recommendation_status` and no approval step, and no `dismissed`; the read-only rendering ends in the hand-off; the stdio rendering ends in `hyp report mark`; over `transport: 'http'` with no recommendation tool `prompts/list` holds `check_team_history` only; `-32602` paths | Claude Code and Cursor, each over stdio and over `/v1/mcp` (human; four runs) |
 | HYP-134: "`hyp client skills install` places the skills for each attached client and an agent in each uses them correctly." (install half) | the install test for the four clients | none |
 | HYP-134 (use half) | none | one task per client (Pi, OpenCode, Cursor, OpenClaw), human |
+| HYP-128 follow-on: Hermes skills (install half) | attach writes only the four `hypaware-*` directories under `~/.hermes/skills`; detach removes only those; a foreign skill, `.usage.json`, `.archive/`, `config.yaml` and `state.db` come through both byte-identical | Hermes uses a skill on a question (human) |
 | HYP-135: "the HYP-75 pilot recipes include the instructions and the agent token." | the two text files exist | deferred with HYP-75 |
 | HYP-136: "every agent prompt names the MCP path, and `hyp report list` has a prompt." | a docs test: every `agent:` marker names a tool or says no MCP path exists; Reports has a `report list` marker | Hernan's copy OK |
 | HYP-137: "no read or act instruction in the docs is CLI-only." | reviewed by reading against the list in #docs-paths | Hernan's copy OK |
@@ -783,8 +804,8 @@ No hot path changes.
 <a id="consequences"></a>
 ## Consequences
 
-This branch adds Draft forward-refs. The LLP 0034 line records Phil's yes;
-the LLP 0298 line is removed if Kenny declines:
+This branch adds Draft forward-refs. The LLP 0034 and LLP 0118 lines record
+Phil's yes; the LLP 0298 line is removed if Kenny declines:
 
 - LLP 0034#tool-auth-class: a third class, `write`, admitted by a named
   credential scope, plus annotations derived from the class (Phil, yes,
@@ -794,3 +815,7 @@ the LLP 0298 line is removed if Kenny declines:
   history and mark recommendations, publish reports and delete reports as
   the person who minted it; `--label` names the integration that holds it
   (Kenny).
+- LLP 0118#requirements: HypAware may create and remove only its own
+  marker-owned skill directories under `~/.hermes/skills/`, nothing else
+  under `~/.hermes/`, removed on detach (Phil, yes, 2026-10-14T18:34:17Z,
+  Slack 1792002857.742579).
