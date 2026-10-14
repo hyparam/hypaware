@@ -14,7 +14,7 @@ import { parseCommandArgv } from './verb_codec.js'
  *
  * @ref LLP 0461#states-are-the-servers [constrained-by]: the CLI repeats the server's states, it does not define them
  */
-const RECOMMENDATION_STATES = ['open', 'in_progress', 'applied', 'dismissed']
+export const RECOMMENDATION_STATES = ['open', 'in_progress', 'applied', 'dismissed']
 
 /**
  * One argument-validation contract for the core command set.

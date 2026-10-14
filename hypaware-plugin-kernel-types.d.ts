@@ -1892,8 +1892,9 @@ export interface VerbInputProperty {
   type: 'string' | 'integer' | 'number' | 'boolean' | 'array'
   description?: string
   enum?: string[]
-  default?: string | number | boolean
+  default?: string | number | boolean | string[]
   minimum?: number
+  maximum?: number
   items?: { type: 'string' | 'integer' | 'number', enum?: string[] }
   /** CLI-only: the final string positional absorbs all remaining tokens (e.g. a SQL string). */
   greedy?: boolean
@@ -1917,6 +1918,28 @@ export interface McpToolInputSchema {
   type: 'object'
   properties: Record<string, Omit<VerbInputProperty, 'greedy'>>
   required?: string[]
+}
+
+/**
+ * A recommendation tool contract the client shares with the server
+ * (`REMOTE_TOOL_CONTRACTS` in `src/core/mcp/contracts.js`). It carries no
+ * operation: the server binds `operation` and `render` by `tool` name, and
+ * no host registers a tool from the contract alone. See LLP 0494
+ * #remote-contracts.
+ */
+export interface RemoteToolContract {
+  /** The MCP tool name, the key the server binds its operation by. */
+  tool: string
+  /** The display title (`tools/list` `title`). */
+  title: string
+  /** The MCP tool description. */
+  summary: string
+  inputSchema: VerbInputSchema
+  authClass: VerbAuthClass
+  /** The credential scope a write needs; absent on a read. */
+  scope?: string
+  /** The CLI command that does the same thing. */
+  cli: string
 }
 
 /**
