@@ -560,7 +560,7 @@ export interface PluginInitPresetManifest {
   summary?: string
 }
 
-export type PluginSkillClient = 'claude' | 'codex' | 'all'
+export type PluginSkillClient = 'claude' | 'codex' | 'pi' | 'opencode' | 'cursor' | 'openclaw' | 'all'
 
 // =============================================================================
 // Plugin discovery, install, and lock

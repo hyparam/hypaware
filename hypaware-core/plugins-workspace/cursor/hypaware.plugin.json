@@ -65,6 +65,12 @@
         "summary": "Report whether this AI session is being dropped right now (fails closed)"
       }
     ],
+    "skills": [
+      { "name": "hypaware-query", "clients": ["cursor"] },
+      { "name": "hypaware-reference", "clients": ["cursor"] },
+      { "name": "hypaware-privacy", "clients": ["cursor"] },
+      { "name": "hypaware-report", "clients": ["cursor"] }
+    ],
     "config_sections": [
       {
         "section": "cursor",

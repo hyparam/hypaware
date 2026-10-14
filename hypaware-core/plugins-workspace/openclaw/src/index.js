@@ -5,6 +5,7 @@ import os from 'node:os'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/index.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
+import { registerNeutralSkills } from '../../../skills/index.js'
 import { createOpenclawAttach } from './attach.js'
 import { createOpenclawBackfillProvider } from './backfill.js'
 import { OPENCLAW_CONFIG_SECTION, validateOpenclawConfig } from './config.js'
@@ -55,9 +56,8 @@ export const configSection = { section: OPENCLAW_CONFIG_SECTION, validate: valid
  *
  * `attach()` emits a `client.attach` span tagged with `hyp_plugin`,
  * `client_name`, `status`, and `restored=false` (it never displaces a user's
- * entry, only rewrites its own, so there is never anything to restore). No
- * skills ship in v1 (`skill_dir` is declared in the manifest for the
- * follow-up).
+ * entry, only rewrites its own, so there is never anything to restore). The
+ * host-neutral skills install under the manifest's `skill_dir`.
  *
  * @param {PluginActivationContext} ctx
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: adapter requires the ai-gateway capability; registers client + upstream preset
@@ -158,6 +158,8 @@ export async function activate(ctx) {
       localOnlyListPath: localOnlyListPath(readObservabilityEnv(ctx.env).stateDir),
     })
   )
+
+  registerNeutralSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
   const openclawAttach = createOpenclawAttach({
     homeDir: ctx.env.HOME ?? os.homedir(),

@@ -1,7 +1,8 @@
 // @ts-check
 
 /**
- * Shared computation for the claude/codex skill parity guard.
+ * Shared computation for the skill-tree parity guard: claude against codex, and the
+ * host-neutral tree against each.
  *
  * @ref LLP 0197#t2-premise-corrected [implements]: records the host-specific surface
  * between the two skill trees rather than trying to eliminate it
@@ -17,28 +18,44 @@
  * re-recorded deliberately. Line-set comparison (rather than a positional diff) keeps
  * the record stable under reordering and reflows, which are not the failure mode worth
  * catching here.
+ *
+ * The neutral tree (LLP 0494#skills) generalizes the host-specific sentences of both,
+ * so it is recorded against each host tree the same way: a host edit that is not
+ * mirrored in the neutral tree, or the reverse, changes a recorded hash.
  */
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { SKILL_TREES } from './client_skill_trees.js'
+
 export const FIXTURE_PATH = 'test/fixtures/skill-host-divergence.json'
 
-const CLAUDE_SKILLS = 'hypaware-core/plugins-workspace/claude/skills'
-const CODEX_SKILLS = 'hypaware-core/plugins-workspace/codex/skills'
+/**
+ * The tree pairs the record covers, `[left, right]` keys of `SKILL_TREES`. The
+ * claude/codex pair comes first and keeps its original field names and hashes.
+ * @type {[keyof typeof SKILL_TREES, keyof typeof SKILL_TREES][]}
+ */
+export const TREE_PAIRS = [['claude', 'codex'], ['neutral', 'claude'], ['neutral', 'codex']]
+
+/** @param {[string, string]} pair */
+export function pairKey([left, right]) {
+  return `${left}-${right}`
+}
 
 /**
- * Skills present in both trees, discovered rather than listed, so a newly shared skill
- * is covered the moment it exists in both places.
+ * Skills present in both trees of a pair, discovered rather than listed, so a newly
+ * shared skill is covered the moment it exists in both places.
  *
  * @param {string} repoRoot
+ * @param {[keyof typeof SKILL_TREES, keyof typeof SKILL_TREES]} pair
  * @returns {string[]}
  */
-export function sharedSkills(repoRoot) {
-  const inClaude = new Set(readSkillDirs(path.join(repoRoot, CLAUDE_SKILLS)))
-  return readSkillDirs(path.join(repoRoot, CODEX_SKILLS))
-    .filter((name) => inClaude.has(name))
+export function sharedSkills(repoRoot, [left, right]) {
+  const inLeft = new Set(readSkillDirs(path.join(repoRoot, SKILL_TREES[left])))
+  return readSkillDirs(path.join(repoRoot, SKILL_TREES[right]))
+    .filter((name) => inLeft.has(name))
     .sort()
 }
 
@@ -71,21 +88,28 @@ function hashLines(lines) {
 }
 
 /**
- * The full divergence record: one entry per skill shipped to both hosts.
+ * The full divergence record: per tree pair, one entry per skill shipped to both
+ * trees, counting the lines only in each as `<left>Only` and `<right>Only`.
  *
  * @param {string} repoRoot
- * @returns {Record<string, { claudeOnly: number, codexOnly: number, hash: string }>}
+ * @returns {Record<string, Record<string, Record<string, number | string>>>}
  */
 export function divergenceReport(repoRoot) {
-  /** @type {Record<string, { claudeOnly: number, codexOnly: number, hash: string }>} */
+  /** @type {Record<string, Record<string, Record<string, number | string>>>} */
   const report = {}
-  for (const skill of sharedSkills(repoRoot)) {
-    const { claudeLines, codexLines } = skillLineSets(repoRoot, skill)
-    report[skill] = {
-      claudeOnly: claudeLines.length,
-      codexOnly: codexLines.length,
-      hash: hashLines([...claudeLines, '--', ...codexLines]),
+  for (const pair of TREE_PAIRS) {
+    const [left, right] = pair
+    /** @type {Record<string, Record<string, number | string>>} */
+    const record = {}
+    for (const skill of sharedSkills(repoRoot, pair)) {
+      const { leftLines, rightLines } = skillLineSets(repoRoot, skill, pair)
+      record[skill] = {
+        [`${left}Only`]: leftLines.length,
+        [`${right}Only`]: rightLines.length,
+        hash: hashLines([...leftLines, '--', ...rightLines]),
+      }
     }
+    report[pairKey(pair)] = record
   }
   return report
 }
@@ -93,11 +117,12 @@ export function divergenceReport(repoRoot) {
 /**
  * @param {string} repoRoot
  * @param {string} skill
+ * @param {[keyof typeof SKILL_TREES, keyof typeof SKILL_TREES]} pair
  */
-export function skillLineSets(repoRoot, skill) {
-  const claude = skillText(path.join(repoRoot, CLAUDE_SKILLS, skill))
-  const codex = skillText(path.join(repoRoot, CODEX_SKILLS, skill))
-  return { claudeLines: linesOnlyIn(claude, codex), codexLines: linesOnlyIn(codex, claude) }
+export function skillLineSets(repoRoot, skill, [left, right]) {
+  const leftText = skillText(path.join(repoRoot, SKILL_TREES[left], skill))
+  const rightText = skillText(path.join(repoRoot, SKILL_TREES[right], skill))
+  return { leftLines: linesOnlyIn(leftText, rightText), rightLines: linesOnlyIn(rightText, leftText) }
 }
 
 /**

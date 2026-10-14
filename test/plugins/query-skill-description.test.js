@@ -6,6 +6,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { SKILL_CLIENTS, clientSkillsDir } from '../helpers/client_skill_trees.js'
+
 /**
  * Routing-surface tests for the `hypaware-query` skill frontmatter.
  *
@@ -16,17 +18,14 @@ import { fileURLToPath } from 'node:url'
  * is model-mediated, so these tests cannot prove the routing works; they pin
  * the two things that ARE deterministic:
  *
- *   1. both client copies carry byte-identical frontmatter (no drift), and
+ *   1. every client copy carries byte-identical frontmatter (no drift), and
  *   2. the description names the natural session-search intents alongside the
  *      original product vocabulary.
  */
 
-const WORKSPACE = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../../hypaware-core/plugins-workspace'
-)
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
-const CLIENTS = ['claude', 'codex']
+const CLIENTS = SKILL_CLIENTS
 
 /**
  * Read the `key: value` frontmatter block of a SKILL.md. Deliberately tiny:
@@ -37,7 +36,7 @@ const CLIENTS = ['claude', 'codex']
  * @returns {Record<string, string>}
  */
 function readFrontmatter(client) {
-  const file = path.join(WORKSPACE, client, 'skills/hypaware-query/SKILL.md')
+  const file = path.join(clientSkillsDir(REPO_ROOT, client), 'hypaware-query/SKILL.md')
   const lines = fs.readFileSync(file, 'utf8').split('\n')
   assert.equal(lines[0], '---', `${file}: expected frontmatter to open on line 1`)
   const end = lines.indexOf('---', 1)
@@ -55,9 +54,9 @@ function readFrontmatter(client) {
   return out
 }
 
-test('hypaware-query frontmatter is identical across both client copies', () => {
-  const [claude, codex] = CLIENTS.map(readFrontmatter)
-  assert.deepEqual(claude, codex)
+test('hypaware-query frontmatter is identical across every client copy', () => {
+  const [claude, ...others] = CLIENTS.map(readFrontmatter)
+  for (const [i, other] of others.entries()) assert.deepEqual(other, claude, `${CLIENTS[i + 1]} frontmatter differs from claude`)
   assert.equal(claude.name, 'hypaware-query')
 })
 

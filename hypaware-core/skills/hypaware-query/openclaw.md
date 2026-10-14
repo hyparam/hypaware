@@ -1,0 +1,3 @@
+# OpenClaw activity
+
+OpenClaw records to multiple sources depending on route: direct provider calls from OpenClaw's own client land under `conversation_source = 'openclaw'` (backfilled from its session store), but runs where OpenClaw drives Claude Code (e.g. on a Claude Code subscription, via the Agent SDK) are captured by the Claude adapter with `entrypoint = 'sdk-cli'`, under `conversation_source = 'claude_code'` when captured live through the gateway or `'claude'` when backfilled from the transcript. Do not filter those runs by a single source label; the reliable filter for all OpenClaw activity across every label is `cwd LIKE '%/.openclaw/%'`.

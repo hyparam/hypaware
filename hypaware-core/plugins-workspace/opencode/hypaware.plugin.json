@@ -33,6 +33,12 @@
       { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
       { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
     ],
+    "skills": [
+      { "name": "hypaware-query", "clients": ["opencode"] },
+      { "name": "hypaware-reference", "clients": ["opencode"] },
+      { "name": "hypaware-privacy", "clients": ["opencode"] },
+      { "name": "hypaware-report", "clients": ["opencode"] }
+    ],
     "config_sections": [{ "section": "opencode", "summary": "OpenCode listener, attach, and bounded backfill settings." }]
   }
 }
