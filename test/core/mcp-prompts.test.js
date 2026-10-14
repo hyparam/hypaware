@@ -275,6 +275,11 @@ test('each malformed request is -32602', async () => {
   assert.equal(/** @type {any} */ (notObject).error.code, -32602)
   const noName = await s.handleMessage({ jsonrpc: '2.0', id: 6, method: 'prompts/get' })
   assert.equal(/** @type {any} */ (noName).error.code, -32602)
+  // A non-string name is refused before it is formatted: String() of this one throws.
+  for (const name of [JSON.parse('{"toString":null}'), 7, ['check_team_history']]) {
+    const r = await s.handleMessage({ jsonrpc: '2.0', id: 7, method: 'prompts/get', params: { name, arguments: { task: 't' } } })
+    assert.equal(/** @type {any} */ (r).error.code, -32602, JSON.stringify(name))
+  }
 
   // The edges that pass.
   assert.ok(textOf(await get(s, 'check_team_history', { task: 'x'.repeat(500) })))

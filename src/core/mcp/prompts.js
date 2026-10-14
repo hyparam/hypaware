@@ -102,9 +102,12 @@ export function listPrompts(visible, transport) {
  * @returns {{ ok: true, result: { description: string, messages: { role: 'user', content: { type: 'text', text: string } }[] } } | { ok: false, error: string }}
  */
 export function renderPrompt(name, args, visible, transport) {
+  // Checked before any formatting: String() of a JSON object such as
+  // {"toString":null} throws, which would surface as -32603.
+  if (typeof name !== 'string') return { ok: false, error: 'prompt name must be a string' }
   const prompt = PROMPTS.find((p) => p.name === name)
   if (!prompt || !offered(prompt.name, visible, transport)) {
-    return { ok: false, error: `unknown prompt '${typeof name === 'string' ? name.slice(0, 64) : String(name)}'` }
+    return { ok: false, error: `unknown prompt '${name.slice(0, 64)}'` }
   }
   if (args !== undefined && args !== null && (typeof args !== 'object' || Array.isArray(args))) {
     return { ok: false, error: 'prompt arguments must be an object' }
