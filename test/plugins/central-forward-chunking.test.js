@@ -1595,3 +1595,47 @@ test('compression is negotiated, bounded to each chunk, and falls back on 415', 
   assert.equal(requests[2].headers['content-encoding'], undefined)
   assert.equal(requests[1].headers['x-hyp-batch-id'], requests[2].headers['x-hyp-batch-id'])
 })
+
+test('close() stops a resumed export on its saved-receipt prefix without a watermark', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'central-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
+  let scanned = 0
+  const rowFactory = (/** @type {number} */ i) => { scanned += 1; return { message_id: `m${i}`, content_text: `row ${i}` } }
+  // Every chunk is acknowledged, then the watermark write fails: the journal
+  // keeps all four receipts for the next sink instance.
+  const first = buildSink({ count: 20_000, receiptsDir, rowFactory })
+  first.watermarks.write = async () => { throw new Error('fixture watermark disk failure') }
+  assert.equal((await first.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'failed')
+  assert.equal(first.calls.length, 4)
+  await first.sink.close?.()
+
+  for (const closeAfter of [1, 4]) {
+    const next = buildSink({ count: 20_000, receiptsDir, rowFactory })
+    scanned = 0
+    let progress = 0
+    let closedAt = 0
+    /** @type {Promise<void> | undefined} */
+    let closing
+    const result = await next.sink.exportBatch(firstSyncBatch, {
+      format: 'native', schedule: '* * * * *',
+      onProgress: () => {
+        progress += 1
+        if (progress === closeAfter) { closedAt = scanned; closing = next.sink.close?.() }
+      },
+    })
+    await closing
+    assert.equal(result.status, 'failed', `close after resumed chunk ${closeAfter}`)
+    assert.match(String(result.error), /closed/)
+    assert.equal(progress, closeAfter, 'no resumed chunk is reported after close')
+    assert.ok(scanned - closedAt <= 5000, `scan stops within one chunk of close (scanned ${scanned - closedAt} more)`)
+    assert.equal(next.calls.length, 0)
+    assert.equal(next.watermarks.writes.length, 0, 'a cancelled run does not checkpoint')
+    assert.equal((await fsp.readdir(receiptsDir)).length, 1, 'receipts stay for the next resume')
+  }
+
+  const resumed = buildSink({ count: 20_000, receiptsDir })
+  assert.equal((await resumed.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(resumed.calls.length, 0)
+  assert.equal(resumed.watermarks.record?.continuation.seq, '20000')
+  assert.deepEqual(await fsp.readdir(receiptsDir), [])
+})

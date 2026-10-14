@@ -889,6 +889,8 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     const resumed = receipts.has(receipt)
     let wireBytes = 0
     try {
+      // @ref LLP 0471#chunk-lifetime [constrained-by]: a saved receipt skips the POST, not the per-chunk cancellation boundary the POST carried
+      if (resumed) abortSignal.throwIfAborted()
       if (!resumed) wireBytes = await postNdjson({
         centralUrl: config.url, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn,
         hyp_dataset: partition.dataset, chunkIndex, transport, onProgress,
@@ -970,6 +972,9 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     }
   }
   await flushChunk()
+  // A close() during the scan must not finish as a success: leave the
+  // watermark and the receipts for the next run to resume from.
+  abortSignal.throwIfAborted()
 
   // @ref LLP 0040#watermark-contract [implements]: ship first, advance second,
   // but advance ONLY at end-of-partition (like the blob sink). Every chunk is
