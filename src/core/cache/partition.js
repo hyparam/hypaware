@@ -123,7 +123,16 @@ function claimPartitionMutation(partitionDir) {
     } catch (error) {
       if (errCode(error) !== 'EEXIST') throw error
       if (attempt) throw busy()
-      const entries = fs.readdirSync(directory)
+      /** @type {string[]} */
+      let entries
+      try {
+        entries = fs.readdirSync(directory)
+      } catch (readError) {
+        // The holder let go between our mkdir and this read: contention,
+        // not corruption, so report it the way every caller already retries.
+        if (errCode(readError) === 'ENOENT') throw busy()
+        throw readError
+      }
       if (entries.length !== 1 || !/^[1-9]\d*-[a-f0-9-]{36}$/.test(entries[0])) throw busy()
       const pid = Number(entries[0].split('-')[0])
       if (!Number.isSafeInteger(pid)) throw busy()
@@ -819,7 +828,7 @@ export function appendRefusalReason(partitionDir) {
  * @param {string[]} sourceSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
- * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[], mutationLockHeld?: boolean }} [options]
+ * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[], stampRows?: (rows: Record<string, unknown>[]) => Promise<void>, mutationLockHeld?: boolean }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
 export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows, options) {
@@ -832,6 +841,15 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     // Buffered rows must be checked again after waiting behind a purge.
     rows = options?.filterRows ? options.filterRows(rows) : rows
     if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
+    // Seqs are stamped here, under the guard and after the purge re-check,
+    // so every row this partition commits carries a seq above every row it
+    // committed before, whichever process did the committing. Stamping any
+    // earlier (the spool reader once did) let two processes commit out of
+    // seq order and left rows under the sink's watermark (issue #2578). A
+    // multi-partition chunk reserves its whole run before this, once every
+    // guard is held, and only hands each partition its slice here.
+    // @ref LLP 0492#reserve-at-commit [implements]: stamp under the partition guard, after the purge re-check
+    if (options?.stampRows) await options.stampRows(rows)
     const fallbackAppended = countGatewayFallbackRows(rows)
     const cursor = readCursorForAppend(partitionDir)
     const tableDir = cursor.tableDir ?? 'table'

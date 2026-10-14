@@ -8,7 +8,6 @@ import { noteProductPending, noteProductPipeline } from '../product_telemetry/cl
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { isConfirmedSymlink } from './paths.js'
-import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, streamSpoolLines, writeProgress } from './streaming-reader.js'
 
 /**
@@ -41,7 +40,6 @@ const FLUSH_FAILURE_MESSAGE_MAX = 512
  * @param {{
  *   cacheRoot: string,
  *   appendChunk(tablePath: string, columns: readonly ColumnSpec[], rows: Record<string, unknown>[]): Promise<{ bytesWritten: number, droppedCount?: number }>,
- *   nextSeq?: () => Promise<bigint>,
  *   batchRowLimit?: number,
  *   batchByteLimit?: number,
  * }} args
@@ -52,10 +50,6 @@ export function createCacheSpool(args) {
   const states = new Map()
   /** @type {Set<string>} */
   const knownTables = new Set()
-  // One cache-global allocator shared across every table's flush, so a seq is
-  // monotonic across the whole cache (and thus strictly increasing within each
-  // destination partition, which can receive rows from more than one spool path).
-  const seqAllocator = createIngestSeqAllocator({ cacheRoot: args.cacheRoot })
 
   /**
    * @param {string} tablePath
@@ -112,7 +106,7 @@ export function createCacheSpool(args) {
       const batchId = `flush-${Date.now()}-${process.pid}`
       let fileMalformed = 0
 
-      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: args.nextSeq ?? seqAllocator.next })) {
+      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit })) {
         const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
         noteProductPipeline('write', { rows: batch.chunk.rows.length - (written.droppedCount ?? 0), bytes: written.bytesWritten })
         totals.rowCount += batch.chunk.rows.length

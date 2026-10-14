@@ -115,12 +115,14 @@ export interface ProgressState {
 
 /**
  * Crash-safe, never-regressing monotonic int64 allocator for the
- * `_hyp_ingest_seq` column. `next()` reserves seq blocks durably
- * (reserve-before-stamp) so a resumed flush never re-issues a seq `<=` one
- * already stamped. See `createIngestSeqAllocator`.
+ * `_hyp_ingest_seq` column. `reserve(count)` durably reserves a contiguous
+ * run of `count` seqs under a cross-process guard and returns its first seq
+ * (reserve-before-stamp), so a resumed flush never re-issues a seq `<=` one
+ * already stamped. Call it inside the partition mutation guard, right before
+ * the rows commit. See `createIngestSeqAllocator`.
  */
 export interface IngestSeqAllocator {
-  next(): Promise<bigint>
+  reserve(count: number): Promise<bigint>
 }
 
 export interface SpoolAppendResult {

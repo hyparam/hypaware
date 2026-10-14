@@ -549,6 +549,12 @@ export function createConfigControl(opts) {
     if (!state.probation) return
     const etag = state.probation.etag
     delete state.probation
+    // A newer revision has now survived probation, so an older rollback is
+    // history, not a condition: keeping it would leave `hyp status` reporting
+    // "Needs attention" forever. The bad etag stays as the re-apply backoff.
+    if (state.last_rollback && state.last_rollback.etag !== etag) {
+      delete state.last_rollback
+    }
     writeState(state)
     disarmProbationWatchdog()
     log.info('config.probation_cleared', {

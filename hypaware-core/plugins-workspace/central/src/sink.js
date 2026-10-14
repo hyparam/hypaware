@@ -23,6 +23,15 @@ const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 // already-delivered prefix (server LLP 0001#idempotency-before-backpressure).
 const MAX_BACKPRESSURE_WAIT_MS = 5 * 60_000
 
+// A chunk POST whose connection drops under it (the edge closing an HTTP/2
+// connection with GOAWAY, a reset socket) is re-sent on a fresh connection
+// a few times before the chunk is given up. Every chunk carries an
+// idempotent batch id, so a resend costs nothing on the server, while a
+// throw here costs a history replay the whole run (issue #2581). The chunk's
+// one 330s deadline still bounds every attempt together.
+const MAX_TRANSPORT_RETRIES = 3
+const TRANSPORT_RETRY_DELAY_MS = 2_000
+
 // A partition is streamed to the server in bounded chunks so a large
 // backlog never materializes in memory (a gateway joining with months
 // of cache would otherwise OOM serializing the whole table into one
@@ -1124,8 +1133,33 @@ async function postNdjson(args) {
     let refreshed = false
     let waitedMs = 0
     let backpressureRetries = 0
+    let transportRetries = 0
     for (;;) {
-      const response = await send(await identityClient.getCurrentJwt(abortSignal))
+      const jwt = await identityClient.getCurrentJwt(abortSignal)
+      /** @type {Response} */
+      let response
+      try {
+        response = await send(jwt)
+      } catch (error) {
+        // The deadline or a close aborted the attempt: that is the caller's
+        // verdict, not a dropped connection, and it is never retried here.
+        abortSignal.throwIfAborted()
+        const code = transportFailureCode(error)
+        if (code === null || transportRetries >= MAX_TRANSPORT_RETRIES) {
+          throw new Error(`central.forward POST ${url} transport failed: ${code ?? 'unknown'}`, { cause: error })
+        }
+        transportRetries += 1
+        log.debug('central.forward.transport_retry', {
+          hyp_sink_signal: signal,
+          hyp_dataset,
+          batch_id: batchId,
+          chunk_index: chunkIndex,
+          error_kind: code,
+          retry: transportRetries,
+        })
+        await sleepFn(TRANSPORT_RETRY_DELAY_MS * transportRetries, abortSignal)
+        continue
+      }
 
       abortSignal.throwIfAborted()
       if (response.status === 202 || response.ok) {
@@ -1325,6 +1359,24 @@ async function registerDataset(args) {
 function joinUrl(base, suffix) {
   const baseWithSlash = `${base.replace(/\/+$/, '')}/`
   return new URL(suffix.replace(/^\//, ''), baseWithSlash).toString()
+}
+
+/**
+ * The short code of a connection-level fetch failure, or `null` when the
+ * error is anything else (an abort, a thrown non-transport error). Node's
+ * fetch rejects with a `TypeError('fetch failed')` whose `cause` carries the
+ * undici or socket code (`UND_ERR_INFO` for an HTTP/2 GOAWAY, `ECONNRESET`,
+ * `UND_ERR_SOCKET`); the code is what a diagnostic needs and all it keeps.
+ *
+ * @param {unknown} error
+ * @returns {string | null}
+ */
+function transportFailureCode(error) {
+  if (!(error instanceof TypeError)) return null
+  const cause = /** @type {{ code?: unknown, name?: unknown } | undefined} */ (error.cause)
+  if (typeof cause?.code === 'string' && cause.code) return cause.code
+  if (typeof cause?.name === 'string' && cause.name) return cause.name
+  return 'fetch_failed'
 }
 
 /** @param {unknown} error @param {string} [phase] */

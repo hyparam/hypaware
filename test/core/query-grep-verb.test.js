@@ -675,3 +675,51 @@ test('an injecting host never loads the local search stack', (t) => {
   assert.ifError(run.error)
   assert.equal(run.status, 0, run.stderr)
 })
+
+test('a colour terminal gets the snippet matches painted; anything else stays plain', () => {
+  const result = {
+    hits: [{
+      date: '2026-08-12', sessionId: 'needle-s', agentId: null, conversationId: null,
+      partId: 'p1', messageId: 'm1', messageCreatedAt: '2026-08-12T00:00:00Z',
+      matches: [{ column: 'content_text', snippet: 'a Needle and a needle' }],
+    }],
+    truncated: false,
+    exhausted: true,
+  }
+  const base = { format: 'table', json: false, maxCell: 200, maxBytes: 32768 }
+  const painted = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: true }), { query: 'needle' }).stdout
+  assert.equal((painted.match(/\x1b\[1m\x1b\[31m/g) ?? []).length, 2, 'both case variants in the snippet are painted')
+  assert.match(painted, /needle-s/, 'the session id locator is not painted')
+  assert.doesNotMatch(painted, /\x1b\[1m\x1b\[31mneedle\x1b\[0m-s/)
+  const plain = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: false }), { query: 'needle' }).stdout
+  assert.doesNotMatch(plain, /\x1b/)
+  const json = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, format: 'json', color: true }), { query: 'needle' }).stdout
+  assert.doesNotMatch(json, /\x1b/, 'a pipeline format is never painted')
+})
+
+// `renderTable` pads a column to at most 80 characters without truncating
+// a longer cell, so a long session id pushes its row's snippet to the
+// right of the header's offset. The paint must follow each row's own
+// snippet, never landing on a locator that happens to contain the query.
+test('a locator wider than its column leaves the paint on the snippet', () => {
+  /** @param {string} sessionId @param {string} snippet */
+  const hit = (sessionId, snippet) => ({
+    date: '2026-08-12', sessionId, agentId: null, conversationId: null,
+    partId: 'needle-part', messageId: 'needle-message', messageCreatedAt: '2026-08-12T00:00:00Z',
+    matches: [{ column: 'content_text', snippet }],
+  })
+  const result = {
+    hits: [hit(`${'x'.repeat(150)}needle`, 'a needle here'), hit('needle-s', 'one more needle')],
+    truncated: false,
+    exhausted: true,
+  }
+  const base = { format: 'table', json: false, maxCell: 200, maxBytes: 32768 }
+  const painted = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: true }), { query: 'needle' }).stdout
+  const plain = queryGrepVerb.render(result, /** @type {any} */ ({ ...base, color: false }), { query: 'needle' }).stdout
+  assert.equal(painted.replace(/\x1b\[[0-9;]*m/g, ''), plain, 'stripped of its paint, the table is the plain one')
+  const red = '\x1b[1m\x1b[31mneedle\x1b[0m'
+  const [, , long, short] = plain.split('\n')
+  const [, , paintedLong, paintedShort] = painted.split('\n')
+  assert.equal(paintedLong, `${long.slice(0, -'a needle here'.length)}a ${red} here`, 'only the overflowing row\'s snippet is painted')
+  assert.equal(paintedShort, `${short.slice(0, -'one more needle'.length)}one more ${red}`, 'only the short row\'s snippet is painted')
+})

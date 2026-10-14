@@ -122,9 +122,19 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     description: 'Rows dropped due to missing required Iceberg partition fields',
   })
   const seqAllocator = createIngestSeqAllocator({ cacheRoot })
+  /**
+   * @param {Record<string, unknown>[]} rows
+   * @param {bigint} first
+   */
+  function stampRun(rows, first) {
+    rows.forEach((row, index) => { row[INGEST_SEQ_COLUMN.name] = first + BigInt(index) })
+  }
+  /** @param {Record<string, unknown>[]} rows */
+  async function stampRows(rows) {
+    stampRun(rows, await seqAllocator.reserve(rows.length))
+  }
   const spool = createCacheSpool({
     cacheRoot,
-    nextSeq: seqAllocator.next,
     async appendChunk(tablePath, columns, rows) {
       const beforePurge = rows.length
       rows = survivingRows(rows)
@@ -190,7 +200,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         }
       }
       let totalBytes = 0
-      const opts = { declaration, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
+      const opts = { declaration, stampRows, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
         const kept = survivingRows(rows)
         const removed = rows.length - kept.length
         droppedCount += removed
@@ -208,8 +218,24 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       if (groups.size > 1) {
         const dirs = Array.from(groups.values(), ({ segments }) => cacheTablePath(cacheRoot, dataset, segments))
         await withPartitionMutationLocks(dirs, async () => {
+          // The seq counter is a third thing that can refuse, so it is asked
+          // once for the whole chunk before any partition commits, and each
+          // partition is stamped from its own contiguous slice of that run.
+          // Every guard is already held, so no other process can commit to
+          // these partitions between this reservation and the commits below.
+          // Rows the purge re-check drops inside the loop leave a gap.
+          // @ref LLP 0347#rows-wait [implements]: counter contention, too, costs no partial commit to replay
+          // @ref LLP 0492#whole-chunk [implements]: one reservation per multi-partition chunk, sliced per partition
+          let next = await seqAllocator.reserve(Array.from(groups.values()).reduce((sum, group) => sum + group.rows.length, 0))
+          const stampSlice = {
+            /** @param {Record<string, unknown>[]} rows */
+            async stampRows(rows) {
+              stampRun(rows, next)
+              next += BigInt(rows.length)
+            },
+          }
           for (const { segments, rows: groupRows } of groups.values()) {
-            const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, { ...opts, mutationLockHeld: true })
+            const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, { ...opts, ...stampSlice, mutationLockHeld: true })
             totalBytes += result.bytesWritten
           }
         })
@@ -642,7 +668,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
       }
       return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
-        declaration: getDeclaration?.(dataset), filterRows: survivingRows, nextSeq: seqAllocator.next })
+        declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
     discoverCachePartitions(scope) {
