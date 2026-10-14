@@ -191,8 +191,8 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       const cleared = kind === 'github_foreign_origin' && cursor.work !== undefined
       if (cleared) delete cursor.work
       // An answer that is terminal for the repository itself - unknown or
-      // inaccessible (404), gone (410), or moved (301, since redirects are
-      // never followed on a credential-bearing request) - retires a one-time
+      // inaccessible (404), gone (410), or moved (301, since redirects
+      // off the API origin are never followed on a credential-bearing request) - retires a one-time
       // import: the marker would otherwise re-enter every later tick and a
       // typo'd `hyp github backfill` retries forever (LLP 0409#one-time-imports
       // makes imports durable, not permanent). 403 is deliberately not

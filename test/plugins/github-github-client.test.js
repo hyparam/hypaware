@@ -37,6 +37,39 @@ test('a refused redirect reports its status and hint without the Location target
   assert.equal(urls.length, 1, 'the redirect is never followed')
 })
 
+test('a same-origin redirect from a transferred repository is followed', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl(url, init) {
+      urls.push(String(url))
+      assert.equal(init?.redirect, 'manual')
+      if (urls.length === 1) {
+        return new Response(null, { status: 301, headers: { location: 'https://api.github.com/repositories/42/issues?state=all&per_page=100' } })
+      }
+      return Response.json([])
+    },
+  })
+  const page = await client.listIssuesPage('old-owner', 'repo', undefined)
+  assert.deepEqual(page.items, [])
+  assert.deepEqual(urls, [
+    'https://api.github.com/repos/old-owner/repo/issues?state=all&per_page=100',
+    'https://api.github.com/repositories/42/issues?state=all&per_page=100',
+  ])
+})
+
+test('a redirect loop on the API origin stops and reports the status', async () => {
+  let calls = 0
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl() {
+      calls++
+      return new Response(null, { status: 301, headers: { location: '/repositories/42/issues' } })
+    },
+  })
+  await assert.rejects(client.listIssuesPage('o', 'r', undefined), /GitHub API 301 for GET/)
+  assert.equal(calls, 4)
+})
+
 test('network failures carry a runtime code or name, never upstream message text', async () => {
   /** @param {unknown} thrown @returns {Promise<Error>} */
   async function failWith(thrown) {

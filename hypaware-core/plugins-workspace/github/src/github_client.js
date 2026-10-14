@@ -27,6 +27,9 @@ const API_VERSION = '2022-11-28'
 const PER_PAGE = 100
 /** The explicit all-visible inventory is normalized into small strings. */
 const MAX_PAGES = 50
+/** Same-origin redirects followed before a renamed or transferred repo errors. */
+const MAX_REDIRECTS = 3
+const REDIRECT_STATUSES = new Set([301, 302, 307, 308])
 /** GitHub embeds at most this many entries in a single commit's `files`. */
 const COMMIT_FILES_CAP = 300
 
@@ -114,13 +117,21 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     if (opts.etag) headers['If-None-Match'] = opts.etag
 
     let res
+    let target = url
     try {
-      // Never follow a redirect on a credential-bearing request: the token
-      // must not be re-sent to a Location the server chose. `manual` keeps
-      // that refusal while preserving the status, so a renamed or transferred
-      // repository reports `GitHub API 301` below instead of collapsing into
-      // a generic network failure.
-      res = await doFetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+      // Never let fetch follow a redirect on a credential-bearing request: the
+      // token must not be re-sent to a Location the server chose. A renamed or
+      // transferred repository answers 301 to `/repositories/<id>/...` on the
+      // same API origin, so follow a Location only when it passes the same
+      // origin pin as a continuation, for a few hops. Anything else keeps the
+      // status and reports `GitHub API 301` below.
+      for (let hop = 0; ; hop++) {
+        res = await doFetch(target, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+        if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECTS) break
+        const next = sameOriginLocation(baseUrl, res.headers.get('location'))
+        if (next === null) break
+        target = next
+      }
     } catch (cause) {
       // Carry a diagnosis without echoing anything server-controlled: an
       // errno code or error name is a runtime constant, while messages can
@@ -136,7 +147,7 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     if (res.status === 304) return { notModified: true }
     if (!res.ok) {
       // No body, no token, no query string - just status + the path.
-      const safePath = pathOf(url)
+      const safePath = pathOf(target)
       const hint = res.status === 401 ? '; check the configured token or run `hyp github login` again'
         : res.status >= 300 && res.status < 400 ? '; redirects are not followed - the repository may have been renamed or transferred' : ''
       const err = /** @type {HypError} */ (new Error(`GitHub API ${res.status} for GET ${safePath}${hint}`))
@@ -349,6 +360,22 @@ function resolveUrl(baseUrl, pathAndQuery) {
   if (!ok) throw foreignOrigin(url)
   // The parsed href, not the input.
   return url.href
+}
+
+/**
+ * A redirect target on the configured API origin, or null when absent or foreign.
+ *
+ * @param {string} baseUrl
+ * @param {string | null} location
+ * @returns {string | null}
+ */
+function sameOriginLocation(baseUrl, location) {
+  if (!location) return null
+  try {
+    return resolveUrl(baseUrl, location)
+  } catch {
+    return null
+  }
 }
 
 /** @param {URL | null} url @returns {HypError} */
