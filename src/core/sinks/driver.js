@@ -565,7 +565,12 @@ function readExportResult(reported, partitions) {
  * @returns {ExportProgress}
  */
 function readExportProgress(reported) {
-  return { rows: readCount(reported?.rows), bytes: readCount(reported?.bytes) }
+  return {
+    rows: readCount(reported?.rows), bytes: readCount(reported?.bytes),
+    ...(reported?.resumedRows !== undefined ? { resumedRows: Math.min(readCount(reported.rows), readCount(reported.resumedRows)) } : {}),
+    ...(reported?.wireBytes !== undefined ? { wireBytes: readCount(reported.wireBytes) } : {}),
+    ...(reported?.waitMs !== undefined ? { waitMs: readCount(reported.waitMs) } : {}),
+  }
 }
 
 /**

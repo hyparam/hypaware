@@ -382,13 +382,16 @@ export async function runSync(argv, ctx) {
  * Reuse the consent preview without rescanning the backlog. Keep only the
  * current destination's counters: sinks run sequentially, and each ETA covers
  * that destination.
- * @param {Map<string, PendingVolume>} volumes
+ * @param {Map<string, Pick<PendingVolume, 'rows' | 'status'>>} volumes
  * @param {() => number} [now]
  */
 export function createSyncProgress(volumes, now = Date.now) {
   let instance = ''
   let rows = 0
   let firstAck = 0
+  let resumedRows = 0
+  let wireBytes = 0
+  let waitUntil = 0
   let lastAck = now()
   /** @type {TickOptions['onProgress']} */
   const update = (name, delta) => {
@@ -396,6 +399,9 @@ export function createSyncProgress(volumes, now = Date.now) {
       instance = name
       rows = 0
       firstAck = 0
+      resumedRows = 0
+      wireBytes = 0
+      waitUntil = 0
       lastAck = now()
       return
     }
@@ -404,7 +410,11 @@ export function createSyncProgress(volumes, now = Date.now) {
     // zero rows, so a sink calling it in a loop would otherwise refresh
     // `lastAck` on every pass and hold the stall warning off the line for as
     // long as the loop ran.
+    if (delta.waitMs && Number.isFinite(delta.waitMs) && delta.waitMs > 0) waitUntil = now() + delta.waitMs
     if (!(delta.rows > 0)) return
+    waitUntil = 0
+    resumedRows += Math.min(delta.rows, delta.resumedRows ?? 0)
+    wireBytes += delta.wireBytes ?? 0
     // The rate is measured from the first acknowledgement, not from the
     // destination's start. The driver announces a destination before
     // `discoverReadyPartitions` lists every dataset, flushes every pending
@@ -423,8 +433,10 @@ export function createSyncProgress(volumes, now = Date.now) {
     const total = volume?.status === 'counted' ? volume.rows : undefined
     const count = total !== undefined && total > 0 && rows <= total
       ? `${groupThousands(rows)}/${groupThousands(total)} rows (${Math.min(99, Math.floor(rows / total * 100))}%)`
-      : `${groupThousands(rows)} rows sent`
-    const prefix = `${instance}: ${count}`
+      : `${groupThousands(rows)} rows ${resumedRows ? 'complete' : 'sent'}`
+    const detail = `${wireBytes > 0 ? ` | ${(wireBytes / 1048576).toFixed(1)} MiB uploaded` : ''}${resumedRows > 0 ? ` | ${groupThousands(resumedRows)} resumed` : ''}`
+    const prefix = `${instance}: ${count}${detail}`
+    if (waitUntil > now()) return `${prefix} | retrying in ${Math.ceil((waitUntil - now()) / 1000)}s`
     // Every line that cannot quote an ETA still ticks, and what it ticks is
     // the time since anything last moved. `onProgress` is optional on the
     // export contract and half the shipped sinks never call it
@@ -444,10 +456,11 @@ export function createSyncProgress(volumes, now = Date.now) {
     // acknowledgement is coming and a long one would otherwise flip a finished
     // transfer to "99% | waiting for progress" - the one reading that is both
     // alarming and wrong.
-    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing... (${waited}s)`
+    if (rows === total) return `${instance}: ${groupThousands(rows)} rows ${resumedRows ? 'complete' : 'sent'}${detail} | finalizing... (${waited}s)`
     if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
     const seconds = Math.max(1, (now() - firstAck) / 1000)
-    const rate = rows / seconds
+    const rate = (rows - resumedRows) / seconds
+    if (rate <= 0) return `${prefix} | ETA unavailable`
     if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
     const remaining = Math.max(1, Math.ceil((total - rows) / rate))
     const eta = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`
@@ -617,14 +630,16 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     return 0
   }
 
+  const progress = createSyncProgress(new Map([...previews].map(([name, preview]) => [name, { rows: preview.rows, status: 'counted' }])))
   let failed = false
   for (const handle of capable) {
     const instance = sinkInstanceName(handle)
     let result
+    progress.update(instance)
     try {
       result = await withSpinner(
-        { stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${instance}...` },
-        async () => handle.sink.replaySourceHistory?.({ source })
+        { status: progress.render, stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${instance}...` },
+        async () => handle.sink.replaySourceHistory?.({ source, onProgress: (delta) => progress.update(instance, delta) })
       )
     } catch (err) {
       failed = true

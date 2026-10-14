@@ -1,15 +1,20 @@
 // @ts-check
 
 import { createHash } from 'node:crypto'
+import { gzip } from 'node:zlib'
+import { promisify } from 'node:util'
+import { openReceipts } from './receipts.js'
 
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail } from './backoff.js'
 
 /**
- * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation, SourceHistoryReplayPreview, SourceHistoryReplayResult } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation, SourceHistoryReplayRequest, SourceHistoryReplayPreview, SourceHistoryReplayResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from '../../../../hypaware-core/plugins-workspace/central/src/identity_client.js'
  * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
  */
+
+const compress = promisify(gzip)
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 
@@ -26,8 +31,8 @@ const MAX_BACKPRESSURE_WAIT_MS = 5 * 60_000
 // A chunk POST whose connection drops under it (the edge closing an HTTP/2
 // connection with GOAWAY, a reset socket) is re-sent on a fresh connection
 // a few times before the chunk is given up. Every chunk carries an
-// idempotent batch id, so a resend costs nothing on the server, while a
-// throw here costs a history replay the whole run (issue #2581). The chunk's
+// idempotent batch id. Retrying in place also avoids restarting the local
+// partition scan after a transient failure (issue #2581). The chunk's
 // one 330s deadline still bounds every attempt together.
 const MAX_TRANSPORT_RETRIES = 3
 const TRANSPORT_RETRY_DELAY_MS = 2_000
@@ -71,6 +76,7 @@ const DATASET_REGISTRATION_REPROBE_MS = 5 * 60_000
  *   fetchFn?: typeof fetch,
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   nowFn?: () => number,
+ *   receiptsDir?: string,
  * }} args
  * @returns {Sink}
  */
@@ -80,6 +86,8 @@ export function createForwardSink(args) {
   // Injectable so tests drive backpressure pacing without real waits.
   const sleepFn = args.sleepFn ?? abortableSleep
   const nowFn = args.nowFn ?? Date.now
+  const transport = { gzip: false }
+  const receiptRoot = args.receiptsDir
   const registeredDatasets = new Set()
   // Datasets this sink instance has already reported as ineligible, so a
   // permanent verdict is stated once rather than once per tick forever.
@@ -100,7 +108,7 @@ export function createForwardSink(args) {
   const activeForwards = new Set()
   /** @param {Parameters<typeof forwardPartition>[0]} args */
   function forwardOwned(args) {
-    const pending = forwardPartition(args)
+    const pending = forwardPartition({ ...args, transport, receiptsDir: args.receiptsDir ?? receiptRoot })
     activeForwards.add(pending)
     const settled = () => { activeForwards.delete(pending) }
     pending.then(settled, settled)
@@ -287,7 +295,7 @@ export function createForwardSink(args) {
      * retry, or overlap with a scheduled tick, row-idempotent.
      *
      * @ref LLP 0345#central [implements]: central replays attributed history through its normal wire path while leaving incremental progress intact
-     * @param {{ source: string }} request
+     * @param {SourceHistoryReplayRequest} request
      * @returns {Promise<SourceHistoryReplayResult>}
      */
     async replaySourceHistory(request) {
@@ -332,6 +340,8 @@ export function createForwardSink(args) {
             persistWatermark: false,
             rowFilter: (row) => row.client_name === request.source,
             replayStats: stats,
+            replaySource: request.source,
+            onProgress: request.onProgress,
           })
           rowsReplayed += stats.rows
         } catch (err) {
@@ -752,10 +762,13 @@ function withDatasetRolloutLock(dataset, locks, fn) {
  *   rowFilter?: (row: Record<string, unknown>) => boolean,
  *   replayStats?: { rows: number, bytes: number },
  *   onProgress?: ExportOptions['onProgress'],
+ *   receiptsDir?: string,
+ *   replaySource?: string,
+ *   transport?: { gzip: boolean },
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats, onProgress }) {
+async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats, onProgress, receiptsDir, replaySource, transport = { gzip: false } }) {
   abortSignal.throwIfAborted()
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
@@ -828,6 +841,17 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     if (!supported) return 0
   }
 
+  // @ref LLP 0497#receipts [implements]: exact chunk acknowledgements survive interruption; the partition cursor still moves only after the complete scan
+  let receipts = await openReceipts(undefined, [])
+  try {
+    const gateway = identityClient.identity?.gateway_id
+    receipts = await openReceipts(gateway ? receiptsDir : undefined, [
+      config.url, gateway ?? '', tablePath, signal, replaySource ?? 'incremental',
+    ])
+  } catch {
+    log.warn('central.forward.receipts_unavailable', { hyp_dataset: partition.dataset })
+  }
+
   let bytesWritten = 0
   let chunkIndex = 0
   // Rows acked across THIS partition's chunks. Accumulated as each chunk POSTs
@@ -861,11 +885,20 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     const bytes = Buffer.byteLength(body, 'utf8')
     const rows = lines.length
     const after = lastAfter
+    const receipt = receipts.key(batchId)
+    const resumed = receipts.has(receipt)
+    let wireBytes = 0
     try {
-      await postNdjson({
+      if (!resumed) wireBytes = await postNdjson({
         centralUrl: config.url, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn,
-        hyp_dataset: partition.dataset, chunkIndex,
+        hyp_dataset: partition.dataset, chunkIndex, transport, onProgress,
       })
+      if (!resumed) {
+        try { await receipts.record(receipt) } catch {
+          log.warn('central.forward.receipts_unavailable', { hyp_dataset: partition.dataset })
+          receipts = await openReceipts(undefined, [])
+        }
+      }
     } catch (err) {
       // Annotate so the partition-level failure log (exportBatch) can
       // name the failing chunk and how many already landed: the new
@@ -889,14 +922,16 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       chunk_index: chunkIndex,
       rows,
       bytes,
+      wire_bytes: wireBytes,
+      resumed,
     })
-    bytesWritten += bytes
+    bytesWritten += resumed ? 0 : bytes
     chunkIndex += 1
     shippedRowCount += rows
-    onProgress?.({ rows, bytes })
+    onProgress?.({ rows, bytes: resumed ? 0 : bytes, wireBytes, ...(resumed ? { resumedRows: rows } : {}) })
     if (replayStats) {
       replayStats.rows += rows
-      replayStats.bytes += bytes
+      replayStats.bytes += resumed ? 0 : bytes
     }
     // The next chunk starts after this chunk's last row, so its batch id keys
     // off this chunk's `after`: keeping ids stable whether a tick streams the
@@ -942,7 +977,8 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // before this), so persisting the partition's high-water `after` can never
   // checkpoint past an un-acked row. A between-chunk failure leaves the
   // watermark untouched: the next tick re-reads the whole partition and the
-  // server ledger dedupes the already-acked prefix. Advancing per chunk to the
+  // receipts skip exact acknowledged chunks; the server ledger handles other
+  // redelivery. Advancing per chunk to the
   // running-max `after` would skip lower-seq rows in a later un-acked chunk
   // whenever the scan is not seq-ordered (LLP 0040 §4 risk #3).
   // @ref LLP 0070#incremental [constrained-by]: widen the gate so a tick that
@@ -955,6 +991,9 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       continuation: lastAfter,
       exportedRowCount: exportedRowCount + shippedRowCount,
     })
+  }
+  try { await receipts.clear() } catch {
+    log.warn('central.forward.receipts_cleanup_failed', { hyp_dataset: partition.dataset })
   }
   if (droppedRowCount > 0) {
     log.debug('central.forward.dropped', {
@@ -1049,8 +1088,10 @@ function serializeValue(value) {
 /**
  * POST one NDJSON chunk to `/v1/ingest/{signal}`, carrying its
  * idempotency key as `X-Hyp-Batch-Id`. Re-sends the *same* body + key on
- * two transient conditions, so every retry stays idempotent:
+ * transient conditions, so every retry stays idempotent:
  *
+ * - `502`/`504` and transport failures: three retries sharing one budget.
+ * - `415` for gzip: retry once in plain form.
  * - `401`: refresh the JWT once and retry (a second `401` escalates).
  * - `429`/`503`: server backpressure. Honor `Retry-After` (falling back
  *   to the linear ladder when it is absent or garbage), sleep, and retry
@@ -1077,10 +1118,12 @@ function serializeValue(value) {
  *   sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   hyp_dataset: string,
  *   chunkIndex: number,
+ *   transport: { gzip: boolean },
+ *   onProgress?: ExportOptions['onProgress'],
  * }} args
  */
 async function postNdjson(args) {
-  const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal: parentSignal, sleepFn, hyp_dataset, chunkIndex } = args
+  const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal: parentSignal, sleepFn, hyp_dataset, chunkIndex, transport, onProgress } = args
   // Escaped the same way `ensureDatasetRegistered` escapes the registration
   // path: since the open-dataset protocol puts an arbitrary dataset name here
   // (not one of the four fixed signals), the two paths would otherwise be able
@@ -1106,7 +1149,18 @@ async function postNdjson(args) {
   const lifetime = centralLifetime(parentSignal, 'central chunk')
   const abortSignal = lifetime.signal
   let bytes = Buffer.from(body, 'utf8')
+  const decodedLength = bytes.length
+  let compressed = false
   try {
+    // @ref LLP 0497#compression [implements]: negotiate once, compress once per chunk, reuse the exact encoded bytes on retries
+    if (transport.gzip) {
+      const packed = await compress(bytes, { level: 1 })
+      abortSignal.throwIfAborted()
+      if (packed.length < bytes.length) {
+        bytes = packed
+        compressed = true
+      }
+    }
     const streamBody = () => {
       let offset = 0
       return new ReadableStream({
@@ -1125,6 +1179,7 @@ async function postNdjson(args) {
         'content-type': 'application/x-ndjson',
         'content-length': String(bytes.byteLength),
         'x-hyp-batch-id': batchId,
+        ...(compressed ? { 'content-encoding': 'gzip', 'x-hyp-uncompressed-length': String(decodedLength) } : {}),
       },
       body: streamBody(),
       duplex: 'half',
@@ -1157,6 +1212,7 @@ async function postNdjson(args) {
           error_kind: code,
           retry: transportRetries,
         })
+        onProgress?.({ rows: 0, bytes: 0, waitMs: TRANSPORT_RETRY_DELAY_MS * transportRetries })
         await sleepFn(TRANSPORT_RETRY_DELAY_MS * transportRetries, abortSignal)
         continue
       }
@@ -1165,7 +1221,29 @@ async function postNdjson(args) {
       if (response.status === 202 || response.ok) {
         await discardBody(response)
         abortSignal.throwIfAborted()
-        return
+        if (response.headers.get('accept-encoding')?.split(',').some((value) => value.trim() === 'gzip')) transport.gzip = true
+        return bytes.length
+      }
+
+      // Mixed-version servers can reject an encoding negotiated on another
+      // backend. Retry plain once with the same id, then remember the fallback.
+      if (response.status === 415 && compressed) {
+        await discardBody(response)
+        transport.gzip = false
+        compressed = false
+        bytes = Buffer.from(body, 'utf8')
+        continue
+      }
+
+      // @ref LLP 0497#retry [implements]: transient edge errors share the bounded transport retry budget and chunk lifetime
+      if ((response.status === 502 || response.status === 504) && transportRetries < MAX_TRANSPORT_RETRIES) {
+        transportRetries += 1
+        await discardBody(response)
+        const delayMs = TRANSPORT_RETRY_DELAY_MS * transportRetries
+        log.debug('central.forward.http_retry', { hyp_dataset, batch_id: batchId, http_status: response.status, retry: transportRetries })
+        onProgress?.({ rows: 0, bytes: 0, waitMs: delayMs })
+        await sleepFn(delayMs, abortSignal)
+        continue
       }
 
       // One-shot refresh + retry on the first 401; a second falls through
@@ -1208,6 +1286,7 @@ async function postNdjson(args) {
         // multi-minute pause (and every retry that piles up) would
         // otherwise pin it.
         await discardBody(response)
+        onProgress?.({ rows: 0, bytes: 0, waitMs: delayMs })
         await sleepFn(delayMs, abortSignal)
         waitedMs += delayMs
         backpressureRetries += 1

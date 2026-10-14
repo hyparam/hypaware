@@ -1516,6 +1516,7 @@ export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
 /** One client's locally retained history, requested for an explicit replay. */
 export interface SourceHistoryReplayRequest {
   source: string
+  onProgress?: (progress: ExportProgress) => void
 }
 
 /** Read-only disclosure produced before a historical replay is confirmed. */
@@ -1583,13 +1584,19 @@ export interface ExportBatch {
 export interface ExportOptions {
   format: string
   schedule: string
-  /** Incremental payload counts, reported only after a chunk or blob is acknowledged. */
+  /** Incremental acknowledged counts, or a zero-count event announcing a retry wait. */
   onProgress?: (progress: ExportProgress) => void
 }
 
 export interface ExportProgress {
   rows: number
   bytes: number
+  /** Rows covered by durable acknowledgements from an interrupted attempt. */
+  resumedRows?: number
+  /** Encoded bytes in acknowledged requests; excludes retries. */
+  wireBytes?: number
+  /** Announced retry/backpressure delay, with zero rows and bytes. */
+  waitMs?: number
 }
 
 export interface ExportResult {

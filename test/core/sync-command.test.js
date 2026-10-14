@@ -7,6 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
+/** @import { SourceHistoryReplayRequest } from '../../hypaware-plugin-kernel-types.js' */
+
 import { createSyncProgress, runSync } from '../../src/core/commands/sync.js'
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 import {
@@ -276,7 +278,7 @@ function fakeHistorySink(instanceName, config) {
       async previewSourceHistory(/** @type {{ source: string }} */ request) {
         return { rows: request.source === 'claude' ? 12 : 0, withheldRows: 3 }
       },
-      async replaySourceHistory(/** @type {{ source: string }} */ request) {
+      async replaySourceHistory(/** @type {SourceHistoryReplayRequest} */ request) {
         replayed.push(request)
         return { status: 'exported', rowsReplayed: 12, bytesWritten: 345 }
       },
@@ -481,7 +483,8 @@ test('--history previews capable destinations and sends only after confirmation'
   assert.match(stdout.text, /12 rows retained and eligible/)
   assert.match(stdout.text, /3 rows withheld by privacy policy \(not sent\)/)
   assert.match(stdout.text, /not replayed.*parquet/)
-  assert.deepEqual(central.replayed, [{ source: 'claude' }])
+  assert.equal(central.replayed[0].source, 'claude')
+  assert.equal(typeof central.replayed[0].onProgress, 'function')
   assert.deepEqual(parquet.exported, [], 'history mode never runs an ordinary tick')
 })
 
@@ -532,8 +535,10 @@ test('--history quotes the rows once when two destinations can replay', async ()
   // The prompt goes to stderr (src/core/cli/confirm.js).
   assert.match(stderr.text, /Replay 12 retained rows/)
   assert.doesNotMatch(stderr.text, /24 retained rows/)
-  assert.deepEqual(one.replayed, [{ source: 'claude' }])
-  assert.deepEqual(two.replayed, [{ source: 'claude' }])
+  assert.equal(one.replayed[0].source, 'claude')
+  assert.equal(typeof one.replayed[0].onProgress, 'function')
+  assert.equal(two.replayed[0].source, 'claude')
+  assert.equal(typeof two.replayed[0].onProgress, 'function')
 })
 
 // The history preview counts only the destinations that can replay. A blob
@@ -1060,4 +1065,22 @@ test('a failed export reports a nonzero exit', async () => {
 
   assert.equal(code, 1)
   assert.match(stdout.text, /^Could not send to \/home\/u\/exports/m)
+})
+
+
+test('sync progress explains retry waits and resumed rows without inflating transfer rate', () => {
+  let now = 1000
+  const progress = createSyncProgress(new Map([['central', { status: 'counted', rows: 1000 }]]), () => now)
+  progress.update('central')
+  progress.update('central', { rows: 750, bytes: 0, resumedRows: 750, wireBytes: 0 })
+  assert.match(progress.render(), /750 resumed.*ETA unavailable/)
+  progress.update('central', { rows: 0, bytes: 0, waitMs: 2000 })
+  assert.match(progress.render(), /retrying in 2s/)
+  now += 1000
+  assert.match(progress.render(), /retrying in 1s/)
+  now += 1000
+  progress.update('central', { rows: 50, bytes: 2097152, wireBytes: 1048576 })
+  assert.match(progress.render(), /1.0 MiB uploaded.*750 resumed.*ETA ~8s/)
+  progress.update('central', { rows: 200, bytes: 100, wireBytes: 50 })
+  assert.match(progress.render(), /1,000 rows complete.*finalizing/)
 })
