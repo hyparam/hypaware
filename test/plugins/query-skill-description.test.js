@@ -2,11 +2,11 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { SKILL_CLIENTS, clientSkillsDir } from '../helpers/client_skill_trees.js'
+import { readSkillFrontmatter } from '../helpers/skill_frontmatter.js'
 
 /**
  * Routing-surface tests for the `hypaware-query` skill frontmatter.
@@ -28,30 +28,15 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const CLIENTS = SKILL_CLIENTS
 
 /**
- * Read the `key: value` frontmatter block of a SKILL.md. Deliberately tiny:
- * the frontmatter these skills use is flat single-line scalars, and the repo
- * has no YAML dependency.
+ * Read the `key: value` frontmatter block of a client's hypaware-query SKILL.md
+ * through the strict reader, so a quoted description compares by its value and
+ * one a real YAML parser would reject fails here too.
  *
  * @param {string} client
  * @returns {Record<string, string>}
  */
 function readFrontmatter(client) {
-  const file = path.join(clientSkillsDir(REPO_ROOT, client), 'hypaware-query/SKILL.md')
-  const lines = fs.readFileSync(file, 'utf8').split('\n')
-  assert.equal(lines[0], '---', `${file}: expected frontmatter to open on line 1`)
-  const end = lines.indexOf('---', 1)
-  assert.ok(end > 0, `${file}: unterminated frontmatter`)
-  /** @type {Record<string, string>} */
-  const out = {}
-  for (const line of lines.slice(1, end)) {
-    const at = line.indexOf(': ')
-    // Skip non-scalar lines (block/list values, folded scalars) instead of
-    // asserting on them: this test only makes claims about the flat keys it
-    // actually reads, not about the shape of the whole frontmatter block.
-    if (at <= 0) continue
-    out[line.slice(0, at)] = line.slice(at + 2)
-  }
-  return out
+  return readSkillFrontmatter(path.join(clientSkillsDir(REPO_ROOT, client), 'hypaware-query/SKILL.md'))
 }
 
 test('hypaware-query frontmatter is identical across every client copy', () => {

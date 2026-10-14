@@ -486,6 +486,7 @@ test('onDiskListing: skills and agents carry their descriptions; hooks are not l
 test('frontMatterDescription: one line, unquoted, capped, empty without front matter', () => {
   assert.equal(frontMatterDescription('---\nname: x\ndescription: "Does a thing."\n---\nbody'), 'Does a thing.')
   assert.equal(frontMatterDescription('---\ndescription: spans\n---\n'), 'spans')
+  assert.equal(frontMatterDescription("---\ndescription: 'Act on it: survey; don''t ship it.'\n---\n"), "Act on it: survey; don't ship it.")
   assert.equal(frontMatterDescription('# no front matter\ndescription: nope'), '')
   assert.equal(frontMatterDescription('---\ndescription: ' + 'x'.repeat(300) + '\n---\n').length, 200)
 })

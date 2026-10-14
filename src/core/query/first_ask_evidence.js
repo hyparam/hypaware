@@ -812,7 +812,9 @@ export function frontMatterDescription(text) {
   const m = /^description:\s*(.*)$/m.exec(head)
   if (!m) return ''
   let value = m[1].trim()
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1)
+  // A single-quoted YAML scalar writes an apostrophe as ''.
+  if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1).replaceAll("''", "'")
+  else if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1)
   return oneLine(value).slice(0, 200)
 }
 
