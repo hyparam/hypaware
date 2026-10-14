@@ -26,6 +26,7 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { clientAssetStateRoot, digestClientAsset, readClientAssetLedger, writeClientAssetLedger } from '../../src/core/runtime/client_asset_ledger.js'
 import { isolatedClientEnv } from '../../hypaware-core/smoke/lib/isolation.js'
 import { NEUTRAL_SKILLS_DIR, NEUTRAL_SKILL_NAMES } from '../../hypaware-core/skills/index.js'
 
@@ -108,7 +109,7 @@ async function hermesHome(t, inject = {}) {
     const code = await dispatch(argv, { stdout, stderr, env, ...inject })
     return { code, stdout: stdout.text(), stderr: stderr.text() }
   }
-  return { home, hermesDir, skillsDir: path.join(hermesDir, 'skills'), run }
+  return { home, env, hermesDir, skillsDir: path.join(hermesDir, 'skills'), run }
 }
 
 /**
@@ -313,4 +314,53 @@ test('hermes re-attach leaves an edited hypaware-* copy in place and refreshes t
   assert.equal(detached.code, 0, detached.stderr)
   assert.deepEqual(await ourDirs(skillsDir), ['hypaware-report'])
   assert.match(detached.stderr, /hypaware-report.*changed since HypAware installed it; left in place/)
+})
+
+// Issue #2602: a ledger record is evidence HypAware wrote a path, not that the
+// consent covered it. The pre-r1 build (d1a9e4f5) copied and recorded a
+// third-party `clients: ['all']` skill under `~/.hermes/skills`; the fixed build
+// must not take it as retired and remove it on the next install.
+// @ref LLP 0494#skills [tests]: retirement, like detach, never removes a Hermes path outside the four consented skills
+
+test('a recorded third-party hermes skill survives detach, re-attach and skills install', async (t) => {
+  const { home, env, hermesDir, skillsDir, run } = await hermesHomeWith(t, async () => [
+    { name: 'foreign-tool', plugin: '@example/ordinary', clients: ['all'], body: 'FOREIGN PLUGIN SKILL\n' },
+  ])
+  assert.equal((await run(['client', 'attach', 'hermes'])).code, 0)
+
+  // The ledger state the pre-r1 install left behind: the copy on disk and a
+  // record of it with its digest.
+  const foreign = path.join(skillsDir, 'foreign-tool')
+  await fs.mkdir(foreign, { recursive: true })
+  await fs.writeFile(path.join(foreign, 'SKILL.md'), 'FOREIGN PLUGIN SKILL\n')
+  const stateRoot = clientAssetStateRoot(env, home)
+  const ledger = await readClientAssetLedger(stateRoot)
+  const digest = await digestClientAsset(foreign)
+  await writeClientAssetLedger(stateRoot, [...ledger, { kind: 'skill', name: 'foreign-tool', client: 'hermes', dest: foreign, ...(digest ? { digest } : {}) }])
+  const foreignBefore = await snapshot(foreign)
+  const before = withoutOurs(await snapshot(hermesDir))
+
+  const detached = await run(['client', 'detach', 'hermes'])
+  assert.equal(detached.code, 0, detached.stderr)
+  assert.deepEqual(await ourDirs(skillsDir), [])
+  assert.deepEqual(await snapshot(foreign), foreignBefore, 'detach left foreign-tool alone')
+
+  const reattached = await run(['client', 'attach', 'hermes'])
+  assert.equal(reattached.code, 0, reattached.stderr)
+  for (const name of NEUTRAL_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
+  assert.deepEqual(await snapshot(foreign), foreignBefore, 're-attach left foreign-tool alone')
+  assert.doesNotMatch(reattached.stdout, /foreign-tool/)
+
+  // A recorded copy of ours that went missing is refreshed; the foreign one is not retired.
+  await fs.rm(path.join(skillsDir, 'hypaware-privacy'), { recursive: true })
+  const installed = await run(['skills', 'install'])
+  assert.equal(installed.code, 0, installed.stderr)
+  for (const name of NEUTRAL_SKILL_NAMES) await isNeutralCopy(skillsDir, name)
+  assert.deepEqual(await snapshot(foreign), foreignBefore, 'skills install left foreign-tool alone')
+  assert.doesNotMatch(installed.stdout, /retired skill 'foreign-tool'/)
+
+  const final = await run(['client', 'detach', 'hermes'])
+  assert.equal(final.code, 0, final.stderr)
+  assert.deepEqual(await ourDirs(skillsDir), [])
+  assert.deepEqual(withoutOurs(await snapshot(hermesDir)), before, '~/.hermes holds exactly what it held before, foreign-tool included')
 })
