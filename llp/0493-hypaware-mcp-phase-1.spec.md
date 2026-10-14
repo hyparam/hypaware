@@ -227,9 +227,9 @@ Hernan's direction for the client items, verbatim from his answer of
 - **The token's reach.** Hernan answered the scope question at 20:50Z:
   the agent token keeps the literal `read report-publish`, with no
   restriction for now. So a token any member can mint can also publish
-  reports and delete the org's reports over REST, for up to 90 days;
-  whether delete stays included is pending his word (hypaware-server
-  LLP 0596#scope, #scope-delete). The client does not narrow it. It says so
+  reports and delete the org's reports over REST, for up to 90 days; his
+  answer of 2026-10-14T02:48Z keeps delete (hypaware-server LLP
+  0596#scope, #scope-delete). The client does not narrow it. It says so
   in plain words where the token is minted and documented
   (LLP 0494#cli-mint, #docs-mcp).
 - **The mark.** HYP-133's "fix a recommendation" ends in a status mark. On

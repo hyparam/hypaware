@@ -32,7 +32,7 @@ The change-set slug is `hypaware-mcp-phase-1`, matching the design's file
 name. Task branches are `codex/hypaware-mcp-phase-1/Tn` and integrate on
 `integration/hypaware-mcp-phase-1`. This plan covers hypaware only; the
 server tasks are hypaware-server LLP 0603 ("server T4" and the like below)
-and the recipe text is hypscope LLP 0106. `neutral ready` sees only this
+and the recipe is hypscope LLP 0105 (its plan, LLP 0106). `neutral ready` sees only this
 repository's refs, so a task that waits on a server landing says so in its
 line, and the orchestrator checks that landing in hypaware-server.
 
@@ -44,15 +44,21 @@ review, without waiting for the rest. Two reasons:
   check out hypaware's default branch (hypaware-server LLP 0603#cross-repo).
   The same holds for T6 before server T6.
 - None of them changes what a user can do without a server change. T2
-  registers nothing. T3 to T5 change `initialize`, `prompts/*` and
-  `tools/list` from the visible tool set, which today holds no
-  recommendation tool, so the rendered text is the stdio line and the
-  hand-off.
+  registers nothing. T5 adds titles and hints to `tools/list`. T3 and T4
+  render `initialize` and `prompts/*` from the transport and the visible
+  tool set (LLP 0494#instructions rule 6, #prompts). Over stdio that is
+  the `hyp report` line. On `/v1/mcp` it is safe in each server state:
+  before server R1 registers the reads there is no recommendation tool,
+  so there is no recommendation line and `prompts/list` holds
+  `check_team_history` alone; after R1 and before R2 a read principal gets
+  the hand-off and no mark line. No `/v1/mcp` rendering names `hyp report`
+  or a tool the server does not serve.
 
 **A hypaware master merge reaches production `/v1/mcp` at the next server
-deploy**, whatever this repository's release does. The reviewer of T3, T4
-and T5 checks the read-principal rendering (no mark line, the hand-off),
-because that is what production serves until server R2.
+deploy**, whatever this repository's release does. The reviewer of T3 and
+T4 checks both `/v1/mcp` renderings the pins below hold (no recommendation
+tool, which production serves until server R1; the reads only, until
+server R2), and of T5 the hints on a read principal's `tools/list`.
 
 <a id="gate"></a>**A1 to A3 are decision gates, not code.** Each carries
 one status-only commit recording the owner's answer, relayed by the mayor
@@ -65,8 +71,8 @@ answer is no, the dependent tasks drop and the named fallback applies.
 
 - id: T1  branch: codex/hypaware-mcp-phase-1/T1  deps: []  complexity: 3  -- hypaware: HYP-134 neutral skills tree (hypaware-query, hypaware-report, hypaware-reference, hypaware-privacy, with #2588's reference files) registered by the pi, opencode, cursor and openclaw plugins; tests widened to six clients; divergence fixture; install test (LLP 0494#skills). Ready now; may merge early
 - id: T2  branch: codex/hypaware-mcp-phase-1/T2  deps: []  complexity: 1  -- hypaware: `src/core/mcp/contracts.js` with the two read contracts (`list_recommendations`, `get_recommendation`); no registration (LLP 0494#remote-contracts). Ready now; may merge early; server T4 needs it on master
-- id: T3  branch: codex/hypaware-mcp-phase-1/T3  deps: [T2]  complexity: 2  -- hypaware: HYP-132 `instructions.js`, `buildInstructions(visibleTools)` once per assembly, the eight rules including "marking applied is expected" (LLP 0494#instructions). Ready now; may merge early
-- id: T4  branch: codex/hypaware-mcp-phase-1/T4  deps: [T2, T3]  complexity: 3  -- hypaware: HYP-133 `prompts.js`, `prompts/list` and `prompts/get`, three prompts naming only visible tools, no approval step (LLP 0494#prompts). Ready now; may merge early
+- id: T3  branch: codex/hypaware-mcp-phase-1/T3  deps: [T2]  complexity: 2  -- hypaware: HYP-132 `instructions.js`, `buildInstructions(visibleTools, transport)` once per assembly, the eight rules including "marking applied is expected", no recommendation line on `/v1/mcp` with no recommendation tool (LLP 0494#instructions). Ready now; may merge early
+- id: T4  branch: codex/hypaware-mcp-phase-1/T4  deps: [T2, T3]  complexity: 3  -- hypaware: HYP-133 `prompts.js`, `prompts/list` and `prompts/get`, three prompts naming only visible tools and rendered by transport, no approval step, `check_team_history` alone on `/v1/mcp` with no recommendation tool (LLP 0494#prompts). Ready now; may merge early
 - id: T5  branch: codex/hypaware-mcp-phase-1/T5  deps: []  complexity: 2  -- hypaware: HYP-141 client share, `title` and class-derived `annotations` in `toolEntry`, the `read` and `operator` rows, titles on the bundled verbs (LLP 0494#annotations). Ready now; may merge early; server T4 needs it on master
 - id: A1  branch: codex/hypaware-mcp-phase-1/A1  deps: []  complexity: 1  -- hypaware: decision gate; Phil's recorded answer to (c), the `write` class against LLP 0034#tool-auth-class
 - id: A2  branch: codex/hypaware-mcp-phase-1/A2  deps: []  complexity: 1  -- hypaware: decision gate; Kenny's recorded answer on `--scope query` against LLP 0298#mint (asked with hypaware-server LLP 0597)
@@ -116,8 +122,14 @@ Ready now.
   `hypaware-report/references/*.md`, not only `SKILL.md`; no neutral file
   names `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `~/.claude/projects`,
   `~/.codex/sessions` or `hypaware-analyst`; the neutral `reports.md`
-  names both `hyp report mark` and `set_recommendation_status`; the claude
-  and codex trees are unchanged.
+  names both `hyp report mark` and `set_recommendation_status`, the MCP
+  tool only "when the connected MCP lists it"; the claude and codex trees
+  are unchanged.
+- **Ships ahead of the mark.** T1 merges early, so a routine hypaware
+  release can carry skills that name `set_recommendation_status` while
+  production `/v1/mcp` does not serve it (until server R2). The
+  conditional wording above is what keeps that honest: an agent whose MCP
+  does not list the tool uses `hyp report mark` or hands off.
 - **Human proof:** "an agent in each uses them correctly": one run per
   client (Pi, OpenCode, Cursor, OpenClaw), in V1.
 - **Gate:** none. **Fallback** if Hernan overrules confirmation 5 (the
@@ -152,17 +164,22 @@ Ready now.
 
 Ready now.
 
-- **Files:** `src/core/mcp/instructions.js` (new, `buildInstructions(visibleTools)`);
-  `src/core/mcp/server.js` (call it once when the server is created, return
-  it in the `initialize` result); `test/core/mcp-server.test.js` and a new
+- **Files:** `src/core/mcp/instructions.js` (new,
+  `buildInstructions(visibleTools, transport)`); `src/core/mcp/server.js`
+  (call it once when the server is created, with `opts.transport`, and
+  return it in the `initialize` result); `test/core/mcp-server.test.js` and a new
   `test/core/mcp-instructions.test.js`.
 - **Realizes:** LLP 0494#instructions, all eight rules.
 - **Done-when:** HYP-132 "initialize returns instructions on both stdio and
   /v1/mcp."
 - **Hermetic proof:** `initialize` over `stdio.js` carries `instructions`
   with rule 6's stdio line and no line for a hidden tool;
-  `createMcpServer` as an HTTP read principal renders the hand-off and no
-  mark line; `buildInstructions` given a visible set that holds
+  `createMcpServer({transport: 'http'})` with no recommendation tool (what
+  production `/v1/mcp` serves until server R1) renders no recommendation
+  line and no `hyp report`; `createMcpServer` as an HTTP read principal
+  with `list_recommendations` and `get_recommendation` registered by
+  their T2 contracts in the test renders the hand-off and no mark line;
+  `buildInstructions` given a visible set that holds
   `set_recommendation_status` renders rule 5, "marking applied is
   expected", with the reason and link and no approval (the text is in the
   code now, even though no assembly shows the mark until T6 and server
@@ -172,7 +189,7 @@ Ready now.
   server deploy (V1).
 - **Gate:** none.
 - **CPU and memory:** one string per assembly, bounded by the visible tool
-  count.
+  count; one transport comparison per build, nothing per request.
 
 ### T4: prompts {#t4}
 
@@ -185,8 +202,12 @@ Ready now.
 - **Realizes:** LLP 0494#prompts.
 - **Done-when:** HYP-133 "the three commands appear in Claude Code and
   Cursor connected over stdio and over /v1/mcp."
-- **Hermetic proof:** `prompts/list` returns `fix_recommendation`,
-  `open_recommendations` and `check_team_history`; with a visible set
+- **Hermetic proof:** over stdio, and over HTTP with the two reads
+  registered in the test, `prompts/list` returns `fix_recommendation`,
+  `open_recommendations` and `check_team_history`; over
+  `createMcpServer({transport: 'http'})` with no recommendation tool it
+  returns `check_team_history` alone, `prompts/get fix_recommendation`
+  returns `-32602`, and no rendering names `hyp report`; with a visible set
   holding the mark, `fix_recommendation` renders the four steps ending in
   `set_recommendation_status`, with no approval step and no `dismissed`;
   the read-principal rendering ends in the hand-off; the stdio rendering
@@ -212,18 +233,24 @@ Ready now.
   (optional `title` on a verb registration and in the activation key list);
   `hypaware-plugin-kernel-types.d.ts` (`title?` on `VerbRegistration`);
   titles on `query_sql` (`src/core/query/verb.js`), `grep_search`
-  (`grep/src/grep_verb.js`), `graph_neighbors` and each operator verb
-  (`context-graph/src/verb.js` and the rest); a new
-  `test/core/mcp-annotations.test.js`.
+  (`grep/src/grep_verb.js`) and `graph_neighbors`
+  (`context-graph/src/verb.js`), and on any verb that declares `authClass:
+  'operator'` (none on master today); a new
+  `test/core/mcp-annotations.test.js`; the LLP 0494#annotations sentence
+  that says the operator class "holds" `graph_project` and
+  `github_backfill` corrected to "will hold" in the same PR (guardian
+  advisory B).
 - **Realizes:** LLP 0494#annotations (the `read` and `operator` rows, the
   title pass-through).
 - **Done-when:** HYP-141 "every tool on /v1/mcp and stdio carries a title
   and the right hint." (client share)
 - **Hermetic proof:** a booted stdio host and `createMcpServer` with an
   HTTP read principal: every `tools/list` entry has a non-empty `title`;
-  every `read` verb has `readOnlyHint: true`; every `operator` verb has
-  `destructiveHint: true`; a verb registered with no title falls back to
-  its tool name.
+  every `read` verb has `readOnlyHint: true`; an `operator` verb
+  registered by the test has `destructiveHint: true` (no bundled verb is
+  `operator` on master, so a pin over the bundled set would hold
+  vacuously); a verb registered with no title falls back to its tool
+  name.
 - **Human proof:** the server's three tools are hypaware-server LLP 0603
   T4 and T6.
 - **Gate:** none. The `write` row waits for T6.
@@ -359,8 +386,11 @@ call, recorded in PROGRESS.md.
 - **Done-when:** HYP-136 "every agent prompt names the MCP path, and `hyp
   report list` has a prompt."; HYP-137 "no read or act instruction in the
   docs is CLI-only."
-- **Hermetic proof:** the docs test: every `agent:` marker (23 plus the
-  new Reports one) names an MCP tool or says no MCP path exists; Reports
+- **Hermetic proof:** the docs test: every `agent:` marker (22 on master,
+  Team setup holding 1, plus the new Reports one; the test counts the
+  tree and hardcodes no total) names an MCP tool or says no MCP path
+  exists; the LLP 0494#docs-paths count of 23 corrected in the same PR
+  (guardian advisory C); Reports
   has a `report list` marker; no page links `MCP.md` or
   `MCP_REFERENCE.md`. HYP-137 is checked by reading against the list in
   #docs-paths.

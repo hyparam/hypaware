@@ -35,7 +35,7 @@ same tools, prompts and instructions.
 | --- | --- | --- |
 | HYP-130 | `hyp remote mint --scope query [--label <name>]` mints an agent token from the member's session, scope `read report-publish`: it reads, marks, and can publish and delete reports; `hyp remote tokens` lists and revokes them | `remote_commands.js`, `command_args.js` |
 | HYP-131 (client share) | one module defines the recommendation tools' contracts, which the server binds; the kernel gains the `write` auth class the mark needs | `src/core/mcp/contracts.js` (new), `registry/verbs.js`, `server.js` |
-| HYP-132 | `initialize` returns an `instructions` string derived from the tools that assembly shows, saying a fix ends with marking it applied | `src/core/mcp/server.js`, `instructions.js` (new) |
+| HYP-132 | `initialize` returns an `instructions` string derived from the tools that assembly shows and its transport, saying a fix ends with marking it applied | `src/core/mcp/server.js`, `instructions.js` (new) |
 | HYP-133 | `prompts/list` and `prompts/get` serve three prompts; the fix prompt ends with the mark and has no approval step | `server.js`, `prompts.js` (new) |
 | HYP-134 | the four skills gain `pi`, `opencode`, `cursor`, `openclaw` in their client lists, from a neutral content tree | client plugin manifests, skills |
 | HYP-135 | a Devin knowledge entry and a Droid skill, written as text; their place in HYP-75's recipes is deferred | `docs/agents/` (new) |
@@ -57,8 +57,8 @@ ended:
 - read the org's recorded history (every `/v1/mcp` read tool, `/v1/query`);
 - mark a recommendation's status, the one write the loop needs;
 - publish a report, and publish a standalone recommendation;
-- delete any report in the org. Whether delete stays included is pending
-  Hernan's word (hypaware-server LLP 0596#scope-delete).
+- delete any report in the org. Hernan kept delete (2026-10-14T02:48Z,
+  hypaware-server LLP 0596#scope-delete).
 
 It cannot change config, ingest or capture, generate or promote a report,
 manage the org, or mint tokens. The server design states this
@@ -262,9 +262,12 @@ result, on every transport. The proxy (`hyp mcp serve --remote`) forwards
 `initialize` unchanged, so a proxied client gets the server's string.
 
 **Built once per assembly.** `instructions.js` exports
-`buildInstructions(visibleTools)`. `createMcpServer` calls it once, when
-the server is created, from the tools its `toolVisible` admits. It is not
-built per request. Its length is bounded: a fixed preamble plus at most one
+`buildInstructions(visibleTools, transport)`. `createMcpServer` calls it
+once, when the server is created, from the tools its `toolVisible` admits
+and the `opts.transport` it already takes. It is not built per request.
+The transport is an input because the visible set alone cannot tell a
+stdio host from a `/v1/mcp` assembly that shows no recommendation tool
+yet (rule 6). Its length is bounded: a fixed preamble plus at most one
 line per visible tool, about 2 KB with every Phase 1 tool shown.
 
 **Content.** Plain sentences, no markup that a client might render
@@ -299,7 +302,11 @@ oddly:
    The agent is never told to run `hyp report mark` itself on `/v1/mcp`:
    the assembly cannot know whether a `hyp` beside the agent holds a member
    session, and in a cloud environment set up by the hypscope LLP 0105
-   recipe it does not.
+   recipe it does not. On `/v1/mcp` with **no recommendation tool** (neither
+   `list_recommendations` nor `get_recommendation`, as before the server
+   registers them, hypaware-server LLP 0603 R1), there is no recommendation
+   line at all: the agent has nothing to act on recommendations with there,
+   and the line never points it at the CLI.
 7. Bounded reads: prefer `LIMIT`, at most two concurrent heavy reads, and
    treat capped results as incomplete (LLP 0491#guidance).
 8. **Recommendations are suggestions; recurrences come back.** Before
@@ -351,8 +358,10 @@ does not offer `dismissed`: dismissing is a person's decision with a
 reason (LLP 0497#states, hypaware-server LLP 0599#reopen), and the prompt
 that runs with no person in it does not make it.
 
-**Transport-aware by the visible set.** The rendered text names only tools
-the assembly shows, and otherwise names the CLI command:
+**Transport-aware, by the transport and the visible set.** The rendered
+text names only tools the assembly shows, and otherwise names the CLI
+command where `hyp` is the person's own (stdio) and nothing where it is
+not (`/v1/mcp`):
 
 - **Over local stdio**, the local host shows no recommendation tool, so the
   same prompt tells the agent to run `hyp report get <id>` and, as the last
@@ -362,6 +371,12 @@ the assembly shows, and otherwise names the CLI command:
   gives the hand-off; it does not run the login itself.
 - **Over `/v1/mcp` without the mark** (an admin-minted read token), the
   last step is the hand-off from #instructions rule 6.
+- **Over `/v1/mcp` with no recommendation tool**, `prompts/list` omits
+  `fix_recommendation` and `open_recommendations`, which would have no
+  tool to take their first step with, and lists `check_team_history`
+  alone; `prompts/get` for either omitted name returns `-32602` as an
+  unknown name. No `/v1/mcp` rendering names `hyp report` or a tool the
+  assembly does not show.
 - `check_team_history` uses LLP 0491#guidance's process over the visible
   search tools (`grep_search`, `graph_neighbors`, `query_sql`,
   `session_evidence`), or `hyp query` when none is visible.
@@ -663,8 +678,8 @@ cites.
 | --- | --- | --- |
 | HYP-130: "the CLI mints an agent token, and the HYP-116 recipe places it in the environment's secret store alongside the enrollment token." (the mint half) | `hyp remote mint --scope query` against a fake server: path, bearer, body (`{}`, `ttl_seconds`, `label`), no `ttl_seconds` when `--expires-days` is absent, stdout is the token alone, the stderr reminder names read, mark, publish and delete; each refusal line; an unknown `--scope` exits 2; bare `hyp remote mint` still sends 365 days | a member mints against production after the server deploy (human, through the mayor) |
 | HYP-130 (the recipe half) | none here | hypscope LLP 0105, reviewed as text; a real cloud environment run is human |
-| HYP-132: "initialize returns instructions on both stdio and /v1/mcp." | stdio: `initialize` over `stdio.js` has `instructions`, rule 6's stdio line, and no line for a hidden tool; HTTP: the same `createMcpServer` with `report-publish` renders rule 5 ("marking applied is expected"), and with a read-only principal renders the hand-off and no mark line | `/v1/mcp` in production after the server deploys this client version |
-| HYP-133: "the three commands appear in Claude Code and Cursor connected over stdio and over /v1/mcp." | `prompts/list` returns three; `fix_recommendation` with `report-publish` renders the four steps ending in `set_recommendation_status` and no approval step, and no `dismissed`; the read-only rendering ends in the hand-off; the stdio rendering ends in `hyp report mark`; `-32602` paths | Claude Code and Cursor, each over stdio and over `/v1/mcp` (human; four runs) |
+| HYP-132: "initialize returns instructions on both stdio and /v1/mcp." | stdio: `initialize` over `stdio.js` has `instructions`, rule 6's stdio line, and no line for a hidden tool; HTTP: the same `createMcpServer` with `report-publish` renders rule 5 ("marking applied is expected"), with a read-only principal and the two reads visible renders the hand-off and no mark line, and with `transport: 'http'` and no recommendation tool renders no recommendation line and no `hyp report` | `/v1/mcp` in production after the server deploys this client version |
+| HYP-133: "the three commands appear in Claude Code and Cursor connected over stdio and over /v1/mcp." | `prompts/list` returns three; `fix_recommendation` with `report-publish` renders the four steps ending in `set_recommendation_status` and no approval step, and no `dismissed`; the read-only rendering ends in the hand-off; the stdio rendering ends in `hyp report mark`; over `transport: 'http'` with no recommendation tool `prompts/list` holds `check_team_history` only; `-32602` paths | Claude Code and Cursor, each over stdio and over `/v1/mcp` (human; four runs) |
 | HYP-134: "`hyp client skills install` places the skills for each attached client and an agent in each uses them correctly." (install half) | the install test for the four clients | none |
 | HYP-134 (use half) | none | one task per client (Pi, OpenCode, Cursor, OpenClaw), human |
 | HYP-135: "the HYP-75 pilot recipes include the instructions and the agent token." | the two text files exist | deferred with HYP-75 |
