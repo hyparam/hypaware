@@ -67,6 +67,21 @@ const CONSENTED_SKILLS = new Map([
 ])
 
 /**
+ * Whether a ledger record names a path its client's consent does not cover. A
+ * record is evidence HypAware wrote a path, not that the consent covered it,
+ * so neither detach nor retirement removes such a path; both carry its record.
+ * The ledger keeps no plugin, so this asks the names alone; the plugin is
+ * checked at plan time, before anything is copied or recorded.
+ *
+ * @param {ClientAssetLedgerRecord} record
+ * @returns {boolean}
+ */
+function outsideConsent(record) {
+  const consent = CONSENTED_SKILLS.get(record.client)
+  return consent !== undefined && !(record.kind === 'skill' && consent.names.has(record.name))
+}
+
+/**
  * Copy every registered skill and agent that targets one of `clients` into that
  * client's asset directories, replacing any existing copy (idempotent). A
  * client under a consent (`CONSENTED_SKILLS`) replaces only a copy the ledger
@@ -387,9 +402,6 @@ export async function removeOwnedClientAssets(options) {
     if (planned.client !== client) othersHold.add(planned.dest)
   }
   const recordedDigests = indexRecordedDigests(ledger)
-  // A record is evidence HypAware wrote a path, not that the consent covered
-  // it, so under a consent only the named skills are ever removed.
-  const consent = CONSENTED_SKILLS.get(client)
 
   /** @type {ClientAssetRemoval[]} */
   const removed = []
@@ -398,8 +410,7 @@ export async function removeOwnedClientAssets(options) {
   /** @type {ClientAssetLedgerRecord[]} */
   const next = []
   for (const record of ledger) {
-    const outsideConsent = consent !== undefined && !(record.kind === 'skill' && consent.names.has(record.name))
-    if (record.client !== client || othersHold.has(record.dest) || outsideConsent) {
+    if (record.client !== client || othersHold.has(record.dest) || outsideConsent(record)) {
       next.push(record)
       continue
     }
@@ -570,6 +581,12 @@ async function reconcileClientAssetLedger({ options, installed }) {
       const candidates = new Map()
       for (const record of ledger) {
         if (record.client !== client || keepAll.has(record.dest)) continue
+        // @ref LLP 0494#skills [implements]: retirement, like detach, never
+        //   removes a Hermes path outside the four consented skills
+        if (outsideConsent(record)) {
+          next.push(record)
+          continue
+        }
         candidates.set(record.dest, record)
       }
       for (const dest of attachMarkerAssets(stateRoot, client)) {
