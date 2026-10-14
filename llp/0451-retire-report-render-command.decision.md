@@ -10,6 +10,8 @@
 
 ## Server rendering {#server-rendering}
 
+**Superseded-by:** [LLP 0495#ownership](./0495-report-rendering-moves-to-the-server.spec.md#ownership) for the retained library export, code and assets.
+
 Remove `hyp report render` from the CLI, its argument schema, help, and command
 telemetry vocabulary. Publishing already sends Markdown for the server to render.
 This supersedes the standalone preview exception in LLP 0436 and LLP 0450's
