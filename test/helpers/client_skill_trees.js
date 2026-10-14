@@ -9,7 +9,7 @@
 import path from 'node:path'
 
 /** Every client that installs HypAware skills. */
-export const SKILL_CLIENTS = ['claude', 'codex', 'pi', 'opencode', 'cursor', 'openclaw']
+export const SKILL_CLIENTS = ['claude', 'codex', 'pi', 'opencode', 'cursor', 'openclaw', 'hermes']
 
 /** Repo-relative skill tree per host; a client not listed installs `neutral`. */
 export const SKILL_TREES = {

@@ -19,7 +19,7 @@ import { confirmOllamaRecording } from '../control/client_recording.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { defaultStateRoot, deleteLocalCa } from '../tls/ca.js'
 import { removeCaTrust } from '../tls/darwin_trust.js'
-import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
+import { clientAssetBaseDirs, removeClientAssets, removeOwnedClientAssets } from '../runtime/client_assets.js'
 import {
   clearClientActionMarker,
   readClientActionStatus,
@@ -221,10 +221,14 @@ async function runClientLifecycle(action, argv, ctx) {
   // @ref LLP 0466#switch [implements]: attach turns recording back on, adapter or not
   let switchOnlyFailed = false
   if (parsed.client === 'all') {
-    for (const [name, descriptor] of await buildClientDescriptorMap(ctx)) {
+    const descriptorMap = await buildClientDescriptorMap(ctx)
+    for (const [name, descriptor] of descriptorMap) {
       if (descriptor.attachProbe || ctx.clients?.getClient(name)) continue
       const resumed = await resumeRecording({ name, descriptor, ctx, parsed })
       if (resumed === 'central_managed') switchOnlyFailed = true
+      if (resumed === 'changed' || resumed === 'unchanged') {
+        await materializeAttachAssets({ name, descriptorMap, ctx, dryRun: parsed.dryRun, json: parsed.json })
+      }
       if (parsed.json && (resumed === 'changed' || resumed === 'central_managed')) {
         ctx.stdout.write(JSON.stringify(resumed === 'changed'
           ? { status: 'ok', action: 'attach', client: name, dry_run: parsed.dryRun === true, changed: true, recording: true }
@@ -232,7 +236,8 @@ async function runClientLifecycle(action, argv, ctx) {
       }
     }
   } else {
-    const descriptor = (await buildClientDescriptorMap(ctx)).get(parsed.client)
+    const descriptorMap = await buildClientDescriptorMap(ctx)
+    const descriptor = descriptorMap.get(parsed.client)
     if (descriptor && !descriptor.attachProbe && !(ctx.clients?.getClient(parsed.client))) {
       const resumed = await resumeRecording({ name: parsed.client, descriptor, ctx, parsed })
       if (resumed === 'central_managed') {
@@ -248,6 +253,11 @@ async function runClientLifecycle(action, argv, ctx) {
         return 1
       }
       if (resumed === 'changed' || resumed === 'unchanged') {
+        // No settings to write, but the client's skills still land: a
+        // switch-only client with a skill directory (Hermes) gets them from
+        // the one materializer, exactly as an adapter attach does.
+        // @ref LLP 0494#skills [implements]: attach writes the marker-owned skill directories
+        await materializeAttachAssets({ name: parsed.client, descriptorMap, ctx, dryRun: parsed.dryRun, json: parsed.json })
         if (parsed.json) {
           ctx.stdout.write(JSON.stringify({
             status: 'ok',
@@ -1616,6 +1626,27 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, quie
               )
               for (const f of failed) ctx.stderr.write(`  ${f.dest} (${f.reason})\n`)
             }
+          }
+        }
+        // A probe-less client has no marker, so the block above never runs for
+        // it. Where its asset directories are its own (Hermes), the install
+        // ledger is the record instead: it removes only the paths HypAware wrote
+        // whose bytes are still ours, and leaves everything else in the
+        // directory. A shared directory (Claude Desktop shares `.claude/skills`
+        // with Claude) keeps the LLP 0107 behaviour and is left alone.
+        // @ref LLP 0494#skills [implements]: detach removes only the marker-owned skill directories
+        if (!descriptor.attachProbe) {
+          const owned = await removeOwnedClientAssets({
+            client: name,
+            descriptors: await buildClientDescriptorMap(ctx),
+            homeDir,
+            stateRoot: clientAssetStateRoot(ctx.env, homeDir),
+            skills: ctx.skills,
+            agents: ctx.agents,
+            stderr: ctx.stderr,
+          })
+          if (owned && owned.removed.length > 0 && !json && !quiet) {
+            ctx.stdout.write(`  Removed ${owned.removed.length} installed skill(s)\n`)
           }
         }
         if (descriptor.attachProbe && assetFailure.length === 0) {

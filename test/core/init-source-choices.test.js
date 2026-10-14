@@ -61,11 +61,13 @@ test('every `hyp setup --client` value is a picker row whose plugin contributes 
 // The converse, which is what actually closes #1301 for `--client`: the
 // one-way check above still lets a new client row join the picker without
 // joining the flag, exactly the way `claude-desktop` did. Every row whose
-// plugin contributes a client is a `--client` value unless it is named here,
-// and the one name here is the open question the branch deliberately leaves
-// open: whether OpenClaw belongs in `--client` at all. Adding a client row
+// plugin contributes a client is a `--client` value unless it is named here.
+// OpenClaw is the open question the branch deliberately leaves open: whether
+// it belongs in `--client` at all. Hermes contributes a client only to place
+// the neutral skills under `~/.hermes/skills` (LLP 0494#skills); it has no
+// attach probe, and `--source hermes` already enables it. Adding a client row
 // now forces that answer instead of silently repeating the gap.
-const CLIENT_ROWS_WITHOUT_A_FLAG = new Set(['openclaw'])
+const CLIENT_ROWS_WITHOUT_A_FLAG = new Set(['openclaw', 'hermes'])
 
 test('every picker row whose plugin contributes a client is a `--client` value, or a named exception', async () => {
   const catalog = await realCatalog()
