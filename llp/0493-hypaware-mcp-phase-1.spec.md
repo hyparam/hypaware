@@ -15,9 +15,9 @@ rest unchanged since 2026-10-11), and the client share of HYP-141 (revision
 2026-10-13T20:50Z (relayed by the orchestrator)
 **Related:** LLP 0494 (design), LLP 0034 (MCP hosting), LLP 0298 (the CI
 mint), LLP 0107 (skills ride attach), LLP 0197 (skills state constraints),
-LLP 0491 (team history guidance); hypaware-server LLP 0595 to 0599 (the
-server half, out of tree); hypscope LLP 0104 (the cloud-agent recipe, out of
-tree)
+LLP 0491 (team history guidance); hypaware-server LLP 0602 and 0596 to 0599
+(the server half, out of tree); hypscope LLP 0105 (the cloud-agent recipe,
+out of tree)
 
 > Draft 2026-10-13, design revision 3 (Hernan's direction change: the loop
 > runs with no human in it). Decision owner: Hernan Alvarez, through the
@@ -28,7 +28,7 @@ tree)
 > without HYP-75, which is not in this mission. This document covers the
 > client half of Phase 1. The parent issue text and the server sub-issues
 > (HYP-129, HYP-131, HYP-141) are quoted in hypaware-server LLP
-> 0595#request.
+> 0602#request.
 
 ## Request {#request}
 
@@ -170,7 +170,7 @@ definitions":**
 > Done when: /docs/mcp-reference is live and regenerates on each docs build.
 
 **HYP-141, "MCP 2.1: Tool annotations on every MCP tool"** (client share;
-the full text is quoted in hypaware-server LLP 0595#request):
+the full text is quoted in hypaware-server LLP 0602#request):
 
 > Phase 2, hypaware-server MCP tools (and the client tools the server
 > reuses).
@@ -248,6 +248,22 @@ Hernan's direction for the client items, verbatim from his answer of
   site build change. Those are HYP-140's, which is held.
 - **HYP-75.** HYP-135's Done-when names its pilot recipes. HYP-75 is not in
   this mission.
+
+## Who connects {#who-connects}
+
+Hernan's framing (2026-10-13T23:04Z, relayed by the orchestrator): the MCP
+serves people connecting their own clients (Claude Desktop, Cursor, Claude
+Code and the like) as well as unattended agents. The instructions, prompts,
+annotations, skills and docs in this document are written for both: a
+person in a chat client sees the same tools, prompts and text an
+unattended agent does, and reads each step.
+
+Phase 1 mints the agent token from the CLI only (Hernan: "It's fine for
+phase one"). Phase 3 OAuth is the path for a person with no CLI and no
+collector, and nothing in the client half closes it off: the docs give the
+bearer header form now (LLP 0494#docs-mcp), and an OAuth client form joins
+it when the server's `/v1/mcp` auth starts the flow (hypaware-server LLP
+0596#token-gate-oauth).
 
 ## Out of scope {#out-of-scope}
 

@@ -9,9 +9,9 @@
 **Extends:** [LLP 0034#tool-auth-class](./0034-mcp-host-intrinsic.decision.md#tool-auth-class) (Phil), [LLP 0298#mint](./0298-ci-tokens-share-one-gateway.decision.md#mint) (Kenny)
 **Related:** LLP 0493 (request), LLP 0034#proxy-fallback, #scoped-credential,
 #stdio-stdout-discipline, LLP 0107#every-attach, LLP 0197, LLP 0491#guidance;
-hypaware-server LLP 0596 (server design), LLP 0597 (the agent token), LLP 0598
-(the mark on `/v1/mcp`), LLP 0599 (the reopen on recurrence), all out of
-tree; hypscope LLP 0104 (the recipe, out of tree)
+hypaware-server LLP 0602 (request), LLP 0596 (server design), LLP 0597 (the
+agent token), LLP 0598 (the mark on `/v1/mcp`), LLP 0599 (the reopen on
+recurrence), all out of tree; hypscope LLP 0105 (the recipe, out of tree)
 
 > Draft 2026-10-13, design revision 3. Decision owner: Hernan Alvarez,
 > through the mayor. Hernan's direction change replaced the options of
@@ -24,6 +24,12 @@ tree; hypscope LLP 0104 (the recipe, out of tree)
 > #cli-mint states it. No seat contacts a human directly.
 
 ## Summary {#summary}
+
+The MCP serves people connecting their own clients (Claude Desktop,
+Cursor, Claude Code and the like) as well as unattended agents (LLP
+0493#who-connects). Everything below is written for both: the unattended
+case sets the hard requirements, and a person in a chat client sees the
+same tools, prompts and instructions.
 
 | Sub-issue | Change, in one line | Where |
 | --- | --- | --- |
@@ -165,7 +171,7 @@ asks a user to handle. It matters more now that the token can publish and
 delete: a member who suspects a leak should be able to revoke it in one
 command. It is two thin commands over the same session client. If Hernan
 declines it, a member has no revoke of their own: the dashboard has no
-member token view (hypscope LLP 0104#out-of-scope), and its Tokens tab
+member token view (hypscope LLP 0105#out-of-scope), and its Tokens tab
 needs `org-manage` (hypscope LLP 0015, T4). The fallback is an org admin
 revoking the token on that Tokens tab, and the `429 token_limit` line then
 says "ask an org admin to revoke one on the dashboard's Tokens tab".
@@ -292,7 +298,7 @@ oddly:
    request. The person marks it with `hyp report mark` or the dashboard."
    The agent is never told to run `hyp report mark` itself on `/v1/mcp`:
    the assembly cannot know whether a `hyp` beside the agent holds a member
-   session, and in a cloud environment set up by the hypscope LLP 0104
+   session, and in a cloud environment set up by the hypscope LLP 0105
    recipe it does not.
 7. Bounded reads: prefer `LIMIT`, at most two concurrent heavy reads, and
    treat capped results as incomplete (LLP 0491#guidance).
@@ -442,11 +448,27 @@ the reason above, and the mission records it as a confirmation for Hernan
 the codex tree's list, with the Codex-only sentences moved behind "if this
 client is Codex".
 
-**Design.**
+**Design.** Rebased on #2588 (`88121e865`), which reorganized the claude
+and codex trees into a short `SKILL.md` per skill plus reference files.
 
 1. **Query, reference, report.** A third tree holds the neutral form, with
    the host-specific sentences removed or generalized ("this client's
-   session id, if it states one"). Each of the four client plugins
+   session id, if it states one"). It mirrors each skill's whole directory,
+   not only its `SKILL.md`:
+   - `hypaware-query`: `SKILL.md` and its reference files (`ai-messages`,
+     `github`, `graph`, `openclaw`, `recommendations`, `remote`,
+     `reports`, `search`, `sql`, `team-history`). The codex tree's own
+     `troubleshooting.md` is Codex-specific and is not mirrored.
+   - `hypaware-report`: `SKILL.md`, `references/analyst-task.md`,
+     `references/querying.md` and `references/report-contract.md` (#2588
+     deleted `references/publishing.md`). The neutral `analyst-task.md`
+     states the constraint (one question, its scope and budget, read-only,
+     no `--remote`, return a short summary) without launching the
+     `hypaware-analyst` subagent, which only the claude host registers: a
+     client that can run a scoped worker gives it that assignment, and one
+     that cannot runs the slice itself under the same budget.
+   - `hypaware-reference`: slimmed to orientation by #2588; the neutral
+     form follows it. Each of the four client plugins
    registers it for its own client, from its `register` hook, as the claude
    and codex plugins do (`ctx.skills.register({name, plugin, clients,
    sourceDir})`). That way each client gets the skills whenever its own
@@ -458,20 +480,30 @@ client is Codex".
    choice. A copy per plugin is the fallback, held equal by the parity
    test.
 2. **Privacy.** The neutral form says only what holds for every client: run
-   `hyp session ignore`, read the receipt, and report what it says. Each of
+   `hyp session ignore`, read the receipt, and report what it says. It
+   carries #2588's direct recording controls (`hyp privacy ignore` and
+   `set`, `hyp session ignore`, `unignore` and `status`, `hyp privacy
+   folders`) in that host-neutral form, without the Claude hook and
+   session id sentences. Each of
    the four plugins already registers `session ignore`. Host-specific
    resolution stays in the verb, not the skill.
 3. **Each skill names both surfaces**, CLI and MCP tools (LLP 0491#guidance),
    so an agent in a client with the remote MCP and no `hyp` can still follow
-   it. The report skill says what #instructions rule 5 says: marking
-   applied is expected at the end of a fix.
+   it. Since #2588 the mark lives in `hypaware-query/reports.md`, which
+   already says mark `in_progress` when work starts and `applied` once the
+   change and its checks are done. The neutral form keeps that and names
+   `set_recommendation_status` beside `hyp report mark`, which is what
+   #instructions rule 5 says: marking applied is expected at the end of a
+   fix.
 4. **Tests.**
    - `client-skill-manifest-agreement`, `query-skill-description` and
      `query-skill-content-boundary` widen their `CLIENTS` to the six.
    - The divergence fixture records the neutral tree against both host
      trees.
    - An install test proves `hyp client skills install` places the four
-     skills under each client's `skill_dir`.
+     skills under each client's `skill_dir`, each with its reference files
+     (`hypaware-query/reports.md`, `hypaware-report/references/*.md`), not
+     only its `SKILL.md`.
 
 **Verification is split.** The install half is hermetic (the install test
 above). "An agent in each uses them correctly" is not: it needs each real
@@ -630,7 +662,7 @@ cites.
 | Done-when | Hermetic proof (this repo) | Human or production proof |
 | --- | --- | --- |
 | HYP-130: "the CLI mints an agent token, and the HYP-116 recipe places it in the environment's secret store alongside the enrollment token." (the mint half) | `hyp remote mint --scope query` against a fake server: path, bearer, body (`{}`, `ttl_seconds`, `label`), no `ttl_seconds` when `--expires-days` is absent, stdout is the token alone, the stderr reminder names read, mark, publish and delete; each refusal line; an unknown `--scope` exits 2; bare `hyp remote mint` still sends 365 days | a member mints against production after the server deploy (human, through the mayor) |
-| HYP-130 (the recipe half) | none here | hypscope LLP 0104, reviewed as text; a real cloud environment run is human |
+| HYP-130 (the recipe half) | none here | hypscope LLP 0105, reviewed as text; a real cloud environment run is human |
 | HYP-132: "initialize returns instructions on both stdio and /v1/mcp." | stdio: `initialize` over `stdio.js` has `instructions`, rule 6's stdio line, and no line for a hidden tool; HTTP: the same `createMcpServer` with `report-publish` renders rule 5 ("marking applied is expected"), and with a read-only principal renders the hand-off and no mark line | `/v1/mcp` in production after the server deploys this client version |
 | HYP-133: "the three commands appear in Claude Code and Cursor connected over stdio and over /v1/mcp." | `prompts/list` returns three; `fix_recommendation` with `report-publish` renders the four steps ending in `set_recommendation_status` and no approval step, and no `dismissed`; the read-only rendering ends in the hand-off; the stdio rendering ends in `hyp report mark`; `-32602` paths | Claude Code and Cursor, each over stdio and over `/v1/mcp` (human; four runs) |
 | HYP-134: "`hyp client skills install` places the skills for each attached client and an agent in each uses them correctly." (install half) | the install test for the four clients | none |
@@ -681,8 +713,15 @@ No hot path changes.
   agent token.
 - **Phase 2.** The registry entry and publishing where agents look
   (annotations are in Phase 1, by Hernan's instruction).
-- **Phase 3.** OAuth 2.1 for the remote MCP. The bearer agent token stays
-  the Phase 1 credential.
+- **Phase 3.** OAuth 2.1 for the remote MCP, the path for a person with no
+  CLI and no collector. The bearer agent token stays the Phase 1
+  credential, minted from the CLI only (Hernan: "It's fine for phase
+  one"). Nothing here boxes OAuth in: it lands at the server's mint gate
+  and its `/v1/mcp` auth (`401` with `WWW-Authenticate` starts the flow;
+  hypaware-server LLP 0596#token-gate-oauth, citing LLP 0011#onboarding
+  and #why-not-minted, the latter superseded in part by LLP 0023 for the
+  static token only). The client's share then is an OAuth form beside
+  the bearer header form in `docs/MCP.md` (#docs-mcp).
 - **Server-only tool contracts** (`session_evidence`) moving into
   `contracts.js`, so the reference has one generated entry for every tool.
 - **A repository field on recommendations**, so `open_recommendations` can
