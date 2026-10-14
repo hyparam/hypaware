@@ -47,8 +47,30 @@ import { isWithinDir } from './contribution_names.js'
  */
 
 /**
+ * Clients HypAware may write assets for only under a named consent, and the
+ * whole of what that consent covers: the registering plugin and the skill
+ * names. `~/.hermes` is Hermes's own directory and LLP 0118 R5 keeps HypAware
+ * out of it; the one extension agreed is these four skill directories, from
+ * the Hermes plugin's own registration. Anything else (another plugin's skill,
+ * a `clients: ['all']` contribution, an agent) never targets the client. A
+ * literal in core rather than a manifest field, so no plugin can widen it.
+ *
+ * @ref LLP 0118#requirements [constrained-by]: the Extended-by line names
+ *   exactly these four directories (consent 2026-10-14T18:34:17Z, Slack 1792002857.742579)
+ * @ref LLP 0494#skills [implements]: hermes accepts only the Hermes plugin's four neutral skills
+ */
+const CONSENTED_SKILLS = new Map([
+  ['hermes', {
+    plugin: '@hypaware/hermes',
+    names: new Set(['hypaware-query', 'hypaware-report', 'hypaware-reference', 'hypaware-privacy']),
+  }],
+])
+
+/**
  * Copy every registered skill and agent that targets one of `clients` into that
- * client's asset directories, replacing any existing copy (idempotent).
+ * client's asset directories, replacing any existing copy (idempotent). A
+ * client under a consent (`CONSENTED_SKILLS`) replaces only a copy the ledger
+ * records HypAware writing.
  *
  * Tolerant by construction: one contribution that cannot be resolved or copied
  * warns and is skipped rather than throwing, so a single bad plugin cannot abort
@@ -70,7 +92,31 @@ export async function materializeClientAssets(options) {
   const planned = planClientAssets(options)
   /** @type {ClientAssetInstall[]} */
   const installed = []
+  /** @type {Map<string, Set<string>> | undefined} */
+  let recorded
   for (const { asset, client, dest } of planned) {
+    // Under a consent the copy may replace only bytes HypAware itself wrote.
+    // A directory already there that the ledger cannot vouch for, whether a
+    // user's own under a colliding name or our copy the user has since edited,
+    // is left exactly as it is, the same evidence detach removes on.
+    // @ref LLP 0494#skills [implements]: attach never overwrites a hermes skill directory it did not write
+    if (CONSENTED_SKILLS.has(client)) {
+      recorded ??= indexRecordedDigests(options.stateRoot ? await readClientAssetLedger(options.stateRoot) : [])
+      if (!(await mayReplaceAsset(dest, recorded))) {
+        stderr?.write(
+          `warning: ${asset.kind} '${asset.name}' at ${dest} was not installed by HypAware or has changed since; left in place\n`
+        )
+        getLogger('client-assets').warn('client_assets.install_withheld', {
+          [Attr.COMPONENT]: 'client-assets',
+          [Attr.OPERATION]: 'client_assets.install',
+          hyp_client: client,
+          [Attr.STATUS]: 'ok',
+          [Attr.ERROR_KIND]: 'not_installed_by_hypaware',
+          detail: dest,
+        })
+        continue
+      }
+    }
     if (dryRun) {
       stdout?.write(`(dry-run) Would install ${asset.kind} '${asset.name}' → ${dest}\n`)
     } else {
@@ -122,6 +168,15 @@ export function planClientAssets(options) {
   for (const asset of resolveAssets(options.skills, options.agents)) {
     for (const client of expandAssetClients(asset, everyClient)) {
       if (wanted && !wanted.has(client)) continue
+      const consent = CONSENTED_SKILLS.get(client)
+      if (consent && !(asset.kind === 'skill' && asset.plugin === consent.plugin && consent.names.has(asset.name))) {
+        // An `all` contribution never meant this client in particular, so
+        // only one that names it is worth a line.
+        if (!asset.clients.includes('all')) {
+          stderr?.write(`warning: ${asset.kind} '${asset.name}' targets ${client}, which accepts only HypAware's own skills; skipped\n`)
+        }
+        continue
+      }
       const descriptor = descriptors.get(client)
       if (!descriptor) {
         stderr?.write(`warning: ${asset.kind} '${asset.name}' targets unknown client '${client}'\n`)
@@ -331,14 +386,10 @@ export async function removeOwnedClientAssets(options) {
   for (const planned of planClientAssets({ ...options, clients: 'all', stderr: undefined })) {
     if (planned.client !== client) othersHold.add(planned.dest)
   }
-  /** @type {Map<string, Set<string>>} */
-  const recordedDigests = new Map()
-  for (const record of ledger) {
-    if (!record.digest) continue
-    const known = recordedDigests.get(record.dest)
-    if (known) known.add(record.digest)
-    else recordedDigests.set(record.dest, new Set([record.digest]))
-  }
+  const recordedDigests = indexRecordedDigests(ledger)
+  // A record is evidence HypAware wrote a path, not that the consent covered
+  // it, so under a consent only the named skills are ever removed.
+  const consent = CONSENTED_SKILLS.get(client)
 
   /** @type {ClientAssetRemoval[]} */
   const removed = []
@@ -347,7 +398,8 @@ export async function removeOwnedClientAssets(options) {
   /** @type {ClientAssetLedgerRecord[]} */
   const next = []
   for (const record of ledger) {
-    if (record.client !== client || othersHold.has(record.dest)) {
+    const outsideConsent = consent !== undefined && !(record.kind === 'skill' && consent.names.has(record.name))
+    if (record.client !== client || othersHold.has(record.dest) || outsideConsent) {
       next.push(record)
       continue
     }
@@ -492,14 +544,7 @@ async function reconcileClientAssetLedger({ options, installed }) {
   // @ref LLP 0284#digests-are-per-path [implements]: the evidence gate matches
   //   the bytes against every digest recorded for that path, not only against
   //   the record whose client this pass happens to be walking.
-  /** @type {Map<string, Set<string>>} */
-  const recordedDigests = new Map()
-  for (const record of ledger) {
-    if (!record.digest) continue
-    const known = recordedDigests.get(record.dest)
-    if (known) known.add(record.digest)
-    else recordedDigests.set(record.dest, new Set([record.digest]))
-  }
+  const recordedDigests = indexRecordedDigests(ledger)
 
   // A client this run did not install for keeps every record it had: this pass
   // learned nothing about it.
@@ -867,6 +912,40 @@ function isRemovableAsset(dest, baseDirs) {
 }
 
 /**
+ * Every digest the ledger records, indexed by physical path (LLP 0284
+ * #digests-are-per-path).
+ *
+ * @param {ClientAssetLedgerRecord[]} ledger
+ * @returns {Map<string, Set<string>>}
+ */
+function indexRecordedDigests(ledger) {
+  /** @type {Map<string, Set<string>>} */
+  const byDest = new Map()
+  for (const record of ledger) {
+    if (!record.digest) continue
+    const known = byDest.get(record.dest)
+    if (known) known.add(record.digest)
+    else byDest.set(record.dest, new Set([record.digest]))
+  }
+  return byDest
+}
+
+/**
+ * Whether a copy may land on `dest`: nothing is there yet, or what is there
+ * is bytes HypAware recorded writing to that path. An unreadable path is
+ * neither, so it is left alone.
+ *
+ * @param {string} dest
+ * @param {Map<string, Set<string>>} recorded
+ * @returns {Promise<boolean>}
+ */
+async function mayReplaceAsset(dest, recorded) {
+  const { digest, missing } = await inspectClientAsset(dest)
+  if (missing) return true
+  return digest !== undefined && (recorded.get(dest)?.has(digest) ?? false)
+}
+
+/**
  * Flatten the two registries into one ordered asset list. Skills come first so
  * the printed output keeps the order operators are used to from when these were
  * two commands.
@@ -879,10 +958,10 @@ function resolveAssets(skills, agents) {
   /** @type {ResolvedClientAsset[]} */
   const assets = []
   for (const skill of skills?.list() ?? []) {
-    assets.push({ kind: 'skill', name: skill.name, clients: skill.clients, source: skill.sourceDir })
+    assets.push({ kind: 'skill', name: skill.name, clients: skill.clients, source: skill.sourceDir, plugin: skill.plugin })
   }
   for (const agent of agents?.list() ?? []) {
-    assets.push({ kind: 'agent', name: agent.name, clients: agent.clients, source: agent.sourceFile })
+    assets.push({ kind: 'agent', name: agent.name, clients: agent.clients, source: agent.sourceFile, plugin: agent.plugin })
   }
   return assets
 }

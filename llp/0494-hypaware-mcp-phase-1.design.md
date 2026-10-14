@@ -548,6 +548,19 @@ them, as for Claude Desktop ([LLP 0135#no-probe](./0135-install-experience-overh
 they land through `hyp client attach hermes`, the walkthrough finale and
 `hyp client skills install --client hermes`.
 
+The consent is enforced in core, not left to what plugins contribute.
+`client_assets.js` holds a literal allowlist: `hermes` takes only skills the
+`@hypaware/hermes` plugin registers under the four names. Every other
+contribution, including a `clients: ['all']` skill and another plugin's
+skill under a `hypaware-*` name, is dropped when the install is planned, so
+nothing is copied. Detach removes only ledger records for the four names. A
+manifest field was rejected because any plugin could then widen the consent.
+The copy also refuses to replace a directory it cannot vouch for. When the
+destination exists and no ledger digest for that path matches its bytes, it
+is left in place with a warning. That covers a user's own directory under
+one of our names and our copy after the user edited it, and is the same
+evidence detach removes on. Other clients keep replace-on-install.
+
 <a id="devin-droid"></a>
 ## Devin and Factory Droid (HYP-135)
 
@@ -704,7 +717,7 @@ cites.
 | HYP-133: "the three commands appear in Claude Code and Cursor connected over stdio and over /v1/mcp." | `prompts/list` returns three; `fix_recommendation` with `report-publish` renders the four steps ending in `set_recommendation_status` and no approval step, and no `dismissed`; the read-only rendering ends in the hand-off; the stdio rendering ends in `hyp report mark`; over `transport: 'http'` with no recommendation tool `prompts/list` holds `check_team_history` only; `-32602` paths | Claude Code and Cursor, each over stdio and over `/v1/mcp` (human; four runs) |
 | HYP-134: "`hyp client skills install` places the skills for each attached client and an agent in each uses them correctly." (install half) | the install test for the four clients | none |
 | HYP-134 (use half) | none | one task per client (Pi, OpenCode, Cursor, OpenClaw), human |
-| HYP-128 follow-on: Hermes skills (install half) | attach writes only the four `hypaware-*` directories under `~/.hermes/skills`; detach removes only those; a foreign skill, `.usage.json`, `.archive/`, `config.yaml` and `state.db` come through both byte-identical | Hermes uses a skill on a question (human) |
+| HYP-128 follow-on: Hermes skills (install half) | attach writes only the four `hypaware-*` directories under `~/.hermes/skills`; detach removes only those; a foreign skill, `.usage.json`, `.archive/`, `config.yaml` and `state.db` come through both byte-identical; another plugin's skill (`all`, or a `hypaware-*` name) never lands; an unrecorded or edited `hypaware-*` directory survives attach | Hermes uses a skill on a question (human) |
 | HYP-135: "the HYP-75 pilot recipes include the instructions and the agent token." | the two text files exist | deferred with HYP-75 |
 | HYP-136: "every agent prompt names the MCP path, and `hyp report list` has a prompt." | a docs test: every `agent:` marker names a tool or says no MCP path exists; Reports has a `report list` marker | Hernan's copy OK |
 | HYP-137: "no read or act instruction in the docs is CLI-only." | reviewed by reading against the list in #docs-paths | Hernan's copy OK |
