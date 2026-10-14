@@ -9,7 +9,7 @@
  * one with no member session.
  */
 
-const MARK_TOOL = 'set_recommendation_status'
+export const MARK_TOOL = 'set_recommendation_status'
 const READ_TOOLS = Object.freeze(['list_recommendations', 'get_recommendation'])
 
 const WHAT = 'HypAware holds the recorded history of AI coding sessions, for this machine or for the team.'
@@ -23,9 +23,27 @@ const MARK_EXPECTED = 'When you have fixed a recommendation and checked the fix,
 const STDIO_CLI = 'Recommendations are not tools here. Read one with hyp report get <id>. '
   + 'When you have fixed it and checked the fix, the last step is hyp report mark <id> applied '
   + '--reason ... --link ..., which runs on this machine with the person\'s session.'
-const HAND_OFF = 'You cannot mark recommendations from here. When you have acted on one, tell the person '
+export const HAND_OFF = 'You cannot mark recommendations from here. When you have acted on one, tell the person '
   + 'the recommendation id, the state you propose (applied or dismissed), a reason, and links to the change, '
   + 'such as the pull request. The person marks it with hyp report mark or the dashboard.'
+
+/**
+ * How an assembly reaches recommendations, from the tools it shows and its
+ * transport: `mark` where the mark is a tool, `cli` over stdio without it
+ * (`hyp` is the person's own), `hand-off` on `/v1/mcp` with a read tool but
+ * no mark, and `none` on `/v1/mcp` with no recommendation tool, where
+ * nothing mentions recommendations or points at the CLI. Shared by the
+ * instructions and the prompts so the two never disagree (rule 6).
+ *
+ * @param {ReadonlySet<string>} visible names of the tools the assembly lists
+ * @param {'stdio' | 'http'} transport
+ * @returns {'mark' | 'cli' | 'hand-off' | 'none'}
+ */
+export function recommendationAccess(visible, transport) {
+  if (visible.has(MARK_TOOL)) return 'mark'
+  if (transport === 'stdio') return 'cli'
+  return READ_TOOLS.some((tool) => visible.has(tool)) ? 'hand-off' : 'none'
+}
 
 /**
  * Build the instructions for one assembly from the tools it shows and its
@@ -44,12 +62,9 @@ const HAND_OFF = 'You cannot mark recommendations from here. When you have acted
 export function buildInstructions(visibleTools, transport) {
   const visible = new Set(visibleTools)
   const stdio = transport === 'stdio'
-  const canMark = visible.has(MARK_TOOL)
-  const canRead = READ_TOOLS.some((tool) => visible.has(tool))
-  // Rule 6: over stdio `hyp` is the person's own, so recommendations are
-  // reachable through it; on `/v1/mcp` with no recommendation tool there is
-  // no recommendation line at all, and nothing points at the CLI.
-  const recommendations = canMark || canRead || stdio
+  const access = recommendationAccess(visible, transport)
+  const canMark = access === 'mark'
+  const recommendations = access !== 'none'
 
   /** @type {string[]} */
   const evidence = []
@@ -69,7 +84,7 @@ export function buildInstructions(visibleTools, transport) {
   ]
   if (recommendations) {
     // Rule 5 where the mark is a tool; rule 6 where it is not.
-    lines.push(canMark ? MARK_EXPECTED : stdio ? STDIO_CLI : HAND_OFF)
+    lines.push(canMark ? MARK_EXPECTED : access === 'cli' ? STDIO_CLI : HAND_OFF)
   }
   lines.push(BOUNDED)
   if (recommendations) {

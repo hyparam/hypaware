@@ -5,6 +5,7 @@ import { jsonReplacer } from '../query/format.js'
 import { toJsonSchema, validateToolArguments } from '../cli/verb_codec.js'
 import { verbAuthClass, verbExposure } from '../registry/verbs.js'
 import { buildInstructions } from './instructions.js'
+import { listPrompts, renderPrompt } from './prompts.js'
 import {
   INTERNAL_ERROR,
   INVALID_PARAMS,
@@ -256,22 +257,32 @@ export function createMcpServer(opts) {
     return tools
   }
 
+  /** @type {ReadonlySet<string> | undefined} */
+  let visibleTools
   /** @type {string | undefined} */
   let instructions
 
   /**
-   * The `initialize` instructions, built once per assembly from the tools it
-   * lists and its transport. The visible set is fixed for the assembly's life
-   * (`listChanged: false`), so every later `initialize` returns this one
-   * string. Built on the first `initialize` rather than at creation: listing
-   * reads plugin-controlled verb properties, and building at creation would
-   * add a read and a skip warn to every assembly, including one that never
-   * sees `initialize`.
+   * The names of the tools this assembly lists, read once. The visible set is
+   * fixed for the assembly's life (`listChanged: false`), so the instructions
+   * and the prompts share this one read. Taken on the first request that
+   * needs it rather than at creation: listing reads plugin-controlled verb
+   * properties, and reading at creation would add a read and a skip warn to
+   * every assembly, including one that never sees `initialize`.
    *
    * @ref LLP 0494#instructions: once per assembly, never per request
    */
+  function assemblyVisibleTools() {
+    visibleTools ??= new Set(listTools().map((tool) => tool.name))
+    return visibleTools
+  }
+
+  /**
+   * The `initialize` instructions, built once per assembly from the tools it
+   * lists and its transport; every later `initialize` returns this one string.
+   */
   function assemblyInstructions() {
-    instructions ??= buildInstructions(listTools().map((tool) => tool.name), transport)
+    instructions ??= buildInstructions(assemblyVisibleTools(), transport)
     return instructions
   }
 
@@ -337,7 +348,7 @@ export function createMcpServer(opts) {
           protocolVersion: typeof params?.protocolVersion === 'string' && params.protocolVersion
             ? params.protocolVersion
             : DEFAULT_PROTOCOL_VERSION,
-          capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
+          capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } },
           serverInfo: { name: SERVER_NAME, version: serverVersion },
           instructions: assemblyInstructions(),
         })
@@ -355,6 +366,12 @@ export function createMcpServer(opts) {
         return await callTool(id, params)
       case 'resources/read':
         return readResource(id, params)
+      case 'prompts/list':
+        return jsonRpcResult(id, { prompts: listPrompts(assemblyVisibleTools(), transport) })
+      case 'prompts/get': {
+        const rendered = renderPrompt(params?.name, params?.arguments, assemblyVisibleTools(), transport)
+        return rendered.ok ? jsonRpcResult(id, rendered.result) : jsonRpcError(id, INVALID_PARAMS, rendered.error)
+      }
       default:
         return jsonRpcError(id, METHOD_NOT_FOUND, `unknown method '${method}'`)
     }
