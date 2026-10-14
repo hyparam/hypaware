@@ -2015,6 +2015,12 @@ export interface VerbRegistration {
   audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** MCP tool name, e.g. `'graph_neighbors'`. */
   tool: string
+  /**
+   * Human-readable MCP tool name, e.g. `'Find related sessions'`. Advertised
+   * as the `tools/list` entry's `title` and `annotations.title`; a verb with
+   * none is listed under its `tool` name. Does not affect the CLI.
+   */
+  title?: string
   plugin?: PluginName
   summary: string
   /**

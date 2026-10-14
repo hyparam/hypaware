@@ -25,6 +25,7 @@ export const graphNeighborsVerb = {
   category: 'explore-share',
   audience: 'everyday',
   tool: 'graph_neighbors',
+  title: 'Find related sessions',
   plugin: PLUGIN_NAME,
   summary: 'Walk the activity graph from a node out to N hops',
   // The traversal mechanics live here rather than in a skill: they are

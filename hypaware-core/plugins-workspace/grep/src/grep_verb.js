@@ -47,6 +47,7 @@ export const queryGrepVerb = {
   category: 'explore-share',
   audience: 'everyday',
   tool: 'grep_search',
+  title: 'Search session text',
   // The coverage clause is not decoration. An MCP caller sees only this
   // text, so without it zero hits are indistinguishable from "that text is
   // not stored" - the exact wrong answer an agent would then report.

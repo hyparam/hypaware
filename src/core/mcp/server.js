@@ -15,7 +15,7 @@ import {
 } from './jsonrpc.js'
 
 /**
- * @import { DatasetRegistration, PluginName, QueryRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, PluginName, QueryRegistry, VerbAuthClass, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /** Protocol version advertised when the client sends none. */
@@ -26,6 +26,19 @@ const SERVER_COMPONENT = 'mcp-server'
 const LIST_TOOLS_OPERATION = 'mcp.tools_list'
 const LIST_RESOURCES_OPERATION = 'mcp.resources_list'
 const HANDLE_OPERATION = 'mcp.handle_message'
+
+/**
+ * The `annotations` hints each auth class implies. A verb names its class,
+ * never its hints, so no registration can advertise a hint its class
+ * contradicts (a `read` claim on a verb allowed to rewrite state).
+ *
+ * @type {Readonly<Record<VerbAuthClass, Readonly<{ readOnlyHint: boolean, destructiveHint?: boolean }>>>}
+ * @ref LLP 0494#annotations [implements]: hints derive from the auth class, with no per-verb override
+ */
+const HINTS_BY_AUTH_CLASS = Object.freeze({
+  read: Object.freeze({ readOnlyHint: true }),
+  operator: Object.freeze({ readOnlyHint: false, destructiveHint: true }),
+})
 
 /**
  * Build the **one server assembly** (verbs → MCP tools, datasets → MCP
@@ -59,12 +72,16 @@ export function createMcpServer(opts) {
 
   const log = getLogger(SERVER_COMPONENT)
 
-  /** @param {VerbRegistration} verb */
-  function toolVisible(verb) {
+  /**
+   * @param {VerbRegistration} verb
+   * @param {VerbAuthClass} [authClass] the class already read, so a caller
+   *   that also derives hints from it gates and annotates on one answer
+   */
+  function toolVisible(verb, authClass) {
     const exposure = verbExposure(verb)
     if (exposure === 'cli-only') return false
     if (transport !== 'stdio' && exposure === 'local-only') return false
-    if (!allowOperator && verbAuthClass(verb) === 'operator') return false
+    if (!allowOperator && (authClass ?? verbAuthClass(verb)) === 'operator') return false
     return true
   }
 
@@ -86,14 +103,20 @@ export function createMcpServer(opts) {
    * any handler try/catch (`src/core/commands/mcp.js`), so an accessor that
    * throws costs the whole tool surface rather than the one verb.
    *
+   * The auth class is read once and used for both the visibility gate and the
+   * hints, so an accessor answering `read` to one and `operator` to the other
+   * cannot list a verb under hints its gate did not judge. A class outside
+   * the hint table has no honest hints and is not listed.
+   *
    * @param {VerbRegistration} verb
-   * @returns {{ name: string, description: string, inputSchema: object } | undefined}
+   * @returns {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint?: boolean } } | undefined}
    */
   function toolEntry(verb) {
     /** @type {string | undefined} */
     let named
     try {
-      if (!toolVisible(verb)) return undefined
+      const authClass = verbAuthClass(verb)
+      if (!toolVisible(verb, authClass)) return undefined
       const tool = verb.tool
       if (verbs.getByTool(tool) !== verb) {
         warnNotAdvertised({
@@ -106,6 +129,20 @@ export function createMcpServer(opts) {
         return undefined
       }
       named = tool
+      if (!Object.hasOwn(HINTS_BY_AUTH_CLASS, authClass)) {
+        warnNotAdvertised({
+          event: 'mcp.tool_not_advertised',
+          operation: LIST_TOOLS_OPERATION,
+          errorKind: 'unknown_auth_class',
+          key: 'tool',
+          name: tool,
+        })
+        return undefined
+      }
+      // One read: a missing (or drifted, non-string) title falls back to the
+      // tool name, so every listed entry carries a non-empty one.
+      const declared = verb.title
+      const title = typeof declared === 'string' && declared.length > 0 ? declared : tool
       // Proved serializable here, where a throw costs this verb its listing
       // and nothing else. `serveStdio` writes the whole response with one
       // `JSON.stringify`, and both remaining fields are second reads of
@@ -115,10 +152,14 @@ export function createMcpServer(opts) {
       // raise, and `serveStdio` answered with no line at all - the same
       // forever-wait `handleMessage`'s catch ends one layer out, on the one
       // method every client calls first, so it hung the session, not a call.
+      // The title goes in both places the MCP spec has for one, so a client
+      // reading either finds it.
       return JSON.parse(JSON.stringify({
         name: tool,
+        title,
         description: verb.summary,
         inputSchema: toJsonSchema(verb.inputSchema),
+        annotations: { title, ...HINTS_BY_AUTH_CLASS[authClass] },
       }))
     } catch (err) {
       warnNotAdvertised({
@@ -205,7 +246,7 @@ export function createMcpServer(opts) {
   }
 
   function listTools() {
-    /** @type {{ name: string, description: string, inputSchema: object }[]} */
+    /** @type {{ name: string, title: string, description: string, inputSchema: object, annotations: { title: string, readOnlyHint: boolean, destructiveHint?: boolean } }[]} */
     const tools = []
     for (const verb of verbs.list()) {
       const entry = toolEntry(verb)
