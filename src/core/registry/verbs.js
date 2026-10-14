@@ -308,6 +308,10 @@ function validateVerb(verb) {
   if (typeof tool !== 'string' || tool.length === 0) {
     throw new TypeError(`registerVerb '${name}': verb.tool is required`)
   }
+  const title = verb.title
+  if (title !== undefined && (typeof title !== 'string' || title.length === 0)) {
+    throw new TypeError(`registerVerb '${name}': title must be a non-empty string when given`)
+  }
   if (typeof verb.summary !== 'string') {
     throw new TypeError(`registerVerb '${name}': summary is required`)
   }

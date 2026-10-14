@@ -238,11 +238,14 @@ test('the shipped verb set is advertised exactly as the plain property read did'
 
   const tools = await toolsList(mcp(verbs))
 
-  // What the pre-guard `tools/list` built, from the same registrations.
+  // What the pre-guard `tools/list` built, from the same registrations. Every
+  // shipped verb is `read`, so each carries the read hint.
   const expected = verbs.list().map((verb) => ({
     name: verb.tool,
+    title: verb.title ?? verb.tool,
     description: verb.summary,
     inputSchema: toJsonSchema(verb.inputSchema),
+    annotations: { title: verb.title ?? verb.tool, readOnlyHint: true },
   }))
   assert.deepEqual(tools.map((/** @type {any} */ t) => t.name), ['graph_neighbors', 'grep_search', 'query_sql'])
   assert.equal(JSON.stringify(tools), JSON.stringify(expected))

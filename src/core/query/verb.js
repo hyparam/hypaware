@@ -22,6 +22,7 @@ import { executeQuerySql } from './sql.js'
 export const querySqlVerb = {
   name: 'query sql',
   tool: 'query_sql',
+  title: 'Run a SQL query',
   summary: 'Run a SQL query against registered datasets',
   authClass: 'read',
   inputSchema: {

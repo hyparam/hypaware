@@ -420,7 +420,7 @@ an `annotations` object. The kernel builds both in `toolEntry(verb)`
   `write` verb that removes data (a report delete, say) would need its own
   class row or a decision; #rejected says why there is no per-verb
   override.
-- **`operator` is marked destructive** because the class holds fleet
+- **`operator` is marked destructive** because the class will hold fleet
   operations (`graph_project`, `github_backfill`) that rewrite state.
   Operator verbs appear only on stdio, under local trust.
 - `verb.title` is a new optional registration field, beside `scope`. The

@@ -542,7 +542,7 @@ function createVerbsFacade(pluginName, registry) {
  * with a prototype, and a mask only hides what it was told to hide.
  */
 const VERB_FIELDS = [
-  'name', 'tool', 'summary', 'plugin', 'category', 'audience', 'aliases', 'help',
+  'name', 'tool', 'title', 'summary', 'plugin', 'category', 'audience', 'aliases', 'help',
   'inputSchema', 'exposure', 'authClass',
 ]
 
