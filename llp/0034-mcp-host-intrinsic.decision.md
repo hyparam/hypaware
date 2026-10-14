@@ -205,7 +205,8 @@ client sees is decided by per-tool auth class, not by the migration order above.
 > (`report-publish`), for one recommendation status write on the remote
 > surface (hypaware-server LLP 0598), with tool annotations derived from the
 > class ([LLP 0494#annotations](./0494-hypaware-mcp-phase-1.design.md#annotations)).
-> Removed if Phil declines.
+> Phil consented 2026-10-14T16:54:20Z ("c. yes", Slack 1791996860.984029,
+> relayed by the mayor).
 
 <a id="stdio-stdout-discipline"></a>**stdio constraint:** stdout is the JSON-RPC
 channel, `hyp mcp` must route *all* logs and human text to stderr/file; a stray

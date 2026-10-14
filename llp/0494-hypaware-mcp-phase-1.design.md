@@ -21,7 +21,9 @@ recurrence), all out of tree; hypscope LLP 0105 (the recipe, out of tree)
 > (LLP 0598, Phil) and the reopen (LLP 0599, Brendan) are accepted. The
 > agent token carries the literal `read report-publish` (Hernan, 20:50Z),
 > so a token any member can mint can publish and delete the org's reports;
-> #cli-mint states it. No seat contacts a human directly.
+> #cli-mint states it. Phil said yes to the `write` class on LLP
+> 0034#tool-auth-class (2026-10-14T16:54:20Z, "c. yes"). No seat contacts
+> a human directly.
 
 ## Summary {#summary}
 
@@ -781,10 +783,12 @@ No hot path changes.
 <a id="consequences"></a>
 ## Consequences
 
-This branch adds Draft forward-refs, each removed if its owner declines:
+This branch adds Draft forward-refs. The LLP 0034 line records Phil's yes;
+the LLP 0298 line is removed if Kenny declines:
 
 - LLP 0034#tool-auth-class: a third class, `write`, admitted by a named
-  credential scope, plus annotations derived from the class (Phil).
+  credential scope, plus annotations derived from the class (Phil, yes,
+  2026-10-14T16:54:20Z, Slack 1791996860.984029).
 - LLP 0298#mint: `--scope query` mints an agent token, a different
   credential with a different default lifetime, which can read the org's
   history and mark recommendations, publish reports and delete reports as

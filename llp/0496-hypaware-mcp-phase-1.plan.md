@@ -23,7 +23,7 @@ provisional number); all out of tree, on their own
 > happens if the answer is no.
 
 @ref LLP 0494 [implements]: the client design this plan builds
-@ref LLP 0034#tool-auth-class [constrained-by]: the `write` class (T6) waits on Phil's answer
+@ref LLP 0034#tool-auth-class [constrained-by]: the `write` class (T6), on Phil's recorded yes (A1)
 @ref LLP 0298#mint [constrained-by]: `--scope query` (T7) waits on Kenny's answer
 
 ## How to read the tasks
@@ -261,6 +261,11 @@ Ready now.
 
 Records Phil's answer to (c) in this plan and confirms the Draft
 forward-ref on LLP 0034#tool-auth-class (or removes it on a no).
+
+- **Recorded:** Phil (c) yes, 2026-10-14T16:54:20Z ("c. yes", Slack
+  1791996860.984029, relayed by the mayor). The LLP 0034 forward-ref
+  records it. T6 still waits on T2, T5 and hypaware-server LLP 0598
+  accepted (server A2).
 
 - **Fallback on no:** T6 drops. The class-derived hints cannot describe
   the mark (a `read` class would claim `readOnlyHint: true`), so server T6
