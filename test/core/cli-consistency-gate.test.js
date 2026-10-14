@@ -654,14 +654,14 @@ function destinationFamilies(help) {
   return DESTINATION_FAMILIES.filter(([, pattern]) => pattern.test(prose)).map(([family]) => family)
 }
 
-test('report render is retired while the shared server renderer remains exported', async () => {
+test('report rendering is absent from the CLI and package exports', async () => {
   const registry = coreRegistry()
   assert.equal(registry.list().some((entry) => entry.name === 'report render'), false)
   const { run } = await harness(registry)
   const { code } = await run(['report', 'render'])
   assert.notEqual(code, 0)
-  const { renderReports } = await import('hypaware/core/reports')
-  assert.equal(typeof renderReports, 'function')
+  const removedExport = 'hypaware/core/reports'
+  await assert.rejects(import(removedExport), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' })
 })
 
 /**

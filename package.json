@@ -53,10 +53,6 @@
       "types": "./types/core/util/index.d.ts",
       "import": "./src/core/util/index.js"
     },
-    "./core/reports": {
-      "types": "./types/core/reports/render.d.ts",
-      "import": "./src/core/reports/render.js"
-    },
     "./integration": {
       "types": "./src/core/cli/integration.d.ts",
       "import": "./src/core/cli/integration.js"
@@ -96,7 +92,6 @@
     "hyparquet-compressors": "1.1.2",
     "hysnappy": "1.1.1",
     "icebird": "0.8.35",
-    "marked": "18.1.0",
     "squirreling": "0.16.8"
   },
   "optionalDependencies": {
