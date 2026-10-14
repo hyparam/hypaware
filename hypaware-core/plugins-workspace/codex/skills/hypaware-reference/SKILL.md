@@ -1,6 +1,6 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, connecting to HypAware Cloud, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). Also use whenever a request names a token of the form `hyprec-` followed by sixteen hex characters (for example `hyprec-0123456789abcdef`): that is a HypAware report recommendation id, and "fix hyprec-…", "implement hyprec-…", "what does hyprec-… say" map to `hyp report get <hyprec-id>`, and "mark hyprec-… applied", "we did hyprec-…", "dismiss hyprec-…", "that recommendation is done / not happening" map to `hyp report mark <hyprec-id> applied|dismissed`, even when HypAware is not mentioned (the older `rec-…` form too, when it is). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
+description: Explain what HypAware does, what it captures, how data flows, configuration and paths, connecting to HypAware Cloud, and local-only versus opt-in behavior. Use for product orientation and conceptual questions. Querying activity, quick recommendations, and report management belong to hypaware-query; capture audits and recording controls belong to hypaware-privacy.
 user-invocable: false
 ---
 
@@ -79,58 +79,11 @@ curated HypAware registry.
 
 ## Hand-offs
 
-- Query or inspect recorded data - use the **hypaware-query** skill.
-- See what was captured here, and mark or purge it - use the
-  **hypaware-privacy** skill (also the review before an enrolled machine's
-  first sync).
-- Opt a folder out of recording - `hyp privacy ignore <path>` writes a committable
-  `.hypignore`; `hyp privacy set <path> ignore` marks it machine-local instead,
-  with no repo breadcrumb.
-- Stop recording *this conversation* - `hyp session ignore` drops this session's
-  exchanges at every local recorder (the gateway, and the Claude telemetry
-  listener when one is running); `hyp session unignore` resumes, and
-  `hyp session status` reports which it is right now. Each resolves the
-  session id itself (Claude and Codex) and fails closed rather than guessing.
-  The opt-out survives restarts until explicitly unignored and is honored by
-  transcript backfill. Forks (`claude --fork-session`, `codex fork`) need a new
-  exclusion. Ignoring does not purge prior records; unignoring permits older
-  transcript content to be imported again.
-  The managed Claude SessionStart hook exports the ID to Bash commands in
-  attached local Desktop Code sessions. Start or resume after upgrading so it
-  runs. If `CLAUDE_CODE_SESSION_ID` is absent, use an explicitly verified Claude
-  ID or report that opt-out is unconfirmed. A recent transcript or matching cwd
-  cannot establish the current Claude conversation; never substitute a Codex ID
-  from the same folder.
-- Decide what happens in new folders - by default they sync with no
-  question; `hyp privacy folders ask` asks once per new folder instead, and
-  `hyp privacy folders sync` returns to the default. It gates the question
-  only, never an existing class.
-- "Is it working?" or diagnose a problem - `hyp status` (add `--json` for the
-  stable shape).
-- Act on a report recommendation - a published usage report ranks its
-  recommendations and the server mints an id for each (`hyprec-` and sixteen
-  hex characters; a server older than mid-September 2026 spelled it `rec-`,
-  and both forms work). When the user names one, run `hyp report get <id>` and read
-  its output: the recommendation page as the report author wrote it (the
-  change, its ready-to-apply artifact, its cost and the case against it),
-  followed by a `Citations from the report record` tail listing the recorded
-  turns it cites and the SQL queries the report ran to reach it. Implement the
-  change in the current repository and verify it the way the repository
-  verifies changes; if it does not apply here, say why rather than forcing it.
-  The queries ran on the server over the whole org; re-run them with
-  `hyp query sql` to check the finding against this machine's recordings,
-  expecting smaller counts. `hyp report list` prints the ids under each report
-  when the user has none. `hyp report fix <id>` is the shell-side form of
-  the same thing: it starts a fresh client on the recommendation, so do not
-  run it from inside a session. The output of `hyp report get <id>` ends with
-  a `Status` section, the recommendation's current state and history; one
-  already `applied` or `dismissed` is not redone without the user's say.
-  When the change is landed, run
-  `hyp report mark <id> applied --reason "<one line>" --link <PR url>`; if
-  the recommendation should not be done, run
-  `hyp report mark <id> dismissed --reason "<why>"`. Carry the same `--org`
-  and `--remote` the read used. `in_progress` marks work that has started;
-  `open` reopens. A dismissal without a reason is refused.
+- Query recorded activity, get a quick recommendation, or save, upload, list,
+  view, and act on reports or recommendations: **hypaware-query**.
+- Generate a full report: **hypaware-report**.
+- Audit captured content, change folder privacy, purge, or stop/resume recording
+  this conversation: **hypaware-privacy**.
 
 ## Guardrails
 

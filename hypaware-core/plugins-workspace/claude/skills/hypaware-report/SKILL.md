@@ -1,6 +1,6 @@
 ---
 name: hypaware-report
-description: Investigate local HypAware recordings with analyst workers and produce an evidence-backed Markdown report with actionable recommendations, or one standalone recommendation page when the user asks for a single recommendation. Use for AI usage or workflow reviews over a reporting period, and for "give me one recommendation about <agent, repo, or user>".
+description: Generate a full evidence-backed Markdown report on local AI usage or workflows, with analyst workers, period coverage, synthesis, recommendations, and review. For quick questions, single recommendations, or managing existing reports, use hypaware-query.
 ---
 
 # Local HypAware report
@@ -11,48 +11,39 @@ neither server credentials nor publishing; applying recommendations is separate.
 
 Read [report-contract.md](references/report-contract.md) for the analytical and
 output standards, and [querying.md](references/querying.md) before querying.
-Read [analyst-task.md](references/analyst-task.md) when delegating. Read
-[publishing.md](references/publishing.md) only when publishing is requested.
+Read [analyst-task.md](references/analyst-task.md) when delegating. Use
+[query report mechanics](../hypaware-query/reports.md) when writing pages,
+saving, or publishing. Quick questions and single recommendations belong to
+**hypaware-query**, without this full-report workflow.
 
 ## Scope
 
-- Resolve inclusive UTC dates; default to the previous calendar month. The
-  range is at most 365 days and ends before today UTC. For an open period,
-  resolve a closed range with the user rather than silently clipping it.
+- Resolve the user's question and scope interactively. If neither the request
+  nor this conversation establishes a focus, ask what the report should focus
+  on and wait before starting analysis or delegation. A requested general
+  overview is a valid focus. Ask when ambiguity would materially change the
+  investigation; reuse established answers rather than asking again.
+- Default to the last 7 days including today. An omitted end date means now.
+  "Last week" means the last 7 days including today. Use calendar week or month
+  boundaries only when specifically requested, never merely because a report
+  covers about a week or month. If wording leaves the intended period unclear
+  (for example, "last month" could mean a rolling month or a calendar month),
+  ask before choosing dates. Honor clearly specified date ranges. State the
+  resolved absolute dates and timezone (UTC by default).
+- Include today's available recordings and label today as partial, with the
+  query time and cache freshness. Do not require a closed period or impose a
+  365-day cutoff. For large ranges, keep queries bounded and agree a narrower
+  question with the user if the budget cannot support useful coverage.
 - Use local `hyp` queries without `--remote`. Inspect cache status and schema;
   do not assume server-only columns exist or change capture/privacy settings.
 - Enumerate counts by day across the full range. Split failed enumerations down
   to a day as needed; distinguish failure from verified zero rows. A verified
   empty period needs no manufactured report or recommendations.
-- Use fixed Monday-to-Sunday weeks clipped to the period. Label partial weeks
-  and compare per-active-day rates when exposure differs; do not merge quiet
-  weeks. Keep a compact ledger of coverage, query labels, evidence locators,
-  figures, filters, and denominators outside the publish directory.
-
-## Single recommendation
-
-When the user asks for one recommendation rather than a report (one finding,
-one fix, "give me a recommendation about X"), take this lighter path. It feeds
-`hyp report recommend`, which publishes one page with no report around it.
-
-- Resolve the subject (an agent, gateway, repository, or user) and an inclusive
-  UTC range as above, but default to the 14 days ending yesterday.
-- Spend at most 2 investigations and 10 coordinator queries. Find the one
-  pattern whose measured cost is largest and whose fix is concrete. Still spend
-  a contrast query on any explanation that would change the proposal.
-- If the user names the issue, skip the coverage plan and the day-by-day
-  enumeration: query that issue directly and spend the budget on its
-  frequency, its cost, and the contrast.
-- Write one `recommendation-<slug>.md` in the current directory under the
-  contract's recommendation-page rules: H1 title, bold thesis, the figures
-  with locators, the fix as a usable artifact, the case against it, and scope
-  and dates under Evidence. No `report.md`, weekly tables, or supporting pages.
-- Answer in chat with the page path and the page's four At a glance bullets,
-  unchanged.
-- `hyp report save` admits only a report folder, so the page stays where it was
-  written. Publish it only when asked, with `hyp report recommend <page>.md
-  --remote <target>` (see publishing.md); the receipt prints the minted
-  `hyprec-` id.
+- Choose time buckets that help answer the question; weekly tables are optional.
+  Keep comparison boundaries consistent, label partial buckets, and compare
+  per-active-day rates when exposure differs. Do not hide quiet days. Keep a
+  compact ledger of coverage, query labels, evidence locators, figures, filters,
+  and denominators outside the publish directory.
 
 ## Investigation
 
@@ -67,7 +58,9 @@ aggregates and bounded samples, grouping up to 10 days or about 20,000 source
 rows per assignment; this is a grouping bound, never a transcript-dump size.
 Start with an informative slice, then dispatch independent assignments within
 host concurrency limits. Cover ordinary and successful work as well as costly
-or failing cases. Reserve budget for cross-date synthesis and report review.
+or failing cases. Reserve budget for coverage gaps, cross-date synthesis, and
+report review. Repair missing survey coverage before new deep investigations;
+if coverage remains incomplete, label the report partial and scope its claims.
 
 Default ceilings: 12 investigations, 40 coordinator SQL queries, and 20 queries
 per worker with a target of 5; a worker's tighter limits still apply. Count
@@ -95,19 +88,8 @@ available and permitted, otherwise self-review. The reviewer gets the pages and
 contract; the coordinator checks figures and locators against the ledger.
 Resolve unsupported claims and contradictions, then recheck affected content.
 
-When the review is complete, move the folder into HypAware's reports store,
-unless the user asked for another destination:
-
-```sh
-hyp report save ./hypaware-report-<from>-to-<to>
-```
-
-It admits only a folder holding `report.md` and supported pages, copies it to
-`$HYP_HOME/reports/<name>` (suffixing a taken name), and removes the draft. If
-it refuses a stray file, remove that file and run it again; do not write under
-the user's home directory yourself. Its receipt prints the saved path and the
-publish command for this report.
-
-Return the saved `report.md` path, scope, dates, and any incomplete coverage or
-review. Do not apply proposals, change settings, or publish unless the user
-requests it.
+When review is complete, save the report using
+[query report mechanics](../hypaware-query/reports.md), unless the user requested
+another destination. Return the saved `report.md` path, scope, dates, and any
+incomplete coverage or review. Publish only when requested, using that same
+reference. Generation does not authorize applying proposals or changing settings.

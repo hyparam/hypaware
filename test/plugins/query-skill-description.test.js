@@ -104,6 +104,17 @@ test('hypaware-query description keeps its original product vocabulary', () => {
   }
 })
 
+test('hypaware-query discovery covers code-change intent and report operations', () => {
+  // Preserve discovery for responsibilities moved out of reference/report,
+  // alongside why/intent questions that otherwise start with git alone.
+  // These checks guard metadata coverage, not model invocation behavior.
+  const intents = [/recordings first/, /why code changed/, /removed/, /git/, /recommendations/i, /save/, /upload/, /list/, /view/, /hyprec-/, /fix/, /mark/]
+  for (const client of CLIENTS) {
+    const description = readFrontmatter(client).description
+    for (const intent of intents) assert.match(description, intent, `${client}: missing discovery intent ${intent}`)
+  }
+})
+
 test('hypaware-query description stays a single-line scalar within budget', () => {
   for (const client of CLIENTS) {
     const description = readFrontmatter(client).description

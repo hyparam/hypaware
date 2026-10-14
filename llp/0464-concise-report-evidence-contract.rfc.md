@@ -30,7 +30,7 @@ capture normalization or the meaning of net input.
 ## Requested guidance {#guidance}
 
 Keep scope, coverage, delegation budgets, and delivery in the entrypoint. Keep
-analysis and page requirements in one contract; let bounded experiments and
+analysis in the report contract and shared page requirements under query; let bounded experiments and
 workflow decisions be usable recommendation artifacts alongside patches. Rank
 by outcome improvement and evidence, not ease of producing a patch. Recommendation count follows the
 evidence and usefulness, with no fixed cap or required mix of types.
@@ -53,7 +53,68 @@ The report worker must not override this with an unconditional plain-SUM rule.
 The original report skill was adapted from the separate HypAware Server's
 report workflow on September 24. Those server prompts remain a maintainer
 reference, not runtime dependencies or a promise of identical local behavior.
-This request changes the local skill and its worker guidance, not server prompts.
+This request changes the local skills and worker guidance, not server prompts.
+
+## Interactive scope and current evidence {#interactive-scope}
+
+Local reporting answers the user's question interactively. Default to the last
+7 days including today; an omitted end date means now. "Last week" means the
+last seven days including today unless the user explicitly requests a calendar
+week. Use calendar month or week boundaries only when specifically requested.
+Ask before resolving unclear periods, such as "last month", instead of assuming
+an entire calendar month. Honor clearly specified date ranges and state absolute
+dates and timezone. Mark today partial and disclose
+query time and cache freshness. Remove the closed-period and 365-day restrictions;
+query budgets still bound work. Comparison buckets follow the question.
+Before a new single-recommendation investigation, ask for a period if none was
+stated or established in the conversation. Suggest the last seven days through
+today, but wait for an answer. Ask for focus when absent, for both recommendations
+and full reports; an explicit general overview is sufficient. Bundle missing
+scope questions and reuse established answers. Already scoped findings and
+implementation of existing recommendations require no new period question.
+Single recommendations use narrow bounded reads and a chat answer by default;
+they require neither a full report nor a page.
+
+Adapt the server's latest-state, cross-section selection, and concrete-handoff
+guidance (server LLPs 0530, 0544-0546, 0573, and 0583). Check later relevant
+outcomes and material remedy assumptions before selecting an action. An unknown
+fix can yield a targeted investigation with a completion test allowing no change.
+Repair survey gaps before new deep investigations. Keep local query budgets,
+optional supporting pages, and evidence-driven recommendation counts. Summary
+bullets need not each carry a number; qualitative findings and unknown effects
+must not become invented metrics. Server orchestration, mandatory page sets,
+larger budgets, and closed-period scheduling do not become local requirements.
+
+## Skill ownership {#ownership}
+
+Query owns interactive investigation, quick recommendations, and report mechanics.
+Its `reports.md` holds shared artifact formats, saving, upload, listing, retrieval,
+and recommendation status/implementation guidance. Load it only for those tasks.
+Report owns full-period generation, delegated analysis, synthesis and review;
+it consults query's shared reference for artifacts and delivery. Investigation
+depth alone does not promote a quick recommendation into the report workflow.
+Reference explains the product and routes operational requests. Privacy retains
+audits and owns direct recording controls without requiring an audit. Move the
+existing controls there without changing capture behavior or authorization.
+Preserve both hosts' discovery metadata and their existing host-specific rules.
+
+## Conditional query guidance {#conditional-query}
+
+Keep hazard warnings and required-reading triggers in query's entrypoint.
+Move text-search details, remote rules, AI message accounting/identity, graph
+procedures, and quick recommendation analysis to task-specific references.
+Require the accounting reference before token measurements: overlapping captures
+and stream updates can double-count responses; missing usage is unknown.
+Keep bounded execution, error/coverage checks, and the captured-content boundary
+visible to every query. Move recommendation-specific provenance guidance alongside
+recommendation analysis. Both host copies retain the same routing and safeguards.
+
+Implementing a published recommendation includes status tracking: retrieve and
+check it, mark in_progress when work begins, and mark applied after the requested
+implementation and required verification complete. Incomplete or failed work
+stays in_progress. Landing is required when part of the requested scope; a local
+completed change does not require an unsolicited merge. Inspect write receipts
+and disclose failed status updates. Command details live in query's reports.md.
 
 ## Validation and cost {#validation}
 
