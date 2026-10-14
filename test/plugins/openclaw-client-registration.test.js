@@ -76,6 +76,7 @@ function stageActivation(config, pluginConfig) {
     config: pluginConfig ?? {},
     configRegistry: { registerSection() {} },
     backfills: { register() {} },
+    skills: { register() {} },
     requireCapability: () => gateway,
   })
   return { homeDir, settingsPath, ctx, client: () => registeredClient }
@@ -254,6 +255,7 @@ test('activate() attach() rethrows a hard failure unmarked, so it is still retri
       configRegistry: { registerSection() {} },
       requireCapability: () => gateway,
       backfills: { register() {} },
+      skills: { register() {} },
     })
     await activate(ctx)
 
@@ -352,6 +354,7 @@ test('activate() registers the settlement enricher right after the exchange proj
     configRegistry: { registerSection() {} },
     requireCapability: () => gateway,
     backfills: { register() { calls.push('backfill') } },
+    skills: { register() {} },
   })
 
   await activate(ctx)

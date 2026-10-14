@@ -8,6 +8,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../ai-gateway/src/session_command.js'
+import { registerNeutralSkills } from '../../../skills/index.js'
 import { attachOpenCodePlugin } from './attach.js'
 import { createOpenCodeBackfillProvider } from './backfill.js'
 import { OPENCODE_CONFIG_SECTION, opencodeListenPort, validateOpenCodeConfig } from './config.js'
@@ -49,6 +50,7 @@ export async function activate(ctx) {
   })
 
   registerSessionCommands(ctx)
+  registerNeutralSkills(ctx, PLUGIN_NAME, CLIENT_NAME)
 
   // @ref LLP 0306#endpoint-free-clients [implements]: install a local plugin
   //   file through the intrinsic registry, with no gateway endpoint

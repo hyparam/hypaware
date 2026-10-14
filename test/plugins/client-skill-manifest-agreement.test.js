@@ -25,10 +25,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import url from 'node:url'
 
+import { SKILL_CLIENTS, clientSkillTree, clientSkillsDir } from '../helpers/client_skill_trees.js'
+
 const repoRoot = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '../..')
 const workspace = path.join(repoRoot, 'hypaware-core/plugins-workspace')
 
-const CLIENTS = ['claude', 'codex']
+const CLIENTS = SKILL_CLIENTS
 
 /**
  * Skills the plugin's `activate()` actually registers, captured by running it against a
@@ -53,14 +55,17 @@ async function registeredSkills(client) {
   const ctx = /** @type {any} */ ({
     skills: { register: (/** @type {any} */ s) => skills.push(s) },
     agents: { register: noop },
-    commands: { register: noop },
+    commands: { register: noop, get: () => undefined },
+    clients: { registerClient: noop },
     backfills: { register: noop },
     sources: { register: noop },
-    query: { registerDataset: noop },
+    query: { registerDataset: noop, getDataset: () => undefined },
+    backfillMaterializers: { register: noop, get: () => undefined },
     configRegistry: { registerSection: noop },
     initPresets: { register: noop },
     paths: { stateDir: '/tmp/hyp-test-state' },
     plugin: { version: '0.0.0-test' },
+    config: {},
     env: {},
     stdout: { write: noop },
     stderr: { write: noop },
@@ -81,7 +86,7 @@ function manifestSkills(client) {
 
 /** @param {string} client */
 function onDiskSkills(client) {
-  const dir = path.join(workspace, client, 'skills')
+  const dir = clientSkillsDir(repoRoot, client)
   return fs
     .readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(dir, entry.name, 'SKILL.md')))
@@ -104,7 +109,7 @@ for (const client of CLIENTS) {
     for (const skill of await registeredSkills(client)) {
       assert.ok(
         onDisk.has(skill.name),
-        `${client} registers "${skill.name}" but ${client}/skills/${skill.name}/SKILL.md does not exist. ` +
+        `${client} registers "${skill.name}" but ${clientSkillTree(client)}/${skill.name}/SKILL.md does not exist. ` +
           'Attach would try to install a skill that was renamed or removed.',
       )
       assert.ok(
@@ -119,7 +124,7 @@ for (const client of CLIENTS) {
     for (const name of onDiskSkills(client)) {
       assert.ok(
         registered.has(name),
-        `${client}/skills/${name}/ ships but nothing registers it, so it is dead weight in the package. ` +
+        `${clientSkillTree(client)}/${name}/ ships but nothing registers it for ${client}, so it is dead weight in the package. ` +
           'Register it, or delete it.',
       )
     }
