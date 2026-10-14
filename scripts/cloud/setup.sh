@@ -15,7 +15,7 @@ mkdir -p "$HOME/.hyp" && cat > "$H" <<'EOF'
 cd "$HOME/.hyp" && exec >>cloud-daemon.log 2>&1 </dev/null
 echo "$(date -u +%FT%TZ) session start"
 [ -f hypaware/config-control/seed.json ] || [ -z "$HYP_JOIN_TOKEN" ] ||
-  printf %s "$HYP_JOIN_TOKEN" | hyp join "$HYP_CENTRAL_URL" --no-daemon
+  printf %s "$HYP_JOIN_TOKEN" | hyp join https://api.hypaware.ai --no-daemon
 P=hypaware/run/hypaware.pid
 pid=$(grep -o '"pid": *[0-9]*' $P 2>/dev/null | grep -o '[0-9]*$')
 [ -n "$pid" ] && ! tr '\0' ' ' 2>/dev/null </proc/$pid/cmdline | grep -q 'daemon run' &&

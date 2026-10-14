@@ -7,9 +7,9 @@ no systemd or launchd, so `hyp daemon install` cannot work there. Instead:
 - the environment's **setup script** (runs once per environment cache, as root,
   before Claude Code starts) installs a pinned `hypaware` and runs
   `hyp setup --client claude --no-daemon`;
-- a **SessionStart hook** it registers in `~/.claude/settings.json` joins a
-  central server the first time it runs, when `HYP_CENTRAL_URL` and
-  `HYP_JOIN_TOKEN` are set (the join is done here because a session sees the
+- a **SessionStart hook** it registers in `~/.claude/settings.json` joins
+  HypAware Cloud (`https://api.hypaware.ai`) the first time it runs, when
+  `HYP_JOIN_TOKEN` is set (the join is done here because a session sees the
   environment's variables, and a join in the setup script did not take
   effect), then starts `hyp daemon run` in every session, including resumed
   ones. A second start
@@ -34,18 +34,15 @@ The CLI cannot create one; `/remote-env` only picks which existing one
 1. Add an environment.
 2. **Network access:**
    - local-only capture: **Trusted** (the default; it reaches npm);
-   - with a central server: **Custom**, with the central host allowed and the
+   - with HypAware Cloud: **Custom**, with `api.hypaware.ai` allowed and the
      default package-manager list kept.
-3. **Environment variables** (central only):
+3. **Environment variable** (HypAware Cloud only):
    ```
-   HYP_CENTRAL_URL=https://api.hypaware.ai
    HYP_JOIN_TOKEN=<token>
    ```
-   `HYP_CENTRAL_URL` is the server's base URL (a self-hosted server's own
-   base URL, never a `/v1/mcp` URL). Mint the token on your own machine,
-   signed in with `hyp remote login`, with
-   `hyp remote mint --label claude-cloud`; it prints once. Anyone who can use
-   the environment can read these values, so give cloud sessions their own
+   Mint the token on your own machine, signed in with `hyp remote login`,
+   with `hyp remote mint --label claude-cloud`; it prints once. Anyone who
+   can use the environment can read it, so give cloud sessions their own
    token. See [CI and headless deployment](../../docs/TEAM_SETUP.md#ci-and-headless-deployment).
 4. **Setup script:** paste the contents of `setup.sh`.
 5. Start a session in the environment. The first start runs the setup script;
