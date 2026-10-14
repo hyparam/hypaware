@@ -4,6 +4,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { jsonReplacer } from '../query/format.js'
 import { toJsonSchema, validateToolArguments } from '../cli/verb_codec.js'
 import { verbAuthClass, verbExposure } from '../registry/verbs.js'
+import { buildInstructions } from './instructions.js'
 import {
   INTERNAL_ERROR,
   INVALID_PARAMS,
@@ -255,6 +256,25 @@ export function createMcpServer(opts) {
     return tools
   }
 
+  /** @type {string | undefined} */
+  let instructions
+
+  /**
+   * The `initialize` instructions, built once per assembly from the tools it
+   * lists and its transport. The visible set is fixed for the assembly's life
+   * (`listChanged: false`), so every later `initialize` returns this one
+   * string. Built on the first `initialize` rather than at creation: listing
+   * reads plugin-controlled verb properties, and building at creation would
+   * add a read and a skip warn to every assembly, including one that never
+   * sees `initialize`.
+   *
+   * @ref LLP 0494#instructions: once per assembly, never per request
+   */
+  function assemblyInstructions() {
+    instructions ??= buildInstructions(listTools().map((tool) => tool.name), transport)
+    return instructions
+  }
+
   function listResources() {
     /** @type {{ uri: string, name: string, description: string, mimeType: string }[]} */
     const resources = []
@@ -319,6 +339,7 @@ export function createMcpServer(opts) {
             : DEFAULT_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
           serverInfo: { name: SERVER_NAME, version: serverVersion },
+          instructions: assemblyInstructions(),
         })
       case 'ping':
         return jsonRpcResult(id, {})
