@@ -44,8 +44,9 @@ import { daemonIncompleteNote } from '../daemon/platform.js'
 /**
  * The default attach-wait budget. Named so the `runBrowserLogin` progress line
  * and the poll loop below quote the same number.
+ * @ref LLP 0498#client-attach [implements]: allow a quick reconcile, then leave remaining work to the daemon
  */
-export const ATTACH_WAIT_DEFAULT_MS = 30000
+export const ATTACH_WAIT_DEFAULT_MS = 3000
 
 /**
  * Wait for the daemon's first reconcile to attach a client after enrollment,
@@ -130,8 +131,8 @@ function defaultSleep(ms) {
 /**
  * The default gateway-bind wait budget. A restarted daemon has to re-read the
  * config, activate the newly-enabled adapter, and bind the gateway listener
- * before it publishes the port, so the budget matches the attach wait rather
- * than a single reconcile tick.
+ * before it publishes the port. Unlike the best-effort login observation,
+ * this wait protects an attach that needs a live gateway endpoint.
  */
 export const GATEWAY_BIND_WAIT_DEFAULT_MS = 30000
 
@@ -195,8 +196,8 @@ export async function waitForGatewayBind({
 
 /**
  * Wait for the daemon to converge on the org config after an enrolling
- * login, so the wizard's join phase can lock the org-owned picker rows
- * before it composes (LLP 0129). "Converged" means the apply engine has
+ * login. The wizard uses a zero budget to check once for org-owned picker
+ * rows without waiting (LLP 0498). "Converged" means the apply engine has
  * committed a pulled config to an active slot - the on-disk fact the
  * locked-row computation reads right after this wait - NOT that a client
  * attached: an org config that names no client for this machine converges
@@ -210,7 +211,7 @@ export async function waitForGatewayBind({
  * than blocking. Timing out is not an error here for the same reason it is
  * not one for `waitForClientAttach`.
  *
- * @ref LLP 0129#join-before-picker [implements]: the bounded org-config wait before the picker composes; budget and timeout fallback per the decision
+ * @ref LLP 0498#org-config [implements]: the wizard uses a single probe with a zero timeout
  * @ref LLP 0223 [implements]: convergence is the applied slot on disk, never the attach markers or the join seed
  * @param {{ env: NodeJS.ProcessEnv, probe?: () => boolean | Promise<boolean>, sleep?: (ms: number) => Promise<void> }} opts
  * @param {{ timeoutMs?: number, intervalMs?: number }} [waitOpts]
@@ -218,10 +219,9 @@ export async function waitForGatewayBind({
  */
 export async function waitForCentralConverge(
   { env, probe, sleep = defaultSleep },
-  // The wizard passes its own budget (ORG_CONFIG_WAIT_MS); the fallback here
-  // quotes the attach wait's own constant so a budget-less call stays bounded
-  // and the two cannot drift apart.
-  { timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 500 } = {}
+  // Keep the helper's existing default for callers that explicitly want a
+  // wait. Onboarding passes zero and never schedules a polling interval.
+  { timeoutMs = 30000, intervalMs = 500 } = {}
 ) {
   const stateRoot = readObservabilityEnv(env).stateDir
   const applied = probe ?? (() => hasAppliedCentralConfig({ stateRoot }))
@@ -235,7 +235,7 @@ export async function waitForCentralConverge(
       // A transient fs error mid-poll is "not converged this tick", never a
       // join failure: keep polling to the timeout fallback. But an fs error
       // that persists is indistinguishable at the wizard from the no-org-config
-      // steady state (both end in "didn't hear back"), so leave a signal for
+      // steady state (both leave the picker unlocked), so leave a signal for
       // the run that has to be diagnosed. Once per wait, not once per poll: a
       // durable EACCES would otherwise log for the whole budget.
       //
@@ -934,7 +934,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // status`, never silent (LLP 0061 D4).
     // @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile, replacing the interim pre-pull hint
     // Announce the wait: the reconcile is async and can take the full budget on a
-    // no-config / slow-pull org, and blocking silently for up to 30s reads as a
+    // no-config / slow-pull org, and blocking silently even briefly reads as a
     // hang. One line on stderr before we start polling, then the result below.
     // Compact: the same wait behind a spinner that clears itself, so the line
     // that announced the wait is not left behind once the answer is in.

@@ -396,14 +396,14 @@ export interface WizardJoinResult {
    * Present on a completed join (`'ok'` or `'daemon_incomplete'`): the
    * picker source ids owned by the central layer,
    * which the pick phase renders locked (LLP 0129 #join-before-picker).
-   * Empty on a timeout or the no-org-config 404 steady state - nothing is
+   * Empty when no org config has applied yet - nothing is
    * pinned, so the picker composes freely.
    */
   lockedSources?: string[]
   /**
    * True when the org config converged, i.e. the machine now carries a
    * central layer. Drives the pick phase's `managed` annotation
-   * (LLP 0132 #never-silent). Absent on the timeout/404 fall-through:
+   * (LLP 0132 #never-silent). Absent when no config has applied yet:
    * nothing is pinned yet, so the picker renders unmanaged.
    */
   managed?: boolean
@@ -444,8 +444,8 @@ export interface RunWizardJoinOptions {
    */
   runLogin?: () => Promise<LoginLaneResult>
   /**
-   * Override the convergence wait (tests). Defaults to
-   * `waitForCentralConverge`.
+   * Override the applied-config check (tests). Defaults to
+   * `waitForCentralConverge` with a zero timeout: one probe, no wait.
    */
   waitForConverge?: (
     opts: { env: NodeJS.ProcessEnv },
