@@ -18,7 +18,10 @@ LLP 0494#cli-mint, #skills, #docs-mcp, #docs-order; hypaware-server LLP
 > DNS TXT record, Hernan runs the registry publish and sends the GitHub
 > email, and the Anthropic directory submission (HYP-143) waits for Phase
 > 3. HypForge stages the repo contents and never holds the registry
-> signing key. No seat contacts a human directly.
+> signing key. No seat contacts a human directly. Revision 2 folds guardian
+> round 1 (B1 to B4, C1 to C6, A1 to A6): the release gates before the
+> move, Hernan's exact commands, the working push, one Kenny ask after
+> Hernan's key, and the Cursor route.
 
 ## Summary {#summary}
 
@@ -51,7 +54,7 @@ manifest and ignores the others'; all three read `skills/`.
 .mcp.json              Claude Code MCP server (remote, bearer header)
 .cursor-plugin/
   plugin.json          Cursor plugin manifest, declares the token variable
-  marketplace.json     Cursor "From GitHub Repository" marketplace
+  marketplace.json     Cursor marketplace, for Import from Repo
 mcp.json               Cursor MCP server (remote, bearer header)
 skills/
   hypaware-query/      copied from the pinned hypaware release (#skills-sync)
@@ -65,6 +68,7 @@ scripts/
   validate.yml         CI (#ci)
 README.md              install per host, the token, what the plugin does not do
 LICENSE                MIT, as hypaware
+.gitignore             `*.pem`, so a registry key can never be committed
 ```
 
 **Read and act only.** The plugin has no `hooks/`, no `bin/`, no
@@ -100,12 +104,18 @@ neither. `<pin>` is the hypaware release the skills come from
 ```json
 {
   "name": "hypaware",
-  "owner": { "name": "Hyperparam", "url": "https://hypaware.ai" },
+  "owner": { "name": "Hyperparam" },
+  "metadata": { "description": "The HypAware MCP and its skills." },
   "plugins": [
     { "name": "hypaware", "source": "./", "description": "The HypAware MCP and its skills." }
   ]
 }
 ```
+
+`metadata.description` is required in practice: without it `claude plugin
+validate . --strict` warns "No marketplace description provided" and
+exits 1 (Claude Code 2.1.283, guardian round 1). `owner` carries `name`
+only, the one field both hosts' marketplace schemas share.
 
 **`.mcp.json`** (Claude Code):
 
@@ -159,8 +169,9 @@ neither. `<pin>` is the hypaware release the skills come from
 }
 ```
 
-**`.cursor-plugin/marketplace.json`** has the same shape as the Claude Code
-one, so "From GitHub Repository" finds the one plugin at `./`.
+**`.cursor-plugin/marketplace.json`** is the same file: `name`, `owner`
+with `name` only (Cursor's `owner` allows `name` and `email`, so no
+`url`), `metadata.description`, and the one plugin at `./`.
 
 **Install, per host** (the README states these):
 
@@ -168,9 +179,19 @@ one, so "From GitHub Repository" finds the one plugin at `./`.
   `/plugin install hypaware@hypaware`; or `claude plugin marketplace add
   hyparam/hypaware-plugin` and `claude plugin install hypaware@hypaware`
   from a shell.
-- Cursor: Settings, Plugins, From GitHub Repository,
-  `hyparam/hypaware-plugin`, then set `HYPAWARE_AGENT_TOKEN` under the
-  plugin's Configure.
+- Cursor, on a team: a team admin opens the Cursor dashboard, Plugins &
+  MCPs, Add Marketplace, Import from Repo, `hyparam/hypaware-plugin`, then
+  sets `HYPAWARE_AGENT_TOKEN` under Plugins, Configure. This is the route
+  Cursor documents; it is a team feature (admin-only on Enterprise), and
+  Cursor documents plugin variables as set by team admins only.
+- Cursor, as an individual: Cursor documents no plugin install for one
+  person, so the README gives two plain steps instead. First, add the
+  `hypaware` block from `docs/MCP.md` to `~/.cursor/mcp.json` (or a
+  project's `.cursor/mcp.json`), with `${env:HYPAWARE_AGENT_TOKEN}` in the
+  header, and export the token. Second, run `npx skills add
+  hyparam/hypaware-plugin -a cursor` for the skills.
+- Cursor's public marketplace (cursor.com/marketplace/publish) is a
+  submission, not authorized in this phase (#out-of-scope).
 - Any agent the `skills` CLI knows (Pi, Codex, OpenCode, Cursor and
   others): `npx skills add hyparam/hypaware-plugin`. This installs the two
   skills only; the `skills` CLI installs no MCP server, so the README
@@ -192,16 +213,33 @@ recommendations, and publishes and deletes reports, as the member who
 minted it; `hyp remote tokens` lists and revokes it. The README says all
 of this in plain words next to the install line, as `docs/MCP.md` does.
 
+**A person who has never minted one** follows these steps, which the
+README gives in this order:
+
+1. Install the CLI: `npm install -g hypaware`.
+2. Sign in for queries only: `hyp remote login --no-forward` (browser
+   sign-in; `--no-forward` enrolls no capture).
+3. Mint: `hyp remote mint --scope query --label <where-it-runs>`. The
+   token lasts the server's default, 21 days today; `--expires-days <n>`
+   asks for longer, up to the server's ceiling (90 days by default),
+   as LLP 0494#cli-mint says.
+4. Put it in the environment the client starts in: `export
+   HYPAWARE_AGENT_TOKEN=<token>` in a shell profile or the client's own
+   secret store, never in a committed file.
+5. Revoke it with `hyp remote tokens` when the integration goes away.
+
 - **Claude Code** expands `${HYPAWARE_AGENT_TOKEN}` from the environment
-  Claude Code starts in. An unset variable leaves the header unexpanded and
-  `claude mcp list` warns; the server answers `401`. The README shows the
-  `export` line and that check.
-- **Cursor** reads `${HYPAWARE_AGENT_TOKEN}` as a plugin variable, declared
-  in `variables` and set under the plugin's Configure. Whether an
-  individual (not a team admin) can set it there is unconfirmed; the
-  acceptance run settles it (#verification). If not, the README's Cursor
-  fallback is the plain `.cursor/mcp.json` block from `docs/MCP.md`, with
-  `${env:HYPAWARE_AGENT_TOKEN}`, and the plugin still supplies the skills.
+  Claude Code starts in (guardian round 1 saw `Bearer test-token-123`
+  arrive at a local listener). An unset variable is not warned about: the
+  header goes out literally and `claude mcp list` prints "Failed to
+  connect" with HTTP 401. The README says a 401 there means the token is
+  unset or invalid.
+- **Cursor on a team** reads `${HYPAWARE_AGENT_TOKEN}` as a plugin
+  variable, declared in `variables` and set by a team admin under Plugins,
+  Configure (#layout).
+- **Cursor for an individual** reads `${env:HYPAWARE_AGENT_TOKEN}` from
+  `.cursor/mcp.json`, the documented form for a plain MCP config
+  (#layout).
 - **The name is ours.** Claude Code reads some credential-shaped names
   (`ANTHROPIC_*`, `NPM_TOKEN` and the like) as empty in plugin config, so
   the variable carries the product name and nothing generic.
@@ -223,7 +261,9 @@ belong to one server name only and one URL keeps that simple.
 What the endpoint serves is Phase 1's: the read tools, the mark
 (`set_recommendation_status`, the `write` class, LLP 0034#tool-auth-class),
 instructions on `initialize`, the three prompts, and annotations. Phase 2
-adds no tool and no server change.
+adds no tool and no server change. Today production does not serve the
+mark yet (server T6), so nothing in this design moves, publishes or
+announces the plugin before it does (#staging, gate 2).
 
 ## Which skills ship {#skills}
 
@@ -270,7 +310,9 @@ from that release's npm tarball (the `files` list ships
   tool production does not serve yet. Phase 1's copy rules hold the docs
   to what is merged and deployed (LLP 0494#docs-order); a release is the
   same gate for the skills, and the npm tarball is the release's own
-  record of them.
+  record of them. The first usable pin is later than `v1.42.0`: the
+  skills moved to `hypaware-core/skills/` after it (#2592), so
+  `sync-skills.js` against `v1.42.0` finds nothing (#staging, gate 1).
 - **One pin.** The pin is the hypaware version. It is
   `registry/server.json`'s `packages[0].version` and `version`, and both
   plugin manifests' `version`. A Claude Code user receives an update only
@@ -365,17 +407,27 @@ first pin.
 ## What CI validates {#ci}
 
 `.github/workflows/validate.yml` runs on every push and pull request to
-the plugin repo. Every step is offline with respect to the registry: none
-publishes and none POSTs to the registry (`mcp-publisher validate` does,
-so it is not used).
+the plugin repo. No step publishes, and no step depends on the registry
+being up (`mcp-publisher validate` is not used: its source, read for
+this design, sends the file to the registry's `/v0/validate` route).
 
-1. **Claude Code.** `npx @anthropic-ai/claude-code@<pinned> plugin
-   validate . --strict`. On a repo that is both marketplace and plugin it
-   checks both: schema, paths, names, unknown fields and the MCP entry.
-   Exit 0 passes; a warning fails under `--strict`. Whether the validator
-   needs an Anthropic login is unconfirmed; the first staging push settles
-   it. If it does, the step leaves CI and becomes a local check run before
-   each push (recorded in the PR), and no credential is added to CI.
+1. **Claude Code**, with `npx @anthropic-ai/claude-code@<pinned>` as
+   `claude`. It needs no login (guardian round 1 ran it with an empty
+   `HOME` and no credential), so it stays in CI:
+
+   ```sh
+   claude plugin validate . --strict
+   claude plugin validate .claude-plugin/plugin.json --strict
+   claude plugin marketplace add "$PWD"
+   claude plugin install hypaware@hypaware
+   ```
+
+   The first command checks the marketplace and, through `plugins[0]`,
+   `plugin.json`. It does not check `.mcp.json`; the second command does.
+   Exit 0 passes, and a warning fails under `--strict`. The last two
+   install the plugin from the checkout into a throwaway `HOME`, the
+   hermetic half of "installs in Claude Code". Neither validator checks a
+   skill's `name` against its directory; step 3 does.
 2. **Cursor.** `scripts/check.js` applies the cursor/plugin-template
    checklist rules that apply here: `name` is kebab-case and the same in
    both Cursor files, every `${VAR}` in `mcp.json` is declared in
@@ -397,8 +449,9 @@ so it is not used).
    `packages[0].version` equal the pin, the remote URL equals the one in
    `.mcp.json` and `mcp.json`, and no `localhost`.
 6. **Directory hygiene** (kept for Phase 3, #out-of-scope): `README.md`
-   has at least 40 words, `LICENSE` exists, every URL is `https`, and no
-   file holds a string shaped like a token.
+   has at least 40 words, `LICENSE` exists, every URL is `https`, no file
+   holds a string shaped like a token, no file holds `BEGIN PRIVATE KEY`,
+   and `.gitignore` lists `*.pem`.
 
 All tools run through `npx` at pinned versions; the repo has no
 dependencies and no lockfile to keep.
@@ -409,18 +462,25 @@ The registry namespace `ai.hypaware` is proven by one TXT record on the
 apex of `hypaware.ai`. The proof grants `ai.hypaware/*` and
 `ai.hypaware.*`.
 
-**Hernan, once, on his own machine** (OpenSSL 3; macOS's default LibreSSL
-cannot run these, so use Homebrew's `openssl@3`):
+**Hernan, once, on his own Mac.** The `openssl` on a Mac's `PATH` is
+LibreSSL, which fails with "Algorithm Ed25519 not found", so every command
+names Homebrew's OpenSSL 3 by path. The key lives outside any repo, so no
+`git add` can reach it:
 
 ```sh
-openssl genpkey -algorithm Ed25519 -out key.pem
-echo "v=MCPv1; k=ed25519; p=$(openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64)"
+brew install openssl@3
+OPENSSL="$(brew --prefix openssl@3)/bin/openssl"
+mkdir -p ~/.config/hypaware-registry && cd ~/.config/hypaware-registry
+"$OPENSSL" genpkey -algorithm Ed25519 -out key.pem && chmod 600 key.pem
+echo "v=MCPv1; k=ed25519; p=$("$OPENSSL" pkey -in key.pem -pubout -outform DER | tail -c 32 | base64)"
 ```
 
-The second command prints the exact record value, one line of the form
+The last command prints the exact record value, one line of the form
 `v=MCPv1; k=ed25519; p=<44 base64 characters>`, with Hernan's public key
-as the last part. Hernan keeps `key.pem` and sends that one line to
-Kenny. HypForge never generates, sees or holds the key.
+as the last part. The line is public. Hernan keeps
+`~/.config/hypaware-registry/key.pem` and sends the line to the mayor,
+who puts it in the one Kenny ask (#staging). HypForge never generates,
+sees or holds the key.
 
 **Kenny, once, in the `hypaware.ai` DNS:**
 
@@ -428,28 +488,38 @@ Kenny. HypForge never generates, sees or holds the key.
 | --- | --- |
 | Type | `TXT` |
 | Host | `@` (the apex, `hypaware.ai.`) |
-| Value | the line Hernan sent, exactly, starting `v=MCPv1;` |
+| Value | the line from Hernan, exactly, starting `v=MCPv1;` (the ask carries it) |
 | TTL | the provider's default |
 
 An existing TXT record on the apex (SPF, site verification) stays; TXT
 records coexist. `dig +short TXT hypaware.ai` shows the new line beside
 them once it propagates.
 
-**Hernan, to publish** (from a checkout of the plugin repo):
+**Hernan, to publish**, after Kenny's record shows in `dig` (#staging):
 
 ```sh
-PRIVATE_KEY=$(openssl pkey -in key.pem -noout -text | grep -A3 "priv:" | tail -n +2 | tr -d ' :\n')
+brew install mcp-publisher
+OPENSSL="$(brew --prefix openssl@3)/bin/openssl"
+KEY=~/.config/hypaware-registry/key.pem
+PRIVATE_KEY=$("$OPENSSL" pkey -in "$KEY" -noout -text | grep -A3 "priv:" | tail -n +2 | tr -d ' :\n')
 mcp-publisher login dns --domain hypaware.ai --private-key "$PRIVATE_KEY"
-cd registry && mcp-publisher publish
+cd "$(mktemp -d)" && git clone https://github.com/hyparam/hypaware-plugin.git
+cd hypaware-plugin/registry && mcp-publisher publish
 ```
 
-**Rotation.** A new key means a new record, published the same way;
-Kenny deletes the old record once the new one verifies, so a leaked old
-key stops proving the namespace.
+The clone is a fresh public checkout in a temp directory, apart from the
+key's directory.
+
+**Rotation.** A new key means a new record. A stale record left on the
+apex is tried and fails verification, so Kenny replaces the old value
+with the new one in one change (delete the old, add the new), and only
+then does Hernan run `login dns`.
 
 ## GitHub's MCP Registry {#github}
 
-After the publish lands, Hernan emails partnerships@github.com to ask that
+After the publish lands, and only once all three gates in #staging hold
+(so the mark the email names is served), Hernan emails
+partnerships@github.com to ask that
 `ai.hypaware/hypaware` be listed. Curation is manual and what GitHub wants
 in the email is unconfirmed; a short draft:
 
@@ -468,11 +538,25 @@ Until Kenny creates the repo, the contents live on an **orphan branch,
 `staging/hypaware-plugin`, in `hyparam/hypaware`**, whose tree is exactly
 the future repo's root.
 
-- **It moves as-is.** Once Kenny creates the empty
-  `hyparam/hypaware-plugin`, one command moves it with its history:
-  `git push git@github.com:hyparam/hypaware-plugin.git
-  staging/hypaware-plugin:main`. Kenny runs it, or HypForge does if
-  Kenny grants it write access. The staging branch is then deleted.
+- **It moves as-is, by Kenny.** Kenny creates the repo empty and pushes
+  the branch into it as `main`, with its history, from no clone:
+
+  ```sh
+  gh repo create hyparam/hypaware-plugin --public
+  git clone --bare --single-branch --branch staging/hypaware-plugin git@github.com:hyparam/hypaware.git hp.git
+  git -C hp.git push git@github.com:hyparam/hypaware-plugin.git staging/hypaware-plugin:refs/heads/main
+  ```
+
+  `gh repo create` with no template, README, license or `.gitignore`
+  makes an empty repo, which the push needs. The full `refs/heads/main`
+  is needed because `main` does not exist yet; a short `:main` is
+  rejected, and a local branch name fails from a normal clone (guardian
+  round 1 ran all three). Kenny owns the push because he creates the repo
+  and already has access; HypForge pushing would need a write grant and
+  its own authorization to publish to a new public repo.
+- **HypForge deletes the staging branch** once `git ls-remote
+  git@github.com:hyparam/hypaware-plugin.git main` shows the staging
+  head: `git push origin --delete staging/hypaware-plugin`.
 - **It is checked before it moves.** Its own `validate.yml` runs on push
   to the branch. hypaware's `ci.yml` does not: it triggers on pull
   requests, merge groups and pushes to `master` only, and the orphan tree
@@ -480,30 +564,47 @@ the future repo's root.
 - **It touches nothing here.** No file on `master` changes, no skill PR
   gains a drift check against a second copy, and no release PR's head
   moves.
+- **Gates.** Nothing moves, publishes or is announced until all three
+  hold, because the README, the skills, the registry entry and the email
+  name what they deliver:
+  1. **The pin** is a hypaware npm release that carries T7 (`hyp remote
+     mint --scope query`, `hyp remote tokens`), the skills at
+     `hypaware-core/skills/`, and the #mcpname line. The client release
+     that carries T7 (the plan's R1) is the natural carrier.
+  2. **Production serves every tool the plugin's text names**, the mark
+     (`set_recommendation_status`) included: server T6 is deployed. If it
+     is not, the README and the email drop the mark and the pin waits for
+     a skill text that does not name it.
+  3. **`docs/MCP.md` is merged** past Hernan's docs gate (LLP
+     0494#docs-order), since the README sends Cursor individuals,
+     `npx skills add` users and self-hosted users to it.
 - **Sequence:**
-  1. The #mcpname PR merges and ships in an npm release; that version is
-     the first pin.
-  2. HypForge builds the staging branch with `sync-skills.js <pin>`;
-     `validate.yml` is green.
-  3. The mayor asks Kenny once, in a new Kenny Phase 2 thread: confirm
-     the repo name, create the empty repo, and add the TXT line when
-     Hernan sends it.
-  4. Hernan generates the key and sends the line to Kenny (#dns).
-  5. The branch moves to the new repo's `main` (the push above).
-  6. Hernan runs `login dns` and `publish`, then sends the GitHub email.
+  1. Hernan generates the key and sends the TXT line to the mayor (#dns).
+     This needs none of the gates and can happen first.
+  2. Once the gates hold, HypForge builds the staging branch with
+     `sync-skills.js <pin>`, and its `validate.yml` is green.
+  3. The mayor sends Kenny one ask, in a new Kenny Phase 2 thread, with
+     the exact values: confirm the repo name, run the three commands
+     above, and add TXT record `hypaware.ai` (host `@`) = `v=MCPv1;
+     k=ed25519; p=<Hernan's value>`. Kenny checks with `dig +short TXT
+     hypaware.ai`.
+  4. HypForge confirms the new `main` and deletes the staging branch.
+  5. Hernan runs the publish block (#dns) and checks the registry
+     (#verification).
+  6. Hernan sends the GitHub email (#github).
 
 ## Verification map {#verification}
 
 | Claim | Hermetic proof | Human or production proof |
 | --- | --- | --- |
-| The plugin is valid for Claude Code | CI step 1 | `/plugin install hypaware@hypaware` from the public repo, then a `query_sql` call with a real agent token (human) |
-| The plugin is valid for Cursor | CI step 2 | install From GitHub Repository, set the variable, call `query_sql`; record whether an individual can set the variable (human) |
+| The plugin installs in Claude Code and passes `claude plugin validate` | CI step 1 (both validates, then `marketplace add` and `install` from the checkout) | `/plugin install hypaware@hypaware` from the public repo, then a `query_sql` call with a real agent token (human) |
+| The plugin installs in Cursor | CI step 2 | a Cursor team admin, named through the mayor, runs Import from Repo, sets the variable under Configure, and calls `query_sql`; one individual follows the README's two steps and calls `query_sql` (human) |
 | `npx skills add` installs the two skills | CI step 3 (`--list`) | one install into a real agent (human) |
 | The skills match the pinned release | CI step 4 | none |
-| The registry entry is well formed | CI step 5 | `mcp-publisher publish` succeeds; the entry appears at `https://registry.modelcontextprotocol.io/v0/servers?search=ai.hypaware` (Hernan) |
+| The registry entry is well formed and resolves | CI step 5 | `mcp-publisher publish` succeeds; the entry appears at `https://registry.modelcontextprotocol.io/v0.1/servers?search=ai.hypaware/hypaware` (Hernan) |
 | `mcpName` ships | the #mcpname test | `npm view hypaware@<pin> mcpName` prints `ai.hypaware/hypaware` |
 | The DNS proof holds | none | `dig +short TXT hypaware.ai` shows the line; `login dns` succeeds (Hernan) |
-| GitHub lists it | none | GitHub's reply (Hernan) |
+| The GitHub request is sent | none | Hernan confirms the email went to partnerships@github.com, with the date |
 
 ## CPU and memory {#cpu-memory}
 
@@ -530,7 +631,9 @@ existing token. No hot path changes; no CPU or memory concern.
 - **Claude chat and Cowork** ignore a plugin MCP server whose config needs
   a value they cannot supply; they get the skills only until Phase 3's
   connector.
-- **HYP-142.** Held, as in LLP 0494#seams.
+- **Cursor's public marketplace.** A submission at
+  cursor.com/marketplace/publish is a publish step; it needs its own
+  authorization and a named human, and is not part of this phase.
 
 ## Open question {#open-question}
 
@@ -562,8 +665,8 @@ existing token. No hot path changes; no CPU or memory concern.
 - **A HypForge-owned repo** as the staging place. A new repo outside
   `hyparam` is not HypForge's to create, and moving it would change its
   owner and history.
-- **`mcp-publisher validate` in CI.** It calls the registry; CI stays
-  offline with respect to it.
+- **`mcp-publisher validate` in CI.** Per its source it sends the file to
+  the registry; CI should not depend on the registry being up.
 - **HypForge generating the DNS key.** The key proves the namespace for
   every future publish; it belongs with the person who publishes
   (orchestrator, 22:10Z).
