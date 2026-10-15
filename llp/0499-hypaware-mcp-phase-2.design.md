@@ -7,6 +7,7 @@
 **Date:** 2026-10-15
 **Source:** [HYP-128 "HypAware MCP: close the agent access gap"](https://linear.app/hyperparam/issue/HYP-128/hypaware-mcp-close-the-agent-access-gap), Phase 2 ("the registry entry and publishing where agents look", LLP 0494#seams); Hernan's Phase 2 answers of 2026-10-15T22:09:16Z
 **Extends:** [LLP 0494#seams](./0494-hypaware-mcp-phase-1.design.md#seams) (the Phase 2 seam)
+**Implemented-by:** [LLP 0500](./0500-hypaware-mcp-phase-2.plan.md) (the plan)
 **Related:** LLP 0034#pluggable-transport, #scoped-credential,
 #tool-auth-class, LLP 0107#every-attach, LLP 0491#guidance, LLP 0197,
 LLP 0494#cli-mint, #skills, #docs-mcp, #docs-order; hypaware-server LLP
@@ -22,6 +23,7 @@ LLP 0494#cli-mint, #skills, #docs-mcp, #docs-order; hypaware-server LLP
 > round 1 (B1 to B4, C1 to C6, A1 to A6): the release gates before the
 > move, Hernan's exact commands, the working push, one Kenny ask after
 > Hernan's key, and the Cursor route.
+> Revision 3 folds guardian round 2's three advisories (R2-A1 to R2-A3).
 
 ## Summary {#summary}
 
@@ -426,8 +428,11 @@ this design, sends the file to the registry's `/v0/validate` route).
    `plugin.json`. It does not check `.mcp.json`; the second command does.
    Exit 0 passes, and a warning fails under `--strict`. The last two
    install the plugin from the checkout into a throwaway `HOME`, the
-   hermetic half of "installs in Claude Code". Neither validator checks a
-   skill's `name` against its directory; step 3 does.
+   hermetic half of "installs in Claude Code". A GitHub runner's home is
+   per job; a local run sets `HOME="$(mktemp -d)"` first, so the install
+   never reaches a real Claude Code config (guardian round 2, R2-A2).
+   Neither validator checks a skill's `name` against its directory; step 3
+   does.
 2. **Cursor.** `scripts/check.js` applies the cursor/plugin-template
    checklist rules that apply here: `name` is kebab-case and the same in
    both Cursor files, every `${VAR}` in `mcp.json` is declared in
@@ -557,6 +562,10 @@ the future repo's root.
 - **HypForge deletes the staging branch** once `git ls-remote
   git@github.com:hyparam/hypaware-plugin.git main` shows the staging
   head: `git push origin --delete staging/hypaware-plugin`.
+- **Two HypForge pushes, both authorized by the build task.** Creating the
+  staging branch (sequence step 2) and deleting it (step 4) are pushes to
+  `hyparam/hypaware`. The plan's build task (LLP 0500#t2) carries the
+  authorization for both and for no other ref (guardian round 2, R2-A3).
 - **It is checked before it moves.** Its own `validate.yml` runs on push
   to the branch. hypaware's `ci.yml` does not: it triggers on pull
   requests, merge groups and pushes to `master` only, and the orphan tree
@@ -573,8 +582,9 @@ the future repo's root.
      that carries T7 (the plan's R1) is the natural carrier.
   2. **Production serves every tool the plugin's text names**, the mark
      (`set_recommendation_status`) included: server T6 is deployed. If it
-     is not, the README and the email drop the mark and the pin waits for
-     a skill text that does not name it.
+     is not, the README and the email drop the mark. The skills need no
+     change: `hypaware-query`'s `reports.md` names the mark only "when the
+     connected MCP lists it" (guardian round 2, R2-A1).
   3. **`docs/MCP.md` is merged** past Hernan's docs gate (LLP
      0494#docs-order), since the README sends Cursor individuals,
      `npx skills add` users and self-hosted users to it.
