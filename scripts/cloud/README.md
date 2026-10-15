@@ -36,14 +36,23 @@ The CLI cannot create one; `/remote-env` only picks which existing one
    - local-only capture: **Trusted** (the default; it reaches npm);
    - with HypAware Cloud: **Custom**, with `api.hypaware.ai` allowed and the
      default package-manager list kept.
-3. **Environment variable** (HypAware Cloud only):
+3. **Environment variables** (HypAware Cloud only):
    ```
    HYP_JOIN_TOKEN=<token>
+   HYP_UPLOAD_DELAY=30
    ```
    Mint the token on your own machine, signed in with `hyp remote login`,
    with `hyp remote mint --label claude-cloud`; it prints once. Anyone who
    can use the environment can read it, so give cloud sessions their own
    token. See [CI and headless deployment](../../docs/TEAM_SETUP.md#ci-and-headless-deployment).
+
+   `HYP_UPLOAD_DELAY` is optional: the seconds after Claude's last reply at
+   which a Stop hook imports the transcript and runs `hyp sync --yes`. An
+   idle cloud VM pauses about 5 minutes after the last reply, with no signal
+   first, and HypAware Cloud otherwise uploads hourly, so without it the end
+   of a session waits on disk until the session is next used. Keep it well
+   under 300. Unset or `off` disables it; it does not depend on running in a
+   cloud session.
 4. **Setup script:** paste the contents of `setup.sh`.
 5. Start a session in the environment. The first start runs the setup script;
    later starts reuse the cached result.
