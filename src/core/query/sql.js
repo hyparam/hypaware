@@ -8,6 +8,7 @@ import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } fr
 import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS, QUERY_FLUSH_FAILURE_COOLDOWN_MS } from '../cache/spool.js'
 import { sanitizeLabel } from '../util/json_util.js'
+import { compareStrings } from '../util/compare_strings.js'
 import { normalizeScanColumn } from './scan-column.js'
 import { coerceTimestampLiterals } from './timestamp-literals.js'
 import {
@@ -429,6 +430,25 @@ export async function executeQuerySql(args) {
         // already points at the real problem (syntax error, unknown function,
         // non-SELECT statement). Surface it verbatim rather than wrapping it.
         const statement = parseSql({ query: trimmed })
+
+        // SHOW TABLES names no table, so the loop below would hand the engine
+        // an empty table map and the answer would be no tables at all. The
+        // registry is the list of what this caller can query, so it answers
+        // directly, without discovering or opening any dataset.
+        if (statement.type === 'show tables') {
+          const rows = registry.listDatasets().map((dataset) => ({ name: dataset.name }))
+            .sort((a, b) => compareStrings(a.name, b.name))
+          span.setAttribute('row_count', rows.length)
+          instruments.queryRunsTotal.add(1, { status: 'ok' })
+          instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
+          return {
+            columns: ['name'],
+            rows,
+            datasets: [],
+            freshnessMessages: [],
+            localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 },
+          }
+        }
 
         // SQL types a character literal by the operand it is compared
         // against; neither squirreling nor the pushdown converter does, so a
