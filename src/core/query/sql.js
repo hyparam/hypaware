@@ -8,7 +8,6 @@ import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } fr
 import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS, QUERY_FLUSH_FAILURE_COOLDOWN_MS } from '../cache/spool.js'
 import { sanitizeLabel } from '../util/json_util.js'
-import { compareStrings } from '../util/compare_strings.js'
 import { normalizeScanColumn } from './scan-column.js'
 import { coerceTimestampLiterals } from './timestamp-literals.js'
 import {
@@ -38,6 +37,13 @@ const DEFAULT_MAX_HEAP_GROWTH_BYTES = 1024 * 1024 * 1024
 
 /** How often the watchdog samples heap growth while a query runs. */
 const HEAP_WATCH_INTERVAL_MS = 100
+
+/**
+ * The whole of a SHOW TABLES statement, in any case, with an optional
+ * trailing semicolon. Matched against the trimmed query, so leading and
+ * trailing whitespace is already gone.
+ */
+const SHOW_TABLES = /^show\s+tables\s*;?$/i
 
 /**
  * Exported so a caller that routes freshness lines by meaning can tell this
@@ -426,18 +432,17 @@ export async function executeQuerySql(args) {
       try {
         const trimmed = query.trim()
         if (trimmed.length === 0) throw new Error('SQL query is required')
-        // squirreling only parses read-only SELECTs, so its own error message
-        // already points at the real problem (syntax error, unknown function,
-        // non-SELECT statement). Surface it verbatim rather than wrapping it.
-        const statement = parseSql({ query: trimmed })
 
-        // SHOW TABLES names no table, so the loop below would hand the engine
-        // an empty table map and the answer would be no tables at all. The
-        // registry is the list of what this caller can query, so it answers
-        // directly, without discovering or opening any dataset.
-        if (statement.type === 'show tables') {
+        // SHOW TABLES names no table, so there is nothing for the engine to
+        // open. The registry is the list of what this caller can query, so it
+        // answers directly, without discovering or opening any dataset. Only
+        // the whole statement matches: anything longer goes to the parser,
+        // which does not know SHOW and refuses it as before. The rows keep the
+        // registry's own order, which is already by name: re-sorting here
+        // would read each live plugin `name` inside a comparator, the read
+        // `listDatasets()` avoids (issue #1524).
+        if (SHOW_TABLES.test(trimmed)) {
           const rows = registry.listDatasets().map((dataset) => ({ name: dataset.name }))
-            .sort((a, b) => compareStrings(a.name, b.name))
           span.setAttribute('row_count', rows.length)
           instruments.queryRunsTotal.add(1, { status: 'ok' })
           instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
@@ -449,6 +454,11 @@ export async function executeQuerySql(args) {
             localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 },
           }
         }
+
+        // squirreling only parses read-only SELECTs, so its own error message
+        // already points at the real problem (syntax error, unknown function,
+        // non-SELECT statement). Surface it verbatim rather than wrapping it.
+        const statement = parseSql({ query: trimmed })
 
         // SQL types a character literal by the operand it is compared
         // against; neither squirreling nor the pushdown converter does, so a

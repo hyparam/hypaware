@@ -132,8 +132,6 @@ function rewriteStatement(statement, registry, ctes, outer) {
     rewriteCompoundOrderBy(statement, registry, ctes, outer)
     return
   }
-  // SHOW TABLES carries no literal to type.
-  if (statement.type === 'show tables') return
   rewriteSelect(statement, registry, ctes, outer)
 }
 
@@ -431,7 +429,6 @@ function inferColumns(statement, registry, ctes) {
       isTimestamp: column.isTimestamp && right[index].isTimestamp,
     }))
   }
-  if (statement.type === 'show tables') return [{ name: 'name', isTimestamp: false }]
   /** @type {{ keys: string[], columns: InferredColumn[] }[]} */
   const relations = []
   for (const relation of selectRelations(statement)) {
