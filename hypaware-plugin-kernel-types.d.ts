@@ -1886,8 +1886,13 @@ export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
  * Gating only applies on an authed (remote/HTTP) transport: the local
  * stdio host is local-user trust and exposes both. See LLP 0034
  * §tool-auth-class.
+ *
+ * `write` is one bounded mutation admitted by a named credential scope: the
+ * verb must name `scope`, and is listed and dispatched only where the host
+ * admits that scope (`allowScopes`), on every transport. See LLP 0494
+ * #write-class.
  */
-export type VerbAuthClass = 'read' | 'operator'
+export type VerbAuthClass = 'read' | 'write' | 'operator'
 
 /**
  * A single typed input property. A deliberately small JSON-Schema subset:
@@ -2047,6 +2052,11 @@ export interface VerbRegistration {
   exposure?: VerbExposure
   /** Default `'read'`. */
   authClass?: VerbAuthClass
+  /**
+   * The credential scope that admits a `write` verb, e.g. `'report-publish'`.
+   * Required, non-empty, on a `write` verb; not read on any other class.
+   */
+  scope?: string
   /** The shared core. Identical for the CLI and the MCP tool. */
   operation(params: Record<string, unknown>, ctx: VerbOperationContext): Promise<unknown> | unknown
   /** CLI-only: turn a structured result into stdout text + exit code. */
