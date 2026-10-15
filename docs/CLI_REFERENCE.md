@@ -1868,7 +1868,7 @@ hyp remote login team --no-forward
 ### `hyp remote mint`
 
 ```text
-hyp remote mint [name] [--label <label>] [--expires-days <n>]
+hyp remote mint [name] [--scope query] [--label <label>] [--expires-days <n>]
 ```
 
 Mints a long-lived CI enrollment token from your logged-in session and prints
@@ -1888,6 +1888,46 @@ stores exactly the secret.
 
 For the complete join, capture, and flush workflow, see
 [CI and headless deployment](TEAM_SETUP.md#ci-and-headless-deployment).
+
+With `--scope query`, it mints a personal agent token instead, for a headless
+agent or CI job that queries and publishes as you. The token reads your
+organization's recorded history and can mark recommendations, publish reports,
+and delete reports, as you, until it expires or you revoke it. `--label` names
+it, and `--expires-days` sets its lifetime; without it, the server's default
+applies. As with the CI token, only the token goes to standard output, and
+HypAware keeps no copy. At your own computer you don't need one:
+`hyp mcp serve --remote` already uses your session.
+
+```sh
+hyp remote mint team --scope query --label nightly-agent
+```
+
+### `hyp remote tokens`
+
+```text
+hyp remote tokens [name] [--json]
+```
+
+Lists your agent tokens on a target: the token ID (`jti`), label, creation
+time, expiry, and whether it's revoked. It never prints a token value. You
+can hold at most ten live agent tokens at a time.
+
+```sh
+hyp remote tokens team
+```
+
+### `hyp remote tokens revoke`
+
+```text
+hyp remote tokens revoke <jti> [--remote <name>]
+```
+
+Revokes one of your agent tokens by its ID, on the default target unless
+`--remote` names another.
+
+```sh
+hyp remote tokens revoke rt-0123456789abcdef --remote team
+```
 
 ### `hyp remote list`
 
