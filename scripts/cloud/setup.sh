@@ -22,17 +22,16 @@ pid=$(grep -o '"pid": *[0-9]*' $P 2>/dev/null | grep -o '[0-9]*$')
   rm $P && echo "removed stale pid file (pid $pid)"
 nohup setsid bash -c 'rc=75; while [ $rc = 75 ]; do hyp daemon run; rc=$?; done' &
 EOF
-# Stop hook (after each reply). With HYP_UPLOAD_DELAY=<seconds>, uploads that
-# long after the last reply: an idle VM pauses about 5 minutes after it, with
-# no signal first. One waiter at a time; a newer reply restarts its wait.
+# Stop hook (after each reply). Uploads 60 s after the last reply: an idle VM
+# pauses about 5 minutes after it, with no signal first, and HypAware Cloud
+# otherwise uploads hourly. One waiter at a time; a newer reply restarts it.
 U=$HOME/.hyp/upload-after-reply.sh
 cat > "$U" <<'EOF'
 #!/bin/bash
-case ${HYP_UPLOAD_DELAY:-off} in off|*[!0-9]*) exit 0 ;; esac
 cd "$HOME/.hyp" && exec >>cloud-daemon.log 2>&1 </dev/null
 date +%s > upload-after
 nohup setsid flock -n upload.lock bash -c 'while :; do
-  s=$(cat upload-after); t=$((s + HYP_UPLOAD_DELAY - $(date +%s)))
+  s=$(cat upload-after); t=$((s + 60 - $(date +%s)))
   [ $t -gt 0 ] && sleep $t
   [ "$(cat upload-after)" = "$s" ] || continue
   echo "$(date -u +%FT%TZ) upload after reply"; hyp backfill claude; hyp sync --yes
