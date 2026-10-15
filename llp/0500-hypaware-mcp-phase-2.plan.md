@@ -16,6 +16,9 @@ plan, whose R1, T6, T7 and T10 the gates below name); hypaware-server LLP
 > seat contacts a human directly. T1 is ready to build now. H1 needs no
 > gate. Everything else waits on A1 to A3, the three gates in LLP
 > 0499#staging.
+> The plan actionability check's two folds are in: T2's push
+> authorization is one ref, fast-forward only (P1), and V1 records
+> `validate.yml` on the moved repo (P2), with its four advisories.
 
 @ref LLP 0499 [implements]: the distribution design this plan builds
 
@@ -48,7 +51,7 @@ deploy or an npm release is checked by the orchestrator, who records it.
 - id: A2  branch: codex/hypaware-mcp-phase-2/A2  deps: []  complexity: 1  -- hypaware: gate 2; production `/v1/mcp` serves `set_recommendation_status` (server T6 deployed; LLP 0499#staging gate 2)
 - id: A3  branch: codex/hypaware-mcp-phase-2/A3  deps: []  complexity: 1  -- hypaware: gate 3; `docs/MCP.md` (Phase 1 T10) merged past Hernan's docs gate (LLP 0499#staging gate 3, LLP 0494#docs-order)
 - id: H1  branch: codex/hypaware-mcp-phase-2/H1  deps: []  complexity: 1  -- human: Hernan generates the Ed25519 key on his Mac, keeps `key.pem`, and sends the one TXT line to the mayor (LLP 0499#dns). Already asked; needs no gate
-- id: T2  branch: staging/hypaware-plugin  deps: [A1, A2, A3]  complexity: 3  -- hyparam/hypaware orphan branch: the whole plugin repo tree (LLP 0499#layout, #skills, #skills-sync, #registry, #ci), skills synced from the A1 pin, `validate.yml` green on push. Carries the authorization for HypForge's two pushes (#t2)
+- id: T2  branch: staging/hypaware-plugin  deps: [A1, A2, A3]  complexity: 3  -- hyparam/hypaware orphan branch: the whole plugin repo tree (LLP 0499#layout, #skills, #skills-sync, #registry, #ci), skills synced from the A1 pin, `validate.yml` green on push. Carries HypForge's push authorization: one ref, fast-forward only (#t2)
 - id: K1  branch: none  deps: [T2, H1]  complexity: 1  -- human: the one Kenny ask; confirm the repo name, `gh repo create`, the bare push to `refs/heads/main`, the TXT record on `hypaware.ai` with H1's exact value (LLP 0499#staging step 3)
 - id: T3  branch: staging/hypaware-plugin  deps: [K1]  complexity: 1  -- hyparam/hypaware: confirm the new repo's `main` equals the staging head with `git ls-remote`, then delete the staging branch (LLP 0499#staging step 4)
 - id: H2  branch: none  deps: [K1, T3]  complexity: 1  -- human: Hernan installs `mcp-publisher`, runs `login dns` and `publish` from a fresh clone, and checks the registry search (LLP 0499#dns, #verification)
@@ -99,6 +102,10 @@ that the release carries all three:
 after it (LLP 0499#skills-sync). Phase 1's R1 (LLP 0496#r1) is the natural
 carrier, so T1 should merge before R1 is cut.
 
+- **Recorded:** when R1 is cut, whether Phase 2 T1 is in it, in
+  PROGRESS. Phase 1 T7 merged at 2026-10-15T22:42:34Z (#2609) and T1 was
+  not yet on `master` then, so R1 carrying T1 rests on the order things
+  land, not on LLP 0496#r1, which names Phase 1's T1 to T7 only.
 - **Fallback:** if R1 ships without T1, the pin is the next release that
   carries T1. Nothing else changes.
 
@@ -141,16 +148,18 @@ the key (orchestrator, 2026-10-15T22:10Z).
 
 ### T2: the staging branch {#t2}
 
-- **Authorization** (folds guardian round 2, R2-A3). The queue row that
-  assigns T2 carries it, and it covers exactly two kinds of push to
-  `hyparam/hypaware`, both on one ref:
-  1. creating `staging/hypaware-plugin` as an orphan branch, and pushing
-     fix-ups to that same branch until K1 moves it (a repo rename at K1 is
-     one such fix-up);
-  2. deleting it in T3.
+- **Authorization** (folds guardian round 2, R2-A3; tightened by the
+  plan actionability check, P1). The queue row that assigns T2 quotes
+  this paragraph verbatim. It covers two kinds of push to
+  `hyparam/hypaware`, both on the one ref `staging/hypaware-plugin`:
+  1. creating `staging/hypaware-plugin` as an orphan branch, and then
+     fast-forward fix-up commits to that same branch until K1 moves it (a
+     red `validate.yml` run, or a repo rename at K1);
+  2. deleting it in T3, only after T3's two equal `ls-remote` heads are
+     recorded.
 
-  No other ref is pushed. No PR is opened from it. It never merges to
-  `master`.
+  No force push, no tags, no other ref. No PR is opened from it. It never
+  merges to `master`.
 - **Files** (the future repo's root, LLP 0499#layout):
   `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
   `.mcp.json`, `.cursor-plugin/plugin.json`,
@@ -203,6 +212,9 @@ exact values from LLP 0499#staging step 3:
   to the staging branch (every manifest, the README, `server.json`
   `repository.url`, the move command), CI goes green again, and the ask
   continues with the new name. The plugin's own `name` stays `hypaware`.
+  Every later ask and command uses the name K1 recorded, not the working
+  name: T3's `ls-remote`, H2's clone URL, H3's draft, and V1 rows 1 to 3
+  and 7.
 - **Fallback on no:** nothing moves; the staging branch stays until the
   orchestrator decides with Hernan.
 
@@ -210,7 +222,7 @@ exact values from LLP 0499#staging step 3:
 
 - **Steps:** `git ls-remote git@github.com:hyparam/hypaware-plugin.git
   main` shows the staging head; then `git push origin --delete
-  staging/hypaware-plugin` (T2's authorization, push 2).
+  staging/hypaware-plugin` (T2's authorization, kind 2).
 - **Hermetic proof:** the two `ls-remote` lines, the plugin repo's `main`
   and the last staging head, equal, recorded before the delete; then
   `git ls-remote origin staging/hypaware-plugin` prints nothing.
@@ -235,8 +247,8 @@ mcp-publisher`, `login dns` with the key, `publish` from a fresh clone in
 ### H3: the GitHub request {#h3}
 
 Hernan sends the draft in LLP 0499#github to partnerships@github.com,
-only after H2 and with A1 to A3 holding (or with the mark dropped under
-A2's fallback).
+only after H2 and with A1 to A3 holding. Under A2's fallback the mayor
+passes the draft's no-mark variant instead (LLP 0499#github gives both).
 
 - **Recorded:** Hernan's confirmation that the email went, with the date.
   GitHub's answer is not a gate; curation is manual.
@@ -256,6 +268,21 @@ Through the mayor, after H2 and H3, the rows of LLP 0499#verification:
 4. `npm view hypaware@<pin> mcpName` prints `ai.hypaware/hypaware`.
 5. The registry search and `dig` results from H2 and K1.
 6. H3's confirmation.
+7. `validate.yml` green on `main` of the moved repo at the staging head
+   (CI step 1, `claude plugin validate . --strict` and `claude plugin
+   validate .claude-plugin/plugin.json --strict`), with the run link
+   recorded. This is HYP-142's "passes `claude plugin validate`" on the
+   repo a user installs from; before it, validate has run only on the
+   staging branch (T2). A seat reads the run with `gh run list` on the
+   public repo, so this row needs no human (plan actionability check,
+   P2).
+
+HYP-142's text names a root `plugin.json` for Cursor. The design ships
+`.cursor-plugin/plugin.json` instead, because Cursor documents
+`variables` for that manifest only and the open agent-plugins root layout
+allows no secret in a header (LLP 0499#layout, #rejected). Row 2 proves
+the Cursor install either way. HypForge is read-only on Linear, so any
+change to that wording is a human's.
 
 The designer records each result, and on a pass moves LLP 0499 and this
 plan to Active. A failure is fixed from evidence and the same check

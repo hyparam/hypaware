@@ -24,6 +24,9 @@ LLP 0494#cli-mint, #skills, #docs-mcp, #docs-order; hypaware-server LLP
 > move, Hernan's exact commands, the working push, one Kenny ask after
 > Hernan's key, and the Cursor route.
 > Revision 3 folds guardian round 2's three advisories (R2-A1 to R2-A3).
+> Revision 4 folds the plan actionability check (P1: the staging push
+> scope matches LLP 0500#t2; P2: the moved repo's `validate.yml` run is a
+> verification row; the GitHub draft's no-mark variant).
 
 ## Summary {#summary}
 
@@ -535,7 +538,18 @@ in the email is unconfirmed; a short draft:
 > https://github.com/hyparam/hypaware-plugin. We would like it listed in
 > GitHub's MCP Registry.
 
-The mayor passes the draft to Hernan; it is not committed anywhere.
+If Hernan moves before server T6 is deployed (gate 2's fallback), the
+mayor passes the no-mark variant instead, which drops only the clause on
+marking:
+
+> HypAware (ai.hypaware/hypaware) is now in the MCP Registry. It gives an
+> agent read access to a team's AI coding history. Remote:
+> https://api.hypaware.ai/v1/mcp (bearer agent token); package: npm
+> `hypaware`. Repo: https://github.com/hyparam/hypaware-plugin. We would
+> like it listed in GitHub's MCP Registry.
+
+Either draft uses the repo name Kenny confirmed (#open-question). The
+mayor passes the draft to Hernan; it is not committed anywhere.
 
 ## Staging {#staging}
 
@@ -562,10 +576,14 @@ the future repo's root.
 - **HypForge deletes the staging branch** once `git ls-remote
   git@github.com:hyparam/hypaware-plugin.git main` shows the staging
   head: `git push origin --delete staging/hypaware-plugin`.
-- **Two HypForge pushes, both authorized by the build task.** Creating the
-  staging branch (sequence step 2) and deleting it (step 4) are pushes to
-  `hyparam/hypaware`. The plan's build task (LLP 0500#t2) carries the
-  authorization for both and for no other ref (guardian round 2, R2-A3).
+- **HypForge pushes one ref, under the build task's authorization.**
+  Creating the staging branch (sequence step 2), fast-forward fix-ups to
+  it before the move (a red `validate.yml` run, or a rename at step 3),
+  and deleting it (step 4) are pushes to `hyparam/hypaware`. LLP 0500#t2
+  carries the authorization and its exact scope: `staging/hypaware-plugin`
+  only, fast-forward only, no force push, no tags, no other ref, and the
+  delete only after the two equal heads are recorded (guardian round 2,
+  R2-A3; plan actionability check, P1).
 - **It is checked before it moves.** Its own `validate.yml` runs on push
   to the branch. hypaware's `ci.yml` does not: it triggers on pull
   requests, merge groups and pushes to `master` only, and the orphan tree
@@ -607,7 +625,7 @@ the future repo's root.
 
 | Claim | Hermetic proof | Human or production proof |
 | --- | --- | --- |
-| The plugin installs in Claude Code and passes `claude plugin validate` | CI step 1 (both validates, then `marketplace add` and `install` from the checkout) | `/plugin install hypaware@hypaware` from the public repo, then a `query_sql` call with a real agent token (human) |
+| The plugin installs in Claude Code and passes `claude plugin validate` | CI step 1 (both validates, then `marketplace add` and `install` from the checkout) | `validate.yml` green on the moved repo's `main` at the staging head, read with `gh run list` (a seat); `/plugin install hypaware@hypaware` from the public repo, then a `query_sql` call with a real agent token (human) |
 | The plugin installs in Cursor | CI step 2 | a Cursor team admin, named through the mayor, runs Import from Repo, sets the variable under Configure, and calls `query_sql`; one individual follows the README's two steps and calls `query_sql` (human) |
 | `npx skills add` installs the two skills | CI step 3 (`--list`) | one install into a real agent (human) |
 | The skills match the pinned release | CI step 4 | none |
