@@ -166,25 +166,77 @@ test('every config block parses and uses only its client\'s documented keys', ()
   }
 })
 
-test('client-specific remote forms match what each client reads', () => {
-  /** @param {string} client */
-  const remote = (client) => serverEntry(/** @type {any} */ (markedBlocks().find((b) => b.client === client && b.kind === 'remote')))
-  assert.equal(remote('claude-code').type, 'http')
-  assert.equal(remote('claude-code').headers.Authorization, 'Bearer ${HYPAWARE_AGENT_TOKEN}')
-  assert.equal(remote('cursor').headers.Authorization, 'Bearer ${env:HYPAWARE_AGENT_TOKEN}')
-  assert.equal(remote('codex').bearer_token_env_var, 'HYPAWARE_AGENT_TOKEN')
-  assert.deepEqual(
-    { transport: remote('devin').transport, auth_method: remote('devin').auth_method },
-    { transport: 'HTTP', auth_method: 'auth_header' },
-  )
+/**
+ * The value constraints each client documents for a remote entry: the
+ * transport values it accepts, and the token reference in that client's own
+ * substitution syntax. A key check alone passes a transport the client
+ * rejects or a bearer the server rejects (`Bearer ${input:x}-junk` is still
+ * `Bearer ` plus text), so each remote entry is pinned whole.
+ *
+ * @type {Record<string, { transports: Record<string, string[]>, entry: Record<string, any> }>}
+ */
+const REMOTE_VALUES = {
+  'claude-code': {
+    transports: { type: ['http', 'sse'] },
+    entry: { type: 'http', url: REMOTE_URL, headers: { Authorization: 'Bearer ${HYPAWARE_AGENT_TOKEN}' } },
+  },
+  cursor: {
+    transports: {},
+    entry: { url: REMOTE_URL, headers: { Authorization: 'Bearer ${env:HYPAWARE_AGENT_TOKEN}' } },
+  },
+  vscode: {
+    transports: { type: ['http', 'sse'] },
+    entry: { type: 'http', url: REMOTE_URL, headers: { Authorization: 'Bearer ${input:hypaware-token}' } },
+  },
+  codex: {
+    transports: {},
+    entry: { url: REMOTE_URL, bearer_token_env_var: 'HYPAWARE_AGENT_TOKEN' },
+  },
+  devin: {
+    transports: { transport: ['STDIO', 'SSE', 'HTTP'] },
+    entry: { transport: 'HTTP', url: REMOTE_URL, auth_method: 'auth_header', headers: { Authorization: 'Bearer <agent token>' } },
+  },
+}
 
-  // VS Code resolves `${input:<id>}` against the same file's `inputs`.
-  const vsBlock = markedBlocks().find((b) => b.client === 'vscode' && b.kind === 'remote')
-  const vsDoc = JSON.parse(/** @type {any} */ (vsBlock).body)
-  const ref = remote('vscode').headers.Authorization.match(/\$\{input:([^}]+)\}/)
-  assert.ok(ref, 'vscode remote header reads an input')
-  const input = vsDoc.inputs.find((/** @type {any} */ i) => i.id === ref[1])
-  assert.deepEqual({ type: input?.type, password: input?.password }, { type: 'promptString', password: true })
+test('each remote block holds values its client accepts, with the token in that client\'s syntax', () => {
+  const remotes = markedBlocks().filter((b) => b.kind === 'remote')
+  assert.deepEqual(remotes.map((b) => b.client).sort(), Object.keys(REMOTE_VALUES).sort())
+  for (const block of remotes) {
+    const { transports, entry: expected } = REMOTE_VALUES[block.client]
+    const entry = serverEntry(block)
+    for (const [key, accepted] of Object.entries(transports)) {
+      assert.ok(accepted.includes(entry[key]), `${block.client} remote: ${key} '${entry[key]}' is not one of ${accepted.join(', ')}`)
+    }
+    assert.deepEqual(entry, expected, `${block.client} remote`)
+  }
+})
+
+test('the VS Code remote block declares the input its header reads, with every required field', () => {
+  const block = markedBlocks().find((b) => b.client === 'vscode' && b.kind === 'remote')
+  const doc = JSON.parse(/** @type {any} */ (block).body)
+  assert.deepEqual(Object.keys(doc).sort(), ['inputs', 'servers'])
+  assert.ok(Array.isArray(doc.inputs), 'vscode: inputs is an array')
+
+  // VS Code's input variables: `type`, `id` and `description` are required;
+  // a promptString may add `password` and `default`.
+  const ids = new Set()
+  for (const input of doc.inputs) {
+    for (const key of Object.keys(input)) {
+      assert.ok(['type', 'id', 'description', 'password', 'default'].includes(key), `vscode input: '${key}' is not a documented key`)
+    }
+    assert.equal(input.type, 'promptString', 'vscode input: type')
+    assert.ok(typeof input.id === 'string' && /^[A-Za-z0-9_-]+$/.test(input.id), `vscode input: id '${input.id}'`)
+    assert.ok(typeof input.description === 'string' && input.description.trim() !== '', `vscode input ${input.id}: description is required`)
+    assert.ok(!ids.has(input.id), `vscode input: duplicate id '${input.id}'`)
+    ids.add(input.id)
+  }
+
+  // Every `${input:<id>}` the servers read resolves, and the token input is masked.
+  const refs = [...JSON.stringify(doc.servers).matchAll(/\$\{input:([^}]*)\}/g)].map((m) => m[1])
+  assert.deepEqual(refs, ['hypaware-token'])
+  const token = doc.inputs.find((/** @type {any} */ i) => i.id === 'hypaware-token')
+  assert.ok(token, 'vscode: the header\'s input is declared')
+  assert.equal(token.password, true, 'vscode: the token input is a password prompt')
 })
 
 // @ref LLP 0494#cli-mint [tests]: the page states the token's reach in the mint reminder's plain words, as the minter
