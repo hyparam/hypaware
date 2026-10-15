@@ -533,6 +533,22 @@ test('waitForClientAttach returns empty on timeout without hanging', async () =>
   assert.ok(calls >= 1)
 })
 
+test('waitForClientAttach stops after three seconds by default when no client attaches', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 0 })
+  let calls = 0
+  const names = await waitForClientAttach({
+    env: {},
+    probe: async () => {
+      calls += 1
+      return []
+    },
+    sleep: async (ms) => { t.mock.timers.tick(ms) },
+  })
+  assert.deepEqual(names, [])
+  assert.equal(Date.now(), 3000)
+  assert.equal(calls, 4)
+})
+
 test('waitForClientAttach swallows a probe that throws mid-poll and still times out to empty (Major 1)', async () => {
   let calls = 0
   // A transient fs error (EMFILE/EACCES/EIO) during a poll, the exact throw the
