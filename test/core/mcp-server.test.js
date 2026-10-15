@@ -9,6 +9,10 @@ import { serveStdio } from '../../src/core/mcp/stdio.js'
 import { REMOTE_TOOL_CONTRACTS } from '../../src/core/mcp/contracts.js'
 import { createVerbRegistry } from '../../src/core/registry/verbs.js'
 
+/**
+ * @import { RemoteToolContract } from '../../hypaware-plugin-kernel-types.js'
+ */
+
 const readVerb = {
   name: 'query sql', tool: 'query_sql', summary: 'Run SQL', authClass: 'read',
   inputSchema: { type: 'object', properties: { sql: { type: 'string', greedy: true } }, required: ['sql'], positional: ['sql'] },
@@ -180,7 +184,7 @@ test('initialize on http with no recommendation tool renders no recommendation l
   assert.doesNotMatch(text, /hyp report/)
 })
 
-test('initialize for an http read principal with the two read contracts renders the hand-off and no mark line', async () => {
+test('initialize for an http read principal with every contract bound renders the hand-off and no mark line', async () => {
   const verbs = createVerbRegistry()
   verbs.register(/** @type {any} */ (readVerb))
   verbs.register(/** @type {any} */ (operatorVerb))
@@ -192,10 +196,12 @@ test('initialize for an http read principal with the two read contracts renders 
       summary: c.summary,
       inputSchema: c.inputSchema,
       authClass: c.authClass,
+      scope: c.scope,
       operation: async () => ({}),
       render: () => ({ stdout: '' }),
     })
   }
+  // A read principal: no report-publish, so the bound mark stays hidden.
   const s = createMcpServer({
     verbs,
     query: /** @type {any} */ (fakeQuery),
@@ -240,4 +246,120 @@ test('instructions are built once per assembly, on the first initialize, not per
   assert.equal(listed, 1)
   assert.equal(new Set(seen).size, 1)
   assert.ok(seen[0].length > 0)
+})
+
+// The mark as the server binds it: the shared contract plus an operation. No
+// host in this repo registers it; the server does, under LLP 0598.
+const MARK_CONTRACT = /** @type {RemoteToolContract} */ (REMOTE_TOOL_CONTRACTS.find((c) => c.tool === 'set_recommendation_status'))
+
+/** @param {(params: Record<string, unknown>) => unknown} operation */
+function boundMark(operation) {
+  return {
+    name: 'contract set_recommendation_status',
+    tool: MARK_CONTRACT.tool,
+    title: MARK_CONTRACT.title,
+    summary: MARK_CONTRACT.summary,
+    inputSchema: MARK_CONTRACT.inputSchema,
+    authClass: MARK_CONTRACT.authClass,
+    scope: MARK_CONTRACT.scope,
+    operation: async (/** @type {Record<string, unknown>} */ p) => operation(p),
+    render: () => ({ stdout: '' }),
+  }
+}
+
+/**
+ * An assembly over a real registry holding the read verb and the bound mark.
+ *
+ * @param {{ transport?: 'stdio' | 'http', allowScopes?: string[], calls?: Record<string, unknown>[] }} opts
+ */
+function markAssembly({ transport = 'http', allowScopes, calls = [] }) {
+  const verbs = createVerbRegistry()
+  verbs.register(/** @type {any} */ (readVerb))
+  verbs.register(boundMark((p) => { calls.push(p); return { id: p.id, status: { state: p.state } } }))
+  return createMcpServer({
+    verbs,
+    query: /** @type {any} */ (fakeQuery),
+    runTool: (v, p) => Promise.resolve(v.operation(p, /** @type {any} */ ({}))),
+    transport,
+    ...(transport === 'http' ? { allowOperator: false } : {}),
+    ...(allowScopes === undefined ? {} : { allowScopes }),
+  })
+}
+
+const MARK_CALL = {
+  jsonrpc: '2.0', id: 20, method: 'tools/call',
+  params: { name: 'set_recommendation_status', arguments: { id: 'hyprec-0123456789abcdef', state: 'applied', reason: 'fixed', links: ['https://example.com/pr/1'] } },
+}
+
+test('a write verb with no scope, or an empty one, is refused at registration', () => {
+  const verbs = createVerbRegistry()
+  for (const scope of [undefined, '', 42]) {
+    assert.throws(
+      () => verbs.register(/** @type {any} */ ({ ...boundMark(() => ({})), scope })),
+      /a write verb must name a non-empty scope/,
+    )
+  }
+  assert.equal(verbs.getByTool('set_recommendation_status'), undefined)
+  // An unknown class stays refused too.
+  assert.throws(() => verbs.register(/** @type {any} */ ({ ...boundMark(() => ({})), authClass: 'admin' })), /unknown authClass 'admin'/)
+})
+
+test('with report-publish admitted the mark is listed as a non-destructive write and dispatched', async () => {
+  /** @type {Record<string, unknown>[]} */
+  const calls = []
+  const s = markAssembly({ allowScopes: ['report-publish'], calls })
+  const list = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+  const mark = list.result.tools.find((/** @type {any} */ t) => t.name === 'set_recommendation_status')
+  assert.ok(mark, 'the mark is listed')
+  assert.equal(mark.title, 'Set recommendation status')
+  assert.deepEqual(mark.annotations, { title: 'Set recommendation status', readOnlyHint: false, destructiveHint: false })
+  assert.deepEqual(mark.inputSchema.required, ['id', 'state'])
+
+  const r = /** @type {any} */ (await s.handleMessage(MARK_CALL))
+  assert.equal(r.result.isError, false)
+  assert.deepEqual(r.result.structuredContent, { id: 'hyprec-0123456789abcdef', status: { state: 'applied' } })
+  assert.deepEqual(calls, [MARK_CALL.params.arguments])
+})
+
+test('without report-publish the mark is neither listed nor reachable by a direct call', async () => {
+  // Default empty, an empty list, and a principal holding only other scopes.
+  for (const allowScopes of [undefined, [], ['query', 'report-read']]) {
+    for (const transport of /** @type {const} */ (['http', 'stdio'])) {
+      /** @type {Record<string, unknown>[]} */
+      const calls = []
+      const s = markAssembly({ transport, allowScopes, calls })
+      const list = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+      assert.deepEqual(list.result.tools.map((/** @type {any} */ t) => t.name), ['query_sql'], `${transport} ${JSON.stringify(allowScopes)}`)
+      const r = /** @type {any} */ (await s.handleMessage(MARK_CALL))
+      assert.equal(r.error.code, -32601, `${transport} ${JSON.stringify(allowScopes)}`)
+      assert.deepEqual(calls, [], 'the operation never ran')
+    }
+  }
+})
+
+test('allowScopes is read once: editing the array afterwards admits nothing', async () => {
+  /** @type {string[]} */
+  const allowScopes = []
+  const s = markAssembly({ allowScopes })
+  allowScopes.push('report-publish')
+  const list = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+  assert.ok(!list.result.tools.some((/** @type {any} */ t) => t.name === 'set_recommendation_status'))
+  assert.equal(/** @type {any} */ (await s.handleMessage(MARK_CALL)).error.code, -32601)
+})
+
+test('the gate is by class and scope, not by tool name', async () => {
+  // A write verb under another name and scope follows its own scope.
+  const verbs = createVerbRegistry()
+  verbs.register(/** @type {any} */ ({ ...boundMark(() => ({ ok: true })), name: 'other write', tool: 'other_write', scope: 'other-scope' }))
+  verbs.register(boundMark(() => ({ ok: true })))
+  const s = createMcpServer({
+    verbs,
+    query: /** @type {any} */ (fakeQuery),
+    runTool: (v, p) => Promise.resolve(v.operation(p, /** @type {any} */ ({}))),
+    transport: 'http',
+    allowOperator: false,
+    allowScopes: ['other-scope'],
+  })
+  const list = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+  assert.deepEqual(list.result.tools.map((/** @type {any} */ t) => t.name), ['other_write'])
 })
