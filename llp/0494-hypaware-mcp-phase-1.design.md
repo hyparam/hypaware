@@ -818,7 +818,7 @@ No hot path changes.
 ## Consequences
 
 This branch adds Draft forward-refs. The LLP 0034 and LLP 0118 lines record
-Phil's yes; the LLP 0298 line is removed if Kenny declines:
+Phil's yes and the LLP 0298 line Kenny's:
 
 - LLP 0034#tool-auth-class: a third class, `write`, admitted by a named
   credential scope, plus annotations derived from the class (Phil, yes,
@@ -827,7 +827,7 @@ Phil's yes; the LLP 0298 line is removed if Kenny declines:
   credential with a different default lifetime, which can read the org's
   history and mark recommendations, publish reports and delete reports as
   the person who minted it; `--label` names the integration that holds it
-  (Kenny).
+  (Kenny, yes, 2026-10-15T18:00:18Z, Slack 1792087218.778909).
 - LLP 0118#requirements: HypAware may create and remove only its own
   marker-owned skill directories under `~/.hermes/skills/`, nothing else
   under `~/.hermes/`, removed on detach (Phil, yes, 2026-10-14T18:34:17Z,
