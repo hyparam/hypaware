@@ -66,10 +66,12 @@ const STUB_PROVIDER = '@doctor/stub-provider'
  *
  * @param {PluginManifest} manifest
  * @param {string} rootDir Absolute path to the plugin directory.
- * @param {{ knownCapabilities?: Map<string, string[]> }} [opts]
+ * @param {{ knownCapabilities?: Map<string, string[]>, withVerbs?: boolean }} [opts]
  *   `knownCapabilities` maps a capability name to the versions other
  *   plugins provide; each is pre-seeded as a stub so `requireCapability`
- *   resolves during the dry run.
+ *   resolves during the dry run. `withVerbs` adds the verbs the plugin
+ *   registered to a successful result, for the MCP reference generator; the
+ *   doctor itself leaves it off, so its report is unchanged.
  * @returns {Promise<DryRunResult>}
  */
 export async function dryRunActivate(manifest, rootDir, opts = {}) {
@@ -152,7 +154,10 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
       }
     }
 
-    return { ok: true, registered: snapshotRegistry(runtime, commandRegistry, refused), refused }
+    const registered = snapshotRegistry(runtime, commandRegistry, refused)
+    // @ref LLP 0494#docs-reference [implements]: the reference reads the verbs a plugin really registers, with no boot and no port bound
+    if (opts.withVerbs) return { ok: true, registered, refused, verbs: runtime.verbs.list() }
+    return { ok: true, registered, refused }
   } finally {
     await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
   }
