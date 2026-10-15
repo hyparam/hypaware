@@ -485,10 +485,11 @@ echo "v=MCPv1; k=ed25519; p=$("$OPENSSL" pkey -in key.pem -pubout -outform DER |
 
 The last command prints the exact record value, one line of the form
 `v=MCPv1; k=ed25519; p=<44 base64 characters>`, with Hernan's public key
-as the last part. The line is public. Hernan keeps
-`~/.config/hypaware-registry/key.pem` and sends the line to the mayor,
-who puts it in the one Kenny ask (#staging). HypForge never generates,
-sees or holds the key.
+as the last part. The line is public. Hernan keeps `key.pem` and sends
+the line to the mayor, who puts it in the one Kenny ask (#staging).
+Keeping `key.pem` in the company password manager, instead of or as well
+as `~/.config/hypaware-registry`, is fine: only `key.pem` is secret.
+HypForge never generates, sees or holds the key.
 
 **Kenny, once, in the `hypaware.ai` DNS:**
 
@@ -508,15 +509,17 @@ them once it propagates.
 ```sh
 brew install mcp-publisher
 OPENSSL="$(brew --prefix openssl@3)/bin/openssl"
-KEY=~/.config/hypaware-registry/key.pem
+KEY=~/.config/hypaware-registry/key.pem  # set to wherever key.pem is
 PRIVATE_KEY=$("$OPENSSL" pkey -in "$KEY" -noout -text | grep -A3 "priv:" | tail -n +2 | tr -d ' :\n')
 mcp-publisher login dns --domain hypaware.ai --private-key "$PRIVATE_KEY"
 cd "$(mktemp -d)" && git clone https://github.com/hyparam/hypaware-plugin.git
 cd hypaware-plugin/registry && mcp-publisher publish
 ```
 
-The clone is a fresh public checkout in a temp directory, apart from the
-key's directory.
+Hernan sets `KEY` to the path of his `key.pem`. If he keeps it in the
+password manager, he saves it to a file outside any repo first (`chmod
+600`) and points `KEY` at that file. The clone is a fresh public checkout
+in a temp directory, apart from the key's directory.
 
 **Rotation.** A new key means a new record. A stale record left on the
 apex is tried and fails verification, so Kenny replaces the old value
