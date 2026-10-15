@@ -7,6 +7,7 @@
 **Date:** 2026-10-13
 **Source:** [HYP-128 "HypAware MCP: close the agent access gap"](https://linear.app/hyperparam/issue/HYP-128/hypaware-mcp-close-the-agent-access-gap), Phase 1, at the Linear revisions LLP 0493 cites; Hernan's direction change of 2026-10-13T20:21:14Z and his scope answer of 2026-10-13T20:50Z
 **Extends:** [LLP 0034#tool-auth-class](./0034-mcp-host-intrinsic.decision.md#tool-auth-class) (Phil), [LLP 0298#mint](./0298-ci-tokens-share-one-gateway.decision.md#mint) (Kenny), [LLP 0118#requirements](./0118-hermes-log-forwarding.spec.md#requirements) (Phil)
+**Extended-by:** [LLP 0499](./0499-hypaware-mcp-phase-2.design.md) (#seams, Phase 2: the plugin repo, the registry entry and the DNS proof)
 **Related:** LLP 0493 (request), LLP 0034#proxy-fallback, #scoped-credential,
 #stdio-stdout-discipline, LLP 0107#every-attach, LLP 0197, LLP 0491#guidance;
 hypaware-server LLP 0602 (request), LLP 0596 (server design), LLP 0597 (the
