@@ -5,13 +5,13 @@ import path from 'node:path'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { syncDestinationName } from '../remote/builtin_remotes.js'
-import { readCentralSinkOrigins, readForwardSinkOrigins } from '../remote/gateway_seed.js'
+import { readSinkOrigins } from '../remote/gateway_seed.js'
 import { createUsagePolicyResolver } from './matcher.js'
 import { localOnlyListPath } from './local_only.js'
 import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe } from './folder_ask.js'
 
 /**
- * Session-start classification (LLP 0106): on an enrolled machine, an
+ * Session-start classification (LLP 0106): on a machine that forwards, an
  * interactive session opened in a directory with no explicit governing usage
  * class is asked - once - to classify the folder (sync / local-only / ignore).
  * The answer is written through the same `hyp policy set` verb the human and
@@ -100,9 +100,9 @@ export function verbArgvForClass(cls, targetPath) {
 /**
  * Build the classification prompt copy for a folder. This is the consent
  * surface many users first meet the class vocabulary through (LLP 0106
- * consequences), so it is deliberately explicit: it names the machine's
- * enrolled state, the default polarity, all three classes in plain language,
- * and the exact command that records each. Written to be delivered to a coding
+ * consequences), so it is deliberately explicit: it names why the machine
+ * forwards (an enrollment, or a sink of the user's own), the default polarity,
+ * all three classes in plain language, and the exact command that records each. Written to be delivered to a coding
  * agent (Claude/Codex), which then asks the human and runs the chosen verb.
  *
  * No em dashes and `-` in runtime strings, per the repo style.
@@ -110,15 +110,18 @@ export function verbArgvForClass(cls, targetPath) {
  * @ref LLP 0111#teaching [implements]: prints `hyp policy set <cwd> <token>`; the exit criterion is that no non-ignore class is ever taught with an ignore-spelled command
  * @ref LLP 0113 [implements]: the copy itself mandates menu presentation, tool-neutral with the Claude tool named, so tool-less clients degrade to prose
  * @ref LLP 0200#escape-hatch [implements]: the prompt names its own off switch, so "stop asking me" is answerable in the session that asked
- * @param {{ cwd: string, origins?: ReadonlyArray<string> }} args
+ * @ref LLP 0510#copy [implements]: a machine forwarding only through its own sink is not told it is enrolled
+ * @param {{ cwd: string, origins?: ReadonlyArray<string>, enrolled?: boolean }} args
  * @returns {string}
  */
-export function buildClassificationPrompt({ cwd, origins }) {
+export function buildClassificationPrompt({ cwd, origins, enrolled = true }) {
   // The namer's neutral fallback is unreachable here: `evaluateCwdClassification`
   // prompts only when an origin exists.
   const destination = syncDestinationName(origins)
   const lines = [
-    'This machine is enrolled, so by default the AI coding sessions you run here',
+    enrolled
+      ? 'This machine is enrolled, so by default the AI coding sessions you run here'
+      : 'This machine is set up to forward, so by default the AI coding sessions you run here',
     `are recorded and forwarded to ${destination}.`,
     `The folder ${cwd} has not been classified yet, so it would sync by default.`,
     '',
@@ -150,12 +153,13 @@ export function buildClassificationPrompt({ cwd, origins }) {
 
 /**
  * The pure decision at the heart of the hook (LLP 0106): prompt only when the
- * machine is enrolled AND the session is interactive AND the folder has no
+ * machine forwards AND the session is interactive AND the folder has no
  * explicit governing class. Every other combination passes through silently:
  *
- * - unenrolled: nothing forwards, so sync-vs-local-only is a distinction
+ * - not forwarding: nothing leaves, so sync-vs-local-only is a distinction
  *   without a difference; a prompt there is pure friction (LLP 0106
- *   #enrolled-only).
+ *   #enrolled-only). Forwarding, not enrollment, is the test: a sink the
+ *   user hand-authored in their own layer forwards just the same (LLP 0510).
  * - already classified: the question was asked and answered once; an explicit
  *   entry (including an explicit `full`/sync) suppresses it (LLP 0106
  *   #interactive, LLP 0103 explicit-full).
@@ -164,19 +168,20 @@ export function buildClassificationPrompt({ cwd, origins }) {
  *   the hook must never hang or fail such a run (LLP 0106 #interactive).
  * - `askMode: 'sync'` (the default, LLP 0200 #default): new folders sync and
  *   nobody is interrupted. Unclassified folders keep the implicit `full`
- *   default and the hook stays quiet. It is checked right after enrollment
+ *   default and the hook stays quiet. It is checked right after forwarding
  *   because it is the broadest answer there is: it settles every folder at
  *   once, so it outranks every per-folder reason below it. Only `ask`, which
  *   the user chooses in the wizard's new-folder step or with `hyp policy
  *   folders ask`, turns the per-folder question on.
  *
- * @ref LLP 0106 [implements]: unclassified + interactive + enrolled => ask once, when the ask is on
+ * @ref LLP 0106 [implements]: unclassified + interactive + forwarding => ask once, when the ask is on
+ * @ref LLP 0510#predicate [implements]: the gate is forwarding in the effective config, not enrollment
  * @ref LLP 0200#suppression [implements]: the mode gates the ask alone, never the resolved class
- * @param {{ enrolled: boolean, interactive: boolean, governed: boolean, askMode?: FolderAskMode }} state
- * @returns {{ prompt: boolean, reason: 'unenrolled' | 'ask-disabled' | 'classified' | 'non-interactive' | 'unclassified' }}
+ * @param {{ forwards: boolean, interactive: boolean, governed: boolean, askMode?: FolderAskMode }} state
+ * @returns {{ prompt: boolean, reason: 'not-forwarding' | 'ask-disabled' | 'classified' | 'non-interactive' | 'unclassified' }}
  */
-export function decideClassification({ enrolled, interactive, governed, askMode = DEFAULT_FOLDER_ASK_MODE }) {
-  if (!enrolled) return { prompt: false, reason: 'unenrolled' }
+export function decideClassification({ forwards, interactive, governed, askMode = DEFAULT_FOLDER_ASK_MODE }) {
+  if (!forwards) return { prompt: false, reason: 'not-forwarding' }
   if (askMode === 'sync') return { prompt: false, reason: 'ask-disabled' }
   if (governed) return { prompt: false, reason: 'classified' }
   if (!interactive) return { prompt: false, reason: 'non-interactive' }
@@ -188,13 +193,14 @@ export function decideClassification({ enrolled, interactive, governed, askMode 
  * to classify the folder, and if so the prompt copy to deliver. Reads exactly
  * the state the CLI marking verbs and the export seam read: the machine-local
  * list under `readObservabilityEnv(env).stateDir` (so a mark made by any writer
- * is honored), and the central-layer sink origins (the LLP 0063 D4 enrollment
- * gate) for the enrolled check. What the copy *names* is read separately and
- * wider, from the effective config the daemon boots, because a sink the
- * central layer never authored forwards all the same (#2208).
+ * is honored), and the `@hypaware/central` sink origins of one layered-config
+ * resolution: the effective config the daemon boots decides whether the
+ * machine forwards and names where (#2208, #2248), and the central layer of
+ * the same resolution answers `enrolled` (the LLP 0063 D4 enrollment, never
+ * widened to a local sink).
  *
  * Defensive throughout: a hook must never hang or fail a session (LLP 0106
- * #interactive). An enrollment lookup that throws is treated as unenrolled
+ * #interactive). A config lookup that throws is treated as not forwarding
  * (inert), and a corrupt/unreadable machine-local list is treated as "do not
  * prompt" rather than surfacing an error into the session - the mark verbs and
  * `hyp status` are where a corrupt list is meant to fail loudly, not a
@@ -208,8 +214,7 @@ export function decideClassification({ enrolled, interactive, governed, askMode 
  *   env: NodeJS.ProcessEnv,
  *   deps?: {
  *     readObservabilityEnv?: typeof readObservabilityEnv,
- *     readCentralSinkOrigins?: typeof readCentralSinkOrigins,
- *     readForwardSinkOrigins?: typeof readForwardSinkOrigins,
+ *     readSinkOrigins?: typeof readSinkOrigins,
  *     createResolver?: (listPath: string) => UsagePolicyResolver,
  *     readFolderAskMode?: typeof readFolderAskModeSafe,
  *   },
@@ -222,19 +227,24 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
   const listPath = localOnlyListPath(stateDir)
   const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
 
-  // Enrollment is the central layer alone (LLP 0063 D4). The origins are kept
-  // past the check because the copy has to name them too: whatever else
-  // forwards, where the enrollment forwards is always disclosed.
+  // One resolution answers both questions, so they describe one moment.
+  // Enrollment is its central layer alone (LLP 0063 D4); forwarding is every
+  // destination in it, enrollment origins leading so where the enrollment
+  // forwards is always disclosed. A repeated origin is harmless, because
+  // `syncDestinationName` dedupes by display name.
   /** @type {ReadonlyArray<string>} */
-  let origins = []
+  let central = []
+  /** @type {ReadonlyArray<string>} */
+  let destinations = []
   try {
-    const read = await (deps.readCentralSinkOrigins ?? readCentralSinkOrigins)({ stateDir, configPath })
-    if (Array.isArray(read)) origins = read
+    const read = await (deps.readSinkOrigins ?? readSinkOrigins)({ stateDir, configPath })
+    if (Array.isArray(read?.central)) central = read.central
+    destinations = Array.isArray(read?.effective) ? [...central, ...read.effective] : central
   } catch {
-    // Can't read the central layer -> the empty list stands, so the machine
-    // reads as not enrolled (inert); never fail the session on it.
+    // Can't resolve the config -> the empty lists stand, so the machine reads
+    // as not forwarding (inert); never fail the session on it.
   }
-  const enrolled = origins.length > 0
+  const enrolled = central.length > 0
 
   // The standing answer, if the user gave one (LLP 0200). The safe reader
   // never throws and falls back to `ask`, so a corrupt preference costs a
@@ -261,7 +271,7 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     governed = true
   }
 
-  const decision = decideClassification({ enrolled, interactive, governed, askMode })
+  const decision = decideClassification({ forwards: destinations.length > 0, interactive, governed, askMode })
   /** @type {{ prompt: boolean, reason: string, cwd: string, enrolled: boolean, governed: boolean, askMode: FolderAskMode, promptText?: string }} */
   const out = {
     prompt: decision.prompt,
@@ -275,20 +285,7 @@ export async function evaluateCwdClassification({ cwd, interactive, env, deps = 
     askMode,
   }
   if (decision.prompt) {
-    // Read only on the prompting path, which is the rare one, so a session
-    // that is never asked costs no second config read. The enrollment origins
-    // lead and are never dropped, so a disclosure read that fails still names
-    // where the enrollment forwards; a repeated origin is harmless, because
-    // `syncDestinationName` dedupes by display name.
-    let destinations = origins
-    try {
-      const readForwarded = deps.readForwardSinkOrigins ?? readForwardSinkOrigins
-      destinations = [...origins, ...await readForwarded({ stateDir, configPath })]
-    } catch {
-      // Same inert posture as the enrollment read: never fail the session on
-      // a config this hook could not resolve (LLP 0106 #interactive).
-    }
-    out.promptText = buildClassificationPrompt({ cwd, origins: destinations })
+    out.promptText = buildClassificationPrompt({ cwd, origins: destinations, enrolled })
   }
   return out
 }

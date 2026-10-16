@@ -323,7 +323,7 @@ export async function activate(ctx) {
   // as Claude's blocking prompt.
   ctx.commands.register({
     name: 'codex-hook classify-cwd',
-    summary: 'Internal Codex hook: nag to classify an unclassified folder on an enrolled machine',
+    summary: 'Internal Codex hook: nag to classify an unclassified folder on a machine that forwards',
     usage: 'hyp codex-hook classify-cwd',
     hidden: true,
     run: runCodexClassifyHook,
