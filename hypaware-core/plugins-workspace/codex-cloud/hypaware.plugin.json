@@ -38,7 +38,7 @@
       {
         "name": "codex-cloud",
         "label": "Codex Cloud (experimental)",
-        "summary": "Records hosted Codex coding chats using your existing Codex ChatGPT login. Includes prompts and tool outputs; imports existing history.",
+        "summary": "Records hosted Codex coding chats using your existing Codex ChatGPT login. Imports existing history.",
         "compose": {
           "plugin": {
             "name": "@hypaware/codex-cloud",
@@ -53,7 +53,7 @@
       {
         "name": "chatgpt-work",
         "label": "ChatGPT Work (experimental)",
-        "summary": "Records Work web and mobile chats together, including personal assistant prompts and tool outputs, using your existing Codex ChatGPT login.",
+        "summary": "Records Work web and mobile chats together using your existing Codex ChatGPT login.",
         "compose": {
           "plugin": {
             "name": "@hypaware/codex-cloud",
