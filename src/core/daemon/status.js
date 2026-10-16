@@ -4344,19 +4344,19 @@ async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, roll
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
   const daemonLog = gatewayLog.count + processingLog.count
-  const sinkMaterialize = gatewayLog.sinkMaterialize + processingLog.sinkMaterialize
+  const daemonLogSinkMaterialize = gatewayLog.sinkMaterialize + processingLog.sinkMaterialize
   /** @type {string[]} */
   const breakdown = []
   if (daemonLog > 0) {
-    breakdown.push(sinkMaterialize > 0
-      ? `${daemonLog} in the daemon log, ${sinkMaterialize} of them sink materialize failure${sinkMaterialize === 1 ? '' : 's'}`
-      : `${daemonLog} in the daemon log`)
+    breakdown.push(`${daemonLog} in the daemon log${sinkMaterializeOfThem(daemonLogSinkMaterialize)}`)
   }
-  if (devTelemetry.warningCount > 0) breakdown.push(`${devTelemetry.warningCount} in dev telemetry`)
+  if (devTelemetry.warningCount > 0) {
+    breakdown.push(`${devTelemetry.warningCount} in dev telemetry${sinkMaterializeOfThem(devTelemetry.sinkMaterialize)}`)
+  }
   return {
     total: daemonLog + sinkOutbox.total + devTelemetry.total,
     warningCount: daemonLog + devTelemetry.warningCount,
-    sinkMaterialize,
+    sinkMaterialize: daemonLogSinkMaterialize + devTelemetry.sinkMaterialize,
     breakdown,
     sinkDiagnostics: sinkOutbox.diagnostics,
     // The kernel daemon is the processing child, so its log speaks first; a
@@ -4365,6 +4365,11 @@ async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, roll
       ? processingLog.probationSinkFailures
       : gatewayLog.probationSinkFailures,
   }
+}
+
+/** @param {number} n */
+function sinkMaterializeOfThem(n) {
+  return n > 0 ? `, ${n} of them sink materialize failure${n === 1 ? '' : 's'}` : ''
 }
 
 /**
@@ -4448,9 +4453,11 @@ const PROBATION_SINK_FAILURES_MAX = 8
  * does not fix. `probationSinkFailures` is the sinks that failed to
  * materialize in the boot that was running when a config probation expired
  * at `rollbackAtMs`. A boot begins at `daemon.starting`. When that boot had
- * logged no materialize failure by then, the expiry was found at boot, before
- * sinks were materialized, so the boot before it is the one that could not
- * confirm the revision.
+ * not yet materialized its sinks by then (no materialize failure and no
+ * `daemon.healthy` or `daemon.degraded`), the expiry was found at boot, so
+ * the boot before it is the one that could not confirm the revision. A boot
+ * that did materialize with no failure explains nothing, whatever an earlier
+ * boot logged.
  *
  * @param {string} logPath
  * @param {number} sinceMs
@@ -4464,6 +4471,9 @@ async function countDaemonLogErrors(logPath, sinceMs, rollbackAtMs) {
   let previousBoot = []
   /** @type {SinkMaterializeFailure[]} */
   let currentBoot = []
+  // True once the current boot has materialized its sinks, which it reports
+  // with a failure or with its `daemon.healthy` / `daemon.degraded` outcome.
+  let currentBootMaterialized = false
   for (const line of (await readFileTail(logPath, DAEMON_LOG_TAIL_BYTES)).split('\n')) {
     if (!line) continue
     /** @type {any} */
@@ -4481,11 +4491,17 @@ async function countDaemonLogErrors(logPath, sinceMs, rollbackAtMs) {
         if (parsed.event === 'daemon.starting') {
           previousBoot = currentBoot
           currentBoot = []
-        } else if (isSinkFailure && currentBoot.length < PROBATION_SINK_FAILURES_MAX) {
-          currentBoot.push({
-            instance: typeof parsed.instance === 'string' ? parsed.instance : null,
-            errorKind: typeof parsed.error_kind === 'string' ? parsed.error_kind : null,
-          })
+          currentBootMaterialized = false
+        } else if (parsed.event === 'daemon.healthy' || parsed.event === 'daemon.degraded') {
+          currentBootMaterialized = true
+        } else if (isSinkFailure) {
+          currentBootMaterialized = true
+          if (currentBoot.length < PROBATION_SINK_FAILURES_MAX) {
+            currentBoot.push({
+              instance: typeof parsed.instance === 'string' ? parsed.instance : null,
+              errorKind: typeof parsed.error_kind === 'string' ? parsed.error_kind : null,
+            })
+          }
         }
       }
     }
@@ -4494,7 +4510,7 @@ async function countDaemonLogErrors(logPath, sinceMs, rollbackAtMs) {
     count += 1
     if (isSinkFailure) sinkMaterialize += 1
   }
-  return { count, sinkMaterialize, probationSinkFailures: currentBoot.length > 0 ? currentBoot : previousBoot }
+  return { count, sinkMaterialize, probationSinkFailures: currentBootMaterialized ? currentBoot : previousBoot }
 }
 
 /**
@@ -4587,10 +4603,10 @@ async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
  *
  * @param {string} telemetryDir
  * @param {number} sinceMs
- * @returns {Promise<{ total: number, warningCount: number }>}
+ * @returns {Promise<{ total: number, warningCount: number, sinkMaterialize: number }>}
  */
 async function countDevTelemetryErrors(telemetryDir, sinceMs) {
-  const result = { total: 0, warningCount: 0 }
+  const result = { total: 0, warningCount: 0, sinkMaterialize: 0 }
   /** @type {string[]} */
   let entries
   try {
@@ -4610,6 +4626,9 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
         if (!recordedWithinWindow(/** @type {any} */ (parsed).timestamp, sinceMs)) continue
         result.total += 1
         if (parsed.body !== 'sink.export_batch.failed') result.warningCount += 1
+        // The OTel half of `daemon.sink_materialize_failed`, so the repair
+        // hint treats it the same way (issue #2547).
+        if (parsed.body === 'sink.materialize_failed') result.sinkMaterialize += 1
       } catch {
         // skip malformed lines silently
       }

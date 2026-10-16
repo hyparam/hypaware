@@ -140,6 +140,22 @@ test('a failure from an earlier boot that later recovered does not explain the e
   assert.deepEqual(rollback.repair, [CONFIG_HINT])
 })
 
+test('a current boot that materialized cleanly is not explained by the boot before it', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  await writeProcessingLog(stateRoot, [
+    { agoMs: 60 * MIN, level: 'info', event: 'daemon.starting' },
+    { agoMs: 59 * MIN, level: 'error', event: 'daemon.sink_materialize_failed', instance: 'central', error_kind: 'sink_plugin_not_active' },
+    { agoMs: 30 * MIN, level: 'info', event: 'daemon.starting' },
+    { agoMs: 29 * MIN, level: 'info', event: 'daemon.healthy' },
+  ])
+  await writeExpiredRollback(stateRoot, 25 * MIN)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const rollback = find(report.diagnostics, 'remote_config_rolled_back')
+  assert.doesNotMatch(rollback.message, /did not materialize/)
+  assert.deepEqual(rollback.repair, [CONFIG_HINT])
+})
+
 test('a plain probation expiry keeps the config-revision hint', async () => {
   const { hypHome, stateRoot } = await makeHome()
   await writeProcessingLog(stateRoot, [
@@ -181,6 +197,26 @@ test('mixed recent errors put the log grep first and scope the restart to the ot
   const recent = find(report.diagnostics, 'recent_errors')
   assert.ok(recent.repair?.[0].startsWith('grep -s sink_materialize_failed '))
   assert.match(recent.repair?.[1] ?? '', /^hyp daemon restart {2}# for the other errors/)
+})
+
+test('the dev telemetry half of a sink materialize failure is not one of the other errors', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  await writeProcessingLog(stateRoot, [
+    { agoMs: 29 * MIN, level: 'error', event: 'daemon.sink_materialize_failed', instance: 'central', error_kind: 'sink_plugin_not_active' },
+  ])
+  const telemetryDir = path.join(stateRoot, 'dev-telemetry')
+  await fs.mkdir(telemetryDir, { recursive: true })
+  await fs.writeFile(path.join(telemetryDir, 'logs-test.jsonl'), JSON.stringify({
+    timestamp: new Date(Date.now() - 29 * MIN).toISOString(),
+    severityText: 'ERROR',
+    body: 'sink.materialize_failed',
+  }) + '\n')
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const recent = find(report.diagnostics, 'recent_errors')
+  assert.match(recent.message, /1 in dev telemetry, 1 of them sink materialize failure/)
+  assert.ok(recent.repair?.[0].startsWith('grep -s sink_materialize_failed '))
+  assert.ok(!offersRestart(recent), 'both halves are the same failure, so no restart')
 })
 
 test('recent errors with no sink materialize failure still offer a plain restart', async () => {
