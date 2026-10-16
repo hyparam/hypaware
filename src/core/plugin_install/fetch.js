@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import { loadManifest } from '../manifest.js'
 import { fetchGitSource } from './git_fetch.js'
-import { installDirIsContained, pluginInstallDir } from './paths.js'
+import { checkInstallDestination, installDirIsContained, pluginInstallDir } from './paths.js'
 import { sha256Hex } from '../util/json_util.js'
 
 /**
@@ -129,6 +129,14 @@ async function fetchLocalDir({ source, stateDir }) {
     }
   }
 
+  const destination = await checkInstallDestination(stateDir, manifest.name)
+  if (!destination.ok) {
+    return {
+      ok: false,
+      errorKind: 'install_dir_unsafe',
+      message: `plugin install: refused, ${destination.reason}; nothing was installed and nothing was removed`,
+    }
+  }
   const installDir = pluginInstallDir(stateDir, manifest.name)
   await fs.rm(installDir, { recursive: true, force: true })
   await fs.mkdir(installDir, { recursive: true })
