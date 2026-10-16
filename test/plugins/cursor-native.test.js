@@ -10,6 +10,8 @@ import { cursorNativeFixture, growToMaximalGraph, wire } from '../../hypaware-co
 import { cursorFields, cursorStorePaths, findCursorSession, listCursorSessions, readCursorSession } from '../../hypaware-core/plugins-workspace/cursor/src/native.js'
 import { createCursorBackfillProvider, cursorAdmission } from '../../hypaware-core/plugins-workspace/cursor/src/recovery.js'
 import { createCursorDecoder } from '../../hypaware-core/plugins-workspace/cursor/src/native_decoder.js'
+import { aiGatewayRowsFromProjectedExchange } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { createProjectedExchangeWriter } from '../../hypaware-core/plugins-workspace/ai-gateway/src/exchange_writer.js'
 import { activate } from '../../hypaware-core/plugins-workspace/cursor/src/index.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
@@ -26,6 +28,69 @@ async function fixture(frontend = 'cli') {
   return { ...f, root, cwd, opts, async cleanup() { f.close(); await fs.rm(root, { recursive: true, force: true }) } }
 }
 
+test('native tool calls retain arguments and join results, including replay over pre-upgrade rows', async () => {
+  const f = await fixture()
+  try {
+    const exchange = readCursorSession(f.session).exchanges[0]
+    const rows = aiGatewayRowsFromProjectedExchange(exchange)
+    const calls = rows.filter((row) => row.part_type === 'tool_call')
+    const results = rows.filter((row) => row.part_type === 'tool_result')
+    assert.equal(calls.length, 5)
+    for (const result of results) {
+      const call = calls.find((row) => row.tool_call_id === result.tool_result_for)
+      assert.ok(call)
+      assert.equal(call.role, 'assistant')
+      assert.equal(call.tool_name, result.tool_name)
+      assert.deepEqual(call.tool_args, result.tool_args)
+      assert.notEqual(call.part_id, result.part_id)
+      assert.ok(rows.indexOf(call) < rows.indexOf(result))
+      assert.equal(result.message_id, 'cursor:' + JSON.stringify([f.session.id, 'native-user', 'tool', result.tool_call_id]))
+    }
+    // The old reader stored these exact identities without call rows. Upgrading
+    // fills the missing calls without duplicating results, text or prompts.
+    const stored = rows.filter((row) => row.part_type !== 'tool_call')
+    const storage = /** @type {any} */ ({
+      cacheTablePath: () => '/cache/ai_gateway_messages',
+      async discoverCachePartitions() { return [] },
+      async *readRows() {},
+      async *readSpooledRows() { yield* stored },
+      async appendRows(_path, _columns, next) { stored.push(...next) },
+    })
+    assert.equal((await createProjectedExchangeWriter({ storage }).record(exchange)).rowsWritten, 5)
+    assert.equal((await createProjectedExchangeWriter({ storage }).record(exchange)).rowsWritten, 0)
+    assert.equal(stored.length, 13)
+  } finally { await f.cleanup() }
+})
+
+test('Shell outcomes ignore known metadata, decode exit status, and keep unrecognized outcomes unknown', async () => {
+  const f = await fixture()
+  try {
+    const cases = [
+      { label: 'success', outcome: wire([1, wire()]), error: false },
+      { label: 'nonzero exit', outcome: wire([1, wire([3, 1])]), error: true },
+      { label: 'negative int32 exit', outcome: wire([1, Buffer.from([24, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1])]), error: true },
+      { label: 'signal', outcome: wire([1, wire([4, 'SIGTERM'])]), error: true },
+      { label: 'failure with sandbox metadata', outcome: wire([2, wire([3, 1])], [101, wire()]), error: true },
+      { label: 'success with metadata', outcome: wire([1, wire()], [101, wire()], [102, 0], [103, '/terminals'], [104, 42]), error: false },
+      { label: 'background still running', outcome: wire([1, wire()], [102, 1]), error: null },
+      ...[2, 3, 4, 5, 7].map((terminal) => ({ label: 'error alternative ' + terminal, outcome: wire([terminal, wire()]), error: true })),
+      { label: 'future outcome', outcome: wire([99, wire()]), error: null },
+      { label: 'future metadata', outcome: wire([1, wire()], [105, 1]), error: null },
+      { label: 'conflicting outcomes', outcome: wire([1, wire()], [2, wire()]), error: null },
+    ]
+    for (const { label, outcome, error } of cases) {
+      const step = f.put(wire([2, wire([57, 'native-call-3'], [1, wire([2, outcome])])]))
+      const turn = f.put(wire([1, wire([1, f.user], [2, step], [3, 'native-generation'])]))
+      f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turn]))
+      const rows = readCursorSession(f.session).exchanges.flatMap((exchange) => aiGatewayRowsFromProjectedExchange(exchange))
+      const result = rows.find((row) => row.part_type === 'tool_result')
+      assert.ok(result)
+      assert.equal(result.is_error ?? null, error === true ? true : null, label)
+      assert.deepEqual(result.status, error === null ? undefined : { tool_status: error ? 'error' : 'success' }, label)
+    }
+  } finally { await f.cleanup() }
+})
+
 for (const frontend of /** @type {const} */ (['editor', 'cli'])) {
   test(`${frontend} reads committed WAL, preserves native identities and full outcomes, excludes private metadata`, async () => {
     const f = await fixture(frontend)
@@ -37,9 +102,9 @@ for (const frontend of /** @type {const} */ (['editor', 'cli'])) {
       assert.ok(session)
       const snap = readCursorSession(session)
       const messages = snap.exchanges.flatMap((e) => e.messages)
-      assert.equal(messages.length, 8)
+      assert.equal(messages.length, 13)
       assert.equal(messages.filter((m) => m.content === 'Same text').length, 2)
-      assert.equal(new Set(messages.map((m) => m.message_id)).size, 8)
+      assert.equal(new Set(messages.map((m) => m.message_id)).size, 13)
       const tools = messages.filter((m) => m.role === 'tool').map((m) => /** @type {any} */ (m.content)[0])
       assert.deepEqual(tools.map((t) => t.name), ['Read', 'Grep', 'Glob', 'Shell', 'Shell'])
       assert.deepEqual(tools.map((t) => t.is_error), [false, false, false, true, true])
@@ -83,7 +148,7 @@ test('CLI refuses unfinished assistant text, retains completed text without an e
     f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turn]))
     assert.throws(() => readCursorSession(f.session), /native_in_progress/)
     f.writeRoot(f.state)
-    assert.equal(readCursorSession(f.session).exchanges[0].messages.length, 8)
+    assert.equal(readCursorSession(f.session).exchanges[0].messages.length, 13)
   } finally { await f.cleanup() }
 })
 
@@ -94,14 +159,14 @@ test('only the exact suppression value drops a typed prompt, and it drops nothin
   try {
     f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turnFor(userWith(1))]))
     const suppressed = readCursorSession(f.session).exchanges[0].messages
-    assert.equal(suppressed.length, 7)
+    assert.equal(suppressed.length, 12)
     assert.equal(suppressed.some((m) => m.role === 'user'), false)
     // Any other value keeps the prompt, so an unrelated flag cannot silently
     // delete human speech while assistant and tool rows still land.
     for (const flag of [0, 2]) {
       f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turnFor(userWith(flag))]))
       const messages = readCursorSession(f.session).exchanges[0].messages
-      assert.equal(messages.length, 8)
+      assert.equal(messages.length, 13)
       assert.equal(messages[0].content, 'Read and search notes.txt')
     }
   } finally { await f.cleanup() }
@@ -112,11 +177,11 @@ test('archive/current overlap does not duplicate tools, and unknown tool outcome
   try {
     const archive = f.put(wire(...f.refs.map((ref) => [1, ref])))
     f.writeRoot(Buffer.concat([f.state, wire([13, archive])]))
-    assert.equal(readCursorSession(f.session).exchanges[0].messages.length, 8)
+    assert.equal(readCursorSession(f.session).exchanges[0].messages.length, 13)
     const step = f.put(wire([2, wire([57, 'native-call-0'], [8, wire([2, wire([99, wire()])])])]))
     const turn = f.put(wire([1, wire([1, f.user], [2, step], [3, 'native-generation'])]))
     f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turn]))
-    const content = /** @type {any} */ (readCursorSession(f.session).exchanges[0].messages[1].content)
+    const content = /** @type {any} */ (readCursorSession(f.session).exchanges[0].messages.find((message) => message.role === 'tool')?.content)
     assert.equal(content[0].is_error, null)
   } finally { await f.cleanup() }
 })
@@ -140,11 +205,13 @@ test('native Read observes workspace, symlink and stricter policies; session ign
     const ignoredSessions = new Set()
     const admission = cursorAdmission({ ignoredSessions })
     const exchange = readCursorSession(f.session).exchanges[0]
-    assert.equal((await admission.filter(exchange))?.messages.length, 8)
+    assert.equal((await admission.filter(exchange))?.messages.length, 13)
     await fs.unlink(path.join(f.cwd, 'notes.txt'))
     await fs.writeFile(path.join(f.root, 'outside'), 'private')
     await fs.symlink(path.join(f.root, 'outside'), path.join(f.cwd, 'notes.txt'))
-    assert.equal((await admission.filter(exchange))?.messages.length, 7)
+    const permitted = await admission.filter(exchange)
+    assert.equal(permitted?.messages.length, 11)
+    assert.equal(JSON.stringify(permitted).includes('native-call-0'), false, 'neither side of the refused Read survives')
     ignoredSessions.add(f.session.id)
     assert.equal(admission.session(f.session), false)
     assert.equal(await admission.filter(exchange), undefined)
@@ -273,7 +340,7 @@ test('historical windows select messages inside recently updated sessions and wi
     assert.equal(first[0].messages.length, 2)
     assert.equal((await collect()).length, 0)
     delete ctx.until
-    assert.equal((await collect())[0].messages.length, 8)
+    assert.equal((await collect())[0].messages.length, 13)
   } finally { await f.cleanup() }
 })
 

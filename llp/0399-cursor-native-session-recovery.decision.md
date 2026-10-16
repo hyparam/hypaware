@@ -33,7 +33,10 @@ identity, including Shell calls whose hook helper IDs differ from native IDs.
 
 A human prompt is identified by `(session, native user-message ID)`. Assistant
 segments use `(session, user-message ID, request ID, typed step ordinal)`;
-tools use `(session, user-message ID, native tool-call ID)`. Encoding is a JSON
+tool calls and results use separate role tags with
+`(session, user-message ID, native tool-call ID)`. The shipped result ID stays
+unchanged; replay can fill missing call rows without duplicating old results.
+Encoding is a JSON
 tuple. Identical text in distinct steps remains distinct; repeated saved
 snapshots converge through stored/waiting-part identity. Native request IDs are
 retained, but do not alone identify assistant messages. No parent chain is
@@ -81,7 +84,11 @@ The listener coalesces hook triggers by session/workspace, reads the exact
 matching store, verifies workspace ownership and applies admission before
 reading conversation bodies. Three bounded attempts cover checkpoint delay;
 later callbacks and the scheduled provider cover missed attempts and downtime.
-Only session/workspace metadata enters the pending queue, never hook payloads.
+Only session/workspace metadata and bounded generation/version strings enter
+the pending queue, never hook payloads. A live hook's version is attached only
+to the exact matching native generation, never to older turns in the same
+snapshot. Offline recovery leaves version unknown; the currently installed
+client is not evidence of the client that produced history.
 
 `backfill cursor` and scheduled recovery use the same reader and identities.
 The existing `backfill.on_join`, `window_days`, and `sweep_cron` controls apply.
@@ -90,6 +97,10 @@ sweeps. Discovery is metadata-only and isolates malformed stores. Existing
 retention/window semantics filter dated messages, while unknown timestamps
 remain unknown and use the storage owner's normal receipt-time fallback.
 The adapter does not infer billed usage from context occupancy or hook counts.
+The inspected native `ConversationTokenDetails` carries used/max context tokens,
+not response billing. Live usage hooks cannot simply enrich already stored
+assistant rows: shared part-ID dedupe keeps the first write. Reliable token
+capture still needs verified accounting and a replay-safe carrier.
 Provider remains unknown; editor/CLI entrypoint comes from the native store.
 
 Following LLP 0359, a bounded process-local map skips unchanged roots during
@@ -104,8 +115,17 @@ live trigger retries; a busy backfill session waits until another pass.
 ## File contents and tool outcomes {#file-content}
 
 Full Read/Grep/Glob/Shell results come from saved tool messages, joined by
-native tool ID to typed outcomes. Verified union alternatives establish
+native tool ID to typed outcomes. Each typed tool step also emits an assistant
+tool-call row with its native arguments when available; result rows retain the
+arguments for compatibility. Calls precede results and share their native ID.
+Verified union alternatives establish
 success or error; unrecognized alternatives explicitly retain unknown status.
+For Shell, independent sandbox/background/terminal/pid metadata (fields
+101-104) is not part of the outcome union. Failure, timeout, rejection,
+spawn error and permission denial are errors. A success payload's signed
+exit code and signal decide whether a completed process failed; background
+success remains unknown. Text that merely resembles an exit code never
+establishes an outcome.
 The shared projector preserves explicit `is_error: null` without changing its
 existing missing-field convention. A hook's claimed Shell exit code is never
 substituted for the native result.
@@ -123,7 +143,8 @@ workspace. The one-cwd export contract cannot express a local-only file under
 a full workspace. Explicit missing-file errors can pass lexical scope/policy
 checks because they contain no successful file contents. Recheck session ignore
 after asynchronous path resolution and directory policy before writing.
-Other tool results use the existing workspace policy contract, not an invented
+A refused Read also drops its paired call, so adding call rows cannot restore
+arguments excluded by the file policy. Other tool results use the existing workspace policy contract, not an invented
 interpretation of arbitrary command text or result paths.
 
 ## Attachment {#attachment}
