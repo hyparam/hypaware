@@ -664,6 +664,13 @@ function booleanFlag(argv, name) {
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
+  // This preset reads no positional argument, so one would be dropped while
+  // the config write reports success (#2468).
+  const extra = argv.find((t) => !t.startsWith('-'))
+  if (extra !== undefined) {
+    ctx.stderr.write(`hyp setup: unexpected argument '${extra}' after preset 'claude-and-otel-local'\n`)
+    return 2
+  }
   const dryRunFlag = booleanFlag(argv, 'dry-run')
   if (!dryRunFlag.ok) {
     ctx.stderr.write(`hyp setup: ${dryRunFlag.error}\n`)

@@ -75,8 +75,9 @@ export function buildPickerBackfillRunner(ctx, skipOptional = false) {
  * `InitPresetRegistry` and invokes its `run(argv, ctx)`. Unknown
  * presets land on stderr with the list of available names. What follows
  * the preset name is gated before the preset runs: a help flag renders
- * help, and a flag `hyp setup` does not advertise is a usage error, so
- * neither reaches the preset's config write.
+ * help, and a flag `hyp setup` does not advertise or a setup choice no
+ * preset can honor is a usage error, so neither reaches the preset's
+ * config write. Positional arguments are the preset's own to read.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -115,10 +116,20 @@ export async function runInit(argv, ctx) {
       return 2
     }
     // A preset writes its own plugin list and runs no picker finale, so these
-    // choices would be dropped while setup reports success.
+    // choices would be dropped while setup reports success. Refused here, ahead
+    // of the preset, so a refusal writes and backs up nothing (#2468).
     const pickerOnly = presetArgv.find((t) => /^--(github|no-backfill)(=|$)/.test(t))
     if (pickerOnly !== undefined) {
-      ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with --source instead\n`)
+      ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with hyp setup --yes --source instead\n`)
+      return 2
+    }
+    const unhonored = presetArgv.find((t) => /^--(client|source|export|retention-days|bin)(=|$)/.test(t))
+    if (unhonored !== undefined) {
+      ctx.stderr.write(`hyp setup: ${unhonored.split('=')[0]} is not supported with a preset; run hyp setup --yes without a preset name to set it\n`)
+      return 2
+    }
+    if (presetArgv.some((t) => /^--from-file(=|$)/.test(t))) {
+      ctx.stderr.write('hyp setup: --from-file is not supported with a preset; run hyp setup --from-file <path> without a preset name\n')
       return 2
     }
     return preset.run(presetArgv, ctx)
