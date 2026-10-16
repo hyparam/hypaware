@@ -188,6 +188,49 @@ Remote sign-in with `--no-forward` grants query access without setting up
 sync. `hyp leave` stops sync but keeps local recordings.
 See [team setup](TEAM_SETUP.md) and [privacy controls](PRIVACY.md).
 
+### Rows skipped by exports before v1.42.0
+
+<!-- @ref LLP 0492#mixed-versions: an old writer that is still running can still commit below a sink's watermark -->
+Before v1.42.0, a `hyp` command that refreshed the cache while the daemon was
+also writing could commit rows below the point a destination had already
+exported to. Those rows stay in the local cache but no scheduled export sends
+them ([issue 2225](https://github.com/hyparam/hypaware/issues/2225)). v1.42.0
+stops new skips once the daemon restarts on it; `hyp daemon restart` makes
+sure. Nothing finds the rows already skipped, so recovery is a manual step for
+each destination. It reaches only rows the local cache still holds: rows that
+retention has removed are gone from this machine.
+
+<!-- @ref LLP 0345#central: central drops a replayed row it already has, by part id -->
+For HypAware Cloud, `hyp sync --history <client>` resends one client's
+retained `ai_gateway_messages` and leaves normal export progress alone. The
+server drops rows it already has, so a rerun is safe. Run it for each client
+that records on this machine, and read the preview first: the client must be
+syncing, and the replay also sends rows it held back while it was local-only.
+Folders marked local-only stay withheld. Other datasets, such as traces and
+logs, have no Cloud replay.
+
+<!-- @ref LLP 0040#watermark-contract: one saved position per sink instance and partition; removing it re-reads the partition from the start -->
+A local folder or S3 destination has no replay, and it does not drop rows it
+already has. To export one dataset again in full, stop the daemon, remove that
+destination's saved position for the dataset, then start the daemon and sync:
+
+```sh
+hyp daemon stop
+rm -r ~/.hyp/hypaware/plugins/@hypaware/local-fs/sink-instances/<instance>/watermarks/<dataset>
+hyp daemon start
+hyp sync <instance>
+```
+
+This is the default `HYP_HOME`; use yours if you set another. For S3, the path
+uses `@hypaware/s3` instead of `@hypaware/local-fs`. `<instance>` is the
+destination's name in `hyp sync --dry-run`. The next export
+writes every retained row of that dataset again, in new files, and leaves the
+earlier files in place, so every row it had already sent is now there twice.
+Remove the duplicates where the data is read, for example by `part_id` for
+`ai_gateway_messages`. Don't delete the earlier files to get rid of them:
+they still hold rows that retention has since removed from the local cache.
+Rows held back as local-only stay held back.
+
 ## A command is missing or rejects an option
 
 <!-- agent: A hyp command or flag from the docs is missing on this machine. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
