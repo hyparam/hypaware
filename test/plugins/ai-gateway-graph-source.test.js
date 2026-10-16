@@ -1,10 +1,22 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import test from 'node:test'
 
+import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { executeQuerySql } from '../../src/core/query/sql.js'
+import { createQueryRegistry } from '../../src/core/registry/datasets.js'
+import { createSourceRegistry } from '../../src/core/registry/sources.js'
+import { aiGatewayDatasetRegistration, DATASET_NAME } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { startGraphSource, FIRST_PROJECTION_DELAY_MS, PROJECTION_INTERVAL_MS, STOP_GRACE_MS } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/source.js'
+import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
+import { edgeId, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
+import { graphDatasetRegistration } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
 import { projectGraph } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
 
 /** @import { TestContext } from 'node:test' */
@@ -237,8 +249,87 @@ test('stop returns at the grace when a projection ignores the signal, and the ne
   t.after(() => restarted.stop())
   await f.advance(FIRST_PROJECTION_DELAY_MS)
   assert.equal(f.state.calls, 2, 'the next start projects again')
+  const completed = f.logs.filter(l => l.event === 'graph.projection_completed').length
   release()
   await setImmediate()
   await f.advance(2 * PROJECTION_INTERVAL_MS)
   assert.equal(f.state.calls, 2, 'the abandoned projection never schedules another tick')
+  assert.equal(f.logs.filter(l => l.event === 'graph.projection_completed').length, completed, 'the abandoned run is not reported as completed')
+  assert.ok(f.logs.some(l => l.event === 'graph.projection_cancelled' && l.attrs.reason === 'abandoned_at_stop_grace'))
+})
+
+// The round 2 reviewer probe (write-after-stop.mjs): real source registry,
+// contract, engine, SQL and on-disk cache, with the first graph append held
+// past the stop grace. Once it settles, no further graph write may start.
+test('a projection abandoned during its first append starts no further write once that append settles', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-late-write-'))
+  const query = createQueryRegistry()
+  for (const d of [aiGatewayDatasetRegistration(), graphDatasetRegistration('node'), graphDatasetRegistration('edge')]) query.registerDataset(d)
+  const row = { session_id: 'sess-1', conversation_id: null, cwd: '/repo', git_branch: 'main', client_name: 'claude-code', user_id: 'u1', model: 'sonnet', tool_name: null, tool_args: null, part_type: 'text', role: 'user', content_text: 'synthetic', message_created_at: new Date().toISOString(), attributes: '{}' }
+  const columns = Object.keys(row).map(name => ({ name, type: 'STRING', nullable: name !== 'session_id' }))
+  /** @type {Array<{ event: string, dataset?: string, stopped?: boolean, aborted?: boolean, attrs?: any }>} */
+  const events = []
+  /** @type {() => void} */
+  let release = () => {}
+  /** @type {() => void} */
+  let entered = () => {}
+  const gate = new Promise(resolve => { release = () => resolve(undefined) })
+  const entry = new Promise(resolve => { entered = () => resolve(undefined) })
+  /** @type {Promise<unknown> | undefined} */
+  let projection
+  /** @type {AbortSignal | undefined} */
+  let signal
+  let stopped = false
+  const registry = createSourceRegistry()
+  try {
+    await appendRowsToSourceTable(cacheRoot, DATASET_NAME, ['source=claude'], /** @type {any} */ (columns), [row])
+    const storage = createQueryStorageService({ cacheRoot })
+    const append = storage.appendRows.bind(storage)
+    storage.appendRows = async (table, cols, rows) => {
+      const dataset = cols.some(c => c.name === 'node_id') ? 'node' : 'edge'
+      events.push({ event: 'append-start', dataset, stopped, aborted: signal?.aborted })
+      if (dataset === 'node') {
+        entered()
+        await gate
+      }
+      await append(table, cols, rows)
+      events.push({ event: 'append-done', dataset, stopped })
+    }
+    /** @param {string} event @param {any} attrs */
+    const log = (event, attrs) => { events.push({ event, attrs }) }
+    const ctx = /** @type {any} */ ({ query, storage, log: { info: log, warn: log, error: log } })
+    const graph = /** @type {any} */ ({
+      project: (/** @type {string} */ _dataset, /** @type {any} */ opts) => {
+        signal = opts.signal
+        projection = projectGraph({ query, storage, contracts: [createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })], signal })
+        return projection
+      },
+    })
+    registry.register(/** @type {any} */ ({ name: 'ai-gateway-graph', plugin: '@hypaware/ai-gateway-graph', summary: 'probe', start: () => startGraphSource(ctx, graph) }))
+    await registry.start('ai-gateway-graph', ctx)
+    await entry
+
+    await registry.stop('ai-gateway-graph')
+    stopped = true
+    assert.equal(signal?.aborted, true)
+    assert.ok(events.some(e => e.event === 'graph.projection_abandoned'), 'stop returned at the grace')
+
+    release()
+    await assert.rejects(/** @type {Promise<unknown>} */ (projection), { name: 'AbortError' })
+    await setImmediate()
+    assert.deepEqual(events.filter(e => e.event === 'append-start').map(e => e.dataset), ['node'], 'only the append under way at stop ran')
+    assert.deepEqual(events.filter(e => e.event === 'append-start' && e.stopped), [], 'no write starts after stop')
+    assert.ok(!events.some(e => e.event === 'graph.projection_completed'), 'an abandoned run is not reported as completed')
+    assert.ok(events.some(e => e.event === 'graph.projection_cancelled' && e.attrs.reason === 'abandoned_at_stop_grace'))
+
+    const nodes = await executeQuerySql({ query: 'SELECT COUNT(*) AS n FROM node', registry: query, storage, refresh: 'always', includeLocalOnly: true })
+    assert.equal(Number(nodes.rows[0].n), 3, 'the node append under way at stop settled')
+    const edges = await executeQuerySql({ query: 'SELECT COUNT(*) AS n FROM edge', registry: query, storage, refresh: 'always', includeLocalOnly: true })
+    assert.equal(Number(edges.rows[0].n), 0, 'no edge was written')
+  } finally {
+    release()
+    await projection?.catch(() => {})
+    await registry.stop('ai-gateway-graph')
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
 })

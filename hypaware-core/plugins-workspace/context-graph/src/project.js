@@ -250,19 +250,19 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         // Settle pending rows through the normal dedup reads before maintenance.
         await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
         await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
-        signal?.throwIfAborted()
-        await refreshGraphRows(storage, NODE_DATASET, nodeRows)
-        await refreshGraphRows(storage, EDGE_DATASET, edgeRows)
+        await refreshGraphRows(storage, NODE_DATASET, nodeRows, signal)
+        await refreshGraphRows(storage, EDGE_DATASET, edgeRows, signal)
       }
 
       const freshNodes = await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
       const freshEdges = await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
-      // Last abort point: once the appends start, they settle together
-      signal?.throwIfAborted()
 
+      // No write starts once aborted; an append already under way settles
+      signal?.throwIfAborted()
       if (freshNodes.length > 0) {
         await storage.appendRows(graphTablePath(storage, NODE_DATASET), [...NODE_COLUMNS], freshNodes)
       }
+      signal?.throwIfAborted()
       if (freshEdges.length > 0) {
         await storage.appendRows(graphTablePath(storage, EDGE_DATASET), [...EDGE_COLUMNS], freshEdges)
       }

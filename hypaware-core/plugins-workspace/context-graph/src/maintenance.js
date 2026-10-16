@@ -421,10 +421,11 @@ function compareDupRows(a, b) {
  * @param {ExtendedQueryStorageService} storage
  * @param {'node' | 'edge'} dataset
  * @param {GraphRow[]} rows
+ * @param {AbortSignal} [signal] once aborted, no further partition rewrite starts
  * @returns {Promise<void>}
  * @ref LLP 0428#refresh [implements]: explicit refresh reuses conditional generation replacement.
  */
-export async function refreshGraphRows(storage, dataset, rows) {
+export async function refreshGraphRows(storage, dataset, rows, signal) {
   const idCol = ID_COLUMNS[dataset]
   const byId = new Map(rows.map(row => [row[idCol], row]))
   const parts = await discoverCachePartitions(storage.cacheRoot, { datasets: [dataset] })
@@ -458,6 +459,7 @@ export async function refreshGraphRows(storage, dataset, rows) {
       if (replacements.has(id)) throw new Error('graph refresh: shared projector identity requires a full graph rebuild')
     }
     if (!replacements.size) continue
+    signal?.throwIfAborted()
     const result = await rewritePartition({ partitionDir: part.path, idCol,
       dropIds: new Set(replacements.keys()), extraRows: [...replacements.values()],
       expectedCursor: cursor, fallbackColumns: FALLBACK_COLUMNS[dataset], sortOrder: SORT_ORDERS[dataset] })

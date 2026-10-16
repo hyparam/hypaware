@@ -35,6 +35,7 @@ export async function startGraphSource(ctx, graph) {
   let lastSuccessAt = null
   let stopped = false
   const cancel = new AbortController()
+  let abandoned = false
   let projectionDue = true
   let rowsWritten = 0
 
@@ -62,6 +63,11 @@ export async function startGraphSource(ctx, graph) {
       projectionDue = true
       ctx.log.info('graph.projection_started', { source_dataset: SOURCE_DATASET })
       const result = await graph.project(SOURCE_DATASET, { signal: cancel.signal })
+      // Stop came during the last write: it settled, but the run ended under stop
+      if (cancel.signal.aborted) {
+        logCancelled(started, { nodes_written: result.nodesWritten, edges_written: result.edgesWritten })
+        return
+      }
       // Keep the pre-scan fingerprint: capture during a projection must stay
       // due. Flushing a pending spool can cause one extra idempotent pass.
       projectedFingerprint = fingerprint
@@ -77,7 +83,7 @@ export async function startGraphSource(ctx, graph) {
       })
     } catch (err) {
       if (cancel.signal.aborted) {
-        ctx.log.info('graph.projection_cancelled', { source_dataset: SOURCE_DATASET, duration_ms: Date.now() - started })
+        logCancelled(started, {})
         return
       }
       lastError = err instanceof Error ? err.message : String(err)
@@ -87,6 +93,20 @@ export async function startGraphSource(ctx, graph) {
         duration_ms: Date.now() - started,
       })
     }
+  }
+
+  /**
+   * A run that ends under stop is never reported as completed.
+   * @param {number} started
+   * @param {{ nodes_written?: number, edges_written?: number }} written
+   */
+  function logCancelled(started, written) {
+    ctx.log.info('graph.projection_cancelled', {
+      source_dataset: SOURCE_DATASET,
+      reason: abandoned ? 'abandoned_at_stop_grace' : 'stopped',
+      ...written,
+      duration_ms: Date.now() - started,
+    })
   }
 
   /** @param {number} delay */
@@ -116,8 +136,8 @@ export async function startGraphSource(ctx, graph) {
       stopped = true
       clearTimeout(timer)
       if (!inFlight) return
-      // Abort stops the projection's reads and starts no write; appends already
-      // under way settle. The grace bounds stop if work ignores the signal.
+      // Abort stops the projection's reads and starts no further write; an append
+      // already under way settles. The grace bounds stop if that append stalls.
       cancel.abort()
       /** @type {ReturnType<typeof setTimeout> | undefined} */
       let grace
@@ -127,6 +147,7 @@ export async function startGraphSource(ctx, graph) {
       ])
       clearTimeout(grace)
       if (outcome === 'timeout') {
+        abandoned = true
         ctx.log.warn('graph.projection_abandoned', { source_dataset: SOURCE_DATASET, grace_ms: STOP_GRACE_MS })
       }
     },
