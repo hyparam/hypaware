@@ -3,6 +3,7 @@
 import os from 'node:os'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { ensureAiGatewayStorageContracts } from '../../ai-gateway/src/storage_contracts.js'
@@ -34,7 +35,7 @@ export async function activate(ctx) {
 
   ensureAiGatewayStorageContracts(ctx)
   const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
-  const ignoredSessions = new Set()
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
   const activeRecoveries = new Set()
   ctx.backfills.register(createCursorBackfillProvider({ env: ctx.env, localOnlyListPath: localPolicyPath, ignoredSessions, activeRecoveries, config: ctx.config }))
   ctx.sources.register({

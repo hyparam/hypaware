@@ -5,6 +5,7 @@ import path from 'node:path'
 import { realpath } from 'node:fs/promises'
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { SESSION_IGNORE_ROUTE, createControlHandler, isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../src/core/otlp/server.js'
 import { CLASS_RANK, createUsagePolicyResolver, isEqualOrDescendant } from '../../../../src/core/usage-policy/index.js'
 import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
@@ -104,7 +105,7 @@ export function createStartCursorSource(deps = {}) {
               activeRecoveries.add(item.id)
               claimed = true
               const admission = cursorAdmission({ localOnlyListPath: deps.localOnlyListPath, ignoredSessions })
-              if (ignoredSessions.has(item.id) || policy.resolve(item.cwd).class === 'ignore') { completedRoots.delete(key); continue }
+              if (sessionIgnoreLoadError(ignoredSessions) || ignoredSessions.has(item.id) || policy.resolve(item.cwd).class === 'ignore') { completedRoots.delete(key); continue }
               const session = await findCursorSession(item.id, item.cwd, readOptions)
               if (!session) throw new CursorReadError('native_session_unavailable')
               const [nativeCwd, hookCwd] = await Promise.all([realpath(session.cwd), realpath(item.cwd)])
@@ -242,7 +243,7 @@ export function createStartCursorSource(deps = {}) {
           // Check once before projection, and again inside the serialized
           // write so a session ignored while queued cannot slip through.
           const admission = async () => {
-            if (ignoredSessions.has(session)) {
+            if (sessionIgnoreLoadError(ignoredSessions) || ignoredSessions.has(session)) {
               counts.session_drops++
               return 'session_ignored'
             }
@@ -271,7 +272,7 @@ export function createStartCursorSource(deps = {}) {
                 counts.policy_drops++
                 return 'file_path_unresolved'
               }
-              if (ignoredSessions.has(session)) {
+              if (sessionIgnoreLoadError(ignoredSessions) || ignoredSessions.has(session)) {
                 counts.session_drops++
                 return 'session_ignored'
               }
@@ -341,7 +342,7 @@ export function createStartCursorSource(deps = {}) {
     return {
       async status() {
         return {
-          state: 'ready', rowsWritten: counts.rows_written, lastError,
+          state: 'ready', rowsWritten: counts.rows_written, lastError: sessionIgnoreLoadError(ignoredSessions) ?? lastError,
           details: { ...counts, ...recoveryCounts, pending_recovery: pending.size, listen_host: bound.host, listen_port: bound.port, control_routes: [SESSION_IGNORE_ROUTE],
             active_requests: active, last_event_at: lastEventAt ?? null,
             coverage: 'native_sessions_and_file_observations', frontend: 'native_store', usage_supported: false,

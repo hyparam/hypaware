@@ -1,7 +1,7 @@
 // @ts-check
 
 import { runBackfill, runBackfillList } from '../commands/backfill.js'
-import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
+import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove, runRemoteTokens, runRemoteTokensRevoke } from './remote_commands.js'
 import { runReportDelete, runReportFix, runReportGet, runReportGenerate, runReportList, runReportMark, runReportPublish, runReportRecommend, runReportSave } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
@@ -758,8 +758,26 @@ function buildCoreCommands(registry) {
         'Requires a logged-in session (hyp remote login). The token enrolls CI',
         'runs under one shared gateway via `hyp join`; default expiry 365 days',
         '(--expires-days <n>), --label names the gateway.',
+        '',
+        'With --scope query it mints a personal agent token instead: it reads the',
+        "org's recorded history and can mark, publish and delete reports as you,",
+        "until it expires (the server's default unless --expires-days) or is revoked",
+        "with 'hyp remote tokens revoke <jti>'. For headless agents and CI; at your",
+        "own computer 'hyp mcp serve --remote' already uses your session.",
       ].join('\n'),
       run: runRemoteMint,
+    },
+    {
+      name: 'remote tokens',
+      summary: 'List your agent tokens on a remote target (never a token value)',
+      usage: coreUsage('remote tokens'),
+      run: runRemoteTokens,
+    },
+    {
+      name: 'remote tokens revoke',
+      summary: 'Revoke one of your agent tokens on a remote target',
+      usage: coreUsage('remote tokens revoke'),
+      run: runRemoteTokensRevoke,
     },
     {
       name: 'remote list',

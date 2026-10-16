@@ -70,26 +70,39 @@ test('the array and everything in it is frozen', () => {
   assert.throws(() => { /** @type {any} */ (contract('list_recommendations').inputSchema.properties.status.default).push('applied') }, TypeError)
 })
 
-test('the read entries, in order, with unique names', () => {
+test('the two reads then the mark, in order, with unique names', () => {
   const tools = REMOTE_TOOL_CONTRACTS.map((c) => c.tool)
-  assert.deepEqual(tools, ['list_recommendations', 'get_recommendation'])
+  assert.deepEqual(tools, ['list_recommendations', 'get_recommendation', 'set_recommendation_status'])
   assert.equal(new Set(tools).size, tools.length)
 })
 
 test('titles are the ones hypaware-server LLP 0596#annotations tabulates', () => {
   assert.equal(contract('list_recommendations').title, 'List recommendations')
   assert.equal(contract('get_recommendation').title, 'Read a recommendation')
+  assert.equal(contract('set_recommendation_status').title, 'Set recommendation status')
 })
 
-test('each entry is a read with no scope, a summary and its CLI equivalent', () => {
+test('each read has no scope, the mark is a write scoped report-publish, and each has a summary and its CLI equivalent', () => {
   for (const c of REMOTE_TOOL_CONTRACTS) {
-    assert.deepEqual(Object.keys(c).sort(), ['authClass', 'cli', 'inputSchema', 'summary', 'title', 'tool'], c.tool)
-    assert.equal(c.authClass, 'read', c.tool)
-    assert.equal(c.scope, undefined, c.tool)
+    const write = c.tool === 'set_recommendation_status'
+    const keys = ['authClass', 'cli', 'inputSchema', 'summary', 'title', 'tool', ...(write ? ['scope'] : [])]
+    assert.deepEqual(Object.keys(c).sort(), keys.sort(), c.tool)
+    assert.equal(c.authClass, write ? 'write' : 'read', c.tool)
+    // The scope the REST status PUT already admits (hypaware-server LLP 0598).
+    assert.equal(c.scope, write ? 'report-publish' : undefined, c.tool)
     assert.ok(c.summary.length > 0, c.tool)
   }
   assert.equal(contract('list_recommendations').cli, 'hyp report list --recommendations')
   assert.equal(contract('get_recommendation').cli, 'hyp report get <rec-id>')
+  assert.equal(contract('set_recommendation_status').cli, 'hyp report mark <id> <state>')
+})
+
+test('the mark summary asks for a reason and a link, and says nothing is removed', () => {
+  const { summary } = contract('set_recommendation_status')
+  assert.match(summary, /mark it applied/)
+  assert.match(summary, /with a reason and a link to the change/)
+  assert.match(summary, /Dismissing needs a reason/)
+  assert.match(summary, /nothing is removed/)
 })
 
 test('list_recommendations says counts are not an org total', () => {
@@ -151,6 +164,19 @@ test('get_recommendation input matches hypaware-server LLP 0596#tools-shapes', (
   assert.equal(properties.include_evidence.default, false)
 })
 
+test('set_recommendation_status input matches hypaware-server LLP 0596#tools-shapes', () => {
+  const { properties, required } = contract('set_recommendation_status').inputSchema
+  assert.deepEqual(Object.keys(properties).sort(), ['id', 'links', 'reason', 'state'])
+  assert.deepEqual(required, ['id', 'state'])
+  assert.equal(properties.id.type, 'string')
+  assert.equal(properties.state.type, 'string')
+  assert.deepEqual(properties.state.enum, RECOMMENDATION_STATES)
+  assert.equal(properties.reason.type, 'string')
+  assert.equal(properties.links.type, 'array')
+  assert.deepEqual(properties.links.items, { type: 'string' })
+  for (const name of Object.keys(properties)) assert.equal(properties[name].default, undefined, name)
+})
+
 // The codec enforces neither `items.enum` nor `maximum`; the server's bound
 // operation validates `status` and `limit`, so only defaults and `required`
 // are pinned here.
@@ -160,6 +186,12 @@ test('the shared codec applies the defaults and refuses a missing id', () => {
   const get = validateToolArguments(contract('get_recommendation').inputSchema, { id: 'hyprec-0123456789abcdef' })
   assert.deepEqual(get, { ok: true, params: { id: 'hyprec-0123456789abcdef', include_evidence: false } })
   assert.equal(validateToolArguments(contract('get_recommendation').inputSchema, {}).ok, false)
+  const mark = contract('set_recommendation_status').inputSchema
+  const applied = { id: 'hyprec-0123456789abcdef', state: 'applied', reason: 'fixed', links: ['https://example.com/pr/1'] }
+  assert.deepEqual(validateToolArguments(mark, applied), { ok: true, params: applied })
+  assert.equal(validateToolArguments(mark, { id: 'hyprec-0123456789abcdef' }).ok, false)
+  assert.equal(validateToolArguments(mark, { state: 'applied' }).ok, false)
+  assert.equal(validateToolArguments(mark, { id: 'hyprec-0123456789abcdef', state: 'done' }).ok, false)
 })
 
 test('a contract registers as a verb once an operation is bound to it by name', () => {
@@ -171,6 +203,7 @@ test('a contract registers as a verb once an operation is bound to it by name', 
       summary: c.summary,
       inputSchema: c.inputSchema,
       authClass: c.authClass,
+      scope: c.scope,
       operation: async () => ({}),
       render: () => ({ stdout: '' }),
     })
