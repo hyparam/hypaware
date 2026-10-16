@@ -389,6 +389,10 @@ call, recorded in PROGRESS.md.
 
 ### T9: the MCP path in the published docs {#t9}
 
+> **Extended-by: [LLP 0494#docs-paths](./0494-hypaware-mcp-phase-1.design.md#docs-paths)
+> (2026-10-16 revision, #2624).** The Done-when and Hermetic proof below
+> are superseded by that section and LLP 0494's verification map.
+
 - **Files:** `docs/CLI.md`, `QUERYING.md`, `REPORTS.md`, `PRIVACY.md`,
   `TROUBLESHOOTING.md`, `TEAM_SETUP.md`, `CLIENTS.md`; a docs test over the
   `agent:` markers.
