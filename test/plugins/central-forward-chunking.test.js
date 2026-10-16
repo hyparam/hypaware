@@ -222,6 +222,53 @@ function makeFetch(responder) {
 
 const TABLE = '/cache/ai_gateway_messages/source=claude'
 
+test('missing-row repair binds the org, preserves its retry batch and never advances watermarks', async () => {
+  const watermarks = makeWatermarks()
+  const calls = []
+  let org = 'test-org'
+  let valid = true
+  let validations = 0
+  let reply = { syncRestore: 1, status: 'accepted', restored: 1, present: 0, purged: 0 }
+  const sink = createForwardSink({ config: /** @type {any} */ ({ url: 'http://server:8740' }),
+    query: /** @type {any} */ (makeQuery('proxy')), storage: /** @type {any} */ (makeStorage(TABLE, 0)),
+    watermarks, rollouts: makeRollouts(), log: makeLog(), sleepFn: async () => {},
+    identityClient: /** @type {any} */ ({ async getCurrentJwt() { return `header.${Buffer.from(JSON.stringify({ org })).toString('base64url')}.signature` } }),
+    fetchFn: /** @type {typeof fetch} */ (async (url, init) => {
+      calls.push({ url: String(url), headers: init?.headers, body: await readRequestBody(init?.body) })
+      if (calls.length === 1) return new Response('', { status: 503, headers: { 'retry-after': '0' } })
+      return Response.json(reply, { status: 202 })
+    }),
+  })
+  const request = { org: 'test-org', revision: 'a'.repeat(64), rows: [{ part_id: 'missing', session_id: 's' }],
+    async validate() {
+      validations++
+      if (!valid) throw new Error('policy changed')
+    } }
+  try {
+    assert.ok(sink.restoreMissingRows)
+    assert.equal((await sink.restoreMissingRows(request)).restored, 1)
+    assert.equal(calls.length, 2)
+    assert.equal(validations, 2, 'policy and local revision revalidated before every attempt')
+    assert.equal(calls[0].url, 'http://server:8740/v1/ingest-missing/ai_gateway_messages')
+    assert.equal(calls[0].headers['x-hyp-batch-id'], calls[1].headers['x-hyp-batch-id'])
+    assert.equal(calls[1].headers['x-hyp-sync-org'], 'test-org')
+    assert.equal(calls[0].body, calls[1].body)
+    assert.equal(watermarks.writes.length, 0)
+    org = 'different-org'
+    await assert.rejects(sink.restoreMissingRows(request), /different organizations/)
+    assert.equal(calls.length, 2, 'wrong-org identity never sends the payload')
+    org = 'test-org'
+    valid = false
+    await assert.rejects(sink.restoreMissingRows(request), /policy changed/)
+    assert.equal(calls.length, 2)
+    valid = true
+    reply = /** @type {any} */ ({})
+    await assert.rejects(sink.restoreMissingRows(request), /unsupported repair acknowledgement/)
+    await assert.rejects(sink.restoreMissingRows({ ...request, rows: Array(1001).fill(request.rows[0]) }), /invalid missing-row/)
+    await assert.rejects(sink.restoreMissingRows({ ...request, rows: [{ content_text: 'x'.repeat(4 * 1024 * 1024) }] }), /4 MiB/)
+  } finally { await sink.close() }
+})
+
 /**
  * @param {{
  *   count: number | (() => number),

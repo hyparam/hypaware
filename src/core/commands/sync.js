@@ -1,5 +1,6 @@
 // @ts-check
 
+import { runSyncCheck } from './sync-check.js'
 import { requireConfirmation } from '../cli/confirm.js'
 import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
@@ -27,7 +28,7 @@ import { groupThousands } from '../util/format_number.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
-const USAGE = 'usage: hyp sync [instance] [--history <client>] [--yes] [--dry-run]'
+const USAGE = 'usage: hyp sync [instance] [--history <client>] [--yes] [--dry-run]\n       hyp sync <instance> --check --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]\n       hyp sync <instance> --missing --dataset ai_gateway_messages [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--dry-run | --yes] [--json]'
 
 /**
  * `hyp sync [instance] [--history <client>] [--yes] [--dry-run]`
@@ -59,6 +60,12 @@ export async function runSync(argv, ctx) {
       type: 'object',
       properties: {
         instance: { type: 'string' },
+        check: { type: 'boolean', default: false },
+        missing: { type: 'boolean', default: false },
+        dataset: { type: 'string' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        json: { type: 'boolean', default: false },
         history: { type: 'string' },
         yes: { type: 'boolean', default: false },
         'dry-run': { type: 'boolean', default: false },
@@ -73,6 +80,24 @@ export async function runSync(argv, ctx) {
   }
   if (!parsed.ok) {
     ctx.stderr.write(`hyp sync: ${parsed.error}\n${USAGE}\n`)
+    return 2
+  }
+  if (parsed.params.check) {
+    if (parsed.params.missing || parsed.params.history !== undefined || parsed.params.yes || parsed.params['dry-run']) {
+      ctx.stderr.write('hyp sync: --check cannot be combined with upload options\n')
+      return 2
+    }
+    return runSyncCheck(parsed.params, ctx)
+  }
+  if (parsed.params.missing) {
+    if (parsed.params.history !== undefined) {
+      ctx.stderr.write('hyp sync: --missing cannot be combined with --history\n')
+      return 2
+    }
+    return runSyncCheck(parsed.params, ctx)
+  }
+  if (parsed.params.dataset !== undefined || parsed.params.from !== undefined || parsed.params.to !== undefined || parsed.params.json) {
+    ctx.stderr.write('hyp sync: --dataset, --from, --to and --json require --check or --missing\n')
     return 2
   }
   const { instance, history, yes, 'dry-run': dryRun } =

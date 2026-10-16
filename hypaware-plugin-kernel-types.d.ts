@@ -1533,6 +1533,22 @@ export interface SourceHistoryReplayResult {
   error?: string
 }
 
+/** A bounded explicit repair selected from a verified server inventory. */
+export interface MissingSyncRequest {
+  org: string
+  revision: string
+  rows: Record<string, unknown>[]
+  validate(): Promise<void>
+}
+
+export interface MissingSyncResult {
+  syncRestore: 1
+  status: 'accepted' | 'already_accepted'
+  restored?: number
+  present?: number
+  purged?: number
+}
+
 export interface Sink {
   /**
    * Called by the sink driver on the configured schedule. The driver
@@ -1572,6 +1588,7 @@ export interface Sink {
    */
   previewSourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayPreview>
   replaySourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayResult>
+  restoreMissingRows?(request: MissingSyncRequest): Promise<MissingSyncResult>
 }
 
 export interface ExportBatch {
