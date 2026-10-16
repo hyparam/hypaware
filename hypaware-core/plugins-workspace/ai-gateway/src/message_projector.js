@@ -6,10 +6,10 @@ import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue, s
 export const SCHEMA_VERSION = 7
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCaptureReason, AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
- * @import { RegisteredProjector } from './types.js'
+ * @import { RegisteredProjector, ThreadChain } from './types.js'
  */
 
 const DATASET_NAME = 'ai_gateway_messages'
@@ -22,8 +22,10 @@ const DATASET_NAME = 'ai_gateway_messages'
  * of which adapter projector produced the messages (projector-defined
  * fields map onto these named columns directly). `schema_version` 7 added
  * the `git_remote` / `head_sha` / `repo_root` capture columns (LLP 0032);
- * the additions are nullable, so old partitions read them as null and no
- * partition-label bump is needed.
+ * the additions are nullable and no partition-label bump is needed. An old
+ * partition physically lacks them; `withSchemaColumns` in `dataset.js` is the
+ * only reason they stay addressable at all, and the exact value a read of one
+ * yields depends on the read path (LLP 0015#multi-partition-union).
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */
@@ -136,6 +138,7 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *   storage?: ExtendedQueryStorageService | QueryStorageService,
  *   log?: PluginLogger | { warn(message: string, fields?: Record<string, unknown>): void, info?: (m: string, f?: Record<string, unknown>) => void },
  *   isSessionIgnored?: (sessionId: string) => boolean,
+ *   now?: () => number,
  * }} opts
  */
 export function createAiGatewayMessageProjector(opts) {
@@ -168,14 +171,33 @@ export function createAiGatewayMessageProjector(opts) {
   /** @type {Map<string, Promise<void>>} */
   const seedPromises = new Map()
 
+  // Which session_ids have committed rows at all. Directory partitioning
+  // is by `source=` only, so the per-session seed scan cannot prune by
+  // path and reads the WHOLE table; autonomous clients mint fresh session
+  // ids constantly, and for a fresh id that full scan finds nothing. This
+  // index is built lazily and shared by every session, so an unseen
+  // session skips its seed scan outright; because a fresh session id is
+  // always a miss in this workload, the index still pays one whole-table
+  // `session_id` scan per `SESSION_INDEX_REBUILD_MS` window, indefinitely,
+  // rather than the single build the name suggests.
+  // @ref LLP 0204#fix [implements]: new sessions must not pay a whole-table scan
+  const sessionIndex = createCommittedSessionIndex(storage, log, opts.now)
+
   return {
     /**
      * @param {AiGatewayExchangeInput | Record<string, unknown>} exchange
+     * @param {{ journal?: (() => void)[], isSessionIgnored?: (id: string) => boolean, captureOutcome?: (reason: AiGatewayCaptureReason) => void }} [projectOpts] Pass a `journal`
+     *   array to have every dedupe-state mutation this projection makes
+     *   record its undo, so a caller whose append fails can hand it to
+     *   `rollbackAiGatewayStateJournal` instead of leaving the shared state
+     *   claiming rows that never landed.
      * @returns {Promise<Record<string, unknown>[]>}
      */
-    async projectExchange(exchange) {
+    async projectExchange(exchange, projectOpts = {}) {
       const input = /** @type {AiGatewayExchangeInput} */ (exchange)
-      const projection = await dispatchProjector(projectors, input, log, isSessionIgnored)
+      let outcomeReported = false
+      const reportOutcome = projectOpts.captureOutcome ? reason => { outcomeReported = true; projectOpts.captureOutcome?.(reason) } : undefined
+      const projection = await dispatchProjector(projectors, input, log, projectOpts.isSessionIgnored ?? isSessionIgnored, reportOutcome)
       // An intentional `.hypignore` usage-policy drop is a TERMINAL success, not
       // a projection miss: the adapter already logged the rich
       // `plugin.<adapter>.usage_policy_drop` event at the seam, so the gateway
@@ -191,12 +213,38 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
       if (!projection) {
+        if (outcomeReported) return []
+        // Carry enough to identify WHAT went unrecorded: an operator
+        // reading only this line must be able to tell a foreign wire
+        // dialect (a path no projector decodes) from a failing client.
+        // Observed cost of the leaner event: OpenClaw's /v1/responses
+        // traffic proxied for hours reading as "client never attached"
+        // (LLP 0176).
+        // @ref LLP 0176#fix-direction [implements]: fix 3, an undecoded
+        //   proxied exchange names its upstream, path, and status
         log?.warn?.('aigw.message_projection_skipped', {
           exchange_id: stringValue(input.exchange_id) ?? '',
           upstream: stringValue(input.upstream) ?? '',
           reason: 'no_projector_match',
+          // Pathname only: the row's `path` is the full request URL, and a
+          // TOML-configured upstream authenticating via a query parameter
+          // would otherwise put that credential into a warn line.
+          path: (stringValue(input.path) ?? '').split('?')[0],
+          method: stringValue(input.method) ?? '',
+          status_code: typeof input.status_code === 'number' ? input.status_code : null,
+          is_sse: input.is_sse === true,
         })
         return []
+      }
+
+      // @ref LLP 0469#exchange-scope [implements]: snapshots have no shared history or committed seed
+      if (typeof input.exchange_id === 'string' && input.exchange_id.length > 0 &&
+          projection.session_id === input.exchange_id && projection.conversation_id == null) {
+        return aiGatewayRowsFromProjectedExchange(projection, {
+          gatewayId,
+          gatewayAttributes: buildGatewayAttributes(input),
+          tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
+        })
       }
 
       // @ref LLP 0030#decision: seed by session_id (the partition key,
@@ -207,7 +255,8 @@ export function createAiGatewayMessageProjector(opts) {
         state,
         seedPromises,
         storage,
-        log
+        log,
+        sessionIndex
       )
 
       return aiGatewayRowsFromProjectedExchange(projection, {
@@ -215,6 +264,7 @@ export function createAiGatewayMessageProjector(opts) {
         gatewayAttributes: buildGatewayAttributes(input),
         tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
         state,
+        ...(projectOpts.journal ? { journal: projectOpts.journal } : {}),
       })
     },
   }
@@ -243,23 +293,246 @@ export function createAiGatewayMessageProjector(opts) {
  * `onExchangeFinished` without serializing (proxy.js stores the returned
  * promise but does not await it), so this overlap is real.
  *
+ * This is also where the seed path's "a seeding miss must never cost a row"
+ * guarantee is ENFORCED rather than merely documented: whatever the seed
+ * rejects with is absorbed here, for the whole path, including the parts of
+ * it that reach storage the leaf scan does not own.
+ *
  * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {Map<string, Promise<void>>} seedPromises
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @param {ReturnType<typeof createCommittedSessionIndex>} [sessionIndex]
  * @returns {Promise<void>}
  */
-function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log) {
+function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log, sessionIndex) {
   if (!sessionId) return Promise.resolve()
   let pending = seedPromises.get(sessionId)
   if (!pending) {
     // This body runs to here synchronously (no prior await), so the map is
     // populated before any concurrent caller can observe a missing entry.
-    pending = scanCommittedMessageIds(sessionId, state, storage, log)
+    //
+    // `projectExchange` awaits this and `source.js` drops the row for
+    // whatever it rejects with, so a seed that could not run must settle as
+    // "seeded nothing", never as a rejection: a seeding miss risks only the
+    // duplicate the seed exists to prevent (which settlement/compaction
+    // still collapse), while a rejection costs a real row.
+    //
+    // Nothing ever REWRITES a memo entry, so absorbing the rejection alone
+    // would cache "could not seed" as this session's verdict for the
+    // listener's lifetime. That is right for a scan that RAN and came back
+    // empty-handed, and wrong for one that broke: every later exchange
+    // would short-circuit onto the memo and inherit a verdict no scan ever
+    // produced. So drop the memo too, and let the next exchange retry and
+    // re-warn. The retry costs a scan that fails the way this one did (the
+    // caching in LLP 0204 is there to spare the daemon whole-table scans
+    // that SUCCEED), and buys back the operator signal whose absence made
+    // this silent: without it, one broken session logged once and then went
+    // quiet while every row for it was dropped.
+    // @ref LLP 0204#fix [constrained-by]: the per-session seed exists to
+    //   save a scan, so nothing in it may end an exchange or outlive itself
+    pending = seedSessionIfCommitted(sessionId, state, storage, log, sessionIndex).catch((err) => {
+      log?.warn?.('aigw.seed_seen_messages_failed', {
+        session_id: sessionId,
+        error_kind: 'seed_rejected',
+        error: err instanceof Error ? err.message : String(err),
+      })
+      // Guarded so a concurrent caller's newer memo is not evicted by this
+      // one's failure.
+      if (seedPromises.get(sessionId) === pending) seedPromises.delete(sessionId)
+    })
     seedPromises.set(sessionId, pending)
   }
   return pending
+}
+
+/**
+ * Seed one session's seen-set. A storage that can push `session_id` down
+ * (the real cache) probes the sort key directly, so there is nothing for the
+ * index to save. Anything else consults the committed-session index first: a
+ * session with no committed rows anywhere has nothing to seed, so the
+ * (whole-table) per-session scan is skipped. Same best-effort posture as the
+ * scan itself: an index that cannot answer errs toward scanning.
+ *
+ * @param {string} sessionId
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
+ * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @param {ReturnType<typeof createCommittedSessionIndex>} [sessionIndex]
+ * @returns {Promise<void>}
+ */
+async function seedSessionIfCommitted(sessionId, state, storage, log, sessionIndex) {
+  // @ref LLP 0311#context [implements]: the real cache probes the leading
+  // session sort key directly instead of rebuilding a global session index
+  if (typeof storage?.readRowsWhere === 'function') {
+    await scanCommittedMessageIds(sessionId, state, storage, log)
+    return
+  }
+  if (sessionIndex && !(await sessionIndex.mightHaveCommittedRows(sessionId))) return
+  await scanCommittedMessageIds(sessionId, state, storage, log)
+}
+
+/**
+ * How long a committed-session index stays authoritative for "this session
+ * has no committed rows", measured from when its scan COMPLETED (not when
+ * it started, or a scan slower than this window could never serve a hit).
+ * Within the window a miss is trusted; after it, a
+ * miss triggers one rebuild before being trusted, so rows committed by a
+ * concurrent writer (a `hyp backfill` in another process importing the
+ * session this listener is now capturing) are seen at most this late. A
+ * stale miss only risks the duplicate seeding guards against, which
+ * settlement/compaction still collapse - the documented failure envelope
+ * of the seed scan itself.
+ */
+export const SESSION_INDEX_REBUILD_MS = 10 * 60_000
+
+/**
+ * Lazily-built index of session_ids that have any committed
+ * `ai_gateway_messages` row. One projection of the `session_id` column
+ * across all partitions, shared by every session the listener projects,
+ * replacing a whole-table scan PER new session id.
+ *
+ * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
+ * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @param {() => number} [now] Injectable clock, defaulting to `Date.now`,
+ *   so rebuild-window tests don't depend on wall-clock timing.
+ */
+function createCommittedSessionIndex(storage, log, now = Date.now) {
+  /** @type {{ atMs: number, ids: Promise<Set<string> | undefined> } | undefined} */
+  let built
+
+  function rebuild() {
+    // `scanCommittedSessionIds` reports a scan it could not run as
+    // `undefined` rather than by rejecting, but nothing structural holds it
+    // to that. Normalize a rejection into the same "could not scan" outcome
+    // so this promise is total, because everything downstream assumes it is:
+    // the stamp-and-self-clear handler below runs on FULFILLMENT only, so a
+    // rejecting scan would leave `built` pinned to the rejected attempt and
+    // every later caller would re-await the same rejection - a permanently
+    // wedged index that loses every subsequent exchange, rather than the
+    // index degrading the way every other failure in this best-effort path
+    // does. It also keeps the rejection away from any handler nothing
+    // awaits, the shape that reaches Node's default handler and would take
+    // the whole daemon down.
+    // @ref LLP 0204#fix [constrained-by]: the seed index is best-effort, so
+    //   a scan it cannot complete must degrade the index, never end the process
+    // `error_kind` separates the two ways this message is reached, because
+    // they call for opposite responses and are otherwise indistinguishable
+    // in the log: `discover_failed` is an I/O condition the next rebuild may
+    // well clear on its own, while `scan_rejected` means the scan broke its
+    // documented "resolve, never reject" contract, i.e. a code defect that
+    // will keep degrading the index on every exchange until someone fixes it.
+    const scan = scanCommittedSessionIds(storage, log).catch((err) => {
+      log?.warn?.('aigw.session_index_scan_failed', {
+        error_kind: 'scan_rejected',
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return undefined
+    })
+    // `atMs` starts at `Infinity` (never stale) and is stamped when the scan
+    // COMPLETES, because the window measures how long the ANSWER is trusted.
+    // Stamped at scan start, a scan slower than SESSION_INDEX_REBUILD_MS
+    // would be stale the moment it resolved, so the next miss would rebuild
+    // at once and the index would rebuild back-to-back without ever serving
+    // a hit - on exactly the table size that makes the index worth having.
+    // The entry is still published to `built` synchronously, so concurrent
+    // callers share this in-flight scan; only the timestamp is deferred.
+    const attempt = { atMs: Infinity, ids: scan }
+    // Chaining (rather than a floating `.then`) is what orders the stamp
+    // before every awaiter: a caller awaits `attempt.ids`, which resolves
+    // only after this handler has run.
+    attempt.ids = scan.then((ids) => {
+      attempt.atMs = now()
+      // A build that failed to scan cannot stand in as "no committed rows"
+      // for the rebuild window; clear it once the failure is known so the
+      // NEXT caller retries instead of trusting a stale, un-scanned answer.
+      // Guarded on `built === attempt` so a later, already-succeeded rebuild
+      // (from a concurrent caller) is not clobbered by this one's failure.
+      if (ids === undefined && built === attempt) built = undefined
+      return ids
+    })
+    built = attempt
+    return attempt
+  }
+
+  return {
+    /**
+     * True when `sessionId` may have committed rows and the per-session
+     * seed scan is worth running.
+     *
+     * @param {string} sessionId
+     * @returns {Promise<boolean>}
+     */
+    async mightHaveCommittedRows(sessionId) {
+      if (!canScanCommittedRows(storage)) return false
+      const current = built ?? rebuild()
+      const ids = await current.ids
+      // A build that could not scan is not "definitely no committed
+      // rows"; err toward running the per-session scan, the same
+      // best-effort posture as the scan itself (see JSDoc above).
+      if (ids === undefined) return true
+      if (ids.has(sessionId)) return true
+      if (now() - current.atMs < SESSION_INDEX_REBUILD_MS) return false
+      // Another caller may have rebuilt (or a failed build may have
+      // cleared itself) while this one awaited.
+      const next = built === current || !built ? rebuild() : built
+      const nextIds = await next.ids
+      return nextIds === undefined || nextIds.has(sessionId)
+    },
+  }
+}
+
+/**
+ * Scan committed partitions for the distinct `session_id`s present.
+ * Best-effort like the message-id scan: an unreadable PARTITION is
+ * skipped and still contributes the rest. A failure to even discover
+ * partitions is a distinct outcome from "scanned and found nothing":
+ * it returns `undefined` so the caller can tell "no sessions known" from
+ * "the scan could not run" and err toward scanning instead of silently
+ * treating a broken index as authoritative.
+ *
+ * Reports failure by RESOLVING to `undefined`, never by rejecting: the
+ * committed-session index's stamp-and-self-clear handler runs on fulfillment
+ * only, so a rejection here would pin `built` to the failed attempt and wedge
+ * the index for the listener's life. `rebuild()` normalizes one back to
+ * `undefined` rather than assuming this contract holds.
+ *
+ * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
+ * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @returns {Promise<Set<string> | undefined>}
+ */
+async function scanCommittedSessionIds(storage, log) {
+  /** @type {Set<string>} */
+  const ids = new Set()
+  if (!canScanCommittedRows(storage)) return ids
+
+  /** @type {CachePartitionMeta[]} */
+  let partitions = []
+  try {
+    partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
+  } catch (err) {
+    log?.warn?.('aigw.session_index_scan_failed', {
+      error_kind: 'discover_failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return undefined
+  }
+
+  for (const part of partitions ?? []) {
+    const tablePath = part?.path
+    if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
+    try {
+      for await (const row of storage.readRows(tablePath, ['session_id'])) {
+        const sessionId = stringValue(row.session_id)
+        if (sessionId) ids.add(sessionId)
+      }
+    } catch {
+      // Skip an unreadable partition; others still contribute.
+      continue
+    }
+  }
+  return ids
 }
 
 /**
@@ -267,11 +540,21 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
  * their `message_id`s into `state.seenMessages`.
  *
  * Best-effort throughout: a missing storage handle (unit-test stubs), a
- * missing table, or an unreadable partition degrades to "not seeded" and
- * NEVER throws (a seeding miss only risks the duplicate this guards
- * against (which settlement/compaction can still collapse), whereas
- * throwing would drop a real row). The promise still resolves on a
- * partial/failed scan, so it is cached and not retried on every exchange.
+ * missing table, or an unreadable partition degrades to "not seeded" (a
+ * seeding miss only risks the duplicate this guards against (which
+ * settlement/compaction can still collapse), whereas failing the exchange
+ * would drop a real row). The promise still resolves on a partial/failed
+ * scan, so it is cached and not retried on every exchange.
+ *
+ * It does NOT, however, promise never to throw, and used to claim it did:
+ * only the `discoverCachePartitions` CALL is guarded below, not the walk
+ * over the answer, so a storage that resolves a truthy NON-iterable (a
+ * violation of its own declared return type) throws out of this function.
+ * The guarantee callers actually need is that seeding never costs a row,
+ * and that is enforced one level up in `seedSeenMessagesForSession`, which
+ * absorbs a rejection from anywhere in the seed path (this scan, or the
+ * committed-session index it consults first) rather than resting on a
+ * contract each leaf asserts about itself.
  *
  * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
@@ -289,6 +572,12 @@ async function scanCommittedMessageIds(sessionId, state, storage, log) {
   } catch (err) {
     log?.warn?.('aigw.seed_seen_messages_failed', {
       session_id: sessionId,
+      // `error_kind` separates the two ways this message is reached,
+      // because they call for opposite responses: `discover_failed` is an
+      // I/O condition this scan handled and the next session may not hit,
+      // while `seed_rejected` (from the caller) means the seed path broke
+      // and will keep breaking until someone fixes it.
+      error_kind: 'discover_failed',
       error: err instanceof Error ? err.message : String(err),
     })
     return
@@ -304,16 +593,45 @@ async function scanCommittedMessageIds(sessionId, state, storage, log) {
     // that don't carry the key in their path.
     const partitionSession = part.partition?.session_id
     if (typeof partitionSession === 'string' && partitionSession !== sessionId) continue
+    const targeted = typeof storage.readRowsWhere === 'function'
     try {
-      for await (const row of storage.readRows(tablePath, ['message_id', 'session_id'])) {
-        if (stringValue(row.session_id) !== sessionId) continue
-        const messageId = stringValue(row.message_id)
-        if (messageId) state.seenMessages.add(messageId)
-      }
+      await collectSeenMessageIds(storage, tablePath, targeted ? sessionId : undefined, sessionId, state)
     } catch {
-      // Skip an unreadable partition; others still contribute.
+      // A scoped read can fail where an unrestricted one succeeds (a partition
+      // whose schema predates `session_id`). An unseeded message replays as a
+      // fresh row, so fall back to the full read before skipping the
+      // partition; only a genuinely unreadable one contributes nothing.
+      if (targeted) {
+        try {
+          await collectSeenMessageIds(storage, tablePath, undefined, sessionId, state)
+        } catch { /* unreadable partition; others still contribute */ }
+      }
       continue
     }
+  }
+}
+
+/**
+ * Fold one partition's committed `message_id`s for `sessionId` into
+ * `state.seenMessages`. `scopeTo` selects the pushed-down read; leaving it
+ * undefined reads the partition unrestricted. The row-level `session_id`
+ * check is the correctness backstop either way, so both shapes agree.
+ *
+ * @param {ExtendedQueryStorageService | QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string | undefined} scopeTo
+ * @param {string} sessionId
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @returns {Promise<void>}
+ */
+async function collectSeenMessageIds(storage, tablePath, scopeTo, sessionId, state) {
+  const rows = scopeTo !== undefined && typeof storage.readRowsWhere === 'function'
+    ? storage.readRowsWhere(tablePath, ['message_id', 'session_id'], { session_id: [scopeTo] })
+    : storage.readRows(tablePath, ['message_id', 'session_id'])
+  for await (const row of rows) {
+    if (stringValue(row.session_id) !== sessionId) continue
+    const messageId = stringValue(row.message_id)
+    if (messageId) state.seenMessages.add(messageId)
   }
 }
 
@@ -336,13 +654,13 @@ function canScanCommittedRows(storage) {
  * session: the started-at memo, per-conversation message-id history,
  * the cross-exchange dedup set, and the tool-call → tool-name lookup.
  *
- * Live capture keeps one instance per listener so identity fallback and
- * dedup span the whole session; backfill creates a fresh instance per
- * provider item (each item already carries a whole conversation), so the
+ * Ordinary live capture keeps one instance per listener so identity fallback
+ * and dedup span the whole session; exchange snapshots and backfill create
+ * fresh state per item (each item already carries a whole conversation), so the
  * identical expansion logic scopes naturally to that one conversation.
  */
 export function createAiGatewayConversationState() {
-  /** @type {Map<string, string[]>} */
+  /** @type {Map<string, ThreadChain>} */
   const messageIdsByConversation = new Map()
   /** @type {Map<string, string>} */
   const conversationStartedAt = new Map()
@@ -362,19 +680,24 @@ export function createAiGatewayConversationState() {
  * scoping by its thread (conversation_id), both unchanged from before
  * the split, since Claude's old conversation_id WAS the session id.
  *
+ * Holds a membership set plus the LAST chained id, not the ordered
+ * array it once was: only the tail is ever read (the 0/1-element
+ * `previous_message_id` link), and the array's linear `includes` per
+ * message made projection O(n^2) over a long-running thread.
+ *
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {string} threadScope
  * @param {string | undefined} agentId
- * @returns {string[]}
+ * @returns {ThreadChain}
  */
 function threadMessageIds(state, threadScope, agentId) {
   const key = agentId ? `${threadScope}\u0000${agentId}` : threadScope
-  let list = state.messageIdsByConversation.get(key)
-  if (!list) {
-    list = []
-    state.messageIdsByConversation.set(key, list)
+  let chain = state.messageIdsByConversation.get(key)
+  if (!chain) {
+    chain = { seen: new Set(), last: undefined, replayLinks: new Map() }
+    state.messageIdsByConversation.set(key, chain)
   }
-  return list
+  return chain
 }
 
 /**
@@ -395,8 +718,15 @@ function threadMessageIds(state, threadScope, agentId) {
  *  - stripping to the advertised `AI_GATEWAY_MESSAGE_COLUMNS` set.
  *
  * Cross-message dedup and identity history live on `state`, owned by the
- * caller. Live capture passes one persistent state per listener;
- * backfill passes a fresh state per conversation item (the default).
+ * caller. Ordinary live capture passes one persistent state per listener;
+ * exchange snapshots and backfill use fresh state per item (the default).
+ *
+ * Expansion MUTATES `state` (the dedup set and the per-thread chain) as it
+ * builds rows, but the append that makes those rows real happens after this
+ * returns. Pass `journal` and every such mutation records its undo, so a
+ * caller whose append failed can call `rollbackAiGatewayStateJournal` and
+ * leave the shared state describing what actually landed rather than what
+ * was merely attempted (issue #879).
  *
  * @param {AiGatewayProjectedExchange} projection
  * @param {{
@@ -404,11 +734,13 @@ function threadMessageIds(state, threadScope, agentId) {
  *   gatewayAttributes?: Record<string, unknown>,
  *   tsStart?: string,
  *   state?: ReturnType<typeof createAiGatewayConversationState>,
+ *   journal?: (() => void)[],
  * }} [opts]
  * @returns {Record<string, unknown>[]}
  */
 export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
   const gatewayId = opts.gatewayId || 'hypaware-local'
+  const journal = opts.journal
   const state = opts.state ?? createAiGatewayConversationState()
   const gatewayAttributes = opts.gatewayAttributes ?? {}
   const tsStart = opts.tsStart ?? stringValue(projection.conversation_started_at) ?? new Date().toISOString()
@@ -445,6 +777,11 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
 
   for (let i = 0; i < projection.messages.length; i++) {
     const message = projection.messages[i]
+    // @ref LLP 0416#ordering: incremental producers supply a stable session position
+    const messageIndex = message.message_index === undefined ? i : message.message_index
+    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > 2147483647) {
+      throw new RangeError('message_index must be a nonnegative INT32')
+    }
     const role = stringValue(message.role)
     if (!role) continue
     const content = normalizeContent(message.content)
@@ -455,7 +792,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     // main loop's, and a Codex thread scopes by its own conversation_id.
     // agent_id null (main loop / Codex) keeps the plain thread key.
     const agentId = stringValue(message.agent_id) ?? stringValue(projection.agent_id)
-    const conversationMessageIds = threadMessageIds(state, threadScope, agentId)
+    const chain = threadMessageIds(state, threadScope, agentId)
 
     const identity = resolveIdentity({
       message,
@@ -463,13 +800,23 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       agentId,
       role,
       content,
-      conversationMessageIds,
+      lastMessageId: chain.last,
     })
 
+    // A message a rollback un-marked but could NOT unchain (a later
+    // exchange had already chained past it) keeps the predecessor it was
+    // first projected with: this re-projection has to rebuild the row the
+    // failed append never wrote, not hang the thread's earlier turns off
+    // whatever tail has since been chained on. Issue #879. Only the
+    // gateway-derived link is restored, because a projector-supplied
+    // `previous_message_id` already replays identically.
+    const buriedLink = chain.replayLinks.get(identity.messageId)
+    if (buriedLink && !Array.isArray(message.previous_message_id)) {
+      identity.previousMessageId = buriedLink
+    }
+
     if (state.seenMessages.has(identity.messageId)) {
-      if (!conversationMessageIds.includes(identity.messageId)) {
-        conversationMessageIds.push(identity.messageId)
-      }
+      chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
       continue
     }
 
@@ -480,7 +827,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       sessionId,
       conversationId,
       conversationStarted,
-      messageIndex: i,
+      messageIndex,
       tsStart,
       projection,
       identity,
@@ -502,13 +849,92 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       rows.push(stripToSchema(row))
     }
 
+    // Journaled, not merely applied: this is the mutation that makes a
+    // re-delivery of the same batch project zero rows, so a caller whose
+    // append then fails has to be able to take it back (issue #879).
     state.seenMessages.add(identity.messageId)
-    if (!conversationMessageIds.includes(identity.messageId)) {
-      conversationMessageIds.push(identity.messageId)
-    }
+    journal?.push(() => { state.seenMessages.delete(identity.messageId) })
+    chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
   }
 
   return rows
+}
+
+/**
+ * Record one message in its thread chain (membership plus the
+ * `previous_message_id` tail), pushing the undo onto `journal` when the
+ * caller asked for one.
+ *
+ * The chain undo has TWO shapes, because one conversation state is shared by
+ * every in-flight exchange of a listener (the proxy fires
+ * `onExchangeFinished` into an unserialized pending set, and
+ * `projectExchange` awaits before it expands), so a later exchange can have
+ * chained further turns onto the same thread by the time a rollback runs:
+ *
+ *  - Still the tail (the sequential case, and the last-in-first-out order
+ *    this journal replays in): unchain it. The re-projection re-walks the
+ *    thread and rebuilds the identical link.
+ *  - No longer the tail: leave `chain.seen` and `chain.last` alone and
+ *    record the link this message HAD in `chain.replayLinks`. Unchaining a
+ *    buried message would strand the turns chained after it, which stay in
+ *    `chain.seen` so nothing re-chains them, settling the tail before them
+ *    and making every later row's `previous_message_id` skip a turn. But
+ *    leaving it at that is not enough either: the re-projection would emit
+ *    the buried message hanging off the CURRENT tail, so the thread's
+ *    opening turns would claim to follow turns that actually follow them
+ *    (a forward link, and a cycle once the later turn already links back to
+ *    this one). The replay link is what keeps both properties.
+ *
+ * `chain.replayLinks` entries are deliberately not consumed on read: a
+ * second failed attempt has to replay the same link, and they are bounded by
+ * `chain.seen`, which is already one entry per message.
+ *
+ * @param {ThreadChain} chain
+ * @param {string} messageId
+ * @param {string[]} previousMessageId The link this message was projected
+ *   with, restored verbatim if a rollback cannot unchain it.
+ * @param {(() => void)[] | undefined} journal
+ * @returns {void}
+ */
+function chainMessageId(chain, messageId, previousMessageId, journal) {
+  if (chain.seen.has(messageId)) return
+  const previousLast = chain.last
+  chain.seen.add(messageId)
+  chain.last = messageId
+  journal?.push(() => {
+    if (chain.last !== messageId) {
+      chain.replayLinks.set(messageId, previousMessageId)
+      return
+    }
+    chain.seen.delete(messageId)
+    chain.last = previousLast
+  })
+}
+
+/**
+ * Undo, newest first, every state mutation a journaled row expansion made,
+ * then empty the journal so it cannot be replayed.
+ *
+ * The dedup set and the thread chain are process-lifetime state shared by
+ * every live producer of `ai_gateway_messages`, and expansion commits to
+ * them before the rows reach storage. Without this, one failed
+ * `appendRows` makes that batch permanently unwritable: the producer's
+ * retry re-projects the same messages, every one of them is now "seen",
+ * and the call returns `rowsWritten: 0` as though there had been nothing
+ * to write - a silent loss, not an error. Rolling back is the cheap
+ * direction of the trade, because re-projecting a row that DID land is
+ * caught by the `part_id` dedupe, while a row wrongly marked seen is gone
+ * until transcript backfill finds it.
+ *
+ * @ref LLP 0252#projection-unchanged [implements]: the dataset's `part_id`
+ *   dedupe absorbs a row projected twice, which is what makes rolling the
+ *   seen-set back safe
+ * @param {(() => void)[]} journal
+ * @returns {void}
+ */
+export function rollbackAiGatewayStateJournal(journal) {
+  for (let i = journal.length - 1; i >= 0; i--) journal[i]()
+  journal.length = 0
 }
 
 /**
@@ -516,9 +942,10 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
  * @param {AiGatewayExchangeInput} input
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
  * @param {(sessionId: string) => boolean} isSessionIgnored
+ * @param {((reason: AiGatewayCaptureReason) => void) | undefined} captureOutcome
  * @returns {Promise<AiGatewayProjectedExchange | UsagePolicyDrop | undefined>}
  */
-async function dispatchProjector(projectors, input, log, isSessionIgnored) {
+async function dispatchProjector(projectors, input, log, isSessionIgnored, captureOutcome) {
   if (projectors.length === 0) return undefined
   const matching = projectors
     .filter((p) => safeMatch(p, input, log))
@@ -526,7 +953,7 @@ async function dispatchProjector(projectors, input, log, isSessionIgnored) {
   // The projector ctx already carries the logger; fold in the read-only
   // ignored-session membership test so an adapter can key its own resolved
   // session_id against the gateway's opt-out set. @ref LLP 0066#enforcement
-  const ctx = { log: { ...noopLogger(), ...(log ?? {}) }, isSessionIgnored }
+  const ctx = { log: { ...noopLogger(), ...(log ?? {}) }, isSessionIgnored, captureOutcome }
   for (const projector of matching) {
     let result
     try {
@@ -610,7 +1037,7 @@ function isValidProjection(value) {
  *   agentId: string | undefined,
  *   role: string,
  *   content: Array<Record<string, unknown>>,
- *   conversationMessageIds: string[],
+ *   lastMessageId: string | undefined,
  * }} ctx
  */
 // @ref LLP 0026#consequences [implements]: store only the immediate
@@ -619,18 +1046,18 @@ function isValidProjection(value) {
 function resolveIdentity(ctx) {
   // `previous_message_id` carries the IMMEDIATE predecessor in this
   // THREAD (a 0- or 1-element array), scoped to (conversation_id,
-  // agent_id) by the caller's `conversationMessageIds`, whether
-  // `message_id` was projector-supplied (transcript uuid) or
-  // hash-synthesized here. The full ancestry is the transitive closure
-  // of this link; the native DAG parent lives in `parent_uuid`. Storing
-  // the whole chain per row was O(N) per message → O(N²) per thread and
-  // dominated the cache (defeats hyparquet's dictionary encoding once
-  // the growing strings pass its cardinality/page-size guards).
+  // agent_id) by the caller's chain state, whether `message_id` was
+  // projector-supplied (transcript uuid) or hash-synthesized here. The
+  // full ancestry is the transitive closure of this link; the native
+  // DAG parent lives in `parent_uuid`. Storing the whole chain per row
+  // was O(N) per message → O(N²) per thread and dominated the cache
+  // (defeats hyparquet's dictionary encoding once the growing strings
+  // pass its cardinality/page-size guards).
   // Projector-supplied history still wins when present.
   const previousFromMessage = Array.isArray(ctx.message.previous_message_id)
     ? ctx.message.previous_message_id.filter((id) => typeof id === 'string')
     : undefined
-  const previousMessageId = previousFromMessage ?? ctx.conversationMessageIds.slice(-1)
+  const previousMessageId = previousFromMessage ?? (ctx.lastMessageId !== undefined ? [ctx.lastMessageId] : [])
   const supplied = stringValue(ctx.message.message_id)
   if (supplied) {
     return {
@@ -690,7 +1117,11 @@ function expandMessageParts(ctx) {
     session_id: ctx.sessionId,
     conversation_id: ctx.conversationId,
     user_id: ctx.projection.user_id,
-    provider: ctx.projection.provider,
+    // @ref LLP 0194#decision [implements]: per-message provider wins over the
+    // exchange provider, the LLP 0026 model precedence extended to the column
+    // it skipped; a mixed-provider backfilled session stops reading as its
+    // first projected turn's vendor.
+    provider: stringValue(ctx.message.provider) ?? ctx.projection.provider,
     // @ref LLP 0026#consequences [implements]: the message envelope (incl.
     // model) mirrors the transcript: backfill records the per-line model on
     // assistant messages only, so the per-message value wins where present and
@@ -747,7 +1178,9 @@ function expandMessageParts(ctx) {
     const toolName = extractToolName(block, toolCallId, ctx.conversationLookup)
     const row = {
       ...base,
-      part_id: `${ctx.identity.messageId}#${partIndex}`,
+      // @ref LLP 0306#recovery-lane [implements]: an adapter-supplied native
+      //   part id is the canonical dedupe identity across live and replay
+      part_id: stringValue(block.part_id) ?? `${ctx.identity.messageId}#${partIndex}`,
       part_index: partIndex,
       part_type: partType,
       provider_type: stringValue(ctx.message.provider_type),
@@ -755,7 +1188,7 @@ function expandMessageParts(ctx) {
       content_text: extractContentText(block),
       tool_name: toolName,
       tool_call_id: toolCallId,
-      tool_args: blockType === 'tool_use' || blockType === 'server_tool_use'
+      tool_args: blockType === 'tool_use' || blockType === 'server_tool_use' || blockType === 'tool_result'
         ? readKey(block, 'input')
         : undefined,
       caller_type: readCallerType(block),
@@ -768,7 +1201,9 @@ function expandMessageParts(ctx) {
       is_error: readKey(block, 'is_error') === true ? true : undefined,
       status: buildStatus(block, isLast, ctx.role, finishReason),
       attributes: mergeJsonObjects(baseClientAttributes, isLast ? messageAttributes : nonCarrierAttributes),
-      raw_frame: isPlainObject(ctx.message.raw_frame) ? ctx.message.raw_frame : undefined,
+      raw_frame: isPlainObject(block.raw_frame)
+        ? block.raw_frame
+        : isPlainObject(ctx.message.raw_frame) ? ctx.message.raw_frame : undefined,
     }
     if (
       partType === 'tool_call' &&
@@ -854,8 +1289,77 @@ function normalizeContent(content) {
   return []
 }
 
-/** @param {unknown} block */
+// An inline `data:<mime>;base64,<payload>` is the bytes of a file (usually a
+// screenshot a tool handed back), not text: nothing reads it, nothing searches
+// it, and it dwarfs every real value in the column. The array path already
+// dropped it, since `textFromContentBlocks` keeps only `part.text` and an
+// `input_image` block has none, but a tool result that reaches the projector
+// ALREADY STRINGIFIED (Codex `view_image` returns
+// `[{"type":"input_image","image_url":"data:image/png;base64,..."}]` as one
+// string) becomes a single `text` block and was stored whole. Identical content
+// therefore cost either nothing or 12MB per row depending on an upstream
+// serialization choice: one production day held 124.5MB of base64 across 35
+// rows, 98.6% of all `content_text`, and a single 12.67MB value made the search
+// index unbuildable (its 9.3M distinct 5-grams overflow V8's Set cap).
+//
+// Any `;base64,` payload is stripped, not just images: none of them are text.
+// The marker stays so the row still records that a payload was there and a
+// search for `input_image` or `image_url` still finds it. Only the bytes go.
+//
+// The marker echoes the mediatype that was on the wire rather than a fixed
+// `image`, so the row does not assert something false about what was captured:
+// a `data:application/pdf` payload used to be rewritten to claim it was an
+// image, and a search for the real mediatype missed the row (#722). The
+// mediatype is echoed verbatim, not normalized through an allowlist; the
+// prefix class already caps it at 255 characters and excludes whitespace and
+// `,`, and what was actually sent is the honest thing to record.
+//
+// The capture group only changes what the replacement does. It must not change
+// what matches: the prefix class stays `[^\s,]{0,255}?` so a `data:` cannot
+// splice onto an unrelated `;base64,` across prose, a comma, or 255 characters.
+//
+// Idempotency survives the varying marker on two locks, and the comma is the
+// load-bearing one: `[^\s,]` excludes `,` and every `;base64,` ends in one, so
+// a captured mediatype can never contain a `;base64,`. The emitted marker
+// therefore holds exactly one, always followed by `<`, which the payload class
+// also excludes, so it can neither re-match in place nor splice onto a later
+// `;base64,` by backtracking past `<stripped>`. Admitting `,` to the mediatype
+// class would break idempotency, not just splice safety.
+//
+// This bounds only the matched forms, so `content_text` is NOT guaranteed
+// bounded. A line-wrapped or `\n`-escaped payload still has its tail survive
+// as bare base64 text, because the match stops at the newline. A general
+// length cap on `content_text` is a deliberate open question (#718) and is
+// not addressed here.
+const BASE64_DATA_URI = /data:([^\s,]{0,255}?);base64,[A-Za-z0-9+/=_-]+/g
+const UNKNOWN_MEDIATYPE = 'application/octet-stream'
+
+/** @param {string | undefined} text */
+function stripBase64DataUris(text) {
+  // Cheap reject first: this runs on every captured part, and almost none of
+  // them carry a payload.
+  if (text === undefined || !text.includes(';base64,')) return text
+  // A replacer function, not a `$1` template: the empty mediatype
+  // (`data:;base64,`) has to fall back to `application/octet-stream`, and a
+  // template string cannot express that. A `$1` template would be safe against
+  // a `$` in the mediatype (a substituted capture is never re-scanned for
+  // replacement patterns), so that is not the reason.
+  return text.replace(BASE64_DATA_URI, (_match, mediatype) => `data:${mediatype || UNKNOWN_MEDIATYPE};base64,<stripped>`)
+}
+
+/**
+ * Strip at the one place every branch funnels through (plain string,
+ * `tool_result` string, `tool_result` array, thinking, error), so a branch
+ * added later inherits the rule instead of reopening the hole.
+ *
+ * @param {unknown} block
+ */
 function extractContentText(block) {
+  return stripBase64DataUris(readContentText(block))
+}
+
+/** @param {unknown} block */
+function readContentText(block) {
   if (!isPlainObject(block)) return undefined
   switch (block.type) {
   case 'text':
@@ -902,6 +1406,10 @@ function extractToolCallId(block) {
 function extractToolName(block, tool_call_id, lookup) {
   if (!isPlainObject(block)) return undefined
   if (block.type === 'tool_use' || block.type === 'server_tool_use') return stringValue(block.name)
+  if (block.type === 'tool_result' || block.type === 'web_search_tool_result') {
+    const direct = stringValue(block.name)
+    if (direct) return direct
+  }
   if ((block.type === 'tool_result' || block.type === 'web_search_tool_result') && tool_call_id && lookup) {
     return lookup.get(tool_call_id)?.tool_name
   }
@@ -926,7 +1434,9 @@ function buildStatus(block, isLastPart, role, finishReason) {
   /** @type {Record<string, unknown>} */
   const status = {}
   const b = isPlainObject(block) ? block : undefined
-  if (b && (b.type === 'tool_result' || b.type === 'web_search_tool_result')) {
+  // Explicit null means the producer cannot establish the outcome. Keep
+  // the legacy missing-field convention for providers that imply success.
+  if (b && b.is_error !== null && (b.type === 'tool_result' || b.type === 'web_search_tool_result')) {
     status.tool_status = b.is_error === true ? 'error' : 'success'
   }
   if (isLastPart && role === 'assistant' && finishReason) status.finish_reason = finishReason
@@ -971,6 +1481,11 @@ function buildGatewayAttributes(exchange) {
     upstream: stringValue(exchange.upstream),
     method: stringValue(exchange.method ?? undefined),
     path: stringValue(exchange.path ?? undefined),
+    // Set iff the gateway rerouted the request off the path it arrived on,
+    // which makes the reroute a queryable fact on the message row rather
+    // than something only the exchange log knew.
+    // @ref LLP 0313#the-row-records-where-the-request-was-sent [implements]
+    upstream_path: readMetadataString(exchange, 'upstream_path'),
     status_code: exchange.status_code ?? undefined,
     request_bytes: exchange.request_bytes ?? undefined,
     response_bytes: exchange.response_bytes ?? undefined,
@@ -1040,6 +1555,17 @@ function utcDate(value) {
   const date = new Date(typeof value === 'bigint' ? Number(value) : /** @type {any} */ (value))
   if (Number.isNaN(date.getTime())) return new Date().toISOString().slice(0, 10)
   return date.toISOString().slice(0, 10)
+}
+
+/**
+ * @param {AiGatewayExchangeInput} exchange
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function readMetadataString(exchange, key) {
+  const metadata = parseMaybeJson(exchange.metadata)
+  if (!isPlainObject(metadata)) return undefined
+  return stringValue(metadata[key])
 }
 
 /** @param {AiGatewayExchangeInput} exchange */

@@ -13,6 +13,15 @@
 > learns **source-scoped** withholding alongside its directory-scoped
 > classes.
 
+> **Superseded-by [LLP 0188](./0188-enrolled-default-sync-with-client-optout.decision.md):**
+> the default flips. Local additions on an enrolled machine now sync
+> unless the user opts them out per client; the per-item toggle this
+> decision rejected is the new mechanism, and the previously derived
+> withheld set is materialized into a machine-local store on upgrade so
+> nothing withheld under this rule starts shipping silently. The
+> source-scoped withholding seam this decision introduced remains the
+> enforcement point.
+
 ## Context
 
 On an enrolled machine, the central sink exports the whole cache; the

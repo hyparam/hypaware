@@ -28,27 +28,23 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  * Phase 9 V1-milestone smoke. Boots the full first-party stack
  * (`@hypaware/ai-gateway` + `@hypaware/otel` + `@hypaware/local-fs` +
  * `@hypaware/format-parquet` + `@hypaware/claude`) against a tmp
- * HYP_HOME, drives `hyp init claude-and-otel-local`, then exercises
+ * HYP_HOME, drives `hyp setup claude-and-otel-local`, then exercises
  * the resulting install end-to-end.
  *
  * Assertions (per bead hy-imw):
  *
- * - `hyp init claude-and-otel-local` exits 0 and writes the v2 config
+ * - `hyp setup claude-and-otel-local` exits 0 and writes the v2 config
  *   at `<HYP_HOME>/hypaware-config.json`. The config matches a golden
  *   shape that enumerates all five plugins and the
  *   `local` sink (writer=format-parquet, destination=local-fs).
- * - `hyp status` exits 0 and prints the four plugins (two sources,
- *   one sink contribution, one client) plus the cache retention
- *   window from the config.
+ * - `hyp status` exits 0 and reports three sources (gateway, generic
+ *   OTLP, and Claude telemetry), one sink contribution, and one client,
+ *   plus the cache retention window from the config.
  * - One OTLP log POST and one gateway request each round-trip through
  *   the running sources, with `dev_run_id` preserved.
- * - SQL count(*) on both `logs` and `ai_gateway_messages` returns 1
- *   under the same `dev_run_id`.
- * - `walkthrough.finish` span (via the preset shortcut: the preset
- *   does not emit it; the bead lists it as a walkthrough-specific
- *   contract, validated separately by an in-process walkthrough call
- *   inside this smoke) carries `sources_picked`/`sinks_picked`/
- *   `clients_picked`.
+ * - SQL count(*) returns one `logs` row and the two projected
+ *   `ai_gateway_messages` rows (user and assistant) under the same
+ *   `dev_run_id`.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -84,7 +80,16 @@ export async function run({ harness, expect }) {
   const aiGatewayConfig = {
     listen: '127.0.0.1:0',
     upstreams: [
-      { name: 'echo', base_url: echo.url, path_prefix: '/' },
+      // The Claude adapter contributes its real Anthropic route at priority
+      // 100. Keep this hermetic route above it so the smoke cannot reach the
+      // network while still exercising the adapter's message projector.
+      {
+        name: 'echo-anthropic',
+        base_url: echo.url,
+        path_prefix: '/v1/messages',
+        provider: 'anthropic',
+        priority: 1000,
+      },
     ],
   }
   const otelConfig = { listen_host: '127.0.0.1', listen_port: 0 }
@@ -142,11 +147,11 @@ export async function run({ harness, expect }) {
       }
     )
 
-    // ----- 1. hyp init claude-and-otel-local -----
+    // ----- 1. hyp setup claude-and-otel-local -----
     const initStdout = makeBuf()
     const initStderr = makeBuf()
     const initCode = await dispatch(
-      ['init', 'claude-and-otel-local'],
+      ['setup', 'claude-and-otel-local'],
       {
         stdout: initStdout,
         stderr: initStderr,
@@ -155,9 +160,9 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: hyp init claude-and-otel-local exited 0', initCode, (v) => v === 0)
+    expect.that('dispatch: hyp setup claude-and-otel-local exited 0', initCode, (v) => v === 0)
     expect.that(
-      'stderr: hyp init had no errors',
+      'stderr: hyp setup had no errors',
       initStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
@@ -174,8 +179,10 @@ export async function run({ harness, expect }) {
     // ----- 2. hyp status -----
     const statusStdout = makeBuf()
     const statusStderr = makeBuf()
+    // The plugin inventory and the cache-retention line are the verbose
+    // report since LLP 0455; the walkthrough assertions below read them there.
     const statusCode = await dispatch(
-      ['status'],
+      ['status', '--verbose'],
       {
         stdout: statusStdout,
         stderr: statusStderr,
@@ -244,7 +251,7 @@ export async function run({ harness, expect }) {
       messages: [{ role: 'user', content: `gateway ${harness.devRunId}` }],
     })
     const gatewayResponse = await postThroughGateway({
-      url: `${gatewayUrl}/v1/echo`,
+      url: `${gatewayUrl}/v1/messages`,
       headers: {
         'content-type': 'application/json',
         'x-hyp-dev-run-id': harness.devRunId,
@@ -314,27 +321,12 @@ export async function run({ harness, expect }) {
       (v) => v === 1
     )
     expect.that(
-      'sql: ai_gateway_messages has exactly one row for this dev_run_id',
+      'sql: ai_gateway_messages has the projected user and assistant rows',
       Number(aigwRow?.n ?? 0),
-      (v) => v === 1
+      (v) => v === 2
     )
 
-    // ----- 5. Span assertions: walkthrough.start/finish + status.render -----
-    // The preset path does not by itself invoke the walkthrough spans
-    // (they're emitted by the interactive walkthrough), so drive a
-    // headless picker walkthrough now with pre-baked picks to validate
-    // the span contract documented on the bead.
-    const { runPickerWalkthrough } = await import('../../../src/core/cli/walkthrough.js')
-    const headlessStdout = makeBuf()
-    const headlessStderr = makeBuf()
-    await runPickerWalkthrough({
-      capabilities: kernel.capabilities,
-      stdout: headlessStdout,
-      stderr: headlessStderr,
-      env: { ...smokeEnv(harness), HYP_CONFIG: path.join(harness.tmpDir, 'walkthrough-config.json') },
-      picks: { sources: ['claude', 'codex'], exportChoice: 'local-parquet', retentionDays: 30 },
-    })
-
+    // Verify the actual CLI workflow telemetry.
     await obs.shutdown()
 
     const traces = await expect.traces()
@@ -347,44 +339,12 @@ export async function run({ harness, expect }) {
       statusSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.source_count === 2 &&
+        v.source_count === 3 &&
         v.sink_count === 1 &&
         v.client_count === 1 &&
         v.retention_days === 90
     )
 
-    const startSpans = traces.filter(
-      (/** @type {any} */ t) => t.name === 'walkthrough.start'
-    )
-    expect.that(
-      'traces: walkthrough.start span emitted with sources_available',
-      startSpans[0]?.attributes?.sources_available,
-      (v) => typeof v === 'number' && v >= 2
-    )
-
-    const finishSpans = traces.filter(
-      (/** @type {any} */ t) => t.name === 'walkthrough.finish'
-    )
-    expect.that(
-      'traces: walkthrough.finish span emitted with picks counts',
-      finishSpans[0]?.attributes,
-      (v) =>
-        v !== undefined &&
-        v.sources_picked === 2 &&
-        v.export_picked === 'local-parquet' &&
-        v.clients_picked === 2 &&
-        v.retention_days === 30
-    )
-
-    const logs = await expect.logs()
-    const pickLogs = logs.filter(
-      (/** @type {any} */ l) => l.body === 'walkthrough.pick'
-    )
-    expect.that(
-      'logs: walkthrough.pick emitted at least once per pick category',
-      new Set(pickLogs.map((/** @type {any} */ l) => l.attributes?.pick_type)),
-      (v) => v instanceof Set && v.has('sources') && v.has('exports')
-    )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -402,13 +362,7 @@ function goldenConfig(hypHome) {
       {
         name: '@hypaware/ai-gateway',
         config: {
-          upstreams: [
-            {
-              name: 'anthropic',
-              base_url: 'https://api.anthropic.com',
-              path_prefix: '/',
-            },
-          ],
+          upstreams: [],
         },
       },
       {
@@ -417,10 +371,9 @@ function goldenConfig(hypHome) {
       },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      {
-        name: '@hypaware/claude',
-        config: { proxy: '@hypaware/ai-gateway' },
-      },
+      { name: '@hypaware/claude' },
+      { name: '@hypaware/context-graph' },
+      { name: '@hypaware/ai-gateway-graph' },
     ],
     sinks: {
       local: {
@@ -479,14 +432,14 @@ async function startEchoUpstream() {
       const body = Buffer.concat(chunks)
       res.statusCode = 200
       res.setHeader('content-type', 'application/json')
-      res.end(
-        JSON.stringify({
-          url: req.url,
-          method: req.method,
-          headers: req.headers,
-          bodyBytes: body.length,
-        })
-      )
+      res.end(JSON.stringify({
+        id: 'msg_walkthrough_echo',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-walkthrough',
+        content: [{ type: 'text', text: `echoed ${body.length} bytes` }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
     })
   })
   await new Promise((resolve) => {

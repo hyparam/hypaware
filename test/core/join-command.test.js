@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { centralSeedPath, resolveCentralLayerPath } from '../../src/core/config/apply.js'
+import { readClientSyncEntries } from '../../src/core/usage-policy/client_sync.js'
 
 /** @param {string} hypHome */
 function seedPathFor(hypHome) {
@@ -71,17 +72,25 @@ test('join writes the central seed (mode 0600) and skips daemon install with --n
   assert.equal(seed.sinks.central.config.url, 'https://central.example')
   assert.equal(seed.sinks.central.config.identity.bootstrap_token, 'policy-token-1')
   assert.match(stdout.text(), /daemon install skipped/)
+
+  // Enrollment stamps the empty client-sync store (LLP 0188 #migration):
+  // the machine is marked new-era (default-sync) before any boot can see a
+  // central layer with no store and migrate fresh picks into opt-outs.
+  const stateDir = path.join(hypHome, 'hypaware')
+  assert.deepEqual(await readClientSyncEntries({ stateDir }), [], 'join stamped an empty opt-out store')
 })
 
 test('join never touches an existing local config (#111 regression)', async () => {
   const { hypHome, opts } = await makeDispatchOpts()
-  // A working local install: ai-gateway + client wiring the user owns.
+  // An upgraded local install: ai-gateway + client wiring the user owns.
+  // Legacy boot migration is covered by grep-config-migration.test.js.
   const localPath = path.join(hypHome, 'hypaware-config.json')
   const localConfig = {
     version: 2,
     plugins: [
       { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787' } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/grep' },
     ],
   }
   await fs.writeFile(localPath, JSON.stringify(localConfig, null, 2) + '\n')

@@ -9,7 +9,8 @@ import path from 'node:path'
 import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { WIZARD_STEP_LABELS, wizardItinerary, wizardStepProgress } from '../../../../src/core/cli/wizard/steps.js'
-import { defaultPromptFactory, runPickerFinale } from '../../../../src/core/cli/walkthrough.js'
+import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
+import { defaultPromptFactory } from '../../../../src/core/cli/walkthrough.js'
 import { render } from '../../../../src/core/cli/tui/render.js'
 
 // The wizard's position indicator (LLP 0135 #progress): the denominator is
@@ -79,6 +80,9 @@ function wizardOpts(home, over = {}) {
     finale: {},
     gate: async () => ({ action: 'first-run', managed: false, report: {} }),
     fork: async (/** @type {any} */ o) => { seen.fork = o; return 'local' },
+    // Positions are what these tests read, and an express run states none
+    // (LLP 0201): decline the gate so every lane counts.
+    express: async (/** @type {any} */ o) => { seen.express = o; return 'choose' },
     join: async (/** @type {any} */ o) => { seen.join = o; return { status: 'ok', lockedSources: [], managed: true } },
     pick: async (/** @type {any} */ o) => { seen.pick = o; return pickResult() },
     configure: async () => ({ results: [] }),
@@ -101,21 +105,113 @@ function wizardOpts(home, over = {}) {
 
 // --- the step vocabulary ---
 
-test('wizardStepProgress: the team pathway counts join, pick and finale', async () => {
-  assert.deepEqual(wizardItinerary('team'), ['join', 'pick', 'finale'])
-  assert.equal(wizardStepProgress('team', 'join'), 'Step 1 of 3 · Join your team')
-  assert.equal(wizardStepProgress('team', 'pick'), 'Step 2 of 3 · Choose what to collect')
-  assert.equal(wizardStepProgress('team', 'finale'), 'Step 3 of 3 · Finish setup')
+test('wizardStepProgress: the team pathway counts join, combined pick, folders and finale', async () => {
+  assert.deepEqual(wizardItinerary('team'), ['join', 'pick', 'folders', 'finale'])
+  assert.equal(wizardStepProgress('team', 'join'), 'Step 1 of 4 · Join your team')
+  assert.equal(wizardStepProgress('team', 'pick'), 'Step 2 of 4 · Choose what to collect and sync')
+  assert.equal(wizardStepProgress('team', 'sync'), undefined)
+  // The new-folder question is its own lane (LLP 0200 #wizard): the sync
+  // lane answers which adapters ship, this one answers what happens the
+  // next time the user works somewhere new.
+  assert.equal(wizardStepProgress('team', 'folders'), 'Step 3 of 4 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('team', 'finale'), 'Step 4 of 4 · Finish setup')
 })
 
-test('wizardStepProgress: pathways without a join lane count two steps', async () => {
-  for (const pathway of /** @type {const} */ (['local', 'scoped'])) {
-    assert.deepEqual(wizardItinerary(pathway), ['pick', 'finale'])
-    assert.equal(wizardStepProgress(pathway, 'pick'), `Step 1 of 2 · ${WIZARD_STEP_LABELS.pick}`)
-    assert.equal(wizardStepProgress(pathway, 'finale'), `Step 2 of 2 · ${WIZARD_STEP_LABELS.finale}`)
-    // A lane the pathway never runs has no position to report.
-    assert.equal(wizardStepProgress(pathway, 'join'), undefined)
+test('wizardStepProgress: the local pathway counts two steps', async () => {
+  assert.deepEqual(wizardItinerary('local'), ['pick', 'finale'])
+  assert.equal(wizardStepProgress('local', 'pick'), `Step 1 of 2 · ${WIZARD_STEP_LABELS.pick}`)
+  assert.equal(wizardStepProgress('local', 'finale'), `Step 2 of 2 · ${WIZARD_STEP_LABELS.finale}`)
+  // A lane the pathway never runs has no position to report.
+  assert.equal(wizardStepProgress('local', 'join'), undefined)
+  assert.equal(wizardStepProgress('local', 'sync'), undefined)
+  assert.equal(wizardStepProgress('local', 'folders'), undefined)
+})
+
+test('wizardStepProgress: a managed machine on the local pathway gains both enrolled lanes (LLP 0188, LLP 0200)', async () => {
+  assert.deepEqual(wizardItinerary('local', { managed: true }), ['pick', 'folders', 'finale'])
+  assert.equal(wizardStepProgress('local', 'pick', { managed: true }), 'Step 1 of 3 · Choose what to collect and sync')
+  assert.equal(wizardStepProgress('local', 'sync', { managed: true }), undefined)
+  assert.equal(wizardStepProgress('local', 'folders', { managed: true }), 'Step 2 of 3 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('local', 'finale', { managed: true }), 'Step 3 of 3 · Finish setup')
+})
+
+// The fully fleet-managed machine: everything picked is the fleet's, so
+// the lane states that and asks nothing. It carries no position line any
+// more - the combined picker took the lane's place in the itinerary
+// (LLP 0396 #combined-selection), and `wizardStepProgress(_, 'sync')` is
+// `undefined` on every pathway (asserted below) - so handing it one here
+// would pin a frame the wizard can no longer render.
+// @ref LLP 0396#combined-selection [tests]: the retired lane states its outcome with no position above it
+test('the sync lane states its outcome, with no position line, when it has nothing to ask', async () => {
+  const stdout = makeBuf()
+  await runWizardSyncScope(/** @type {any} */ ({
+    stdout,
+    stderr: makeBuf(),
+    env: { HYP_HOME: await tmpHome(), HYP_NO_TUI: '1' },
+    candidates: [],
+    locked: [{ id: 'claude', label: 'Claude Code' }],
+    lockedHidden: 0,
+    candidatesHiddenIds: [],
+  }))
+
+  const lines = stdout.text().split('\n').filter((l) => l !== '')
+  // The statement alone: no `Step n of m` above it, because the lane is
+  // not a counted screen any more.
+  assert.deepEqual(lines, [
+    "✓ Syncing it to the cloud (set by your team)",
+  ], stdout.text())
+})
+
+// @ref LLP 0396#combined-selection [tests]: the combined itinerary is fixed before selection, even when no sources are editable
+test('wizardItinerary: no lane emptiness can reach the denominator', async () => {
+  const emptiness = /** @type {any} */ ({
+    managed: true,
+    syncEmpty: true,
+    candidates: [],
+    picked: { descriptors: [] },
+  })
+  const forEveryMachine = [
+    wizardItinerary('team'),
+    wizardItinerary('team', {}),
+    wizardItinerary('team', { managed: true }),
+    wizardItinerary('team', { managed: false }),
+    wizardItinerary('team', emptiness),
+  ]
+  for (const itinerary of forEveryMachine) {
+    assert.deepEqual(itinerary, ['join', 'pick', 'folders', 'finale'])
   }
+  assert.equal(wizardStepProgress('team', 'sync'), undefined)
+  assert.equal(wizardStepProgress('team', 'folders'), 'Step 3 of 4 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('team', 'sync', emptiness), undefined)
+  assert.equal(
+    wizardStepProgress('team', 'folders', emptiness),
+    'Step 3 of 4 · Choose how new folders are handled'
+  )
+
+  // Enrolled local reconfiguration uses the same combined choice.
+  for (const itinerary of [
+    wizardItinerary('local', { managed: true }),
+    wizardItinerary('local', emptiness),
+  ]) {
+    assert.deepEqual(itinerary, ['pick', 'folders', 'finale'])
+  }
+  assert.equal(wizardStepProgress('local', 'sync', emptiness), undefined)
+  assert.equal(
+    wizardStepProgress('local', 'folders', emptiness),
+    'Step 2 of 3 · Choose how new folders are handled'
+  )
+
+  // An options bag cannot see the last seam: the returned list itself. It
+  // used to be the module's own array, so a caller that spliced a lane out
+  // of what it was handed moved the total for every lane after it, with
+  // nothing passing through an argument at all.
+  const handed = wizardItinerary('team')
+  handed.splice(2, 1)
+  assert.deepEqual(
+    wizardItinerary('team'),
+    ['join', 'pick', 'folders', 'finale'],
+    'the itinerary a caller was handed is not the one the next caller gets'
+  )
 })
 
 test('wizardStepProgress: an uncommitted pathway has no denominator', async () => {
@@ -125,23 +221,29 @@ test('wizardStepProgress: an uncommitted pathway has no denominator', async () =
 
 // --- orchestrator threading ---
 
-test('runInitWizard: the local pathway reads step 1 of 2 then step 2 of 2', async () => {
+// @ref LLP 0437#headings [tests]: the menus carry the count, the finish step neither a count nor a heading
+test('runInitWizard: the local pathway counts on its menu and opens the finish step bare', async () => {
   const { opts, seen } = wizardOpts(await tmpHome())
   const result = await runInitWizard(opts)
   assert.equal(result.pathway, 'local')
   assert.equal(seen.pick.progress, 'Step 1 of 2 · Choose what to collect')
-  assert.equal(seen.finale.progress, 'Step 2 of 2 · Finish setup')
+  assert.equal(seen.finale.progress, undefined)
+  assert.equal(seen.finale.heading, undefined)
 })
 
-test('runInitWizard: the team pathway reads step 1/2/3 across join, pick and finale', async () => {
+test('runInitWizard: the team pathway counts four steps with no separate sync position', async () => {
   const { opts, seen } = wizardOpts(await tmpHome(), {
     fork: async () => 'team',
+    syncScope: async (/** @type {any} */ o) => { seen.sync = o; return {} },
+    folderAsk: async (/** @type {any} */ o) => { seen.folders = o; return { mode: 'sync' } },
   })
   const result = await runInitWizard(opts)
   assert.equal(result.pathway, 'team')
-  assert.equal(seen.join.progress, 'Step 1 of 3 · Join your team')
-  assert.equal(seen.pick.progress, 'Step 2 of 3 · Choose what to collect')
-  assert.equal(seen.finale.progress, 'Step 3 of 3 · Finish setup')
+  assert.equal(seen.join.progress, undefined)
+  assert.equal(seen.pick.progress, 'Step 2 of 4 · Choose what to collect and sync')
+  assert.equal(seen.sync.progress, undefined)
+  assert.equal(seen.folders.progress, 'Step 3 of 4 · Choose how new folders are handled')
+  assert.equal(seen.finale.heading, undefined)
 })
 
 test('runInitWizard: the fork never carries a counter, before or after a failed join', async () => {
@@ -162,18 +264,25 @@ test('runInitWizard: the fork never carries a counter, before or after a failed 
   // The retry lands on the local pathway: the counter states that pathway's
   // total, not the abandoned team one.
   assert.equal(seen.pick.progress, 'Step 1 of 2 · Choose what to collect')
-  assert.equal(seen.finale.progress, 'Step 2 of 2 · Finish setup')
 })
 
-test('runInitWizard: the scoped re-entry counts two steps and skips the fork', async () => {
+// A managed machine's Reconfigure runs the fork like any other (LLP
+// 0182), so its counter is the fork's answer, not a pathway of its own -
+// but being managed adds the sync lane to that pathway's count (LLP 0188).
+test('runInitWizard: a managed re-entry counts the pathway the fork returns, plus both enrolled lanes', async () => {
   const { opts, seen } = wizardOpts(await tmpHome(), {
-    gate: async () => ({ action: 'scoped-reconfigure', managed: true, report: {} }),
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    // Stay connected at the disconnect question (LLP 0190 #fork-disconnect).
+    confirm: async () => 'stay',
+    syncScope: async (/** @type {any} */ o) => { seen.sync = o; return {} },
+    folderAsk: async (/** @type {any} */ o) => { seen.folders = o; return { mode: 'sync' } },
   })
   const result = await runInitWizard(opts)
-  assert.equal(result.pathway, 'scoped')
-  assert.equal(seen.fork, undefined)
-  assert.equal(seen.pick.progress, 'Step 1 of 2 · Choose what to collect')
-  assert.equal(seen.finale.progress, 'Step 2 of 2 · Finish setup')
+  assert.equal(result.pathway, 'local')
+  assert.equal(seen.fork.progress, undefined)
+  assert.equal(seen.pick.progress, 'Step 1 of 3 · Choose what to collect and sync')
+  assert.equal(seen.sync.progress, undefined)
+  assert.equal(seen.folders.progress, 'Step 2 of 3 · Choose how new folders are handled')
 })
 
 test('runInitWizard: a non-interactive run carries no breadcrumb anywhere', async () => {
@@ -182,32 +291,13 @@ test('runInitWizard: a non-interactive run carries no breadcrumb anywhere', asyn
   })
   await runInitWizard(opts)
   assert.equal(seen.pick.progress, undefined)
-  assert.equal(seen.finale.progress, undefined)
+  assert.equal(seen.finale.heading, undefined)
   assert.ok(!stdout.text().includes('Step '), stdout.text())
 })
 
 // --- the phases that render it ---
 
-test('runWizardJoin: prints its position above the joining narration', async () => {
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  await runWizardJoin(/** @type {any} */ ({
-    stdout,
-    stderr,
-    env: {},
-    catalog: { pickerDescriptors: new Map(), clientDescriptors: new Map() },
-    progress: 'Step 1 of 3 · Join your team',
-    runLogin: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-    waitForConverge: async () => ({ ok: false, attached: [] }),
-  }))
-  assert.equal(
-    stdout.text().startsWith('Step 1 of 3 · Join your team\nJoining your team...\n'),
-    true,
-    stdout.text()
-  )
-})
-
-test('runWizardJoin: without a position it narrates exactly as it does today', async () => {
+test('runWizardJoin: opens with a plain heading, not a step count', async () => {
   const stdout = makeBuf()
   const stderr = makeBuf()
   await runWizardJoin(/** @type {any} */ ({
@@ -216,52 +306,10 @@ test('runWizardJoin: without a position it narrates exactly as it does today', a
     env: {},
     catalog: { pickerDescriptors: new Map(), clientDescriptors: new Map() },
     runLogin: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-    waitForConverge: async () => ({ ok: false, attached: [] }),
+    waitForConverge: async () => ({ ok: false }),
   }))
-  assert.equal(stdout.text().startsWith('Joining your team...\n'), true, stdout.text())
-})
-
-/**
- * The finale with every action skipped: enough to prove the lane prints
- * its own position line, without installing or attaching anything.
- *
- * @param {{ write(chunk: string): unknown, text(): string }} stdout
- * @param {Record<string, unknown>} over
- */
-function finaleArgs(stdout, over = {}) {
-  return /** @type {any} */ ({
-    finale: { skipDaemon: true, skipDaemonInstall: true, skipRestart: true },
-    clientsPicked: [],
-    capabilities: /** @type {any} */ ({ has: () => false }),
-    config: { version: 2, plugins: [] },
-    configPath: '/tmp/x/config.json',
-    env: { HOME: '/tmp/x' },
-    stdout,
-    stderr: makeBuf(),
-    retentionDays: 30,
-    interactive: true,
-    ...over,
-  })
-}
-
-test('runPickerFinale: states its position once, where the lane starts', async () => {
-  const stdout = makeBuf()
-  await runPickerFinale(finaleArgs(stdout, { progress: 'Step 2 of 2 · Finish setup' }))
-  assert.equal(stdout.text().startsWith('Step 2 of 2 · Finish setup\n'), true, stdout.text())
-  // Once, not once per action inside the lane.
-  assert.equal(stdout.text().split('Step 2 of 2').length - 1, 1, stdout.text())
-})
-
-test('runPickerFinale: without a position it writes exactly what it writes today', async () => {
-  const withProgress = makeBuf()
-  const without = makeBuf()
-  await runPickerFinale(finaleArgs(withProgress, { progress: 'Step 2 of 2 · Finish setup' }))
-  await runPickerFinale(finaleArgs(without))
-  assert.equal(
-    withProgress.text(),
-    'Step 2 of 2 · Finish setup\n' + without.text(),
-    without.text()
-  )
+  assert.equal(stdout.text().startsWith('Joining your team\n'), true, stdout.text())
+  assert.doesNotMatch(stdout.text(), /Step /)
 })
 
 test('the legacy numbered picker prompt prints the breadcrumb as plain text', async () => {

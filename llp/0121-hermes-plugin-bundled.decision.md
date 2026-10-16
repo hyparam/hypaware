@@ -6,6 +6,8 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0002, LLP 0005, LLP 0007, LLP 0008, LLP 0118, LLP 0120, LLP 0122
+**Extended-by:** [LLP 0360](./0360-github-source-is-bundled.decision.md)
+(Hermes remains bundled; the standalone GitHub comparison is superseded)
 
 > `@hypaware/hermes` lives in this repo at
 > `hypaware-core/plugins-workspace/hermes/`, beside `claude` and `codex`,

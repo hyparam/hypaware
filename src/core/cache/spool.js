@@ -3,12 +3,15 @@
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
+import { noteProductPending, noteProductPipeline } from '../product_telemetry/client.js'
 
+import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { createIngestSeqAllocator } from './ingest-seq.js'
-import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
+import { isConfirmedSymlink } from './paths.js'
+import { readProgress, removeProgress, streamFlushFile, streamSpoolLines, writeProgress } from './streaming-reader.js'
 
 /**
+ * @import { FileHandle } from 'node:fs/promises'
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CacheSpool, FlushResult } from '../../../src/core/cache/types.js'
  */
@@ -16,11 +19,22 @@ import { readProgress, removeProgress, streamFlushFile, writeProgress } from './
 export const SPOOL_DIR = '_hypaware_spool'
 export const DEFAULT_SPOOL_BYTES_THRESHOLD = 512 * 1024 * 1024
 export const QUERY_FLUSH_DEBOUNCE_MS = 2 * 60 * 1000
+// How long a failed flush holds the automatic query gate closed. Ten minutes,
+// not LLP 0319's six hours: the re-settle scan already had the hourly tick as
+// a cadence and needed a slower one, while the query gate has no cadence at
+// all, so this window is the cadence. Kept under the maintenance interval so a
+// repair that lands there is picked up by the next query in the same hour.
+// @ref LLP 0322#stamp-the-failure [implements]: the window a standing failure stamp holds the auto gate closed
+export const QUERY_FLUSH_FAILURE_COOLDOWN_MS = 10 * 60 * 1000
 
 const ACTIVE_FILE = 'active.jsonl'
 const FLUSH_PREFIX = 'flush-'
 const FLUSH_SUFFIX = '.jsonl'
 const LAST_FLUSH_FILE = 'last-flush.json'
+const FLUSH_FAILURE_FILE = 'last-flush-failure.json'
+// The writer's bound and the reader's. The stamp is a file on disk, so a build
+// that reads one it did not write cannot rely on the writer having clamped it.
+const FLUSH_FAILURE_MESSAGE_MAX = 512
 
 /**
  * @param {{
@@ -36,10 +50,6 @@ export function createCacheSpool(args) {
   const states = new Map()
   /** @type {Set<string>} */
   const knownTables = new Set()
-  // One cache-global allocator shared across every table's flush, so a seq is
-  // monotonic across the whole cache (and thus strictly increasing within each
-  // destination partition, which can receive rows from more than one spool path).
-  const seqAllocator = createIngestSeqAllocator({ cacheRoot: args.cacheRoot })
 
   /**
    * @param {string} tablePath
@@ -80,6 +90,110 @@ export function createCacheSpool(args) {
     return next
   }
 
+  /**
+   * Move one set of already-rotated flush files into the cache, accumulating
+   * into `totals`. Throws on the first append the cache rejects, leaving the
+   * remaining files where they are for a later attempt.
+   *
+   * @param {string} tablePath
+   * @param {string[]} files
+   * @param {{ rowCount: number, chunkCount: number, bytesWritten: number, malformedCount: number, droppedCount: number }} totals
+   */
+  async function drainFlushFiles(tablePath, files, totals) {
+    for (const filePath of files) {
+      const progress = await readProgress(filePath)
+      const startOffset = progress?.byteOffset ?? 0
+      const batchId = `flush-${Date.now()}-${process.pid}`
+      let fileMalformed = 0
+
+      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit })) {
+        const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
+        noteProductPipeline('write', { rows: batch.chunk.rows.length - (written.droppedCount ?? 0), bytes: written.bytesWritten })
+        totals.rowCount += batch.chunk.rows.length
+        totals.chunkCount += 1
+        totals.bytesWritten += written.bytesWritten
+        totals.droppedCount += written.droppedCount ?? 0
+        fileMalformed += batch.malformedCount
+        await writeProgress(filePath, batch.resumeOffset)
+      }
+
+      totals.malformedCount += fileMalformed
+      await removeProgress(filePath)
+      await fs.rm(filePath, { force: true })
+    }
+  }
+
+  /**
+   * The flush body. Lifted out of `flushTable` so the failure stamp write
+   * and the stamp clear wrap every exit from it, the early return included.
+   *
+   * @param {string} tablePath
+   * @param {{ reason?: string, force?: boolean }} opts
+   * @returns {Promise<FlushResult>}
+   */
+  async function runFlush(tablePath, opts) {
+    const reason = opts.reason ?? 'manual'
+    const totals = { rowCount: 0, chunkCount: 0, bytesWritten: 0, malformedCount: 0, droppedCount: 0 }
+
+    // A rotation while a failure stands only adds a file to a set nothing is
+    // draining: the waiting files cannot be read past the append that
+    // rejected them, so the retry has the same work either way. Skipping it
+    // keeps the stranded set fixed instead of growing it once per attempt,
+    // and lets new rows coalesce in the active file.
+    //
+    // This has to cover forced calls too, or it does not bound anything: the
+    // sink adapters flush with `force: true` once per partition per export
+    // tick and the driver's default schedule is every minute, so exempting
+    // `force` would move the growth off query traffic and onto a cron that
+    // strands ~1440 files a day per partition.
+    // One refusal line per flush pass, which is the rate LLP 0329
+    // #consequences priced ("one line per refusing flush or sweep pass"). This
+    // pass lists the spool up to three times and every list re-asks the guard,
+    // so without a shared budget one refusing flush says the same thing twice,
+    // once a minute per partition on the sink driver's default schedule, into
+    // a daemon log the service manager appends to and never truncates. A box
+    // rather than a positional flag so the first list that refuses is the one
+    // that speaks, wherever in the pass that turns out to be: a symlink
+    // planted after the opening list still gets said out loud once.
+    // @ref LLP 0329#consequences [constrained-by]: a refusing pass costs one stderr line, and it costs it again next pass
+    const saidRefusal = { yet: false }
+
+    // @ref LLP 0322#coalesce-the-retry [implements]: a retry under a standing stamp reuses the files already rotated
+    const stranded = listFlushFiles(tablePath, saidRefusal)
+    const coalescing = stranded.length > 0 && (await readFlushFailedAt(tablePath)) !== null
+    if (!coalescing) {
+      await withWriteLock(tablePath, async () => {
+        await rotateActiveFile(tablePath)
+      })
+    }
+
+    await drainFlushFiles(tablePath, coalescing ? stranded : listFlushFiles(tablePath, saidRefusal), totals)
+
+    // Reaching here from a coalesced pass means the cache accepted the very
+    // rows it was rejecting, so the condition that suppressed the rotation is
+    // over and the skipped rows are drained in the same call. Without this a
+    // completed flush would return `flushed: true` having knowingly left
+    // `active.jsonl` behind, which breaks both halves of the contract: a
+    // forced caller ("everything captured so far is committed once this
+    // resolves" - `--refresh always`, `hyp query refresh`, the post-backfill
+    // commit, the sink export paths) would silently export without those
+    // rows, and `writeLastFlush` below would re-arm the query debounce over
+    // rows it had just decided to skip, hiding them for another window.
+    // @ref LLP 0322#coalesce-the-retry [implements]: a coalesced flush that completes rotates and drains before it returns
+    // @ref LLP 0321#decision [constrained-by]: forced refresh stays strict, so a flush that resolves has moved everything
+    if (coalescing) {
+      await withWriteLock(tablePath, async () => {
+        await rotateActiveFile(tablePath)
+      })
+      await drainFlushFiles(tablePath, listFlushFiles(tablePath, saidRefusal), totals)
+    }
+
+    if (totals.chunkCount > 0) {
+      await writeLastFlush(tablePath, { rowCount: totals.rowCount, bytesWritten: totals.bytesWritten })
+    }
+    return { flushed: totals.chunkCount > 0, rowCount: totals.rowCount, chunkCount: totals.chunkCount, bytesWritten: totals.bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount: totals.malformedCount, droppedCount: totals.droppedCount, reason }
+  }
+
   return {
     async append(tablePath, columns, rows) {
       if (rows.length === 0) {
@@ -90,59 +204,77 @@ export function createCacheSpool(args) {
       const result = await withWriteLock(tablePath, async () => {
         const dir = spoolDir(tablePath)
         await fs.mkdir(dir, { recursive: true })
-        const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a')
+        // Opened `a+` rather than `a`: writes still append, and the read
+        // side is what lets a failed append verify the tail is its own
+        // bytes before truncating them (see `discardTail`).
+        const handle = await fs.open(path.join(dir, ACTIVE_FILE), 'a+')
+        // An append either lands in the spool or it does not, and the
+        // outcome says which. Callers read a rejection as "nothing landed"
+        // and re-derive what to write from the spool - `dedupeStoredPartIds`
+        // in the AI gateway's exchange writer rescans the committed
+        // partitions plus the spool on every call - so the spool has to
+        // tell the truth about what is in it. A rejection that left a torn
+        // record behind is the expensive half: the remnant carries no
+        // newline, so it swallows the NEXT record into one malformed line
+        // the flush reader drops. A rejection over a durable record is the
+        // other half, reporting landed rows as lost for a fault that cost
+        // nothing. Both are handled here rather than by asking every caller
+        // to reason about which syscall failed (issues #879, #924).
         try {
-          await handle.writeFile(line, 'utf8')
-          await handle.sync()
+          const startSize = (await handle.stat()).size
+          try {
+            await handle.writeFile(line, 'utf8')
+            await handle.sync()
+          } catch (err) {
+            // `writeFile` can fail with a prefix of the line already in the
+            // file; that remnant has no trailing newline, so leaving it
+            // would also swallow the NEXT record into one malformed line.
+            const retained = await discardTail(handle, startSize, line)
+            // The rollback can find the whole line already written and be
+            // refused the truncate that would take it back: an fsync and an
+            // ftruncate can fail on the same device. The record is complete
+            // and newline-terminated, so the next flush commits it, and
+            // rejecting here would tell the caller to replay rows that
+            // landed, which is the double commit this path exists to
+            // prevent. Same reasoning as the close failure below: an error
+            // that cannot un-write the record does not decide the outcome.
+            if (!retained) throw err
+          }
         } finally {
-          await handle.close()
+          // Past the sync the record is durable, and closing the handle
+          // cannot un-write it. A close failure is a descriptor problem
+          // with nothing the caller can do about it, so it never decides
+          // the outcome: on the failure path above the original error
+          // stays the one that propagates.
+          await handle.close().catch(() => undefined)
         }
         return { bytesWritten, pendingBytes: pendingBytesSync(tablePath) }
       })
+      noteProductPipeline('capture', { rows: rows.length, bytes: result.bytesWritten })
+      noteProductPending(tablePath, result.pendingBytes)
       return result
     },
 
     async flushTable(tablePath, opts = {}) {
       return withFlushLock(tablePath, async () => {
-        const reason = opts.reason ?? 'manual'
-        await withWriteLock(tablePath, async () => {
-          await rotateActiveFile(tablePath)
-        })
-
-        const files = listFlushFiles(tablePath)
-        if (files.length === 0) {
-          return { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: pendingBytesSync(tablePath), malformedCount: 0, droppedCount: 0, reason }
+        try {
+          const result = await runFlush(tablePath, opts)
+          // Any completed attempt retires the stamp, including one that found
+          // nothing to move: the stamp asserts that the last attempt failed,
+          // and this one did not.
+          // @ref LLP 0322#clearing [implements]: a flush that completed is the evidence that clears the stamp
+          await clearFlushFailure(tablePath)
+          noteProductPending(tablePath, result.pendingBytes)
+          return result
+        } catch (err) {
+          // Written before the rethrow so the error the caller sees is
+          // unchanged, and so the very next query can pace itself off a
+          // failure this process is about to forget.
+          // @ref LLP 0322#stamp-the-failure [implements]: the failed flush leaves the pacing record the query gate reads
+          await writeFlushFailure(tablePath, err)
+          noteProductPipeline('write', { failures: 1 })
+          throw err
         }
-
-        let rowCount = 0
-        let chunkCount = 0
-        let bytesWritten = 0
-        let malformedCount = 0
-        let droppedCount = 0
-        for (const filePath of files) {
-          const progress = await readProgress(filePath)
-          const startOffset = progress?.byteOffset ?? 0
-          const batchId = `flush-${Date.now()}-${process.pid}`
-          let fileMalformed = 0
-
-          for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
-            const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
-            rowCount += batch.chunk.rows.length
-            chunkCount += 1
-            bytesWritten += written.bytesWritten
-            droppedCount += written.droppedCount ?? 0
-            fileMalformed += batch.malformedCount
-            await writeProgress(filePath, batch.resumeOffset)
-          }
-
-          malformedCount += fileMalformed
-          await removeProgress(filePath)
-          await fs.rm(filePath, { force: true })
-        }
-        if (chunkCount > 0) {
-          await writeLastFlush(tablePath, { rowCount, bytesWritten })
-        }
-        return { flushed: chunkCount > 0, rowCount, chunkCount, bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount, droppedCount, reason }
       })
     },
 
@@ -159,8 +291,27 @@ export function createCacheSpool(args) {
         droppedCount: 0,
         reason: opts.reason ?? 'manual',
       }
+      // Every table gets its attempt before the first error surfaces: a
+      // failing table must not strand the flush (and the stamp refresh,
+      // via `flushTable` above) of every table behind it in iteration
+      // order. Callers keep the throw-on-failure contract they had; only
+      // the abort order changes.
+      // @ref LLP 0333#every-table-before-failure [implements]: attempt every table, then rethrow the first error
+      let failed = false
+      /** @type {unknown} */
+      let firstError
       for (const tablePath of tables) {
-        const result = await this.flushTable(tablePath, opts)
+        /** @type {FlushResult} */
+        let result
+        try {
+          result = await this.flushTable(tablePath, opts)
+        } catch (err) {
+          if (!failed) {
+            failed = true
+            firstError = err
+          }
+          continue
+        }
         total.flushed ||= result.flushed
         total.rowCount += result.rowCount
         total.chunkCount += result.chunkCount
@@ -169,15 +320,25 @@ export function createCacheSpool(args) {
         total.malformedCount += result.malformedCount
         total.droppedCount += result.droppedCount
       }
+      if (failed) throw firstError
       return total
     },
 
     async pendingInfo(tablePath) {
       knownTables.add(tablePath)
+      const failure = await readFlushFailure(tablePath)
       return {
         pending: hasPendingSync(tablePath),
         pendingBytes: pendingBytesSync(tablePath),
         lastFlushAtMs: await readLastFlushAt(tablePath),
+        // Both halves of the stamp, not only its time. A caller that reports
+        // the cooldown can then say what the flush failed with, which is the
+        // one fact the cooldown itself withholds. Still pacing state and not a
+        // verdict: neither field is read as a claim about what the spool or
+        // the cache holds, and `pending`/`pendingBytes` above are untouched.
+        // @ref LLP 0322#what-the-stamp-is-not [implements]: the stamp reaches a reader as a reason, never as a freshness or durability claim
+        flushFailedAtMs: failure?.failedAtMs ?? null,
+        flushFailureMessage: failure?.errorMessage ?? null,
       }
     },
 
@@ -234,22 +395,14 @@ async function* readSpooledRows(tablePath) {
     } catch {
       continue
     }
-    let tail = ''
     try {
-      for await (const chunk of stream) {
-        tail += chunk
-        let newlineIdx
-        while ((newlineIdx = tail.indexOf('\n')) !== -1) {
-          const line = tail.slice(0, newlineIdx)
-          tail = tail.slice(newlineIdx + 1)
-          yield* rowsFromSpoolLine(line)
-        }
-      }
       // The spool writer always terminates lines with `\n`, so a non-empty tail
       // is a truncated/half-written final line. The whole-file reader parsed it
       // best-effort (its `split('\n')` kept a trailing no-newline segment), so
       // keep that parity: a malformed remnant simply fails JSON.parse and drops.
-      yield* rowsFromSpoolLine(tail)
+      for await (const line of streamSpoolLines(stream, true)) {
+        yield* rowsFromSpoolLine(line)
+      }
     } catch {
       // A mid-read error (file vanished/unreadable) degrades to skipping the
       // rest of this file, matching the whole-file reader's per-file try/catch:
@@ -293,6 +446,66 @@ function* rowsFromSpoolLine(line) {
 }
 
 /**
+ * Roll a failed append off the tail of the active spool file, so a
+ * rejected `append` really does mean "the record is not in the spool".
+ *
+ * The tail is compared byte for byte against the line this append tried
+ * to write, and only an exact prefix match is truncated. `append` holds
+ * the per-table write lock, so nothing in THIS process can have appended
+ * behind us, but nothing locks `active.jsonl` across processes: two `hyp`
+ * runs can share one table's spool. A size ceiling alone would not catch
+ * that, because a small concurrent record fits inside the bytes this
+ * append could have produced; comparing the content does, and discarding
+ * another writer's durable rows to tidy up ours would be the worse trade.
+ *
+ * The content check narrows the cross-process hazard, it does not close
+ * it: reading the tail and truncating it are two syscalls, so a foreign
+ * record appended in between still sits inside the range this truncate
+ * drops, and a torn prefix that lands BEFORE a foreign line takes that
+ * line down with it whatever the rollback does. Closing those needs an
+ * advisory lock over `active.jsonl`, which the spool does not have.
+ *
+ * Best effort past that: the device that just refused a write or an fsync
+ * may refuse the truncate too. When it does a torn remnant gets a closing
+ * newline instead, which is the difference between this failed append
+ * costing its own rows and costing the next record as well.
+ *
+ * @param {FileHandle} handle
+ * @param {number} startSize
+ * @param {string} line
+ * @returns {Promise<boolean>} true when the rollback left the whole record
+ *   in the spool intact, so a later flush will commit it and the append
+ *   must not be reported as failed
+ */
+async function discardTail(handle, startSize, line) {
+  try {
+    const { size } = await handle.stat()
+    const written = size - startSize
+    const expected = Buffer.from(line, 'utf8')
+    if (written <= 0 || written > expected.length) return false
+    const tail = Buffer.alloc(written)
+    const { bytesRead } = await handle.read(tail, 0, written, startSize)
+    if (bytesRead !== written || !tail.equals(expected.subarray(0, written))) return false
+    try {
+      await handle.truncate(startSize)
+    } catch {
+      // A whole line is already terminated and already committable: there
+      // is nothing to repair, and nothing for the caller to replay.
+      if (written === expected.length) return true
+      // Terminate the remnant so the flush reader drops that line alone
+      // instead of concatenating it with whatever is appended next.
+      await handle.writeFile('\n', 'utf8')
+      return false
+    }
+    await handle.sync()
+    return false
+  } catch {
+    /* the write path is already failing; the tail stays as it is */
+    return false
+  }
+}
+
+/**
  * @param {string} name
  */
 function isSpoolDataFile(name) {
@@ -304,6 +517,29 @@ function isSpoolDataFile(name) {
  */
 function spoolDir(tablePath) {
   return path.join(tablePath, SPOOL_DIR)
+}
+
+/**
+ * Say that the flush refused a spool directory, and say it out loud.
+ *
+ * The symptom is otherwise a partition that silently stops committing: rows
+ * still append, the flush still returns, and nothing reports that the files
+ * it would have drained are somewhere the cache does not own. `ls -l` at the
+ * logged path answers in one line.
+ *
+ * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
+ * @param {string} tablePath
+ * @param {string} dir
+ */
+function reportPlantedSpoolDir(tablePath, dir) {
+  try {
+    getLogger('cache', { mirrorStderr: true }).warn('the spool directory is a symlink; draining nothing for this table', {
+      [Attr.OPERATION]: 'cache.spool_flush',
+      [Attr.ERROR_KIND]: 'spool_dir_is_symlink',
+      table_path: tablePath,
+      spool_dir: dir,
+    })
+  } catch { /* a flush must not fail on a logger provider that is not installed */ }
 }
 
 /**
@@ -324,11 +560,46 @@ async function rotateActiveFile(tablePath) {
 }
 
 /**
+ * The rotated files a flush will read, drain into the cache, and then
+ * unlink.
+ *
+ * `_hypaware_spool` is a fixed name inside the partition, so it is the same
+ * door LLP 0326#one-level-down closed in the maintenance sweeps, reached
+ * without a cursor: `readdir` follows a symlinked directory, the entries it
+ * lists are real files, and `drainFlushFiles` removes each one by path once
+ * it has read it. Measured on this branch before this guard: a planted
+ * `<partition>/_hypaware_spool -> <outside>` with a `flush-*.jsonl` name in
+ * `<outside>` had that file read into the cache and then unlinked, while a
+ * differently named neighbour survived. Nothing in the tree mints a symlink
+ * here, so a confirmed one means this is not the spool to drain.
+ *
+ * This one function rather than `spoolDir`: it is the list every read and
+ * every unlink comes from, and returning nothing can only make a flush do
+ * less. Refusing inside `spoolDir` would instead fail `append`, which is
+ * the contract that decides whether a caller replays rows.
+ *
+ * The guard is asked on every call, because every call is a list a drain
+ * would act on, and re-asking is one `lstat`. Saying so is the half with a
+ * standing cost, so the report is spent from the calling pass's budget
+ * instead: the first list that refuses says it, and the rest of that pass
+ * stays quiet.
+ *
+ * @ref LLP 0326#one-level-down [implements]: a pass that unlinks by path checks the path it will walk.
+ * @ref LLP 0329#consequences [constrained-by]: the refusal is priced per refusing pass, not per list the pass makes.
  * @param {string} tablePath
+ * @param {{ yet: boolean }} saidRefusal  the calling pass's one-line budget,
+ *   flipped by the first list that refuses
  * @returns {string[]}
  */
-function listFlushFiles(tablePath) {
+function listFlushFiles(tablePath, saidRefusal) {
   const dir = spoolDir(tablePath)
+  if (isConfirmedSymlink(dir)) {
+    if (!saidRefusal.yet) {
+      saidRefusal.yet = true
+      reportPlantedSpoolDir(tablePath, dir)
+    }
+    return []
+  }
   try {
     return fsSync
       .readdirSync(dir, { withFileTypes: true })
@@ -344,6 +615,59 @@ function listFlushFiles(tablePath) {
 /**
  * @param {string} tablePath
  */
+/**
+ * Newest mtime, in ms, among the files in a table's spool that hold captured
+ * rows: `active.jsonl` and any rotated `flush-*.jsonl`. Zero when there are
+ * none.
+ *
+ * For callers deciding whether a partition is old enough to remove. The
+ * committed Iceberg data files are only half of what a partition directory
+ * holds; the other half is rows this process captured and has not committed
+ * yet, and they are the half no snapshot, no manifest and no cursor count
+ * knows about. A pass that weighs `<generation>/data` alone reads a partition
+ * whose source went quiet in March and came back this morning as untouched
+ * since March.
+ *
+ * The stamps are deliberately not weighed. `last-flush.json` is rewritten by
+ * a flush that committed nothing, so a partition that merely gets
+ * flush-ATTEMPTED would look perpetually fresh and never reclaim - the
+ * silent-non-reclamation failure, arrived at from the other side.
+ *
+ * A spool directory that is absent answers 0: there are no captured rows to
+ * weigh, which is the ordinary case. One that exists and cannot be read
+ * answers `Date.now()`, because the caller is about to do something
+ * irreversible and "I could not look" is not evidence that there is nothing
+ * there (LLP 0326#positive-evidence, in the direction that protects data).
+ *
+ * @param {string} tablePath
+ * @returns {number}
+ */
+export function pendingSpoolMtimeSync(tablePath) {
+  const dir = spoolDir(tablePath)
+  /** @type {import('node:fs').Dirent[]} */
+  let entries
+  try {
+    entries = fsSync.readdirSync(dir, { withFileTypes: true })
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 0 : Date.now()
+  }
+  let newest = 0
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    if (entry.name !== ACTIVE_FILE && !(entry.name.startsWith(FLUSH_PREFIX) && entry.name.endsWith(FLUSH_SUFFIX))) continue
+    try {
+      const mtime = fsSync.statSync(path.join(dir, entry.name)).mtimeMs
+      if (mtime > newest) newest = mtime
+    } catch {
+      // The file was rotated or drained under the read. Something is writing
+      // here right now, which is the answer this function was asked for.
+      return Date.now()
+    }
+  }
+  return newest
+}
+
 function hasPendingSync(tablePath) {
   return pendingBytesSync(tablePath) > 0
 }
@@ -400,14 +724,114 @@ async function readLastFlushAt(tablePath) {
 }
 
 /**
+ * Record that this table's last flush attempt threw. Deliberately a separate
+ * file from `last-flush.json` rather than a poisoned `flushedAt`: the
+ * freshness line the user reads quotes that timestamp as the age of the last
+ * write to the cache, and a failed attempt is not one.
+ *
+ * @ref LLP 0322#what-the-stamp-is-not [implements]: pacing state kept apart from the freshness report it must not falsify
+ * @param {string} tablePath
+ * @param {unknown} err
+ */
+async function writeFlushFailure(tablePath, err) {
+  const message = err instanceof Error ? err.message : String(err)
+  try {
+    await fs.mkdir(spoolDir(tablePath), { recursive: true })
+    await atomicWriteJson(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), {
+      failedAt: new Date().toISOString(),
+      errorMessage: message.slice(0, FLUSH_FAILURE_MESSAGE_MAX),
+    })
+  } catch {
+    // The stamp is a pacing hint. Failing to write it costs an unpaced
+    // retry, never the error the caller is about to receive.
+  }
+}
+
+/**
+ * @param {string} tablePath
+ */
+async function clearFlushFailure(tablePath) {
+  try {
+    await fs.rm(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), { force: true })
+  } catch {
+    /* a stamp that outlives its removal only costs one delayed retry */
+  }
+}
+
+/**
+ * Absent, unparseable, or dated in the future by a clock that moved all read
+ * as "no recent failure", so the flush is attempted. Suppressing work on
+ * state this build cannot interpret is the direction that silently withholds
+ * rows; attempting it is only ever a cost.
+ *
+ * Returns the message the stamp carries alongside its time, so a reader that
+ * reports the cooldown can also say what the flush failed with. The message
+ * is advisory: a stamp whose `failedAt` reads but whose `errorMessage` does
+ * not still cools the gate down, with a null message, because the pacing
+ * decision has never depended on it. Re-clamped to the writer's 512 here as
+ * well, since the bound has to hold for a file this process did not write.
+ *
+ * @ref LLP 0322#stamps-that-cannot-be-read [implements]: an uninterpretable stamp is no stamp
+ * @param {string} tablePath
+ * @returns {Promise<{ failedAtMs: number, errorMessage: string | null } | null>}
+ */
+export async function readFlushFailure(tablePath) {
+  try {
+    const raw = await fs.readFile(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), 'utf8')
+    const parsed = /** @type {{ failedAt?: unknown, errorMessage?: unknown }} */ (JSON.parse(raw))
+    if (typeof parsed.failedAt !== 'string') return null
+    const ms = Date.parse(parsed.failedAt)
+    if (!Number.isFinite(ms)) return null
+    if (ms > Date.now()) return null
+    const message = typeof parsed.errorMessage === 'string' && parsed.errorMessage.length > 0
+      ? parsed.errorMessage.slice(0, FLUSH_FAILURE_MESSAGE_MAX)
+      : null
+    return { failedAtMs: ms, errorMessage: message }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * @param {string} tablePath
+ * @returns {Promise<number | null>}
+ */
+async function readFlushFailedAt(tablePath) {
+  return (await readFlushFailure(tablePath))?.failedAtMs ?? null
+}
+
+/**
+ * Every table under the cache that carries a spool directory, found by
+ * walking the tree rather than by asking the registry, so a label table
+ * nothing has declared yet is still flushed.
+ *
+ * `datasets` narrows the walk to those dataset directories. The walk
+ * recurses into each generation's `data/` directory, which on a mature
+ * cache holds thousands of entries, so the unscoped form costs a readdir of
+ * every dataset's files. That is the right price for a background sweep
+ * (`flushAll`, storage bootstrap) which has to reach every table anyway,
+ * and the wrong one for a per-query caller: `hyp query grep` settles one
+ * dataset's spool and would otherwise readdir the traces, logs and metrics
+ * trees on every search to find it.
+ *
+ * An EMPTY `datasets` means every dataset, not none, matching the scoping
+ * word of `discoverCachePartitions` (`scope.datasets && length > 0`). The
+ * two are routinely passed the same computed list, and one reading it as
+ * "all" while the other read it as "nothing" would make a caller whose list
+ * came out empty walk every partition and flush no spool: the failure would
+ * surface as a query answering from a stale cache, not as an error.
+ *
  * @param {string} cacheRoot
+ * @param {{ datasets?: string[] }} [opts]
  * @returns {Promise<string[]>}
  */
-export async function discoverSpoolTables(cacheRoot) {
+export async function discoverSpoolTables(cacheRoot, opts = {}) {
   /** @type {string[]} */
   const tables = []
   const root = path.join(cacheRoot, 'datasets')
-  await walk(root)
+  const scoped = opts.datasets && opts.datasets.length > 0 ? opts.datasets : null
+  const roots = scoped ? scoped.map((name) => path.join(root, name)) : [root]
+  for (const dir of roots) await walk(dir)
   return tables
 
   /** @param {string} dir */

@@ -3,6 +3,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
+import { compareStrings } from '../util/compare_strings.js'
 import { atomicWriteJson, readFileIfExists } from '../util/fs_atomic.js'
 
 /**
@@ -73,7 +74,7 @@ function normalizeEntries(entries) {
   for (const entry of entries) byDir.set(path.resolve(entry.dir), entry.class)
   return [...byDir.entries()]
     .map(([dir, cls]) => ({ dir, class: cls }))
-    .sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0))
+    .sort((a, b) => compareStrings(a.dir, b.dir))
 }
 
 /**

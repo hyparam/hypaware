@@ -20,10 +20,10 @@ manifest `entrypoint`.
 
 ## Deliberately ruled out at V1
 
-- `npm install` at user install time — too many failure modes.
-- Plugin-declared peer deps on host-provided libs — couples plugins to the
+- `npm install` at user install time: too many failure modes.
+- Plugin-declared peer deps on host-provided libs: couples plugins to the
   kernel version.
-- In-process native modules — would require a C toolchain on every machine.
+- In-process native modules: would require a C toolchain on every machine.
 - Any plugin runtime that isn't pure JS in-process. Native modules and non-JS
   runtimes (Python, ffmpeg, …) are out of scope; the kernel provides no
   host-side process supervisor, and anything needing one is post-V1.
@@ -31,7 +31,7 @@ manifest `entrypoint`.
 ## Consequences
 
 - **Version conflicts dissolve.** Each plugin's bundle carries its own copy of
-  its deps. The duplication is real but predictable — the same tradeoff browser
+  its deps. The duplication is real but predictable: the same tradeoff browser
   and VS Code extensions make.
 - **Private files stay private.** The kernel loads each plugin only through its
   manifest `entrypoint`; cross-plugin imports must go through

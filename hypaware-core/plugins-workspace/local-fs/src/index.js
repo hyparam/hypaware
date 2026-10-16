@@ -37,7 +37,7 @@ const PLUGIN_VERSION = '1.0.0'
  * The sink closes over the activation context so its `exportBatch` can
  * (a) look up dataset schemas through `ctx.query.getDataset` and
  * (b) stream the cache rows added since its watermark through
- * `ctx.storage.readRowsSince` — both inputs are then handed to the paired
+ * `ctx.storage.readRowsSince`, both inputs are then handed to the paired
  * encoder via the kernel's `sink.encode_partition` helper.
  *
  * @param {PluginActivationContext} ctx
@@ -96,10 +96,10 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
   return {
     /**
      * @param {ExportBatch} batch
-     * @param {ExportOptions} _opts
+     * @param {ExportOptions} [opts]
      * @returns {Promise<ExportResult>}
      */
-    async exportBatch(batch, _opts) {
+    async exportBatch(batch, opts) {
       let bytesWritten = 0
       let exported = 0
       /** @type {QueryPartition[]} */
@@ -147,9 +147,10 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
             plugin: PLUGIN_NAME,
           })
           // Embed [sinceSeq, lastSeq] so a crash-retry re-writes the same file
-          // (idempotent overwrite) — the blob sink's server-ledger stand-in.
+          // (idempotent overwrite): the blob sink's server-ledger stand-in.
           const filename = withSeqRangeFilename(blob.filename, reader.sinceSeq, reader.lastAfter.seq)
           const destPath = await writeBlob(baseDir, partition, filename, blob.bytes)
+          opts?.onProgress?.({ rows: reader.rowCount, bytes: blob.bytesWritten ?? 0 })
           // Durable now: advance the watermark to this blob's last row.
           if (wmKey) {
             await watermarks.write(wmKey, {

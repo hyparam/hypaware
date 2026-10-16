@@ -8,8 +8,8 @@
 **Related:** LLP 0016 (ai-gateway), LLP 0109 (OpenClaw client adapter), LLP 0152 (plugin-steered shadow providers), LLP 0146 (host-signed providers out of scope)
 
 > LLP 0109 captured Anthropic only. OpenClaw speaks exactly two model API
-> shapes, so two shadow providers cover the whole catalog — OpenRouter,
-> OpenAI, Groq, and the rest — without a shadow entry per vendor.
+> shapes, so two shadow providers cover the whole catalog, OpenRouter,
+> OpenAI, Groq, and the rest, without a shadow entry per vendor.
 
 ## Context
 
@@ -19,7 +19,7 @@ vendor was never captured, and nothing said so.
 
 OpenClaw normalizes every model provider to one of two API shapes:
 `anthropic-messages` or `openai-completions`. The shape is a property of
-the provider entry, not the vendor — verified in the `openclaw` repo, where
+the provider entry, not the vendor, verified in the `openclaw` repo, where
 `anthropic-vertex`, minimax, synthetic, kimi-coding, cloudflare-ai-gateway
 and vercel-ai-gateway all declare `api: "anthropic-messages"` while
 OpenRouter, OpenAI, Groq and most of the catalog are `openai-completions`.
@@ -37,7 +37,7 @@ capturing it rather than deferring.
 1. **One shadow provider per vendor** (`hypaware-openrouter`,
    `hypaware-openai`, `hypaware-groq`, …). Rejected: unbounded mirroring
    work, a new HypAware release every time OpenClaw adds a provider, and
-   nothing gained — the wire shape is what the gateway and projectors care
+   nothing gained, the wire shape is what the gateway and projectors care
    about.
 2. **One shadow provider total, with the gateway sniffing the shape.**
    Rejected: OpenClaw's client SDK selection is driven by the provider
@@ -50,8 +50,8 @@ capturing it rather than deferring.
 
 The plugin contributes exactly two shadow providers:
 
-- `hypaware-anthropic` — `api: "anthropic-messages"`
-- `hypaware-openai` — `api: "openai-completions"`
+- `hypaware-anthropic`, `api: "anthropic-messages"`
+- `hypaware-openai`, `api: "openai-completions"`
 
 `before_model_resolve` (LLP 0152) maps the resolved provider to whichever
 shadow matches its declared `api`, and the real upstream identity travels
@@ -66,7 +66,7 @@ plugin iff not already present, following the last-write-wins
 `anthropic` preset stays named `anthropic` per LLP 0016.
 
 Providers whose `api` is neither shape, or whose authentication is bound to
-the request host, are not steered — see LLP 0146.
+the request host, are not steered: see LLP 0146.
 
 ## Consequences
 
@@ -84,11 +84,11 @@ the request host, are not steered — see LLP 0146.
   Verified against OpenClaw source: the contexts a plugin controls at
   request time (`wrapStreamFn`, `prepareRuntimeAuth`) carry no
   `sessionId`, and the hooks that do carry it (`before_model_resolve`,
-  `llm_input`) cannot set request headers — correlating them through
+  `llm_input`) cannot set request headers, correlating them through
   shared plugin state would race under concurrent runs. Native session
   identity is a settlement-time enrichment from OpenClaw's session JSONL
   (`~/.openclaw/agents/<id>/sessions/`), the LLP 0027 pattern, exactly as
-  LLP 0109's open question anticipated — a follow-up, not part of this
+  LLP 0109's open question anticipated: a follow-up, not part of this
   set.
 
 ## Open questions

@@ -20,10 +20,10 @@
 All plugins install through one CLI surface: `hypaware plugin install <name>`.
 The resolver tries, in order:
 
-1. `@hypaware/<name>` — first-party scope → `github:hyperparam/hypaware-<name>`
-2. `@scope/hypaware-plugin-<name>` — third-party scoped → npm registry
+1. `@hypaware/<name>`, first-party scope → `github:hyperparam/hypaware-<name>`
+2. `@scope/hypaware-plugin-<name>`: third-party scoped → npm registry
    `repository` URL
-3. `hypaware-plugin-<name>` — third-party unscoped → same path as (2)
+3. `hypaware-plugin-<name>`: third-party unscoped → same path as (2)
 
 Scoped community plugins (`@acme/hypaware-plugin-foo`) must be installed by full
 name; short-name resolution cannot guess the scope.
@@ -40,7 +40,7 @@ first-party.
 The kernel fetches a **prebuilt artifact from git**: clone/tarball the resolved
 ref, read the manifest, copy the tree into the install root. The plugin's own CI
 commits its built `dist/` to the release tag named in the manifest `version`.
-**The kernel never runs `npm install` on the user's machine** — npm is a naming
+**The kernel never runs `npm install` on the user's machine**: npm is a naming
 authority and metadata lookup, not an install source. See
 [LLP 0008](./0008-plugin-runtime-dependencies.decision.md).
 

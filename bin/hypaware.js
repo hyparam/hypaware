@@ -2,8 +2,32 @@
 // @ts-check
 
 import process from 'node:process'
+import { withProductInvocation } from '../src/core/product_telemetry/client.js'
+
+// performance.now() is relative to process startup, so zero includes static
+// imports and bootstrap as well as dispatch and command-body work.
+const invocationStarted = 0
+
+// The leaf modules imported statically, because they are pure - no
+// observability, no HYP_HOME, nothing the `__smoke_internal` branch below is
+// careful to load late. Two of them the palette needs; `flushStream` is here
+// because the boot-failure catch cannot import the flush it needs when a failed
+// import is what it reports. Everything else here stays a lazy dynamic import.
+// @ref LLP 0189#choke-point [implements]: the entry's own diagnostics get the same colouring dispatch gives commands
+import { ANSI, colorizeStderr, paint } from '../src/core/cli/style.js'
+import { useColor } from '../src/core/cli/stdio.js'
+import { flushStream } from '../src/core/cli/flush-streams.js'
 
 const argv = process.argv.slice(2)
+
+// @ref LLP 0399#coexistence: Cursor inherits these Claude hook commands even
+// when Claude is inactive. Skip before config/dispatch can reject the command.
+if (process.env.CURSOR_VERSION && argv[0] === 'claude-hook' &&
+    (argv[1] === 'session-context' || argv[1] === 'classify-cwd') &&
+    !argv.includes('--help') && !argv.includes('-h')) process.exit(0)
+
+const stderr = colorizeStderr(process.stderr, process.env)
+const color = useColor(process.stderr, process.env)
 
 // `__smoke_internal <flow>` is the in-process entry the registered
 // `smoke` command re-execs us with. It bypasses the dispatcher because
@@ -18,7 +42,7 @@ const argv = process.argv.slice(2)
 if (argv[0] === '__smoke_internal') {
   const flow = argv[1]
   if (!flow) {
-    process.stderr.write('usage: hyp smoke <flow-name>\n')
+    stderr.write('usage: hyp smoke <flow-name>\n')
     process.exit(2)
   }
   try {
@@ -28,39 +52,163 @@ if (argv[0] === '__smoke_internal') {
     process.exit(0)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    process.stderr.write(`smoke ${flow}: FAIL\n${message}\n`)
+    // `FAIL` is the verdict the eye looks for in a scrollback of smoke runs,
+    // and it is not a prefix any severity rule recognizes, so paint it here.
+    stderr.write(
+      `smoke ${flow}: ${paint('FAIL', ANSI.red, color)}\n${message}\n`
+    )
     const detail = err && /** @type {{ detail?: string }} */ (err).detail
-    if (typeof detail === 'string') process.stderr.write(`  ${detail}\n`)
+    if (typeof detail === 'string') stderr.write(`  ${detail}\n`)
     process.exit(1)
   }
 }
 
-const { dispatch } = await import('../src/core/cli/dispatch.js')
-const { installObservability } = await import('../src/core/observability/index.js')
-const { flushStream } = await import('../src/core/cli/flush-streams.js')
-const { installStreamErrorHandlers } = await import('../src/core/cli/stream_errors.js')
-
-// Before anything writes: an asynchronous stdout/stderr failure (EPIPE when
-// a reader like `head` walks away mid-write) is delivered as an 'error'
-// event, which bypasses the try/catch below and every one inside the
-// commands. Unlistened, it crashes a run that had already succeeded.
-installStreamErrorHandlers([process.stdout, process.stderr], (message) => {
-  try { process.stderr.write(message) } catch { /* the stream is what failed */ }
-})
-
-const obs = installObservability()
-let exitCode = 1
-try {
-  exitCode = await dispatch(argv)
-} catch (err) {
-  const message = err instanceof Error ? err.message : String(err)
-  process.stderr.write(`hyp: ${message}\n`)
-  exitCode = 1
-} finally {
-  await obs.shutdown()
+/**
+ * The value of `--config <path>` / `--config=<path>` in argv, matching
+ * how `resolveConfigPath` reads the flag the daemon was launched with.
+ *
+ * @param {string[]} args
+ * @returns {string | undefined}
+ */
+function readConfigFlag(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]
+    if (token.startsWith('--config=')) return token.slice('--config='.length)
+    if (token !== '--config') continue
+    const next = args[i + 1]
+    if (next !== undefined && !next.startsWith('--')) return next
+  }
+  return undefined
 }
 
-// Flush stdout/stderr before exiting: `process.exit()` is synchronous and
-// would drop output still buffered in a pipe (the >64KiB truncation).
-await Promise.all([flushStream(process.stdout), flushStream(process.stderr)])
-process.exit(exitCode)
+// The self-update check runs before dispatch (and so before any kernel
+// import) for `daemon run` only: a release broken anywhere past this
+// point still reaches the check on every service-manager relaunch, so a
+// stuck machine jumps forward when a fixed version is published. When
+// an update lands, exit through the restart code so the service manager
+// relaunches onto the new code instead of booting the old.
+// @ref LLP 0309#unstick-from-the-front [implements]: pre-boot lane; only the import-light updater loads before it runs
+if (argv[0] === 'daemon' && argv[1] === 'run') {
+  try {
+    const { runSelfUpdatePass, SELF_UPDATE_RESTART_EXIT_CODE } = await import(
+      '../src/core/update/self_update.js'
+    )
+    const result = await runSelfUpdatePass({
+      // The installed service unit always renders `--config <path>` (both
+      // the launchd and the systemd writer do), and that file is where an
+      // operator writes `auto_update: false`. Hand it to the lane so the
+      // off switch binds on a non-default config too; the parse is inline
+      // because the codec lives past the import boundary this lane keeps.
+      configPath: readConfigFlag(argv),
+      // Routine skips (a dev checkout, auto_update off) stay silent
+      // here; only events an operator would act on reach stderr.
+      log: (event, fields) => {
+        if (event === 'self_update.skipped') return
+        try {
+          stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`)
+        } catch {
+          /* stderr gone */
+        }
+      }
+    })
+    if (result.action === 'updated') process.exit(SELF_UPDATE_RESTART_EXIT_CODE)
+  } catch {
+    /* the updater must never block a boot */
+  }
+}
+
+/**
+ * The failure text for an error caught outside dispatch: the stack the runtime
+ * built, then every `cause` behind it. The catch below is the only report on
+ * stderr such a failure gets, because the invocation-counting wrapper has to
+ * see the boot fail rather than let the rejection escape to Node. The wrapper
+ * still records the failure in the product-telemetry outbox.
+ *
+ * Most of what reaches it is a bootstrap import failure, where the frames are
+ * the only thing naming the module that would not load. Observability setup and
+ * shutdown reach it too, and there the actionable text is still the first line.
+ *
+ * The depth cap keeps a self-referential `cause` from spinning, and the
+ * fallback keeps a thrown `undefined` or `null` from printing nothing at all.
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+function describeBootFailure(error) {
+  const parts = []
+  let current = error
+  for (
+    let depth = 0;
+    depth < 8 && current !== undefined && current !== null;
+    depth += 1
+  ) {
+    const text =
+      current instanceof Error
+        ? current.stack || `${current.name}: ${current.message}`
+        : String(current)
+    parts.push(depth === 0 ? text : `caused by: ${text}`)
+    current = current instanceof Error ? current.cause : undefined
+  }
+  return parts.join('\n') || String(error)
+}
+
+const result = await withProductInvocation(
+  argv,
+  process.env,
+  async () => {
+    try {
+      const { dispatch } = await import('../src/core/cli/dispatch.js')
+      const { installObservability } = await import(
+        '../src/core/observability/index.js'
+      )
+      const { installStreamErrorHandlers } = await import(
+        '../src/core/cli/stream_errors.js'
+      )
+
+      // Before anything writes: an asynchronous stdout/stderr failure (EPIPE when
+      // a reader like `head` walks away mid-write) is delivered as an 'error'
+      // event, which bypasses the try/catch below and every one inside the
+      // commands. Unlistened, it crashes a run that had already succeeded.
+      installStreamErrorHandlers(
+        [process.stdout, process.stderr],
+        (message) => {
+          try {
+            stderr.write(message)
+          } catch {
+            /* the stream is what failed */
+          }
+        }
+      )
+
+      const obs = installObservability()
+      let exitCode = 1
+      try {
+        exitCode = await dispatch(argv)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        stderr.write(`hyp: ${message}\n`)
+        exitCode = 1
+      } finally {
+        await obs.shutdown()
+      }
+
+      // Flush stdout/stderr before exiting: `process.exit()` is synchronous and
+      // would drop output still buffered in a pipe (the >64KiB truncation).
+      await Promise.all([
+        flushStream(process.stdout),
+        flushStream(process.stderr)
+      ])
+      return exitCode
+    } catch (error) {
+      try {
+        stderr.write(`hyp: ${describeBootFailure(error)}\n`)
+        // The same flush the success path takes: `process.exit` below would
+        // drop whatever of this report is still buffered in a pipe.
+        await flushStream(process.stderr)
+      } catch {}
+      return 1
+    }
+  },
+  { startedAt: invocationStarted, outer: true }
+)
+process.exit(result)

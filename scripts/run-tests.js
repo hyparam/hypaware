@@ -3,12 +3,33 @@
 
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import process from 'node:process'
 
+import { isolatedClientEnv } from '../hypaware-core/smoke/lib/isolation.js'
+
 const ROOT = 'test'
 const IGNORED_DIRS = new Set(['.git', '.github', 'node_modules'])
+
+/**
+ * Test files whose entire subject is a POSIX mechanism the OS refuses on
+ * stock Windows, skipped there as whole files (LLP 0300 names the port
+ * status). TODO(win32): replace the first with a symlink capability probe
+ * (Developer Mode allows symlinks) instead of a blanket skip.
+ * - usage-policy-symlink: creates real file symlinks (EPERM without
+ *   Developer Mode / admin)
+ * - service-command-timeout: drives hanging children through sh-script fake
+ *   `security` / `launchctl` binaries on PATH (shebangs + exec bits)
+ * - service-manager-test-sandbox: meta-suite spawning the launchctl /
+ *   systemctl attach fixtures
+ */
+const WIN32_SKIPPED_FILES = new Set([
+  path.join('core', 'usage-policy-symlink.test.js'),
+  path.join('core', 'service-command-timeout.test.js'),
+  path.join('core', 'service-manager-test-sandbox.test.js'),
+])
 
 if (isMain(import.meta.url, process.argv[1])) {
   process.exit(run(process.argv.slice(2)))
@@ -24,22 +45,48 @@ export function run(forwardedArgs) {
   collectTestFiles(path.resolve(ROOT), files)
   files.sort()
 
+  if (process.platform === 'win32') {
+    // Anchor on the same resolved root the collector walked, so matching
+    // does not silently depend on npm test running from the repo root.
+    const skipped = files.filter((f) => WIN32_SKIPPED_FILES.has(path.relative(path.resolve(ROOT), f)))
+    if (skipped.length > 0) {
+      // Loud, never silent: name what this platform is not running.
+      process.stderr.write(`win32: skipping ${skipped.length} POSIX-bound test file(s): ${skipped.map((f) => path.basename(f)).join(', ')}\n`)
+      for (const f of skipped) files.splice(files.indexOf(f), 1)
+    }
+  }
+
   if (files.length === 0) {
     process.stderr.write(`no test files found under ${ROOT}\n`)
     return 1
   }
 
-  const result = spawnSync(
-    process.execPath,
-    buildNodeTestArgs(files, forwardedArgs),
-    { stdio: 'inherit' },
-  )
-
-  if (result.error) {
-    process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
-    return 1
+  // The parent owns this directory even when a test exits before its hooks run.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-t-'))
+  try {
+    const homeDir = path.join(temp, 'home')
+    fs.mkdirSync(homeDir)
+    const result = spawnSync(
+      process.execPath,
+      buildNodeTestArgs(files, forwardedArgs),
+      { stdio: 'inherit', env: { ...isolatedClientEnv(process.env, homeDir), TMPDIR: temp, TMP: temp, TEMP: temp } },
+    )
+    if (result.error) {
+      process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
+      return 1
+    }
+    return result.status ?? 1
+  } finally {
+    // Best effort. `force` only swallows ENOENT and `maxRetries` never retries
+    // EACCES, so a fixture the suite left unreadable (a test that chmod'd a
+    // directory and died before restoring it) would otherwise throw from here,
+    // discard the run's exit status, and report a green suite as a crash.
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 3 })
+    } catch (err) {
+      process.stderr.write(`could not remove the test temp root ${temp}: ${/** @type {Error} */ (err).message}\n`)
+    }
   }
-  return result.status ?? 1
 }
 
 /**

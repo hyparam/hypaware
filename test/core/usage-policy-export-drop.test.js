@@ -89,7 +89,7 @@ test('readRowsSince: local-only cwd rows are dropped from the payload but the cu
 
   // The local-only rows are still in the cache (local query is a different read
   // path): the unfiltered full-scan `readRows` returns every row, including the
-  // withheld ones — cache-but-never-forward, not capture-time drop.
+  // withheld ones, cache-but-never-forward, not capture-time drop.
   /** @type {number[]} */
   const cachedIds = []
   for (const part of await svc.discoverCachePartitions()) {
@@ -121,7 +121,7 @@ test('readRowsSince: a `columns` projection omitting cwd still withholds local-o
   const shipped = []
   let droppedCount = 0
   for (const part of await svc.discoverCachePartitions()) {
-    // Caller asks for `id` only — NO `cwd`. Withholding must not depend on it.
+    // Caller asks for `id` only: NO `cwd`. Withholding must not depend on it.
     for await (const entry of svc.readRowsSince(part.path, { columns: ['id'] })) {
       if (entry.dropped) {
         droppedCount += 1
@@ -134,7 +134,7 @@ test('readRowsSince: a `columns` projection omitting cwd still withholds local-o
 
   assert.equal(droppedCount, 1, 'the local-only row is still withheld despite the cwd-less projection')
   assert.deepEqual(shipped, [{ id: 1n }], 'the full row is shipped as the projected columns only (INT64 reads back as a bigint)')
-  assert.ok(!('cwd' in shipped[0]), "cwd is stripped back off — the caller's projection contract is honored")
+  assert.ok(!('cwd' in shipped[0]), "cwd is stripped back off - the caller's projection contract is honored")
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })

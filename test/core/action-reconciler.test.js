@@ -8,9 +8,11 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
+  REFUSAL_REARM_GENERATION,
   createActionReconciler,
   readClientActionStatus,
   clearClientActionMarker,
+  rearmRefusedActionMarker,
 } from '../../src/core/config/action_reconciler.js'
 import { createAttachHandler } from '../../src/core/config/action_attach.js'
 
@@ -585,6 +587,493 @@ test('clearClientActionMarker drops an emptied bucket but preserves sibling buck
     // The sibling bucket and both its keys survive untouched.
     assert.equal(store.backfill['@hypaware/claude'].status, 'done', 'sibling backfill key survives')
     assert.equal(store.backfill['@hypaware/codex'].status, 'done', 'sibling backfill key survives')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+// The re-arm's two shapes. `refused` is the only status it touches (a `done`
+// marker is a live undo record; a `failed` one is short-circuited by nothing
+// and needs no help), and it only *drops* a marker that records no effect: one
+// carrying `installed_assets` names files an earlier successful attach copied,
+// and that record has to outlive the re-arm or a later detach cannot remove
+// them.
+// @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [tests]: only a refused
+//   marker is re-armed, and an assetless one is the only one dropped
+// @ref LLP 0138#marker-undo [tests]: the re-arm never destroys the record of an
+//   applied effect
+test('rearmRefusedActionMarker only touches a refused marker, and drops it only when it records no assets', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // (a) Missing store file: nothing to re-arm, and none is created.
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'missing marker file returns false'
+    )
+    assert.equal(fs.existsSync(markerPath(stateRoot)), false, 'no marker file is written for a missing store')
+
+    // (b) A `done` marker is left exactly as it was: it is the only record
+    //     naming what an org-driven attach installed.
+    seedMarkerFile(stateRoot, {
+      attach: {
+        claude: { status: 'done', request_key: 'claude', installed_assets: ['/home/u/.claude/skills/org'] },
+      },
+    })
+    const beforeDone = fs.readFileSync(markerPath(stateRoot), 'utf8')
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'a done marker is not re-armed'
+    )
+    assert.equal(fs.readFileSync(markerPath(stateRoot), 'utf8'), beforeDone, 'a done marker is not rewritten')
+
+    // (c) A `failed` marker likewise: nothing short-circuits it already.
+    seedMarkerFile(stateRoot, {
+      attach: { claude: { status: 'failed', request_key: 'claude', reason: 'boom', attempts: 2 } },
+    })
+    const beforeFailed = fs.readFileSync(markerPath(stateRoot), 'utf8')
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'a failed marker is not re-armed'
+    )
+    assert.equal(fs.readFileSync(markerPath(stateRoot), 'utf8'), beforeFailed, 'a failed marker is not rewritten')
+
+    // (d) An assetless `refused` marker records no effect, so it is dropped
+    //     outright (and its emptied bucket with it), leaving siblings alone.
+    seedMarkerFile(stateRoot, {
+      attach: { claude: { status: 'refused', request_key: 'claude', reason: 'JSONC settings file', at: 'T0' } },
+      backfill: { '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude' } },
+    })
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      true,
+      'an assetless refused marker is re-armed'
+    )
+    const dropped = readMarkerFile(stateRoot)
+    assert.equal('attach' in dropped, false, 'the assetless refused marker is dropped, emptied bucket and all')
+    assert.equal(dropped.backfill['@hypaware/claude'].status, 'done', 'sibling bucket survives')
+
+    // (e) A `refused` marker carrying `installed_assets` is re-armed WITHOUT
+    //     dropping the undo record: rewritten to `failed` (short-circuited by
+    //     nothing, so the next pass re-performs) with the paths intact.
+    seedMarkerFile(stateRoot, {
+      attach: {
+        claude: {
+          status: 'refused',
+          request_key: 'claude',
+          reason: 'JSONC settings file',
+          at: 'T0',
+          endpoint: 'http://127.0.0.1:4388',
+          installed_assets: ['/home/u/.claude/skills/org'],
+        },
+      },
+    })
+    assert.equal(
+      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      true,
+      'an asset-bearing refused marker is re-armed'
+    )
+    const kept = readMarkerFile(stateRoot).attach.claude
+    assert.equal(kept.status, 'failed', 'it is rewritten to failed, which nothing short-circuits')
+    assert.deepEqual(kept.installed_assets, ['/home/u/.claude/skills/org'], 'the undo record survives the re-arm')
+    assert.equal(kept.request_key, 'claude')
+    assert.equal(kept.endpoint, 'http://127.0.0.1:4388', 'unrelated detail is carried, not reconstructed')
+    assert.match(String(kept.reason), /re-armed by an explicit 'hyp client attach claude'/)
+    assert.match(String(kept.reason), /previous refusal: JSONC settings file/)
+    assert.equal('attempts' in kept, false, 'no attempt counter is invented for a re-arm')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('a refused marker short-circuits unconditionally, unlike a done marker the handler reports stale (LLP 0186)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // The refusing handler would happily succeed on a second call, and declares
+    // its marker stale on every pass. Neither re-arms it: only an explicit
+    // `hyp attach` (which clears the marker) does, so `perform()` must be called
+    // exactly once for the whole life of the refusal. This is what separates
+    // `refused` from `done`, which the same `isCurrent() => false` DOES re-fire.
+    let refuse = true
+    /** @type {ActionHandler & { performCalls: number }} */
+    const refusing = {
+      kind: 'attach',
+      performCalls: 0,
+      desired() {
+        return [{ requestKey: 'openclaw' }]
+      },
+      isCurrent() {
+        return false
+      },
+      async perform() {
+        refusing.performCalls += 1
+        return refuse
+          ? { status: 'refused', reason: 'models.providers.anthropic is not ours' }
+          : { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({
+      stateRoot,
+      handlers: [refusing],
+      now: () => Date.parse('2026-08-04T00:00:00.000Z'),
+      log: NOOP_LOG,
+    })
+
+    const p1 = await reconciler.reconcile(INPUT)
+    assert.equal(refusing.performCalls, 1)
+    assert.deepEqual(
+      p1.results.map((r) => [r.requestKey, r.outcome]),
+      [['openclaw', 'refused']]
+    )
+    assert.equal(p1.results[0].reason, 'models.providers.anthropic is not ours')
+
+    // The precondition is "fixed" (perform would now report done) and the
+    // freshness hook still says stale: the pass must skip anyway.
+    refuse = false
+    const p2 = await reconciler.reconcile(INPUT)
+    assert.equal(refusing.performCalls, 1, 'a refused marker is never re-performed')
+    assert.deepEqual(
+      p2.results.map((r) => [r.requestKey, r.outcome]),
+      [['openclaw', 'skipped']]
+    )
+    assert.equal(readMarkerFile(stateRoot).attach.openclaw.status, 'refused')
+
+    // Control: the same `isCurrent() => false` against a DONE marker does
+    // re-perform, so the skip above is the refusal's doing, not a dead hook.
+    /** @type {ActionHandler & { performCalls: number }} */
+    const succeeding = {
+      kind: 'attach',
+      performCalls: 0,
+      desired() {
+        return [{ requestKey: 'claude' }]
+      },
+      isCurrent() {
+        return false
+      },
+      async perform() {
+        succeeding.performCalls += 1
+        return { status: 'done' }
+      },
+    }
+    const control = createActionReconciler({ stateRoot, handlers: [succeeding], log: NOOP_LOG })
+    await control.reconcile(INPUT)
+    await control.reconcile(INPUT)
+    assert.equal(succeeding.performCalls, 2, 'a stale done marker still re-performs')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+// The shipped fleet's escape hatch. A `refused` marker written before this
+// build carries no re-arm generation, so it reads as generation 0 and is below
+// the one this build stamps: the pass re-arms it exactly once instead of
+// short-circuiting. If the refusal is still true the fresh marker is stamped at
+// the current generation and every later pass skips it again, which is what
+// keeps LLP 0184's forever-retry closed.
+// @ref LLP 0364#the-generation-bit [tests]: a stale-generation refused marker is re-performed once; the marker the retry writes is terminal again
+// @ref LLP 0364#one-retry-not-a-retry-loop [tests]: a refusal the re-arm cannot fix costs one re-perform, not one per boot
+test('a refused marker below the build re-arm generation is re-performed exactly once (LLP 0364)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    let refuse = true
+    /** @type {ActionHandler & { performCalls: number }} */
+    const handler = {
+      kind: 'attach',
+      performCalls: 0,
+      desired() {
+        return [{ requestKey: 'openclaw' }]
+      },
+      async perform() {
+        handler.performCalls += 1
+        return refuse ? { status: 'refused', reason: 'openclaw.json is not ours' } : { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+
+    // The marker an earlier release wrote: terminal, and with no generation.
+    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.writeFileSync(
+      path.join(stateRoot, 'config-control', 'client-actions.json'),
+      JSON.stringify({
+        attach: {
+          openclaw: { status: 'refused', request_key: 'openclaw', reason: 'legacy', at: 'T0' },
+        },
+      })
+    )
+
+    // Still refusing: one re-perform, then terminal again at this generation.
+    const p1 = await reconciler.reconcile(INPUT)
+    assert.deepEqual(p1.results.map((r) => r.outcome), ['refused'])
+    assert.equal(handler.performCalls, 1)
+    assert.equal(readMarkerFile(stateRoot).attach.openclaw.rearm_generation, REFUSAL_REARM_GENERATION)
+    await reconciler.reconcile(INPUT)
+    await reconciler.reconcile(INPUT)
+    assert.equal(handler.performCalls, 1, 'a re-armed refusal that refuses again is not retried per boot')
+
+    // A second legacy marker, this time over a precondition that has cleared:
+    // the one re-perform is what lands the effect the host has been missing.
+    fs.writeFileSync(
+      path.join(stateRoot, 'config-control', 'client-actions.json'),
+      JSON.stringify({
+        attach: {
+          openclaw: { status: 'refused', request_key: 'openclaw', reason: 'legacy', at: 'T0' },
+        },
+      })
+    )
+    refuse = false
+    const p2 = await reconciler.reconcile(INPUT)
+    assert.deepEqual(p2.results.map((r) => r.outcome), ['done'])
+    assert.equal(handler.performCalls, 2)
+    assert.equal(readMarkerFile(stateRoot).attach.openclaw.status, 'done')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('a refused outcome writes a terminal marker (reason + at, no attempts) that carries installed_assets forward (LLP 0186)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // The interesting shape: an attach that went `done` and copied assets, then
+    // drifted (isCurrent → false) into a re-perform that refuses. The refusal
+    // must not orphan the copies the earlier success recorded, and must not
+    // grow an `attempts` counter, since nothing will ever retry it.
+    seedMarkerFile(stateRoot, {
+      attach: {
+        openclaw: {
+          status: 'done',
+          request_key: 'openclaw',
+          at: '2026-07-01T00:00:00.000Z',
+          installed_assets: ['/home/u/.openclaw/skills/helper'],
+        },
+      },
+    })
+
+    /** @type {ActionHandler} */
+    const handler = {
+      kind: 'attach',
+      desired() {
+        return [{ requestKey: 'openclaw' }]
+      },
+      isCurrent() {
+        return false
+      },
+      async perform() {
+        return { status: 'refused', reason: 'openclaw.json is not ours' }
+      },
+    }
+    const reconciler = createActionReconciler({
+      stateRoot,
+      handlers: [handler],
+      now: () => Date.parse('2026-08-04T00:00:00.000Z'),
+      log: NOOP_LOG,
+    })
+
+    await reconciler.reconcile(INPUT)
+
+    const marker = readMarkerFile(stateRoot).attach.openclaw
+    assert.equal(marker.status, 'refused')
+    assert.equal(marker.request_key, 'openclaw')
+    assert.equal(marker.reason, 'openclaw.json is not ours')
+    assert.equal(marker.at, '2026-08-04T00:00:00.000Z', 'at carries the terminal-state time, like done')
+    assert.equal('attempts' in marker, false, 'a refusal is never retried, so nothing counts attempts')
+    assert.equal('last_attempt' in marker, false)
+    assert.deepEqual(
+      marker.installed_assets,
+      ['/home/u/.openclaw/skills/helper'],
+      "the earlier success's undo record survives the rewrite"
+    )
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('the reverse gap drops an assetless refused marker and reverses one that recorded an effect (LLP 0186)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // A refusal writes nothing to the client's settings, so a refused marker
+    // for a key the config stops naming has nothing to undo and is dropped,
+    // exactly like an assetless `failed` one. Unless it carried assets forward
+    // from an earlier successful attach: then it takes the reverse path.
+    seedMarkerFile(stateRoot, {
+      attach: {
+        'refused-with-assets': {
+          status: 'refused',
+          request_key: 'refused-with-assets',
+          reason: 'not ours',
+          at: '2026-08-04T00:00:00.000Z',
+          installed_assets: ['/home/u/.openclaw/skills/helper'],
+        },
+        'refused-no-assets': {
+          status: 'refused',
+          request_key: 'refused-no-assets',
+          reason: 'not ours',
+          at: '2026-08-04T00:00:00.000Z',
+        },
+      },
+    })
+
+    /** @type {ActionHandler & { reverseCalls: string[] }} */
+    const handler = {
+      kind: 'attach',
+      reverseCalls: [],
+      desired() {
+        return []
+      },
+      async perform() {
+        return { status: 'done' }
+      },
+      async reverse(requestKey) {
+        handler.reverseCalls.push(requestKey)
+        return { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+    const report = await reconciler.reconcile(INPUT)
+
+    assert.deepEqual(
+      handler.reverseCalls,
+      ['refused-with-assets'],
+      'only the refused marker with a recorded effect reverses'
+    )
+    assert.deepEqual(
+      report.results.map((r) => [r.requestKey, r.outcome]),
+      [['refused-with-assets', 'reversed']]
+    )
+    // Both keys are gone: one dropped outright, one through its undo.
+    assert.equal(readClientActionStatus({ stateRoot }).byKind.attach, undefined)
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+// The settings-only half of the undo record. `installed_assets` was the marker's
+// only evidence that an effect had been applied, which is no evidence at all for
+// a client whose attach writes settings and copies no files (openclaw is the
+// routine case). These two tests pin the `prior_done` bit that carries that
+// evidence, and the reverse gap's drop condition that reads it.
+// @ref LLP 0250#the-bit [tests]: a done-to-terminal rewrite records the effect
+//   it overwrites, and the reverse gap stops dropping such a marker
+test('a settings-only attach rewritten from done to refused is reversed, not dropped (LLP 0250)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    let phase = 'attach'
+    /** @type {ActionHandler & { reverseCalls: string[] }} */
+    const handler = {
+      kind: 'attach',
+      reverseCalls: [],
+      desired() {
+        return phase === 'dropped' ? [] : [{ requestKey: 'openclaw' }]
+      },
+      // The LLP 0086 freshness hook: the recorded input drifted, so the `done`
+      // marker re-`perform()`s instead of short-circuiting.
+      isCurrent() {
+        return false
+      },
+      async perform() {
+        return phase === 'attach'
+          ? { status: 'done' }
+          : { status: 'refused', reason: 'models.providers.anthropic is not ours' }
+      },
+      async reverse(requestKey) {
+        handler.reverseCalls.push(requestKey)
+        return { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({
+      stateRoot,
+      handlers: [handler],
+      now: () => Date.parse('2026-08-17T00:00:00.000Z'),
+      log: NOOP_LOG,
+    })
+
+    // 1. The attach applies: the client's settings are written, no assets copied.
+    await reconciler.reconcile(INPUT)
+    const applied = readMarkerFile(stateRoot).attach.openclaw
+    assert.equal(applied.status, 'done')
+    assert.equal('installed_assets' in applied, false, 'a settings-only attach records no assets')
+    assert.equal('prior_done' in applied, false, 'a done marker says so with its status')
+
+    // 2. The input drifts and the re-`perform()` refuses. The refusal itself
+    //    wrote nothing, but the settings the earlier `done` wrote are still on
+    //    disk, so the rewrite has to record the effect it overwrites.
+    phase = 'refuse'
+    await reconciler.reconcile(INPUT)
+    const rewritten = readMarkerFile(stateRoot).attach.openclaw
+    assert.equal(rewritten.status, 'refused')
+    assert.equal('installed_assets' in rewritten, false)
+    assert.equal(
+      rewritten.prior_done,
+      true,
+      'the rewrite records that an earlier pass reached done, so the settings write stays named'
+    )
+
+    // 3. The config stops naming the key. The marker records no assets, so the
+    //    reverse gap used to drop it and strand the settings; it must reverse.
+    phase = 'dropped'
+    const report = await reconciler.reconcile(INPUT)
+    assert.deepEqual(
+      handler.reverseCalls,
+      ['openclaw'],
+      'a marker over a settings write that is still on disk is reversed, never dropped'
+    )
+    assert.deepEqual(
+      report.results.map((r) => [r.requestKey, r.outcome]),
+      [['openclaw', 'reversed']]
+    )
+    assert.equal(readClientActionStatus({ stateRoot }).byKind.attach, undefined)
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('the prior-done bit survives repeated failed rewrites, and a key that never applied anything is still dropped (LLP 0250)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    let phase = 'attach'
+    /** @type {ActionHandler & { reverseCalls: string[] }} */
+    const handler = {
+      kind: 'attach',
+      reverseCalls: [],
+      desired() {
+        return phase === 'dropped' ? [] : [{ requestKey: 'applied' }, { requestKey: 'never-applied' }]
+      },
+      isCurrent() {
+        return false
+      },
+      async perform(action) {
+        if (action.requestKey === 'never-applied') return { status: 'failed', reason: 'transient' }
+        return phase === 'attach' ? { status: 'done' } : { status: 'failed', reason: 'transient' }
+      },
+      async reverse(requestKey) {
+        handler.reverseCalls.push(requestKey)
+        return { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+
+    await reconciler.reconcile(INPUT)
+    phase = 'fail'
+    // Two failing passes: the bit is set by the first rewrite and has to survive
+    // the second, which reads it off a marker that is already `failed`.
+    await reconciler.reconcile(INPUT)
+    await reconciler.reconcile(INPUT)
+
+    const store = readMarkerFile(stateRoot).attach
+    assert.equal(store.applied.status, 'failed')
+    assert.equal(store.applied.attempts, 2, 'a failed marker still counts its retries')
+    assert.equal(store.applied.prior_done, true, 'the bit outlives every later rewrite')
+    assert.equal('prior_done' in store['never-applied'], false, 'a key that never reached done records nothing')
+
+    phase = 'dropped'
+    await reconciler.reconcile(INPUT)
+    assert.deepEqual(
+      handler.reverseCalls,
+      ['applied'],
+      'only the key whose attach really applied something is reversed; the other is dropped'
+    )
+    assert.equal(readClientActionStatus({ stateRoot }).byKind.attach, undefined)
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }

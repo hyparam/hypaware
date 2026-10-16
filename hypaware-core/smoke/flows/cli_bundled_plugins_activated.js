@@ -7,6 +7,11 @@ import process from 'node:process'
 import { installObservability } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
+import {
+  V1_BUNDLED_PLUGIN_ALLOWLIST,
+  V1_EXCLUDED_FROM_DEFAULT,
+  discoverBundledPlugins,
+} from '../../../src/core/runtime/bundled.js'
 
 /**
  * Phase 2 V1 smoke (finish-v1.md §Phase 2). Drives the unified
@@ -15,27 +20,30 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  *
  *  1. `hyp plugin list` shows active bundled plugins from the
  *     generated config (both text and `--json` form).
- *  2. `hyp attach --client claude --dry-run` reaches the Claude
+ *  2. `hyp client attach claude --dry-run` reaches the Claude
  *     adapter (the adapter's own `client.attach` span fires with
  *     `dry_run=true` and the dry-run banner lands on stdout).
- *  3. `hyp attach --client codex --dry-run` reaches the Codex adapter
- *     (same shape), and `hyp attach --client openclaw --dry-run`
+ *  3. `hyp client attach codex --dry-run` reaches the Codex adapter
+ *     (same shape), and `hyp client attach openclaw --dry-run`
  *     reaches the OpenClaw adapter against a seeded OPENCLAW_HOME.
  *  4. `hyp status --json` emits a stable JSON document listing the
- *     configured sources, sinks, clients, and active plugins. Because
- *     neither `@hypaware/central` nor `@hypaware/gascity` is in this
- *     config, they must not appear as they are excluded from default
- *     activation but remain discoverable through the plugin catalog and
+ *     configured sources, sinks, clients, and active plugins. This
+ *     config names none of `V1_EXCLUDED_FROM_DEFAULT`, so no member of
+ *     that set may appear: they are excluded from default activation
+ *     but remain discoverable through the plugin catalog and
  *     activatable via explicit config or init presets.
  *
  * Telemetry contract (per bead):
  *  - One `kernel.boot` root span per dispatch boot.
  *  - One `plugin.activate` child span per active plugin per boot.
  *  - One `plugin.skipped` log row per bundled-but-not-selected plugin
- *    with `status=skipped` and `hyp_reason=not_configured`. The
- *    selected set here covers six of the nine V1-bundled plugins so
- *    `@hypaware/format-jsonl`, `@hypaware/s3`, and
- *    `@hypaware/format-iceberg` land on the skipped path.
+ *    with `status=skipped` and `hyp_reason=not_configured`. The config
+ *    below names a subset of the default activation surface, so every
+ *    other plugin on that surface lands on the skipped path.
+ *
+ * The rosters here are derived from the shipped allowlist, exclude set,
+ * and manifests, because a pinned one goes stale the moment a plugin
+ * joins or leaves the tree (issues #2079, #2081).
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -47,13 +55,11 @@ export async function run({ harness, expect }) {
     )
   }
 
-  // Stage a v2 config that selects seven of the V1-bundled plugins.
-  // `@hypaware/format-jsonl`, `@hypaware/s3`, `@hypaware/format-iceberg`,
-  // `@hypaware/context-graph`, and `@hypaware/ai-gateway-graph` are
-  // intentionally omitted so the smoke can assert the "skipped" log
-  // surface. `@hypaware/central` and
-  // `@hypaware/gascity` are not in this config, they are excluded from
-  // default activation but activatable via explicit config.
+  // Stage a v2 config naming a proper subset of the default activation
+  // surface, so the rest of that surface lands on the "skipped" log path the
+  // assertions below derive. Nothing in `V1_EXCLUDED_FROM_DEFAULT` is named,
+  // so none of it activates: that set never reaches the skip loop either, it
+  // is activatable only via explicit config.
   const configPath = defaultConfigPath(harness.hypHome)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, JSON.stringify({
@@ -61,7 +67,7 @@ export async function run({ harness, expect }) {
     plugins: [
       {
         // A concrete `listen` port (not `:0`) is load-bearing for the
-        // OpenClaw dry-run below: `hyp attach --dry-run` derives the
+        // OpenClaw dry-run below: `hyp client attach --dry-run` derives the
         // gateway endpoint from this configured `listen` (the source is
         // never started in a CLI dispatch, so `localEndpoint()` is
         // unavailable), and the OpenClaw adapter only runs
@@ -85,7 +91,7 @@ export async function run({ harness, expect }) {
         name: '@hypaware/otel',
         config: { listen_host: '127.0.0.1', listen_port: 0 },
       },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/claude' },
       { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
       { name: '@hypaware/openclaw' },
       { name: '@hypaware/local-fs' },
@@ -132,6 +138,10 @@ export async function run({ harness, expect }) {
     '@hypaware/claude',
     '@hypaware/codex',
     '@hypaware/format-parquet',
+    // The seeded config is deliberately a legacy one that never named grep:
+    // the boot migration adds it, so this flow also covers the upgrade
+    // reaching `hyp plugin list`.
+    '@hypaware/grep',
     '@hypaware/local-fs',
     '@hypaware/openclaw',
     '@hypaware/otel',
@@ -146,23 +156,22 @@ export async function run({ harness, expect }) {
     (listed.plugins ?? []).filter((/** @type {any} */ p) => p.active),
     (rows) => Array.isArray(rows) && rows.every((/** @type {any} */ r) => r.source === 'bundled')
   )
+  // The whole exclude set, so a name joining it is covered the moment it
+  // joins. A pinned subset of it just stops covering the rest (issue #2081).
   expect.that(
-    'plugins: unconfigured plugins (central/gascity) absent from active list',
+    'plugins: no excluded-from-default plugin appears in hyp plugin list',
     (listed.plugins ?? []).map((/** @type {any} */ p) => p.name),
-    (v) =>
-      Array.isArray(v) &&
-      !v.includes('@hypaware/central') &&
-      !v.includes('@hypaware/gascity')
+    (v) => Array.isArray(v) && !v.some((/** @type {any} */ n) => V1_EXCLUDED_FROM_DEFAULT.has(n))
   )
 
-  // ----- 2. hyp attach --client claude --dry-run -----
+  // ----- 2. hyp client attach claude --dry-run -----
   const claudeStdout = makeBuf()
   const claudeStderr = makeBuf()
   const claudeCode = await dispatch(
-    ['attach', '--client', 'claude', '--dry-run'],
+    ['client', 'attach', 'claude', '--dry-run'],
     { stdout: claudeStdout, stderr: claudeStderr, env: baseEnv }
   )
-  expect.that('dispatch: hyp attach --client claude --dry-run exited 0', claudeCode, (v) => v === 0)
+  expect.that('dispatch: hyp client attach claude --dry-run exited 0', claudeCode, (v) => v === 0)
   expect.that(
     'stderr: claude attach dry-run had no errors',
     claudeStderr.text(),
@@ -174,14 +183,14 @@ export async function run({ harness, expect }) {
     (v) => typeof v === 'string' && v.includes('(dry-run) Would attach Claude Code')
   )
 
-  // ----- 3. hyp attach --client codex --dry-run -----
+  // ----- 3. hyp client attach codex --dry-run -----
   const codexStdout = makeBuf()
   const codexStderr = makeBuf()
   const codexCode = await dispatch(
-    ['attach', '--client', 'codex', '--dry-run'],
+    ['client', 'attach', 'codex', '--dry-run'],
     { stdout: codexStdout, stderr: codexStderr, env: baseEnv }
   )
-  expect.that('dispatch: hyp attach --client codex --dry-run exited 0', codexCode, (v) => v === 0)
+  expect.that('dispatch: hyp client attach codex --dry-run exited 0', codexCode, (v) => v === 0)
   expect.that(
     'stderr: codex attach dry-run had no errors',
     codexStderr.text(),
@@ -193,7 +202,7 @@ export async function run({ harness, expect }) {
     (v) => typeof v === 'string' && v.includes('(dry-run) Would attach Codex')
   )
 
-  // ----- 3b. hyp attach --client openclaw --dry-run -----
+  // ----- 3b. hyp client attach openclaw --dry-run -----
   // Seeded OPENCLAW_HOME keeps the step hermetic: the adapter refuses a
   // missing settings file or a non-Anthropic primary (LLP 0109), so the
   // real user HOME must never leak into this dispatch. The placeholder
@@ -224,7 +233,7 @@ export async function run({ harness, expect }) {
   let openclawCode
   try {
     openclawCode = await dispatch(
-      ['attach', '--client', 'openclaw', '--dry-run'],
+      ['client', 'attach', 'openclaw', '--dry-run'],
       { stdout: openclawStdout, stderr: openclawStderr, env: openclawEnv }
     )
   } finally {
@@ -233,7 +242,7 @@ export async function run({ harness, expect }) {
     if (prevAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY
     else process.env.ANTHROPIC_API_KEY = prevAnthropicKey
   }
-  expect.that('dispatch: hyp attach --client openclaw --dry-run exited 0', openclawCode, (v) => v === 0)
+  expect.that('dispatch: hyp client attach openclaw --dry-run exited 0', openclawCode, (v) => v === 0)
   expect.that(
     'stderr: openclaw attach dry-run had no errors',
     openclawStderr.text(),
@@ -259,7 +268,8 @@ export async function run({ harness, expect }) {
     statusStderr.text(),
     (v) => typeof v === 'string' && v.length === 0
   )
-  const status = parseJson(statusStdout.text())
+  const statusText = statusStdout.text()
+  const status = parseJson(statusText)
   expect.that('stdout: status --json parses', status, (v) => v && typeof v === 'object')
   expect.that(
     'status: active_plugins enumerates the configured set',
@@ -287,16 +297,15 @@ export async function run({ harness, expect }) {
       typeof v.running === 'boolean' &&
       typeof v.state === 'string'
   )
-  expect.that(
-    'status: unconfigured @hypaware/central absent from status JSON',
-    statusStdout.text(),
-    (v) => typeof v === 'string' && !v.includes('@hypaware/central')
-  )
-  expect.that(
-    'status: unconfigured @hypaware/gascity absent from status JSON',
-    statusStdout.text(),
-    (v) => typeof v === 'string' && !v.includes('@hypaware/gascity')
-  )
+  // Same derivation as the `hyp plugin list` check, over the whole rendered
+  // document rather than the parsed plugin rows.
+  for (const name of V1_EXCLUDED_FROM_DEFAULT) {
+    expect.that(
+      `status: unconfigured ${name} absent from status JSON`,
+      statusText,
+      (v) => typeof v === 'string' && !v.includes(name)
+    )
+  }
 
   await obs.shutdown()
 
@@ -324,19 +333,44 @@ export async function run({ harness, expect }) {
     (/** @type {any} */ s) => s.attributes?.boot_profile === 'config'
   )
   expect.that(
-    'traces: at least one config-profile boot reports plugins_activated=7',
+    `traces: at least one config-profile boot reports plugins_activated=${expectedActive.length}`,
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_activated),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 7)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === expectedActive.length)
   )
-  // Skipped = allowlist plugins this flow's config does not name (the
-  // excluded-from-default set never reaches the skip loop). Bumps
-  // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST without joining
-  // this flow's config: currently format-jsonl, s3, format-iceberg,
-  // context-graph, ai-gateway-graph, and hermes (6).
+  // A manifest the workspace ships under a name neither the allowlist nor the
+  // exclude set claims is a half-landed plugin: the directory landed, the
+  // kernel's declaration of it did not. It gets its own assertion rather than
+  // joining the roster below, because boot never pools such a manifest
+  // (`selectBootPlugins` pools `loaded` + `excluded` + the unshadowed
+  // installed plugins, and an unknown manifest is in none of the three), so it
+  // is neither activated nor skip-logged: counting it into `expectedSkipped`
+  // would demand boot skip a name it cannot see, failing the smoke on a
+  // correct kernel and blaming the skip count for it (issue #2085). Sorted so
+  // the names the failure prints are stable.
+  const { unknown } = await discoverBundledPlugins()
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=6',
+    'bundled: every shipped manifest is claimed by the allowlist or the exclude set',
+    unknown.map((m) => m.manifest.name).sort(),
+    (v) => Array.isArray(v) && v.length === 0
+  )
+  // Skipped = every default-surface bundled plugin this flow's config does
+  // not name (the excluded-from-default set never reaches the skip loop).
+  // Derived rather than pinned as a literal, which drifts the moment a plugin
+  // joins the default surface (issue #2079).
+  //
+  // The allowlist, not the `loaded` bucket boot skips from: that bucket is
+  // declared intersected with shipped, so it moves with the run, and a plugin
+  // declared but no longer shipped would shrink the expectation by exactly
+  // what it shrinks the run by. The allowlist does not move, so that
+  // disagreement still fails.
+  const expectedSkipped = [...V1_BUNDLED_PLUGIN_ALLOWLIST]
+    .filter((n) => !expectedActive.includes(n))
+    .sort()
+  expect.that(
+    `traces: at least one config-profile boot reports plugins_skipped=${expectedSkipped.length}` +
+      ` (${expectedSkipped.join(',')})`,
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 6)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === expectedSkipped.length)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')
@@ -362,30 +396,45 @@ export async function run({ harness, expect }) {
       )
   )
 
+  // Scoped to the boots under test by `spanId`, which `plugin.skipped` carries
+  // because it is logged inside the `kernel.boot` span. These dispatches also
+  // produce an `explicit:0` boot that selects nothing and so skips the whole
+  // default surface: an unfiltered scan therefore holds every bundled name,
+  // and a name check against it is true no matter which boot skipped it, so it
+  // cannot fail (issue #2081).
+  const configBootSpanIds = new Set(configBoots.map((/** @type {any} */ s) => s.spanId))
   const skippedLogs = logs.filter(
     (/** @type {any} */ l) =>
       l.body === 'plugin.skipped' &&
       l.attributes?.hyp_reason === 'not_configured' &&
-      l.attributes?.status === 'skipped'
+      l.attributes?.status === 'skipped' &&
+      configBootSpanIds.has(l.spanId)
   )
   const skippedPlugins = new Set(
     skippedLogs.map((/** @type {any} */ l) => l.attributes?.hyp_plugin).filter(Boolean)
   )
   expect.that(
-    'logs: format-jsonl emitted a plugin.skipped log with hyp_reason=not_configured',
-    skippedPlugins.has('@hypaware/format-jsonl'),
-    (v) => v === true
+    'logs: config-profile boots skipped exactly the default-surface plugins this' +
+      ` config omits (${expectedSkipped.join(',')})`,
+    [...skippedPlugins].sort(),
+    (v) => Array.isArray(v) && v.join(',') === expectedSkipped.join(',')
   )
-  expect.that(
-    'logs: s3 emitted a plugin.skipped log with hyp_reason=not_configured',
-    skippedPlugins.has('@hypaware/s3'),
-    (v) => v === true
-  )
-  expect.that(
-    'logs: format-iceberg emitted a plugin.skipped log with hyp_reason=not_configured',
-    skippedPlugins.has('@hypaware/format-iceberg'),
-    (v) => v === true
-  )
+  // Named, where the set above is derived, and that is the point: the
+  // derivation moves with `expectedActive`, so re-scoping this config to
+  // activate one of these would carry the expectation along and prove nothing.
+  // These four are the flow's own claim about the skipped path it covers.
+  for (const name of [
+    '@hypaware/cursor',
+    '@hypaware/format-jsonl',
+    '@hypaware/s3',
+    '@hypaware/format-iceberg',
+  ]) {
+    expect.that(
+      `logs: ${name} emitted a plugin.skipped log with hyp_reason=not_configured`,
+      skippedPlugins.has(name),
+      (v) => v === true
+    )
+  }
 }
 
 /**

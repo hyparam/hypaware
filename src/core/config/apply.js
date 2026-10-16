@@ -98,6 +98,105 @@ export function resolveCentralLayerPath({ stateRoot }) {
 }
 
 /**
+ * Whether the daemon's apply engine has committed a pulled org config: the
+ * active-slot pointer resolves to a slot file. Read-only and safe from any
+ * process, like {@link resolveCentralLayerPath}, but deliberately blind to
+ * the join seed: the seed exists the instant enrollment writes it and names
+ * only the central plugin, so it is evidence of *enrollment*, not of the
+ * org's config having arrived.
+ *
+ * Unlike {@link resolveCentralLayerPath} this one *throws* on a pointer it
+ * cannot read. `readActiveSlot` answers `null` for both "no pointer yet" and
+ * "pointer unreadable", and the converge wait polling this has to tell them
+ * apart: the first is its ordinary steady state, polled to the timeout in
+ * silence, the second is a stuck host it has to log. Same
+ * ENOENT/ENOTDIR-is-the-answer discrimination
+ * {@link centralLayerResolutionFailure} makes.
+ *
+ * @param {{ stateRoot: string }} args
+ * @returns {boolean}
+ * @throws {NodeJS.ErrnoException} when the active pointer exists but cannot be read
+ * @ref LLP 0223 [implements]: the join converge wait's probe - applied slot, never the seed
+ */
+export function hasAppliedCentralConfig({ stateRoot }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  if (readActiveSlot(controlDir) !== null) return true
+  // Only on the not-converged answer, so the happy path stays one readlink:
+  // re-read the pointer to separate a control directory that holds nothing
+  // yet from one this process cannot read (EACCES, EIO, a pointer that is
+  // not a symlink at all).
+  try {
+    fs.readlinkSync(path.join(controlDir, ACTIVE_BASENAME))
+  } catch (err) {
+    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err
+  }
+  return false
+}
+
+/**
+ * The central-layer file names {@link resolveCentralLayerPath} resolves
+ * *through*: the pointer it reads and the files it can name. Their presence
+ * is the on-disk evidence that this host has a central layer, independent of
+ * whether the resolution above managed to follow them.
+ */
+const CENTRAL_LAYER_BASENAMES = [ACTIVE_BASENAME, SEED_BASENAME, 'config.a.json', 'config.b.json']
+
+/**
+ * Why {@link resolveCentralLayerPath} returned `null`, for the two callers
+ * that cannot treat "resolved nothing" and "could not resolve" alike: the D4
+ * exclusivity gate (LLP 0063), which reads `null` as *not enrolled* and would
+ * otherwise let a second org enroll a machine whose layer it merely failed to
+ * look up (#623); and `hyp status`'s unreadable-central-layer diagnostic,
+ * which would otherwise report a host with an unresolvable layer as having
+ * no central layer at all and name no file (#2423).
+ *
+ * Resolution is lossy on purpose everywhere else. `readActiveSlot` swallows
+ * every `readlink` error into `null` (the pointer replaced by a regular file,
+ * a dangling or looping link, a target that is not a slot), and `existsSync`
+ * swallows `EACCES` on `config-control/` into `false`. Boot is right to see
+ * one `null`: there is no layer to merge either way. A permission decision
+ * and a report that has to name the layer are not, so this reports
+ * resolution *failure* separately: the control directory could not be
+ * listed, or it still holds central-layer files that the resolution above
+ * did not manage to name.
+ *
+ * `null` means the absence is real: no control directory, or one with no
+ * central-layer file left in it (what `hyp leave` and `resetCentralLayerToSeed`
+ * produce). Nothing here reads file *contents*: a layer that resolves is the
+ * loader's business, not this function's.
+ *
+ * @param {{ stateRoot: string }} args
+ * @returns {{ configPath: string, errorKind: 'config_unreadable', message: string } | null}
+ * @ref LLP 0031#physical-layout [constrained-by]: same active-slot-else-seed layout, read for evidence of a layer rather than for a path to load
+ */
+export function centralLayerResolutionFailure({ stateRoot }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  if (resolveCentralLayerPath({ stateRoot }) !== null) return null
+  /** @type {string[]} */
+  let entries
+  try {
+    entries = fs.readdirSync(controlDir)
+  } catch (err) {
+    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+    // No control directory at all is the genuine never-joined host.
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null
+    return {
+      configPath: controlDir,
+      errorKind: 'config_unreadable',
+      message: `failed to read the central config directory ${controlDir}: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+  const residue = CENTRAL_LAYER_BASENAMES.filter((name) => entries.includes(name))
+  if (residue.length === 0) return null
+  return {
+    configPath: controlDir,
+    errorKind: 'config_unreadable',
+    message: `${controlDir} still holds central layer state (${residue.join(', ')}) that the active-slot pointer does not resolve to a readable layer file`,
+  }
+}
+
+/**
  * Reset the central layer to **seed-config mode**: remove the active-slot
  * pointer, both A/B slot files and their etag sidecars, and the
  * apply-engine state (probation / bad-etag / last-rollback). Best-effort
@@ -131,7 +230,20 @@ export function resetCentralLayerToSeed(stateRoot) {
     'config.a.etag',
     'config.b.etag',
   ]) {
-    fs.rmSync(path.join(controlDir, name), { force: true })
+    const target = path.join(controlDir, name)
+    if (name === ACTIVE_BASENAME) {
+      // `rmSync(..., { force: true })` first follows an existence check and
+      // leaves a dangling or looping symlink untouched. The active pointer is
+      // allowed to be exactly those damaged shapes, so unlink it as a directory
+      // entry instead of asking whether its target exists.
+      try {
+        fs.unlinkSync(target)
+      } catch (err) {
+        if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
+      }
+      continue
+    }
+    fs.rmSync(target, { force: true })
   }
   return { supersededActiveSlot }
 }
@@ -299,6 +411,7 @@ export function createConfigControl(opts) {
     const activeEtag = runningEtag()
     if (!activeEtag || activeEtag !== state.bad_etag.etag) return null
 
+    /** @type {string|null} */
     let seedRaw = null
     try {
       seedRaw = fs.readFileSync(seedPath, 'utf8')
@@ -436,6 +549,12 @@ export function createConfigControl(opts) {
     if (!state.probation) return
     const etag = state.probation.etag
     delete state.probation
+    // A newer revision has now survived probation, so an older rollback is
+    // history, not a condition: keeping it would leave `hyp status` reporting
+    // "Needs attention" forever. The bad etag stays as the re-apply backoff.
+    if (state.last_rollback && state.last_rollback.etag !== etag) {
+      delete state.last_rollback
+    }
     writeState(state)
     disarmProbationWatchdog()
     log.info('config.probation_cleared', {
@@ -612,6 +731,7 @@ export function createConfigControl(opts) {
       // bytes in slot 'a' so rollback lands back on it. Seed-config mode
       // is a legitimate steady state, so this is a safe rollback target
       // by construction.
+      /** @type {string|null} */
       let seedRaw = null
       try {
         seedRaw = fs.readFileSync(seedPath, 'utf8')

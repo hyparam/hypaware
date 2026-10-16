@@ -5,15 +5,14 @@ import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
-import { canPushWhere, emptySource, normalizeScanColumn, unionSources, whereColumns } from 'hypaware/core/query'
+import { alignRows, canPushWhere, emptySource, scanColumnOrNulls, unionSources, whereColumns } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
- * @import { AsyncDataSource } from 'squirreling'
  */
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
@@ -120,6 +119,7 @@ export async function refreshPartition() {
  *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
+ * @returns {Promise<ScannableDataSource>}
  */
 export async function createDataSource(partitions, ctx) {
   const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
@@ -137,7 +137,7 @@ export async function createDataSource(partitions, ctx) {
     tablePaths.add(p.path)
   }
 
-  /** @type {AsyncDataSource[]} */
+  /** @type {ScannableDataSource[]} */
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)
@@ -164,57 +164,81 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * `validateScan` rejects a SELECT that names a column absent from the source's
  * `columns`, so without this a contract or query that reads a freshly-added
  * column would throw `ColumnNotFoundError` over any pre-bump partition. The scan
- * itself is unchanged: a row object that lacks the key simply reads as null,
- * which is the correct value for "this partition predates the column".
+ * itself is unchanged: a column an old partition physically lacks stays
+ * addressable, and the exact value a read of it yields depends on the read path
+ * (LLP 0015#multi-partition-union).
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
- * @param {AsyncDataSource} source
- * @returns {AsyncDataSource}
+ * @param {ScannableDataSource} source
+ * @returns {ScannableDataSource}
  */
 function withSchemaColumns(source) {
   const columns = Array.from(new Set([...source.columns, ...SCHEMA_COLUMN_NAMES]))
-  /** @type {AsyncDataSource} */
+  /** @type {ScannableDataSource} */
   const wrapped = {
     columns,
     numRows: source.numRows,
     scan(options) {
-      return source.scan(options)
+      // The engine names this scan's output columns from the list advertised
+      // here, but fills them from each row's own `columns`. A partition that
+      // predates a declared column yields a SHORTER row, which slides every
+      // output name past the gap onto its neighbour's value: over a drifted
+      // union `SELECT *, git_remote` answered with git_remote's value under
+      // the name of the column that happened to follow the star's short
+      // width. Pad each row back out to the advertised list.
+      // @ref LLP 0241#alignment [implements]: a declared-but-absent column becomes a padded cell, not a missing slot the star can slide through
+      const scanColumns = options?.columns ?? columns
+      const result = source.scan(options)
+      return {
+        appliedWhere: result.appliedWhere,
+        appliedLimitOffset: result.appliedLimitOffset,
+        rows: () => alignRows(result.rows(), scanColumns),
+      }
     },
   }
   // Forward the column-stream hook so single-column aggregates stay on the
-  // engine's streaming fast path. A partition that physically lacks the
+  // engine's streaming fast path. A source that physically lacks the
   // requested column (the additive schema-drift case this wrapper exists
-  // for) surfaces its values as `undefined` holes in the chunk; normalize
-  // them to null, the same "this partition predates the column" value the
-  // row path reads, so accumulators see one representation either way.
+  // for) is never asked for it: a parquet-backed source throws on a column
+  // it cannot find, so `scanColumnOrNulls` streams a null per row instead,
+  // and every partition's chunk reads the same way to an accumulator. This
+  // is NOT the value the row path reads: `scan` above pads an absent cell
+  // with `undefined` (LLP 0241 §alignment), and 0241 deliberately left the
+  // null/undefined split between the two paths unsettled, so nothing may
+  // branch on which one it got.
   //
   // A `where` naming a DECLARED-but-physically-absent column can't be
-  // handed to the source: this wrapper is the only layer that knows the
-  // column exists at all, and a parquet-backed source throws on a filter
-  // column it can't find. Strip the predicate (and the limit/offset that
+  // handed to the source either: this wrapper is the only layer that knows
+  // the column exists at all. Strip the predicate (and the limit/offset that
   // are only meaningful after it) and report `appliedWhere: false`; the
-  // engine then filters over the null-normalized values, where IS NULL
-  // and friends read the absent column correctly.
+  // engine then filters over the null stream, where IS NULL and friends
+  // read the absent column correctly.
   // @ref LLP 0055 [implements]: withSchemaColumns forwards scanColumn; a partition lacking the column yields nulls, never throws
   // @ref LLP 0098#wrapper-duties [implements]: a predicate naming a declared-but-absent column is stripped before it can reach a parquet filter
   if (typeof source.scanColumn === 'function') {
-    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
     wrapped.scanColumn = (options) => {
       const pushable = !options.where || canPushWhere(source, whereColumns(options.where))
       const subOptions = pushable ? options : { column: options.column, signal: options.signal }
-      const inner = normalizeScanColumn(scanColumn(subOptions), subOptions)
+      const inner = scanColumnOrNulls(source, subOptions)
       return {
         appliedWhere: pushable && inner.appliedWhere,
         appliedLimitOffset: pushable && inner.appliedLimitOffset,
-        async *chunks() {
-          for await (const chunk of inner.chunks()) {
-            for (let i = 0; i < chunk.length; i++) {
-              if (chunk[i] === undefined) /** @type {unknown[]} */ (chunk)[i] = null
-            }
-            yield chunk
-          }
-        },
+        chunks: inner.chunks,
       }
+    }
+  }
+  // Native batches are transparent only when the physical prepared schema
+  // already covers the full declared schema. A drifted source stays on the
+  // row/column paths above, which own its absent-column semantics.
+  // @ref LLP 0294#schema-drift [implements]: prepared batches never invent a value for a declared-but-absent field
+  if (source.schema && source.prepareScan) {
+    const prepareScan = source.prepareScan
+    const fieldsByName = new Map(source.schema.fields.map((field) => [field.name, field]))
+    if (columns.every((column) => fieldsByName.has(column))) {
+      wrapped.schema = {
+        fields: columns.map((column) => /** @type {NonNullable<ReturnType<typeof fieldsByName.get>>} */ (fieldsByName.get(column))),
+      }
+      wrapped.prepareScan = (request) => prepareScan.call(source, request)
     }
   }
   return wrapped
@@ -258,16 +282,17 @@ export function aiGatewayDatasetRegistration(state) {
         fallback: 'unknown',
       },
       iceberg: {
-        // @ref LLP 0030#breaking: the required identity partition field
-        // is session_id (always present), not conversation_id (now
-        // nullable). @ref LLP 0022#within-partition-sort: these identity
-        // fields, in declared order, also seed the export sort order, so
-        // session_id leads the clustering and conversation_id rides along
-        // as a secondary thread-lookup sort key.
+        // @ref LLP 0311#date-partition [implements]: the cache partitions on
+        // date alone; the identity columns are sortOnly lookup columns, so
+        // the table sorts by them without the one-file-per-session floor.
+        // @ref LLP 0022#within-partition-sort: these identity fields, in
+        // declared order, still seed the export sort order (sortOnly does
+        // not affect the export), so session_id leads the clustering and
+        // conversation_id rides along as a secondary thread-lookup sort key.
         fields: [
-          { column: 'session_id', transform: 'identity', required: true },
-          { column: 'conversation_id', transform: 'identity' },
-          { column: 'cwd', transform: 'identity' },
+          { column: 'session_id', transform: 'identity', required: true, sortOnly: true },
+          { column: 'conversation_id', transform: 'identity', sortOnly: true },
+          { column: 'cwd', transform: 'identity', sortOnly: true },
           { column: 'date', transform: 'identity', required: true },
         ],
       },
@@ -283,16 +308,17 @@ export function aiGatewayDatasetRegistration(state) {
 /**
  * Build the flush-time settlement pass (LLP 0024). On each flush batch:
  *
- *  1. Short-circuit when the batch carries no fallback rows AND no null-cwd
- *     rows - the common case, so the hot path does zero transcript or storage
- *     I/O. (A null-cwd row is the #258 session-start race, handled by 2/LLP 0085.)
+ *  1. Choose the rows the enricher sees (`planSettleSelection`), and
+ *     short-circuit when there are none - the common case, so the hot path
+ *     does zero transcript or storage I/O.
  *  2. Group selected rows by `client_name` and hand each group to the
  *     enricher registered for that client; the enricher upgrades the rows it
  *     can match against its native log (re-stamping
  *     `message_id`/`part_id`/native identity, clearing `identity_source`),
  *     re-resolves a null-cwd row's `cwd` from the now-present session context
  *     (filling it, or marking the row for removal when it resolves to a
- *     `.hypignore` `ignore`, LLP 0085), and returns the rest unchanged.
+ *     `.hypignore` `ignore`, LLP 0085), re-points the links of the rows whose
+ *     predecessors it just renamed (LLP 0440), and returns the rest unchanged.
  *  3. Dedupe the whole batch by `part_id` against already-committed
  *     partitions and within-batch, so an upgraded row collapses onto the
  *     uuid twin a later replay already wrote. The committed row wins (the
@@ -305,32 +331,90 @@ export function aiGatewayDatasetRegistration(state) {
 function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
-    const hasFallback = rows.some(isFallbackRow)
-    // @ref LLP 0085 [implements]: a null-cwd row (the #258 session-start race)
-    // gets a second look at flush even when it is NOT a gateway fallback (its
-    // transcript identity landed but the session-context record raced), so the
-    // settle pass must select it too.
-    const hasNullCwd = rows.some(rowHasNullCwd)
-    if (!hasFallback && !hasNullCwd) return rows
+    const plan = planSettleSelection(rows)
+    if (!plan) return rows
     // @ref LLP 0085 [implements]: the settle pass may now REMOVE a row (a
     // late-resolved `.hypignore` ignore), not only upgrade its identity - the
     // filtered batch is what gets committed, so the dropped row never reaches a
     // durable partition or a sink.
     const settled = await upgradeFallbackRows(rows, state, ctx, {
-      select: settleSelect,
+      select: (row) => plan.selected.has(row),
       allowDrop: true,
     })
     // Dedupe only matters for a fallback->native upgrade that can twin a
     // committed uuid row; a pure cwd-enrich/drop pass creates no new twins, so
     // preserve the original dedupe trigger and leave non-fallback batches
     // byte-for-byte as before.
-    return hasFallback ? dedupeByPartId(settled, ctx) : settled
+    return plan.hasFallback ? dedupeByPartId(settled, ctx) : settled
   }
 }
 
-/** @param {Record<string, unknown>} row */
-function settleSelect(row) {
-  return isFallbackRow(row) || rowHasNullCwd(row)
+/**
+ * Choose which rows of a flush batch reach the settlement enricher. Three
+ * shapes qualify:
+ *
+ *  - a `gateway_fallback` row: the identity-upgrade case (LLP 0027).
+ *  - a null-cwd row: the #258 session-start race, selected even when the row
+ *    is NOT a gateway fallback (its transcript identity landed but the
+ *    session-context record raced).
+ *    @ref LLP 0085 [implements]: that second look is what the late `.hypignore`
+ *    resolve, and its drop, run on.
+ *  - a row whose `previous_message_id` names a fallback row of this same
+ *    batch. Nothing about such a row asks to be settled; it is selected so the
+ *    relink can reach it when the pass renames its predecessor, and the relink
+ *    only ever sees rows the enricher was called with.
+ *    @ref LLP 0441#select-the-successors [implements]: the renameable ids are
+ *    the pre-settlement `message_id`s of the batch's fallback rows, so the
+ *    successors LLP 0440's repair can move are knowable before the pass runs.
+ *
+ * One pass over the batch decides all three and the result is reused as the
+ * `select` predicate: `isFallbackRow` parses the `attributes` column, so the
+ * batch is parsed once per flush rather than once per membership question. The
+ * successor sweep is a second, parse-free pass, skipped when nothing in the
+ * batch can be renamed.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @returns {{ selected: Set<Record<string, unknown>>, hasFallback: boolean } | undefined} `undefined` when there is nothing to settle
+ */
+function planSettleSelection(rows) {
+  /** @type {Set<Record<string, unknown>>} */
+  const selected = new Set()
+  /** @type {Set<string>} */
+  const renameable = new Set()
+  let hasFallback = false
+  for (const row of rows) {
+    const fallback = isFallbackRow(row)
+    if (fallback) {
+      hasFallback = true
+      const id = stringValue(row.message_id)
+      if (id !== undefined) renameable.add(id)
+    }
+    if (fallback || rowHasNullCwd(row)) selected.add(row)
+  }
+  if (selected.size === 0) return undefined
+  if (renameable.size > 0) {
+    for (const row of rows) {
+      if (!selected.has(row) && linksInto(row, renameable)) selected.add(row)
+    }
+  }
+  return { selected, hasFallback }
+}
+
+/**
+ * True when any entry of `row.previous_message_id` names one of `ids`. Links
+ * are 0- or 1-element (LLP 0026 #consequences), so this is one hash lookup in
+ * practice.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {Set<string>} ids
+ */
+function linksInto(row, ids) {
+  const previous = row?.previous_message_id
+  if (!Array.isArray(previous)) return false
+  for (const id of previous) {
+    if (typeof id === 'string' && ids.has(id)) return true
+  }
+  return false
 }
 
 /**
@@ -453,6 +537,12 @@ async function upgradeFallbackRows(rows, state, ctx, opts = {}) {
  * and be dropped (see scanSpooledPartIds's hazard note). That spool scan
  * belongs to backfill alone.
  *
+ * The committed scan is restricted to the `part_id`s present in THIS
+ * batch: the flush only needs membership answers for the rows in hand,
+ * and the unrestricted variant materialized every part_id ever written
+ * (millions of entries, hundreds of MB) on every fallback-carrying
+ * flush tick, a main driver of daemon GC thrash (LLP 0204#fix).
+ *
  * @param {Record<string, unknown>[]} rows
  * @param {DatasetSettleContext} ctx
  * @returns {Promise<Record<string, unknown>[]>}
@@ -460,7 +550,13 @@ async function upgradeFallbackRows(rows, state, ctx, opts = {}) {
 async function dedupeByPartId(rows, ctx) {
   const storage = ctx?.storage
   if (rows.length === 0 || !canScanExistingRows(storage)) return rows
-  const seen = await scanExistingPartIds(storage)
+  /** @type {Set<string>} */
+  const batchKeys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) batchKeys.add(key)
+  }
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
   /** @type {Record<string, unknown>[]} */
   const fresh = []
   for (const row of rows) {
@@ -471,6 +567,70 @@ async function dedupeByPartId(rows, ctx) {
     fresh.push(row)
   }
   return fresh
+}
+
+/**
+ * Pre-write `part_id` dedupe for a LIVE producer that is not the proxy
+ * recorder: the OTEL telemetry listener of `@hypaware/claude`. Same
+ * membership question the backfill materializer asks, with the same two
+ * seeds (committed partitions plus the spool), but restricted to the
+ * keys of the batch in hand so a per-exchange call stays O(batch).
+ *
+ * Folding the spool in is safe here and required: the rows being tested
+ * have NOT been spooled yet, so a spool hit means another producer
+ * (the proxy, or a backfill run) already wrote this part. That is the
+ * whole overlap story of the migration window. The hazard note on
+ * `scanSpooledPartIds` applies to the FLUSH path only, which passes
+ * rows that are themselves the spool.
+ *
+ * Best-effort with respect to storage, like every other dedupe here: a
+ * stub without the read surface lets every row through.
+ *
+ * @ref LLP 0252#projection-unchanged [implements]: a third producer writes the
+ *   same dataset and its overlap with the proxy and backfill producers collapses
+ *   on `part_id` before the write, not after
+ * @param {Record<string, unknown>[]} rows
+ * @param {QueryStorageService | undefined} storage
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+export async function dedupeStoredPartIds(rows, storage) {
+  if (rows.length === 0 || !canScanExistingRows(storage)) return rows
+  /** @type {Set<string>} */
+  const batchKeys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) batchKeys.add(key)
+  }
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
+  await scanSpooledPartIds(storage, seen, batchKeys)
+  /** @type {Record<string, unknown>[]} */
+  const fresh = []
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key === undefined) { fresh.push(row); continue }
+    if (seen.has(key)) continue
+    seen.add(key)
+    fresh.push(row)
+  }
+  return fresh
+}
+
+/**
+ * Return every session scope represented by a batch. If a malformed or legacy
+ * row lacks its required session id, disable targeting and preserve the
+ * original full scan.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @returns {string[] | undefined}
+ */
+function batchSessionIds(rows) {
+  const ids = new Set()
+  for (const row of rows) {
+    const sessionId = row.session_id
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    ids.add(sessionId)
+  }
+  return [...ids]
 }
 
 /** @param {Record<string, unknown>} row */
@@ -515,9 +675,9 @@ function safeParseJson(value) {
  * @returns {BackfillMaterializerContribution}
  */
 export function aiGatewayBackfillMaterializer() {
-  // The materializer instance is created once at plugin activation and
-  // reused for every `hyp backfill` invocation in the process, so the
-  // dedupe state is scoped per run id (see createBackfillDedupe).
+  // The materializer instance is created once at plugin activation and reused
+  // for every invocation. The dedupe state is isolated by the runner's opaque
+  // run token and becomes collectible with that token.
   const dedupe = createBackfillDedupe()
   return {
     kind: AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
@@ -534,7 +694,9 @@ export function aiGatewayBackfillMaterializer() {
       const rows = aiGatewayRowsFromProjectedExchange(projection, {
         gatewayAttributes: backfillGatewayAttributes(item),
       })
-      return dedupe.skipExisting(rows, ctx)
+      // @ref LLP 0449#reconciliation [implements]: a mutable snapshot must reach
+      // storage whole, including old identities whose payload or position changed.
+      return item.reconcile ? rows : dedupe.skipExisting(rows, ctx)
     },
   }
 }
@@ -542,28 +704,34 @@ export function aiGatewayBackfillMaterializer() {
 /**
  * Build the per-run pre-write dedupe used by the backfill materializer.
  *
- * The seen-`part_id` set is rebuilt whenever `ctx.devRunId` changes: all
- * items in one backfill run share a single scan of the already-committed
- * partitions, and every emitted batch folds its own keys back in so two
- * items in the same run that resolve to the same `part_id` (transitional
- * fixtures, fallback-id collisions, a re-yielded conversation) also
- * dedupe against each other. A later run carries a fresh run id, so it
- * re-scans and observes the prior run's now-committed rows, which is
- * what makes a clean rerun write zero new rows.
+ * Every item probes the committed partitions only for its own candidate part
+ * ids and session ids. Emitted keys are also folded into an in-run set so a
+ * re-yielded item is skipped before it reaches the writer. That set and the
+ * spool snapshot below are both keyed by the runner's opaque token in a
+ * WeakMap, not by a process-wide current run id, so concurrent callers cannot
+ * replace each other and completed runs are not retained.
  *
- * The seen-set is seeded from two sources: the committed (flushed)
- * Iceberg partitions AND the rows still pending in the spool (captured
- * live but not yet flushed, issue #107). Without the spool scan, backfill
- * re-materializes its own copy of an unflushed live row and the spool
- * later flushes its copy, leaving two rows with the same `part_id`. The
- * spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
+ * The rows still pending in the spool (captured live but not yet flushed,
+ * issue #107) are folded in too. Without them, backfill re-materializes its
+ * own copy of an unflushed live row and the spool later flushes its copy,
+ * leaving two rows with the same `part_id`. That scan is taken ONCE per run:
+ * `readSpooledRows` streams the whole spool and cannot stop early the way the
+ * committed scan can, and the spool grows with the run's own appends until
+ * the closing flush, so probing it per item costs O(items x spool) reads. The
+ * snapshot is bounded by the spool at run start and dies with the run token.
+ * The spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
  * settle path must never fold spool rows into its seen-set.
  *
  * @returns {{ skipExisting(rows: Record<string, unknown>[], ctx: BackfillMaterializeContext | undefined): Promise<Record<string, unknown>[]> }}
  */
 function createBackfillDedupe() {
-  /** @type {{ runId: string | undefined, seen: Set<string> } | undefined} */
-  let memo
+  /** @type {WeakMap<object, { seen: Set<string>, spooled: Set<string> | undefined }>} */
+  const stateByRun = new WeakMap()
+  // Compatibility for direct/older callers that do not supply a token. Keep
+  // only the current diagnostic run so this path cannot retain historical
+  // candidate sets. Production runners always take the WeakMap path.
+  /** @type {{ runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined} */
+  let legacyMemo
 
   return {
     async skipExisting(rows, ctx) {
@@ -573,16 +741,20 @@ function createBackfillDedupe() {
       // method, so dedupe is skipped and every row passes through.
       if (rows.length === 0 || !canScanExistingRows(storage)) return rows
 
-      const runId = ctx?.devRunId
-      if (!memo || memo.runId !== runId) {
-        const seen = await scanExistingPartIds(storage)
-        // Fold in part_ids pending in the spool so backfill does not
-        // re-materialize a row that was captured live and is still waiting
-        // to flush. Opt-in to the backfill path only (see scanSpooledPartIds).
-        await scanSpooledPartIds(storage, seen)
-        memo = { runId, seen }
+      const resolved = runDedupeState(ctx, stateByRun, legacyMemo)
+      legacyMemo = resolved.legacyMemo
+      const state = resolved.state
+      // Once per run, never once per item: see this function's doc comment.
+      // Items of one run are materialized in sequence, so the first item pays
+      // for the snapshot and the rest reuse it.
+      if (!state.spooled) {
+        const snapshot = new Set()
+        await scanSpooledPartIds(storage, snapshot)
+        state.spooled = snapshot
       }
-      const seen = memo.seen
+      const spooled = state.spooled
+      const seen = state.seen
+      const stored = await scanExistingPartIds(storage, partIdKeys(rows), batchSessionIds(rows))
 
       /** @type {Record<string, unknown>[]} */
       const fresh = []
@@ -593,13 +765,51 @@ function createBackfillDedupe() {
           fresh.push(row)
           continue
         }
-        if (seen.has(key)) continue
+        if (stored.has(key) || spooled.has(key) || seen.has(key)) continue
         seen.add(key)
         fresh.push(row)
       }
       return fresh
     },
   }
+}
+
+/**
+ * @param {Record<string, unknown>[]} rows
+ * @returns {Set<string>}
+ */
+function partIdKeys(rows) {
+  const keys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) keys.add(key)
+  }
+  return keys
+}
+
+/**
+ * The state one run accumulates: the ids it has already emitted, and its
+ * once-per-run spool snapshot (undefined until the first item takes it).
+ *
+ * @param {BackfillMaterializeContext | undefined} ctx
+ * @param {WeakMap<object, { seen: Set<string>, spooled: Set<string> | undefined }>} stateByRun
+ * @param {{ runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined} legacyMemo
+ * @returns {{ state: { seen: Set<string>, spooled: Set<string> | undefined }, legacyMemo: { runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined }}
+ */
+function runDedupeState(ctx, stateByRun, legacyMemo) {
+  if (ctx?.runToken) {
+    let state = stateByRun.get(ctx.runToken)
+    if (!state) {
+      state = { seen: new Set(), spooled: undefined }
+      stateByRun.set(ctx.runToken, state)
+    }
+    return { state, legacyMemo }
+  }
+  const runId = ctx?.devRunId ?? 'legacy'
+  if (!legacyMemo || legacyMemo.runId !== runId) {
+    legacyMemo = { runId, state: { seen: new Set(), spooled: undefined } }
+  }
+  return { state: legacyMemo.state, legacyMemo }
 }
 
 /**
@@ -613,19 +823,74 @@ function canScanExistingRows(storage) {
 }
 
 /**
- * Scan every committed `ai_gateway_messages` partition and collect the
- * set of `part_id`s already present. Reads are projected to the three
- * identity columns so the scan stays cheap, and every failure mode
- * (unreadable partition, missing table) degrades to "not seen" rather
- * than aborting the backfill (a dedupe miss only risks a duplicate that
- * compaction will later collapse, whereas throwing would drop real rows).
+ * Widest session list the scoped committed read is allowed to carry. Past it
+ * the scan reverts to the unrestricted full read.
+ *
+ * A scoped read is not an index probe. Iceberg prunes a file or row group on
+ * an `IN` list only when EVERY listed value falls outside the chunk
+ * `session_id` bounds, so each value added is another chance to keep the
+ * chunk and pruning decays toward nothing as the list widens. Every row that
+ * survives is then matched by hyparquet walking the whole value list. So the
+ * scoped read costs O(rows scanned x sessions) where the full read costs
+ * O(rows scanned), and past a crossover it is slower than the scan it exists
+ * to avoid, by an unbounded factor rather than a bounded one. Measured against
+ * a 200k-row committed partition: 0.93x the full read at 200 sessions, 1.9x
+ * at 500, 5.4x at 1,000, 13.8x at 4,000, crossing over near 220.
+ *
+ * The cap sits under that measured crossover, but the number it caps is the
+ * linear term, not the crossover: the shape is O(sessions) on every layout,
+ * while where it crosses 1x moves with file count, row width, and how tight
+ * the per-file `session_id` bounds are. So the guarantee the cap buys is
+ * bounded cost, not a specific multiple. On a layout whose crossover sits
+ * below the cap, a batch at the cap costs a small multiple of the full read
+ * instead of slightly less than it, and above the cap it IS the full read.
+ * Read the numbers as calibration, not as a portable constant.
+ *
+ * Choosing the full read is always safe: it answers the same membership
+ * question over a superset of the rows, so its seen-set is a superset of the
+ * scoped one and it can only find MORE committed twins, never fewer. It
+ * cannot miss a duplicate the scoped read would have caught, and it is the
+ * shape this scan already takes for a batch with no usable session ids.
+ *
+ * @ref LLP 0311#context [constrained-by]: bounds on the leading `session_id`
+ * sort key prune a session lookup, which is a claim about ONE narrow lookup;
+ * a batch-wide list of them is not one.
+ */
+const MAX_SCOPED_SESSION_IDS = 200
+
+/**
+ * Scan committed `ai_gateway_messages` partitions and collect the set of
+ * `part_id`s already present. Reads are projected to the three identity
+ * columns so the scan stays cheap, and every failure mode (unreadable
+ * partition, missing table) degrades to "not seen" rather than aborting
+ * the caller (a dedupe miss only risks a duplicate that compaction will
+ * later collapse, whereas throwing would drop real rows).
+ *
+ * `restrictTo` bounds the result: only keys in that set are collected,
+ * and the scan stops early once all of them have been found. The
+ * flush-time settle passes its batch keys here so a steady-state flush
+ * holds O(batch) memory. Backfill now passes the same candidate restriction;
+ * its in-run emitted-id set is separate and never needs the full committed
+ * identity set (LLP 0359).
+ *
+ * `sessionIds` scopes hot-path reads to the batch's exact sessions. The cache
+ * is sorted by `session_id`, so Iceberg can prune unrelated files while the
+ * lookup still searches every date that may contain that session. A partition
+ * that cannot answer the scoped read (a schema with no `session_id` column)
+ * degrades to the full read rather than being skipped: skipping it would
+ * report a committed row as fresh and write a duplicate. A list wider than
+ * `MAX_SCOPED_SESSION_IDS` degrades the same way, for cost rather than
+ * capability.
  *
  * @param {QueryStorageService} storage
+ * @param {ReadonlySet<string>} [restrictTo]
+ * @param {string[]} [sessionIds]
  * @returns {Promise<Set<string>>}
  */
-async function scanExistingPartIds(storage) {
+async function scanExistingPartIds(storage, restrictTo, sessionIds) {
   /** @type {Set<string>} */
   const seen = new Set()
+  if (restrictTo && restrictTo.size === 0) return seen
   /** @type {CachePartitionMeta[]} */
   let partitions = []
   try {
@@ -633,20 +898,73 @@ async function scanExistingPartIds(storage) {
   } catch {
     return seen
   }
+  const targeted = !!sessionIds && sessionIds.length <= MAX_SCOPED_SESSION_IDS &&
+    typeof storage.readRowsWhere === 'function'
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])) {
-        const key = partIdKey(row)
-        if (key !== undefined) seen.add(key)
+      if (await collectPartIds(storage, tablePath, targeted ? sessionIds : undefined, seen, restrictTo)) {
+        return seen
       }
     } catch {
-      // Skip an unreadable partition; other partitions still contribute.
+      // A TARGETED read can fail where the unrestricted one succeeds: the
+      // predicate names `session_id`, and a partition whose schema predates
+      // that column (LLP 0030 bumped the label to `proxy_messages_v5`, but a
+      // cache upgraded rather than recreated still carries the older table)
+      // rejects it outright. Skipping the partition would answer "not
+      // committed" for a row that IS committed, and the caller writes a
+      // duplicate on that answer, so degrade to the full read before giving up
+      // on the partition.
+      if (targeted) {
+        try {
+          if (await collectPartIds(storage, tablePath, undefined, seen, restrictTo)) return seen
+        } catch {
+          // Genuinely unreadable; other partitions still contribute.
+        }
+      }
       continue
     }
   }
   return seen
+}
+
+/**
+ * Fold one partition's `part_id`s into `seen`, honouring `restrictTo`.
+ * Returns true once every restricted key has been found, so the caller can
+ * stop opening partitions. Re-running it over a partition is harmless (`seen`
+ * is a set), which is what lets the caller retry a failed targeted read as an
+ * unrestricted one.
+ *
+ * @param {QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string[] | undefined} sessionIds
+ * @param {Set<string>} seen
+ * @param {ReadonlySet<string>} [restrictTo]
+ * @returns {Promise<boolean>}
+ */
+async function collectPartIds(storage, tablePath, sessionIds, seen, restrictTo) {
+  // @ref LLP 0311#context [implements]: session_id leads the table sort,
+  // so a session-scoped read prunes cold files while searching every date
+  const rows = sessionIds && typeof storage.readRowsWhere === 'function'
+    ? storage.readRowsWhere(
+        tablePath,
+        ['part_id', 'message_id', 'part_index'],
+        { session_id: sessionIds },
+      )
+    : storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])
+  for await (const row of rows) {
+    const key = partIdKey(row)
+    if (key === undefined) continue
+    if (restrictTo) {
+      if (!restrictTo.has(key)) continue
+      seen.add(key)
+      if (seen.size >= restrictTo.size) return true
+    } else {
+      seen.add(key)
+    }
+  }
+  return false
 }
 
 /**
@@ -672,16 +990,26 @@ async function scanExistingPartIds(storage) {
  *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
  *   rows in the materializer (not the settle path).
  *
+ * `restrictTo`, when supplied, keeps only the keys of the batch in hand
+ * (the live-producer caller, `dedupeStoredPartIds`). Backfill omits it and
+ * takes one unrestricted snapshot per run instead: this scan streams the
+ * whole spool whatever `restrictTo` says, so restricting it would buy a
+ * smaller Set at the price of re-reading the spool once per item.
+ *
  * @param {QueryStorageService} storage
  * @param {Set<string>} seen
+ * @param {ReadonlySet<string>} [restrictTo]
  * @returns {Promise<void>}
  */
-async function scanSpooledPartIds(storage, seen) {
+async function scanSpooledPartIds(storage, seen, restrictTo) {
   if (!canScanSpooledRows(storage)) return
+  if (restrictTo && restrictTo.size === 0) return
   try {
     for await (const row of storage.readSpooledRows(DATASET_NAME, ['part_id', 'message_id', 'part_index'])) {
       const key = partIdKey(row)
-      if (key !== undefined) seen.add(key)
+      if (key === undefined) continue
+      if (restrictTo && !restrictTo.has(key)) continue
+      seen.add(key)
     }
   } catch {
     // Spool unreadable mid-scan: keep whatever we folded in already.

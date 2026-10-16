@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { McpToolInputSchema, VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -40,10 +40,10 @@ const REFRESH_MODES = new Set(['never', 'auto', 'always'])
  * param), so neither belongs in the MCP tool schema.
  *
  * @param {string[]} argv
- * @returns {{ ok: true, controls: VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined }, rest: string[] } | { ok: false, error: string }}
+ * @returns {{ ok: true, controls: VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined, org?: string }, rest: string[] } | { ok: false, error: string }}
  */
 export function parseControlFlags(argv) {
-  /** @type {VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined }} */
+  /** @type {VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined, org?: string }} */
   const controls = {
     format: 'table',
     json: false,
@@ -111,6 +111,12 @@ export function parseControlFlags(argv) {
         controls.refreshExplicit = true
         break
       }
+      case '--org': {
+        const v = takeVal()
+        if (!v) return { ok: false, error: '--org expects an org label or *' }
+        controls.org = v
+        break
+      }
       case '--remote': {
         // Bare `--remote` (no value) selects the default target, resolved
         // downstream against config + built-ins; `--remote <name>` names one.
@@ -125,6 +131,9 @@ export function parseControlFlags(argv) {
     }
   }
 
+  if (controls.org !== undefined && controls.remote === undefined) {
+    return { ok: false, error: '--org requires --remote' }
+  }
   return { ok: true, controls, rest }
 }
 
@@ -136,9 +145,12 @@ export function parseControlFlags(argv) {
  *
  * @param {VerbInputSchema} inputSchema
  * @param {string[]} argv
+ * @param {{ strictShortFlags?: boolean }} [opts] when `strictShortFlags`, a
+ *   single-dash token no alias expanded is an unknown flag rather than a
+ *   positional value
  * @returns {{ ok: true, params: Record<string, unknown> } | { ok: false, error: string }}
  */
-export function argvToParams(inputSchema, argv) {
+export function argvToParams(inputSchema, argv, opts = {}) {
   const props = inputSchema.properties ?? {}
   /** @type {Record<string, unknown>} */
   const params = {}
@@ -148,6 +160,14 @@ export function argvToParams(inputSchema, argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
     if (!token.startsWith('--')) {
+      // Only `--` tokens read as flags here, so a misspelled short flag
+      // otherwise binds as a positional value: `hyp query refresh -f` means
+      // the dataset named '-f'. Verbs keep the lenient reading (a greedy SQL
+      // string carries '-1' and friends); the core command set opts in.
+      // @ref LLP 0293#one-contract [implements]: an unknown short flag refuses like an unknown long one instead of becoming a value
+      if (opts.strictShortFlags && token.length > 1 && token.startsWith('-')) {
+        return { ok: false, error: `unknown flag ${token}` }
+      }
       positionals.push(token)
       continue
     }
@@ -160,13 +180,9 @@ export function argvToParams(inputSchema, argv) {
       return { ok: false, error: `unknown flag --${flag}` }
     }
     if (prop.type === 'boolean') {
-      if (inlineVal === undefined) {
-        params[propName] = true
-      } else if (inlineVal === 'true' || inlineVal === 'false') {
-        params[propName] = inlineVal === 'true'
-      } else {
-        return { ok: false, error: `--${flag} expects true|false (got ${inlineVal})` }
-      }
+      const read = booleanFlagValue(flag, inlineVal)
+      if (!read.ok) return read
+      params[propName] = read.value
       continue
     }
     let value = inlineVal
@@ -193,11 +209,53 @@ export function argvToParams(inputSchema, argv) {
 
   applyDefaults(props, params)
 
-  const missing = requiredMissing(inputSchema, params)
+  // On a command line an empty argument is an unset shell variable, not a
+  // value: `hyp remote add "$NAME" "$URL"` with NAME unset must not register a
+  // remote called ''. The hand-written `if (!name)` guards this schema replaced
+  // refused it; `required` alone tests only `!== undefined`, so it did not.
+  // The MCP path below keeps the plain test: there a JSON `""` is explicit.
+  // @ref LLP 0293#one-contract [implements]: an empty required positional is unusable input, so it is a usage error like any other
+  const missing = requiredMissing(inputSchema, params, true)
   if (missing) return { ok: false, error: `missing required ${missing}` }
 
   return { ok: true, params }
 }
+
+/**
+ * Read one boolean flag the way the codec does: a bare `--flag` is true,
+ * `--flag=true` / `--flag=false` carry their value, and any other inline
+ * value is a usage error. Exported for argv readers that cannot run the
+ * whole codec, so a malformed value refuses there too instead of reading
+ * as false (issue #2440).
+ *
+ * @param {string} flag flag name as typed, without the leading dashes
+ * @param {string | undefined} inlineVal the text after `=`, or undefined for a bare flag
+ * @returns {{ ok: true, value: boolean } | { ok: false, error: string }}
+ */
+export function booleanFlagValue(flag, inlineVal) {
+  if (inlineVal === undefined) return { ok: true, value: true }
+  if (inlineVal === 'true' || inlineVal === 'false') return { ok: true, value: inlineVal === 'true' }
+  return { ok: false, error: `--${flag} expects true|false (got ${inlineVal})` }
+}
+
+/**
+ * The parse options a core command that binds a positional passes to
+ * {@link parseCommandArgv}. Spread it (`{ ...STRICT_SHORT_FLAGS, aliases }`)
+ * where the command also declares aliases.
+ *
+ * Only `--` tokens read as flags, so without this a misspelled short flag
+ * binds as the positional's *value*: `hyp policy show -Z` reported on a
+ * directory named `-Z` and exited 0, and `hyp sink maintain -Z` looked up a
+ * sink named `-Z` and exited 1. Commands that reach `parseCoreCommandArgv()`
+ * get the rule from there; the ones that call this function directly opt in
+ * here, one call site at a time, because each site owes a look at whether a
+ * legitimate value of its positional can start with a dash. The verb family
+ * never opts in: a greedy SQL positional carries tokens like `-1`.
+ *
+ * @type {{ strictShortFlags: true }}
+ * @ref LLP 0293#one-contract [implements]: D1's short-flag rule reaches the commands that parse through the codec directly, not only the ones in the table
+ */
+export const STRICT_SHORT_FLAGS = { strictShortFlags: true }
 
 /**
  * Parse a core command's argv against a verb-style input schema. The
@@ -213,14 +271,19 @@ export function argvToParams(inputSchema, argv) {
  *
  * @param {string[]} argv
  * @param {VerbInputSchema} inputSchema
- * @param {{ aliases?: Record<string, string> }} [opts] argv token aliases, e.g. `{ '-y': '--yes' }`
+ * @param {{ aliases?: Record<string, string>, strictShortFlags?: boolean }} [opts] argv token
+ *   aliases, e.g. `{ '-y': '--yes' }`, and whether an unaliased single-dash token
+ *   refuses instead of binding as a positional value
  * @returns {{ help: true } | { ok: true, params: Record<string, unknown> } | { ok: false, error: string }}
  */
 export function parseCommandArgv(argv, inputSchema, opts = {}) {
   const aliases = opts.aliases ?? {}
-  const expanded = argv.map((token) => aliases[token] ?? token)
+  // `Object.hasOwn`, not a bare lookup: tokens come off the command line, so an
+  // `Object.prototype` name ('constructor', 'toString') would otherwise expand
+  // to the inherited function and the parse dies on it (issue #1601).
+  const expanded = argv.map((token) => (Object.hasOwn(aliases, token) ? aliases[token] : token))
   if (expanded.includes('--help') || expanded.includes('-h')) return { help: true }
-  return argvToParams(inputSchema, expanded)
+  return argvToParams(inputSchema, expanded, { strictShortFlags: opts.strictShortFlags === true })
 }
 
 /**
@@ -238,7 +301,12 @@ export function validateToolArguments(inputSchema, args) {
   /** @type {Record<string, unknown>} */
   const params = {}
   for (const [key, raw] of Object.entries(args ?? {})) {
-    const prop = props[key]
+    // `Object.hasOwn`, not truthiness: `key` comes off the MCP wire, so an
+    // `Object.prototype` name ('constructor', '__proto__') would otherwise
+    // resolve to the inherited member and pass as a declared property. The CLI
+    // half refuses it (see `resolveFlag`); the two projections of one schema
+    // must not disagree about what an unknown argument is (issue #1601).
+    const prop = Object.hasOwn(props, key) ? props[key] : undefined
     if (!prop) return { ok: false, error: `unknown argument '${key}'` }
     if (raw === undefined || raw === null) continue
     if (prop.type === 'array') {
@@ -272,17 +340,16 @@ export function validateToolArguments(inputSchema, args) {
  * contract).
  *
  * @param {VerbInputSchema} inputSchema
- * @returns {{ type: 'object', properties: Record<string, object>, required?: string[] }}
+ * @returns {McpToolInputSchema}
+ * @ref LLP 0034#verbs [implements]: the advertised tool schema is projected from the verb's own inputSchema, never authored
  */
 export function toJsonSchema(inputSchema) {
-  /** @type {Record<string, object>} */
-  const properties = {}
+  /** @type {McpToolInputSchema} */
+  const schema = { type: 'object', properties: {} }
   for (const [name, prop] of Object.entries(inputSchema.properties ?? {})) {
     const { greedy: _greedy, ...rest } = prop
-    properties[name] = rest
+    schema.properties[name] = rest
   }
-  /** @type {{ type: 'object', properties: Record<string, object>, required?: string[] }} */
-  const schema = { type: 'object', properties }
   if (inputSchema.required && inputSchema.required.length > 0) schema.required = [...inputSchema.required]
   return schema
 }
@@ -314,7 +381,7 @@ export function usageForVerb(name, inputSchema) {
       parts.push(`[${flag} <${prop.type === 'array' ? `${propName}...` : propName}>]`)
     }
   }
-  parts.push('[--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]')
+  parts.push('[--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]')
   return parts.join(' ')
 }
 
@@ -327,8 +394,11 @@ export function usageForVerb(name, inputSchema) {
  */
 function resolveFlag(props, flag) {
   const snake = flag.replace(/-/g, '_')
-  if (props[snake]) return snake
-  if (props[flag]) return flag
+  // `Object.hasOwn`, not truthiness: `flag` comes off the command line, so
+  // `--constructor` would otherwise bind Object.prototype's function as a
+  // declared property instead of refusing as an unknown flag.
+  if (Object.hasOwn(props, snake)) return snake
+  if (Object.hasOwn(props, flag)) return flag
   return undefined
 }
 
@@ -447,11 +517,15 @@ function applyDefaults(props, params) {
 /**
  * @param {VerbInputSchema} inputSchema
  * @param {Record<string, unknown>} params
+ * @param {boolean} [emptyStringIsMissing] argv only: an empty token is an unset
+ *   shell variable, not a value
  * @returns {string | undefined}
  */
-function requiredMissing(inputSchema, params) {
+function requiredMissing(inputSchema, params, emptyStringIsMissing = false) {
   for (const name of inputSchema.required ?? []) {
-    if (params[name] === undefined) return name
+    const value = params[name]
+    if (value === undefined) return name
+    if (emptyStringIsMissing && value === '') return name
   }
   return undefined
 }

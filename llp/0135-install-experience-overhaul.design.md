@@ -4,6 +4,13 @@
 **Status:** Active
 **Systems:** Onboarding, CLI, Config, Plugins
 **Generated-by:** neutral
+**Extended-by:** [LLP 0338](./0338-a-question-lane-counts-even-with-nothing-to-ask.decision.md)
+(#progress: a lane the pathway runs keeps its position line and its place in
+the denominator even on a machine where it turns out to have nothing to ask)
+**Extended-by:** [LLP 0341](./0341-a-dead-consent-surface-ends-the-run-as-a-cancel.decision.md)
+(#orchestration: when the run's stdout dies, the orchestrator ends the run
+as a cancel at the next lane or phase boundary instead of crashing on the
+next write)
 **Related:** LLP 0128, LLP 0129, LLP 0130, LLP 0131, LLP 0132, LLP 0133, LLP 0134, LLP 0005, LLP 0011, LLP 0025, LLP 0031, LLP 0037, LLP 0044, LLP 0058, LLP 0062, LLP 0063, LLP 0070, LLP 0100, LLP 0101, LLP 0114, LLP 0115, LLP 0116, LLP 0117, LLP 0120
 
 > Buildable design for the six-phase `hyp init` wizard (Fork -> Join -> Pick ->
@@ -154,6 +161,19 @@ sites share it:
 
 ## Wizard orchestration {#orchestration}
 
+> **Extended-by [LLP 0191](./0191-wizard-back-navigation.decision.md):**
+> the phase sequence below also runs backwards one step at a time -
+> escape at a question lane returns to the lane before it, with a
+> completed join reused rather than re-run. The forward flow and every
+> phase's contract are unchanged.
+
+> **Extended-by [LLP 0341](./0341-a-dead-consent-surface-ends-the-run-as-a-cancel.decision.md):**
+> the sequence below assumes a live output stream. When stdout dies
+> mid-run, the orchestrator's stream guard absorbs the failure and the
+> run ends as a cancel at the next lane or phase boundary; warnings on
+> stderr are best-effort everywhere. The forward flow on a healthy
+> stream is unchanged.
+
 `runInitWizard(opts)` (`src/core/cli/wizard/index.js`) replaces
 `runPickerWalkthrough` as `runInit`'s entry point for the interactive case
 (`opts.picks` absent). Non-interactive callers (`--yes`, `--dry-run`, presets,
@@ -279,8 +299,10 @@ print a plain-text form of the same text: the legacy numbered picker prompt
 writes it above the question exactly where the TUI paints it.
 
 Lanes that own no prompt spec write the line themselves where the lane
-starts, once: `runWizardJoin` above its `Joining your team...` narration,
-`runPickerFinale` before its first action.
+starts, once: `runWizardJoin` where its `Joining your team...` narration
+would go, `runPickerFinale` before its first action. The position line
+already names the lane it starts, so join prints that plain sentence only
+on a run that has no position line to print.
 
 `wizardStepProgress` returns `undefined` whenever no position can be stated
 honestly, and every caller threads that `undefined` straight through as an
@@ -289,6 +311,14 @@ omitted field. Non-interactive runs (`--yes`, `--dry-run`, presets,
 output is byte-identical to what it was before this existed
 (`@ref LLP 0131#attended-only`).
 
+> Extended by [LLP 0338](./0338-a-question-lane-counts-even-with-nothing-to-ask.decision.md):
+> the two rules above meet on a lane that is a question lane on the pathway
+> but has no question on this machine (the sync lane on a fully fleet-managed
+> one). Rule 1 wins - the itinerary is a property of the pathway, so the lane
+> keeps its place in the denominator and states its position. `first look`
+> stays outside the count on the static ground that it is never a question on
+> any run.
+
 ## Join phase {#join}
 
 `runWizardJoin(opts)` (`src/core/cli/wizard/join.js`) is a thin narration
@@ -296,7 +326,8 @@ wrapper, not a second enrollment mechanism (`@ref LLP 0134#login-lane`):
 
 ```js
 export async function runWizardJoin(opts) {
-  opts.stdout.write('Joining your team...\n')
+  if (opts.progress) opts.stdout.write(`${opts.progress}\n`)   // the position line names the lane (#progress)
+  else opts.stdout.write('Joining your team...\n')
   const login = await runRemoteLogin([], loginCtxFrom(opts), {})  // existing hyp remote login machinery
   if (login.exitCode !== 0) return { status: classifyLoginFailure(login) }
 
@@ -324,7 +355,27 @@ transient network error) to `'failed' | 'abandoned'` for
 `runInitWizard`'s retry-or-local-or-quit prompt
 (`@ref LLP 0129#failed-join-returns-to-fork`).
 
+Extended-by: [LLP 0179](./0179-login-lane-returns-its-outcome.decision.md).
+The taxonomy and the classification it feeds are unchanged; how the wizard
+*learns* them is not. The implementation read the login lane's captured
+stderr and substring-matched the messages it printed; the lane now returns
+`{ exitCode, reason }` and `classifyLoginFailure` switches on the code.
+
+Extended-by: [LLP 0223](./0223-converge-on-applied-config.decision.md).
+The reuse-the-reconcile-wait sketch above is withdrawn:
+`waitForCentralConverge` now runs its own bounded poll over the applied
+org-config slot under `config-control/`, because an attach marker is
+sufficient but not necessary evidence that the org config landed. It stays
+a small exported helper of `remote_commands.js`, with the same budget and
+the same unlocked-picker timeout fallback, and returns `{ ok }` only.
+
 ## Pick phase {#pick}
+
+> **Extended-by [LLP 0190](./0190-wizard-defaults-gate.decision.md):**
+> when detection or the locked set yields a non-empty default, the lane
+> now opens with a defaults gate (state the selection, accept on a bare
+> enter, menu on request). The menu described below is unchanged and one
+> keypress away.
 
 `runWizardPick` keeps `walkthrough.js`'s existing shape (prompt, write, guard,
 overwrite confirm) but two things change:
@@ -504,7 +555,7 @@ independent reasons, any one sufficient:
    machines where install had succeeded. Neither answer is usable, and the
    quiet one is the more dangerous of the two.
 3. **No undo record.** The plist carries no `marker_record`, and per
-   [LLP 0045 §Part 3](./0045-client-attach.design.md#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record)
+   [LLP 0045 §Part 3](./0045-client-attach.design.md#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record)
    a record-less marker is refused, never half-reversed. Nor would adding
    one help: the file is root-owned, so an unprivileged detach cannot write
    it back.
@@ -524,6 +575,13 @@ the plist with sudo (plus `killall cfprefsd` and an app restart,
 over a file core can neither read nor reverse.
 
 ## Export-seam source-scoped withholding {#export-seam}
+
+> **Extended-by [LLP 0188](./0188-enrolled-default-sync-with-client-optout.decision.md):**
+> the withheld set is no longer "the picker source ids classified
+> `'local'`"; it is the explicit per-client opt-out store, minus
+> central-classified sources. The seam mechanics below (attribution
+> column, drop-but-advance) are unchanged, and datasets without an
+> attribution column gain a dataset-scoped withholding rule.
 
 Extends `readRowsSince` (`src/core/cache/storage.js:243`), which already
 enforces `cwd`-derived `local-only` withholding via `usagePolicyResolver`
@@ -594,6 +652,22 @@ requires no new code beyond `claude-desktop`'s manifest declaring
 under [LLP 0037](./0037-backfill-on-join.decision.md) default-on doctrine.
 
 ## First look {#first-look}
+
+> **Extended-by [LLP 0198](./0198-setup-ends-on-a-question.decision.md):**
+> two changes to what is settled below. (1) The block is no longer the
+> run's last step: a printed question list follows the privacy narration
+> with a few questions worth putting to the rows this block just showed.
+> It never starts a client; an explicit later `hyp ask` owns launch. This
+> **narrows** [#privacy](#privacy)'s "closing words" rule rather than
+> extending it: the narration keeps its position and stays the last thing
+> said about privacy, but it is no longer the last thing on screen.
+> (2) **Setup renders
+> `['models', 'daily']`, not all four sections**
+> ([#wizard-sections](./0198-setup-ends-on-a-question.decision.md#wizard-sections)),
+> taking up the seam this section left open; "Both callers render all
+> four" below is superseded for the wizard. `hyp query overview` is
+> unchanged and still renders all four. The look's budget and placement
+> are otherwise untouched.
 
 Setup used to end on a hint: `next: hyp query sql 'select count(*) from
 logs'`. That command fails on most installs, because `logs` only exists

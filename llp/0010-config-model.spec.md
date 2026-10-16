@@ -10,9 +10,9 @@
 > The v2 config shape. Decomposed from `hypaware-design.md` (Config Model).
 
 > **Extended by [LLP 0031](./0031-layered-config.decision.md).** On a
-> centrally-managed host the effective config is the **merge of two layers** — a
+> centrally-managed host the effective config is the **merge of two layers**, a
 > server-owned central layer (authoritative, locked) and a user-owned local
-> layer (`hypaware-config.json`, additive-only) — computed at boot, with
+> layer (`hypaware-config.json`, additive-only), computed at boot, with
 > per-entry provenance (`[central · locked]` / `[local]`) and a dropped-local
 > section surfaced in `hyp status`. The explicit-`plugins[]` grep-ability
 > rationale below is preserved: each layer file is still plain JSON. Non-joined
@@ -23,7 +23,7 @@
 Use a breaking **v2** config shape. There is **no `mode` field** and no
 architectural role label. A host is described entirely by the plugins it loads,
 the sinks (if any) it exports to, and its cache retention settings. A host
-becomes "the gateway" purely by configuring an `@hypaware/central` sink — there
+becomes "the gateway" purely by configuring an `@hypaware/central` sink: there
 is no mode flag to keep in sync.
 
 ```json
@@ -40,7 +40,7 @@ is no mode flag to keep in sync.
 
 ## Explicit plugin set
 
-The written config enumerates chosen plugins explicitly in `plugins[]` — there
+The written config enumerates chosen plugins explicitly in `plugins[]`: there
 is **no implicit "use defaults" mode**. This keeps `hypaware status` and any
 config diff trivially grep-able and avoids the failure mode where a default set
 drifts between releases and silently changes a running install. **Query is
@@ -56,7 +56,7 @@ package implements it; `config` carries settings, schedule, and format. See
 ## Validation
 
 Each plugin validates its own `config` section through core's validation
-framework — which is why a plugin declares `config_sections` in its manifest
+framework, which is why a plugin declares `config_sections` in its manifest
 ([LLP 0005](./0005-plugin-manifest.spec.md)). Core validates cross-plugin
 references after all manifests are loaded.
 

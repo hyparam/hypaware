@@ -20,16 +20,16 @@ efficient way possible and surfaces it for efficient LLM-native querying.
 
 HypAware is split into three pieces:
 
-- **Core kernel** — the host runtime. Owns the mechanics that should be
+- **Core kernel**: the host runtime. Owns the mechanics that should be
   identical for every plugin: plugin discovery/manifest/dependency/activation
   lifecycle, the versioned capability registry, config parsing and validation,
   the CLI command registry, source lifecycle, the sink registry and export
   driver, the query/dataset registry and SQL surface, the intrinsic
   Iceberg-backed cache, result formatting, and managed state directories.
-- **Server package** — the enterprise companion that receives logs forwarded
+- **Server package**: the enterprise companion that receives logs forwarded
   from HypAware instances across an org, composes them into files, and uploads
   them to a sink. Full server design is out of tree for now (TK).
-- **Plugins** — every piece of domain behavior. A plugin's category is
+- **Plugins**: every piece of domain behavior. A plugin's category is
   expressed by what it `requires`, `provides`, and `contributes`, not by a
   privileged variant. See [plugin categories](#plugin-categories).
 
@@ -39,15 +39,20 @@ plugin that registers a dataset gets query and formatting for free.
 
 ## Plugin categories
 
-- **Source plugins** — produce normalized rows and own a daemon lifecycle
+- **Source plugins**: produce normalized rows and own a daemon lifecycle
   (proxy listener, OTLP receiver, gascity subscriber). See [LLP 0012](./0012-sources.spec.md).
-- **Sink plugins** — *export targets*, not the write path. Captured data always
+- **Sink plugins**: *export targets*, not the write path. Captured data always
   lands in the intrinsic [local query cache](./0013-local-query-cache.decision.md);
   sinks receive scheduled exports out of it. See [LLP 0014](./0014-sinks.spec.md).
-- **Client adapter plugins** — wire an external tool (Claude Code, Codex) to a
+- **Client adapter plugins**: wire an external tool (Claude Code, Codex) to a
   HypAware capability such as [the AI gateway](./0016-ai-gateway.decision.md).
-- **Composition plugins** — init presets, skill scaffolds; small surface, no
+- **Composition plugins**: init presets, skill scaffolds; small surface, no
   daemon.
+- **Derived-data plugins**: materialize a new dataset from what another plugin
+  already captured (the context graph's `node` / `edge` tables, projected from
+  `ai_gateway_messages`). No external input and no daemon lifecycle, so they are
+  never a pick the user makes; they ride the pick whose data they derive from.
+  See [LLP 0213](./0213-graph-plugin-always-active.decision.md#derived-data-plugins).
 
 ## Subsystem map
 
@@ -79,6 +84,9 @@ plugin that registers a dataset gets query and formatting for free.
 | MCP hosting intrinsic (verbs → tools) | [0034](./0034-mcp-host-intrinsic.decision.md) | Decision |
 | Remote attach (client consumer half) | [0033](./0033-remote-query-attach.spec.md) | Spec |
 | Token-usage normalization (net input) | [0035](./0035-token-usage-normalization.decision.md) | Decision |
+| Bundled GitHub source | [0360](./0360-github-source-is-bundled.decision.md) | Decision |
+| Work-budgeted GitHub capture | [0361](./0361-github-capture-is-work-budgeted.decision.md) | Decision |
+| Observed-repos withholding revalidation | [0367](./0367-observed-repos-revalidate-against-withholding.decision.md) | Decision |
 
 ## Where to start
 

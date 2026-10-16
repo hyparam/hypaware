@@ -1,0 +1,318 @@
+// @ts-check
+
+/**
+ * The unparseable-body arm of the Claude telemetry listener, driven through
+ * its real transport: a listener on an ephemeral port, a fake gateway behind
+ * it, and OTLP/JSON over the wire.
+ *
+ * A body file that does not parse is deleted immediately (an undeleted body is
+ * a raw prompt sitting on disk), and the published `spool_bytes` gauge has to
+ * come down with it, exactly as it does for a body that projected.
+ *
+ * @ref LLP 0257#status-and-health [tests]: S16 - `spool_bytes` is the spool's
+ *   current size, so the reader's own deletion has to move it
+ */
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
+import { createStartClaudeTelemetrySource } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
+import { claudeBodySpoolDir } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/spool.js'
+import { loadSpooledBodies } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/bodies.js'
+
+const SESSION = 'd41f0b2e-7c8a-4f19-9f61-6a1c2f7d0e33'
+const REQUEST_ID = 'req_011Ce8sjpb8Uzvot2JMvFkKe'
+
+/** @param {Record<string, unknown>} attrs */
+function kvAttributes(attrs) {
+  return Object.entries(attrs).map(([key, value]) => {
+    if (typeof value === 'number') {
+      return Number.isInteger(value)
+        ? { key, value: { intValue: value } }
+        : { key, value: { doubleValue: value } }
+    }
+    return { key, value: { stringValue: String(value) } }
+  })
+}
+
+/**
+ * @param {string} name
+ * @param {Record<string, unknown>} attrs
+ * @param {string} timestamp
+ */
+function record(name, attrs, timestamp) {
+  return {
+    timeUnixNano: String(BigInt(Date.parse(timestamp)) * 1_000_000n),
+    body: { stringValue: `claude_code.${name}` },
+    attributes: kvAttributes({
+      'session.id': SESSION,
+      'event.name': name,
+      'event.timestamp': timestamp,
+      ...attrs,
+    }),
+  }
+}
+
+/** @param {Array<ReturnType<typeof record>>} records */
+function envelope(records) {
+  return {
+    resourceLogs: [
+      {
+        resource: { attributes: kvAttributes({ 'service.name': 'claude-code' }) },
+        scopeLogs: [{ scope: { name: 'com.anthropic.claude_code.events' }, logRecords: records }],
+      },
+    ],
+  }
+}
+
+/**
+ * Start a real listener on an ephemeral port with a fake gateway behind it.
+ *
+ * `seed` files are written BEFORE the start-time sweep, which is what primes
+ * the published `spool_bytes`: a file dropped in afterwards is invisible to
+ * the gauge until the next sweep restates it.
+ *
+ * @param {{ seed?: Array<{ name: string, content: string }> }} [opts]
+ */
+async function startListener(opts = {}) {
+  const hypHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-'))
+  const spoolDir = claudeBodySpoolDir(hypHome)
+  await fsp.mkdir(spoolDir, { recursive: true })
+  for (const file of opts.seed ?? []) {
+    await fsp.writeFile(path.join(spoolDir, file.name), file.content, 'utf8')
+  }
+  const stateFile = path.join(hypHome, 'claude-sessions.json')
+  const noop = () => {}
+  const start = createStartClaudeTelemetrySource({
+    gateway: /** @type {any} */ ({
+      recordProjectedExchange: async () => ({ rowsWritten: 0, rowsSkipped: 0 }),
+    }),
+    clientName: 'claude',
+    stateFile,
+  })
+  const ctx = /** @type {any} */ ({
+    config: { telemetry: { listen_host: '127.0.0.1', listen_port: 0 } },
+    env: { HYP_HOME: hypHome },
+    log: { info: noop, warn: noop, error: noop, debug: noop },
+    storage: {
+      cacheTablePath: () => path.join(hypHome, 'cache', 'claude_telemetry_events'),
+      appendRows: async () => {},
+    },
+  })
+  // `status` and `stop` are optional on the kernel's StartedSource; this one
+  // publishes both, and this test reads them.
+  const source = /** @type {any} */ (await start(ctx))
+  const first = /** @type {any} */ ((await source.status()).details)
+  const port = /** @type {number} */ (first.listen_port)
+
+  return {
+    hypHome,
+    spoolDir,
+    stateFile,
+    /** @param {ReturnType<typeof envelope>} body */
+    async post(body) {
+      return fetch(`http://127.0.0.1:${port}/v1/logs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    },
+    async details() {
+      return /** @type {Record<string, unknown>} */ ((await source.status()).details ?? {})
+    },
+    async cleanup() {
+      await source.stop()
+      await fsp.rm(hypHome, { recursive: true, force: true })
+    },
+  }
+}
+
+// The reader deletes an unparseable body and counts it, but before this fix it
+// never told the caller how many bytes went with it, so `spool_bytes` stayed
+// at its pre-batch value until the next sweep restated it (up to a minute) and
+// `hyp status` reported bytes for a file that was already off the disk.
+test('an unparseable body brings the published spool_bytes down with it', async () => {
+  const content = 'not json at all'
+  const listener = await startListener({ seed: [{ name: 'broken.request.json', content }] })
+  try {
+    // A recorded cwd, so the usage-policy gate resolves rather than withholds:
+    // this has to reach the READ path, not the drop path.
+    await appendSessionContext(listener.stateFile, {
+      session_id: SESSION,
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: listener.hypHome,
+      ts: '2026-08-17T19:30:00.000Z',
+    })
+    const body = path.join(listener.spoolDir, 'broken.request.json')
+    // The start-time sweep is what primes the gauge, so the file has to be on
+    // disk before it runs.
+    assert.equal(
+      (await listener.details()).spool_bytes,
+      content.length,
+      'the start sweep publishes what is already spooled'
+    )
+
+    const res = await listener.post(envelope([
+      record('api_request_body', { body_ref: body, request_id: REQUEST_ID }, '2026-08-17T19:31:00.000Z'),
+    ]))
+    assert.equal(res.status, 200)
+
+    await assert.rejects(fsp.stat(body), 'an unparseable body is deleted, not left on disk')
+    const details = await listener.details()
+    assert.equal(details.spool_bytes, 0, 'the gauge has to come down by what the read arm removed')
+  } finally {
+    await listener.cleanup()
+  }
+})
+
+// The reader half on its own: the byte total is what lets the call site
+// subtract, so it has to be reported even when nothing projects.
+test('loadSpooledBodies reports the bytes an unparseable body took with it', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-unit-'))
+  try {
+    const content = 'not json at all'
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, content, 'utf8')
+    const events = [{
+      name: 'api_request_body',
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    }]
+    const loaded = await loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    assert.equal(loaded.unparseable, 1)
+    assert.equal(loaded.consumedBytes, 0, 'nothing projected, so nothing was consumed')
+    assert.equal(loaded.unparseableBytes, content.length)
+    await assert.rejects(fsp.stat(file))
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Hold deletion open while a later caller reads the same body. Both callers
+// classify it, but only the caller owning removal may report its bytes.
+test('two overlapping reads of one unparseable body report its bytes once', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-race-'))
+  const removing = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  try {
+    const content = 'not json at all'
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, content, 'utf8')
+    const raw = await fsp.readFile(file)
+    const readFile = fsp.readFile
+    const unlink = fsp.unlink
+    t.mock.method(fsp, 'readFile', (target) => target === file ? Promise.resolve(raw) : readFile(target))
+    const deletion = release.promise.then(() => unlink(file))
+    const remove = t.mock.method(fsp, 'unlink', (target) => {
+      if (target !== file) return unlink(target)
+      removing.resolve(undefined)
+      // Concurrent unlink calls can both succeed on macOS. Sharing this
+      // completion reproduces that behavior on every platform.
+      return deletion
+    })
+    const events = [{
+      name: 'api_request_body',
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    }]
+    const first = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    await removing.promise
+    const second = loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir })
+    release.resolve(undefined)
+    const both = await Promise.all([first, second])
+    assert.equal(both[0].unparseable + both[1].unparseable, 2, 'both reads saw it')
+    assert.equal(
+      both[0].unparseableBytes + both[1].unparseableBytes,
+      content.length,
+      'one file left the disk, so its bytes are reported once'
+    )
+    assert.equal(remove.mock.callCount(), 1, 'only one caller removes the body')
+    await assert.rejects(fsp.stat(file), { code: 'ENOENT' })
+  } finally {
+    release.resolve(undefined)
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Nothing the callers return can tell the shared read from its absence: reads
+// issued in one tick all resolve before any `unlink`, so the counts and the
+// bytes agree either way. Counting `readFile` is what distinguishes them, and
+// it is the assertion that fails both when the dedup is deleted and when its
+// `reading.set` moves behind an `await` (which narrows the window instead of
+// closing it: the next caller then arrives before the read has been claimed).
+test('overlapping loadSpooledBodies calls for one body_ref issue exactly one readFile', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dedup-'))
+  const realReadFile = fsp.readFile
+  try {
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, 'not json at all', 'utf8')
+    const events = [{
+      name: 'api_request_body',
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    }]
+    let reads = 0
+    // The reader and this test hold the same `node:fs/promises` module object,
+    // and the reader looks `readFile` up at call time, so counting its calls
+    // needs no hook in the production path.
+    fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+      if (target === file) reads += 1
+      return realReadFile(target)
+    })
+    // Started in one tick, so all three overlap: each runs synchronously as far
+    // as its first `await`, which is where the shared read has to be claimed.
+    await Promise.all([
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+      loadSpooledBodies(/** @type {any} */ (events), { spoolDir: dir }),
+    ])
+    assert.equal(reads, 1, 'three overlapping callers share one read of the file')
+  } finally {
+    fsp.readFile = realReadFile
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// One call, two events naming the SAME unparseable ref. Deduping on
+// `bodies.has(ref)` missed it, because an unparseable ref never lands in
+// `bodies`: the second event read the file again after the first event had
+// deleted it, saw ENOENT, and counted `missing`, so one result called one ref
+// both `unparseable` and `missing`. The shared `reading` entry does not
+// cover it: it is dropped when the read settles, before the first `unlink`.
+test('one batch naming an unparseable body_ref twice counts it once, never missing', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-claude-unparseable-dup-'))
+  const realReadFile = fsp.readFile
+  try {
+    const content = 'not json at all'
+    const file = path.join(dir, 'broken.request.json')
+    await fsp.writeFile(file, content, 'utf8')
+    let reads = 0
+    fsp.readFile = /** @type {any} */ ((/** @type {string} */ target) => {
+      if (target === file) reads += 1
+      return realReadFile(target)
+    })
+    /** @param {string} name */
+    const event = (name) => ({
+      name,
+      timestamp: '2026-08-17T19:31:00.000Z',
+      attributes: { body_ref: file, request_id: REQUEST_ID },
+    })
+    const loaded = await loadSpooledBodies(
+      /** @type {any} */ ([event('api_request_body'), event('api_response_body')]),
+      { spoolDir: dir }
+    )
+    assert.equal(loaded.missing, 0, 'a ref this call just deleted is not also missing')
+    assert.equal(loaded.unparseable, 1, 'one file, classified once')
+    assert.equal(loaded.unparseableBytes, content.length, 'one deletion, sized once')
+    assert.equal(reads, 1, 'the second event reuses the first classification, not a fresh read')
+    await assert.rejects(fsp.stat(file))
+  } finally {
+    fsp.readFile = realReadFile
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})

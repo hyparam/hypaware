@@ -19,6 +19,11 @@ const OK = { exitCode: 0, stdout: '', stderr: '' }
  * prefix. `print` is scripted by exit code alone; `bootstrap` by full
  * result so a test can inject EIO vs. a genuine failure.
  *
+ * Once a bootstrap has succeeded the print queue is done: the agent is
+ * loaded and running, so `print` reports a pid. The installer verifies
+ * that pid before it calls the install a success (#1036), and the queue
+ * only exists to script the bootout/bootstrap race that precedes it.
+ *
  * @param {{ print?: number[], bootstrap?: Array<{ exitCode: number, stdout: string, stderr: string }> }} script
  */
 function fakeLaunchctl(script) {
@@ -28,10 +33,12 @@ function fakeLaunchctl(script) {
   const bootQ = script.bootstrap ?? [OK]
   let pi = 0
   let bi = 0
+  let running = false
   return {
     calls,
     print(args) {
       calls.push(['print', ...args])
+      if (running) return Promise.resolve({ exitCode: 0, stdout: 'pid = 4242\n', stderr: '' })
       const code = printQ[Math.min(pi++, printQ.length - 1)]
       return Promise.resolve({ exitCode: code, stdout: '', stderr: '' })
     },
@@ -41,7 +48,9 @@ function fakeLaunchctl(script) {
     },
     bootstrap(args) {
       calls.push(['bootstrap', ...args])
-      return Promise.resolve(bootQ[Math.min(bi++, bootQ.length - 1)])
+      const res = bootQ[Math.min(bi++, bootQ.length - 1)]
+      if (res.exitCode === 0) running = true
+      return Promise.resolve(res)
     },
     kickstart(args) {
       calls.push(['kickstart', ...args])

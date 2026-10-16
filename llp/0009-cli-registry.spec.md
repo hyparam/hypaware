@@ -6,18 +6,28 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0003, LLP 0015
+**Extended-by:** LLP 0420 (#core-owns-dispatch: the registry records which plugin registered each command, and the dispatcher splits `CommandRunContext` on it), LLP 0406 (redundant CLI flag removal), LLP 0267 (#d1: top-level help reads the manifest while group help reads the registry, so the two are compared rather than assumed to agree), LLP 0293 (a registration's `usage` line and its parser are one declaration, and every visible core command refuses input it does not know with exit 2)
+
+**Extended-by:** [LLP 0455](./0455-compact-status.spec.md) (compact text view, per-client sharing labels, and verbose details; collector and JSON verdicts unchanged).
 
 > Command registration, dispatch, and help. Decomposed from
 > `hypaware-design.md` (CLI Registry).
 
 > **Extended by [LLP 0034](./0034-mcp-host-intrinsic.decision.md).** Query-shaped
 > operations register as **verbs** (`ctx.verbs.register`), from which the kernel
-> projects *both* a CLI command and an MCP tool — one typed `inputSchema`, no CLI
+> projects *both* a CLI command and an MCP tool: one typed `inputSchema`, no CLI
 > ↔ tool drift. Imperative/interactive commands stay `ctx.commands.register`. The
 > core `--remote` flag ([LLP 0033](./0033-remote-query-attach.spec.md)) routes a
 > verb to a remote MCP tool; being core-defined, it does not violate
 > [no cross-plugin option injection](#no-cross-plugin-option-injection). `hyp mcp`
 > (serve) is a core command.
+
+> **Extended by [LLP 0268](./0268-plugin-commands-classified-as-surface-or-mechanism.decision.md).**
+> A manifest-declared command may be an internal mechanism rather than CLI
+> surface. 0268 replaces the mechanism the discovery section below names
+> (omit the command from `contributes.commands`) with a `hidden: true` flag
+> on the declaration, which keeps it out of help without losing the
+> declaration the dispatch-miss path reads.
 
 ## Core owns dispatch
 
@@ -41,10 +51,10 @@ The binary is `hypaware`, with `hyp` as an alias
 ### Top-level help lists plugin commands without booting
 
 `hyp --help` renders *before* `bootKernel`, so the activated registry holds
-only core commands at that point — booting just to populate it would import
+only core commands at that point: booting just to populate it would import
 every plugin entrypoint and bind the gateway/OTLP listeners some plugins open
 during activation. Instead, top-level help reads the same cheap inputs boot uses
-for *discovery* — plugin manifests (plain JSON) and the effective config — and
+for *discovery*, plugin manifests (plain JSON) and the effective config, and
 lists the commands each **config-active** plugin *declares* in its manifest
 `contributes.commands` ([LLP 0005](./0005-plugin-manifest.spec.md#declarative):
 "list datasets/commands before any plugin code is loaded"). The listing is

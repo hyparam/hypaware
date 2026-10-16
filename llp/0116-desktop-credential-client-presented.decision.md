@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0016, LLP 0115, LLP 0117
+**Extended-by:** LLP 0235, the interception CA is minted in-process, name-constrained, and removed on detach ("no secret-bearing code" is qualified: proxy mode holds a local signing key, generated on the machine, constrained to the intercepted hosts, and deleted on detach)
 
 > A Desktop attach (LLP 0115) must get an Anthropic credential onto each
 > request. Three placements were on the table: the gateway injects it, the

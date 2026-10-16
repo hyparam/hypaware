@@ -18,7 +18,7 @@ import { markerSubsumedBySnapshot } from '../../hypaware-core/plugins-workspace/
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
- * @import { BlobStore, HypError } from '../../hypaware-plugin-kernel-types.js'
+ * @import { BlobStore, ColumnSpec, HypError } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -57,10 +57,11 @@ test('commitBatch creates an Iceberg table on first append and produces a snapsh
   try {
     const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
     const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/dummy_rows')
-    const columns = /** @type {const} */ ([
+    /** @type {readonly ColumnSpec[]} */
+    const columns = [
       { name: 'id', type: 'INT64', nullable: false },
       { name: 'value', type: 'STRING', nullable: false },
-    ])
+    ]
     const rows = [
       { id: 1n, value: 'a' },
       { id: 2n, value: 'b' },
@@ -88,10 +89,11 @@ test('commitBatch appends keep schema ids stable across batches', async () => {
   try {
     const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
     const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/dummy_rows')
-    const columns = /** @type {const} */ ([
+    /** @type {readonly ColumnSpec[]} */
+    const columns = [
       { name: 'id', type: 'INT64', nullable: false },
       { name: 'value', type: 'STRING', nullable: false },
-    ])
+    ]
     await commitBatch(
       { tableUrl, columns, rows: [{ id: 1n, value: 'a' }], resolver, lister },
       { exists: false, metadata: null }
@@ -218,10 +220,11 @@ test('commitBatch surfaces iceberg_commit_conflict when initial create races', a
   const fixture = await freshLocalFsStore()
   try {
     const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/race')
-    const columns = /** @type {const} */ ([
+    /** @type {readonly ColumnSpec[]} */
+    const columns = [
       { name: 'id', type: 'INT64', nullable: false },
       { name: 'value', type: 'STRING', nullable: false },
-    ])
+    ]
     const { resolver: rA, lister: lA } = await createBlobStoreIO(fixture.blobStore)
     const { resolver: rB, lister: lB } = await createBlobStoreIO(fixture.blobStore)
 
@@ -254,10 +257,11 @@ test('probeTable discovers latest snapshot when version-hint.text is stale', asy
   const fixture = await freshLocalFsStore()
   try {
     const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/stale_hint')
-    const columns = /** @type {const} */ ([
+    /** @type {readonly ColumnSpec[]} */
+    const columns = [
       { name: 'id', type: 'INT64', nullable: false },
       { name: 'value', type: 'STRING', nullable: false },
-    ])
+    ]
     const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
 
     await commitBatch(
@@ -291,9 +295,10 @@ test('probeTable discovers latest snapshot when version-hint.text is missing', a
   const fixture = await freshLocalFsStore()
   try {
     const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/missing_hint')
-    const columns = /** @type {const} */ ([
+    /** @type {readonly ColumnSpec[]} */
+    const columns = [
       { name: 'id', type: 'INT64', nullable: false },
-    ])
+    ]
     const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
     const create = await commitBatch(
       { tableUrl, columns, rows: [{ id: 1n }], resolver, lister },
@@ -322,10 +327,11 @@ test('markerSubsumedBySnapshot recognises a marker whose snapshot is an ancestor
   try {
     const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
     const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/supersede')
-    const columns = /** @type {const} */ ([
+    /** @type {readonly ColumnSpec[]} */
+    const columns = [
       { name: 'id', type: 'INT64', nullable: false },
       { name: 'value', type: 'STRING', nullable: false },
-    ])
+    ]
 
     const initial = await probeTable(tableUrl, resolver, lister)
     const aCommit = await commitBatch(

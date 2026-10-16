@@ -5,9 +5,11 @@ import vm from 'node:vm'
 
 import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
 
-import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
-import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
+import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, withSpan } from '../observability/index.js'
+import { QUERY_FLUSH_DEBOUNCE_MS, QUERY_FLUSH_FAILURE_COOLDOWN_MS } from '../cache/spool.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { normalizeScanColumn } from './scan-column.js'
+import { coerceTimestampLiterals } from './timestamp-literals.js'
 import {
   callerSeesEverything,
   defaultQueryVisibilityResolver,
@@ -16,11 +18,11 @@ import {
 } from './visibility.js'
 
 /**
- * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginLogger, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
- * @import { AsyncDataSource } from 'squirreling'
+ * @import { AsyncBatch, AsyncDataSource, ColumnResult, ColumnVector, PrepareScan } from 'squirreling'
  */
 
 /**
@@ -37,6 +39,37 @@ const DEFAULT_MAX_HEAP_GROWTH_BYTES = 1024 * 1024 * 1024
 const HEAP_WATCH_INTERVAL_MS = 100
 
 /**
+ * The whole of a SHOW TABLES statement, in any case, with an optional
+ * trailing semicolon. Matched against the trimmed query, so leading and
+ * trailing whitespace is already gone.
+ */
+const SHOW_TABLES = /^show\s+tables\s*;?$/i
+
+/**
+ * Exported so a caller that routes freshness lines by meaning can tell this
+ * one apart from the ordinary debounce staleness line. They arrive in the
+ * same `freshnessMessages` array and read alike, but only this one means
+ * rows are missing rather than merely a couple of minutes old.
+ *
+ * @ref LLP 0321#decision [implements]: the degrade emits one warning that newer waiting rows may be missing
+ */
+export const AUTO_REFRESH_FAILURE_MESSAGE =
+  'cache: refresh failed; using previously saved data; newer waiting rows may be missing'
+
+/**
+ * The line that says why, appended after the warning above by both branches
+ * of a standing failure: the live one from the error in hand, the cooled one
+ * from the stamped message the flush left behind. Exported as a prefix
+ * because the suffix varies with the failure, and a caller routing notices by
+ * meaning must classify it with the warning it explains rather than with the
+ * droppable debounce line, or "rows may be missing" survives a surface that
+ * dropped its why.
+ *
+ * @ref LLP 0330#query-quotes-the-reason [implements]: the staleness warning carries the stamped reason, not only that one exists
+ */
+export const REFRESH_FAILURE_REASON_PREFIX = 'cache: last refresh attempt failed: '
+
+/**
  * Typed refusal for a query whose execution outgrew its heap budget.
  * Refusal, not truncation: a partial sort or partial aggregate would be a
  * silently wrong answer. Callers render it as actionable guidance and map
@@ -49,14 +82,25 @@ export class QueryExecutionBudgetError extends Error {
    * @param {number} limitBytes
    * @param {number} observedBytes
    * @param {{ site: string, rawBytes: number, baselineBytes: number, gcMode: 'confirmed' | 'unavailable' }} [diagnostics]
+   * @param {boolean} [budgetFromOption] the refused budget came from an
+   *   explicit `maxHeapBytes`, not from the environment or the default
    */
-  constructor(limitBytes, observedBytes, diagnostics) {
+  constructor(limitBytes, observedBytes, diagnostics, budgetFromOption = false) {
     const limitMb = Math.round(limitBytes / 1048576)
     const observedMb = Math.round(observedBytes / 1048576)
+    // resolveHeapBudgetBytes returns an explicit maxHeapBytes before it ever
+    // reads the environment, so on a caller-budgeted path (graph reads and the
+    // graph projection both pass one) advising HYP_QUERY_MAX_HEAP_MB sends the
+    // reader to a knob that does nothing at any value. Name where the budget
+    // came from instead, claiming nothing about how that caller chose it.
+    // @ref LLP 0097 [constrained-by]: the env override applies to the default ceiling only, an explicit maxHeapBytes wins ahead of it
+    const escape = budgetFromOption
+      ? '(this query kind runs under a budget set by its caller, not the operator query-budget default)'
+      : '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
     let message =
       `query exceeded its execution memory budget (${observedMb}MB used of ${limitMb}MB) - ` +
       'add a WHERE/date filter, a LIMIT, or aggregate instead of selecting raw rows ' +
-      '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
+      escape
     // The suffix is the refusal's own diagnosis, and it matters most when
     // the refusal happens on a machine the investigator cannot inspect (a
     // remote daemon surfacing this message through MCP): which check site
@@ -125,14 +169,55 @@ function resolveForcedGc() {
     try {
       v8.setFlagsFromString('--expose-gc')
       const gc = vm.runInNewContext('gc')
-      v8.setFlagsFromString('--no-expose-gc')
       if (typeof gc === 'function') resolved = gc
     } catch {
       resolved = null
+    } finally {
+      // The reset has to run on the throwing path too. A build or host that
+      // refuses to expose `gc` throws a ReferenceError out of
+      // runInNewContext, and that is exactly the run that would otherwise
+      // leave --expose-gc set process-wide for the rest of the daemon or CLI
+      // invocation: the `catch` degrades the guard quietly, so nothing fails
+      // loudly and the leak is invisible on the hosts where the handle does
+      // resolve. A captured `gc` keeps working after the reset.
+      //
+      // Swallowed on its own, because a `finally` is outside the reach of
+      // the sibling `catch`: on a runtime whose setFlagsFromString throws
+      // (a hardened embedding, a `node:v8` shim), the reset would otherwise
+      // escape resolveForcedGc and abort an otherwise valid query from
+      // inside guard.check. Failing to resolve a GC handle must degrade to
+      // gcMode=unavailable, never refuse the query outright.
+      try {
+        v8.setFlagsFromString('--no-expose-gc')
+      } catch {}
     }
   }
   cachedForcedGc = resolved
   return resolved
+}
+
+/**
+ * A source's logical column names. Squirreling widened `AsyncDataSource` so a
+ * prepared-only source may carry `schema` instead of `columns`; the kernel
+ * therefore derives the names the way the engine's own `dataSourceColumns`
+ * does. That helper is internal to squirreling and not exported, so the rule
+ * lives here once rather than at each of the three sites that need it.
+ *
+ * The precedence is the engine's, not the convenient one: when a source offers
+ * both `prepareScan` and `schema`, squirreling plans from the schema and never
+ * reads the `columns` such a source may also advertise. Preferring `columns`
+ * here would evaluate the local-only gate below against a list the engine
+ * ignores, so a content column present only in `schema` would slip the gate.
+ * Reading the authoritative list can only widen the set of sources that get
+ * wrapped, which is the fail-closed direction.
+ *
+ * @ref LLP 0294#transparent-wrappers [implements]: a prepared-only source is addressed by schema, not by an advertised column list
+ * @param {AsyncDataSource} source
+ * @returns {string[]}
+ */
+function sourceColumnNames(source) {
+  if (source.prepareScan && source.schema) return source.schema.fields.map((field) => field.name)
+  return source.columns ?? []
 }
 
 /**
@@ -150,12 +235,26 @@ function resolveForcedGc() {
  * @returns {AsyncDataSource}
  */
 function withHeapBudget(source, guard) {
+  if (!source.scan) {
+    const schema = /** @type {NonNullable<AsyncDataSource['schema']>} */ (source.schema)
+    const prepareScan = /** @type {NonNullable<AsyncDataSource['prepareScan']>} */ (source.prepareScan)
+    /** @type {AsyncDataSource} */
+    const bounded = {
+      numRows: source.numRows,
+      columns: sourceColumnNames(source),
+      schema,
+      prepareScan: budgetedPrepareScan((request) => prepareScan.call(source, request), guard),
+    }
+    forwardBudgetedScanColumn(bounded, source, guard)
+    return bounded
+  }
+  const scan = source.scan
   /** @type {AsyncDataSource} */
   const bounded = {
     numRows: source.numRows,
-    columns: source.columns,
+    columns: sourceColumnNames(source),
     scan(options) {
-      const inner = source.scan(options)
+      const inner = scan.call(source, options)
       return {
         appliedWhere: inner.appliedWhere,
         appliedLimitOffset: inner.appliedLimitOffset,
@@ -172,24 +271,112 @@ function withHeapBudget(source, guard) {
       }
     },
   }
-  if (typeof source.scanColumn === 'function') {
-    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
-    // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
-    bounded.scanColumn = (options) => {
-      const inner = normalizeScanColumn(scanColumn(options), options)
-      return {
-        appliedWhere: inner.appliedWhere,
-        appliedLimitOffset: inner.appliedLimitOffset,
-        async *chunks() {
-          for await (const chunk of inner.chunks()) {
-            guard.check('column_chunk')
-            yield chunk
-          }
-        },
-      }
+  if (source.schema && source.prepareScan) {
+    const prepareScan = source.prepareScan
+    bounded.schema = source.schema
+    bounded.prepareScan = budgetedPrepareScan((request) => prepareScan.call(source, request), guard)
+  }
+  forwardBudgetedScanColumn(bounded, source, guard)
+  return bounded
+}
+
+/**
+ * Forward a column stream with its negotiation flags intact and sample each
+ * materialized chunk.
+ *
+ * @param {AsyncDataSource} bounded
+ * @param {AsyncDataSource} source
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {void}
+ */
+function forwardBudgetedScanColumn(bounded, source, guard) {
+  if (typeof source.scanColumn !== 'function') return
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+  // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
+  bounded.scanColumn = (options) => {
+    const inner = normalizeScanColumn(scanColumn.call(source, options), options)
+    return {
+      appliedWhere: inner.appliedWhere,
+      appliedLimitOffset: inner.appliedLimitOffset,
+      async *chunks() {
+        for await (const chunk of inner.chunks()) {
+          guard.check('column_chunk')
+          yield chunk
+        }
+      },
     }
   }
-  return bounded
+}
+
+/**
+ * Preserve a prepared source through the heap-budget decoration. Direct
+ * vectors are sampled after batch production; deferred vectors are sampled
+ * immediately after their lazy read resolves.
+ *
+ * @param {PrepareScan} prepareScan
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {PrepareScan}
+ */
+function budgetedPrepareScan(prepareScan, guard) {
+  return function prepareWithBudget(request) {
+    const inner = prepareScan(request)
+    return {
+      schema: inner.schema,
+      residual: inner.residual,
+      properties: inner.properties,
+      async *batches(options = {}) {
+        for await (const batch of inner.batches(options)) {
+          guard.check('native_batch')
+          yield budgetedBatch(batch, guard)
+        }
+      },
+    }
+  }
+}
+
+/**
+ * Sample the budget after a deferred column materializes, WITHOUT converting a
+ * synchronous read into a promise. `ReadColumn` returns `ColumnVector |
+ * Promise<ColumnVector>`, and squirreling keeps whole expression and projection
+ * batches off the promise machinery when every column result resolves inline
+ * (`resolveColumnResults`). An `async read` would hand it a thenable every
+ * time and reintroduce exactly the per-batch microtask this path exists to
+ * remove.
+ *
+ * @param {AsyncBatch} batch
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {AsyncBatch}
+ */
+function budgetedBatch(batch, guard) {
+  return {
+    selection: batch.selection,
+    columns: batch.columns.map((column) => {
+      if (!('read' in column)) return column
+      const read = column.read
+      return {
+        ...column,
+        read(request) {
+          const result = read.call(column, request)
+          if (!isThenable(result)) {
+            guard.check('native_batch')
+            return result
+          }
+          return result.then((vector) => {
+            guard.check('native_batch')
+            return vector
+          })
+        },
+      }
+    }),
+  }
+}
+
+/**
+ * @param {ColumnResult} value
+ * @returns {value is Promise<ColumnVector>}
+ */
+function isThenable(value) {
+  return typeof (/** @type {{ then?: unknown }} */ (value))?.then === 'function'
 }
 
 /**
@@ -245,10 +432,40 @@ export async function executeQuerySql(args) {
       try {
         const trimmed = query.trim()
         if (trimmed.length === 0) throw new Error('SQL query is required')
+
+        // SHOW TABLES names no table, so there is nothing for the engine to
+        // open. The registry is the list of what this caller can query, so it
+        // answers directly, without discovering or opening any dataset. Only
+        // the whole statement matches: anything longer goes to the parser,
+        // which does not know SHOW and refuses it as before. The rows keep the
+        // registry's own order, which is already by name: re-sorting here
+        // would read each live plugin `name` inside a comparator, the read
+        // `listDatasets()` avoids (issue #1524).
+        if (SHOW_TABLES.test(trimmed)) {
+          const rows = registry.listDatasets().map((dataset) => ({ name: dataset.name }))
+          span.setAttribute('row_count', rows.length)
+          instruments.queryRunsTotal.add(1, { status: 'ok' })
+          instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
+          return {
+            columns: ['name'],
+            rows,
+            datasets: [],
+            freshnessMessages: [],
+            localOnly: { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 },
+          }
+        }
+
         // squirreling only parses read-only SELECTs, so its own error message
         // already points at the real problem (syntax error, unknown function,
         // non-SELECT statement). Surface it verbatim rather than wrapping it.
         const statement = parseSql({ query: trimmed })
+
+        // SQL types a character literal by the operand it is compared
+        // against; neither squirreling nor the pushdown converter does, so a
+        // string bound on a TIMESTAMP column matched nothing at all until the
+        // literal is typed here, before either sees it (issue #860).
+        // @ref LLP 0272 [implements]: the one shared read path types string literals against the column's declared type
+        coerceTimestampLiterals(statement, registry)
 
         const tableNames = uniqueStrings(extractTables(statement))
         span.setAttribute('table_count', tableNames.length)
@@ -259,13 +476,21 @@ export async function executeQuerySql(args) {
         const datasetsUsed = []
         /** @type {string[]} */
         const freshnessMessages = []
+        // Carried to the run metric so a fleet-wide broken cache is visible on
+        // the `status` dimension instead of counting as clean runs.
+        // @ref LLP 0322#degrade-reaches-the-signals [implements]: a degraded run is not recorded as an ok run
+        let refreshDegraded = false
         /** @type {LocalOnlyVisibilityReport} */
         const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
 
         for (const name of tableNames) {
           const dataset = registry.getDataset(name)
           if (!dataset) {
-            throw new Error(`SQL query references unknown dataset: ${name}`)
+            const available = registry.listDatasets().map((dataset) => dataset.name)
+            const suffix = available.length > 0
+              ? `. Available datasets: ${available.join(', ')}`
+              : ''
+            throw new Error(`SQL query references unknown dataset: ${name}${suffix}`)
           }
           datasetsUsed.push(name)
 
@@ -286,12 +511,13 @@ export async function executeQuerySql(args) {
             }
           }
 
-          await settlePendingCacheForQuery({
+          const settled = await settlePendingCacheForQuery({
             partitions,
             storage,
             refresh,
             messages: freshnessMessages,
           })
+          if (settled.degraded) refreshDegraded = true
 
           const source = await withSpan(
             'query.scan_dataset',
@@ -319,14 +545,18 @@ export async function executeQuerySql(args) {
           let table = source
           if (!includeLocalOnly) {
             const contentColumns = dataset.localOnlyContentColumns ?? []
-            const governable = source.columns.includes('cwd') ||
-              contentColumns.some((c) => source.columns.includes(c))
+            const sourceColumns = sourceColumnNames(source)
+            const governable = sourceColumns.includes('cwd') ||
+              contentColumns.some((c) => sourceColumns.includes(c))
             if (governable) {
               const vis = getVisibility()
               localOnly.callerClass = vis.callerClass
               if (!callerSeesEverything(vis.callerRank)) {
+                if (!source.scan || !source.columns) {
+                  throw new Error(`Dataset "${name}" must provide columns and scan() to enforce local-only visibility`)
+                }
                 localOnly.filtered = true
-                table = withLocalOnlyVisibility(source, {
+                table = withLocalOnlyVisibility(/** @type {ScannableDataSource} */ (source), {
                   resolver: vis.resolver,
                   callerRank: vis.callerRank,
                   contentColumns,
@@ -375,7 +605,7 @@ export async function executeQuerySql(args) {
               rawBytes: crossing.raw,
               baselineBytes: baselineHeap,
               gcMode: crossing.gcMode,
-            })
+            }, args.maxHeapBytes !== undefined)
             span.setAttribute('budget_trip_site', site)
             span.setAttribute('budget_raw_mb', Math.round(crossing.raw / 1048576))
             span.setAttribute('budget_settled_mb', Math.round(crossing.settled / 1048576))
@@ -431,7 +661,9 @@ export async function executeQuerySql(args) {
         }
 
         try {
-          const results = squirrelExecuteSql({ tables, query: trimmed, signal: controller.signal })
+          // The rewritten statement, not the original text: re-parsing here
+          // would throw the literal typing above away.
+          const results = squirrelExecuteSql({ tables, query: statement, signal: controller.signal })
           const rows = await collect(results)
           // Terminal budget check: the inline guard only samples every
           // BUDGET_CHECK_ROW_STRIDE rows (and per column chunk), and the
@@ -456,8 +688,9 @@ export async function executeQuerySql(args) {
             })
           }
 
-          instruments.queryRunsTotal.add(1, { status: 'ok' })
-          instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
+          const runStatus = refreshDegraded ? 'degraded' : 'ok'
+          instruments.queryRunsTotal.add(1, { status: runStatus })
+          instruments.queryDurationMs.record(Date.now() - start, { status: runStatus })
 
           return { columns, rows, datasets: datasetsUsed, freshnessMessages, localOnly }
         } catch (err) {
@@ -483,32 +716,177 @@ export async function executeQuerySql(args) {
 }
 
 /**
+ * The query seam's freshness move: flush each referenced partition's
+ * pending spool (debounced under `auto`, forced under `always`, skipped
+ * under `never`) and report the staleness the debounce accepted.
+ * Exported so the grep service applies the identical policy; two read
+ * surfaces with different flush rules would answer differently about
+ * the same seconds-old row.
+ *
  * @param {{
  *   partitions: Array<{ tablePath?: string }>,
  *   storage: ExtendedQueryStorageService,
  *   refresh: RefreshMode,
  *   messages: string[],
  * }} args
+ * @returns {Promise<{ degraded: boolean }>} whether any stream served
+ *   unrefreshed data because its flush failed or is cooling down
  */
-async function settlePendingCacheForQuery(args) {
+export async function settlePendingCacheForQuery(args) {
   const now = Date.now()
+  let degraded = false
   for (const partition of args.partitions) {
     if (!partition.tablePath) continue
-    const info = await args.storage.pendingInfo(partition.tablePath)
-    if (!info.pending) continue
-    if (args.refresh === 'always') {
-      await args.storage.flushTable(partition.tablePath, { force: true, reason: 'query_always' })
-      continue
+    try {
+      const info = await args.storage.pendingInfo(partition.tablePath)
+      if (!info.pending) continue
+      if (args.refresh === 'always') {
+        // This gate never consults the stamp under `always`: freshness is the
+        // caller's stated requirement, so it gets the attempt and the original
+        // error. The gate only. The spool's coalescing rule reads the stamp for
+        // forced callers too, and still returns them the newest rows, because a
+        // coalesced pass that completes drains the active file in the same call.
+        // @ref LLP 0322#coalesce-the-retry [constrained-by]: the stamp paces this gate, not the flush the gate calls
+        await args.storage.flushTable(partition.tablePath, { force: true, reason: 'query_always' })
+        continue
+      }
+      if (args.refresh === 'never') continue
+      // A flush that failed inside the window is not retried. Nothing else in
+      // this loop remembers a failure: `lastFlushAtMs` only advances on
+      // success, so without the stamp the debounce below reads a null or
+      // ancient timestamp and reopens on every query, retrying a doomed
+      // append and stranding one more rotated spool file each time.
+      // @ref LLP 0322#stamp-the-failure [implements]: a standing failure stamp holds the automatic gate closed
+      const failedAtMs = info.flushFailedAtMs ?? null
+      if (failedAtMs !== null && now - failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS) {
+        reportRefreshCoolingDown(args.messages, info.flushFailureMessage ?? null)
+        degraded = true
+        continue
+      }
+      if (info.lastFlushAtMs === null || now - info.lastFlushAtMs >= QUERY_FLUSH_DEBOUNCE_MS) {
+        await args.storage.flushTable(partition.tablePath, { reason: 'query_auto' })
+        continue
+      }
+      args.messages.push(
+        `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
+      )
+    } catch (err) {
+      if (args.refresh !== 'auto') throw err
+      // A storage service that never had the spool methods is a wiring bug,
+      // not the blocked spool-to-cache write the auto degrade is for. Told
+      // apart here rather than up front because the callers that legitimately
+      // pass a bare storage only ever reach this loop with no flushable
+      // table, so an eager capability check would reject them too. Swallowed,
+      // it would read as "cache: refresh failed" on every query forever while
+      // newly captured rows silently never arrived.
+      // @ref LLP 0321#decision [constrained-by]: the degrade covers a failed spool-to-cache move, not a storage service missing the move
+      if (typeof args.storage.pendingInfo !== 'function' || typeof args.storage.flushTable !== 'function') throw err
+      reportAutoRefreshFailure(err, args.messages)
+      degraded = true
     }
-    if (args.refresh === 'never') continue
-    if (info.lastFlushAtMs === null || now - info.lastFlushAtMs >= QUERY_FLUSH_DEBOUNCE_MS) {
-      await args.storage.flushTable(partition.tablePath, { reason: 'query_auto' })
-      continue
-    }
-    args.messages.push(
-      `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
-    )
   }
+  return { degraded }
+}
+
+/**
+ * An automatic freshness attempt is allowed to serve the last confirmed
+ * cache when its spool flush fails. The explicit `always` mode never reaches
+ * this helper: it preserves the original error because freshness was the
+ * caller's requirement, not a best effort.
+ *
+ * @ref LLP 0321#decision [implements]: auto refresh degrades to confirmed data, while forced refresh remains strict
+ * @param {unknown} err
+ * @param {string[]} messages
+ */
+function reportAutoRefreshFailure(err, messages) {
+  const errorMessage = err instanceof Error ? err.message : String(err)
+  getLogger('query').warn('query.cache_refresh_failed', {
+    [Attr.COMPONENT]: 'query',
+    [Attr.OPERATION]: 'cache.refresh',
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+    status: 'degraded',
+    error_message: errorMessage.slice(0, 512),
+  })
+  const span = getActiveSpan()
+  // `markSpanStatus` rather than a bare attribute write: `withSpan` reads its
+  // status code from the attributes the span opened with, so setting the
+  // attribute alone leaves a degraded query ending `OK` for anyone alerting
+  // on span status.
+  // @ref LLP 0322#degrade-reaches-the-signals [implements]: the degrade reaches the span status code, not only the attribute
+  markSpanStatus(span, 'degraded')
+  span?.setAttribute('cache_refresh_failed', true)
+  span?.addEvent('query.cache_refresh_failed', {
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+  })
+  if (!messages.includes(AUTO_REFRESH_FAILURE_MESSAGE)) {
+    messages.push(AUTO_REFRESH_FAILURE_MESSAGE)
+  }
+  appendRefreshFailureReason(messages, errorMessage)
+}
+
+/**
+ * A query that skipped its flush because a recent one failed is degraded for
+ * the same reason and says so the same way, so the user-facing warning does
+ * not flicker on and off with the cooldown window. Separable in telemetry by
+ * `cache_refresh_cooling_down`.
+ *
+ * The stamped reason rides along when the stamp carries one this build can
+ * read: on the log event as `error_message`, matching the live-failure event
+ * so the two branches are not asymmetric in telemetry, and on the stderr
+ * reason line, so the person told "the cache may be stale" is no longer left
+ * to open `_hypaware_spool` by hand to learn why.
+ *
+ * @ref LLP 0322#stamp-the-failure [implements]: the cooled query still reports degraded, and is separable in telemetry
+ * @ref LLP 0330#query-quotes-the-reason [implements]: the cooled branch consumes the stamp's message, not only its time
+ * @param {string[]} messages
+ * @param {string | null} [flushFailureMessage]
+ */
+function reportRefreshCoolingDown(messages, flushFailureMessage = null) {
+  getLogger('query').warn('query.cache_refresh_cooling_down', {
+    [Attr.COMPONENT]: 'query',
+    [Attr.OPERATION]: 'cache.refresh',
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+    status: 'degraded',
+    cooldown_ms: QUERY_FLUSH_FAILURE_COOLDOWN_MS,
+    ...(flushFailureMessage !== null ? { error_message: flushFailureMessage.slice(0, 512) } : {}),
+  })
+  const span = getActiveSpan()
+  markSpanStatus(span, 'degraded')
+  span?.setAttribute('cache_refresh_failed', true)
+  span?.setAttribute('cache_refresh_cooling_down', true)
+  span?.addEvent('query.cache_refresh_cooling_down', {
+    [Attr.ERROR_KIND]: 'cache_refresh_failed',
+    refresh_mode: 'auto',
+  })
+  if (!messages.includes(AUTO_REFRESH_FAILURE_MESSAGE)) {
+    messages.push(AUTO_REFRESH_FAILURE_MESSAGE)
+  }
+  appendRefreshFailureReason(messages, flushFailureMessage)
+}
+
+/**
+ * One reason line per query run, first failure wins, appended by both the
+ * live-failure and the cooled branch so the wording does not flicker with the
+ * cooldown window. The reason is prose a person reads on stderr, assembled
+ * from an error some other process may have stamped, so it goes through the
+ * label policy exactly as the `hyp status` line does (strip and clamp, LLP
+ * 0225 via `sanitizeLabel`); a reason the policy empties appends no line,
+ * which is also the shape when the stamp carries no readable message, and
+ * the LLP 0321 warning stands alone as before.
+ *
+ * @ref LLP 0330#query-quotes-the-reason [implements]: one bounded, terminal-safe reason line beside the warning it explains
+ * @param {string[]} messages
+ * @param {string | null} reason
+ */
+function appendRefreshFailureReason(messages, reason) {
+  if (typeof reason !== 'string' || reason.length === 0) return
+  const cleaned = sanitizeLabel(reason, 200)
+  if (!cleaned) return
+  if (messages.some((m) => m.startsWith(REFRESH_FAILURE_REASON_PREFIX))) return
+  messages.push(`${REFRESH_FAILURE_REASON_PREFIX}${cleaned}`)
 }
 
 /** @param {number} ageMs */

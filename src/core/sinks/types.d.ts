@@ -1,6 +1,9 @@
 import type {
+  DatasetRegistration,
   ExportResult,
+  ExportProgress,
   HypAwareV2Config,
+  QueryPartition,
   QueryRegistry,
   SinkContinuation,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
@@ -15,13 +18,13 @@ import type { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/types
  */
 export interface IncrementalRowReader {
   /**
-   * True when there is no PAYLOAD row to encode since the watermark — the sink
+   * True when there is no PAYLOAD row to encode since the watermark: the sink
    * writes no blob. A partition of only `local-only` (dropped) rows is `empty`
    * yet still exposes `droppedRowCount > 0` and an advanced `lastAfter`, so the
    * caller checkpoints past the withheld tail instead of re-scanning it.
    */
   empty: boolean
-  /** Incoming watermark seq (decimal string; `'0'` when none) — the range lower bound. */
+  /** Incoming watermark seq (decimal string; `'0'` when none): the range lower bound. */
   sinceSeq: string
   /** Clean (internal-stripped) rows to feed the encoder. Single-use; do not re-iterate. */
   rows: AsyncIterable<Record<string, unknown>>
@@ -44,7 +47,7 @@ export interface IncrementalRowReader {
 /**
  * Stable logical identity of a partition for watermark storage: the partition's
  * directory relative to `<cacheRoot>/datasets/`, split into the dataset and the
- * (sanitized, `/`-joined) partition path — never the physical `tableDir`.
+ * (sanitized, `/`-joined) partition path, never the physical `tableDir`.
  */
 export interface SinkWatermarkKey {
   dataset: string
@@ -77,6 +80,83 @@ export interface SinkWatermarkStore {
   ): Promise<SinkWatermarkRecord>
 }
 
+/**
+ * How much data one destination would send right now, read off the same
+ * watermark + `readRowsSince` seam the export uses. Produced by
+ * `previewPendingRows` for the `hyp sync` consent summary.
+ */
+export interface PendingVolume {
+  /**
+   * `counted` - `rows` is the total.
+   * `partial` - `rows` is a **floor**; the scan stopped early or could not see
+   * everything, so the caller must render it as "at least N".
+   * `unknown` - no usable count. Never render this as zero.
+   */
+  status: 'counted' | 'partial' | 'unknown'
+  /** Payload rows that would be sent. A floor when `status` is `partial`. */
+  rows: number
+  /**
+   * Rows the export seam withholds (a `local-only` directory, an opted-out
+   * source). Reported apart from `rows` and never added to it: they advance the
+   * cursor but never ship.
+   *
+   * A floor when `status` is `partial`, for the same reason `rows` is: one scan
+   * produces both tallies, so whatever cut it short cut both short. Render it
+   * as "at least N" on every `partial` volume, including the one where `rows`
+   * is 0 and the payload line stands down to "not fully counted": there the
+   * withheld tally is the only number on screen, so it is the branch that most
+   * needs the mark. An exact-looking withheld number beside an admittedly
+   * incomplete payload count claims a precision the count never had, on the one
+   * line that says policy is working at all.
+   */
+  withheldRows: number
+  /**
+   * How far back the pending range reaches. `since` carries the oldest resume
+   * point across the destination's partitions; `beginning` means at least one
+   * partition has no durable cursor, so the range is the whole local history;
+   * `unknown` means no cursor timestamp was readable.
+   */
+  resume: { kind: 'beginning' } | { kind: 'unknown' } | { kind: 'since'; at: string }
+  /** Why the count is `partial` or `unknown`. Short enough to print. */
+  reason?: string
+}
+
+/**
+ * What one preview run found in the cache, shared by every destination it then
+ * counts for. Discovery is paid once; the per-destination work reads this.
+ */
+export interface Discovered {
+  /** Materialized partitions, deduplicated by table path, in driver order. */
+  partitions: QueryPartition[]
+  /**
+   * The registration each partition came from, keyed by table path exactly as
+   * `partitions` is deduplicated. Carried because the count is per destination
+   * and a destination may refuse a dataset outright: asking it requires the
+   * same `DatasetRegistration` the sink's own export rule reads.
+   */
+  datasets: Map<string, DatasetRegistration>
+  /** Rows sit in an unflushed spool, so any count off these tables is a floor. */
+  unflushed: boolean
+  /** Datasets whose partition discovery threw. */
+  failures: number
+}
+
+export interface PendingPreviewOptions {
+  /** Rows one destination may scan before reporting a floor. */
+  rowLimit?: number
+  /**
+   * Wall-clock budget for the whole preview, spent as cumulative
+   * per-destination deadlines (LLP 0325). Partition discovery is one shared
+   * cost charged to no slice; whatever is left when it returns is divided so
+   * destination i of n counts until `scanStart + remaining * (i + 1) / n`. A
+   * slow first destination therefore cannot spend a later one down to
+   * `unknown`, and the last deadline is still `start + budget`.
+   */
+  budgetMs?: number
+  /** Clock seam (tests). */
+  now?: () => number
+}
+
 export interface DriverOptions {
   sinkRegistry: ExtendedSinkRegistry
   queryRegistry: QueryRegistry
@@ -84,9 +164,22 @@ export interface DriverOptions {
   /** Kernel state root (e.g. `<HYP_HOME>/hypaware`). */
   stateRoot: string
   config?: HypAwareV2Config
+  /** Actual admitted exports only, with bounded scalar summary and wall-clock completion. */
+  onComplete?: (completion: SinkCompletion) => void
+  /** Separate cleanup failure, never an export acknowledgement or payload reason. */
+  onDiagnosticCleanupFailure?: (instance: string, code: string) => void
+}
+
+/** Bounded scalar metadata for one recognized ordinary driver diagnostic. */
+export interface SinkDiagnosticRecord {
+  name: string
+  at: number
+  sequence: bigint
 }
 
 export interface TickOptions {
+  /** Undefined progress starts a destination; subsequent events are acknowledged deltas. */
+  onProgress?: (instance: string, progress?: ExportProgress) => void
   now?: Date
   /** Only fire one sink (test/manual use). */
   sinkInstance?: string
@@ -111,6 +204,35 @@ export interface TickReport {
    * (LLP 0101).
    */
   held?: 'first_sync_hold'
+}
+
+/** Internal host seams, never part of the public plugin Sink contract. */
+export interface SinkCompletion {
+  instance: string
+  startedAt: string
+  completedAt: string
+  report: TickReport['sinks'][number]
+}
+
+export interface SinkRunOutcome {
+  report?: TickReport['sinks'][number]
+  held?: 'first_sync_hold'
+}
+
+export interface SinkManualReceipt {
+  run: () => Promise<SinkRunOutcome>
+  resolve: (outcome: SinkRunOutcome) => void
+  reject: (error: unknown) => void
+}
+
+export interface SinkExecutionState {
+  active: boolean
+  operation: Promise<SinkRunOutcome> | null
+  rerun: boolean
+  manual: SinkManualReceipt | null
+  stopped: boolean
+  stop: () => void
+  scheduled: (handle: ExtendedSinkHandle, state: SinkExecutionState) => void
 }
 
 export interface MaterializeResult {

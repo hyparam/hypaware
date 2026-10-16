@@ -4,6 +4,7 @@ import process from 'node:process'
 import readline from 'node:readline'
 
 import { reduce } from './keypress.js'
+import { createLiveRegion } from './live_region.js'
 import { render } from './render.js'
 
 /**
@@ -13,7 +14,6 @@ import { render } from './render.js'
 
 const CURSOR_HIDE  = '\x1b[?25l'
 const CURSOR_SHOW  = '\x1b[?25h'
-const CLEAR_TO_END = '\x1b[J'
 
 let activeRun = false
 
@@ -41,9 +41,11 @@ export async function run(initialState, io) {
 
   /** @type {State} */
   let state = initialState
-  let previousLineCount = 0
+  const region = createLiveRegion(stdout)
   /** @type {((s: string | undefined, k: ReadlineKey) => void) | null} */
   let onKeypress = null
+  /** @type {(() => void) | null} */
+  let onAbort = null
   let cleanedUp = false
 
   // Snapshot raw mode so we can restore it on exit.
@@ -60,6 +62,10 @@ export async function run(initialState, io) {
       stdin.removeListener('keypress', onKeypress)
       onKeypress = null
     }
+    if (onAbort) {
+      try { io.signal?.removeEventListener('abort', onAbort) } catch {}
+      onAbort = null
+    }
     try {
       if (typeof stdin.setRawMode === 'function') {
         stdin.setRawMode(previousRawMode)
@@ -70,25 +76,21 @@ export async function run(initialState, io) {
         stdin.pause()
       }
     } catch {}
-    if (clearOnResolve && previousLineCount > 0) {
-      // Move the cursor back to the top of the rendered frame and clear
-      // everything below it, leaving the screen as it was before the
-      // prompt drew. The next prompt then redraws in the same position.
-      try { stdout.write(`\x1b[${previousLineCount}A\r${CLEAR_TO_END}`) } catch {}
-      previousLineCount = 0
+    if (clearOnResolve) {
+      // Leave the screen as it was before the prompt drew. The next
+      // prompt then redraws in the same position.
+      try { region.clear() } catch {}
     }
     try { stdout.write(CURSOR_SHOW) } catch {}
   }
 
   function writeFrame() {
-    let buf = ''
-    if (previousLineCount > 0) {
-      buf += `\x1b[${previousLineCount}A\r${CLEAR_TO_END}`
-    }
-    const frame = render(state, { color })
-    buf += frame
-    previousLineCount = countPhysicalRows(frame, terminalColumns(stdout))
-    stdout.write(buf)
+    // Width is read per frame, not once: a resize between keystrokes must
+    // reach both the renderer (which drops a box that no longer fits) and
+    // the row count below it, or the two disagree about the same frame.
+    const columns = terminalColumns(stdout)
+    const rows = terminalRows(stdout)
+    region.draw(render(state, { color, columns, ...(rows !== undefined ? { rows } : {}) }), columns)
   }
 
   try {
@@ -111,6 +113,9 @@ export async function run(initialState, io) {
           } else if (state.status === 'cancelled') {
             cleanup()
             reject(new PromptCancelledError())
+          } else if (state.status === 'backed') {
+            cleanup()
+            reject(new PromptBackRequestedError())
           }
         } catch (err) {
           cleanup()
@@ -119,6 +124,18 @@ export async function run(initialState, io) {
       }
       stdin.on('keypress', onKeypress)
       if (typeof stdin.resume === 'function') stdin.resume()
+      // An abort settles the prompt exactly as escape does, chrome unwound
+      // before the caller sees the rejection, so a caller may still spawn
+      // into the terminal it inherits.
+      // @ref LLP 0198#real-launch [constrained-by]: the chrome is fully unwound before the spawn
+      if (io.signal) {
+        onAbort = () => {
+          cleanup()
+          reject(new PromptCancelledError())
+        }
+        if (io.signal.aborted) onAbort()
+        else io.signal.addEventListener('abort', onAbort, { once: true })
+      }
     }).finally(() => cleanup())
   } finally {
     activeRun = false
@@ -174,49 +191,18 @@ function terminalColumns(stdout) {
   return typeof cols === 'number' && cols > 0 ? cols : 80
 }
 
-// Match ANSI SGR (color/style) sequences so they are excluded from the
-// visible-width measurement. The renderer only emits `\x1b[...m` codes.
-const ANSI_SGR = /\x1b\[[0-9;]*m/g
-
 /**
- * Visible (printable) width of a single logical line, ignoring ANSI
- * style codes. Measured in code units, which matches column count for
- * the Latin/punctuation text the prompts render.
+ * Resolve the terminal height in rows, or `undefined` when the stream does
+ * not expose a usable `.rows` (a pipe, a test double). Unlike width there
+ * is no safe default to invent: the renderer treats an unknown height as
+ * "no limit" and draws every row, which is what it did before it could ask.
  *
- * @param {string} line
- * @returns {number}
+ * @param {NodeJS.WriteStream} stdout
+ * @returns {number | undefined}
  */
-function visibleWidth(line) {
-  return line.replace(ANSI_SGR, '').length
-}
-
-/**
- * Count the number of *physical* terminal rows a frame occupies. The
- * runtime uses this to know how far to move the cursor up before
- * clearing the previous frame. A naive newline count is wrong whenever
- * a logical line is wider than the terminal: the terminal soft-wraps it
- * onto multiple rows, so the cursor descended further than the number of
- * `\n` written. Undercounting here leaves stale rows on screen on every
- * redraw: the classic "the question keeps duplicating when I move the
- * cursor" symptom.
- *
- * Frames always end with a trailing `\n`; the empty segment after it
- * contributes no row.
- *
- * @param {string} frame
- * @param {number} columns
- * @returns {number}
- */
-export function countPhysicalRows(frame, columns) {
-  const width = columns > 0 ? columns : 80
-  const lines = frame.split('\n')
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
-  let rows = 0
-  for (const line of lines) {
-    const len = visibleWidth(line)
-    rows += len === 0 ? 1 : Math.ceil(len / width)
-  }
-  return rows
+function terminalRows(stdout) {
+  const rows = stdout.rows
+  return typeof rows === 'number' && rows > 0 ? rows : undefined
 }
 
 /**
@@ -240,5 +226,32 @@ export class PromptCancelledError extends Error {
 export function isPromptCancelledError(err) {
   return err instanceof PromptCancelledError || (
     err instanceof Error && err.name === 'PromptCancelledError'
+  )
+}
+
+/**
+ * Thrown when the user steps back from a prompt that opted into
+ * back-navigation (`allowBack`, LLP 0191): escape on the TUI path, `b`
+ * on the readline fallbacks. A control-flow signal like
+ * {@link PromptCancelledError}, not a failure: callers re-run the
+ * previous screen.
+ */
+export class PromptBackRequestedError extends Error {
+  constructor(message = 'TUI prompt backed out') {
+    super(message)
+    this.name = 'PromptBackRequestedError'
+  }
+}
+
+/**
+ * Identify a back request across direct runtime errors and wrapped
+ * copies that preserve the established error name.
+ *
+ * @param {unknown} err
+ * @returns {err is PromptBackRequestedError}
+ */
+export function isPromptBackError(err) {
+  return err instanceof PromptBackRequestedError || (
+    err instanceof Error && err.name === 'PromptBackRequestedError'
   )
 }

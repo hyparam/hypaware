@@ -10,12 +10,19 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
-import { asyncRow } from 'squirreling'
+import { asyncRow, selectVector } from 'squirreling'
 import { executeQuerySql } from '../../src/core/query/sql.js'
+import { withLocalOnlyVisibility } from '../../src/core/query/visibility.js'
+import { appendRowsToTable, dataSourceForTable, deleteMatchingRows } from '../../src/core/cache/iceberg/store.js'
+import { unionSources } from '../../src/core/query/union-source.js'
 
 /**
- * @import { AsyncDataSource, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { AsyncBatch, AsyncDataSource, RowSelection, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { UsagePolicyResolver } from '../../src/core/usage-policy/types.js'
  */
 
@@ -319,4 +326,182 @@ test('datasets with neither cwd nor a content declaration are untouched', async 
   assert.deepEqual(out.rows, rows)
   assert.equal(out.localOnly.filtered, false)
   assert.equal(out.localOnly.callerClass, 'unknown')
+})
+
+/**
+ * Native source whose deferred readers require their original batch.
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {RowSelection} selection
+ * @returns {ScannableDataSource}
+ */
+function nativeSource(rows, selection) {
+  const columns = ['id', 'cwd', 'msg']
+  const fields = columns.map((name, index) => ({
+    id: index + 10, name, nullable: true,
+    dataType: name === 'id' ? /** @type {const} */ ({ type: 'number' }) : /** @type {const} */ ({ type: 'string' }),
+  }))
+  return {
+    columns,
+    schema: { fields },
+    numRows: rows.length,
+    scan() { throw new Error('visibility must stay on native batches') },
+    prepareScan(request) {
+      assert.equal(request.limit, undefined)
+      assert.equal(request.offset, undefined)
+      const cwdDemand = request.columns.find((demand) => demand.field === 11)
+      assert.equal(cwdDemand?.mode, 'required')
+      const requested = request.columns.map((demand) => fields.find((field) => field.id === demand.field))
+      assert.ok(requested.every((field) => field !== undefined))
+      return {
+        schema: { fields: /** @type {typeof fields} */ (requested) },
+        residual: { filter: request.filter },
+        properties: { exactRows: rows.length, maxRows: rows.length },
+        async *batches() {
+          /** @type {AsyncBatch} */
+          const batch = {
+            selection,
+            columns: requested.map((field) => ({
+              read({ batch: input, selection: selected }) {
+                assert.equal(input, batch, 'deferred readers retain their original input')
+                const values = rows.map((row) => row[/** @type {NonNullable<typeof field>} */ (field).name])
+                return selectVector({ type: 'values', values, length: rows.length }, selected)
+              },
+            })),
+          }
+          yield batch
+        },
+      }
+    },
+  }
+}
+
+// @ref LLP 0388#batch-filter [tests]: native filtering agrees with the row path through selections, aggregates, predicates and global range operators
+test('native visibility agrees with row visibility across SQL shapes and caller classes', async () => {
+  const rows = [...ROWS, { id: 5, cwd: null, msg: 'no provenance' }, { id: 6, cwd: '', msg: 'empty cwd' }]
+  /** @type {{ selection: RowSelection, rows: typeof rows }[]} */
+  const cases = [
+    { selection: { type: 'all', length: rows.length }, rows },
+    { selection: { type: 'range', start: 1, end: 5, length: rows.length }, rows: rows.slice(1, 5) },
+    { selection: { type: 'indices', indices: new Uint32Array([0, 2, 4, 5]), length: rows.length }, rows: [rows[0], rows[2], rows[4], rows[5]] },
+  ]
+  const queries = [
+    'SELECT id, msg FROM t ORDER BY id',
+    'SELECT cwd, id FROM t ORDER BY id',
+    'SELECT COUNT(*) AS n FROM t',
+    'SELECT MIN(id) AS low, MAX(id) AS high, SUM(id) AS total FROM t',
+    'SELECT cwd, COUNT(*) AS n FROM t GROUP BY cwd ORDER BY cwd',
+    'SELECT id FROM t WHERE id > 1 LIMIT 2 OFFSET 1',
+    "SELECT id FROM t WHERE cwd = '/w/lo'",
+    'SELECT id FROM t ORDER BY id DESC LIMIT 2 OFFSET 1',
+  ]
+  for (const { selection, rows: selected } of cases) {
+    for (const callerCwd of [null, '/w/full', '/w/lo']) {
+      for (const sql of queries) {
+        const native = await run({ source: nativeSource(rows, selection), sql, callerCwd })
+        const legacy = await run({ rows: selected, sql, callerCwd })
+        assert.deepEqual(native.rows, legacy.rows, `${selection.type}: ${callerCwd}: ${sql}`)
+      }
+    }
+  }
+  const out = await run({ source: nativeSource(rows, cases[0].selection) })
+  assert.equal(out.localOnly.withheldRows, 2)
+  assert.equal(out.localOnly.suppressedRows, 0)
+})
+
+test('native visibility drops an entirely withheld batch and propagates policy failures and aborts', async () => {
+  const source = nativeSource(ROWS.slice(2), { type: 'all', length: 2 })
+  assert.deepEqual((await run({ source, sql: 'SELECT COUNT(*) AS n FROM t' })).rows, [{ n: 0 }])
+  const report = { callerClass: /** @type {const} */ ('unknown'), filtered: true, withheldRows: 0, suppressedRows: 0 }
+  const guarded = withLocalOnlyVisibility(source, {
+    resolver: { resolve() { throw new Error('policy unavailable') }, isIgnored() { return false } },
+    callerRank: 0, report, contentColumns: [],
+  })
+  const scan = /** @type {NonNullable<typeof guarded.prepareScan>} */ (guarded.prepareScan)({ columns: [] })
+  await assert.rejects(async () => { for await (const _ of scan.batches()) {} }, /policy unavailable/)
+  const controller = new AbortController()
+  controller.abort(new Error('query cancelled'))
+  await assert.rejects(async () => { for await (const _ of scan.batches({ signal: controller.signal })) {} }, /query cancelled/)
+})
+
+test('sources mixing cwd and content suppression retain the row path', async () => {
+  const rows = [{ id: 1, cwd: null, msg: 'secret' }]
+  const native = nativeSource(rows, { type: 'all', length: 1 })
+  const source = { ...native, scan: /** @type {ScannableDataSource} */ (memorySource(rows)).scan,
+    prepareScan() { throw new Error('content suppression must use the row path') } }
+  const out = await run({ source, extras: { localOnlyContentColumns: ['msg'] }, sql: "SELECT id FROM t WHERE msg = 'secret'" })
+  assert.deepEqual(out.rows, [])
+})
+
+// @ref LLP 0431#native-suppression [tests]: graph-shaped sources stay native without leaking predicate matches, decoding content or losing deletes
+test('cwd-less native suppression agrees with row semantics across predicates, ranges and deletes', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-native-suppression-'))
+  const rows = [{ id: 1, msg: 'deleted' }, { id: 2, msg: 'secret' }, { id: 3, msg: 'other' }]
+  try {
+    await appendRowsToTable(root, [
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'msg', type: 'STRING', nullable: false },
+    ], rows)
+    await deleteMatchingRows(root, row => Number(row.id) === 1, { columns: ['id'] })
+    const original = await dataSourceForTable(root)
+    assert.ok(original?.prepareScan)
+    const prepare = original.prepareScan.bind(original)
+    const source = { ...original, scan() { throw new Error('suppression fell back to rows') },
+      prepareScan(request) {
+        const contentRequested = request.columns.some(demand => original.schema?.fields.find(f => f.id === demand.field)?.name === 'msg')
+        if (contentRequested) assert.equal(request.filter, undefined, 'content predicates cannot reach the source')
+        assert.equal(request.limit, undefined)
+        assert.equal(request.offset, undefined)
+        const inner = prepare(request)
+        return { ...inner, async *batches(options) {
+          for await (const batch of inner.batches(options)) {
+            yield { ...batch, columns: batch.columns.map((column, i) => inner.schema.fields[i].name === 'msg'
+              ? { read() { throw new Error('suppressed content must not be decoded') } } : column) }
+          }
+        } }
+      },
+    }
+    for (const sql of [
+      'SELECT id, msg FROM t ORDER BY id',
+      "SELECT id FROM t WHERE msg = 'secret'",
+      "SELECT id FROM t WHERE msg = 'other' OR id = 2",
+      'SELECT id, msg FROM t WHERE msg IS NULL ORDER BY id LIMIT 1 OFFSET 1',
+      'SELECT id FROM t WHERE msg IS NOT NULL',
+      'SELECT COUNT(*) AS n, COUNT(msg) AS visible FROM t',
+      'SELECT id FROM t WHERE id > 1 ORDER BY id LIMIT 1 OFFSET 1',
+      'SELECT msg, COUNT(*) AS n FROM t GROUP BY msg',
+    ]) {
+      const extras = { localOnlyContentColumns: ['msg'] }
+      const native = await run({ source, extras, sql })
+      const legacy = await run({ rows: rows.slice(1), extras, sql })
+      assert.deepEqual(native.rows.map(row => 'id' in row ? { ...row, id: Number(row.id) } : row), legacy.rows, sql)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('native visibility composes with real Iceberg position deletes and multiple partitions', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-native-visibility-'))
+  try {
+    const sources = []
+    for (const [index, rows] of [ROWS.slice(0, 2), ROWS.slice(2)].entries()) {
+      const table = path.join(root, String(index))
+      await appendRowsToTable(table, [
+        { name: 'id', type: 'INT64', nullable: false },
+        { name: 'cwd', type: 'STRING', nullable: true },
+        { name: 'msg', type: 'STRING', nullable: true },
+      ], rows)
+      await deleteMatchingRows(table, (row) => Number(row.id) === 1, { columns: ['id'] })
+      const source = await dataSourceForTable(table)
+      assert.ok(source?.prepareScan)
+      sources.push({ ...source, scan() { throw new Error('Iceberg visibility fell back to rows') } })
+    }
+    const source = unionSources(sources)
+    assert.ok(source.prepareScan)
+    assert.deepEqual((await run({ source, sql: 'SELECT COUNT(*) AS n FROM t' })).rows, [{ n: 1 }])
+    assert.deepEqual((await run({ source, sql: 'SELECT id FROM t ORDER BY id' })).rows.map((row) => Number(row.id)), [2])
+    assert.deepEqual((await run({ source, sql: 'SELECT id FROM t WHERE id > 1 LIMIT 1 OFFSET 1' })).rows, [])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })

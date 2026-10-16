@@ -26,10 +26,10 @@ Does this decision change how the system is or should be built/understood?
                → Is it a genuine, non-obvious decision a future agent could get wrong?
                  ├─ YES → Create a new LLP (next number, NNNN-slug.type.md, full header).
                  │         Choose Type deliberately:
-                 │           Decision  — a settled choice + its rationale (ADR-like)
-                 │           Spec      — normative "must/must not" the code follows
-                 │           Principle — an "always/never" that guides many decisions
-                 │           Plan      — execution steps (often tombstoned once done)
+                 │           Decision  - a settled choice + its rationale (ADR-like)
+                 │           Spec      - normative "must/must not" the code follows
+                 │           Principle - an "always/never" that guides many decisions
+                 │           Plan      - execution steps (often tombstoned once done)
                  │         Tag **Systems:** with the existing vocabulary (or extend it
                  │         and update LLP 0000's map).
                  └─ NO  → It's obvious from the code and filename. Write nothing.
@@ -37,7 +37,7 @@ Does this decision change how the system is or should be built/understood?
 
 ## The capture bar (lower than ADRs, but not zero)
 
-LLP documents are *living* — editable, supersede-able, deletable — so you are
+LLP documents are *living* (editable, supersede-able, deletable), so you are
 not making a permanent commitment the way an append-only ADR is. That lowers the
 cost of capturing, but the **value** test is the same one from LLP 0000:
 
@@ -46,20 +46,20 @@ cost of capturing, but the **value** test is the same one from LLP 0000:
 
 Strong candidates:
 
-- **Cross-cutting invariants** — "sources never see sinks", "one source, one
+- **Cross-cutting invariants**: "sources never see sinks", "one source, one
   table". Code that violates these looks locally fine.
-- **Deliberate deviations from the obvious path** — anything where a reasonable
+- **Deliberate deviations from the obvious path**: anything where a reasonable
   agent would assume the opposite and "fix" it.
-- **Boundary and ownership decisions** — who owns this data/table/capability;
+- **Boundary and ownership decisions**, who owns this data/table/capability;
   the explicit no-s are as valuable as the yes-s.
-- **Constraints not visible in code** — compliance, latency budgets, a contract
+- **Constraints not visible in code**: compliance, latency budgets, a contract
   with an upstream the code can't show.
 
 Skip:
 
 - The obvious ("we use the standard library here").
-- Volatile, still-being-prototyped code — wait until the design stabilises.
-- Restating what an existing LLP already says — link to it instead.
+- Volatile, still-being-prototyped code: wait until the design stabilises.
+- Restating what an existing LLP already says: link to it instead.
 
 ## After disposition
 

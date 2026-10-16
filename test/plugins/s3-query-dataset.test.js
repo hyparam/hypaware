@@ -2,13 +2,21 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { Readable } from 'node:stream'
+
+import { compareStrings } from '../../src/core/util/compare_strings.js'
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { collect, executeSql } from 'squirreling'
 
 import { buildS3QueryDataset } from '../../hypaware-core/plugins-workspace/s3/src/query-dataset.js'
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
+import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
+import { createBlobStoreIO, tableUrlForBlobPrefix } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
+import { commitBatch, probeTable } from '../../hypaware-core/plugins-workspace/format-iceberg/src/commit.js'
 
 /**
  * @import { BlobStore, ColumnSpec, DatasetRegistration } from '../../hypaware-plugin-kernel-types.js'
@@ -39,7 +47,7 @@ function fakeBlobStore(objects) {
       const wanted = prefix ?? ''
       return {
         async *[Symbol.asyncIterator]() {
-          const entries = [...objects.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+          const entries = [...objects.entries()].sort((a, b) => compareStrings(a[0], b[0]))
           for (const [key, bytes] of entries) {
             if (wanted.length > 0 && !key.startsWith(wanted)) continue
             yield { key, size: bytes.byteLength, lastModified: new Date(0) }
@@ -80,6 +88,33 @@ async function runQuery(dataset, query) {
   })
   return collect(executeSql({ tables: { [dataset.name]: source }, query }))
 }
+
+test('the query-path BlobStore double lists keys in byte order, the way a bucket does', async () => {
+  // Asserted on the double directly rather than through `discoverPartitions`,
+  // which sorts the partitions it built with `compareStrings` of its own and
+  // would answer the same whatever order it was handed. That re-sort is why
+  // reverting this double changed no test result, and it is why the statement
+  // has to be made here or not at all.
+  //
+  // Four keys chosen so byte order and collation disagree twice over, on the
+  // two pairs `compare-strings.test.js` names: the characters put `B` before
+  // `a` and `-` before `_`, and every collation probed (`en-US`, `de-DE`,
+  // `lt-LT`, `az`, `tr-TR`) reverses both. So this listing tells a
+  // byte-ordered double from a collated one on any box with ICU data, which is
+  // the fidelity no assertion in the tree made when the doubles moved to
+  // `compareStrings` (#1148 item 3). A bucket really does answer in this
+  // order: for a general-purpose bucket S3 returns keys sorted by UTF-8 byte
+  // value, and for these keys that is the same as UTF-16 code unit order.
+  const objects = new Map(
+    ['ds/x_1.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/B.parquet'].map((key) => [
+      key,
+      new Uint8Array([1]),
+    ])
+  )
+  const seen = []
+  for await (const entry of fakeBlobStore(objects).listObjects({ prefix: 'ds/' })) seen.push(entry.key)
+  assert.deepEqual(seen, ['ds/B.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/x_1.parquet'])
+})
 
 test('parquet query source reads a single object back through SQL', async () => {
   const objects = new Map([
@@ -159,6 +194,79 @@ test('iceberg query source with no metadata reads as empty (no throw)', async ()
   })
   const rows = await runQuery(dataset, 'SELECT * FROM ai_gw')
   assert.deepEqual(rows, [])
+})
+
+// The s3 iceberg branch (`createIcebergDataSource`) reaches the same
+// `icebergDataSource` the local cache's `dataSourceForTable` does, so it
+// inherits the same pushdown converter (LLP 0222), but it is a lazy dynamic
+// import reached only by s3-configured deployments and had no test of its own.
+// This writes a real table through a real BlobStore (local-fs standing in for
+// S3, the same adapter shape `@hypaware/s3` uses) and proves the remote branch
+// is NULL-correct, not just the local one.
+test('iceberg query source is NULL-correct through a real BlobStore round trip', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-s3-iceberg-'))
+  try {
+    const blobStore = createLocalFsBlobStore({ baseDir: dir })
+    const { resolver, lister } = await createBlobStoreIO(blobStore)
+    const prefix = 'iceberg/datasets/ai_gw'
+    const tableUrl = tableUrlForBlobPrefix(prefix)
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'ts', type: 'INT64', nullable: true },
+    ]
+    // Same `ts` shape as the local-cache parity fixture
+    // (`test/core/iceberg-source-parity.test.js`): straddles a bound with
+    // NULLs on either side, so `!= 300` has to exclude both the NULL rows
+    // and the literal match rather than just the match.
+    const rows = [
+      { id: 1, ts: 100 },
+      { id: 2, ts: null },
+      { id: 3, ts: 300 },
+      { id: 4, ts: null },
+      { id: 5, ts: 500 },
+    ]
+    const priorState = await probeTable(tableUrl, resolver, lister)
+    await commitBatch({ tableUrl, columns, rows, resolver, lister }, priorState)
+
+    const dataset = buildS3QueryDataset({
+      source: { name: 'ai_gw', format: 'iceberg', prefix, schema: columns },
+      blobStore,
+      plugin: '@hypaware/s3',
+    })
+
+    /** @type {[string, number[]][]} */
+    const cases = [
+      ['ts = NULL', []],
+      ['NOT (ts = NULL)', []],
+      ['ts != NULL', []],
+      ['ts NOT IN (300, NULL)', []],
+      ['ts != 300', [1, 5]],
+      // rows are identical whether the cast is folded and pushed or declined
+      // and answered by the three-valued engine, so this does not pin the
+      // fold (verified: with icebird's cast fold removed, this file is still
+      // 7/0). The negated form is the one case in this corpus that actually
+      // fails when the remote tier's hyparquet drops below 1.28.2, so it is
+      // this file's hyparquet-floor tripwire (LLP 0222#hyparquet-floor)
+      ['ts > CAST(300 AS BIGINT)', [5]],
+      ['NOT (ts > CAST(300 AS BIGINT))', [1, 3]],
+    ]
+    /** @type {string[]} */
+    const wrong = []
+    for (const [predicate, expected] of cases) {
+      const got = await runQuery(dataset, `SELECT id FROM ai_gw WHERE ${predicate}`)
+      const ids = got.map((r) => Number(r.id)).sort((a, b) => a - b)
+      if (ids.join(',') !== expected.join(',')) {
+        wrong.push(`WHERE ${predicate} -> [${ids.join(',')}], SQL says [${expected.join(',')}]`)
+      }
+    }
+    assert.deepEqual(wrong, [])
+
+    const agg = await runQuery(dataset, 'SELECT COUNT(ts) AS n FROM ai_gw WHERE NOT (ts = NULL)')
+    assert.equal(Number(agg[0].n), 0, 'a filtered aggregate must reach the same NULL-correct rows')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('parquet discovery bounds the prefix to a directory, excluding sibling namespaces', async () => {

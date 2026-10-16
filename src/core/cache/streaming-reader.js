@@ -16,12 +16,13 @@ export const BATCH_ROW_LIMIT = 100_000
 
 /**
  * Internal append-monotonic ingest sequence column. Hidden, nullable, and
- * additive: it is stamped on every flushed row at the `decorateRow`
- * chokepoint, carried verbatim through compaction (it is a row-resident
+ * additive: it is stamped on every row as it commits, inside the partition
+ * mutation guard (`appendRowsToSourceTable` and `reconcileRowsInTable`),
+ * carried verbatim through compaction (it is a row-resident
  * value, so a generation-swap rewrite copies it into the new table), and
  * stripped from every query/`readRows` consumer via `INTERNAL_FIELDS`.
  *
- * Nullable so it rides existing tables as an additive schema change — rows
+ * Nullable so it rides existing tables as an additive schema change: rows
  * written before the column existed read back as `null`.
  *
  * @ref LLP 0040#ingest-seq-column [implements]: row-resident monotonic int64 watermark column
@@ -38,14 +39,17 @@ export const INGEST_SEQ_COLUMN = { name: '_hyp_ingest_seq', type: 'INT64', nulla
  * or is still being written).
  *
  * Each emitted row is decorated with:
- * - `_hyp_cache_row_id`  — SHA-256 of the serialized row (stable dedup key)
- * - `_hyp_cache_batch_id` — caller-supplied batch identifier
- * - `_hyp_ingest_seq`     — monotonic int64 from `nextSeq` (null when absent)
+ * - `_hyp_cache_row_id`: SHA-256 of the serialized row (stable dedup key)
+ * - `_hyp_cache_batch_id`: caller-supplied batch identifier
+ * - `_hyp_ingest_seq`: null here; the commit path stamps the real seq
  *
  * The decorated chunk's `columns` carry an extra nullable `_hyp_ingest_seq`
  * `ColumnSpec` so the value lands in the Iceberg schema (additive, never
- * required). The `_hyp_cache_row_id` hash is computed over the ORIGINAL row,
- * before any decoration, so the seq does not perturb the dedup identity.
+ * required). The seq itself is reserved only at commit time, under the
+ * partition guard, so rows from two processes can never commit out of seq
+ * order (issue #2578). The `_hyp_cache_row_id` hash is computed over the
+ * ORIGINAL row, before any decoration, so the seq does not perturb the dedup
+ * identity.
  *
  * Resume support: if `startOffset` > 0 the reader seeks past already-
  * flushed bytes and continues from there. After each yielded batch the
@@ -58,7 +62,6 @@ export const INGEST_SEQ_COLUMN = { name: '_hyp_ingest_seq', type: 'INT64', nulla
  *   startOffset?: number,
  *   batchByteLimit?: number,
  *   batchRowLimit?: number,
- *   nextSeq?: () => Promise<bigint>,
  * }} opts
  * @returns {AsyncGenerator<{
  *   chunk: FlushChunk,
@@ -73,7 +76,6 @@ export async function* streamFlushFile(opts) {
     startOffset = 0,
     batchByteLimit = BATCH_BYTE_LIMIT,
     batchRowLimit = BATCH_ROW_LIMIT,
-    nextSeq,
   } = opts
 
   const stream = createReadStream(filePath, {
@@ -82,7 +84,6 @@ export async function* streamFlushFile(opts) {
     highWaterMark: 64 * 1024,
   })
 
-  let tail = ''
   let absoluteOffset = startOffset
   /** @type {readonly ColumnSpec[] | null} */
   let currentColumns = null
@@ -105,77 +106,65 @@ export async function* streamFlushFile(opts) {
     return chunk
   }
 
-  for await (const data of stream) {
-    const text = /** @type {string} */ (data)
-    tail += text
+  for await (const line of streamSpoolLines(stream)) {
+    const lineByteLen = Buffer.byteLength(line, 'utf8') + 1
+    const lineStartOffset = absoluteOffset
+    absoluteOffset += lineByteLen
 
-    let newlineIdx
-    while ((newlineIdx = tail.indexOf('\n')) !== -1) {
-      const line = tail.slice(0, newlineIdx)
-      const lineByteLen = Buffer.byteLength(line, 'utf8') + 1
-      const lineStartOffset = absoluteOffset
-      tail = tail.slice(newlineIdx + 1)
-      absoluteOffset += lineByteLen
+    if (line.length === 0) continue
 
-      if (line.length === 0) continue
+    /** @type {{ version?: number, columns?: readonly ColumnSpec[], rows?: Record<string, unknown>[] } | null} */
+    let envelope = null
+    try {
+      envelope = JSON.parse(line)
+    } catch {
+      malformedCount++
+      continue
+    }
 
-      /** @type {{ version?: number, columns?: readonly ColumnSpec[], rows?: Record<string, unknown>[] } | null} */
-      let envelope = null
-      try {
-        envelope = JSON.parse(line)
-      } catch {
-        malformedCount++
-        continue
+    if (
+      !envelope ||
+      envelope.version !== 1 ||
+      !Array.isArray(envelope.columns) ||
+      !Array.isArray(envelope.rows)
+    ) {
+      malformedCount++
+      continue
+    }
+
+    const signature = JSON.stringify(envelope.columns)
+    if (currentColumns && signature !== currentSignature) {
+      const sealed = sealBatch()
+      if (sealed) {
+        yield { chunk: sealed, resumeOffset: absoluteOffset - lineByteLen, malformedCount }
+        malformedCount = 0
       }
+    }
 
-      if (
-        !envelope ||
-        envelope.version !== 1 ||
-        !Array.isArray(envelope.columns) ||
-        !Array.isArray(envelope.rows)
-      ) {
-        malformedCount++
-        continue
-      }
+    currentColumns = envelope.columns
+    currentSignature = signature
 
-      const signature = JSON.stringify(envelope.columns)
-      if (currentColumns && signature !== currentSignature) {
+    for (let idx = 0; idx < envelope.rows.length; idx++) {
+      const row = envelope.rows[idx]
+      const decorated = decorateRow(row, batchId)
+      const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8')
+      currentRows.push(decorated)
+      currentBatchBytes += rowBytes
+
+      if (currentRows.length >= batchRowLimit || currentBatchBytes >= batchByteLimit) {
         const sealed = sealBatch()
         if (sealed) {
-          yield { chunk: sealed, resumeOffset: absoluteOffset - lineByteLen, malformedCount }
+          const endedOnLineBoundary = idx === envelope.rows.length - 1
+          yield {
+            chunk: sealed,
+            resumeOffset: endedOnLineBoundary ? absoluteOffset : lineStartOffset,
+            malformedCount,
+          }
           malformedCount = 0
         }
-      }
-
-      currentColumns = envelope.columns
-      currentSignature = signature
-
-      for (let idx = 0; idx < envelope.rows.length; idx++) {
-        const row = envelope.rows[idx]
-        // Reserve-before-stamp: each seq is durably reserved (allocator
-        // advances the persisted nextSeq one block ahead) before it reaches
-        // a row, so a resumed flush never re-issues a seq it already stamped.
-        const seq = nextSeq ? await nextSeq() : null
-        const decorated = decorateRow(row, batchId, seq)
-        const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8')
-        currentRows.push(decorated)
-        currentBatchBytes += rowBytes
-
-        if (currentRows.length >= batchRowLimit || currentBatchBytes >= batchByteLimit) {
-          const sealed = sealBatch()
-          if (sealed) {
-            const endedOnLineBoundary = idx === envelope.rows.length - 1
-            yield {
-              chunk: sealed,
-              resumeOffset: endedOnLineBoundary ? absoluteOffset : lineStartOffset,
-              malformedCount,
-            }
-            malformedCount = 0
-          }
-          if (!currentColumns) {
-            currentColumns = envelope.columns
-            currentSignature = signature
-          }
+        if (!currentColumns) {
+          currentColumns = envelope.columns
+          currentSignature = signature
         }
       }
     }
@@ -188,26 +177,56 @@ export async function* streamFlushFile(opts) {
 }
 
 /**
+ * Split decoded spool chunks without repeatedly flattening and scanning a
+ * growing envelope. An envelope can span thousands of chunks; retain its
+ * fragments and join only at the newline, so work stays linear in its size.
+ * The caller's UTF-8 stream decoder owns split multibyte characters. Flush
+ * ignores unfinished envelopes; provisional inspection also tries the tail.
+ *
+ * @param {AsyncIterable<string>} stream
+ * @param {boolean} [includeTrailing]
+ * @returns {AsyncGenerator<string>}
+ */
+export async function* streamSpoolLines(stream, includeTrailing = false) {
+  /** @type {string[]} */
+  let fragments = []
+  for await (const text of stream) {
+    let start = 0
+    let end
+    while ((end = text.indexOf('\n', start)) !== -1) {
+      let line = text.slice(start, end)
+      if (fragments.length) {
+        fragments.push(line)
+        line = fragments.join('')
+        fragments = []
+      }
+      start = end + 1
+      yield line
+    }
+    if (start < text.length) fragments.push(text.slice(start))
+  }
+  if (includeTrailing && fragments.length) yield fragments.join('')
+}
+
+/**
  * @param {Record<string, unknown>} row
  * @param {string} batchId
- * @param {bigint | null} seq monotonic ingest sequence, or `null` when no
- *   allocator is wired (the seq is then absent and reads back as null)
  * @returns {Record<string, unknown>}
  */
-function decorateRow(row, batchId, seq) {
+function decorateRow(row, batchId) {
   const serialized = JSON.stringify(row, stableReplacer)
   const hash = createHash('sha256').update(serialized).digest('hex')
   return {
     ...row,
     _hyp_cache_row_id: hash,
     _hyp_cache_batch_id: batchId,
-    [INGEST_SEQ_COLUMN.name]: seq,
+    [INGEST_SEQ_COLUMN.name]: null,
   }
 }
 
 /**
  * Append the nullable `_hyp_ingest_seq` column to a chunk's column list so the
- * stamped value lands in the Iceberg schema. Idempotent — never double-adds.
+ * stamped value lands in the Iceberg schema. Idempotent, never double-adds.
  *
  * @param {readonly ColumnSpec[]} columns
  * @returns {ColumnSpec[]}
@@ -289,7 +308,7 @@ function progressPath(spoolFilePath) {
  * Internal-field names that should be hidden from query output and from every
  * `readRows` consumer (forward/blob sinks, query, projectors). `_hyp_ingest_seq`
  * is included so the sink-read watermark column never leaks to the wire payload
- * or query results — `readRowsSince` (T2) re-exposes it as an opaque token only.
+ * or query results: `readRowsSince` (T2) re-exposes it as an opaque token only.
  *
  * @ref LLP 0040#storage-api-extension [constrained-by]: internal, stripped on read
  */

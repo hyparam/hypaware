@@ -18,6 +18,7 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { maintainCache } from '../../../src/core/cache/maintenance.js'
 import { readCursorSync } from '../../../src/core/cache/partition.js'
+import { compareStrings } from '../../../src/core/util/compare_strings.js'
 
 /**
  * @import { ActivePlugin, ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
@@ -41,13 +42,13 @@ const COLUMNS = [
  * Acceptance smoke for incremental sink reads (LLP 0040, T6) through the REAL
  * sink driver. Stands up `@hypaware/format-parquet` + `@hypaware/local-fs` plus
  * a fixture `proxy` dataset, then drives the blob sink across the cache rewrite
- * that makes incremental export hard — a compaction GENERATION SWAP — and proves:
+ * that makes incremental export hard, a compaction GENERATION SWAP, and proves:
  *
  *   - tick 1 (3 rows): one parquet blob lands carrying exactly those rows;
  *   - tick 2 (no new rows): the sink writes NO new blob and reports ≈0 bytes;
  *   - a compaction rewrites the partition into a fresh `table-<seq>` dir;
  *   - tick 3 (2 new rows): exactly one new blob lands carrying ONLY the 2 new
- *     rows — the row-resident `_hyp_ingest_seq` rode the compaction verbatim and
+ *     rows, the row-resident `_hyp_ingest_seq` rode the compaction verbatim and
  *     the logical-path watermark read straight through the generation swap;
  *   - across all ticks every row is exported exactly once (no skip, no dup).
  *
@@ -60,7 +61,7 @@ const COLUMNS = [
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
-    throw new Error('incremental_sink_compaction: tracer provider not installed — expected HYP_DEV_TELEMETRY=1')
+    throw new Error('incremental_sink_compaction: tracer provider not installed - expected HYP_DEV_TELEMETRY=1')
   }
 
   const cacheRoot = path.join(harness.stateDir, 'cache')
@@ -91,7 +92,7 @@ export async function run({ harness, expect }) {
     async () => {
       const { loaded, failed } = await loadManifests([parquetDir, localFsDir, fixtureDir])
       if (failed.length > 0) {
-        throw new Error(`incremental_sink_compaction: manifest failures — ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`)
+        throw new Error(`incremental_sink_compaction: manifest failures - ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`)
       }
       const entries = loaded.map((l) => ({ manifest: l.manifest, rootDir: l.rootDir }))
       const result = await activatePlugins({ plugins: entries, stateRoot: harness.stateDir, runId: harness.devRunId, runtime: kernel, tmpRoot })
@@ -156,6 +157,9 @@ export async function run({ harness, expect }) {
   const before = readCursorSync(sourceDir).tableDir ?? 'table'
   const maint = await maintainCache({ cacheRoot, force: true, compactOnly: true })
   expect.that('compaction: at least one partition compacted', maint.totalCompacted, (v) => typeof v === 'number' && v > 0)
+  // @ref LLP 0220#tick-reports-degraded: a partition that throws no longer
+  // rejects the tick, so the failure has to be read off the report.
+  expect.that('compaction: no partition failed', maint.totalFailed, (v) => v === 0)
   const after = readCursorSync(sourceDir).tableDir ?? 'table'
   expect.that('compaction: generation directory swapped', [before, after], ([b, a]) => b !== a)
 
@@ -222,7 +226,7 @@ async function readBlobs(destDir) {
     }
   }
   await walk(destDir)
-  return out.sort((a, b) => a.name.localeCompare(b.name))
+  return out.sort((a, b) => compareStrings(a.name, b.name))
 }
 
 /**

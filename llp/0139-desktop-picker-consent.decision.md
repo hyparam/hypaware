@@ -90,6 +90,15 @@ every file that changes.
 > Read "the picker tick is the consent point" below as scoped to live
 > capture; history is gated separately, by transcript-entrypoint ownership.
 
+> **Amended by [LLP 0224](./0224-desktop-setup-second-pass.decision.md)**:
+> the explanation and every disclosed fact stand, but the screen now
+> leads with the decision rather than the mechanism, the question after
+> it defaults to yes and names the browser sign-in a yes may launch, and
+> it is asked for a new pick only - a reconfigure's carried row is
+> skipped, with the incomplete-setup state surfaced by `hyp status`'s
+> `client_attach_missing` diagnostic (§repair-must-be-runnable) instead
+> of by re-asking. The row itself is never pre-checked by detection.
+
 This is a better gate than the exclusion list was, for three reasons.
 First, the acquisition of a credential was already attended: step 1 of
 `install` runs `claude-account login` interactively and refuses outright
@@ -108,7 +117,15 @@ path, so it composes `subscription`. `org_key` is fleet policy and arrives
 through the central layer on `hyp join`, never through the picker
 ([LLP 0117](./0117-claude-account-credential-plugin.decision.md)).
 
-<a id="default-no"></a>**The prompt defaults to no**, unlike the backfill
+<a id="default-no"></a>
+
+> **Superseded by [LLP 0224 §one-question-default-yes](./0224-desktop-setup-second-pass.decision.md#one-question-default-yes)**:
+> the prompt now defaults to yes. The non-answer rule below survives
+> unchanged - every non-answer declines, with the hint, without hanging;
+> only an explicit no declines an answered prompt. The original text is
+> kept below as the record of the earlier reasoning.
+
+**The prompt defaults to no**, unlike the backfill
 consent prompt, which defaults to yes. Backfill reads local files this
 machine already has; this acquires a credential, escalates to root, and
 writes a file outside the user's home. A bare enter must not do any of
@@ -212,7 +229,10 @@ adapter has to name its own setup command, or the repair we print answers
 ## Consequences
 
 - Ticking Claude Desktop in `hyp init` now works end to end: compose,
-  explain, confirm, login, helper, residue, plist, restart.
+  explain, confirm, login, helper, residue, plist, restart. *(Amended by
+  [LLP 0224](./0224-desktop-setup-second-pass.decision.md): the confirm
+  defaults to yes, names the sign-in launch, and is asked per pick, not
+  per run.)*
 - Declining leaves `@hypaware/claude-account` and
   `@hypaware/claude-desktop` in the written config with no credential and
   no plist. That is the converging state, not a broken one: the re-run

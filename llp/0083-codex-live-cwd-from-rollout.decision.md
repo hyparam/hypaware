@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0066, LLP 0067, LLP 0150, LLP 0151
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0066, LLP 0067, LLP 0150, LLP 0151, LLP 0160, LLP 0350
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -70,21 +70,32 @@ has the symmetric fallback.
   against the **daemon's** own process cwd and return a confident verdict for an
   unrelated directory (#471). The rollout fallback then still gets its turn, and
   when nothing usable is found the row records `cwd = NULL` exactly as before, so
-  refusing does not make this path fail closed. The rollout-stated `cwd` is held
-  to the same two checks, by a different owner: core's `sessionMetaCwd` refuses a
-  blank or relative `session_meta.cwd`
+  refusing does not make this path fail closed. All three cwd sources for this
+  gate answer that from **one** predicate: core's `sessionMetaCwd` refuses a
+  blank or relative value
   ([LLP 0150 §usable-cwd](./0150-one-reader-for-codex-session-meta.decision.md#usable-cwd)),
-  and `rollout-cwd.js` reads through it, so a refused in-band value falls through
-  to an already-predicated source. That predicate is **not** borrowed for the
-  in-band value, and this bullet is not a consequence of LLP 0150: 0150 scopes the
-  in-band path out of its own mandate, because in-band is a separate source with
-  its own trust story whose value is also stamped on the row for workspace/git
-  enrichment. So the two checks are restated locally, in `usableInBandCwd`. One
-  limit of the rule, stated rather than implied: on the Codex route the value the
-  predicate sees is usually not the request's `cwd` but the workspace key
-  `selectCodexWorkspace` selected for it, which substitutes the first workspace
-  when none matches, so an absolute-but-unrelated directory can still reach the
-  gate (#476).
+  `rollout-cwd.js` reads the rollout through it, and `usableInBandCwd` calls it
+  for the in-band value, so a refused in-band value falls through to a source
+  predicated the same way. The in-band wrapper survives only to name *which* way
+  the value was unusable (`error_kind`: `cwd_blank` vs `cwd_not_absolute`), which
+  a single `undefined` cannot carry. Sharing the predicate is a de-duplication
+  (#478), not an invariant LLP 0150 imposed: 0150 scopes the in-band path out of
+  its own mandate, because in-band is a separate source with its own trust story
+  whose value is also stamped on the row for workspace/git enrichment. The first
+  cut (#471) restated the two checks locally on exactly that scoping argument,
+  not for want of an owner: `sessionMetaCwd` was already on `master` when that
+  copy landed, and its docstring cited LLP 0150 `#usable-cwd` by anchor while
+  declining to borrow it. What changed here is the weight given to drift, not
+  the scoping: the two readings were behaviourally identical over every input
+  that can reach the seam, so folding them together changed nothing except the
+  number of places the rule can drift from. The workspace key is the third source
+  with the same trust problem, and `usableInBandCwd` is applied to it too, as a
+  **separate** call, because the key no longer arrives folded into the in-band
+  value (#480). One limit of the rule, stated rather than implied: it bounds the
+  *shape* of a value, never its provenance, so an absolute-but-unrelated
+  directory (the first workspace `selectCodexWorkspace` substitutes when none
+  matches) passes it. What keeps such a guess from deciding a verdict is the
+  **ranking** below, not this predicate (#476).
 - **Keyed on the codex thread id, and the rollout must confirm it.** A rollout is
   one **thread's** file: its name embeds `session_meta.payload.id` (the thread),
   matched via the `sessionIdFromPath` helper shared with the backfill (a helper
@@ -234,30 +245,49 @@ has the symmetric fallback.
 - **One resolved `cwd`, used twice.** The same value feeds the `.hypignore` drop
   and the row's stamped `cwd`, so live rows now carry the cwd the backfill reads
   and the two halves of the policy agree (closes the live/backfill inconsistency).
-- **A substituted workspace key never decides the verdict** (amended, #476). The
-  Codex projector picks a `workspaces` turn-metadata key for enrichment, falling
+- **A substituted workspace key never decides the verdict** (amended, #476,
+  #480). {#workspace-key-ranks-last} The Codex projector picks a `workspaces`
+  turn-metadata key for enrichment, falling
   back to the *first* key when none matches the request's `cwd`. That substituted
   key is a guess about a directory the session may never have run in, so it does
-  not supply the one resolved `cwd`: an explicit in-band `cwd` outranks it for
+  not supply the one resolved `cwd` while any better-founded source exists. The
+  order is **in-band, rollout, key**: an explicit in-band `cwd` outranks it for
   both the gate and the stamp, and the refusal is reported as
   `plugin.codex.usage_policy_workspace_cwd_refused`
-  (`error_kind: workspace_cwd_mismatch`, paths hashed). The key keeps its
+  (`error_kind: workspace_cwd_mismatch`, paths hashed); the rollout's
+  `session_meta.cwd` outranks it too, because that line is what Codex itself
+  wrote at session start rather than a guess this projector made. The key keeps its
   enrichment role (`attributes.codex.workspace`, `git_remote`, `git_commit`,
-  `has_changes`) and still supplies the `cwd` on the subscription route, where
-  the request states none and the key is the only in-band source there is.
+  `has_changes`) and remains the **last resort** for the `cwd` on the
+  subscription route: when the request states none and no rollout is found, it is
+  the only source there is, and refusing it outright would remove `.hypignore`
+  coverage from that whole route.
   Consequence: for a session running in a *subdirectory* of its workspace the
   row now stamps the subdirectory rather than the workspace root, which is the
   directory the policy is actually scoped to.
-  Three limits, stated rather than implied, and each one filed so it does not
-  live only here. The key still outranks the **rollout** fallback (it resolves
-  before the `??`), so a subscription-route session that declares a `workspaces`
-  map never consults `session_meta.cwd` and a first-key guess can still decide
-  its verdict (#480). That one is pre-existing, verified byte-identical before
-  and after this amendment; ranking the guess below the rollout is a separate
-  call, not taken in the lines PRs #467/#474 rewrite. Because the key keeps
-  enriching, a row recorded where it used to drop (clean in-band `cwd`, ignored
-  declared workspace) carries that workspace's identity even though the
-  directory it names is `.hypignore`-ignored: the gate is scoped by `cwd`
+  The key is offered as a last-resort `cwd` **only when the request stated no
+  `cwd` at all**, not merely when what it stated was unusable: a relative or
+  blank in-band value is still a statement about where the session ran, and
+  letting the key stand in for it is exactly the substitution this bullet
+  refuses (#476 case c).
+  Three limits, stated rather than implied. A key outranked by the **rollout**
+  is discarded silently: `usage_policy_workspace_cwd_refused` fires only for the
+  in-band contradiction, because that predicate compares the key against a value
+  the request stated, and the rollout arrives after it. A naive widening would
+  put a warn on every turn of an ordinary session whose `session_meta.cwd` is a
+  subdirectory of its workspace, which is the frequency objection
+  [LLP 0160](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#decision)
+  has since settled on the in-band side by making the refusal an **ancestor**
+  test rather than a byte test. Widening is therefore no longer blocked on that
+  objection, but it must reuse 0160's predicate and not a byte comparison, or it
+  reintroduces exactly the noise 0160 removed. The other two are filed so they
+  do not live only here. Because the
+  key keeps enriching, a row recorded where it used to drop (an ignored declared
+  workspace outranked by a clean `cwd`, in-band since #476 and, now that the key
+  ranks below it, from the **rollout** too: demoting the key widens this case to
+  the whole subscription route rather than leaving it to the in-band one) carries
+  that workspace's identity even though the directory it names is
+  `.hypignore`-ignored: the gate is scoped by `cwd`
   ([LLP 0049](./0049-hypignore-usage-policy.spec.md#scope)), not by enrichment
   source (#481). And the gate does not canonicalize paths, so *which spelling*
   reaches it decides the verdict: a symlinked spelling of an ignored directory
@@ -267,12 +297,25 @@ has the symmetric fallback.
   misses symlinked spellings here). What this amendment changes is which of two
   symmetric spellings trips it, by taking the client's honest `cwd` over the
   key's: it closes the case where the *key* held the non-canonical spelling and
-  opens the case where the *request* does. The widest case is untouched, a
-  declared symlinked key on a subscription-route request that states no `cwd` at
-  all, which leaks the same before and after. Canonicalizing belongs in the
+  opens the case where the *request* does. The widest case is narrowed but not
+  closed: a declared symlinked key on a subscription-route request that states no
+  `cwd` at all now loses to the rollout, whose value came from `getcwd(2)` and is
+  therefore canonical, but it still reaches the gate uncanonicalized whenever no
+  rollout is found. Canonicalizing belongs in the
   shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)),
   where it must also canonicalize the `local-only` list entries or it un-governs
   an entry a user marked by its symlink spelling.
+
+**Extended-by:
+[LLP 0160](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#decision)** -
+which cases count as "refused" is narrowed to keys off the in-band `cwd`'s
+ancestor chain, because an ancestor key was never a guess about where the session
+ran (**not** because it could not have changed the verdict - it can, and 0160
+§decision discloses when). That
+document also records what is now stale in the "an unusable in-band `cwd` is a
+miss" bullet's closing #476 sentence
+([§corrections](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#corrections-0083)),
+and leaves the enrichment question open under #492.
 
 ## Why not the alternatives
 

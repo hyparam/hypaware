@@ -6,20 +6,20 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { ClientDetachError, detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
-import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
-import { V1_BUNDLED_PLUGIN_ALLOWLIST } from '../../src/core/runtime/bundled.js'
+import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
+// Fixture setup only. The core undo under test imports no plugin code; building
+// the "this entry is ours" case with the real attach is what proves the two
+// halves agree on the shape rather than on a shape this file invented.
+import { createOpenclawAttach } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
 
 /**
- * LLP 0109: the third core probe/undo format, `json_path`. The marker is a
- * nested managed object (OpenClaw's `models.providers.hypaware`) rather than a
- * top-level key, and the self-describing undo record is a JSON-encoded string
- * inside it (`headers.x-hypaware-marker`). These tests hand-write fixtures the
- * shape the openclaw adapter's attach produces - core imports no plugin code,
- * and neither do the tests.
+ * LLP 0173 T2: the `json_path` undo (`detachJsonPathProviders`). Unlike the
+ * `json`/`toml` formats there is no separate marker to replay: the entries
+ * attach wrote *are* the record, so every outcome here turns on the signature
+ * check (`marker_header` names the key, the shape is attach's; LLP 0210).
+ *
+ * @import { ClientDescriptor } from '../../src/core/types.js'
  */
-
-/** @import { ClientDescriptor } from '../../src/core/types.js' */
 
 /** @type {ClientDescriptor} */
 const OPENCLAW_DESCRIPTOR = {
@@ -29,81 +29,14 @@ const OPENCLAW_DESCRIPTOR = {
   attachProbe: {
     format: 'json_path',
     settings_file: '.openclaw/openclaw.json',
-    marker_path: 'models.providers.hypaware',
-    marker_record: 'headers.x-hypaware-marker',
+    container_path: 'models.providers',
+    provider_keys: ['anthropic', 'openai'],
+    marker_header: 'x-hypaware-upstream',
+    cache_glob: 'agents/*/agent/models.json',
   },
 }
 
-const PRIMARY_PREV = 'anthropic/claude-sonnet-4-5'
-const PRIMARY_OURS = 'hypaware/claude-sonnet-4-5'
-
-/**
- * The undo record shape LLP 0109 specifies (attach writes it as a JSON
- * string). `any` so tests can bend fixtures per scenario.
- *
- * @returns {any}
- */
-function undoRecord() {
-  return {
-    attached_at: '2026-07-15T00:00:00.000Z',
-    version: '0.3.0',
-    port: 4321,
-    managed: {
-      added: ['models.providers.hypaware'],
-      created_parents: ['models', 'models.providers'],
-      set: [{ path: 'agents.defaults.model.primary', value: PRIMARY_OURS, prev: PRIMARY_PREV }],
-      appended: [{ path: 'agents.defaults.models', value: PRIMARY_OURS }],
-    },
-  }
-}
-
-/**
- * The pre-attach settings file: an anthropic primary and a models allowlist,
- * no `models` root.
- */
-function originalSettings() {
-  return {
-    agents: {
-      defaults: {
-        model: { primary: PRIMARY_PREV },
-        models: [PRIMARY_PREV],
-      },
-    },
-  }
-}
-
-/**
- * What the openclaw adapter's attach leaves on disk: primary repointed,
- * allowlist appended, and the injected provider whose headers carry the
- * marker + record.
- *
- * @param {Record<string, unknown>} [record]
- * @returns {any}
- */
-function attachedSettings(record = undoRecord()) {
-  return {
-    agents: {
-      defaults: {
-        model: { primary: PRIMARY_OURS },
-        models: [PRIMARY_PREV, PRIMARY_OURS],
-      },
-    },
-    models: {
-      providers: {
-        hypaware: {
-          baseUrl: 'http://127.0.0.1:4321',
-          api: 'anthropic-messages',
-          apiKey: '${ANTHROPIC_API_KEY}',
-          headers: {
-            'x-hypaware-client': 'openclaw',
-            'x-hypaware-marker': JSON.stringify(record),
-          },
-          models: ['claude-sonnet-4-5'],
-        },
-      },
-    },
-  }
-}
+const ENDPOINT = 'http://127.0.0.1:18521'
 
 /** @returns {Promise<string>} */
 async function stageHome() {
@@ -115,398 +48,369 @@ async function stageHome() {
  * @param {unknown} value
  * @returns {Promise<string>}
  */
-async function writeOpenclawSettings(home, value) {
+async function writeOpenclawConfig(home, value) {
   const p = path.join(home, '.openclaw', 'openclaw.json')
   await fs.mkdir(path.dirname(p), { recursive: true })
   await fs.writeFile(p, JSON.stringify(value, null, 2) + '\n')
   return p
 }
 
-/* --------------------------------- allowlist --------------------------------- */
+/**
+ * @param {string} home
+ * @param {string} agentId
+ * @param {string} content
+ * @returns {Promise<string>}
+ */
+async function writeAgentCache(home, agentId, content) {
+  const p = path.join(home, '.openclaw', 'agents', agentId, 'agent', 'models.json')
+  await fs.mkdir(path.dirname(p), { recursive: true })
+  await fs.writeFile(p, content)
+  return p
+}
 
-test('@hypaware/openclaw is in the V1 bundled allowlist', () => {
-  assert.ok(
-    V1_BUNDLED_PLUGIN_ALLOWLIST.has('@hypaware/openclaw'),
-    'expected @hypaware/openclaw in V1_BUNDLED_PLUGIN_ALLOWLIST so it activates by default'
-  )
-})
+/** @param {string} settingsPath */
+async function readJsonFile(settingsPath) {
+  return JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+}
 
-/* ----------------------------------- probe ----------------------------------- */
+/**
+ * Attach for real, with its output swallowed: these tests assert the file the
+ * write produced, not the prose around it.
+ *
+ * @param {string} home
+ */
+async function attachForReal(home) {
+  const attach = createOpenclawAttach({ homeDir: home, env: {} })
+  return await attach.attach(/** @type {any} */ ({
+    endpoint: ENDPOINT,
+    stdout: { write() { return true } },
+  }))
+}
 
-test('json_path probe reports attached with version/port from the nested record', async () => {
+/** @param {string} upstream @param {string} baseUrl */
+function ourEntry(upstream, baseUrl) {
+  return { baseUrl, headers: { 'x-hypaware-upstream': upstream }, models: [] }
+}
+
+/* ------------------------------ ours: deleted ----------------------------- */
+
+test('json_path undo deletes the two entries the gateway wrote', async () => {
   const home = await stageHome()
   try {
-    const settingsPath = await writeOpenclawSettings(home, attachedSettings())
+    const settingsPath = await writeOpenclawConfig(home, { theme: 'dark', models: { default: 'sonnet' } })
+    assert.deepEqual(await attachForReal(home), { status: 'done' })
 
-    const probe = await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(probe.attached, true)
-    assert.equal(probe.settingsPath, settingsPath)
-    assert.equal(probe.version, '0.3.0')
-    assert.equal(probe.port, '4321')
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path probe reports not attached when the marker path is absent', async () => {
-  const home = await stageHome()
-  try {
-    await writeOpenclawSettings(home, originalSettings())
-
-    const probe = await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(probe.attached, false)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path probe reports not attached when the settings file is absent', async () => {
-  const home = await stageHome()
-  try {
-    const probe = await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(probe.attached, false)
-    assert.equal('error' in probe && probe.error !== undefined, false)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path probe tolerates a malformed record: attached with unknown version/port', async () => {
-  const home = await stageHome()
-  try {
-    const value = attachedSettings()
-    value.models.providers.hypaware.headers['x-hypaware-marker'] = 'not json {'
-    await writeOpenclawSettings(home, value)
-
-    const probe = await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(probe.attached, true)
-    assert.equal(probe.version, undefined)
-    assert.equal(probe.port, undefined)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path probe tolerates a missing record header: attached with unknown version/port', async () => {
-  const home = await stageHome()
-  try {
-    const value = attachedSettings()
-    delete value.models.providers.hypaware.headers['x-hypaware-marker']
-    await writeOpenclawSettings(home, value)
-
-    const probe = await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(probe.attached, true)
-    assert.equal(probe.version, undefined)
-    assert.equal(probe.port, undefined)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-/* ----------------------------------- detach ---------------------------------- */
-
-test('json_path undo replays the full record and round-trips to the original bytes', async () => {
-  const home = await stageHome()
-  try {
-    const originalText = JSON.stringify(originalSettings(), null, 2) + '\n'
-    const settingsPath = await writeOpenclawSettings(home, attachedSettings())
-
-    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(result.changed, true)
-    assert.equal(result.restoredValue, PRIMARY_PREV)
-    assert.equal(result.settingsPath, settingsPath)
-    assert.equal('warning' in result, false)
-
-    // Set restored, appended value removed, added subtree deleted, and the
-    // created parents (`models`, `models.providers`) pruned - byte-for-byte.
-    assert.equal(await fs.readFile(settingsPath, 'utf8'), originalText)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path undo clears exactly what the probe detects', async () => {
-  const home = await stageHome()
-  try {
-    await writeOpenclawSettings(home, attachedSettings())
-    assert.equal((await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })).attached, true)
-    await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal((await probeClientAttachFromDescriptor({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })).attached, false)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path undo leaves an externally-overridden set value in place with a warning', async () => {
-  const home = await stageHome()
-  try {
-    const value = attachedSettings()
-    // The user repointed the primary after we attached.
-    value.agents.defaults.model.primary = 'openai/gpt-5'
-    const settingsPath = await writeOpenclawSettings(home, value)
-
-    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(result.changed, true)
-    assert.match(String(result.warning), /overridden externally/)
-    assert.equal('restoredValue' in result, false)
-
-    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
-    assert.equal(parsed.agents.defaults.model.primary, 'openai/gpt-5') // user value untouched
-    assert.equal('models' in parsed, false) // provider + created parents still removed
-    assert.deepEqual(parsed.agents.defaults.models, [PRIMARY_PREV]) // appended value still removed
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path undo names EVERY externally-overridden set entry in the warning', async () => {
-  const home = await stageHome()
-  try {
-    // Issue #440 finding 2, the json_path side of the same accumulator: a record
-    // may carry several `set` entries, and they can be overridden independently.
-    // A single reassigned `warning` reported only the last one.
-    const record = undoRecord()
-    record.managed.set.push({
-      path: 'agents.defaults.model.fallback',
-      value: PRIMARY_OURS,
-      prev: PRIMARY_PREV,
+    const result = await detachClientFromDisk({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: home,
+      env: {},
     })
-    const value = attachedSettings(record)
-    value.agents.defaults.model.fallback = PRIMARY_OURS
-    // The user repointed both managed leaves after we attached.
-    value.agents.defaults.model.primary = 'openai/gpt-5'
-    value.agents.defaults.model.fallback = 'openai/gpt-5-mini'
-    const settingsPath = await writeOpenclawSettings(home, value)
 
-    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, true)
-    const warning = String(result.warning)
-    assert.match(warning, /agents\.defaults\.model\.primary was overridden externally/)
-    assert.match(warning, /agents\.defaults\.model\.fallback was overridden externally/)
-    // ` | `, not `; `: each notice already ends in "externally; leaving in
-    // place", so a `; ` join would hide where one notice stops.
-    assert.equal(
-      warning,
-      'agents.defaults.model.primary was overridden externally; leaving in place' +
-        ' | agents.defaults.model.fallback was overridden externally; leaving in place'
-    )
-
-    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
-    assert.equal(parsed.agents.defaults.model.primary, 'openai/gpt-5') // user values untouched
-    assert.equal(parsed.agents.defaults.model.fallback, 'openai/gpt-5-mini')
+    assert.equal(result.settingsPath, settingsPath)
+    // Both spellings attach writes are ours: the bare origin (anthropic) and
+    // the `+ /v1` one (openai). A check that only knew one of them would leave
+    // the other entry behind.
+    const after = await readJsonFile(settingsPath)
+    assert.deepEqual(after.models.providers, {})
+    // Nothing outside the two keys is touched, and nothing is backed up:
+    // there was no foreign value to preserve.
+    assert.equal(after.theme, 'dark')
+    assert.equal(after.models.default, 'sonnet')
+    assert.equal(result.warning, undefined)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-test('json_path undo deletes a prev-less set leaf and reports it removed', async () => {
+/* ------------------ present but not ours: left in place -------------------- */
+
+test('json_path undo leaves a present-but-not-ours entry in place and warns by path', async () => {
   const home = await stageHome()
   try {
-    // Attach onto a file with no primary at all: the record's set entry has
-    // no `prev`, so the undo deletes the leaf instead of restoring.
-    const record = undoRecord()
-    record.managed.set = [
-      { path: 'agents.defaults.model.primary', value: PRIMARY_OURS },
-    ]
-    record.managed.appended = []
-    const value = attachedSettings(record)
-    value.agents.defaults.models = [PRIMARY_PREV]
-    const settingsPath = await writeOpenclawSettings(home, value)
+    const foreign = {
+      baseUrl: 'https://foreign.example/anthropic',
+      headers: { authorization: 'Bearer user-secret' },
+      models: ['claude-x'],
+    }
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: foreign, openai: ourEntry('openai', `${ENDPOINT}/v1`) } },
+    })
 
-    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
+    const result = await detachClientFromDisk({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: home,
+      env: {},
+    })
+
     assert.equal(result.changed, true)
-    assert.equal(result.removed, PRIMARY_OURS)
-    assert.equal('restoredValue' in result, false)
-
-    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
-    assert.equal('primary' in parsed.agents.defaults.model, false)
+    const providers = (await readJsonFile(settingsPath)).models.providers
+    // Ours went; theirs stayed exactly where the user put it (LLP 0210 D2):
+    // the same disposal the json undo makes for an overridden env value.
+    assert.equal('openai' in providers, false)
+    assert.deepEqual(providers.anthropic, foreign)
+    assert.equal('_hypaware_detach_backup' in providers, false)
+    // Reported by path, never by value: a provider entry is exactly where a
+    // credential header ends up, and this string is printed and echoed into
+    // `hyp detach --json`.
+    assert.match(String(result.warning), /models\.providers\.anthropic/)
+    assert.match(String(result.warning), /left in place/)
+    assert.equal(String(result.warning).includes('user-secret'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-test('json_path undo skips an appended value the user already removed', async () => {
+test('json_path undo does not touch or remark on a config that was never attached', async () => {
   const home = await stageHome()
   try {
-    const value = attachedSettings()
-    value.agents.defaults.models = [PRIMARY_PREV] // user removed ours
-    const settingsPath = await writeOpenclawSettings(home, value)
-
-    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-    assert.equal(result.changed, true)
-
-    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
-    assert.deepEqual(parsed.agents.defaults.models, [PRIMARY_PREV])
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path undo keeps a created parent that gained user keys since attach', async () => {
-  const home = await stageHome()
-  try {
-    const value = attachedSettings()
-    // The user added their own provider under the parent attach created.
-    value.models.providers.mine = { baseUrl: 'https://mine.example' }
-    const settingsPath = await writeOpenclawSettings(home, value)
-
-    await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
-
-    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
-    assert.equal('hypaware' in parsed.models.providers, false)
-    assert.deepEqual(parsed.models.providers.mine, { baseUrl: 'https://mine.example' })
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path undo fails MALFORMED_MARKER on a marker without a readable record, leaving the file untouched', async () => {
-  const home = await stageHome()
-  try {
-    const value = attachedSettings()
-    value.models.providers.hypaware.headers['x-hypaware-marker'] = 'not json {'
-    const settingsPath = path.join(home, '.openclaw', 'openclaw.json')
-    await writeOpenclawSettings(home, value)
+    // A user-authored provider at a key attach manages, wrong-marker variant
+    // included: nothing here is ours, so nothing moves and nothing is warned,
+    // and the derived caches those entries feed are not edited either
+    // (LLP 0210 D2).
+    const impostor = { baseUrl: ENDPOINT, headers: { 'x-hypaware-upstream': 'openai' }, models: [] }
+    const theirs = { baseUrl: 'https://api.anthropic.com', models: ['claude-x'] }
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: impostor, openai: theirs } },
+    })
     const before = await fs.readFile(settingsPath, 'utf8')
+    const cacheContent = JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      openai: { baseUrl: 'https://api.anthropic.com' },
+    }, null, 2) + '\n'
+    const cachePath = await writeAgentCache(home, 'main', cacheContent)
 
-    await assert.rejects(
-      detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home }),
-      (/** @type {any} */ err) => err instanceof ClientDetachError && err.code === 'MALFORMED_MARKER'
-    )
+    const result = await detachClientFromDisk({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: home,
+      env: {},
+    })
 
-    assert.equal(await fs.readFile(settingsPath, 'utf8'), before) // non-destructive
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path undo fails MALFORMED_MARKER when the record header is missing entirely', async () => {
-  const home = await stageHome()
-  try {
-    const value = attachedSettings()
-    delete value.models.providers.hypaware.headers
-    const settingsPath = path.join(home, '.openclaw', 'openclaw.json')
-    await writeOpenclawSettings(home, value)
-    const before = await fs.readFile(settingsPath, 'utf8')
-
-    await assert.rejects(
-      detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home }),
-      (/** @type {any} */ err) => err instanceof ClientDetachError && err.code === 'MALFORMED_MARKER'
-    )
-
-    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
-  } finally {
-    await fs.rm(home, { recursive: true, force: true })
-  }
-})
-
-test('json_path undo is a no-op when the marker is absent', async () => {
-  const home = await stageHome()
-  try {
-    const text = JSON.stringify(originalSettings(), null, 2) + '\n'
-    const settingsPath = await writeOpenclawSettings(home, originalSettings())
-
-    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, false)
-    assert.equal(await fs.readFile(settingsPath, 'utf8'), text) // untouched
+    assert.equal(result.warning, undefined)
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+    assert.equal(await fs.readFile(cachePath, 'utf8'), cacheContent)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+test('json_path undo rerun finishes a cache purge the first pass left behind', async () => {
+  // Retryability (LLP 0210 D2): the settings half of an earlier detach landed
+  // (managed surface empty), the cache half did not. The residue still
+  // carries the marker header that identifies it, so the rerun purges it
+  // with nothing deleted from the settings this time.
+  const home = await stageHome()
+  try {
+    await writeOpenclawConfig(home, { models: { providers: {} } })
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT, headers: { 'x-hypaware-upstream': 'anthropic' } },
+      google: { baseUrl: 'https://vendor.example' },
+    }, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, false)
+    assert.deepEqual(await readJsonFile(cachePath), { google: { baseUrl: 'https://vendor.example' } })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('json_path undo rerun purges marked residue beside a user entry it leaves alone', async () => {
+  // The mixed rerun: the user's own openai entry occupies one managed key,
+  // our anthropic residue (marker and all) is stranded in the cache from an
+  // earlier partial detach. The row test purges ours and keeps theirs; a
+  // whole-purge gate on the settings pass would leave the residue forever.
+  const home = await stageHome()
+  try {
+    const theirs = { baseUrl: 'https://their-proxy.example', models: ['claude-x'] }
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { openai: theirs } },
+    })
+    const before = await fs.readFile(settingsPath, 'utf8')
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT, headers: { 'x-hypaware-upstream': 'anthropic' } },
+      openai: { baseUrl: 'https://their-proxy.example' },
+    }, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, false)
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+    assert.deepEqual(await readJsonFile(cachePath), { openai: { baseUrl: 'https://their-proxy.example' } })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('json_path undo leaves a never-attached machine with no managed settings keys and marker-less cache rows untouched', async () => {
+  // The ordinary OpenClaw state: models.providers absent entirely, caches
+  // carrying the user's own rows at the managed keys (merged forward from
+  // their config, no marker). Nothing here is ours, in either file.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeOpenclawConfig(home, { theme: 'dark' })
+    const before = await fs.readFile(settingsPath, 'utf8')
+    const cacheContent = JSON.stringify({
+      anthropic: { baseUrl: 'https://api.anthropic.com', models: [{ id: 'claude-sonnet-4' }] },
+      openai: { baseUrl: 'https://api.openai.com/v1', models: [{ id: 'gpt-5' }] },
+    }, null, 2) + '\n'
+    const cachePath = await writeAgentCache(home, 'main', cacheContent)
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, false)
+    assert.equal(result.warning, undefined)
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), before)
+    assert.equal(await fs.readFile(cachePath, 'utf8'), cacheContent)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('json_path undo deletes a stale entry from an old port: the signature is the whole test', async () => {
+  // LLP 0210: the entry's own signature identifies it, whatever URL it
+  // carries. An entry left behind by a daemon that has since rebound (or been
+  // uninstalled) is still ours and still needs to go; under the retired
+  // origin-comparison rule this exact fixture could not be reversed at all
+  // without a live daemon to ask.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: ourEntry('anthropic', 'http://127.0.0.1:9999') } },
+    })
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
+
+    assert.equal(result.changed, true)
+    const providers = (await readJsonFile(settingsPath)).models.providers
+    assert.equal('anthropic' in providers, false)
+    assert.equal('_hypaware_detach_backup' in providers, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/* ------------------------------ absent file ------------------------------- */
 
 test('json_path undo is a no-op when the settings file is absent', async () => {
   const home = await stageHome()
   try {
-    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
+    const result = await detachClientFromDisk({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: home,
+      env: {},
+    })
+
     assert.equal(result.changed, false)
+    assert.equal(result.settingsPath, path.join(home, '.openclaw', 'openclaw.json'))
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-/* ------------------------------ concurrent edit ------------------------------ */
+/* --------------------------- best-effort cache purge ---------------------- */
 
-/**
- * An `fs` double that delegates to the real `node:fs/promises` but bumps the
- * settings file's mtime right after the undo reads it - simulating an
- * external edit landing between read and write. The mtime-gated atomic
- * writer must surface CONCURRENT_EDIT rather than clobber.
- * @returns {any}
- */
-function makeTouchAfterReadFs() {
-  return /** @type {any} */ ({
-    stat: (/** @type {string} */ p) => fs.stat(p),
-    async readFile(/** @type {string} */ p, /** @type {any} */ enc) {
-      const content = await fs.readFile(p, enc)
-      await fs.utimes(p, new Date(), new Date(Date.now() + 5000))
-      return content
-    },
-    mkdir: (/** @type {string} */ p, /** @type {any} */ opts) => fs.mkdir(p, opts),
-    rename: (/** @type {string} */ a, /** @type {string} */ b) => fs.rename(a, b),
-    rm: (/** @type {string} */ p, /** @type {any} */ opts) => fs.rm(p, opts),
-    open: (/** @type {string} */ p, /** @type {any} */ flags, /** @type {any} */ mode) => fs.open(p, flags, mode),
-  })
-}
-
-test('json_path undo surfaces CONCURRENT_EDIT when the file changes between read and write', async () => {
+test('json_path undo keeps the cache row for a user entry it left in the settings', async () => {
+  // The purge mirrors the settings disposal: ours came out of both, the
+  // user's openai entry stayed in the settings so its cache row stays with it.
   const home = await stageHome()
   try {
-    const settingsPath = path.join(home, '.openclaw', 'openclaw.json')
-    await writeOpenclawSettings(home, attachedSettings())
-    const before = await fs.readFile(settingsPath, 'utf8')
+    const theirs = { baseUrl: 'https://their-proxy.example', models: ['claude-x'] }
+    await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: ourEntry('anthropic', ENDPOINT), openai: theirs } },
+    })
+    const cachePath = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      openai: { baseUrl: 'https://their-proxy.example' },
+    }, null, 2) + '\n')
 
-    await assert.rejects(
-      detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, fs: makeTouchAfterReadFs() }),
-      (/** @type {any} */ err) => err instanceof ClientDetachError && err.code === 'CONCURRENT_EDIT'
-    )
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home, env: {} })
 
-    assert.equal(await fs.readFile(settingsPath, 'utf8'), before) // never clobbered
+    assert.equal(result.changed, true)
+    assert.deepEqual(await readJsonFile(cachePath), { openai: { baseUrl: 'https://their-proxy.example' } })
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-/* ------------------------- hand-edited record paths ------------------------ */
-
-test('a record path that leaves the document cannot delete an Object.prototype member', async () => {
-  // `managed.added` and `managed.created_parents` are replayed with no equality
-  // gate at all - unlike `managed.set`, whose "is it still ours?" test happens
-  // to block a prototype path because such a path always reads back undefined.
-  // The record lives in the user's own settings file, so an `added` entry of
-  // `__proto__.toString` used to run `delete Object.prototype.toString` and
-  // break every object in the process. Refuse the path instead.
+test('json_path undo purges the derived caches, skipping one that will not parse', async () => {
   const home = await stageHome()
   try {
-    const record = undoRecord()
-    record.managed.added = ['models.providers.hypaware', '__proto__.toString']
-    record.managed.created_parents = ['models', 'models.providers', '__proto__']
-    await writeOpenclawSettings(home, attachedSettings(record))
+    const settingsPath = await writeOpenclawConfig(home, {
+      models: { providers: { anthropic: ourEntry('anthropic', ENDPOINT) } },
+    })
+    // The anthropic row rides out on this run's settings deletion; the openai
+    // row (carried forward wholesale, marker and all, per LLP 0167 verify
+    // item 3) is recognized as ours by its own signature.
+    const good = await writeAgentCache(home, 'main', JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      openai: { baseUrl: `${ENDPOINT}/v1`, headers: { 'x-hypaware-upstream': 'openai' } },
+      google: { baseUrl: 'https://vendor.example' },
+    }, null, 2) + '\n')
+    const brokenText = '{ this is not json'
+    const broken = await writeAgentCache(home, 'sidecar', brokenText)
 
-    await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
+    const result = await detachClientFromDisk({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: home,
+      env: {},
+    })
 
-    assert.equal(typeof ({}).toString, 'function')
-    assert.equal(typeof ({}).hasOwnProperty, 'function')
+    // The settings half landed and the malformed sibling did not fail it.
+    assert.equal(result.changed, true)
+    assert.deepEqual((await readJsonFile(settingsPath)).models.providers, {})
+
+    // The purge is provider-key scoped: another vendor's cached entry stays.
+    assert.deepEqual(await readJsonFile(good), { google: { baseUrl: 'https://vendor.example' } })
+    // Skipped, not rewritten and not truncated.
+    assert.equal(await fs.readFile(broken, 'utf8'), brokenText)
+    assert.match(String(result.warning), /sidecar/)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
 })
 
-test('a record set path that leaves the document cannot write onto Object.prototype', async () => {
-  // Defence in depth on the sibling writer: the equality gate already refuses
-  // (a prototype path reads back undefined and a recorded `value` comes from
-  // JSON, so it never is), but the guard is on the helper so a future caller
-  // without that gate cannot reopen the hole.
+// `$OPENCLAW_HOME` may sit NESTED inside `$HOME`, which is the case that broke:
+// deriving the config home from the first segment of the settings path's
+// home-relative form answered `$HOME/.config` here, the `agents/*/...` glob
+// matched nothing, and an unmatched glob is not an error - so the settings half
+// reported success while the caches kept routing at the dead gateway. Two
+// segments is what makes it a regression test; a one-segment relocation
+// (`OPENCLAW_HOME=$HOME/elsewhere`) passed either way.
+// @ref LLP 0169#decision [tests]: the cache purge follows the relocated config
+// home, since the caches are what do not self-heal
+test('json_path undo purges the caches under a nested $OPENCLAW_HOME', async () => {
   const home = await stageHome()
   try {
-    const record = undoRecord()
-    record.managed.set = [{ path: '__proto__.hyp_polluted_set', value: undefined, prev: 'PWNED' }]
-    await writeOpenclawSettings(home, attachedSettings(record))
+    const openclawHome = path.join(home, '.config', 'openclaw')
+    const settingsPath = path.join(openclawHome, 'openclaw.json')
+    await fs.mkdir(openclawHome, { recursive: true })
+    await fs.writeFile(settingsPath, JSON.stringify({
+      models: { providers: { anthropic: ourEntry('anthropic', ENDPOINT) } },
+    }, null, 2) + '\n')
 
-    await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
+    const cachePath = path.join(openclawHome, 'agents', 'main', 'agent', 'models.json')
+    await fs.mkdir(path.dirname(cachePath), { recursive: true })
+    await fs.writeFile(cachePath, JSON.stringify({
+      anthropic: { baseUrl: ENDPOINT },
+      google: { baseUrl: 'https://vendor.example' },
+    }, null, 2) + '\n')
 
-    assert.equal(/** @type {any} */ ({}).hyp_polluted_set, undefined)
+    const result = await detachClientFromDisk({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: home,
+      env: { OPENCLAW_HOME: openclawHome },
+    })
+
+    assert.equal(result.changed, true)
+    assert.equal(result.settingsPath, settingsPath)
+    assert.equal(result.removed, ENDPOINT)
+    assert.deepEqual((await readJsonFile(settingsPath)).models.providers, {})
+    // The half that silently no-opped before.
+    assert.deepEqual(await readJsonFile(cachePath), { google: { baseUrl: 'https://vendor.example' } })
   } finally {
-    delete (/** @type {any} */ (Object.prototype).hyp_polluted_set)
     await fs.rm(home, { recursive: true, force: true })
   }
 })

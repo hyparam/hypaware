@@ -16,16 +16,29 @@ import { posix } from 'node:path'
  * primitives, so the substrate scales to many (incl. unofficial) plugins
  * without privileging a blessed set of node types.
  *
- * The recipes here are **byte-identical** to `github-hyp-plugin/src/keys.js`:
- * that is what makes a repo, commit, or file seen by both the GitHub source and
- * a recorded Claude/Codex session land on one node. This connector is the
- * host-side twin of that GitHub `keys.js`. The cross-repo contract is enforced
- * by digest pins on both sides (host: `test/plugins/ai-gateway-graph-bridge.test.js`;
- * GitHub plugin: `test/graph-ids.test.js`). If either side changes a recipe,
- * the pins mismatch and the change becomes a deliberate, visible decision
- * rather than a silent orphaning. The two are kept in sync by hand; the plugins
- * are decoupled (separate repos), so a shared module isn't an option. And the
- * engine is not it either, since convergence is pin-enforced, not engine-hosted.
+ * The recipes here are **byte-identical** to the GitHub source's
+ * `hypaware-core/plugins-workspace/github/src/keys.js`: that is what makes a
+ * repo, commit, or file seen by both the GitHub source and a recorded
+ * Claude/Codex session land on one node. This connector is the host-side twin
+ * of that `keys.js`. Both are enforced by digest pins (host:
+ * `test/plugins/ai-gateway-graph-bridge.test.js`; GitHub:
+ * `test/plugins/github-graph-ids.test.js`) plus a direct agreement test over
+ * the shared recipes (`test/plugins/github-graph-ids.test.js`). If either side
+ * changes a recipe, those mismatch and the change becomes a deliberate, visible
+ * decision rather than a silent orphaning.
+ *
+ * The two are still kept in sync by hand. LLP 0032 justified that by the two
+ * plugins living in separate repositories, which LLP 0360 ended by bundling the
+ * GitHub source here; the copies remain because each plugin owns the recipe for
+ * the node types it mints, and the engine is not the home either, since
+ * convergence is pin-enforced rather than engine-hosted. Whether a small shared
+ * module now beats hand-syncing is a live question for a later LLP, not
+ * something to settle by editing either copy.
+ *
+ * One divergence is deliberate and settled: this side's `commitKey` rejects an
+ * abbreviated sha where the GitHub side trusts the API for full shas
+ * (LLP 0032#abbreviated-sha-guard). For a full 40-hex sha the two are
+ * byte-identical, which is what the agreement test pins.
  *
  * The host adds two reconciliation steps the GitHub side does not need (it
  * receives `owner/repo` and repo-relative paths straight from the API): turning
@@ -36,7 +49,7 @@ import { posix } from 'node:path'
  */
 
 // ---------------------------------------------------------------------------
-// Verbatim from github-hyp-plugin/src/keys.js. KEEP IN SYNC.
+// Verbatim from hypaware-core/plugins-workspace/github/src/keys.js. KEEP IN SYNC.
 // @ref LLP 0032#shared-key-vocabulary [constrained-by]: byte-identical to the GitHub side or the join silently stops converging
 // ---------------------------------------------------------------------------
 

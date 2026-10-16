@@ -4,11 +4,11 @@ import { Buffer } from 'node:buffer'
 
 import { parquetMetadataAsync } from 'hyparquet'
 import { parquetDataSource, unionSources, emptySource } from 'hypaware/core/query'
+import { compareStrings } from 'hypaware/core/util'
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
- * @import { AsyncDataSource } from 'squirreling/src/types.js'
- * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { S3QuerySourceConfig } from './types.js'
  */
 
@@ -35,7 +35,7 @@ export function buildS3QueryDataset({ source, blobStore, plugin }) {
     /**
      * @param {QueryPartition[]} partitions
      * @param {DatasetDataSourceContext} _ctx
-     * @returns {Promise<AsyncDataSource>}
+     * @returns {Promise<ScannableDataSource>}
      */
     createDataSource: (partitions, _ctx) => createDataSource(source, blobStore, partitions),
   }
@@ -66,7 +66,7 @@ async function discoverPartitions(source, blobStore) {
     partitions.push({ dataset: source.name, partition: {}, tableUrl: entry.key })
   }
   // Stable order so multi-file unions and tests are deterministic.
-  partitions.sort((a, b) => String(a.tableUrl).localeCompare(String(b.tableUrl)))
+  partitions.sort((a, b) => compareStrings(String(a.tableUrl), String(b.tableUrl)))
   return partitions
 }
 
@@ -74,13 +74,13 @@ async function discoverPartitions(source, blobStore) {
  * @param {S3QuerySourceConfig} source
  * @param {BlobStore} blobStore
  * @param {QueryPartition[]} partitions
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function createDataSource(source, blobStore, partitions) {
   if (source.format === 'iceberg') {
     return createIcebergDataSource(source, blobStore)
   }
-  /** @type {AsyncDataSource[]} */
+  /** @type {ScannableDataSource[]} */
   const sources = []
   for (const partition of partitions) {
     const key = partition.tableUrl
@@ -103,7 +103,7 @@ async function createDataSource(source, blobStore, partitions) {
  *
  * @param {S3QuerySourceConfig} source
  * @param {BlobStore} blobStore
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function createIcebergDataSource(source, blobStore) {
   // Guard against a missing/empty table the way the local cache does
@@ -139,8 +139,9 @@ async function icebergTableHasMetadata(blobStore, prefix) {
 
 /**
  * Materialize an S3 object into an in-memory `AsyncBuffer`. This reads
- * the whole object (fine for the modest parquet files HypAware writes);
- * range-based reads can be layered on later by extending `getObject`.
+ * the whole object, which is fine for the modest parquet files HypAware
+ * writes. `getObject` now takes an optional range (LLP 0452), so a caller
+ * that needs footer-and-column reads can ask for slices instead.
  *
  * @param {BlobStore} blobStore
  * @param {string} key

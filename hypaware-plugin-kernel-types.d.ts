@@ -11,11 +11,16 @@
  * When the two disagree the LLPs win; this file is updated to follow.
  */
 
-import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
+import type { AsyncDataSource, ScanOptions, ScanResults, ScannableDataSource } from 'squirreling'
 import type { CachePartitioningDeclaration } from './src/core/iceberg/types.d.ts'
 import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
+import type { GrepSearchBackend } from './src/core/search/types.d.ts'
 
-export type { AsyncDataSource, ScanOptions, ScanResults }
+// ScannableDataSource is the squirreling source that retains the row
+// interface. Hypaware's storage, union, visibility, and legacy parquet
+// adapters all guarantee this stronger shape even when they also expose
+// prepared native batches.
+export type { AsyncDataSource, ScanOptions, ScanResults, ScannableDataSource }
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -27,25 +32,25 @@ export interface JsonObject {
 export type PluginName = string
 /**
  * Versioned capability identifier. Well-known capabilities at V1:
- * - `hypaware.ai-gateway` — local HTTP/SSE AI gateway, provided by
+ * - `hypaware.ai-gateway`: local HTTP/SSE AI gateway, provided by
  *   `@hypaware/ai-gateway`. Consumed by client adapter plugins.
- * - `hypaware.blob-store` — object-store API (put/get/list/delete),
+ * - `hypaware.blob-store`: object-store API (put/get/list/delete),
  *   provided by blob destination plugins (`@hypaware/local-fs`,
  *   `@hypaware/s3`). The capability VALUE is a `BlobStore`; consumers
  *   call its methods directly. Consumed by table-format plugins.
- * - `hypaware.encoder` — per-batch byte encoder, provided by writer
+ * - `hypaware.encoder`: per-batch byte encoder, provided by writer
  *   plugins (`@hypaware/format-parquet`, `@hypaware/format-jsonl`).
  *   Consumed by table-format plugins and blob destinations.
- * - `hypaware.table-format` — directory layout + manifests on top of a
+ * - `hypaware.table-format`: directory layout + manifests on top of a
  *   blob store and encoder. Provided by `@hypaware/format-iceberg`.
  *   The capability VALUE is a `TableFormatProvider`.
- * - `hypaware.http-endpoint` — request destination capability, provided
+ * - `hypaware.http-endpoint`: request destination capability, provided
  *   by request sinks (`@hypaware/central`, future `@hypaware/webhook`).
- * - `hypaware.embedder` — text embedding production, provided by
+ * - `hypaware.embedder`: text embedding production, provided by
  *   embedder plugins (`@hypaware/embedder-openai`, future local
  *   embedders). The capability VALUE is an `EmbedderCapability`.
  *   Consumed by `@hypaware/vector-search`.
- * - `hypaware.vector-search` — vector similarity search over cached
+ * - `hypaware.vector-search`: vector similarity search over cached
  *   datasets, provided by `@hypaware/vector-search`. The capability
  *   VALUE is a `VectorSearchCapability`.
  *
@@ -116,6 +121,23 @@ export interface PluginManifest {
   provides?: PluginProvides
   permissions?: PluginPermission[]
   contributes?: PluginContributionManifest
+  /**
+   * Plugins whose presence in a composed config pulls this one in with
+   * them. When the walkthrough composes every plugin named here, it
+   * composes this plugin too; when it composes none of them, this plugin
+   * is not written.
+   *
+   * This is how a **derived-data** plugin rides a pick it does not
+   * contribute: `@hypaware/context-graph` has no picker row of its own,
+   * because "project my sessions into a graph" is not a thing the user is
+   * asked, and it is useless without a source to project.
+   *
+   * Distinct from `requires.plugins`, which is a hard dependency governing
+   * activation order and presence. `requires` says "I cannot run without
+   * this"; `compose_with` says "write me down wherever this is written
+   * down". A plugin may declare either, both, or neither.
+   */
+  compose_with?: PluginName[]
 }
 
 export interface PluginRequirements {
@@ -177,10 +199,106 @@ export interface PluginClientManifest {
    * and attributes its entrypoints automatically.
    */
   transcript_entrypoints?: string[]
+  /**
+   * How to start this client on a question, for the wizard's closing
+   * first ask and `hyp ask` (LLP 0198#split). Absent for a client that
+   * cannot be started on a prompt at all: Claude Desktop is a GUI app
+   * with no prompt argument, so it is detectable, pickable, and
+   * attachable but never launchable.
+   */
+  launch?: PluginClientLaunchManifest
+  /**
+   * Where this client's own activity leaves a file trail, for the
+   * `hyp status` capture-health comparison (LLP 0257#status-and-health):
+   * the newest matching mtime under `dir` is the client's last activity,
+   * which status holds against the telemetry the daemon actually
+   * captured. Declared here rather than in a core table for the same
+   * reason as `attach_probe`: the path is the client's business, and
+   * core must be able to read it without importing plugin code.
+   *
+   * An mtime alone only nominates: when it would report a gap, core reads
+   * the tail of the newest files to confirm a real turn is behind the
+   * write, and that read understands Claude Code's JSONL records
+   * (`type`, `isMeta`). A client whose trail is shaped differently gets
+   * the mtime pass and a confirmation read that will not recognise its
+   * turns, so declare one here only alongside that record shape.
+   */
+  activity_probe?: PluginActivityProbeManifest
+  /**
+   * Set to `false` when this client registers no backfill provider of its
+   * own because another plugin's provider imports its history: Claude
+   * Desktop's transcripts are read by the `@hypaware/claude` provider.
+   * Absent means the plugin registers a provider (every other client
+   * adapter does).
+   *
+   * Read by `hyp status`, which cannot see the runtime backfill registry
+   * without activating plugins and so derives backfill-on-join targets
+   * from the client descriptors. Without this flag a provider-less client
+   * on a joined host reads as a `backfill ... [pending]` that no
+   * reconciler pass will ever clear; with it the line reads `n/a`, the same
+   * answer a probe-less client gets for attach (LLP 0229).
+   *
+   * Opt-out rather than opt-in so a client that forgets the flag shows the
+   * loud permanent `pending` this exists to fix, never a silently missing
+   * line for a provider that is real.
+   */
+  backfill_provider?: boolean
+}
+
+/**
+ * A client-written directory core reads to answer "when was this client
+ * last active?": every matching file's mtime, and, only when those mtimes
+ * would report a capture gap, the tail of the newest few (see
+ * `activity_probe` above). Same home-relative contract as
+ * `attach_probe.settings_file`: relative to `$HOME`, first segment
+ * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
+ */
+export interface PluginActivityProbeManifest {
+  /** Directory of activity files, RELATIVE to the user's home (e.g. `.claude/projects`). */
+  dir: string
+  /** Only files ending in this suffix count (e.g. `.jsonl`); absent means every file. */
+  file_suffix?: string
+}
+
+/**
+ * A client's launch spec: the binary to look for on `$PATH` and the
+ * argv to start it with. Exactly one `args` element must contain the
+ * `{prompt}` placeholder, which is replaced with the user's question;
+ * a spec without it would start the client mute, which looks like the
+ * feature working (LLP 0198#split).
+ */
+export interface PluginClientLaunchManifest {
+  /** Executable name resolved against `$PATH` (e.g. `claude`). */
+  bin: string
+  /** Argv template; `{prompt}` in any element is replaced. */
+  args: string[]
+  /** Display name for the launch row (e.g. `Claude Code`). */
+  label?: string
 }
 
 export interface PluginAttachProbeManifest {
-  format: 'json' | 'toml' | 'json_path'
+  /**
+   * `json_path` returns here (LLP 0173 T1), reversing LLP 0143's removal.
+   * LLP 0143 pulled the format because, at the time, nothing validated
+   * `attach_probe` at runtime (`src/core/manifest.js` treats `contributes`
+   * opaquely): a manifest declaring `json_path` with no runtime support
+   * behind it would type-check, probe as never-attached, and then slip
+   * past `action_attach.js`'s `!descriptor.attachProbe` orphaning guard on
+   * reverse, dropping the marker with the client's settings still written.
+   * That was exactly #212. The danger was in the *gap* between declaring
+   * the format and a runtime that reads/undoes it, not in the format
+   * itself. LLP 0173 T2 restores the undo side
+   * (`client_detach_disk.js`'s `detachJsonPathProviders`) and T3 restores
+   * the read side (`daemon/status.js`'s `json_path` branch) before
+   * OpenClaw's manifest (T5) declares this format again, so the gap #212
+   * warned about is closed by construction: no manifest may reach this
+   * format without both runtime sides already merged.
+   *
+   * @ref LLP 0172#lane-a-detach [implements]: json_path's runtime undo
+   * (client_detach_disk.js) and read (daemon/status.js) sides, which close
+   * the #212 gap this format's prior removal warned about.
+   */
+  format: 'json' | 'toml' | 'json_path' | 'managed_file'
   /**
    * The client's settings file, RELATIVE to the user's home (e.g.
    * `.codex/config.toml`). Its first path segment is the client's config
@@ -193,29 +311,28 @@ export interface PluginAttachProbeManifest {
   settings_file: string
   marker_key?: string
   marker_header?: string
+  /** `managed_file` only: exact ownership marker required for probe and removal. */
+  marker_text?: string
   /**
-   * `json_path` only: dotted path to the managed object whose presence
-   * means the client is attached (e.g. `models.providers.hypaware`).
-   * Segments are plain literals split on `.` with no escaping, so a
-   * key containing a dot cannot be addressed.
+   * `json_path` only: dotted path, relative to the parsed settings file,
+   * to the container object the probe/undo navigate (e.g.
+   * `models.providers`).
    */
-  marker_path?: string
+  container_path?: string
   /**
-   * `json_path` only: dotted path RELATIVE to the marker object to a
-   * string property holding the JSON-encoded self-describing undo
-   * record (e.g. `headers.x-hypaware-marker`).
-   *
-   * The record's `set` list is **unordered**: core replays every entry and
-   * nothing in this contract makes the first one primary. A record whose
-   * replay restores more than one prior value restores them all on disk,
-   * but the single `DetachFromDiskResult.restoredValue` reported back (and
-   * the `restored_value` field of `hyp detach --json`) is only meaningful
-   * for a record with at most one restoring entry; for several, which one
-   * is reported is unspecified. Declare at most one restoring `set` entry
-   * per record if the restored value must be reported (LLP 0109
-   * §restoredValue is single-primary only).
+   * `json_path` only: the container's keys the probe/undo consider, in
+   * order (e.g. `['anthropic', 'openai']`). `marker_header` (reused, not
+   * duplicated) is checked against each key's own header value to decide
+   * ownership.
    */
-  marker_record?: string
+  provider_keys?: string[]
+  /**
+   * `json_path` only: glob, relative to the client's config home, of
+   * cache files the undo best-effort purges the same `provider_keys`
+   * entries from after the settings-file write (e.g.
+   * `agents/*\/agent/models.json`).
+   */
+  cache_glob?: string
 }
 
 /**
@@ -241,6 +358,29 @@ export interface PluginPickerContribution {
    * state. A probe failure means "not present," never an error.
    */
   detect?: PickerDetectProbe
+  /**
+   * True when the row is kept out of the interactive picker menu while
+   * staying a real picker source everywhere else: `hyp init --source
+   * <id>` still composes it, a config that already collects it still
+   * reads back as collecting it, and the id keeps its identity in the
+   * opt-out/sync store and in the dataset-owner map the export-seam
+   * withholding rules key on. For a row whose audience is narrow enough
+   * that a first-run checkbox costs every other user more than it earns
+   * that one.
+   */
+  hidden?: boolean
+  /**
+   * The `process.platform` values this row is offered on, for a client
+   * whose integration only exists on some of them. Absent means every
+   * platform, which is what almost every row wants.
+   *
+   * Like `hidden`, this gates DISPLAY only: `hyp init --source <id>`
+   * still composes the row, read-back still recognizes it, and the id
+   * keeps its dataset-owner identity. It differs from `detect` in being
+   * a fact about the integration rather than about this machine, so it
+   * can withhold a row instead of merely leaving its box unchecked.
+   */
+  platforms?: string[]
   /**
    * True when picking this row is not sufficient on its own: an
    * attended `configure_command` must run to place the integration
@@ -304,6 +444,17 @@ export interface PluginPickerCompose {
    * gateway plugin's `upstreams`. Accepts a single upstream or an array.
    */
   gateway_upstream?: PluginPickerGatewayUpstream | PluginPickerGatewayUpstream[]
+  /**
+   * True when this row's client attaches through the gateway's CONNECT
+   * front door rather than a repointed base URL. The fold writes
+   * `proxy_mode: true` into the composed gateway config when any picked
+   * row sets this, so a fresh install boots interception and mints the
+   * local CA before the client's first attach. Attach reads the same
+   * declaration to decide whether to offer the proxy-mode migration on
+   * an existing install.
+   * @ref LLP 0243#composed-default: a proxy-attaching row declares it; composition writes the explicit key
+   */
+  gateway_proxy_mode?: boolean
 }
 
 /**
@@ -327,8 +478,31 @@ export type PickerDetectProbe =
 
 export interface PluginCommandManifest {
   name: string
+  /** Help presentation category, mirrored onto the runtime registration. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Compatibility spellings used for inactive-plugin ownership checks. */
+  aliases?: string[]
   summary?: string
   usage?: string
+  /**
+   * True when the command is an internal mechanism rather than CLI
+   * surface: it keeps dispatching, and it keeps its manifest entry, but
+   * it is absent from `hyp --help` and from its group's help. For a
+   * command whose caller is a program (a credential-helper wrapper, an
+   * in-process orchestration step), not a person (LLP 0268).
+   *
+   * Declaring it hidden rather than deleting the entry is deliberate,
+   * the same display-filter-not-catalog-deletion rule LLP 0202 set for
+   * hidden picker rows: the declaration is what lets the dispatch-miss
+   * path name the owning plugin ("unavailable", not "unknown",
+   * LLP 0153) and what the manifest/registration parity tests compare.
+   *
+   * The runtime registration must set `CommandRegistration.hidden` to
+   * match; the manifest field governs pre-boot help, the registration
+   * field governs post-boot group help.
+   */
+  hidden?: boolean
 }
 
 export interface PluginConfigSectionManifest {
@@ -386,7 +560,7 @@ export interface PluginInitPresetManifest {
   summary?: string
 }
 
-export type PluginSkillClient = 'claude' | 'codex' | 'all'
+export type PluginSkillClient = 'claude' | 'codex' | 'pi' | 'opencode' | 'cursor' | 'openclaw' | 'hermes' | 'all'
 
 // =============================================================================
 // Plugin discovery, install, and lock
@@ -395,7 +569,7 @@ export type PluginSkillClient = 'claude' | 'codex' | 'all'
 /**
  * Short-name resolver kinds. The kernel tries first-party, then scoped
  * third-party, then unscoped third-party. All three resolve down to a
- * git source — the kernel fetches a prebuilt artifact from git and
+ * git source: the kernel fetches a prebuilt artifact from git and
  * never runs `npm install` on the user's machine. npm is a naming
  * authority (and metadata lookup for third-party), not an install
  * source.
@@ -483,7 +657,7 @@ export interface PluginActivationContext {
   verbs: VerbRegistry
   /**
    * Intrinsic storage handle for the kernel-managed query cache.
-   * Plugins reach the local Iceberg-backed cache through this — they
+   * Plugins reach the local Iceberg-backed cache through this: they
    * never construct paths or open files themselves. The kernel owns
    * `cacheDir`; plugins ask the storage for a `tablePath` and call
    * `appendRows` / `readRows`.
@@ -495,7 +669,7 @@ export interface PluginActivationContext {
   /**
    * Backfill provider registry (kernel-owned). Plugins register
    * `BackfillContribution`s during activation; `hyp backfill` selects
-   * providers from this registry. The shape is intentionally narrow —
+   * providers from this registry. The shape is intentionally narrow:
    * provider authors keep dataset-specific behavior in their `run`
    * implementation rather than expanding the kernel surface.
    */
@@ -508,12 +682,14 @@ export interface PluginActivationContext {
    * before appending to the cache.
    */
   backfillMaterializers: BackfillMaterializerRegistry
+  /** Kernel-owned client lifecycle registry. */
+  clients: ClientRegistry
   /**
    * Narrow facade over the kernel config apply engine (LLP 0023). Only
    * present when the host process runs an apply engine (the daemon);
    * absent in plain CLI boots, so transport plugins must treat it as
    * optional and skip their pull loops when it is missing. The facade
-   * is the only channel a plugin has into config application — the
+   * is the only channel a plugin has into config application: the
    * kernel owns validation, install, persistence, restart, probation,
    * and rollback.
    */
@@ -614,7 +790,7 @@ export interface CapabilityRegistration {
 
 /**
  * Breaking v2 config shape. There is no `mode` field and no
- * architectural role label — a host is described entirely by its
+ * architectural role label: a host is described entirely by its
  * plugins, sinks, and cache retention settings.
  */
 export interface HypAwareV2Config {
@@ -631,6 +807,12 @@ export interface HypAwareV2Config {
    * listed must be unambiguously provided.
    */
   disambiguate?: Record<CapabilityName, PluginName>
+  /**
+   * Kernel self-update switch. Default true when absent; the daemon
+   * applies new HypAware releases automatically. Central wins over
+   * local when both layers set it.
+   */
+  auto_update?: boolean
 }
 
 /** Legacy alias retained only while the project rename completes. */
@@ -660,6 +842,15 @@ export interface PluginConfigInstance {
    * maps to its canonical git source.
    */
   source?: string
+  /**
+   * Whether HypAware records the client this plugin contributes
+   * (`contributes.client`). Absent means recording. `hyp client detach`
+   * writes `false` to the local entry and `hyp client attach` removes it;
+   * the backfill runner, the attach-on-join reconciler, `hyp setup`, and
+   * `hyp status` all read it. Ignored for a plugin that contributes no
+   * client.
+   */
+  recording?: boolean
 }
 
 /**
@@ -704,7 +895,7 @@ export interface RequestSinkConfigInstance {
 }
 
 export type SinkInstanceConfig = JsonObject & {
-  /** Export cadence — standard 5-field cron expression (e.g. "0 * * * *"). */
+  /** Export cadence: standard 5-field cron expression (e.g. "0 * * * *"). */
   schedule?: string
   /**
    * For table-format writers (writer provides `hypaware.table-format`),
@@ -789,14 +980,77 @@ export interface ValidationError {
 // =============================================================================
 
 export interface CommandRegistry {
+  /**
+   * Claim a command name. `command` is an input, not the registry's
+   * storage: the registry keeps a shallow copy and fills the semantic
+   * defaults (`category`, `audience`, `bootProfile`) on that copy, so a
+   * frozen module-level registration is accepted, a registration this
+   * call rejects comes back exactly as it was passed, and editing the
+   * object afterwards does not reach what `get`/`list` return. Function
+   * members (`run`) are shared with the copy, not cloned.
+   *
+   * The copy is own enumerable properties only, and the shape checks run
+   * on it, so a registration whose members live on a prototype (a class
+   * instance) is rejected here rather than stored half-formed.
+   *
+   * This declaration cannot express that rule: TypeScript has no notion of
+   * property ownership or enumerability, so a class whose `run()` sits on
+   * its prototype satisfies `CommandRegistration` under `--strict` and then
+   * throws at this call. Register a plain object, or assign the members onto
+   * the instance itself.
+   */
   register(command: CommandRegistration): void
+  /**
+   * Describe a command *group* (`graph`, `query`) so its `--help` can
+   * carry a header and a paragraph, not just a subcommand table. Core
+   * groups get this from the bare command `makeGroupCommand` builds; a
+   * plugin namespace has no bare command, so it says so here instead.
+   *
+   * Metadata only: a registered group never appears in `list()`, so it
+   * cannot shadow a command or show up as its own subcommand.
+   */
+  registerGroup(group: CommandGroupRegistration): void
+  /**
+   * Release a registered command name, along with every alias pointing at
+   * it. Accepts whatever `get` accepts (primary name or alias), is
+   * idempotent, and is a no-op on an unknown name. Exists so a retracted
+   * verb can give back the CLI surface its registration claimed.
+   *
+   * Optional on purpose. The kernel accepts an injected command registry,
+   * and `VerbRegistry.unregister` feature-detects this member before
+   * calling it, so a registry that predates the affordance is tolerated
+   * rather than fatal. Typing it required would narrow that check to
+   * always-true for anyone compiling against these declarations and
+   * invite its removal, which is what turns an older kernel into a boot
+   * failure. `createCommandRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): CommandRegistration | undefined
+  getGroup(name: string): CommandGroupRegistration | undefined
   list(): CommandRegistration[]
+}
+
+export interface CommandGroupRegistration {
+  /** The group prefix, e.g. `'graph'`. */
+  name: string
+  plugin?: PluginName
+  /** One-line group description, rendered as the help header. */
+  summary?: string
+  /** Long help, rendered between the usage line and the subcommand table. */
+  help?: string
 }
 
 export interface CommandRegistration {
   name: string
   plugin?: PluginName
+  /** Help presentation category used to organize the command surface. */
+  category?: string
+  /** Intended help audience. Machine commands are hidden contracts. */
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Plugin activation policy selected after semantic command resolution. */
+  bootProfile?: 'config' | 'all-available' | 'none'
+  /** True for a help-only namespace command created by core. */
+  group?: boolean
   summary: string
   usage: string
   /**
@@ -805,7 +1059,15 @@ export interface CommandRegistration {
    * summary stays one line for command listings.
    */
   help?: string
+  /** Compatibility spellings. Indexed for dispatch and omitted from help. */
   aliases?: string[]
+  /**
+   * True when the command is an internal mechanism, not CLI surface:
+   * it still dispatches, but core drops it from top-level help and
+   * from its group table. A plugin command that sets this must also
+   * set `hidden` on its manifest entry, which is what governs the
+   * pre-boot help rendered before any plugin is loaded (LLP 0268).
+   */
   hidden?: boolean
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
@@ -816,9 +1078,37 @@ export interface CommandRunContext {
   stdin?: NodeJS.ReadStream
   env: NodeJS.ProcessEnv
   cwd: string
+  /**
+   * The whole effective config, not the plugin's slice `activate()`
+   * receives (LLP 0420 #split). A plugin-owned command body therefore
+   * reads every section, a neighbour's inline credentials included;
+   * narrowing it is issue #1978.
+   */
   config: HypAwareV2Config
   plugins: ActivePlugin[]
+  /**
+   * Plugins this boot came up short of (kernel-owned, populated by the
+   * dispatcher from `bootKernel`'s `unavailablePlugins`). Four routes, and
+   * only the first ever reaches an activation record: a throwing
+   * `activate()`, a dep-graph elimination for an unsatisfied `requires`, a
+   * manifest that would not load (named by its directory, since it has no
+   * plugin name), and a config-enabled plugin the boot profile withheld.
+   * `plugins` alone cannot express a partial boot: `activatePlugins` catches
+   * per plugin and continues, so a command body that acts on "what the plugin
+   * set contributes now" sees a plan with a hole in it and no way to know.
+   * Empty on a clean boot, and on a caller that pre-built the kernel. Read by
+   * the client-asset materializer, which must not read a failed plugin's
+   * missing contribution as a retirement
+   * (LLP 0219 #incomplete-activation-prunes-nothing).
+   */
+  failedPlugins?: string[]
+  /**
+   * Capability registry. Per-plugin for a plugin-contributed command, raw
+   * for a core one: see `sinks` below for the rule and why it exists.
+   */
   capabilities: CapabilityRegistry
+  /** Kernel-owned client lifecycle registry. Present on current hosts. */
+  clients?: ClientRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
   /**
@@ -830,6 +1120,35 @@ export interface CommandRunContext {
    * populates it, so it is present for every command body.
    */
   commands: { run(name: string, argv: string[]): Promise<number> }
+  /**
+   * In-process plugin activation seam (kernel-owned). Populated by the
+   * dispatcher, so it is present for every command body, like `commands`.
+   *
+   * Given plugin names, activates them (and their manifest-declared
+   * dependency closure) into THIS process's already-booted kernel, but only
+   * the subset a *fresh disk read* of the effective config would itself
+   * select for a `config`-profile boot - it can never activate a plugin the
+   * on-disk config does not name. Exists for a command body that writes
+   * config mid-invocation (LLP 0031's guarded local-layer writers) and then
+   * needs this same process's own `capabilities`/gateway registries to see
+   * what it just enabled, which a raw kernel handle would allow but this
+   * narrower seam does not: activation only, never a second config writer
+   * and never a network listener bind (a source's own `start()` still owns
+   * that).
+   *
+   * Generalizes the LLP 0139 dispatch-miss seam
+   * (`ctx.commands.run`'s owner-lookup activation) so the manual-attach
+   * enable prompt has the same in-process activation path instead of a
+   * second mechanism. Returns which of `names` are live in this process
+   * afterward (already-active names count as no-ops, never `failed`); never
+   * throws.
+   *
+   * @ref LLP 0174#prompt [implements]: the manual-attach accept path's need
+   * for this same process's kernel to see a plugin a mid-invocation config
+   * write just enabled, resolved by generalizing LLP 0139's seam instead of
+   * adding a second activation mechanism
+   */
+  activatePluginClosure(names: string[]): Promise<{ activated: string[], failed: string[] }>
   /**
    * Verb registry (kernel-owned). Populated by the dispatcher. `hyp mcp`
    * enumerates this to assemble the MCP tool surface; the projected CLI
@@ -852,15 +1171,33 @@ export interface CommandRunContext {
    */
   agents: AgentRegistry
   /**
-   * Source registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-source breakdown and harvest source picks.
+   * Source registry. Per-plugin for a plugin-contributed command, raw for a
+   * core one: see `sinks` below for the rule and why it exists. `hyp status`
+   * and the wizard's pick phase are core, so they still enumerate every
+   * plugin's sources to render the breakdown and harvest source picks.
    */
   sources: SourceRegistry
   /**
-   * Sink registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-sink breakdown and harvest sink picks.
+   * Sink registry. Which registry depends on who owns the command:
+   *
+   * - A command a **plugin** contributed gets that plugin's own
+   *   `ctx.sinks` facade, the one its `activate()` holds. Registering a
+   *   command is a plugin extension point, so the body of one is a second
+   *   context the same plugin reaches the kernel through, and it is
+   *   bracketed the way the first one is: a neighbour's configured instance
+   *   answers with no `config`, no live `exportBatch`, no `reader()`, no
+   *   writable `sink`, and `closeAll()` closes only this plugin's own.
+   * - A **core** command gets the kernel's registry unchanged. `hyp status`
+   *   and the wizard render every plugin's sinks, `hyp sink maintain`
+   *   drives them, and that is core's job.
+   *
+   * The owner is the plugin the registry recorded as registering the
+   * command, not `CommandRegistration.plugin`, which the plugin writes.
+   * The split scopes the command as registered: the stored record stays
+   * mutable through `get()`, and rewriting its `run` sidesteps the split
+   * (issue #1977).
+   *
+   * @see LLP 0420 #split
    */
   sinks: SinkRegistry
   /**
@@ -1066,11 +1403,19 @@ export interface PutObjectResult {
 
 export interface GetObjectInput {
   key: string
+  /** Single HTTP byte range, e.g. bytes=0-7 or bytes=-8. Ends are inclusive. */
+  range?: string
 }
 
 export interface GetObjectResult {
+  /** Caller owns the stream: consume it or destroy() it. A provider may hold
+   * an open file handle or socket until one of those happens, and a range
+   * reader makes many such reads per object. */
   body: NodeJS.ReadableStream
+  /** Length of the returned body, which may be only a range. */
   contentLength?: number
+  /** HTTP Content-Range when range was honored. Absent means a whole object. */
+  contentRange?: string
   etag?: string
 }
 
@@ -1103,7 +1448,7 @@ export interface DeleteObjectInput {
  * `createSink`.
  *
  * Unlike encoder writers (which run via the destination's sink
- * contribution), a table-format writer is the sink itself — the
+ * contribution), a table-format writer is the sink itself: the
  * destination's contribution is bypassed. The destination still has to
  * provide `hypaware.blob-store` so the table-format sink can write
  * bytes.
@@ -1147,6 +1492,63 @@ export interface SinkHandle {
   sink: Sink
 }
 
+/**
+ * What a sink would do with one dataset, as a consent surface needs to state
+ * it: the sink forwards the dataset, it skips the dataset entirely, or it
+ * forwards the dataset but starts from now, so history predating the sink
+ * ships nothing.
+ *
+ * `starts-from-now` is narrower than it reads, and the narrowing is what keeps
+ * the prompt honest. It is a claim about a partition with *no durable
+ * watermark*: the preview counts such a partition as zero and lets it bound no
+ * resume range. Answer it only if your export really would ship nothing from an
+ * uncursored partition. A sink that establishes its baselines up front, so an
+ * uncursored partition is instead one that appeared afterwards and forwards in
+ * full, must answer `forwards`, or the prompt reads "nothing pending" over rows
+ * the next export sends. `@hypaware/central` is such a sink, and LLP 0327 is
+ * the decision of record for that rule; it supersedes the start-now clause of
+ * LLP 0324#disposition-seam's central mapping.
+ *
+ * @ref LLP 0327#uncursored-forwards: a sink that baselines at creation must answer forwards, because its uncursored partitions forward in full
+ */
+export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
+
+/** One client's locally retained history, requested for an explicit replay. */
+export interface SourceHistoryReplayRequest {
+  source: string
+  onProgress?: (progress: ExportProgress) => void
+}
+
+/** Read-only disclosure produced before a historical replay is confirmed. */
+export interface SourceHistoryReplayPreview {
+  rows: number
+  withheldRows: number
+}
+
+/** Result of one destination's historical replay. */
+export interface SourceHistoryReplayResult {
+  status: 'exported' | 'failed'
+  rowsReplayed: number
+  bytesWritten: number
+  error?: string
+}
+
+/** A bounded explicit repair selected from a verified server inventory. */
+export interface MissingSyncRequest {
+  org: string
+  revision: string
+  rows: Record<string, unknown>[]
+  validate(): Promise<void>
+}
+
+export interface MissingSyncResult {
+  syncRestore: 1
+  status: 'accepted' | 'already_accepted'
+  restored?: number
+  present?: number
+  purged?: number
+}
+
 export interface Sink {
   /**
    * Called by the sink driver on the configured schedule. The driver
@@ -1158,6 +1560,35 @@ export interface Sink {
   close(): Promise<void>
   /** Implemented by sinks that declare `supports: ["queryable"]`. */
   reader?(): SinkQueryReader
+  /**
+   * Consultative and preview-only: what this sink would do with `dataset`.
+   * `hyp sync`'s pending preview asks, so it does not quote rows a destination
+   * refuses to forward. Nothing else asks. The driver keeps handing every
+   * discovered partition to every sink, the first-sync hold stays driver-wide,
+   * and the sink's own export path stays the sole authority on what ships, so
+   * an answer here can never gate, hold, or release an export.
+   *
+   * Not implementing it, throwing from it, and answering something the kernel
+   * does not recognize all read as `forwards`. That is over-disclosure, the
+   * only direction a consent prompt may be wrong in, and it is exactly what a
+   * sink implementing nothing gets today.
+   *
+   * An implementation must answer from the same rule its export path enforces:
+   * answering `skips` or `starts-from-now` while `exportBatch` ships the rows
+   * anyway makes the prompt promise less egress than occurs.
+   */
+  datasetDisposition?(dataset: DatasetRegistration): DatasetDisposition
+  /**
+   * Optional attended replay capability. Both methods must be implemented as a
+   * pair: the first is read-only disclosure for the consent prompt; the second
+   * sends exactly that class of history after confirmation. A sink without
+   * both is not a historical-replay destination.
+   *
+   * @ref LLP 0345#sink-capability [implements]: preview and execution are separate sink operations
+   */
+  previewSourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayPreview>
+  replaySourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayResult>
+  restoreMissingRows?(request: MissingSyncRequest): Promise<MissingSyncResult>
 }
 
 export interface ExportBatch {
@@ -1170,6 +1601,19 @@ export interface ExportBatch {
 export interface ExportOptions {
   format: string
   schedule: string
+  /** Incremental acknowledged counts, or a zero-count event announcing a retry wait. */
+  onProgress?: (progress: ExportProgress) => void
+}
+
+export interface ExportProgress {
+  rows: number
+  bytes: number
+  /** Rows covered by durable acknowledgements from an interrupted attempt. */
+  resumedRows?: number
+  /** Encoded bytes in acknowledged requests; excludes retries. */
+  wireBytes?: number
+  /** Announced retry/backpressure delay, with zero rows and bytes. */
+  waitMs?: number
 }
 
 export interface ExportResult {
@@ -1188,7 +1632,7 @@ export interface ExportResult {
  */
 export interface SinkQueryReader {
   discoverPartitions(scope: QueryScope): Promise<QueryPartition[]> | QueryPartition[]
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
 }
 
 // =============================================================================
@@ -1221,7 +1665,7 @@ export interface DatasetRegistration {
   localOnlyContentColumns?: string[]
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
   /**
    * Optional flush-time settlement pass. The kernel calls this once per
    * flush batch (before partition write) with the batch's rows; the
@@ -1240,6 +1684,19 @@ export interface DatasetRegistration {
    * non-upgraded fallback against its own copy). Compaction owns the
    * within-rewrite de-twin instead. Distinct from `settleBatch`, whose
    * dedupe assumes the rows are not yet committed.
+   *
+   * MUST be free of observable side effects and MUST be idempotent. This is
+   * the hook cache maintenance calls SPECULATIVELY, before it has picked a
+   * compaction path: it asks whether re-settlement would change a candidate
+   * file's rows, discards the rows it gets back, and may ask again on the
+   * next tick about rows it never commits. An implementation that marked a
+   * transcript line consumed, advanced a cursor, or wrote anything a later
+   * run or another process can observe would fire that effect for work which
+   * never happened. Reading logs and memoising in memory is fine. Whatever
+   * this hook fans out to inherits the requirement; for the gateway dataset
+   * that is `AiGatewaySettlementEnricher`.
+   *
+   * @ref LLP 0312#settle-purity [implements]: maintenance probes this hook and discards the answer, so the hook must not notice being called.
    */
   resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
 }
@@ -1339,7 +1796,7 @@ export interface ReadRowsOptions {
 /**
  * Intrinsic storage service exposed by core to plugins that materialize
  * rows into the local Iceberg-backed cache. Plugins do not configure
- * storage — the cache root is HypAware-managed.
+ * storage: the cache root is HypAware-managed.
  *
  * `cacheRoot` and `cacheTablePath` let plugins discover the layout
  * convention without baking the `datasets/<name>` segment into
@@ -1347,6 +1804,9 @@ export interface ReadRowsOptions {
  * long as those helpers keep their contract.
  */
 export interface QueryStorageService {
+  /** Reconcile a complete scoped snapshot, including removals, in the local cache. */
+  reconcileRows?(dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[], scope: { where: Record<string, string>; key: string }): Promise<number>
+
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string
   appendRows(tablePath: string, columns: ColumnSpec[], rows: Record<string, unknown>[]): Promise<void>
@@ -1361,10 +1821,20 @@ export interface QueryStorageService {
   tableUrl(tablePath: string): string
   readRows(tablePath: string, columns?: string[], opts?: ReadRowsOptions): AsyncIterable<Record<string, unknown>>
   /**
+   * Exact equality-list read for lookup paths. The predicate is applied by
+   * the cache data source, allowing Iceberg file and row-group bounds to prune
+   * sorted lookup columns before rows are materialized.
+   */
+  readRowsWhere?(
+    tablePath: string,
+    columns: string[] | undefined,
+    whereIn: Record<string, string[]>,
+  ): AsyncIterable<Record<string, unknown>>
+  /**
    * Cursor-aware sibling of `readRows` for sinks that must advance a
    * per-(sink instance, partition) watermark. Pairs each internal-stripped row
    * with the `after` continuation to persist ONCE that row is durably exported.
-   * The internal `_hyp_ingest_seq` never reaches the row payload — it is read to
+   * The internal `_hyp_ingest_seq` never reaches the row payload: it is read to
    * derive `after`, then stripped. `after` is a monotonic high-water mark, so a
    * null-seq legacy row carries the prior watermark forward unchanged. See
    * LLP 0040 §2.
@@ -1372,12 +1842,18 @@ export interface QueryStorageService {
    * The element type is a discriminated union so the shared export read can
    * withhold `local-only` rows (LLP 0070 #enforce) without wedging the
    * watermark: a `{ dropped: true }` entry carries the running high-water
-   * `after` but **no** row payload — the row was recorded locally and stays
+   * `after` but **no** row payload, the row was recorded locally and stays
    * locally queryable, but no sink can forward it because the payload never
    * leaves the cache read. Every consumer still advances its cursor across the
    * drop, so a partition tail of withheld rows checkpoints once and is durably
-   * passed — not re-scanned each tick, not re-sent if the directory is later
+   * passed, not re-scanned each tick, not re-sent if the directory is later
    * un-excluded (LLP 0070 #incremental: drop-but-advance).
+   *
+   * Omitting `columns` reads every column; an EMPTY `columns` reads none, and
+   * is how a consumer that wants only the verdict and the cursor (a pending-row
+   * count) avoids decoding payloads it will discard. The columns the
+   * withholding rules need are forced into the scan either way, so no
+   * projection can turn a `dropped` entry into a forwarded row.
    */
   readRowsSince(
     tablePath: string,
@@ -1386,6 +1862,17 @@ export interface QueryStorageService {
     | { row: Record<string, unknown>; after: SinkContinuation; dropped?: undefined }
     | { row?: undefined; after: SinkContinuation; dropped: true }
   >
+  /**
+   * Cheap stable digest of the mutable machine-local inputs behind
+   * `readRowsSince`'s withholding verdicts (the `local-only`/class list and
+   * the client sync opt-out set). A consumer that derives durable state from
+   * those verdicts compares this across ticks to detect a privacy-policy
+   * change without re-reading history, then revalidates what it derived
+   * (LLP 0367). No cache I/O; equal digests promise nothing about the cache's
+   * contents, only about the policy. Optional so hand-built test storage
+   * fakes read as a constant policy.
+   */
+  exportPolicyFingerprint?(): string
 }
 
 export interface CachePartitionMeta {
@@ -1404,7 +1891,7 @@ export interface CachePartitionMeta {
  * Where a verb is reachable. The default (`cli+mcp`) projects both a CLI
  * command and an MCP tool. `cli-only` suppresses the tool; `local-only`
  * keeps the tool on the local stdio host but withholds it from the
- * remote/HTTP transport — for operations that shouldn't be remotely
+ * remote/HTTP transport, for operations that shouldn't be remotely
  * invokable. See LLP 0034 §tool-exposure-emergent.
  */
 export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
@@ -1413,15 +1900,20 @@ export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
  * Credential scope a verb's MCP tool requires. `read` (read/compute) is
  * reachable by the query-scoped credential; `operator` (mutating) needs
  * the operator token and is never reachable by a query-scoped client.
- * Gating only applies on an authed (remote/HTTP) transport — the local
+ * Gating only applies on an authed (remote/HTTP) transport: the local
  * stdio host is local-user trust and exposes both. See LLP 0034
  * §tool-auth-class.
+ *
+ * `write` is one bounded mutation admitted by a named credential scope: the
+ * verb must name `scope`, and is listed and dispatched only where the host
+ * admits that scope (`allowScopes`), on every transport. See LLP 0494
+ * #write-class.
  */
-export type VerbAuthClass = 'read' | 'operator'
+export type VerbAuthClass = 'read' | 'write' | 'operator'
 
 /**
- * A single typed input property. A deliberately small JSON-Schema subset
- * — the argv↔schema codec coerces CLI tokens to these types, and the
+ * A single typed input property. A deliberately small JSON-Schema subset:
+ * the argv↔schema codec coerces CLI tokens to these types, and the
  * same object is emitted (minus the CLI-only `positional`/`greedy`
  * hints) as the MCP tool's `inputSchema`.
  */
@@ -1429,8 +1921,9 @@ export interface VerbInputProperty {
   type: 'string' | 'integer' | 'number' | 'boolean' | 'array'
   description?: string
   enum?: string[]
-  default?: string | number | boolean
+  default?: string | number | boolean | string[]
   minimum?: number
+  maximum?: number
   items?: { type: 'string' | 'integer' | 'number', enum?: string[] }
   /** CLI-only: the final string positional absorbs all remaining tokens (e.g. a SQL string). */
   greedy?: boolean
@@ -1442,6 +1935,40 @@ export interface VerbInputSchema {
   required?: string[]
   /** Property names bound to CLI positionals, in order. */
   positional?: string[]
+}
+
+/**
+ * The JSON Schema an MCP tool advertises: a verb's `VerbInputSchema` with the
+ * CLI-only argv-binding hints removed (`positional`, and per-property
+ * `greedy`). It is a projection, never authored by hand, so the flag set and
+ * the wire contract cannot drift apart.
+ */
+export interface McpToolInputSchema {
+  type: 'object'
+  properties: Record<string, Omit<VerbInputProperty, 'greedy'>>
+  required?: string[]
+}
+
+/**
+ * A recommendation tool contract the client shares with the server
+ * (`REMOTE_TOOL_CONTRACTS` in `src/core/mcp/contracts.js`). It carries no
+ * operation: the server binds `operation` and `render` by `tool` name, and
+ * no host registers a tool from the contract alone. See LLP 0494
+ * #remote-contracts.
+ */
+export interface RemoteToolContract {
+  /** The MCP tool name, the key the server binds its operation by. */
+  tool: string
+  /** The display title (`tools/list` `title`). */
+  title: string
+  /** The MCP tool description. */
+  summary: string
+  inputSchema: VerbInputSchema
+  authClass: VerbAuthClass
+  /** The credential scope a write needs; absent on a read. */
+  scope?: string
+  /** The CLI command that does the same thing. */
+  cli: string
 }
 
 /**
@@ -1466,6 +1993,18 @@ export interface VerbOperationContext {
    * to `executeQuerySql` as `callerCwd`.
    */
   callerCwd: string | null
+  /**
+   * Host-supplied grep-search data plane (LLP 0314). When present,
+   * queryGrepVerb calls it instead of the local cache service, so a host
+   * owning a different data plane answers grep_search without registering
+   * a second verb. Absent on every in-tree host: buildOperationContext
+   * never sets it, and the verb then runs executeGrepSearch over
+   * ctx.storage as before.
+   *
+   * @ref LLP 0353#seam [implements]: host-supplied grep-search data plane,
+   * absent on every in-tree host
+   */
+  search?: GrepSearchBackend
 }
 
 /** CLI render controls parsed by the kernel and passed to `render`. */
@@ -1475,6 +2014,8 @@ export interface VerbRenderControls {
   output?: string
   maxCell: number
   maxBytes: number
+  /** True when stdout is a colour terminal and the render goes there, not to `--output`. */
+  color?: boolean
 }
 
 /** What a verb's `render` returns; the kernel performs the actual IO. */
@@ -1486,7 +2027,7 @@ export interface VerbRenderResult {
 }
 
 /**
- * A query-shaped operation — typed params in, structured result out —
+ * A query-shaped operation, typed params in, structured result out,
  * declared once. The kernel projects a CLI command (argv→params via
  * `inputSchema`, run `operation`, `render` to stdout) and an MCP tool
  * (`inputSchema` + `operation` → structured result) from the same
@@ -1496,23 +2037,70 @@ export interface VerbRenderResult {
 export interface VerbRegistration {
   /** CLI command name, e.g. `'graph neighbors'`. */
   name: string
+  /** CLI-only compatibility spellings. The MCP tool name is unchanged. */
+  aliases?: string[]
+  /** CLI help metadata. Does not affect MCP exposure or auth. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** MCP tool name, e.g. `'graph_neighbors'`. */
   tool: string
+  /**
+   * Human-readable MCP tool name, e.g. `'Find related sessions'`. Advertised
+   * as the `tools/list` entry's `title` and `annotations.title`; a verb with
+   * none is listed under its `tool` name. Does not affect the CLI.
+   */
+  title?: string
   plugin?: PluginName
   summary: string
+  /**
+   * Long help for the CLI command this verb projects, rendered by
+   * dispatch's central `--help` interception under `summary` and `usage`.
+   * CLI-only, like `render`: the MCP tool describes itself with `summary`
+   * and `inputSchema`.
+   *
+   * This is where a verb's **mechanics** belong (what a flag means, how an
+   * argument resolves, where output is truncated) so a skill does not have
+   * to narrate them. Constraints, the rules with nameable harm, stay in the
+   * skill: the constraint guard reads skill files, not help strings.
+   */
+  help?: string
   inputSchema: VerbInputSchema
   /** Default `'cli+mcp'`. */
   exposure?: VerbExposure
   /** Default `'read'`. */
   authClass?: VerbAuthClass
+  /**
+   * The credential scope that admits a `write` verb, e.g. `'report-publish'`.
+   * Required, non-empty, on a `write` verb; not read on any other class.
+   */
+  scope?: string
   /** The shared core. Identical for the CLI and the MCP tool. */
   operation(params: Record<string, unknown>, ctx: VerbOperationContext): Promise<unknown> | unknown
   /** CLI-only: turn a structured result into stdout text + exit code. */
-  render(result: any, controls: VerbRenderControls): VerbRenderResult
+  render(result: any, controls: VerbRenderControls, params?: Record<string, unknown>): VerbRenderResult
 }
 
 export interface VerbRegistry {
   register(verb: VerbRegistration): void
+  /**
+   * Release a claimed verb name: the name map, the tool map, and the CLI
+   * command projected from a verb under that name (and only that one; a
+   * plugin's own same-named command survives). By-name, idempotent, and a
+   * no-op on an unknown name.
+   *
+   * This is what lets a host displace a kernel-shipped verb with its own
+   * implementation of the same tool: it takes the name back, then
+   * registers. Callers should re-check `getByTool` afterwards rather than
+   * trust the removal, since registering into a still-held tool slot
+   * throws (LLP 0264 §verb).
+   *
+   * Optional on purpose: plugins declare a kernel semver *range*, so a
+   * plugin built against these declarations can be loaded by a kernel
+   * that predates this member. Feature-detect it (`typeof
+   * verbs.unregister === 'function'`) rather than assume it. The kernel's
+   * own `createVerbRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): VerbRegistration | undefined
   getByTool(tool: string): VerbRegistration | undefined
   list(): VerbRegistration[]
@@ -1533,7 +2121,7 @@ export interface VerbRegistry {
  * use these hooks to:
  *
  * - register upstream presets (`registerUpstreamPreset`) that own
- *   routing — the gateway no longer has any hardcoded provider routing
+ *   routing: the gateway no longer has any hardcoded provider routing
  *   such as Anthropic-header or `/v1/messages` matching;
  * - register a client `attach()` helper (`registerClient`) so the
  *   shared `hyp attach` CLI can dispatch without coupling core to
@@ -1548,11 +2136,13 @@ export interface VerbRegistry {
  *
  * The gateway owns the `ai_gateway_messages` dataset and its schema.
  * Removed in 2.0.0: `registerExchangeContextProjector` and
- * `registerMessageEnricher` — both are subsumed by the full exchange
+ * `registerMessageEnricher`, both are subsumed by the full exchange
  * projector hook.
  */
 export interface AiGatewayCapability {
   registerUpstreamPreset(preset: AiGatewayUpstreamPreset): void
+  /** Runtime-only scoped door, resolved once from an operator-owned upstream. */
+  registerUpstreamAlias(name: string, canonicalName: string, route: AiGatewayUpstreamAliasRoute): void
   registerClient(client: AiGatewayClientRegistration): void
   registerExchangeProjector(projector: AiGatewayExchangeProjector): void
   /**
@@ -1563,6 +2153,22 @@ export interface AiGatewayCapability {
    * LLP 0024.
    */
   registerSettlementEnricher(enricher: AiGatewaySettlementEnricher): void
+  /**
+   * Record one already-projected exchange into `ai_gateway_messages`.
+   *
+   * For a LIVE producer that does not sit on the wire: it holds a
+   * finished `AiGatewayProjectedExchange` and hands it to the dataset's
+   * owner rather than learning the table path, the column list, and the
+   * `part_id` dedupe rules. The proxy recorder does not use this (it
+   * already owns the projector chain); the Claude OTEL telemetry
+   * listener does. Rows whose `part_id` another producer already stored
+   * are skipped, which is what makes producer overlap harmless. See
+   * LLP 0252 #projection-unchanged.
+   */
+  recordProjectedExchange(
+    exchange: AiGatewayProjectedExchange,
+    opts?: AiGatewayRecordOptions,
+  ): Promise<AiGatewayRecordResult>
   localEndpoint(opts?: AiGatewayEndpointOptions): string
   /**
    * Look up a registered client by name. Returns `undefined` when no
@@ -1576,6 +2182,24 @@ export interface AiGatewayCapability {
    * and the walkthrough to list available adapters.
    */
   listClients(): AiGatewayClientRegistration[]
+}
+
+/** Options for `AiGatewayCapability.recordProjectedExchange`. */
+export interface AiGatewayRecordOptions {
+  /**
+   * Producer provenance merged under every emitted row's `attributes`,
+   * the same slot the backfill materializer fills with
+   * `{ gateway: { source: 'backfill' } }`.
+   */
+  gatewayAttributes?: JsonObject
+}
+
+/** Outcome of one `recordProjectedExchange` call. */
+export interface AiGatewayRecordResult {
+  /** Rows appended to the dataset. */
+  rowsWritten: number
+  /** Rows dropped because another producer already stored that `part_id`. */
+  rowsSkipped: number
 }
 
 /**
@@ -1593,6 +2217,17 @@ export interface AiGatewayCapability {
  * honored only by the flush-time `settleBatch`, before partition write; the
  * maintenance `resettleBatch` ignores it, so an already-committed row is never
  * purged.
+ *
+ * `settle` MUST be free of observable side effects and MUST be idempotent.
+ * Cache maintenance calls it SPECULATIVELY, on rows it may never commit and
+ * possibly on the same rows again next tick, purely to answer "would
+ * settlement change anything" before choosing a compaction path
+ * (`victimFallbacksSettleable`); it then discards the returned rows. So
+ * calling `settle` twice, or calling it and throwing the answer away, must be
+ * indistinguishable from not calling it at all. Reading logs and memoising in
+ * memory is fine; marking a transcript line consumed, advancing a cursor, or
+ * writing anything a later run or another process can observe is not. See
+ * LLP 0312#settle-purity.
  */
 export interface AiGatewaySettlementEnricher {
   name: string
@@ -1621,13 +2256,44 @@ export interface AiGatewayUpstreamPreset {
   path_prefix?: string
   priority?: number
   match?(input: AiGatewayRouteInput): boolean
+  /**
+   * Rewrite the inbound path prefix before the request is forwarded, for
+   * an upstream whose own path shape differs from the door the request
+   * arrived on. Declarative data rather than a callback so core can print
+   * the whole routing rule, validate it at registration, and fix it at
+   * startup (LLP 0313).
+   */
+  rewrite?: AiGatewayUpstreamPathRewrite
+}
+
+/**
+ * A single path-prefix swap. `from` must be a path-segment prefix the
+ * upstream owns (equal to, or under, its `path_prefix` when it declares
+ * one); `to` replaces it and the rest of the path is carried verbatim,
+ * query string included. A request whose path is not under `from` is
+ * forwarded unchanged.
+ */
+export interface AiGatewayUpstreamPathRewrite {
+  from: string
+  to: string
+}
+
+// @ref LLP 0474#routes [implements]: aliases own a reserved door while canonical config owns transport
+export interface AiGatewayUpstreamAliasRoute {
+  path_prefix: string
+  provider?: string
+  priority?: number
+  match(input: AiGatewayRouteInput): boolean
+  rewrite: AiGatewayUpstreamPathRewrite
+  /** Forwarding-only discovery/control calls never acquire raw capture slots. */
+  captureMatch?(input: AiGatewayRouteInput): boolean
 }
 
 /**
  * Read-only view of the inbound request handed to a preset's
  * `match()`. Header names are lowercased; values are arrays so callers
  * never have to special-case the `IncomingHttpHeaders` string-or-array
- * union. The body is intentionally not exposed here — matching is
+ * union. The body is intentionally not exposed here: matching is
  * supposed to be cheap and head-only.
  */
 export interface AiGatewayRouteInput {
@@ -1648,17 +2314,29 @@ export interface AiGatewayEndpointOptions {
  * through, so there is no per-adapter detach for the one undo to drift
  * from.
  *
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
  */
-export interface AiGatewayClientRegistration {
+export interface ClientRegistration {
   name: string
-  defaultUpstream: string
-  attach(ctx: AiGatewayClientAttachContext): Promise<void>
+  /** False when attach installs a local integration and needs no gateway URL. */
+  requiresEndpoint?: boolean
+  attach(ctx: ClientAttachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
 }
 
-export interface AiGatewayClientAttachContext {
-  endpoint: string
+export interface ClientRegistry {
+  registerClient(client: ClientRegistration): void
+  getClient(name: string): ClientRegistration | undefined
+  listClients(): ClientRegistration[]
+}
+
+export interface AiGatewayClientRegistration extends ClientRegistration {
+  defaultUpstream: string
+  attach(ctx: AiGatewayClientAttachContext): Promise<void>
+}
+
+export interface ClientAttachContext {
+  endpoint?: string
   config: JsonObject
   stdout: WriteStream
   stderr: WriteStream
@@ -1675,6 +2353,10 @@ export interface AiGatewayClientAttachContext {
    * `changed`, `prev_value`).
    */
   json?: boolean
+}
+
+export interface AiGatewayClientAttachContext extends ClientAttachContext {
+  endpoint: string
 }
 
 export interface AiGatewayClientStatusContext {
@@ -1712,14 +2394,22 @@ export interface AiGatewayExchangeProjector {
     | undefined
 }
 
+/** Finite capture outcomes; payloads and upstream exception text never cross this seam. */
+export type AiGatewayCaptureReason = 'text' | 'media_omitted' | 'load_unload' | 'session_ignored' |
+  'invalid_request' | 'unsupported_shape' | 'invalid_response' | 'malformed_stream' | 'trailing_record' | 'missing_terminal' |
+  'transport_error' | 'upstream_unavailable' | 'http_error' | 'capture_limit' | 'processor_unavailable' | 'append_failure' |
+  'recording_disabled' | 'owner_absent' | 'owner_disabled' | 'policy_unreadable' | 'stale_generation' | 'recording_barrier_unconfirmed'
+
 export interface AiGatewayExchangeProjectorContext {
+  /** Adapter-owned semantic admission, independent of eventual append success. */
+  captureOutcome?(reason: AiGatewayCaptureReason): void
   log: PluginLogger
   /**
    * Read-only membership test against the gateway's in-memory
    * ignored-session set (LLP 0066). The gateway holds only opaque
    * session-id tokens and answers this set-membership question; the
-   * adapter — which alone knows which wire/body field is the canonical
-   * `session_id` — resolves that id and, when it is ignored, returns the
+   * adapter, which alone knows which wire/body field is the canonical
+   * `session_id`, resolves that id and, when it is ignored, returns the
    * terminal `USAGE_POLICY_DROP` sentinel. Absent (backfill materialization,
    * unit-test stubs) → treat as `() => false`. @ref LLP 0066#enforcement
    */
@@ -1771,7 +2461,7 @@ export interface AiGatewayExchangeInput {
  * each `messages[]` entry into part rows in `ai_gateway_messages`.
  *
  * Provider-defined fields (`provider`, `session_id`, `conversation_id`,
- * identity) are authoritative — the gateway never overrides them when
+ * identity) are authoritative: the gateway never overrides them when
  * present.
  */
 export interface AiGatewayProjectedExchange {
@@ -1780,6 +2470,11 @@ export interface AiGatewayProjectedExchange {
    * Partition key and session container, always present: the Claude
    * session id or Codex `metadata.session_id`. A session holds the main
    * loop plus N subagent / side-chat threads. (LLP 0030)
+   * On the live wire dispatcher, equality with a nonempty input.exchange_id
+   * and an absent/null conversation_id declares an exchange snapshot: row
+   * expansion uses temporary state without committed seeding or shared
+   * history/dedup. Other sessions and the projected writer/backfill retain
+   * their existing state contracts. (LLP 0469#exchange-scope)
    */
   session_id: string
   /**
@@ -1840,6 +2535,12 @@ export interface AiGatewayProjectedExchange {
 export interface AiGatewayProjectedMessage {
   role: string
   content: string | JsonObject[]
+  /**
+   * Optional zero-based position in the session for incremental producers.
+   * Must be a nonnegative INT32. Omission preserves the exchange-array index.
+   * Positions must agree across replay, filtering and live/recovery batches.
+   */
+  message_index?: number
   message_id?: string
   previous_message_id?: string[]
   message_created_at?: string
@@ -1856,7 +2557,7 @@ export interface AiGatewayProjectedMessage {
    * request, one model) and the gateway stamps it on every row of the
    * exchange, user rows included. A backfilled exchange spans a whole session
    * that can switch models mid-stream, so backfill stamps the model per
-   * assistant message instead, mirroring the transcript — which records
+   * assistant message instead, mirroring the transcript, which records
    * `message.model` on assistant lines only. Backfilled user-prompt and
    * tool_result rows therefore carry no model (model fidelity in backfill is
    * assistant-output-only). The gateway prefers this per-message value over
@@ -1864,6 +2565,20 @@ export interface AiGatewayProjectedMessage {
    * otherwise.
    */
   model?: string
+  /**
+   * Per-message provider id, for exchanges that span turns served by
+   * different providers (an OpenClaw session can switch its model, and with
+   * it the provider, mid-session; the backfilled exchange is the whole
+   * session). The gateway prefers this value over the exchange `provider`
+   * when present and falls back to the exchange provider otherwise, the same
+   * precedence `model` carries. Unlike `model`, projectors that supply it
+   * are expected to stamp it on every row of the turn (prompts and tool
+   * results included, via their turn's resolved backend): `provider` is
+   * non-nullable per row, so an unstamped minority-turn prompt would fall
+   * back to the exchange value and misattribute, which is the exact defect
+   * the field exists to fix (LLP 0194).
+   */
+  provider?: string
   entrypoint?: string
   user_type?: string
   permission_mode?: string
@@ -2009,7 +2724,7 @@ export interface VectorShardStatus {
  * `@hypaware/completion-anthropic` and `@hypaware/completion-openai`).
  * Consumers (e.g. `@hypaware/context-graph-enrich`) require this
  * capability rather than binding to a specific provider, so swapping the
- * model backend is a config decision — which plugin is installed — not a
+ * model backend is a config decision, which plugin is installed, not a
  * refactor. This is the same separable-capability split as
  * `hypaware.embedder`; a localhost `base_url` keeps generation on-machine.
  *
@@ -2035,7 +2750,7 @@ export interface CompletionCapability {
    * Async batch generation, when the provider offers it (Anthropic Message
    * Batches: 50% off, asynchronous, results within ≤24h). Latency-insensitive
    * callers submit many requests at once, poll, and collect. Absent on
-   * providers without a batch API — callers feature-detect and fall back to
+   * providers without a batch API: callers feature-detect and fall back to
    * sequential {@link complete}.
    */
   batch?: CompletionBatch
@@ -2047,7 +2762,7 @@ export interface CompletionCapability {
  * `customId`; `poll` reports job progress; `results` returns one outcome per
  * `customId` (a normalized {@link CompletionResult} or an error). A `refusal`
  * is a *successful* per-request result with `stopReason: "refusal"`, not an
- * error — the same contract as {@link CompletionCapability.complete}.
+ * error, the same contract as {@link CompletionCapability.complete}.
  */
 export interface CompletionBatch {
   submit(requests: CompletionBatchRequest[], opts?: CompletionOptions): Promise<CompletionBatchStatus>
@@ -2099,9 +2814,9 @@ export interface CompletionRequest {
   /**
    * Provider-neutral tool-choice control. Each provider translates to its
    * native shape, so a caller forcing structured output stays portable:
-   *   - `'auto'` — the model decides whether to call a tool.
-   *   - `'required'` — the model must call some tool.
-   *   - `{ name }` — the model must call this specific tool.
+   *   - `'auto'`: the model decides whether to call a tool.
+   *   - `'required'`: the model must call some tool.
+   *   - `{ name }`: the model must call this specific tool.
    * Prefer this over a provider-specific `params.tool_choice`; when both are
    * set, `toolChoice` wins. Leave unset for the provider default.
    */
@@ -2109,7 +2824,7 @@ export interface CompletionRequest {
   /** JSON-schema structured-output request, when the provider supports it. */
   responseFormat?: JsonValue
   /**
-   * Provider-specific passthrough merged into the request body — e.g.
+   * Provider-specific passthrough merged into the request body: e.g.
    * Anthropic `thinking` / `output_config.effort`. Portable callers leave
    * this unset and use the neutral fields above.
    */
@@ -2231,11 +2946,11 @@ export interface InitPresetContribution {
 }
 
 // =============================================================================
-// Backfill (first-class client history import)
+// Backfill (first-class `hyp backfill`)
 // =============================================================================
 
 /**
- * Plugin-registered backfill providers. Each provider plans and yields
+ * Plugin-registered backfill providers. Each provider scans and yields
  * `BackfillItem` envelopes (and optional `BackfillEvent` lifecycle
  * signals) for one or more datasets. Core owns the runner, telemetry
  * envelope, dry-run behavior, and dataset materialization; providers
@@ -2257,21 +2972,30 @@ export interface BackfillContribution {
   /** Short human-readable description for `hyp backfill list`. */
   summary?: string
   /**
-   * Optional planning hook. Called by `hyp backfill plan` to surface
-   * what would be scanned without committing to writes. Returning
-   * `undefined` means the provider has no planning information.
-   */
-  plan?(ctx: BackfillPlanContext): Promise<BackfillPlan | undefined>
-  /**
    * Stream `BackfillItem` envelopes (one per scanned record) and
    * optional `BackfillEvent` lifecycle signals. The runner consumes
    * each `BackfillItem` by resolving its `kind` against the
    * dataset-materializer registry.
    */
   run(ctx: BackfillRunContext): AsyncIterable<BackfillItem | BackfillEvent>
+  /**
+   * Opt-in scheduling metadata for the daemon's periodic sweep (LLP 0173
+   * T9's `backfill_sweep.js`), not a new mechanism: a contribution with no
+   * `sweep` field is never ticked by the sweep driver, so this is
+   * absent-by-default and zero behavior change for every provider that
+   * doesn't set it (Codex today, and Claude/OpenClaw before their scheduled
+   * transcript lanes). `cron` is a standard 5-field cron
+   * expression, evaluated by `cronMatches` (`src/core/sinks/driver.js`),
+   * the same schedule shape sinks already use.
+   *
+   * @ref LLP 0172#lane-b-sweep [implements]: the daemon-side scheduled
+   * sweep's opt-in contribution field, absent-by-default for every
+   * provider that doesn't set it.
+   */
+  sweep?: { cron: string }
 }
 
-export interface BackfillPlanContext {
+export interface BackfillRunContext {
   env: NodeJS.ProcessEnv
   cacheRoot: string
   /** Effective lower bound for record timestamps (ISO string). */
@@ -2314,16 +3038,48 @@ export interface BackfillPlanContext {
    * while the shared-tree gate keeps its own fail-open rules.
    */
   isPluginConfigured?: (plugin: PluginName) => boolean
-}
-
-export interface BackfillRunContext extends BackfillPlanContext {
+  /**
+   * Whether a plugin's client is detached (`recording: false`, LLP 0466),
+   * read fresh by the runner. `isPluginConfigured` already answers false for
+   * a detached plugin; this is the narrower question a shared-tree provider
+   * asks about its own client, whose unclaimed sessions otherwise fail open.
+   * Absent means nothing is detached.
+   */
+  isPluginDetached?: (plugin: PluginName) => boolean
   storage: QueryStorageService
+  /** True only for a daemon-scheduled provider pass. */
+  sweep?: boolean
   /**
    * When true, the runner expects the provider to scan and yield items
    * without performing irreversible side effects. The runner skips the
    * materialize/write/flush steps in dry-run mode.
    */
   dryRun: boolean
+  /**
+   * How many yielded items the runner could not land, updated before the
+   * generator is resumed. It counts the non-throwing write failures only
+   * (no materializer for the item's `kind`, a materializer targeting a
+   * different dataset, an unregistered target dataset); a throwing write
+   * aborts the run, so the generator never resumes to read the count. An
+   * item whose materializer emitted no rows is not counted, because an
+   * already imported item legitimately materializes to nothing: an
+   * unchanged count means no enumerated failure, not proof of a write.
+   *
+   * Resuming a provider generator says the runner consumed the item, not
+   * that its rows landed. A provider that records per-input progress reads
+   * this around its yields (snapshot before, compare after) and withholds
+   * that progress when the count moved, so the input is retried rather
+   * than marked done against rows that were never written.
+   *
+   * The count is meaningless under `dryRun`: that mode skips materialize
+   * and write entirely, so it lands no rows and enumerates no failure. A
+   * provider must gate per-input progress on `dryRun` as well, or a
+   * dry run would mark inputs done against a write that never happened.
+   *
+   * Optional so an older host that supplies no count keeps the previous
+   * behavior: snapshot and comparison then read the same absent value.
+   */
+  itemsFailed?: number
 }
 
 /**
@@ -2332,6 +3088,9 @@ export interface BackfillRunContext extends BackfillPlanContext {
  * and asks the registered materializer to produce canonical rows.
  */
 export interface BackfillItem {
+  /** Authoritative local snapshot. Empty rows retract this exact scope; dry-run never writes. */
+  reconcile?: { where: Record<string, string>; key: string }
+
   type?: 'item'
   /** Target dataset (must match the materializer's `dataset`). */
   dataset: string
@@ -2358,15 +3117,6 @@ export interface BackfillEvent {
   event: string
   /** Optional structured attributes. */
   attributes?: Record<string, unknown>
-}
-
-export interface BackfillPlan {
-  /** Provider-supplied estimate of records that would be scanned. */
-  estimated_items?: number
-  /** Free-form scan-location descriptors (e.g. file paths). */
-  sources?: string[]
-  /** Optional human-readable notes (`hyp backfill plan` surfaces these). */
-  notes?: string[]
 }
 
 /**
@@ -2405,5 +3155,8 @@ export interface BackfillMaterializeContext {
   storage: QueryStorageService
   /** Stable run id propagated from the CLI runner. */
   devRunId?: string
+  /** Opaque identity unique to one provider invocation. */
+  runToken?: object
+  /** True only for a daemon-scheduled provider pass. */
+  sweep?: boolean
 }
-

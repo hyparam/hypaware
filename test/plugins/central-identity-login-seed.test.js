@@ -77,7 +77,7 @@ test('writeLoginSeed writes a 0600 login-origin identity stamped with the centra
   assert.equal(persisted.gateway_id, 'gw-login')
   assert.equal(persisted.expires_at, NOW_SEC + 30 * DAY)
   assert.equal(persisted.bootstrap_token_fp, undefined)
-  assert.equal(fs.statSync(persistedPath).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') assert.equal(fs.statSync(persistedPath).mode & 0o777, 0o600)
 })
 
 test('writeLoginSeed returns the identity it displaced', () => {
@@ -132,10 +132,21 @@ test('a re-point with no token refuses a login seed and points at re-login, not 
   const { fetchFn, calls } = makeFetch()
   await assert.rejects(
     new IdentityClient({ centralUrl: 'https://central-b.example', persistedPath, fetchFn, now }).acquire(),
-    /central URL mismatch.*hyp remote login/s
+    /central URL mismatch.*`hyp remote login <name>` for a remote that points at https:\/\/central-b\.example.*`hyp remote add <name> https:\/\/central-b\.example`/s
   )
   assert.equal(calls.bootstrap, 0)
   assert.equal(calls.refresh, 0)
+})
+
+test('a login seed under the new built-in host loads when config names its old host', async () => {
+  const persistedPath = tmpIdentityPath()
+  writeLoginSeed({ ...seedArgs(persistedPath), centralUrl: 'https://api.hypaware.ai' })
+  const { fetchFn, calls } = makeFetch()
+  const source = await new IdentityClient({
+    centralUrl: 'https://hypaware.hyperparam.app', persistedPath, fetchFn, now,
+  }).acquire()
+  assert.equal(source, 'loaded')
+  assert.equal(calls.bootstrap, 0)
 })
 
 test('refresh preserves the login origin and central_url on the persisted identity', async () => {

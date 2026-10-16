@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-24
 **Related:** LLP 0011, LLP 0013, LLP 0129, LLP 0135
+**Extended-by:** [LLP 0183](./0183-reconfigure-starts-from-the-config-on-disk.decision.md#retention) - the pathway default applies to a machine with no stated window; a reconfigure keeps the window the config already carries.
 
 > Amends [LLP 0011](./0011-setup-and-onboarding.decision.md): the
 > "Cache retention (days)" question is removed from the interactive

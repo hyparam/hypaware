@@ -15,6 +15,7 @@
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
+import { registerNeutralSkills } from '../../../skills/index.js'
 import { HERMES_CONFIG_SECTION, validateHermesConfig } from './config.js'
 import { createHermesBackfillProvider } from './backfill.js'
 import { HERMES_CLIENT_NAME } from './projector.js'
@@ -85,4 +86,8 @@ export async function activate(ctx) {
       pluginName: PLUGIN_NAME,
     })
   )
+
+  // @ref LLP 0494#skills [implements]: the neutral skills, installed only as
+  //   marker-owned `~/.hermes/skills/hypaware-*` directories (extends LLP 0118#requirements R5)
+  registerNeutralSkills(ctx, PLUGIN_NAME, HERMES_CLIENT_NAME)
 }

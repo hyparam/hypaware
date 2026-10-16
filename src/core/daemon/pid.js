@@ -21,6 +21,20 @@ export function daemonRunDir(stateRoot) {
 }
 
 /**
+ * Resolve the state root the supervised processing daemon keeps its own
+ * runtime files under: `<HYP_HOME>/hypaware/processing`. Its pid, status,
+ * control and log paths are the ordinary ones rooted here, so a reader that
+ * wants the processor's copy of one derives it through this rather than
+ * repeating the segment. The gateway keeps the primary state root.
+ *
+ * @ref LLP 0038#lifecycle-and-operator-behavior [implements]: the processor's runtime files live below `hypaware/processing`
+ * @param {string} stateRoot
+ */
+export function processingStateRoot(stateRoot) {
+  return path.join(stateRoot, 'processing')
+}
+
+/**
  * Path to the PID file. There is exactly one daemon per `HYP_HOME`,
  * so a single fixed filename keeps `daemon stop` / `daemon status`
  * simple.
@@ -89,9 +103,11 @@ export function clearPidFile(stateRoot) {
 }
 
 /**
- * Send signal 0 to probe whether `pid` is still running. Returns
- * false when the process is gone or when we don't have permission to
- * signal it (in which case it isn't *our* daemon anyway).
+ * Send signal 0 to probe whether `pid` is still running. True when the
+ * signal lands, and true on `EPERM`: a pid we lack permission to signal
+ * is a pid some process still holds, and reading it as dead would let a
+ * stale-pid clear delete the pid file of a live, reissued pid. False on
+ * `ESRCH` and on any other error.
  *
  * @param {number} pid
  */
@@ -104,4 +120,23 @@ export function processIsAlive(pid) {
     if (code === 'EPERM') return true
     return false
   }
+}
+
+/**
+ * Drop the PID file under `stateRoot` when the pid it names is no longer
+ * running, and leave it exactly as it is otherwise: a file whose pid is still
+ * held belongs to whoever holds it, which is why `processIsAlive` reads
+ * `EPERM` as alive.
+ *
+ * Best-effort, because the callers are stops that already happened: a pid file
+ * this cannot parse or unlink is `hyp daemon status`'s to report rather than a
+ * reason to call a completed stop a failure.
+ *
+ * @param {string} stateRoot
+ */
+export function clearStalePidFile(stateRoot) {
+  try {
+    const entry = readPidFile(stateRoot)
+    if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
+  } catch { /* an unreadable or unremovable pid file outlives this stop */ }
 }

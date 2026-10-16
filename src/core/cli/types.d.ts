@@ -1,6 +1,8 @@
 import type {
   CapabilityRegistry,
+  ClientRegistry,
   HypAwareV2Config,
+  VerbInputSchema,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type {
   ExtendedSinkRegistry,
@@ -15,6 +17,52 @@ export type AsyncBackfillConsentPrompt = (args: {
   retentionDays: number
 }) => Promise<boolean>
 
+/** One choice offered by the wizard's defaults gate. */
+export interface ConfirmSelectOption {
+  value: string
+  label: string
+  summary?: string
+}
+
+/**
+ * The gate question a wizard lane asks before opening its full menu
+ * (LLP 0190): a single-select between accepting the stated defaults and
+ * opening the menu to change them. Renders as a TUI select on a real TTY
+ * and as a numbered readline fallback elsewhere; a bare enter takes
+ * `default` (the first option when unset), so accepting the defaults is
+ * one keypress on both paths.
+ */
+export interface ConfirmSelectQuestion {
+  title: string
+  /** Position line above the title (LLP 0135 #progress), wizard-only. */
+  progress?: string
+  /**
+   * Context lines listed under the title, one per entry: what the accept
+   * option covers. Rendered verbatim (callers own indentation) on both
+   * the TUI and readline paths.
+   */
+  items?: string[]
+  options: ConfirmSelectOption[]
+  /** Value returned on a bare enter; defaults to the first option. */
+  default?: string
+  /**
+   * Value returned when stdin can no longer answer, for the gates whose
+   * printed default acts rather than declines (LLP 0299 #eof-declines).
+   * Unset questions keep taking `default` at EOF, which is what the
+   * sync gate's stated-default fallback relies on (LLP 0190 #sync-gate).
+   */
+  eofValue?: string
+  /**
+   * Back-navigation opt-in (LLP 0191): the TUI select's escape and the
+   * readline fallback's `b` answer throw `PromptBackRequestedError`
+   * instead of cancelling, returning the user to the previous screen.
+   * Only wizard lanes with a screen behind them set this.
+   */
+  allowBack?: boolean
+}
+
+export type AsyncConfirmSelectPrompt = (question: ConfirmSelectQuestion) => Promise<string>
+
 /**
  * The bundled picker source ids. Rows are manifest-sourced (LLP 0130), so
  * this union tracks the bundled plugins' `contributes.picker` names; a
@@ -23,8 +71,12 @@ export type AsyncBackfillConsentPrompt = (args: {
 export type PickerSource =
   | 'claude'
   | 'codex'
+  | 'opencode'
+  | 'cursor'
+  | 'pi'
   | 'claude-desktop'
   | 'openclaw'
+  | 'ollama'
   | 'hermes'
   | 'raw-anthropic'
   | 'raw-openai'
@@ -47,8 +99,10 @@ export interface WalkthroughOption {
   plugin?: string
   /**
    * Initial checkbox state in the TUI multiselect. Used by the picker to
-   * pre-select autodetected sources and the default export. Ignored by
-   * the legacy numbered prompt, which has no preselection concept.
+   * pre-select autodetected sources and the default export. The legacy
+   * numbered prompt ignores it unless the question sets
+   * `enterKeepsChecked`, which renders the state and makes a bare enter
+   * keep it.
    */
   checked?: boolean
   /**
@@ -66,12 +120,34 @@ export interface WalkthroughQuestion {
   /**
    * Optional position line shown above the title (LLP 0135 #progress),
    * e.g. `Step 2 of 3 · Choose what to collect`. Set only by the wizard,
-   * which knows the committed pathway; `runPickerWalkthrough` and every
-   * non-interactive caller leave it unset and print nothing.
+   * which knows the committed pathway; non-interactive callers leave it
+   * unset and print nothing.
    */
   progress?: string
   options: WalkthroughOption[]
   bounds?: { min?: number; max?: number }
+  /**
+   * Back-navigation opt-in (LLP 0191): the TUI multiselect's escape and
+   * the numbered fallback's `b` answer throw `PromptBackRequestedError`
+   * instead of cancelling. Set only by wizard lanes that have a screen
+   * to return to.
+   */
+  allowBack?: boolean
+  /**
+   * When set, the legacy numbered fallback renders each row's checked
+   * state (`[x]`/`[ ]`) and a bare enter returns the checked values
+   * instead of none, matching the TUI multiselect's enter. Set by the
+   * wizard's sync menu, where checked means "syncs" and an invisible
+   * empty-selection default would invert it (LLP 0190 #sync-gate). It
+   * also buys one re-ask on an answer that names no row, for the same
+   * reason, and makes the checked set what the question falls back to
+   * when the re-ask is spent or stdin closes. Unset questions keep the
+   * historical semantics: no state rendered, bare enter selects nothing,
+   * one ask only - and, having no stated default to fall back to, a
+   * closed stdin cancels them (`PromptCancelledError`) rather than
+   * answering them with an empty selection.
+   */
+  enterKeepsChecked?: boolean
 }
 
 export interface WalkthroughOptions {
@@ -90,6 +166,9 @@ export interface PickerPicks {
   sources: PickerSource[]
   exportChoice: PickerExport
   retentionDays: number
+  retentionExplicit?: boolean
+  /** Explicit opt-in to GitHub collection; browser login is a separate command. */
+  github?: boolean
 }
 
 export interface PickerFinaleActions {
@@ -110,65 +189,6 @@ export interface PickerFinaleActions {
    * restart to take effect.
    */
   skipDaemonInstall?: boolean
-}
-
-export interface RunPickerWalkthroughOptions {
-  capabilities: CapabilityRegistry
-  sources?: { stopAll?: () => Promise<void> }
-  skills?: {
-    list(): { name: string; clients: ('claude' | 'codex')[]; sourceDir: string }[]
-  }
-  agents?: {
-    list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[]
-  }
-  stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
-  stdin?: NodeJS.ReadableStream
-  env: NodeJS.ProcessEnv
-  /** Pre-baked picks; bypass prompts when set. */
-  picks?: PickerPicks
-  /**
-   * Provenance of `picks.exportChoice`, for telemetry only. Consulted
-   * solely on the pre-baked path (with `picks`); the interactive wizard
-   * always defaults export, so its origin is `default`. Omit to default.
-   */
-  exportOrigin?: PickerExportOrigin
-  prompt?: AsyncPickPrompt
-  /**
-   * Override the system source detector. Defaults to a catalog-backed
-   * wrapper around the real filesystem-based `detectPickerSources`.
-   * Only consulted in interactive mode (no pre-baked `picks`); tests
-   * inject a stub so the picker's preselected boxes do not depend on
-   * the dev's home dir.
-   */
-  detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
-  /**
-   * Interactive consent prompt for the onboarding backfill step. Only
-   * consulted in interactive mode (no pre-baked `picks`); non-interactive
-   * runs (`--yes` / `--dry-run`) backfill automatically. Defaults to a
-   * yes/no confirm that defaults to yes.
-   */
-  backfillConsentPrompt?: AsyncBackfillConsentPrompt
-  /**
-   * Backfill runner the finale uses to import a picked client's local
-   * history right after config is written. Injected by `hyp init` with the
-   * kernel registries; omit to skip the backfill step entirely.
-   */
-  backfill?: PickerBackfillRunner
-  /** When set, run daemon install / attach / skills / restart after writing config. */
-  finale?: PickerFinaleActions
-  /**
-   * Overwrite an existing local config (LLP 0031). Non-interactive only
-   * (`--force` / `--from-file`); the interactive wizard prompts instead.
-   */
-  force?: boolean
-  /**
-   * Interactive overwrite confirm, consulted only in interactive mode
-   * (no pre-baked `picks`) when a local config already exists. Tests
-   * inject a stub; the default is a readline yes/no prompt defaulting to
-   * no.
-   */
-  confirmOverwrite?: (targetPath: string) => Promise<boolean>
 }
 
 /**
@@ -195,6 +215,13 @@ export interface BackfillFinaleResult {
  */
 export interface PickerBackfillRunner {
   available: string[]
+  /**
+   * Provider names whose contribution declares a daemon sweep schedule
+   * (LLP 0170). The finale never asks backfill consent for these: the
+   * sweep imports their history regardless of any answer, so they get a
+   * disclosure and an immediate first import instead (LLP 0180).
+   */
+  sweeping?: string[]
   run(args: {
     provider: string
     dryRun: boolean
@@ -216,6 +243,12 @@ export interface FinaleSummary {
     dryRun: boolean
     plan?: Record<string, unknown>
     targetPath?: string
+    /**
+     * The install step ran and threw. Distinct from `skipped`, a caller's
+     * decision not to run it at all: the finale carries on either way, so
+     * without this a failure reads as a clean install with no target path.
+     */
+    failed?: boolean
   }
   globalInstall: {
     skipped: boolean
@@ -223,24 +256,32 @@ export interface FinaleSummary {
     binPath?: string
     packageSpec?: string
   }
-  /** `skipped` marks a client the wizard left alone because `hyp status` already reported it attached (team pathway). */
-  attach: { client: 'claude' | 'codex'; dryRun: boolean; ok: boolean; skipped?: boolean }[]
-  skillsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
-  agentsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
+  /**
+   * `skipped` marks a client the wizard left alone because `hyp status`
+   * already reported it attached (team pathway). `noAdapter` marks a client
+   * contribution with no registered runtime adapter (Claude Desktop's
+   * deliberate no-attach-on-join posture): not applicable to the attach
+   * lane, so `ok: true` and the run summary prints nothing for it.
+   */
+  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean; notRecording?: boolean }[]
+  skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
+  agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
+  /**
+   * `skipped` is "the restart did not run": the caller asked for no daemon or
+   * no restart, or the install above failed, which leaves nothing to restart.
+   * `daemonInstall.failed` is where a run says it was the latter.
+   */
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
-}
-
-export interface PickerWalkthroughResult {
-  exitCode: number
-  configPath: string
-  config: HypAwareV2Config
-  sourcesPicked: PickerSource[]
-  exportPicked: PickerExport
-  clientsPicked: ('claude' | 'codex')[]
-  retentionDays: number
-  finale?: FinaleSummary
+  /**
+   * Clients still carrying a HypAware attach marker that this run's config no
+   * longer enables: the state an unchecked-on-re-run client is left in. The
+   * finale names them and stops there (LLP 0185); the detach stays the user's
+   * to run. Optional so a scripted finale runner (tests, the wizard's
+   * injectable seam) need not synthesize it.
+   */
+  attachedNotConfigured?: string[]
 }
 
 export interface CommandResult {
@@ -252,7 +293,7 @@ export interface CommandResult {
 export type CommandRunner = (
   cmd: string,
   args: string[],
-  opts: { env: NodeJS.ProcessEnv; cwd?: string },
+  opts: { env: NodeJS.ProcessEnv; cwd?: string; timeoutMs?: number },
 ) => Promise<CommandResult>
 
 export interface DurableBinResult {
@@ -269,10 +310,13 @@ export interface InitFlags {
   yes: boolean
   noDaemon: boolean
   dryRun: boolean
-  clients: ('claude' | 'codex')[]
-  sources: ('claude' | 'codex' | 'raw-anthropic' | 'raw-openai' | 'otel')[]
+  github?: boolean
+  noBackfill?: boolean
+  clients: ('claude' | 'claude-desktop' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'ollama')[]
+  sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number
+  retentionExplicit?: boolean
   fromFile?: string
   binPath?: string
   /** Overwrite an existing local config (backs it up first). */
@@ -289,6 +333,8 @@ export interface DispatchOptions {
   cwd?: string
   /** Override the local plugin workspace */
   workspaceDir?: string
+  /** Override OS temp root (tests); reaches `createPluginPaths` through `bootKernel`. */
+  tmpRoot?: string
   registry?: ReturnType<typeof createCommandRegistry>
   kernel?: KernelRuntime
 }
@@ -350,17 +396,116 @@ export interface ClientResult {
   removed?: string
   /**
    * Prior value restored on detach. Emitted by every core undo format that
-   * records a prior (`json`, `toml`, `json_path`), not just codex.
+   * records a prior (`json`, `toml`), not just codex.
    *
    * Single-primary only: an undo that restores several priors restores them
    * all on disk but reports one unspecified value here (LLP 0109
    * §restoredValue is single-primary only).
    */
   restored_value?: string
+  /**
+   * Dotted paths whose `prev_malformed` backup the `json` undo put back on
+   * detach - the blocks attach had to rebuild because they were present with
+   * the wrong JSON type (LLP 0163). Absent when the replay restored nothing.
+   *
+   * Paths, never values: a malformed `env` block is exactly where an API key
+   * ends up, and this is printed and logged. That is also why it is not folded
+   * into `restored_value`, which is rendered as a bare value.
+   */
+  restored_paths?: string[]
   /** Non-fatal warning emitted by the adapter. */
   warning?: string
   /** Machine-readable failure category on the error path. */
   error_kind?: string
   /** Human-readable error message on the error path. */
   error?: string
+}
+
+/**
+ * The whole argument surface of one core command: the schema its parser
+ * enforces and the usage line the registry advertises, authored together
+ * so a flag can never appear in one and not the other. Lives in
+ * `src/core/cli/command_args.js`.
+ */
+export interface CoreCommandArgSpec {
+  /** Registered usage line, without the `usage: ` prefix. */
+  usage: string
+  /** Schema `parseCommandArgv` enforces for this command. */
+  schema: VerbInputSchema
+  /** argv token aliases, e.g. `{ '-y': '--yes' }`. */
+  aliases?: Record<string, string>
+}
+
+/**
+ * One saved report as `hyp report list` inventories the store
+ * (`$HYP_HOME/reports`): the folder's name and path and the brief's mtime,
+ * never its contents.
+ */
+export interface LocalReportRow {
+  name: string
+  path: string
+  /** `report.md`'s mtime as ISO-8601, the listing's sort key and display. */
+  modifiedAt: string
+  /** The same mtime as a number, for ordering without re-parsing. */
+  mtimeMs: number
+}
+
+/**
+ * One turn a recommendation page cites, as the server records it (server
+ * LLP 0419#evidence): enough to find the message, never its content.
+ */
+export interface FixEvidence {
+  sessionId: string
+  /** A subagent's agent_id or a Codex thread's conversation_id; null for the main conversation. */
+  chainId: string | null
+  messageId: string
+  /** One tool call inside the message, when that is the cited thing; null otherwise. */
+  toolCallId: string | null
+  /** The message's UTC day. */
+  day: string
+  /** One line saying what the turn shows. */
+  note: string
+}
+
+/** One query the report ran to reach a recommendation (server LLP 0419#basis). */
+export interface FixBasisQuery {
+  /** `coordinator`, `coordinator-revision`, `subagent-<n>`, or empty when the record did not say. */
+  agent: string
+  query: string
+}
+
+/**
+ * One status event on a recommendation, as the server records it (server
+ * recommendation-status RFC). `state` is the server's enum (`open`,
+ * `in_progress`, `applied`, `dismissed`) and is carried as the server spelled
+ * it, so a newer server's state still prints. A recommendation never marked
+ * has no status at all; clients read that as `open`.
+ */
+export interface RecommendationStatus {
+  state: string
+  reason?: string
+  links: string[]
+  /** The subject that marked it: a user key, `email:<email>`, or `operator`. */
+  by?: string
+  /** ISO-8601 timestamp of the event. */
+  at?: string
+  /** `cli`, `dashboard`, or `api`. */
+  via?: string
+}
+
+/**
+ * A recommendation as `hyp report fix` carries it from the record to the
+ * saved brief: the page stem and title, the citations the server attached at
+ * publish (empty when the record carries none), and the status the server
+ * joins onto the record (`status` absent when never marked, `history` oldest
+ * first and empty off the listing route or an older server).
+ */
+export interface FixRecommendation {
+  id: string
+  page: string
+  title?: string
+  evidence: FixEvidence[]
+  basis: FixBasisQuery[]
+  status?: RecommendationStatus
+  history: RecommendationStatus[]
 }

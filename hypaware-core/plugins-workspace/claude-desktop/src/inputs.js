@@ -13,21 +13,223 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import process from 'node:process'
+
+import { findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
 
 import { DEFAULT_BUNDLE_ID, DEFAULT_MODELS, resolveGatewayBaseUrl } from './profile.js'
 
 /** Basename of the generated credential-helper wrapper under the state dir. */
 export const HELPER_BASENAME = 'credential-helper.sh'
 
+/** Entry-script extensions `node <path>` will load. */
+const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
+
+/**
+ * Bound on the shebang read. A shebang is one short line and the read is
+ * positional, so this never depends on the size of the file behind it.
+ */
+const SHEBANG_READ_LIMIT_BYTES = 256
+
 /**
  * Absolute path of the `hyp` executable to embed in the wrapper.
  * Desktop runs the wrapper outside any shell profile, so a bare `hyp`
  * on PATH is not a given; resolve the running CLI's entry script.
  *
+ * Under `npx hypaware` that entry script lives in npm's `_npx` cache, and in a
+ * project that depends on `hypaware` it lives in that project's
+ * `node_modules`; `isEphemeralBinPath` reads both as what they are, a copy npm
+ * deletes on a schedule of its own, so writing either into the wrapper records
+ * a path that outlives what owns it. Desktop runs the wrapper with the app's
+ * minimal environment and reads its stdout, so a vanished interpreter target
+ * surfaces as a credential-helper failure inside the app, with nothing on this
+ * machine reporting it. An installed CLI is durable, and resolving it here
+ * still yields a concrete absolute path: the `$PATH` walk is spent once, when
+ * the wrapper is generated, which is the point.
+ *
+ * A durable copy found this way may be a different version than the one that
+ * ran this command, which for a project-local entry script it usually is. What
+ * the wrapper needs of the path it bakes is that it still exists and still
+ * runs when Desktop next asks for a credential, and the command it runs is a
+ * credential fetch rather than any version-pinned surface; an operator who
+ * does mean a particular copy says so with `HYPAWARE_BIN`. `repointedFrom`
+ * carries the entry script the walk moved off, so the caller can disclose the
+ * swap instead of baking it where nothing can see it (issue #1623).
+ *
+ * With nothing installed the ephemeral path is still written, flagged
+ * `ephemeral` rather than refused: a wrapper that works until npm removes that
+ * tree beats no wrapper at all, and `install-helper` then says so instead of
+ * writing the rot silently.
+ *
+ * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
+ * operator chose, and second-guessing it would defeat the override. Which copy
+ * is all that settles, though, and the wrapper is a command line rather than a
+ * path: so the answer also carries `runsUnderNode` for the caller to build
+ * that command line around, and the variable's name for a word about it to
+ * say which knob set it (issue #1811). Asked of every lane, because which lane
+ * found a path is not what decides how a command line runs it; the walk tests
+ * its own candidates, so in practice only an override answers no.
+ *
+ * `entry` defaults to the running CLI's own entry script and is a parameter
+ * only so a test can present an ephemeral entrypoint: nothing short of a real
+ * `npx` run or a real project install puts this package inside one of those
+ * trees.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [entry]
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string, overrideVar?: string, nodeRunnable: boolean }}
+ */
+export function resolveHypBin(env = process.env, entry = process.argv[1]) {
+  const found = locateHypBin(env, entry)
+  return { ...found, nodeRunnable: runsUnderNode(found.binPath) }
+}
+
+/**
+ * Which copy, on its own. Split out so the runnability question is answered
+ * once, for whichever exit here returns, rather than at four returns that
+ * could drift.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string | undefined} entry
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string, overrideVar?: string }}
+ */
+function locateHypBin(env, entry) {
+  const overrideVar = ['HYPAWARE_BIN', 'HYP_BIN']
+    .find((name) => typeof env[name] === 'string' && /** @type {string} */ (env[name]).trim() !== '')
+  // Trimmed, because the emptiness test above is already the decision that
+  // surrounding whitespace is not part of the value. Untrimmed, ` /opt/hyp`
+  // is not absolute, so `path.resolve` would anchor it to whatever directory
+  // this command ran in and bake that into the wrapper.
+  if (overrideVar !== undefined) {
+    const explicit = /** @type {string} */ (env[overrideVar])
+    return { binPath: path.resolve(explicit.trim()), ephemeral: false, overrideVar }
+  }
+
+  const running = resolveEntryPath(entry)
+  if (!isEphemeralBinPath(running, env)) return { binPath: running, ephemeral: false }
+  // Recorded as `$PATH` spells it, never as `realpathSync` resolves it: what a
+  // global install puts on `$PATH` is usually a symlink into the package tree,
+  // and the durable name is that link, not the versioned directory it
+  // currently points at. Each candidate's link is still followed inside the
+  // walk, to decide whether to take it (`runsUnderNode`) or carry on past it;
+  // only the name that comes back is left unresolved.
+  const installed = findInstalledHypawareBin(env, process.platform, runsUnderNode)
+  if (installed === undefined) return { binPath: running, ephemeral: true }
+  return {
+    binPath: installed,
+    ephemeral: false,
+    ...(isSameBinFile(installed, running) ? {} : { repointedFrom: running }),
+  }
+}
+
+/**
+ * Whether `node <candidate>` can run what `$PATH` calls `hypaware`.
+ *
+ * The wrapper is `exec <nodeBin> <hypBin> ...`, so this call site needs a
+ * script Node can parse, not merely an executable. `findInstalledHypawareBin`
+ * answers the weaker question its other caller asks: `@hypaware/claude` puts
+ * the path at the head of a command line and runs it directly, where pnpm's
+ * shell script or a volta/asdf shim is a perfectly good answer. Here the same
+ * answer is a `SyntaxError` on the wrapper's first run, which Claude Desktop
+ * reports as a failed credential helper and nothing on this machine reports at
+ * all - so it would be worse than the `_npx` path it replaced, which at least
+ * works until npm prunes the cache.
+ *
+ * `npm install -g` links `<prefix>/bin/hypaware` onto the package's own
+ * `bin/hypaware.js`, so following the link and asking for a module extension
+ * accepts the layout the walk exists to find and declines the shims. All three
+ * of `.js`/`.mjs`/`.cjs` are listed because the question is what Node can run,
+ * not what this package happens to name its entry today: pinning the check to
+ * the current `bin` filename would turn a later rename into a silent return to
+ * ephemeral wrappers, with every test still green. A file the extension cannot
+ * answer for is asked for its shebang rather than declined on its name
+ * (`hasNodeShebang`).
+ *
+ * On the override lane the same answer routes rather than rejects: the
+ * operator's copy is still what the wrapper runs, without an interpreter it
+ * was never going to survive (issue #1811).
+ *
+ * This is passed to the walk rather than applied to its answer, so a rejected
+ * candidate costs the next `$PATH` entry and not the whole search - the
+ * managers that ship shims are exactly the ones that put their directory in
+ * front of `/usr/local/bin`. When the walk does come back empty, the fallback
+ * is the npx path and its warning, which is what the machine had before the
+ * walk: never worse than not looking.
+ *
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+function runsUnderNode(candidate) {
+  try {
+    const real = fs.realpathSync(candidate)
+    return NODE_MODULE_EXTENSIONS.has(path.extname(real)) || hasNodeShebang(real)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The same question, asked of a file the extension cannot answer for: a real
+ * JavaScript entry script that simply carries no extension, which is what a
+ * hand-rolled wrapper or a packaging that is not `npm install -g` leaves at
+ * the name an operator pins with `HYPAWARE_BIN`.
+ *
+ * Only worth asking since the answer stopped being a filter. On the `$PATH`
+ * walk a false negative cost the next candidate and nothing else; it now also
+ * decides whether `install-helper` drops the interpreter, so calling a node
+ * script unloadable takes the absolute interpreter off a wrapper that had one
+ * and worked, and rests it on Desktop's stripped environment carrying a
+ * `node` - the failure the interpreter is baked in to avoid.
+ *
+ * The shebang separates the two populations exactly, which is what makes it
+ * worth a read: pnpm's and yarn's global entries are `#!/bin/sh`, volta's
+ * shims are compiled binaries with no shebang at all, and asdf's are
+ * `#!/usr/bin/env bash`. What the test rests on is that none of them names
+ * `node`, not which of the three shapes any one manager happens to ship, so
+ * all of them keep the direct `exec` they need.
+ *
+ * Kind first, because `openSync` on a fifo blocks until a writer shows up and
+ * these paths are `$PATH` entries and operator-supplied values rather than
+ * ones this code chose. Reached only once the extension test has already said
+ * no, so the layout the walk exists to find never pays for it.
+ *
+ * @param {string} real
+ * @returns {boolean}
+ */
+function hasNodeShebang(real) {
+  let fd
+  try {
+    if (!fs.statSync(real).isFile()) return false
+    fd = fs.openSync(real, 'r')
+    const buf = Buffer.allocUnsafe(SHEBANG_READ_LIMIT_BYTES)
+    const read = fs.readSync(fd, buf, 0, SHEBANG_READ_LIMIT_BYTES, 0)
+    const first = buf.toString('utf8', 0, read).split('\n', 1)[0]
+    if (!first.startsWith('#!')) return false
+    // Every word, not just the first: `#!/usr/bin/env node` and
+    // `#!/usr/bin/env -S node --flags` both name the interpreter downstream of
+    // `env`, and this package's own entry script is spelled the first way.
+    return first.slice(2).trim().split(/\s+/).some((word) => {
+      const base = path.basename(word)
+      return base === 'node' || base === 'nodejs'
+    })
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
+}
+
+/**
+ * The running CLI's entry script. `realpathSync` resolves *through* the
+ * `node_modules/.bin` shim that npx and npm both put on `$PATH`, so the answer
+ * is the script itself rather than a link naming it, which is what a stripped
+ * environment needs and what lets the npx check above see a cache checkout for
+ * what it is.
+ *
+ * @param {string | undefined} entry
  * @returns {string}
  */
-export function resolveHypBin() {
-  const entry = process.argv[1]
+function resolveEntryPath(entry) {
   if (typeof entry === 'string' && entry.length > 0) {
     try {
       return fs.realpathSync(entry)

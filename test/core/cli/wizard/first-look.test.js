@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 
 import { firstLookNoticeSink, runWizardFirstLook } from '../../../../src/core/cli/wizard/first_look.js'
 import { OVERVIEW_PROBE_SQL, buildOverviewSql } from '../../../../src/core/query/overview.js'
+import { AUTO_REFRESH_FAILURE_MESSAGE } from '../../../../src/core/query/sql.js'
 
 // The wizard's half of the first look (LLP 0135 #first-look): when the step
 // runs, and that it can never fail a finished install. The block's layout
@@ -44,7 +45,7 @@ const ROWS_BY_SQL = {
   [SECTION_SQL.tools]: TOOL_ROWS,
 }
 
-test('runWizardFirstLook: writes every section, names the repeat command, reports row counts', async () => {
+test('runWizardFirstLook: writes the two setup sections, reports row counts', async () => {
   const stdout = makeBuf()
   /** @type {string[]} */
   const seen = []
@@ -58,19 +59,23 @@ test('runWizardFirstLook: writes every section, names the repeat command, report
       },
     },
   })
-  // Probe first, then the same four sections `hyp query overview` prints.
-  assert.deepEqual(
-    seen,
-    [OVERVIEW_PROBE_SQL, SECTION_SQL.models, SECTION_SQL.daily, SECTION_SQL.repos, SECTION_SQL.tools]
-  )
-  assert.deepEqual(result, { shown: true, providerRows: 1, dayRows: 1 })
+  // Probe, then models and daily. Repos and tools are not run at all:
+  // setup pays for the two sections that prove capture worked, and
+  // `hyp query overview` is where the other two live.
+  // @ref LLP 0198#wizard-sections [tests]:
+  assert.deepEqual(seen, [OVERVIEW_PROBE_SQL, SECTION_SQL.models, SECTION_SQL.daily])
+  assert.deepEqual(result, { shown: true, providerRows: 1, dayRows: 1, wrote: true })
   const text = stdout.text()
   assert.match(text, /First look at what HypAware has recorded/)
   assert.match(text, /claude-opus-5/)
-  assert.match(text, /acme\/api\s+3\s+200\s+4,000\s+42/)
-  assert.match(text, /Bash\s+9\s+3/)
-  // One pointer line, not the render's footer plus this one.
-  assert.match(text, /See this again anytime: hyp query overview \(--sql shows the queries\)/)
+  assert.match(text, /2026-07-24/)
+  // The two it does not run are absent, not empty-stated.
+  assert.ok(!text.includes('acme/api'))
+  assert.ok(!text.includes('Bash'))
+  // A section that was never requested is never called unfinished.
+  assert.ok(!text.includes('did not finish'))
+  // No pointer line: the block ends on its last section.
+  assert.ok(!text.includes('See more anytime'))
   assert.ok(!text.includes('The SQL behind these'))
 })
 
@@ -83,9 +88,8 @@ test('runWizardFirstLook: an expired deadline keeps the sections that finished',
       hasDataset: () => true,
       /** @param {string} sql */
       async run(sql) {
-        // Probe and the first two sections land fast; `repos` stalls past
-        // the budget, so `tools` never starts.
-        if (sql === SECTION_SQL.repos) {
+        // Probe and `models` land fast; `daily` stalls past the budget.
+        if (sql === SECTION_SQL.daily) {
           return new Promise((resolve) => { setTimeout(() => resolve({ columns: [], rows: [] }), 5000).unref() })
         }
         return { columns: [], rows: ROWS_BY_SQL[sql] ?? [] }
@@ -96,12 +100,17 @@ test('runWizardFirstLook: an expired deadline keeps the sections that finished',
   // What completed is shown rather than thrown away.
   assert.equal(result.shown, true)
   assert.equal(result.partial, true)
+  assert.equal(result.wrote, true)
   assert.match(text, /First look at what HypAware has recorded/)
   assert.match(text, /claude-opus-5/)
-  assert.match(text, /2026-07-24/)
-  // The unfinished sections are named as unfinished, not as empty.
-  assert.match(text, /Stopped here to keep setup moving - the repos and tools sections did not finish\./)
-  assert.ok(!text.includes('acme/api'))
+  // The unfinished section is named as unfinished, not as empty - and only
+  // the requested one is named, never repos or tools.
+  const stopped = text.split('\n').find((l) => l.startsWith('Stopped here')) ?? ''
+  assert.match(stopped, /Stopped here to keep setup moving: the daily section did not finish\./)
+  // Only the requested section is named. Repos and tools were never asked
+  // for, so calling them unfinished would be a claim about work nobody
+  // started.
+  assert.ok(!stopped.includes('repos') && !stopped.includes('tools'))
 })
 
 test('runWizardFirstLook: a slow cache skips within budget and says what to run', async () => {
@@ -121,7 +130,10 @@ test('runWizardFirstLook: a slow cache skips within budget and says what to run'
       }),
     },
   })
-  assert.deepEqual(result, { shown: false, reason: 'slow' })
+  // The block did not render, and the step still put two lines on the
+  // screen. Both facts are reported, because callers ask both questions
+  // (LLP 0230 #when).
+  assert.deepEqual(result, { shown: false, reason: 'slow', wrote: true })
   // Setup moved on rather than waiting out the query.
   assert.ok(Date.now() - started < 2000)
   assert.match(stdout.text(), /Skipped the first look/)
@@ -142,6 +154,7 @@ test('runWizardFirstLook: a cache inside the budget still renders', async () => 
     },
   })
   assert.equal(result.shown, true)
+  assert.equal(result.wrote, true)
   assert.match(stdout.text(), /claude-opus-5/)
   assert.ok(!stdout.text().includes('Skipped the first look'))
 })
@@ -152,7 +165,7 @@ test('runWizardFirstLook: an unregistered dataset skips silently', async () => {
     stdout,
     runner: { hasDataset: () => false, async run() { throw new Error('must not run') } },
   })
-  assert.deepEqual(result, { shown: false, reason: 'no-dataset' })
+  assert.deepEqual(result, { shown: false, reason: 'no-dataset', wrote: false })
   assert.equal(stdout.text(), '')
 })
 
@@ -162,7 +175,7 @@ test('runWizardFirstLook: a query failure degrades to a skipped step, not a thro
     stdout,
     runner: { hasDataset: () => true, async run() { throw new Error('cache unreadable') } },
   })
-  assert.deepEqual(result, { shown: false, reason: 'error' })
+  assert.deepEqual(result, { shown: false, reason: 'error', wrote: false })
   assert.equal(stdout.text(), '')
 })
 
@@ -192,7 +205,10 @@ test('runWizardFirstLook: a synchronous write failure cannot escape and fail a f
       },
     },
   })
-  assert.deepEqual(result, { shown: false, reason: 'error' })
+  // `wrote` is true here: the write was attempted and a partial chunk may
+  // have landed before the throw. It is counted before the delegation for
+  // exactly that reason, and the failure direction is the safe one.
+  assert.deepEqual(result, { shown: false, reason: 'error', wrote: true })
 })
 
 test('runWizardFirstLook: a render failure is contained too', async () => {
@@ -202,16 +218,18 @@ test('runWizardFirstLook: a render failure is contained too', async () => {
     runner: {
       hasDataset: () => true,
       async run(sql) {
-        // A row shape the renderer never expects: `repo_root` claims to be a
-        // string but throws when read.
-        if (sql === SECTION_SQL.repos) {
+        // A row shape the renderer never expects: every field throws when
+        // read. On a section setup actually runs, so the containment being
+        // tested is reachable.
+        if (sql === SECTION_SQL.daily) {
           return { columns: [], rows: [new Proxy({}, { get() { throw new Error('bad row') } })] }
         }
         return { columns: [], rows: ROWS_BY_SQL[sql] ?? [] }
       },
     },
   })
-  assert.deepEqual(result, { shown: false, reason: 'error' })
+  assert.deepEqual(result, { shown: false, reason: 'error', wrote: false })
+  assert.equal(stdout.text(), '')
 })
 
 test('firstLookNoticeSink: discloses withheld rows, drops the freshness line', async () => {
@@ -223,6 +241,19 @@ test('firstLookNoticeSink: discloses withheld rows, drops the freshness line', a
   // finishing an install can act on. `hyp query overview` prints it.
   sink({ kind: 'freshness', line: 'note: capture may lag by up to 2 minutes\n' })
   assert.equal(stderr.text(), 'local-only: withheld 3 row(s) not visible from this full caller\n')
+})
+
+test('firstLookNoticeSink: a failed refresh is disclosed, not dropped with the freshness line', async () => {
+  // Both arrive on the same freshness channel and read alike, but only one
+  // of them means rows are missing. Before LLP 0321 this failure threw and
+  // setup printed no block; serving confirmed rows under "First look at what
+  // HypAware has recorded" while swallowing the one signal that they are
+  // incomplete would trade a visible failure for a silent one.
+  const stderr = makeBuf()
+  const sink = firstLookNoticeSink(stderr)
+  sink({ kind: 'freshness', line: 'cache: last write to query cache was 4 minutes ago\n' })
+  sink({ kind: 'refresh-failed', line: `${AUTO_REFRESH_FAILURE_MESSAGE}\n` })
+  assert.equal(stderr.text(), `${AUTO_REFRESH_FAILURE_MESSAGE}\n`)
 })
 
 test('firstLookNoticeSink: a closed sink drops a late disclosure', async () => {
@@ -239,6 +270,6 @@ test('firstLookNoticeSink: a closed sink drops a late disclosure', async () => {
 test('runWizardFirstLook: no runner (no query registry) skips', async () => {
   const stdout = makeBuf()
   const result = await runWizardFirstLook({ stdout })
-  assert.deepEqual(result, { shown: false, reason: 'no-dataset' })
+  assert.deepEqual(result, { shown: false, reason: 'no-dataset', wrote: false })
   assert.equal(stdout.text(), '')
 })

@@ -3,6 +3,7 @@
 import { createRequire } from 'node:module'
 import process from 'node:process'
 
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { readObservabilityEnv } from '../observability/env.js'
 
 /**
@@ -10,10 +11,12 @@ import { readObservabilityEnv } from '../observability/env.js'
  */
 
 /**
- * @param {string[]} _argv
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runVersion(_argv, ctx) {
+export async function runVersion(argv, ctx) {
+  const parsed = parseCoreCommandArgv('version', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const require = createRequire(import.meta.url)
   const { version } = require('../../../package.json')
   const { hypHome } = readObservabilityEnv(ctx.env)

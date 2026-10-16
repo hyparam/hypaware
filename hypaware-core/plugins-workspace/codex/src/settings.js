@@ -30,8 +30,8 @@ export async function attach(opts) {
     port,
     version,
     configPath = defaultConfigPath(),
-    baseUrl = `http://127.0.0.1:${port}/v1`,
-    providerName = 'HypAware OpenAI Gateway',
+    baseUrl = `http://127.0.0.1:${port}/backend-api/codex`,
+    providerName = 'HypAware Codex Gateway',
   } = opts
   validatePort(port)
   validateVersion(version)
@@ -50,20 +50,24 @@ export async function attach(opts) {
 
 /**
  * Reverse a previous `attach`. No-op when config.toml is absent or
- * has no hypaware-managed Codex block.
+ * already has an unmarked hypaware provider. Missing providers in existing
+ * configs are repaired for saved chats migrated by 1.38.0.
  *
  * @param {CodexDetachOptions} [opts]
  * @returns {Promise<CodexDetachResult>}
  */
 export async function detach(opts = {}) {
-  const { configPath = defaultConfigPath() } = opts
+  const { configPath = defaultConfigPath(), dryRun = false } = opts
   const { content, existed, mtimeMs } = await readConfig(configPath)
   if (!existed) return { changed: false }
 
   const prepared = prepareDetach(content)
   if (!prepared.changed) return { changed: false }
 
-  await writeAtomic(configPath, prepared.content, mtimeMs)
+  // A dry run reports the same answer it would act on: `changed: false` on
+  // an install that does have a managed block tells the operator the
+  // opposite of the truth, on the one command whose job is to inspect.
+  if (!dryRun) await writeAtomic(configPath, prepared.content, mtimeMs)
 
   /** @type {CodexDetachResult} */
   const result = { changed: true }

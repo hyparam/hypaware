@@ -3,10 +3,14 @@
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 
+import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { errCode } from '../util/json_util.js'
+import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
-import { cacheTablePath, datasetsRoot } from './paths.js'
+import { cacheTablePath, datasetsRoot, isConfirmedSymlink } from './paths.js'
 
 /**
  * @import { ColumnSpec, QueryScope } from '../../../hypaware-plugin-kernel-types.js'
@@ -17,6 +21,146 @@ import { cacheTablePath, datasetsRoot } from './paths.js'
 const CURSOR_FILE = 'cursor.json'
 const SPOOL_DIR = '_hypaware_spool'
 const RETIRED_DIR = '.retired'
+
+/**
+ * The one byte no directory entry on any supported filesystem can carry,
+ * and the one that would make a path stat throw on its argument rather
+ * than on the filesystem. Built rather than escaped, so this source file
+ * carries no control character of its own.
+ */
+const NUL_BYTE = String.fromCharCode(0)
+
+/** @type {Map<string, Promise<unknown>>} */
+const partitionMutationLocks = new Map()
+
+/** Guard owner names this process holds right now. @type {Set<string>} */
+const heldMutationOwners = new Set()
+
+/**
+ * `error_kind` of the refusal {@link claimPartitionMutation} raises when the
+ * guard is held or unverifiable. Tagged rather than left to message matching
+ * because it is the one failure a caller may absorb and retry later: nothing
+ * was mutated under a guard it never took.
+ */
+export const PARTITION_MUTATION_BUSY_ERROR_KIND = 'cache_partition_mutation_busy'
+
+/**
+ * Whether a thrown value is the mutation guard's contention refusal.
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isPartitionMutationBusy(error) {
+  return /** @type {{ error_kind?: unknown } | null | undefined} */ (error)?.error_kind === PARTITION_MUTATION_BUSY_ERROR_KIND
+}
+
+/**
+ * Serialize cursor-coupled mutations of one logical cache partition across
+ * processes. Flush and maintenance run on independent daemon timers, but a
+ * compaction cursor swap must not strand an append in the retired generation.
+ *
+ * @ref LLP 0301#requirements [implements]: keep the replacement-generation cursor swap atomic with respect to daemon flushes
+ * @template T
+ * @param {string} partitionDir
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withPartitionMutationLock(partitionDir, fn) {
+  const previous = partitionMutationLocks.get(partitionDir) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(async () => {
+    const release = claimPartitionMutation(partitionDir)
+    try { return await fn() } finally { release() }
+  })
+  partitionMutationLocks.set(partitionDir, current)
+  return current.finally(() => {
+    if (partitionMutationLocks.get(partitionDir) === current) {
+      partitionMutationLocks.delete(partitionDir)
+    }
+  })
+}
+
+/**
+ * Hold the mutation locks of several partitions at once, claimed in sorted
+ * order so two multi-partition holders cannot deadlock in-process; the
+ * cross-process guard fails fast, so contention unwinds every claim.
+ * @ref LLP 0347#rows-wait [implements]: a multi-partition chunk claims every guard before it commits to any
+ * @template T
+ * @param {readonly string[]} partitionDirs
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withPartitionMutationLocks(partitionDirs, fn) {
+  const dirs = [...new Set(partitionDirs)].sort()
+  /** @param {number} index @returns {Promise<T>} */
+  const run = index => index === dirs.length ? fn() : withPartitionMutationLock(dirs[index], () => run(index + 1))
+  return run(0)
+}
+
+/**
+ * A directory grants ownership; its single PID/nonce filename publishes the
+ * owner. Never steal from a live process, however long its rewrite takes.
+ * Recovery unlinks that exact dead owner's entry before rmdir: a competing
+ * reclaimer that lost the unlink must not remove a successor's directory.
+ * Empty or malformed locks fail closed (including a crash during admission).
+ * An owner carrying this process's own PID that it does not hold is a
+ * previous incarnation's: in a container the daemon is always PID 1.
+ * @ref LLP 0417#cache-mutation-guard [implements]: CLI purge and daemon publication share a non-expiring guard
+ * @param {string} partitionDir
+ * @returns {() => void}
+ */
+function claimPartitionMutation(partitionDir) {
+  // Keep the guard outside a partition that retention may remove.
+  const directory = path.join(path.dirname(partitionDir), `.${path.basename(partitionDir)}.mutation-lock`)
+  const owner = `${process.pid}-${randomUUID()}`
+  const busy = () => Object.assign(
+    new Error('cache partition mutation busy or lock unverifiable; retry after the writer finishes'),
+    { error_kind: PARTITION_MUTATION_BUSY_ERROR_KIND }
+  )
+  fs.mkdirSync(path.dirname(partitionDir), { recursive: true })
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.mkdirSync(directory, { mode: 0o700 })
+      break
+    } catch (error) {
+      if (errCode(error) !== 'EEXIST') throw error
+      if (attempt) throw busy()
+      /** @type {string[]} */
+      let entries
+      try {
+        entries = fs.readdirSync(directory)
+      } catch (readError) {
+        // The holder let go between our mkdir and this read: contention,
+        // not corruption, so report it the way every caller already retries.
+        if (errCode(readError) === 'ENOENT') throw busy()
+        throw readError
+      }
+      if (entries.length !== 1 || !/^[1-9]\d*-[a-f0-9-]{36}$/.test(entries[0])) throw busy()
+      const pid = Number(entries[0].split('-')[0])
+      if (!Number.isSafeInteger(pid)) throw busy()
+      // @ref LLP 0417#cache-mutation-guard [implements]: a guard naming our own PID that we do not hold is dead, so PID reuse never wedges a restarted container
+      let dead = pid === process.pid && !heldMutationOwners.has(entries[0])
+      if (!dead) {
+        try { process.kill(pid, 0) } catch (error) {
+          if (errCode(error) !== 'ESRCH') throw busy()
+          dead = true
+        }
+      }
+      if (!dead) throw busy()
+      // No force: losing this exact unlink must abort recovery.
+      fs.unlinkSync(path.join(directory, entries[0]))
+      fs.rmdirSync(directory)
+      continue
+    }
+  }
+  const file = path.join(directory, owner)
+  // Failed owner publication leaves the directory closed for inspection.
+  fs.writeFileSync(file, '', { flag: 'wx', mode: 0o600 })
+  heldMutationOwners.add(owner)
+  return () => {
+    heldMutationOwners.delete(owner)
+    fs.unlinkSync(file)
+    fs.rmdirSync(directory)
+  }
+}
 
 /**
  * Read the cursor for a logical partition directory.  Returns the
@@ -37,6 +181,11 @@ export function readCursorSync(partitionDir) {
  * cursor (e.g. the orphan-generation sweep) must use this so a corrupt
  * `cursor.json` is never mistaken for "the live generation is epoch 0".
  *
+ * A `tableDir` that names anything outside its own partition makes the
+ * whole cursor unreadable, and it is rejected here rather than at any call
+ * site: see {@link generationDirIsContained}.
+ *
+ * @ref LLP 0323#one-gate [implements]: the containment check belongs to the reader every destructive path already shares.
  * @param {string} partitionDir
  * @returns {PartitionCursor | null}
  */
@@ -45,30 +194,513 @@ export function tryReadCursorSync(partitionDir) {
   let raw
   try {
     raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
-  } catch {
+  } catch (err) {
+    noteEscapeCleared(partitionDir)
+    // Only "there is no cursor here" retires the unreadable condition. Any
+    // other read failure (an EACCES, an EIO, a directory where the file
+    // was) is that condition rather than its end: the bytes on disk are
+    // still whatever they were, so retracting on one would put the
+    // partition back into the silence this refusal exists to remove. The
+    // escape condition is genuinely unproven either way, which is why it
+    // clears above (LLP 0334#recovery-is-announced).
+    if (errCode(err) === 'ENOENT') {
+      noteUnreadableCleared(partitionDir)
+    } else {
+      reportUnreadableCursor(partitionDir, err)
+    }
     return null
   }
   try {
     const parsed = JSON.parse(raw)
+    // `JSON.parse` answers with any JSON value, and only `null` makes the
+    // field reads below throw: an array, a number, a string and a boolean
+    // all answer `undefined` to `.epoch` and would synthesize an epoch-0
+    // cursor. That is the exact value `walkForRetired` reads a null for
+    // rather than trust, because a live `table/` generation under a
+    // synthesized `epoch=0` matches no live name and goes to the orphan
+    // sweep (LLP 0323#whole-cursor).
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      const kind = parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`
+      throw new TypeError(`cursor.json holds ${kind}, not a cursor object`)
+    }
     /** @type {PartitionCursor} */
     const cursor = {
       epoch: typeof parsed.epoch === 'number' ? parsed.epoch : 0,
       rowCount: typeof parsed.rowCount === 'number' ? parsed.rowCount : 0,
       compaction: parsed.compaction ?? null,
     }
+    // Here, and not one line earlier: the guard above is what decides
+    // whether the bytes read as a cursor at all, so this is the first point
+    // at which they are known to. Clearing right after `JSON.parse` would
+    // retract and re-arm the refusal on every read of a file that parses to
+    // something that is not a cursor, which is the throttle spending itself
+    // on a standing condition (LLP 0332#not-a-pass-object). Every refusal
+    // below this line is an escape refusal, which carries its own report.
+    noteUnreadableCleared(partitionDir)
     if (parsed.layout === 'source-table' || parsed.layout === 'epoch') {
       cursor.layout = parsed.layout
     }
-    if (typeof parsed.tableDir === 'string') {
+    // Present but not a string is rejected too, not dropped. Dropping it
+    // is exactly the field-level guard LLP 0323#whole-cursor refuses: the
+    // cursor would still read as source-table, name the default `table`,
+    // and cost a `table-<ms>` partition its live generation to the orphan
+    // sweep. Absent stays legitimate - it is the pre-`tableDir` spelling
+    // of `table`, and `liveGenerationDir` reads it as one.
+    if (parsed.tableDir !== undefined) {
+      if (typeof parsed.tableDir !== 'string' || !generationDirIsContained(partitionDir, parsed.tableDir)) {
+        reportEscapingTableDir(partitionDir, parsed.tableDir)
+        return null
+      }
       cursor.tableDir = parsed.tableDir
+    } else {
+      // An absent `tableDir` still names a generation: every reader resolves
+      // it to the layout default and joins THAT onto the partition path, so
+      // the default is the name the sweep will walk and the name the gate has
+      // to ask about. Absent stays legitimate (LLP 0323#whole-cursor) - what
+      // is refused is the same planted symlink, wearing the name nobody had
+      // to write down.
+      const root = path.resolve(partitionDir)
+      const planted = defaultGenerationDirs(cursor).find((name) => generationDirIsSymlink(root, name))
+      if (planted !== undefined) {
+        reportEscapingTableDir(partitionDir, planted)
+        return null
+      }
     }
     if (parsed.retention && typeof parsed.retention === 'object') {
       cursor.retention = parsed.retention
     }
+    if (typeof parsed.pendingFallbacks === 'number') {
+      cursor.pendingFallbacks = parsed.pendingFallbacks
+    }
+    noteEscapeCleared(partitionDir)
     return cursor
-  } catch {
+  } catch (err) {
+    // Escape first: the bytes no longer prove an escape, and an unproven
+    // condition may not throttle (LLP 0334#recovery-is-announced). What
+    // that used to leave behind was silence - the retraction went out and
+    // nothing said why the partition is still being skipped. It now arms
+    // the refusal that is actually standing.
+    noteEscapeCleared(partitionDir)
+    reportUnreadableCursor(partitionDir, err)
     return null
   }
+}
+
+/**
+ * Does `tableDir` name a generation directory inside `partitionDir`?
+ *
+ * Every writer in the tree mints a bare `table` or `table-<ms>` name
+ * (`generationLayout`'s `nextDirName`, the context-graph rewrite, and the
+ * first append below), so a value that resolves anywhere else did not come
+ * from `hyp`. It came from a corrupt or edited `cursor.json`, and the
+ * readers downstream are not all read-only: maintenance joins this name
+ * onto the partition path and then sweeps, unlinks, and rewrites whatever
+ * it finds there. One `..` segment therefore aims destructive cache
+ * maintenance at a directory the cache does not own.
+ *
+ * One segment, because the consumers do not all resolve the value: the
+ * orphan sweep compares it to a `readdir` entry name (`entry.name ===
+ * liveDirName`), so `./table` and `table/` resolve to the live
+ * generation while matching no entry, and the sweep reclaims the very
+ * directory the cursor meant to protect. A spelling that resolves inside
+ * the partition is therefore not enough; the string itself has to be the
+ * name. That is also what every writer mints, so nothing legitimate is
+ * spelled any other way.
+ *
+ * Resolution is still checked after that, because `.` and `..` are both
+ * single segments: one names the partition, which holds the cursor rather
+ * than a generation, and the other leaves it.
+ *
+ * All of which reads the string and none of which reads the disk, so a
+ * bare-name SYMLINK is contained by spelling and elsewhere in fact. The
+ * last check asks the filesystem: see {@link generationDirIsSymlink}. A NUL
+ * is rejected on the way past it, because it is the one byte that would
+ * make that stat throw on its argument rather than on the filesystem, and
+ * no directory entry can carry one anyway.
+ *
+ * @ref LLP 0323#contained [implements]: a cursor may name a generation only inside its own partition, by its own name.
+ * @ref LLP 0326#not-a-symlink [implements]: and the name has to be the directory, not a pointer to one.
+ * @param {string} partitionDir
+ * @param {string} tableDir
+ * @returns {boolean}
+ */
+function generationDirIsContained(partitionDir, tableDir) {
+  if (tableDir === '' || tableDir.includes(NUL_BYTE) || tableDir !== path.basename(tableDir)) return false
+  const root = path.resolve(partitionDir)
+  if (!path.resolve(root, tableDir).startsWith(root + path.sep)) return false
+  return !generationDirIsSymlink(root, tableDir)
+}
+
+/**
+ * Is the thing at `<root>/<tableDir>` a symlink rather than a generation?
+ *
+ * `lstat`, so the link itself is measured rather than what it points at,
+ * and only the LAST component: every component above it is the partition's
+ * own path, which the cache did not choose and which is legitimately
+ * reached through a symlink (a `$HYP_HOME` on another volume, `/tmp` on
+ * macOS). Resolving those would reject a working cache for the shape of the
+ * path it lives at. `realpath` is the same check with that cost attached.
+ *
+ * Rejection needs positive evidence. A stat that cannot answer - the
+ * generation is not created yet, it was removed under us, the directory
+ * will not be traversed - says nothing about the name, and treating
+ * silence as an escape would invent a fresh way to lose a live generation
+ * to the orphan sweep, which is the trade LLP 0323#whole-cursor already
+ * refused once.
+ *
+ * @ref LLP 0326#positive-evidence [implements]: only a symlink the filesystem confirms rejects the cursor.
+ * @param {string} root  the resolved partition directory
+ * @param {string} tableDir  a bare generation name: an explicit one the
+ *   string rules above already passed, or a layout default
+ * @returns {boolean}
+ */
+function generationDirIsSymlink(root, tableDir) {
+  return isConfirmedSymlink(path.join(root, tableDir))
+}
+
+/**
+ * The generation names a reader may resolve for a cursor that carries no
+ * `tableDir`.
+ *
+ * Two of them, because the consumers do not agree and the gate has to cover
+ * every name one of them could walk: `liveGenerationDir` reads the layout
+ * and answers `epoch=<n>` for anything that is not source-table, while
+ * `appendRowsToSourceTable` answers `table` regardless. Only one of the two
+ * exists in any real partition, so the other costs a stat that finds
+ * nothing.
+ *
+ * @ref LLP 0326#not-a-symlink [implements]: the default generation name is a generation name.
+ * @param {PartitionCursor} cursor
+ * @returns {string[]}
+ */
+function defaultGenerationDirs(cursor) {
+  return ['table', `epoch=${cursor.epoch}`]
+}
+
+/**
+ * How long an unchanged standing cursor refusal stays quiet between
+ * repeats, for both conditions: `reportStandingRefusal` applies one rate
+ * rule rather than one per condition. The name is the escape refusal's
+ * because LLP 0332 and LLP 0334 settled the window under it.
+ * The same 10-minute floor as `REWARN_MS` in
+ * `src/core/daemon/control.js`, chosen for the same reason: a standing
+ * condition must not be mute for the daemon's whole lifetime, and must not
+ * be a line per read either. Under the default 60-minute maintenance
+ * interval this lands on one line per refusing tick.
+ */
+const ESCAPE_REWARN_MS = 10 * 60 * 1000
+
+/**
+ * How much of a cursor read failure's own text a refusal line carries. A
+ * `SyntaxError` quotes the input it choked on, and a `cursor.json` is a file
+ * that anything at all can end up inside, so the diagnostic is worth having
+ * and is not worth an unbounded line.
+ */
+const READ_ERROR_MAX_CHARS = 200
+
+/**
+ * The escape refusals this process has already said out loud, keyed by
+ * resolved partition directory: a type-qualified key for the rejected value
+ * the line named, and when. One entry at most per partition that ever
+ * refused; cleared by {@link noteEscapeCleared} the moment any read of that
+ * partition stops refusing for escape, so a healed-then-repoisoned
+ * partition warns afresh, and cleared again by {@link clearEscapeReport}
+ * where retention removes the partition directory, so no entry outlives the
+ * partition it is keyed on (LLP 0334#eviction-clears). Bounded by the
+ * partitions this process saw refuse that still exist.
+ *
+ * @type {Map<string, { rejectedKey: string, warnedAtMs: number }>}
+ */
+const escapeReportedAt = new Map()
+
+/**
+ * The unreadable-cursor refusals this process has already said out loud,
+ * keyed and windowed exactly like {@link escapeReportedAt}, whose entries
+ * describe the other way a `cursor.json` stops the partition: present, not
+ * escaping, and not readable as a cursor.
+ *
+ * A second map rather than a second kind of entry in the first one, because
+ * the two conditions start and stop independently. A cursor that parses has
+ * stopped being unreadable while its `tableDir` may still escape, and a
+ * cursor that stops parsing has stopped being provably escaping while it is
+ * now unreadable, so the two clearings would be retracting each other's
+ * refusal. Each retraction says what it retracts (LLP 0334#recovery-is-announced),
+ * and a line that named the wrong condition would be worse than the silence
+ * it replaced.
+ *
+ * @type {Map<string, { rejectedKey: string, warnedAtMs: number }>}
+ */
+const unreadableReportedAt = new Map()
+
+/**
+ * Forget every standing cursor-read refusal recorded for a partition,
+ * without saying anything: whatever the entries described is no longer what
+ * this partition is, so the next refusal of either kind is a transition and
+ * warns immediately.
+ *
+ * Exported for the callers outside this file. Retention removes whole
+ * date partitions, and a partition evicted while poisoned never gets the
+ * non-refusing read that would clear it, so its entry would otherwise
+ * strand for the process lifetime. Retention already holds the path and is
+ * already deleting the directory, so clearing there adds nothing to the hot
+ * synchronous reader, which is the cost LLP 0332#transition-plus-rewarn
+ * weighed when it accepted the strand. The rule is the site rather than the
+ * condition: a directory that stops existing takes every entry keyed on its
+ * path with it, so a new refusal kind never has to find the eviction sites
+ * again.
+ *
+ * @ref LLP 0334#eviction-clears [implements]: the entry is dropped where the partition it is keyed on is removed.
+ * @param {string} partitionDir
+ * @returns {boolean} whether there was an entry to forget
+ */
+export function clearEscapeReport(partitionDir) {
+  const key = path.resolve(partitionDir)
+  const hadEscape = escapeReportedAt.delete(key)
+  const hadUnreadable = unreadableReportedAt.delete(key)
+  return hadEscape || hadUnreadable
+}
+
+/**
+ * Say a standing refusal out loud, at most once per condition per
+ * {@link ESCAPE_REWARN_MS}, and record that it was said.
+ *
+ * Shared by both refusal reports because the rate is one rule, not one per
+ * condition: a refusal warns when it appears or when the rejected value
+ * changes, then at most once per window while it stands.
+ *
+ * @ref LLP 0332#transition-plus-rewarn [implements]: the unit of the standing signal is the condition, not the read that noticed it.
+ * @param {Map<string, { rejectedKey: string, warnedAtMs: number }>} reportedAt
+ * @param {string} partitionDir
+ * @param {string} rejectedKey  what the window compares, which is the value
+ *   that was rejected and not the string the line renders it as
+ * @param {() => void} emit
+ */
+function reportStandingRefusal(reportedAt, partitionDir, rejectedKey, emit) {
+  const key = path.resolve(partitionDir)
+  const now = Date.now()
+  const prior = reportedAt.get(key)
+  // A negative age means the wall clock stepped back under this entry
+  // (`Date.now` is NTP-steppable, and a daemon that starts before the first
+  // sync can read far into the past). The window is then not proven to hold,
+  // so say it again: the only degradation this throttle may have is an extra
+  // line, never silence (LLP 0332#transition-plus-rewarn).
+  const sinceMs = prior ? now - prior.warnedAtMs : 0
+  if (prior && prior.rejectedKey === rejectedKey && sinceMs >= 0 && sinceMs < ESCAPE_REWARN_MS) return
+  try {
+    emit()
+    // Recorded only once the line is out. `getLogger`'s OTel emit runs
+    // before the stderr mirror, so an installed provider that throws would
+    // otherwise arm a whole rewarn window over a refusal nobody ever saw.
+    reportedAt.set(key, { rejectedKey, warnedAtMs: now })
+  } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
+}
+
+/**
+ * Forget a standing refusal and, if this process had said it out loud,
+ * retract it once.
+ *
+ * The delete happens whether or not the line does. An entry kept alive by a
+ * throwing log channel would throttle the next genuine refusal against a
+ * condition that had already ended, and that is silence: the one
+ * degradation LLP 0332#not-a-pass-object promises this throttle can never
+ * have.
+ *
+ * @ref LLP 0334#recovery-is-announced [implements]: the read that clears an armed refusal says so, so silence after a refusal means the condition still stands.
+ * @param {Map<string, { rejectedKey: string, warnedAtMs: number }>} reportedAt
+ * @param {string} partitionDir
+ * @param {() => void} emit
+ */
+function clearStandingRefusal(reportedAt, partitionDir, emit) {
+  if (!reportedAt.delete(path.resolve(partitionDir))) return
+  try {
+    emit()
+  } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
+}
+
+/**
+ * Note that a read of this partition did not refuse for escape (it
+ * returned a cursor, found no file, or failed to parse), so the next
+ * escape refusal is a transition and warns immediately, and say so once if
+ * this process had warned about that partition.
+ *
+ * The line is what makes silence mean one thing again. Under the throttle a
+ * quiet read is either "healed" or "still poisoned, the next line is not
+ * due yet"; announcing the clearing collapses that to the second, the way
+ * `daemon.control_scan_recovered` already does for the control channel
+ * (`src/core/daemon/control.js`). It is bounded to one line per refusal
+ * this process actually warned about, and a partition that never refused
+ * still costs one `Map.delete` that misses, as before.
+ *
+ * INFO, not WARN: nothing is wrong. It mirrors to stderr anyway, because it
+ * is only legible beside the refusal it answers, and that refusal is on
+ * stderr by default-install necessity (LLP 0329#stderr-mirror).
+ *
+ * It reports that the refusal cleared, not that the partition is well: two
+ * of the three exits are an absent or unparseable `cursor.json`, which
+ * still reads as unreadable. The escape condition ending is exactly the
+ * fact the warn armed, and all this line retracts. The wording carries
+ * that: a read can fail for reasons that have nothing to do with the
+ * cursor's contents (an EACCES on `cursor.json`, an `lstat` the symlink
+ * check fails open on), and the identical poison can still be sitting on
+ * disk under it. Saying the `tableDir` no longer escapes would be a claim
+ * about the file this read never got to look at.
+ *
+ * @ref LLP 0334#recovery-is-announced [implements]: the read that clears an armed refusal says so, so silence after a refusal means the condition still stands.
+ * @param {string} partitionDir
+ */
+function noteEscapeCleared(partitionDir) {
+  clearStandingRefusal(escapeReportedAt, partitionDir, () => {
+    getLogger('cache', { mirrorStderr: true }).info(
+      'the cursor containment refusal for this partition has cleared; this read did not refuse for escape',
+      {
+        [Attr.OPERATION]: 'cache.cursor_read',
+        [Attr.STATUS]: 'ok',
+        recovery_kind: 'cursor_escape_recovered',
+        partition_dir: partitionDir,
+      }
+    )
+  })
+}
+
+/**
+ * Note that a read of this partition got a cursor out of the bytes it
+ * found, or found no bytes at all, so the next unreadable refusal is a
+ * transition and warns immediately, and say so once if this process had
+ * warned about that partition.
+ *
+ * The escape report's counterpart, for the same reason and on the same
+ * terms: see {@link noteEscapeCleared}, but reached from fewer of the same
+ * exits. It retracts the refusal rather than certifying the partition, and
+ * only two reads retract it: one that got a cursor out of the bytes, and
+ * one that found no `cursor.json` to read. A read that failed any other
+ * way (an EACCES, an EIO, a directory in the file's place) leaves whatever
+ * was on disk on disk, which satisfies the unreadable condition rather than
+ * ending it, so that exit arms the refusal instead. The escape condition is
+ * the one such a read leaves genuinely unproven, and an unproven condition
+ * may not throttle.
+ *
+ * @param {string} partitionDir
+ */
+function noteUnreadableCleared(partitionDir) {
+  clearStandingRefusal(unreadableReportedAt, partitionDir, () => {
+    getLogger('cache', { mirrorStderr: true }).info(
+      'the unreadable-cursor refusal for this partition has cleared; this read did not refuse the cursor as unreadable',
+      {
+        [Attr.OPERATION]: 'cache.cursor_read',
+        [Attr.STATUS]: 'ok',
+        recovery_kind: 'cursor_unreadable_recovered',
+        partition_dir: partitionDir,
+      }
+    )
+  })
+}
+
+/**
+ * Say that a `cursor.json` is present but does not read as a cursor, and
+ * say it out loud.
+ *
+ * This is the other half of the refusal set LLP 0323#one-gate routes
+ * through `tryReadCursorSync`, and it was the silent half. The escape
+ * refusal knows its cause and says so; a torn or edited `cursor.json` that
+ * does not parse produced the same permanent skip with nothing on any
+ * channel, so a partition stopped compacting, stopped being swept, and read
+ * as empty with no line anywhere saying why. The refusal is permanent by
+ * design, and what retention then does with the partition turns on a
+ * shape nothing surfaces. `tick()` reads through the lenient
+ * `readCursorSync`, so an unreadable cursor arrives as the layout-less
+ * epoch-0 default and routes to `evictLegacyPartition`, which acts only on
+ * an `epoch=0/` table or one directly under the partition. A partition
+ * still on its first epoch is therefore removed whole on directory mtime,
+ * which is what a healthy `epoch=0` cursor gets too: the broken cursor
+ * does not add that delete, it just fails to stand in the way of one it
+ * was never consulted for. Every other shape (source-table, or any later
+ * epoch) is skipped and keeps its rows past the configured window for as
+ * long as the cursor stays broken, and that silent suspension of the
+ * window is the change corruption actually makes. A delete that proceeds
+ * without the cursor and a retention window that quietly stops being
+ * enforced are both defensible only while something says the cursor could
+ * not be read, and that was true for one of the refusal set's two exits.
+ *
+ * Same shape as the escape refusal because it is the same signal: `warn`
+ * rather than `error` (nothing failed and the tick carries on), mirrored to
+ * stderr, and thrown away by the window unless it is a transition or the
+ * failure itself changed. The parse error's own text is what the window
+ * compares, so a file that fails differently is the new fact it is; it is
+ * capped because a `SyntaxError` quotes the input it choked on and a
+ * `cursor.json` is a file anything can be written into.
+ *
+ * @ref LLP 0323#say-it [implements]: the other corrupt-cursor exit through the shared gate, which knew its cause and did not say it.
+ * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
+ * @param {string} partitionDir
+ * @param {unknown} err  whatever reading the bytes as a cursor threw
+ */
+function reportUnreadableCursor(partitionDir, err) {
+  const text = err instanceof Error ? `${err.name}: ${err.message}` : 'unknown'
+  const reason = text.length > READ_ERROR_MAX_CHARS ? `${text.slice(0, READ_ERROR_MAX_CHARS)}...` : text
+  reportStandingRefusal(unreadableReportedAt, partitionDir, reason, () => {
+    getLogger('cache', { mirrorStderr: true }).warn(
+      'cursor.json does not read as a cursor; treating the cursor as unreadable',
+      {
+        [Attr.OPERATION]: 'cache.cursor_read',
+        [Attr.ERROR_KIND]: 'cursor_unreadable',
+        partition_dir: partitionDir,
+        read_error: reason,
+      }
+    )
+  })
+}
+
+/**
+ * Say that a cursor was rejected for naming a generation outside its
+ * partition, and say it out loud.
+ *
+ * The rejection is otherwise indistinguishable from every other unreadable
+ * cursor: the partition stops compacting, stops sweeping, and reads as
+ * empty until the next append rewrites the cursor. That is the safe
+ * behaviour and the useless diagnostic - "my rows vanished" and "a file I
+ * never wrote is in my cache" are two symptoms an operator would otherwise
+ * have to reconcile against silence.
+ *
+ * `warn`, not `error`: nothing failed, and the tick carries on.
+ *
+ * Once per condition, not once per read: every destructive reader shares
+ * `tryReadCursorSync` (LLP 0323#one-gate), so one poisoned cursor is read
+ * by many callers that share no pass object, and repeating the identical
+ * line for each of them tells the operator nothing the first did not.
+ * A refusal warns when it appears or when the rejected value changes, then
+ * at most once per {@link ESCAPE_REWARN_MS} while it stands; both channels
+ * (the structured WARN and the stderr mirror) throttle together because
+ * they are one signal.
+ *
+ * @ref LLP 0323#say-it [implements]: this is the one corrupt-cursor case that knows its cause, so it does not degrade silently.
+ * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
+ * @ref LLP 0332#transition-plus-rewarn [implements]: the unit of the standing signal is the condition, not the read that noticed it.
+ * @ref LLP 0334#type-qualified-key [implements]: the window compares the rejected value, not the string the line renders it as.
+ * @param {string} partitionDir
+ * @param {unknown} tableDir  the rejected value, which need not be a string
+ */
+function reportEscapingTableDir(partitionDir, tableDir) {
+  const rejected = typeof tableDir === 'string' ? tableDir : JSON.stringify(tableDir) ?? String(tableDir)
+  // The line says what was rejected; the window compares what it was. Those
+  // are not the same string: `JSON.stringify` renders the number 5 and the
+  // string "5" identically, so a poison that changed only its JSON type
+  // would look unchanged and wait out the window instead of warning as the
+  // new fact it is (LLP 0332#transition-plus-rewarn: a poison that changes
+  // shape is never absorbed into the old one's window). Qualifying the
+  // comparison key by type separates them without touching the reported
+  // `table_dir`, which is the rendered value either way.
+  const rejectedKey = `${typeof tableDir}:${rejected}`
+  reportStandingRefusal(escapeReportedAt, partitionDir, rejectedKey, () => {
+    getLogger('cache', { mirrorStderr: true }).warn(
+      'cursor.tableDir does not name a generation in its partition; treating the cursor as unreadable',
+      {
+        [Attr.OPERATION]: 'cache.cursor_read',
+        [Attr.ERROR_KIND]: 'cursor_table_dir_escapes_partition',
+        partition_dir: partitionDir,
+        table_dir: rejected,
+      }
+    )
+  })
 }
 
 /**
@@ -79,6 +711,106 @@ export function tryReadCursorSync(partitionDir) {
  */
 export async function writeCursor(partitionDir, cursor) {
   await atomicWriteJson(path.join(partitionDir, CURSOR_FILE), cursor)
+}
+
+/**
+ * Read the cursor an append is about to build its next cursor from, or
+ * refuse the append.
+ *
+ * Both append paths used to spell out the `readCursorSync` default inline,
+ * which erased the very refusal {@link tryReadCursorSync} exists to raise:
+ * null means "missing OR unreadable", and the two are not alike here. A
+ * partition with no `cursor.json` is provably fresh, and the default is the
+ * truth about it. A partition whose `cursor.json` is present but does not
+ * read has a live generation the default only guesses at, and on one already
+ * compacted onto a `table-<ms>` the guess is wrong: the append publishes
+ * `table` as live, the real generation becomes unreferenced, and the orphan
+ * sweep reclaims it once past its grace window. Every row the partition held
+ * before that append is then gone (issue #1170).
+ *
+ * So the same distinction {@link partitionHasCommittedRows} already draws for
+ * the pending-fallback tally decides whether the append may run at all, and
+ * it is drawn on the same evidence: the file's presence, not the reader's
+ * answer.
+ *
+ * Refusing is not a dead end for the rows. Appends arrive from a spool flush,
+ * and a flush whose append throws leaves its file undrained under a failure
+ * stamp for the next pass to coalesce (LLP 0322#coalesce-the-retry), so the
+ * rows wait for a readable cursor instead of being written somewhere that
+ * costs the partition its history.
+ *
+ * @ref LLP 0347#file-not-reader [implements]: the append is gated on the cursor file's presence, not the reader's answer.
+ * @ref LLP 0323#whole-cursor [constrained-by]: the write path may not re-derive the guess the reader refuses to make.
+ * @param {string} partitionDir
+ * @returns {PartitionCursor}
+ */
+function readCursorForAppend(partitionDir) {
+  const cursor = tryReadCursorSync(partitionDir)
+  if (cursor) return cursor
+  // Decided from the read above and one `existsSync`, never by asking the
+  // reader a second time. A second read can succeed where the first did not
+  // (an operator repairing `cursor.json` by hand is not atomic, and the
+  // mutation lock is in-process), and "the first read failed, the second
+  // worked" would fall through to the fresh-partition default over a
+  // partition that is not fresh, which is #1170 again.
+  if (!fs.existsSync(path.join(partitionDir, CURSOR_FILE))) {
+    // Missing is the fresh partition, and it gets the concrete default: this
+    // is where a first append legitimately publishes its first generation.
+    return { epoch: 0, rowCount: 0, compaction: null }
+  }
+  // The read itself already reported why, under the standing-refusal window
+  // (LLP 0332#transition-plus-rewarn), so the message says what the refusal
+  // costs and does not re-say the cause.
+  throw new Error(refusedAppendMessage(partitionDir))
+}
+
+/**
+ * What a refused append says. Both causes are named because
+ * {@link tryReadCursorSync} answers null for both and the operator is the
+ * one who has to repair the file: a `cursor.json` that does not parse, and
+ * one that parses but names a generation outside its own partition
+ * (LLP 0323#one-gate), look identical from here and only the second leaves
+ * well-formed JSON on disk to be puzzled by.
+ *
+ * @param {string} partitionDir
+ * @returns {string}
+ */
+function refusedAppendMessage(partitionDir) {
+  return `cache append refused: cursor.json in ${partitionDir} is present but unreadable (it does not parse, or it names a generation outside its partition), so the live generation is unknown`
+}
+
+/**
+ * Why an append onto this partition would be refused, or `null` when it
+ * would not be: the gate {@link readCursorForAppend} runs, asked without
+ * committing anything, so a caller about to commit several partitions out of
+ * one batch can find out before it commits the first.
+ *
+ * Those callers are `appendChunk` in `src/core/cache/storage.js` and
+ * `migrateLegacyPartitions` in `src/core/cache/migrate.js`, which fan out
+ * the same way. Taking the spool as the example: one
+ * chunk fans out into one append per partition it touches, and the flush
+ * checkpoints the chunk only once every one of them has returned. A refusal
+ * partway through therefore leaves the partitions before it committed and
+ * the checkpoint unwritten, and the next flush replays the whole chunk:
+ * nothing dedupes rows that already carry their native identity, so every
+ * healthy sibling in that chunk grows by its share of it once per flush tick
+ * for as long as the refusal stands. Asked first, the chunk commits nothing
+ * and waits whole, which is the outcome LLP 0347#rows-wait describes.
+ *
+ * The answer can go stale between this call and the append - another writer
+ * can corrupt a cursor in between - and that is the pre-existing hazard of
+ * any append that fails partway, not a new one. The refusal it guards is a
+ * standing condition, so the pass after such a race sees it here and refuses
+ * before committing anything.
+ *
+ * @ref LLP 0347#rows-wait [implements]: a chunk spanning a refused partition waits whole instead of half-committing once per flush.
+ * @param {string} partitionDir
+ * @returns {string | null}
+ */
+export function appendRefusalReason(partitionDir) {
+  if (tryReadCursorSync(partitionDir)) return null
+  if (!fs.existsSync(path.join(partitionDir, CURSOR_FILE))) return null
+  return refusedAppendMessage(partitionDir)
 }
 
 /**
@@ -96,7 +828,7 @@ export async function writeCursor(partitionDir, cursor) {
  * @param {string[]} sourceSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
- * @param {{ declaration?: CachePartitioningDeclaration }} [options]
+ * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[], stampRows?: (rows: Record<string, unknown>[]) => Promise<void>, mutationLockHeld?: boolean }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
 export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows, options) {
@@ -104,48 +836,153 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
-  const cursor = readCursorSync(partitionDir)
-  const tableDir = cursor.tableDir ?? 'table'
-  const icebergDir = path.join(partitionDir, tableDir)
-  const declaration = options?.declaration
-  const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
-  await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
-    rowCount: cursor.rowCount + rows.length,
-    compaction: cursor.compaction,
-    layout: 'source-table',
-    tableDir,
-    retention: cursor.retention,
-  })
-  return result
+  /** @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>} */
+  const append = async () => {
+    // Buffered rows must be checked again after waiting behind a purge.
+    rows = options?.filterRows ? options.filterRows(rows) : rows
+    if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
+    // Seqs are stamped here, under the guard and after the purge re-check,
+    // so every row this partition commits carries a seq above every row it
+    // committed before, whichever process did the committing. Stamping any
+    // earlier (the spool reader once did) let two processes commit out of
+    // seq order and left rows under the sink's watermark (issue #2578). A
+    // multi-partition chunk reserves its whole run before this, once every
+    // guard is held, and only hands each partition its slice here.
+    // @ref LLP 0492#reserve-at-commit [implements]: stamp under the partition guard, after the purge re-check
+    if (options?.stampRows) await options.stampRows(rows)
+    const fallbackAppended = countGatewayFallbackRows(rows)
+    const cursor = readCursorForAppend(partitionDir)
+    const tableDir = cursor.tableDir ?? 'table'
+    const icebergDir = path.join(partitionDir, tableDir)
+    // Asked BEFORE the append, which creates the table on first use: after
+    // it every partition looks like one that already held rows.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, icebergDir)
+    const declaration = options?.declaration
+    const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
+    // Spread first, so every field the reader returned survives the append
+    // (see `appendRowsToPartition` for the loss a field list caused).
+    await writeCursor(partitionDir, {
+      ...cursor,
+      rowCount: cursor.rowCount + rows.length,
+      layout: 'source-table',
+      tableDir,
+      ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
+    })
+    return result
+  }
+  // @ref LLP 0027#re-settle-sweep [implements]: the sweep's gate is this
+  // count, so the write path is where it is maintained - maintenance reading
+  // the cursor is only cheap because nothing here forgets to tally. Rows
+  // arrive after the flush-time settle hook has run, so a marker still
+  // present is a genuinely unsettled row.
+  //
+  // `mutationLockHeld` skips this: a multi-partition chunk in storage.js
+  // already claimed every guard, sorted, before committing to any of them
+  // (@ref LLP 0347#rows-wait), and claiming it again here would self-deadlock
+  // in-process.
+  if (options?.mutationLockHeld) return append()
+  return withPartitionMutationLock(partitionDir, append)
 }
 
 /**
- * Append rows into the current epoch's Iceberg table for the resolved
- * partition.  Creates the partition directory and cursor on first
- * write.
+ * Append rows into the live generation of the resolved partition, whichever
+ * layout the cursor names. Creates the partition directory and an
+ * `epoch=0` cursor on first write.
+ *
+ * The entry point is the legacy epoch layout's, but the generation it
+ * appends to is the cursor's, not the caller's. A purge rewrite
+ * (`maintenance.js`, the `purgeRewrite` branch) converts an epoch partition
+ * to a `table-<ms>-<uuid>` source-table generation, and this function used
+ * to append to `epoch=<n>` regardless and rewrite the cursor from a field
+ * list that had no `layout` or `tableDir`. That one write pointed the
+ * partition back at the epoch directory, which held only the rows appended
+ * since the purge, and left the rewritten generation holding every
+ * pre-purge row unreferenced for the orphan sweep to reclaim. The server
+ * ingest mover appends through here, so one session purge on a partition
+ * still receiving rows cost it its history.
+ *
+ * Hence the two rules below: the live directory is resolved from the
+ * cursor's layout, and the cursor is written by spreading the one read, so
+ * no field the reader returned is dropped.
  *
  * @param {string} cacheRoot
  * @param {string} dataset
  * @param {string[]} partitionSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
+ * @param {{ filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[] }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
-export async function appendRowsToPartition(cacheRoot, dataset, partitionSegments, columns, rows) {
+export async function appendRowsToPartition(cacheRoot, dataset, partitionSegments, columns, rows, options) {
   if (rows.length === 0) {
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, partitionSegments)
-  const cursor = readCursorSync(partitionDir)
-  const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
-  const result = await appendRowsToTable(epochDir, columns, rows)
-  await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
-    rowCount: cursor.rowCount + rows.length,
-    compaction: cursor.compaction,
+  // @ref LLP 0027#re-settle-sweep [implements]: as above - the legacy epoch
+  // layout is not settle-eligible today, but a cursor field maintained on
+  // only one of two write paths is a count that drifts the day it is.
+  return withPartitionMutationLock(partitionDir, async () => {
+    // Buffered rows must be checked again after waiting behind a purge.
+    rows = options?.filterRows ? options.filterRows(rows) : rows
+    if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
+    const fallbackAppended = countGatewayFallbackRows(rows)
+    const cursor = readCursorForAppend(partitionDir)
+    const liveDir = path.join(partitionDir, cursor.layout === 'source-table' ? cursor.tableDir ?? 'table' : `epoch=${cursor.epoch}`)
+    // As above: asked before the append creates the generation's table.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, liveDir)
+    const result = await appendRowsToTable(liveDir, columns, rows)
+    await writeCursor(partitionDir, {
+      ...cursor,
+      rowCount: cursor.rowCount + rows.length,
+      ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
+    })
+    return result
   })
-  return result
+}
+
+/**
+ * May this partition already hold committed rows that no cursor count
+ * covers? Yes whenever a `cursor.json` is present - deliberately NOT "did
+ * {@link tryReadCursorSync} return a cursor", which also answers null for a
+ * file that exists but cannot be parsed, and a partition whose cursor is
+ * unreadable is not a fresh one. Yes also when the cursor is gone but the
+ * Iceberg table is not: that is what a crash between an append and its
+ * cursor write leaves behind, and a source-table partition in that state is
+ * invisible to {@link discoverCachePartitions} until an append restores its
+ * cursor, so nothing else would ever re-derive the count for it.
+ *
+ * Only when NEITHER exists is the partition provably new, and only then may
+ * an append claim a concrete zero.
+ *
+ * @param {string} partitionDir
+ * @param {string} tableDir  the Iceberg table this append writes into
+ * @returns {boolean}
+ */
+function partitionHasCommittedRows(partitionDir, tableDir) {
+  return fs.existsSync(path.join(partitionDir, CURSOR_FILE)) || icebergTableExists(tableDir)
+}
+
+/**
+ * The `pendingFallbacks` entry an append should write, as a spreadable
+ * fragment. A first write to a provably new partition starts the count at
+ * the appended tally, so tables born after the field existed always carry a
+ * concrete number. Over anything that may already hold committed rows an
+ * absent count means "unknown" (a cursor written before the field existed,
+ * an unreadable one, or a table whose cursor was lost), and an append of
+ * zero marker rows must preserve that: claiming zero would let maintenance
+ * skip that table's one seeding scan and strand its split twins. Once a
+ * marker row lands the count turns concrete regardless - an undercount only
+ * until the next rewrite records the exact remainder, and any positive
+ * value routes to that rewrite.
+ *
+ * @param {PartitionCursor} cursor
+ * @param {boolean} mayHoldUncountedRows see {@link partitionHasCommittedRows}
+ * @param {number} fallbackAppended
+ * @returns {{ pendingFallbacks?: number }}
+ */
+function pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended) {
+  if (mayHoldUncountedRows && cursor.pendingFallbacks === undefined && fallbackAppended === 0) return {}
+  return { pendingFallbacks: (cursor.pendingFallbacks ?? 0) + fallbackAppended }
 }
 
 /**
@@ -232,46 +1069,6 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
  */
 export function resolveClientName(row) {
   return nonEmpty(row.client_name) ?? nonEmpty(row.conversation_source) ?? nonEmpty(row.provider) ?? 'unknown'
-}
-
-/**
- * Extract a `YYYY-MM-DD` date string from common timestamp fields.
- * Returns `undefined` when no recognizable timestamp is present.
- *
- * @param {Record<string, unknown>} row
- * @returns {string | undefined}
- */
-export function resolvePartitionDate(row) {
-  const ts = row.timestamp ?? row.created_at ?? row.recorded_at ?? row.date
-  if (typeof ts === 'string') {
-    const match = ts.match(/^(\d{4}-\d{2}-\d{2})/)
-    if (match) return match[1]
-    const d = new Date(ts)
-    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10)
-  }
-  if (ts instanceof Date) return ts.toISOString().slice(0, 10)
-  if (typeof ts === 'number' && Number.isFinite(ts)) return new Date(ts).toISOString().slice(0, 10)
-  return undefined
-}
-
-/**
- * Derive the partition segments for a row by inspecting its data for
- * client and date fields.  Falls back to `['all']` when neither
- * dimension is resolvable, preserving backwards compatibility with
- * datasets that carry no partition-relevant columns.
- *
- * @param {Record<string, unknown>} row
- * @returns {string[]}
- */
-export function resolvePartitionSegments(row) {
-  const client = resolveClientName(row)
-  const date = resolvePartitionDate(row)
-  if (client === 'unknown' && !date) return ['all']
-  /** @type {string[]} */
-  const segments = []
-  segments.push(`client=${client}`)
-  if (date) segments.push(`date=${date}`)
-  return segments
 }
 
 /**

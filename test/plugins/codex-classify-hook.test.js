@@ -21,7 +21,7 @@ test('an unclassified interactive session prints a plain-text classification nag
   const code = await runCodexClassifyHook(
     ['classify-cwd'],
     ctx({ stdout, stdin: stdinFor({ cwd: '/work/fresh' }) }),
-    { evaluate: async ({ cwd }) => ({ prompt: true, reason: 'unclassified', cwd, enrolled: true, governed: false, promptText: `classify ${cwd} via hyp ignore` }) }
+    { evaluate: async ({ cwd }) => ({ prompt: true, reason: 'unclassified', cwd, enrolled: true, governed: false, askMode: 'ask', promptText: `classify ${cwd} via hyp ignore` }) }
   )
   assert.equal(code, 0)
   const text = stdout.text()
@@ -36,7 +36,7 @@ test('no prompt -> no output', async () => {
   const code = await runCodexClassifyHook(
     ['classify-cwd'],
     ctx({ stdout, stdin: stdinFor({ cwd: '/work/x' }) }),
-    { evaluate: async ({ cwd }) => ({ prompt: false, reason: 'unenrolled', cwd, enrolled: false, governed: false }) }
+    { evaluate: async ({ cwd }) => ({ prompt: false, reason: 'unenrolled', cwd, enrolled: false, governed: false, askMode: 'ask' }) }
   )
   assert.equal(code, 0)
   assert.equal(stdout.text(), '')
@@ -49,7 +49,7 @@ test('falls back to ctx.cwd when no event cwd is piped', async () => {
   const code = await runCodexClassifyHook(
     ['classify-cwd'],
     ctx({ stdout, stdin: stdinFor(''), cwd: '/work/from-ctx' }),
-    { evaluate: async ({ cwd }) => { seenCwd = cwd; return { prompt: false, reason: 'classified', cwd, enrolled: true, governed: true } } }
+    { evaluate: async ({ cwd }) => { seenCwd = cwd; return { prompt: false, reason: 'classified', cwd, enrolled: true, governed: true, askMode: 'ask' } } }
   )
   assert.equal(code, 0)
   assert.equal(seenCwd, '/work/from-ctx')

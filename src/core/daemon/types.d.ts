@@ -1,7 +1,12 @@
 import type {
+  BackfillMaterializerRegistry,
+  BackfillRegistry,
   CapabilityRegistry,
+  HypAwareV2Config,
   QueryRegistry,
+  QueryStorageService,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { BackfillRunnerContext } from '../commands/types.d.ts'
 import type { ActionReconciler, ConfigControlStatus, ConfigLayerDrop, V1Diagnostic } from '../config/types.d.ts'
 import type {
   ExtendedSinkRegistry,
@@ -9,6 +14,7 @@ import type {
 } from '../registry/types.d.ts'
 import type { KernelRuntime } from '../runtime/types.d.ts'
 import type { CommandRunner, DurableBinResult } from '../cli/types.d.ts'
+import type { FolderAskMode } from '../usage-policy/types.d.ts'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
@@ -29,6 +35,80 @@ export interface SourceSnapshot {
   state: 'started' | 'failed' | 'stopped'
   error?: string
   details?: object
+  health?: SourceHealth
+}
+
+/**
+ * What a source last said about *itself*, as opposed to what the daemon
+ * observed about its lifecycle. Every field is the kernel contract's
+ * `SourceStatus` field of the same name, and every one is optional: a field
+ * that did not arrive usable is dropped rather than recorded wrong.
+ *
+ * It rides beside `SourceSnapshot.state` rather than replacing it because
+ * the two answer different questions and may disagree: `state` is the
+ * lifecycle's verdict ("this source started"), `health.state` is the
+ * source's own reading of how that is going ("and it is degraded").
+ */
+export interface SourceHealth {
+  state?: 'starting' | 'ready' | 'degraded' | 'stopped' | 'error'
+  message?: string
+  rowsWritten?: number
+  lastError?: string
+}
+
+/**
+ * One client surface the running gateway has produced rows for, lifted
+ * out of the gateway source's `status()` details in `status.json`.
+ *
+ * `entrypoint` is verbatim whatever the projector wrote into the row's
+ * `entrypoint` column (Codex owns `codex-tui` and whatever Codex Desktop
+ * reports; Claude Desktop's 3p route reports `local-agent`). Core never
+ * interprets it, which is what keeps this surface client-agnostic.
+ */
+export interface RecentEntrypoint {
+  entrypoint: string
+  /** `client_name` last seen with this entrypoint, or null when unset. */
+  clientName: string | null
+  /** ISO timestamp of the most recent row projected under it. */
+  lastSeen: string
+  /** Rows projected under it since the daemon booted. */
+  rows: number
+}
+
+/**
+ * One plugin whose `activate()` did not complete on this boot.
+ *
+ * The kernel catches per plugin and boots the rest, so the snapshot around
+ * this entry looks exactly like the snapshot of a boot that was never asked
+ * for the plugin at all: no source, no sink, no command, and no error. This
+ * is the entry that tells those two apart (issue #1556).
+ */
+export interface FailedPluginSnapshot {
+  name: string
+  /**
+   * `activate_failed`, `activate_missing`, or whatever the throw carried
+   * (bar `requires_unsatisfied`, which a throw's own label is rewritten to
+   * `activate_failed` rather than be mistaken for the door below) -
+   * and `requires_unsatisfied` when there was no throw because the dependency
+   * resolver eliminated the plugin before `activate()` ran (issue #1580). That
+   * one value is the discriminator `hyp status` branches on to pick a message
+   * and a repair; the resolver's own kind is kept in front of `message`.
+   */
+  errorKind: string
+  message: string
+}
+
+/**
+ * A plugin directory this boot found but could not load a manifest from
+ * (issue #1576). Deliberately not a `FailedPluginSnapshot`: a manifest that is
+ * corrupt, unparseable, or fails schema validation has no plugin name, and a
+ * `rootDir` in a `name` field would be read as one by every consumer of it.
+ */
+export interface UnloadableManifestSnapshot {
+  /** The plugin directory, which is the only identity it has. Never a name. */
+  rootDir: string
+  /** Why `loadManifest` rejected it, clamped the way a throw's message is. */
+  message: string
 }
 
 export interface SinkSnapshot {
@@ -41,16 +121,99 @@ export interface SinkSnapshot {
   nextScheduledAt?: string
 }
 
+/**
+ * Why a maintenance tick deliberately left a partition fragmented instead
+ * of rewriting it (LLP 0228#reason-ids-are-span-attribute-names). The ids
+ * are the `maintenance.partition` span's attribute names verbatim, which
+ * are themselves named after the `MaintenancePartitionReport` fields, so
+ * one spelling covers the trace, the status file, `hyp status`, and the
+ * daemon log.
+ *
+ * - `compaction_ineffective`: this writer already rewrote the partition and
+ *   reproduced the same file count (LLP 0217#record-effectiveness).
+ * - `compaction_attempt_failed`: the one retry the writer generation owed it
+ *   was spent by a rewrite that threw (LLP 0218#report-the-spent-attempt).
+ *
+ * Convergence (LLP 0199#baseline-gate) is not on this list: it is the
+ * healthy majority of a cache, not a partition left fragmented.
+ */
+export type MaintenanceSkipReason = 'compaction_ineffective' | 'compaction_attempt_failed'
+
+/** One partition the last maintenance tick left fragmented, and why. */
+export interface MaintenanceSkippedPartition {
+  dataset: string
+  /** Partition tuple as `k=v/k=v`, or `all` for an unpartitioned dataset. */
+  partition: string
+  reason: MaintenanceSkipReason
+  /**
+   * The data-file count the recorded rewrite ran over, not the live one
+   * (LLP 0217). Set for `compaction_ineffective` when the cursor records it.
+   */
+  dataFiles?: number
+  /**
+   * ISO time the spent attempt failed, as the cursor records it. Set for
+   * `compaction_attempt_failed`.
+   */
+  failedAt?: string
+}
+
+/**
+ * What the daemon's last completed maintenance tick left alone, summarized
+ * for a standing surface (LLP 0228). Overwritten whole by every tick,
+ * including one that skipped nothing: a skip reason is a state the tick
+ * re-derives from the partition cursor, so only the newest tick's answer is
+ * current, and a partition that thaws drops off by itself
+ * (LLP 0228#last-tick-only).
+ *
+ * Absent means no tick has reported (a daemon that has not reached one, or
+ * maintenance disabled), which is not the same as "nothing is frozen".
+ */
+export interface MaintenanceSkipSnapshot {
+  /** ISO time of the tick this snapshot describes. */
+  tickAt: string
+  /** Partitions the tick actually visited (a budget can cut the walk short). */
+  partitionsVisited: number
+  /** Partitions skipped for a stated reason, all reasons summed. */
+  skippedTotal: number
+  /** How many partitions each reason accounts for. Zero keys are kept. */
+  reasons: Record<MaintenanceSkipReason, number>
+  /**
+   * The worst of them by name, in walk order (LLP 0199#neediest-first, so
+   * descending live data-file count), capped at
+   * `MAX_SKIPPED_PARTITIONS_REPORTED`. `skippedTotal` is the true count.
+   */
+  partitions: MaintenanceSkippedPartition[]
+}
+
 export interface DaemonStatus {
+  /** Independent process health; absent on pre-split status files. */
+  processes?: {
+    gateway: { pid?: number; state: string }
+    processing: { pid?: number; state: string; restarts: number }
+  }
   state: DaemonState
   pid: number
   /** ISO timestamp of the daemon process boot. */
   startedAt: string
-  /** ISO timestamp the daemon first reached `healthy`. */
+  /**
+   * ISO timestamp the daemon started serving: written once the sources have
+   * been started, whatever the boot aggregate said, so a `degraded` boot
+   * carries it too. Absent only before that point, when there is no tick loop
+   * yet. The name predates the meaning and is kept because every reader and
+   * every older build shares this field.
+   * @ref LLP 0386#the-pair-keeps-its-name [constrained-by]: renaming would mint the field LLP 0348 declined to mint
+   */
   healthyAt?: string
   /** ISO timestamp the daemon transitioned to `stopped`. */
   stoppedAt?: string
-  /** Milliseconds since `healthyAt` (0 when not yet healthy). */
+  /**
+   * Milliseconds since `healthyAt` (0 before the daemon serves), recomputed
+   * immediately before every write. So `healthyAt + uptimeMs` is the moment
+   * of that write, and `hyp status` reads the pair as the daemon heartbeat: a
+   * writer, or a republisher, that refreshes either half against the current
+   * clock reports a liveness it has not proved.
+   * @ref LLP 0348#heartbeat-is-derived [constrained-by]: the pair is read as a heartbeat, so a reader may not recompute either half
+   */
   uptimeMs: number
   /** dev_run_id stamped on telemetry from this daemon. */
   runId: string
@@ -60,6 +223,29 @@ export interface DaemonStatus {
   configPath?: string
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
+  /**
+   * Plugins this daemon's boot could not activate, by either door that names
+   * one: a plugin whose `activate()` threw, and a plugin the dependency
+   * resolver eliminated for an unsatisfied `requires` and so never called
+   * `activate()` on at all (issue #1580). Absent, never `[]`, when every
+   * configured plugin came up, so a boot with nothing to report writes the
+   * file shape it always wrote.
+   */
+  failedPlugins?: FailedPluginSnapshot[]
+  /**
+   * The plugin directories this daemon's boot could not load a manifest from,
+   * with the rejection reason (issue #1576). The third door into
+   * `unavailablePlugins`, kept in a field of its own because it is the one
+   * that names a directory rather than a plugin. Absent, never `[]`, when
+   * every manifest loaded, so a boot with nothing to report writes the file
+   * shape it always wrote.
+   */
+  unloadableManifests?: UnloadableManifestSnapshot[]
+  /**
+   * What the last completed cache-maintenance tick left fragmented, and why
+   * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
+   */
+  maintenance?: MaintenanceSkipSnapshot
   warnings?: string[]
 }
 
@@ -69,14 +255,33 @@ export type StatusDiagnosticKind =
   | 'config_missing'
   | 'config_unreadable'
   | 'config_local_unreadable'
+  | 'config_central_unreadable'
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
+  | 'daemon_heartbeat_stale'
+  | 'daemon_exited_abnormally'
   | 'client_attach_missing'
   | 'client_attach_stale'
+  | 'client_telemetry_stale'
+  | 'client_telemetry_env_override'
+  | 'client_attached_not_configured'
   | 'gateway_port_fallback'
+  | 'gateway_idle_no_upstreams'
+  | 'gateway_upstreams_dropped'
   | 'recent_errors'
+  | 'sink_export_failing'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
+  | 'client_sync_list_unreadable'
+  | 'maintenance_partitions_skipped'
+  | 'capture_gap'
+  | 'cache_flush_failing'
+  | 'installed_plugin_shadowed'
+  | 'source_name_unregistered'
+  | 'plugin_activate_failed'
+  | 'plugin_requires_unsatisfied'
+  | 'plugin_manifest_unloadable'
+  | 'plugin_lock_entry_invalid'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -93,25 +298,57 @@ export interface StatusDiagnostic {
 }
 
 /**
+ * Which of a bound gateway's dropped upstream names an adapter preset
+ * backfilled into the routing table, and which nothing did. Produced by
+ * intersecting the dropped names with `details.registered_presets`, both of
+ * which the gateway source publishes; the two lists together always account
+ * for every dropped name.
+ *
+ * Both lists are claims about the *table*, not about traffic, because that is
+ * the most an intersection of names can support. Routing is by `path_prefix`
+ * and `match()`, and then by rank, and none of those are published:
+ *
+ * `covered` is not "fine" and it is not "proxied" either. The operator's entry
+ * did not take effect at all, so the preset's own `base_url`, `provider`,
+ * `priority` and routing surface are in force - and where that surface is a
+ * `match()` (as it is for every bundled adapter preset) the preset's
+ * `path_prefix` is only a sort key, never consulted at match time. The
+ * backfilled entry can also be shadowed outright by a surviving config
+ * upstream that outranks it, in which case the preset routes nothing.
+ *
+ * `silent` is scoped to the name, not to the path. A surviving upstream
+ * written with no `path_prefix` is the `/` catch-all, so traffic aimed at a
+ * silent name can still be proxied and recorded under another upstream's name.
+ */
+export interface DroppedUpstreamAttribution {
+  covered: string[]
+  silent: string[]
+}
+
+/**
  * Display state of one reconciler client-action, derived for `hyp status`
  * from the persisted marker store (LLP 0036 / 0041) plus the effective
- * config — `hyp status` never runs a pass. A `failed` entry is
+ * config: `hyp status` never runs a pass. A `failed` entry is
  * informational: it never flips `overall` to `degraded` (the gateway runs
  * fine on a valid config, LLP 0041 §failure-is-surfaced-not-fatal).
  *
- * - `done` — run-once effect completed (carries `rows` + `at`).
- * - `failed` — last attempt failed; retried next pass (carries `reason`,
+ * - `done`: run-once effect completed (carries `rows` + `at`).
+ * - `failed`: last attempt failed; retried next pass (carries `reason`,
  *   `lastAttempt`, `attempts`).
- * - `pending` — desired on this joined host but no marker yet.
- * - `n/a` — suppressed (`on_join: false`) or inert (host never joined).
+ * - `refused`: terminal; the reconciler will never retry it on its own,
+ *   needs an explicit `hyp attach <requestKey>` re-run to clear (carries
+ *   `reason` + `at`, no `attempts`). Informational like `failed`: never
+ *   degrades `overall`.
+ * - `pending`: desired on this joined host but no marker yet.
+ * - `n/a`: suppressed (`on_join: false`) or inert (host never joined).
  */
-export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a'
+export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a' | 'refused'
 
 /** One reconciler action's state for the status surface. */
 export interface ClientActionReport {
   /** Handler kind / marker namespace, e.g. `backfill`. */
   kind: string
-  /** Request key — the owning plugin name for backfill (LLP 0041). */
+  /** Request key: the owning plugin name for backfill (LLP 0041). */
   requestKey: string
   state: ClientActionState
   /** Rows imported (on `done`). */
@@ -136,15 +373,46 @@ export interface ClientActionsReport {
   actions: ClientActionReport[]
 }
 
+/** Current-run route and bounded append evidence for Ollama. */
+export interface OllamaCaptureStatus {
+  state: 'ready' | 'observed' | 'persisted' | 'failed' | 'disabled' | 'unconfirmed'
+  configuredRoot: string | null
+  captureRoot: string | null
+  routeConfirmed: boolean
+  processorReady: boolean
+  lastPersisted: string | null
+  lastFailed: string | null
+  historical: boolean
+  reason: string | null
+  next: string
+}
+
 /** Per-client attach state probed off the user's home directory. */
 export interface ClientAttachReport {
+  /** Bounded current-run Ollama route and append evidence, without cache reads. */
+  capture?: OllamaCaptureStatus
   /** `claude` or `codex`. */
   name: string
   /** The plugin that owns this client (for layer provenance, LLP 0031). */
   plugin: string
   /** Plugin enabled in config. */
   configured: boolean
-  /** Settings file carries the HypAware marker. */
+  /**
+   * HypAware records this client: configured, and not switched off by
+   * `hyp client detach` (`recording: false` on the plugin entry, LLP 0466).
+   */
+  recording: boolean
+  /**
+   * The client declares an `attach_probe`, so attach is a state that can be
+   * observed (and reversed). False for a probe-less client (`claude-desktop`
+   * is the only one shipping today, LLP 0115 #no-attach-on-join), whose attach
+   * state is not applicable rather than negative: `attached` is then
+   * structurally false and means nothing (LLP 0229
+   * #status-derives-by-the-same-gate). Read off the descriptor, so a client
+   * that gains or loses a probe changes this answer with no core change.
+   */
+  attachable: boolean
+  /** Settings file carries the HypAware marker. Only meaningful when `attachable`. */
   attached: boolean
   /** Path the probe inspected. */
   settingsPath?: string
@@ -152,12 +420,110 @@ export interface ClientAttachReport {
   version?: string
   /** Local gateway port the adapter routes through, when recorded. */
   port?: string
+  /** Attach mode recorded in the marker (`base_url` / `proxy` / `otel`), when present. */
+  mode?: string
+  /** ISO timestamp the marker records the attach at, when present. */
+  attachedAt?: string
+  /**
+   * Port the marker's managed `OTEL_EXPORTER_OTLP_ENDPOINT` sends telemetry
+   * to, when the marker carries one. Distinct from `port` above (the
+   * gateway's): in `otel` mode this is the only address capture depends on,
+   * and it is what `client_telemetry_stale` compares against the listener's
+   * live bind.
+   */
+  telemetryPort?: number
   /** Probe error string, when the file was unreadable. */
   error?: string
 }
 
+/**
+ * One otel-attached client's capture health: what its own file trail says it
+ * did (`lastTranscriptActivityAt`, the newest activity-probe mtime) held
+ * against what the telemetry path actually captured (`lastEventAt`, from the
+ * listener source's status.json details). `state` is `gap` when activity ran
+ * past the capture baseline by more than the threshold; the paired
+ * `capture_gap` diagnostic carries the severity and repair
+ * (LLP 0257#status-and-health).
+ */
+export interface CaptureHealthReport {
+  /** Client name (`claude`). */
+  client: string
+  /** The plugin that owns the client and its listener source. */
+  plugin: string
+  /** The listener source's snapshot name in status.json, or null when no daemon recorded one. */
+  source: string | null
+  /** Last telemetry event the listener saw, or null when none is recorded. */
+  lastEventAt: string | null
+  /**
+   * The newest transcript activity the probe could establish, or null when
+   * the trail is empty or unprobed.
+   *
+   * The newest matching file mtime, which is the cheap first pass. When that
+   * pass alone would report a gap it is replaced by the timestamp of the
+   * newest *conversation* record the bounded confirmation read found, because
+   * a metadata write, a local slash command, or a bare touch moves an mtime
+   * without producing a turn that owed any telemetry.
+   */
+  lastTranscriptActivityAt: string | null
+  /** The attach timestamp the marker records, or null when unreadable. */
+  attachedAt: string | null
+  /**
+   * When the live listener started, or null when no daemon is running. The
+   * third baseline the gap is measured from: `lastEventAt` is in-process
+   * state, so a restart republishes it as null however long capture has been
+   * healthy, and without this the gap would be measured from an attach that
+   * can be weeks old.
+   */
+  listenerStartedAt: string | null
+  /**
+   * Milliseconds of activity past the capture baseline (0 when none).
+   *
+   * Under `state: 'unknown'` this is still the filesystem's unconfirmed
+   * suspicion, which is all it ever was: it is `state`, not this number,
+   * that says whether anything stands behind it.
+   */
+  gapMs: number
+  /**
+   * `gap` is confirmed against transcript content, never against an mtime
+   * alone. `unknown` is the third answer the bounded confirmation read owes
+   * when its budget ran out before the question was settled: it asserts
+   * neither an interruption nor a healthy capture path, and raises no
+   * diagnostic.
+   */
+  state: 'ok' | 'gap' | 'unknown'
+}
+
+/**
+ * One table whose last spool-to-cache flush attempt failed, read from the
+ * failure stamp that paces the automatic retry (LLP 0322#stamp-the-failure).
+ *
+ * A pacing record surfaced as prose, and nothing more: it says an attempt
+ * failed, when, and with what. It makes no claim about what the spool or the
+ * cache holds, and it never feeds the freshness or cache-size lines
+ * (LLP 0322#what-the-stamp-is-not).
+ */
+export interface CacheFlushFailureReport {
+  /** Table directory, relative to the cache root. */
+  table: string
+  /** ISO timestamp the stamp records the failed attempt at. */
+  failedAt: string
+  /**
+   * The bounded message the failed flush threw, or null when the stamp
+   * carries none this build can read. Byte-exact as stamped: the renderer
+   * cleans it for a terminal where the prose is assembled (LLP 0225).
+   */
+  errorMessage: string | null
+  /**
+   * Whether the stamp is still young enough to hold the automatic query
+   * flush gate closed. False means the failure stands but the next `auto`
+   * query will attempt the flush again.
+   */
+  stillCoolingDown: boolean
+}
+
 /** Service-level daemon state surfaced by `hyp status`. */
 export interface ServiceState {
+  processes?: DaemonStatus['processes']
   /** Service file present at the platform path. */
   installed: boolean
   /** Service registered with launchd/systemd. */
@@ -166,7 +532,12 @@ export interface ServiceState {
   running: boolean
   /** PID, if running. */
   pid?: number
-  /** Last reported daemon state, when a status file exists. */
+  /**
+   * The collector's verdict on the daemon's state, when a status file
+   * exists. Normally the state the daemon last wrote, but a live process
+   * whose heartbeat has gone stale is reported `degraded` whatever its
+   * snapshot claims (LLP 0348).
+   */
   state?: DaemonState
   /** dev_run_id of the active daemon process. */
   runId?: string
@@ -177,14 +548,74 @@ export interface ServiceState {
   error?: string
 }
 
+/**
+ * What proxy-mode capture depends on and nothing else reports: the local
+ * CA's identity, whether the login keychain still trusts it (LLP 0237), and
+ * whether `NODE_USE_SYSTEM_CA` is live in the launchd user environment
+ * (LLP 0239). Both are macOS mechanisms, so this is only ever built on
+ * darwin with a CA on disk; see `HypAwareStatusReport.proxyTrust`.
+ *
+ * `trusted` / `launchdEnvSet` are tri-state on purpose: `null` is "the probe
+ * could not run", which is not the same claim as "not trusted".
+ */
+export interface ProxyTrustReport {
+  /** SHA-256 fingerprint of the CA on disk, colon-separated uppercase hex. */
+  caFingerprint: string
+  /**
+   * The CA's permitted `dNSName` subtrees: every host this grant lets the CA
+   * vouch for, which is the full provider set and not the subset this install
+   * captures (LLP 0238#full-provider-constraints). Empty only for a
+   * certificate carrying no dNSName constraints at all. Passed through
+   * `displayableCaHosts`, because the bytes come from the certificate on disk
+   * rather than from us (LLP 0225): entries are sanitized, and a list longer
+   * than any real CA's ends in a `(+N more ...)` entry rather than being
+   * silently shortened.
+   */
+  hosts: string[]
+  /** `security verify-cert -p ssl` against the CA, or null when it could not run. */
+  trusted: boolean | null
+  /** `launchctl getenv NODE_USE_SYSTEM_CA` is `1`, or null when it could not run. */
+  launchdEnvSet: boolean | null
+  /**
+   * Whether an enabled gateway entry in the effective config still carries
+   * `proxy_mode: true`, or null when the config could not be read at all.
+   * The two probes above cannot tell a CA in live use from residue an old
+   * proxy attach left behind, and the advice differs completely: a
+   * proxy-mode gateway re-mints this CA on every start and terminates TLS
+   * with it, so purging it breaks capture rather than tidying it up. Null is
+   * "cannot tell", which a consumer must not read as "proxy_mode is off".
+   */
+  proxyModeConfigured: boolean | null
+}
+
 export interface HypAwareStatusReport {
   configPath: string
   configExists: boolean
   configValid: boolean
+  /**
+   * Whether anything on this machine records an answer to onboarding's pick
+   * question (LLP 0277 #answer-less), as opposed to a config existing only
+   * because a writer that never asked one created it. True when the local
+   * layer records a pick answer, or when the central layer carries capture of
+   * its own (the fleet having answered on the machine's behalf); the bare
+   * `@hypaware/central` enrollment seed is not such an answer.
+   * `hyp remote add` and the enrolling `hyp remote login` before the first
+   * `hyp init` leave `configExists` true and this false; that pair is what the
+   * returning gate reads (LLP 0281 #returning-gate).
+   */
+  configRecordsAnswer: boolean
   activePlugins: string[]
   /**
+   * Plugins the running daemon could not activate, by either door: a throw from
+   * `activate()`, or elimination by the dependency resolver before it ran
+   * (issues #1556, #1580). Empty when no daemon is running:
+   * a snapshot left by an exited daemon is a record of how that run went, not
+   * a claim about now (LLP 0383#a-record-not-a-claim).
+   */
+  failedPlugins: string[]
+  /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a
-   * single local layer — the V1 surface is unchanged). When set, the
+   * single local layer: the V1 surface is unchanged). When set, the
    * gateway is centrally managed: `centralPlugins` / `centralSinks` name
    * the entries the central layer locks (everything else in
    * `activePlugins` / `sinks` is local), `drops` lists local entries that
@@ -227,7 +658,7 @@ export interface HypAwareStatusReport {
   /**
    * Client-action reconciler state (LLP 0036 / 0041): per-provider
    * backfill-on-join (and future reconciled actions), read from the marker
-   * file via `readClientActionStatus` — `hyp status` never runs a pass.
+   * file via `readClientActionStatus`, `hyp status` never runs a pass.
    * Null when nothing applies, so the V1 status surface is unchanged. A
    * `failed` entry is informational and is deliberately excluded from
    * `overall === 'degraded'`.
@@ -239,8 +670,15 @@ export interface HypAwareStatusReport {
    * from forwarding, read from the machine-local exclusion list. Null only
    * when the list itself could not be read or parsed (see the
    * `local_only_list_unreadable` diagnostic) - never a silent zero.
+   *
+   * `folderAsk` is the standing new-folder ask (LLP 0200): `sync` is the
+   * default (unclassified folders sync and nothing interrupts the session),
+   * `ask` means the user opted into a session-start question per new folder.
+   * It rides here for the same never-silent reason as the count: the default
+   * is the mode with data consequences, so it is exactly the one that must
+   * not be silent.
    */
-  usagePolicy: { localOnlyDirCount: number } | null
+  usagePolicy: { localOnlyDirCount: number, folderAsk: FolderAskMode } | null
   /**
    * The pending first-sync export hold's absolute deadline (epoch ms), read
    * from the machine-local marker (LLP 0101). Null whenever no hold is live:
@@ -250,6 +688,65 @@ export interface HypAwareStatusReport {
    * holding ticks. A held machine must never be a silent state (LLP 0100 R9).
    */
   firstSyncHoldDeadline: number | null
+  /**
+   * Client surfaces the running (or last-run) daemon's gateway produced rows
+   * for, most recent first, read from `status.json` (LLP 0164). Empty when no
+   * daemon has run for this state root, when the gateway recorded nothing, or
+   * when the daemon predates the tracker - `hyp status` activates no plugins
+   * and reads no cache, so this is the only place the answer can come from.
+   */
+  recentEntrypoints: RecentEntrypoint[]
+  /**
+   * What the daemon's last cache-maintenance tick deliberately left
+   * fragmented (LLP 0228). Read from `status.json`, like
+   * `recentEntrypoints`: the daemon runs the hourly walk, and `hyp status`
+   * activates no plugins and reads no cache, so re-deriving this would mean
+   * running a second walk from a status command. Null when no daemon has
+   * reported a tick for this state root.
+   */
+  maintenance: MaintenanceSkipSnapshot | null
+  /**
+   * Capture health for every otel-attached client (LLP 0257#status-and-health,
+   * the RFC 0262 open-question-1 duty): last event seen on the telemetry path
+   * vs the client's own last activity. Empty when no configured client is
+   * otel-attached, so the pre-otel surface is unchanged. Like
+   * `recentEntrypoints` this reads status.json without a liveness gate: a
+   * dead daemon's stale `lastEventAt` is exactly the evidence a capture gap
+   * is made of.
+   */
+  captureHealth: CaptureHealthReport[]
+  /**
+   * Tables whose last spool-to-cache flush failed, newest first and uncapped:
+   * the text renderer applies the eight-line terminal cap, and `--json`
+   * carries this whole list, because it is where the overflow line's pointer
+   * points (LLP 0330#count-beside-cap). Empty on every healthy install, so
+   * the ordinary status surface is unchanged. Unlike `maintenance` this is
+   * read from the spool rather than status.json, because the stamp is
+   * written by whichever process attempted the flush and no single process
+   * sees them all.
+   */
+  cacheFlushFailures: CacheFlushFailureReport[]
+  /**
+   * How many tables carried a readable failure stamp. Always equal to the
+   * list's length now that the list is uncapped, and kept anyway: it is a
+   * shipped `--json` key, the text plane's overflow arithmetic reads it, and
+   * the equality is an invariant a consumer may rely on.
+   */
+  cacheFlushFailuresTotal: number
+  /**
+   * Proxy-mode trust state (LLP 0237, LLP 0239). Null whenever the question
+   * does not apply: a non-darwin host (both mechanisms are macOS-only, LLP
+   * 0237#darwin-only), or no local CA on disk (proxy mode was never on). An
+   * absent section is the honest answer there, and a quieter one than an
+   * "unknown" a user could not act on.
+   */
+  proxyTrust: ProxyTrustReport | null
+  /**
+   * Kernel self-update health (LLP 0309). `line` is null when there is
+   * nothing worth surfacing on the text renderer; `json` always carries
+   * version, cached auto_update flag, provenance, and the last probe.
+   */
+  selfUpdate: { line: string | null, json: Record<string, unknown> }
 }
 
 export interface CollectStatusOptions {
@@ -272,6 +769,10 @@ export interface CollectStatusOptions {
   launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
   isSystemdUnitInstalled?: (opts: { label?: string; unitDir?: string; homeDir?: string }) => boolean
   systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  /** Keychain trust probe (tests, and any caller that must not shell out). */
+  isCaTrusted?: (args: { certPath: string }) => Promise<boolean>
+  /** Launchd user-environment probe (tests, and any caller that must not shell out). */
+  isLaunchdEnvSet?: () => Promise<boolean>
 }
 
 export interface SystemctlResult {
@@ -392,19 +893,23 @@ export interface LaunchAgentInstallPlan {
 export type DaemonInstallPlan = LaunchAgentInstallPlan | SystemdInstallPlan
 
 /**
- * Override seam for the npx->durable global-bin upgrade installDaemon
- * runs before writing the service unit. Production leaves this unset
- * (process.env / process streams / the real npm runner); tests inject a
- * fake env + runner so no global npm install actually happens.
+ * CLI resolution context for installDaemon, before writing the service unit.
+ * Commands pass their streams and interaction mode; tests can replace npm
+ * and the confirmation prompt without changing a real installation.
  */
 export interface DurableBinUpgradeSeam {
   env?: NodeJS.ProcessEnv
   stdout?: { write(chunk: string): unknown }
   stderr?: { write(chunk: string): unknown }
   runner?: CommandRunner
+  stdin?: NodeJS.ReadableStream
+  interactive?: boolean
+  confirm?: (question: string) => Promise<boolean>
 }
 
 export interface DaemonInstallOptions {
+  /** Allow a temporary CLI when a durable installation cannot be established. */
+  force?: boolean
   /** Absolute path to the HypAware CLI entrypoint. */
   binPath: string
   /**
@@ -413,7 +918,7 @@ export interface DaemonInstallOptions {
    * `_npx` path (the explicit-bin escape hatch).
    */
   binExplicit?: boolean
-  /** Override seam for the npx->durable global-bin upgrade (tests only). */
+  /** CLI resolution context, including test overrides for npm and prompts. */
   durableBin?: DurableBinUpgradeSeam
   /** Config path passed to the daemon (defaults to ~/.hyp/hypaware-config.json). */
   configPath?: string
@@ -437,7 +942,7 @@ export interface DaemonInstallOptions {
   restart?: boolean
   /** Linux: RestartSec= seconds (default 5). */
   restartSec?: number
-  /** Pass `--foreground` to the daemon (default true). */
+  /** @deprecated Service commands always run in the foreground. */
   foreground?: boolean
   /** macOS: override LaunchAgents dir. */
   plistDir?: string
@@ -449,6 +954,8 @@ export interface DaemonInstallOptions {
   systemctl?: SystemctlAdapter
   /** macOS: override the launchctl user domain (e.g. gui/501). */
   userDomain?: string
+  /** Override the poll delay the installers use while waiting (tests only). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface DaemonUninstallOptions {
@@ -460,6 +967,8 @@ export interface DaemonUninstallOptions {
   launchctl?: LaunchctlAdapter
   systemctl?: SystemctlAdapter
   userDomain?: string
+  /** Override the poll delay the uninstall waits out the unload with (tests only). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface DaemonServiceOptions {
@@ -483,7 +992,7 @@ export interface DaemonHandle {
   /** Trigger a config reload (SIGHUP-equivalent). */
   reload(): Promise<void>
   /**
-   * Phase 3 test affordance. The runtime the daemon activated —
+   * Phase 3 test affordance. The runtime the daemon activated:
    * exposed so smoke flows can drive sink instantiation, dispatch,
    * and per-test setup until config-driven sink setup lands.
    */
@@ -491,6 +1000,10 @@ export interface DaemonHandle {
 }
 
 export interface RunDaemonOptions {
+  /** Internal process-launch seam for resource limits and hermetic fault tests. */
+  processingExecArgv?: string[]
+  /** Private runtime files for a supervised processor; data/config keep hypHome. */
+  runtimeStateRoot?: string
   /** Override HYP_HOME (defaults from env). */
   hypHome?: string
   /** Explicit config file path. */
@@ -500,9 +1013,16 @@ export interface RunDaemonOptions {
   runId?: string
   /** Sink tick cadence (default 60_000). */
   tickIntervalMs?: number
-  /** Default true; smoke flows opt out and drive shutdown directly. */
+  /**
+   * Default true; smoke flows and in-process tests opt out and drive shutdown
+   * directly. It also declares that the caller does not own this process, so
+   * the gateway's stop deadline kills the processing child without exiting
+   * (#1531): left default inside `node --test`, a stop that reaches its
+   * deadline ends the worker mid-file, dropping every later test in it while
+   * the run still reports green.
+   */
   installSignalHandlers?: boolean
-  /** Phase 3 only supports foreground; surfaced for symmetry with `--foreground`. */
+  /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
   tmpRoot?: string
@@ -533,4 +1053,99 @@ export interface PidFileEntry {
   runId: string
   /** `foreground` (Phase 3) or `detached` (Phase 4 installers). */
   mode: string
+}
+
+/**
+ * The runner the sweep driver fires per due contribution: exactly
+ * `runBackfillProvider`'s (`src/core/commands/backfill.js`) shape, narrowed to
+ * the arguments a sweep passes. Declared as a type rather than taken from the
+ * import so the driver can accept an injected fake in a unit test without the
+ * test having to stand up a real cache, storage service, and materializer set.
+ */
+export interface BackfillSweepRunner {
+  (args: {
+    ctx: BackfillRunnerContext
+    provider: string
+    dryRun: boolean
+    devRunId?: string
+    retentionDays?: number
+    sweep?: boolean
+  }): Promise<{
+    ok: boolean
+    scanned: number
+    rowsWritten: number
+    skipped: number
+    /** Which step failed, for the settlement log; absent on a clean run. */
+    errorKind?: string
+  }>
+}
+
+/**
+ * One backfill contribution's identity, read once out of the plugin's object and
+ * rebuilt as strings the kernel owns. Everything the sweep does after that
+ * read - the re-entrancy set, the dev run id, the log records, and the
+ * settlement handlers that run long after `tick()` returned - uses this
+ * instead of the contribution, so no later step can run a plugin accessor.
+ */
+export interface BackfillSweepProviderIdentity {
+  name: string
+  plugin: string
+}
+
+export interface BackfillSweepDriverOptions {
+  backfills: BackfillRegistry
+  backfillMaterializers: BackfillMaterializerRegistry
+  env: NodeJS.ProcessEnv
+  storage: QueryStorageService
+  /**
+   * Dataset registry. `runBackfillProvider`'s write/flush path
+   * (`writeRows`/`flushDataset` in `src/core/commands/backfill.js`) resolves
+   * a dataset's registered table path through this before it can commit a
+   * row, so a fired sweep run needs it on `BackfillRunnerContext` exactly
+   * like `hyp backfill`'s CLI path already gets it from `CommandRunContext`.
+   */
+  query: QueryRegistry
+  /** The daemon's effective config; absent on a host with no readable document. */
+  config?: HypAwareV2Config
+  /** Test seam: defaults to `runBackfillProvider`. */
+  runBackfill?: BackfillSweepRunner
+  /**
+   * How long one queued run may hold the shared background queue before the
+   * driver stops waiting on it. Test seam: defaults to 30 minutes, which no
+   * healthy sweep reaches.
+   */
+  runTimeoutMs?: number
+}
+
+export interface BackfillSweepTickOptions {
+  /** Tick instant the cron due-check evaluates against. Defaults to `new Date()`. */
+  now?: Date
+  /** Ignore the cron due-check and fire every sweep-bearing provider (test use). */
+  force?: boolean
+}
+
+/**
+ * What one `tick()` decided, for the caller's telemetry and for tests. Runs are
+ * fired unblocked, so `fired` names the providers a run was *started* for, never
+ * the ones that finished.
+ */
+export interface BackfillSweepTickReport {
+  fired: string[]
+}
+
+export interface BackfillSweepDriver {
+  tick(opts?: BackfillSweepTickOptions): Promise<BackfillSweepTickReport>
+}
+
+/**
+ * One control request the boot-time clear could not remove
+ * (`clearControlRequests`), handed to `watchControlRequests` as
+ * `staleRequests` so the watcher consumes a matching leftover without
+ * dispatching it.
+ */
+export interface UnclearedRequest {
+  /** The file's bytes when readable, else null (matched conservatively). */
+  content: string | null
+  /** The error that kept the clear from removing the file. */
+  message: string
 }

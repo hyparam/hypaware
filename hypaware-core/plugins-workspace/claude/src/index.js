@@ -3,20 +3,33 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
-import { defaultConfigPath } from '../../../../src/core/config/schema.js'
+import { defaultConfigPath, prepareLocalConfigWrite } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
+import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
+import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
+import { booleanFlagValue } from '../../../../src/core/cli/verb_codec.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { attach, defaultSettingsPath } from './settings.js'
+import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
+import { resolveClaudeCodeVersion } from './claude_version.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
 import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
 import { runClaudeClassifyHook } from './classify_hook.js'
+import {
+  CLAUDE_TELEMETRY_SOURCE,
+  createStartClaudeTelemetrySource,
+  resolveAttachTelemetryPort,
+} from './telemetry/source.js'
+import { claudeTelemetryDatasetRegistration } from './telemetry/events_dataset.js'
+import { claudeBodySpoolDir, ensureClaudeBodySpool } from './telemetry/spool.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -25,7 +38,7 @@ import { runClaudeClassifyHook } from './classify_hook.js'
 const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'
 const UPSTREAM_NAME = 'anthropic'
-const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
+const CLI_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
 
 /**
  * The plugin's `config_sections` validator, surfaced as a side-effect-free
@@ -116,6 +129,10 @@ export async function activate(ctx) {
   // where the file never exists.
   const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
+  // @ref LLP 0403#storage [implements]: load saved exclusions for both live
+  // recording and backfill, including a fresh manual importer.
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
+
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({
       homeDir,
@@ -148,6 +165,8 @@ export async function activate(ctx) {
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
       localOnlyListPath: localOnlyList,
+      config: ctx.config,
+      ignoredSessions,
     })
   )
 
@@ -169,47 +188,233 @@ export async function activate(ctx) {
           dry_run: attachCtx.dryRun === true,
         },
         async (span) => {
-          if (attachCtx.dryRun) {
-            span.setAttribute('status', 'ok')
-            span.setAttribute('restored', false)
-            const port = safeEndpointPort(attachCtx.endpoint)
-            writeAttachOutput(attachCtx, {
-              status: 'ok',
-              client: CLIENT_NAME,
-              dryRun: true,
-              settingsPath,
-              port,
-              changed: false,
-              prevValue: undefined,
-            })
-            return
-          }
-          const port = endpointPort(attachCtx.endpoint)
+          const obsEnv = readObservabilityEnv(ctx.env)
+          // Everything the `otel` env block names, resolved before the
+          // settings write so the write is one atomic decision. `otel` is the
+          // claude client's only attach mode: a machine still carrying a
+          // proxy attach is migrated by this same write (the mode-switch key
+          // release plus the residue unwind below), never re-attached by
+          // proxy.
+          // @ref LLP 0258#version-floor [constrained-by]: one attach mode per client, with no proxy fallback
+          const telemetryPort = resolveAttachTelemetryPort({
+            stateRoot: obsEnv.stateDir,
+            config: ctx.config,
+          })
+          const spoolDir = claudeBodySpoolDir(obsEnv.hypHome)
           try {
+            // The read-only preflight runs for dry-run too, so the plan cannot
+            // promise a switch the write path refuses. It happens before any
+            // settings I/O, leaving an existing proxy attach byte-identical.
+            // @ref LLP 0258#version-floor [implements]: the probed version is what attach refuses on; unknown proceeds
+            const claudeVersion = await resolveClaudeCodeVersion(ctx.env)
+            preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir })
+            if (attachCtx.dryRun) {
+              span.setAttribute('status', 'ok')
+              span.setAttribute('restored', false)
+              writeAttachOutput(attachCtx, {
+                status: 'ok',
+                client: CLIENT_NAME,
+                dryRun: true,
+                settingsPath,
+                port: safeEndpointPort(attachCtx.endpoint),
+                changed: false,
+                prevValue: undefined,
+                mode: MODE_OTEL,
+                telemetryPort,
+                spoolDir,
+              })
+              return
+            }
+            const port = endpointPort(attachCtx.endpoint)
+            const hookBin = resolveHookBinPath(ctx.env)
+
+            // The base URL is never written and no proxy keys appear, which is
+            // what keeps Remote Control's first-party predicate true with no
+            // override keys.
+            // @ref LLP 0258#settings-env [implements]: one settings write is the entire attach
+            // @ref LLP 0258#nothing-else [implements]: no keychain, no launchctl setenv, no LaunchAgent on this path
             const result = await attach({
               port,
               version: ctx.plugin.version,
               stateFile,
               settingsPath,
-              binPath: resolveHookBinPath(ctx.env),
+              binPath: hookBin.binPath,
+              mode: MODE_OTEL,
+              telemetryPort,
+              spoolDir,
+              claudeVersion,
+              // The half of the per-signal override check that can only be
+              // made here. A leftover OTEL_EXPORTER_OTLP_LOGS_ENDPOINT lives in
+              // the user's shell, never in the settings file attach writes, and
+              // it outranks the endpoint this attach is about to write - which
+              // is total, silent capture loss with every surface reporting
+              // healthy. Read to warn; never unset, never shadowed.
+              // @ref LLP 0271#attach-reads-the-process-environment [implements]
+              processEnv: ctx.env,
             })
+            // After the settings write, not before: a floor refusal must leave
+            // nothing behind, and Claude Code only starts writing bodies once a
+            // session launches with the new settings. Created owner-only here
+            // so raw prompts never pass through a default-mode directory.
+            //
+            // In its own try, because the settings write above has already
+            // landed: an unwritable spool root would otherwise report the whole
+            // attach as failed while the client is in fact attached, and would
+            // swallow the migration notes below - including the line naming
+            // `hyp client detach claude --purge` for the CA a migrated machine still
+            // carries. A warning names the one thing that did not happen.
+            // @ref LLP 0253#spool-location [implements]
+            /** @type {string | undefined} */
+            let spoolWarning
+            try {
+              await ensureClaudeBodySpool(spoolDir)
+            } catch (spoolErr) {
+              const detail = spoolErr instanceof Error ? spoolErr.message : String(spoolErr)
+              spoolWarning =
+                `could not prepare the raw-body spool at ${spoolDir} (${detail}); ` +
+                'capture falls back to the events alone until it is writable'
+              logger.warn('client.attach.spool_unavailable', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                spool_dir: spoolDir,
+                error: detail,
+              })
+            }
             // Malformed `env` / `hooks` blocks attach rebuilt after backing the
             // displaced value up into the marker (LLP 0163). Reported on the
             // span, in the log, and to the user - the whole point of the
             // decision is that the repair stops being silent.
-            const warnings = result.changed && result.warnings !== undefined ? result.warnings : []
+            const malformedWarnings = result.changed && result.warnings !== undefined
+              ? [...result.warnings]
+              : []
+            // The spool warning rides the same user-facing list but is counted
+            // apart: `malformed_blocks_repaired` names one specific repair, and
+            // folding an unrelated warning into it would make the count lie.
+            const warnings = spoolWarning === undefined
+              ? [...malformedWarnings]
+              : [...malformedWarnings, spoolWarning]
+            // Nothing else will ever mention an ephemeral hook path: the hook
+            // exits 0 and says nothing once its command is gone, so the first
+            // symptom is columns that stopped arriving. Pushed onto a copy, so
+            // `malformed_blocks_repaired` keeps counting only repairs.
+            //
+            // The repair is a plain re-attach. The already-attached exit used
+            // to compare the marker's mode, format and port and never the
+            // recorded hook command, so the repair had to name a detach first;
+            // the probe now reads a hook command this predicate calls ephemeral
+            // - the `_npx` cache, and any `node_modules` tree with a manifest
+            // beside it, a pnpm or yarn global root included (issue #1625) - as
+            // marker drift (issue #1607), so the re-run reaches this adapter and
+            // rewrites the command. Narrowing either side reopens #1607 for
+            // whichever tree the two stop agreeing on.
+            if (hookBin.ephemeral) {
+              // Named for the tree it is actually in, as far as the verdict
+              // can tell: npm's prune runs on npm's schedule, an `npm ci` on
+              // the operator's, so an operator told the wrong one goes looking
+              // in the wrong place. The repair is the same either way.
+              const where = describeEphemeralBinPath(
+                hookBin.binPath,
+                'capture of cwd and git branch stops',
+                ctx.env,
+              )
+              warnings.push(
+                `the managed hook records ${hookBin.binPath}, ${where}. ` +
+                "Run 'npm install -g hypaware', then 'hyp client attach claude', to " +
+                'record a durable path'
+              )
+              logger.warn('client.attach.ephemeral_hook_bin', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                bin_path: hookBin.binPath,
+              })
+            } else if (hookBin.repointedFrom !== undefined) {
+              // The walk's other outcome, and the one nothing else reports: a
+              // pinned project dependency traded for some other copy, on a
+              // path flagged durable because it is.
+              warnings.push(
+                describeRepointedBinPath(hookBin.binPath, hookBin.repointedFrom, 'the managed hook')
+              )
+              // The warning above is read once, by whoever attached; the skew
+              // it discloses is met later as a subcommand exiting 0, with the
+              // attach long gone. Recorded for the same reason the ephemeral
+              // arm records its own choice: so the machine can be asked
+              // afterwards which copy the hook was pointed at, and off what.
+              logger.warn('client.attach.repointed_hook_bin', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                bin_path: hookBin.binPath,
+                repointed_from: hookBin.repointedFrom,
+              })
+            }
+
+            // A prior proxy marker makes this attach a migration. The settings
+            // write above already released the proxy keys (the LLP 0232
+            // mode-switch rule); what is left is the residue outside the
+            // settings file. The launchd environment is unwound here; the CA
+            // trust is OFFERED, never taken: it carries the once-per-machine
+            // password-dialog grant, other clients may still proxy through the
+            // gateway, and ending the grant is `hyp client detach --purge`'s job.
+            // @ref LLP 0262#migration [implements]: release the proxy keys, unwind the launchd env, offer detach --purge, write the OTEL block
+            const migratedFrom = result.changed && result.priorMode === MODE_PROXY
+              ? MODE_PROXY
+              : undefined
+            /** @type {boolean | undefined} */
+            let launchdEnvRemoved
+            /** @type {string[]} */
+            const migrationNotes = []
+            /** @type {string | undefined} */
+            let migrationResidue
+            if (migratedFrom !== undefined) {
+              const unwind = await unwindProxyLaunchdEnv({ homeDir })
+              launchdEnvRemoved = unwind.launchdEnvRemoved
+              warnings.push(...unwind.warnings)
+              migrationNotes.push(
+                'Migrated from proxy attach: the proxy env keys are released and ' +
+                'Claude Code talks to Anthropic directly again.',
+                'Sessions started before this keep proxying until they restart; ' +
+                'the overlap dedupes into the same rows.'
+              )
+              if (launchdEnvRemoved === true) {
+                migrationNotes.push('Removed NODE_USE_SYSTEM_CA from the launchd environment.')
+              }
+              // "any trust it was granted" rather than "the trust you granted":
+              // a proxy attach whose keychain dialog was refused still ran and
+              // still left the CA, so claiming a grant we never verified would
+              // be the one false line in the migration's story.
+              migrationResidue = (
+                (process.platform === 'darwin'
+                  ? 'The HypAware Local CA, and any login-keychain trust it was granted, ' +
+                    'is still in place. '
+                  : 'The HypAware local CA is still on disk. ') +
+                "Run 'hyp client detach claude --purge' to remove it (then 'hyp client attach claude' " +
+                'to keep capturing); it is never removed without you asking.'
+              )
+              span.setAttribute('migrated_from', migratedFrom)
+              if (launchdEnvRemoved !== undefined) {
+                span.setAttribute('launchd_env_removed', launchdEnvRemoved)
+              }
+              logger.info('client.attach.migrated', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                from_mode: MODE_PROXY,
+                to_mode: MODE_OTEL,
+                ...(launchdEnvRemoved !== undefined
+                  ? { launchd_env_removed: launchdEnvRemoved }
+                  : {}),
+              })
+            }
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            span.setAttribute('malformed_blocks_repaired', warnings.length)
+            span.setAttribute('malformed_blocks_repaired', malformedWarnings.length)
             logger.info('client.attach.write', {
               hyp_plugin: PLUGIN_NAME,
               hyp_client: CLIENT_NAME,
               settings_path: settingsPath,
               port,
               changed: result.changed === true,
-              malformed_blocks_repaired: warnings.length,
+              malformed_blocks_repaired: malformedWarnings.length,
             })
-            for (const warning of warnings) {
+            for (const warning of malformedWarnings) {
               logger.warn('client.attach.malformed_block', {
                 hyp_plugin: PLUGIN_NAME,
                 hyp_client: CLIENT_NAME,
@@ -227,6 +432,13 @@ export async function activate(ctx) {
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
                 : undefined,
+              mode: MODE_OTEL,
+              telemetryPort,
+              spoolDir,
+              migratedFrom,
+              launchdEnvRemoved,
+              migrationNotes,
+              ...(migrationResidue !== undefined ? { migrationResidue } : {}),
               warnings,
             })
           } catch (err) {
@@ -239,6 +451,52 @@ export async function activate(ctx) {
       )
     },
   })
+
+  // The plugin's first dataset: behavioral events the wire never showed.
+  // Registered unconditionally (not gated on the listener below): the
+  // rows a past daemon wrote must stay queryable and enumerable even
+  // when this boot cannot host the listener.
+  // @ref LLP 0255#owned-by-claude [implements]: the payload shapes are Claude
+  // Code's, so the plugin that interprets them owns the table
+  ctx.query.registerDataset(claudeTelemetryDatasetRegistration())
+
+  // The telemetry listener: Claude Code's own OTLP export, received on
+  // loopback and projected into the same `ai_gateway_messages` rows the
+  // proxy and transcript backfill produce. Registered, not started:
+  // the daemon starts every registered source, so a CLI activation
+  // never binds a port.
+  //
+  // Feature-detected against the gateway capability so a mixed install
+  // (an older `@hypaware/ai-gateway` without the record seam) degrades
+  // to "no listener" rather than throwing at boot.
+  // @ref LLP 0257#registration [implements]: `@hypaware/claude` contributes the
+  // listener source through the kernel source registry, with its own config
+  // section and its own port
+  if (typeof gateway.recordProjectedExchange === 'function') {
+    ctx.sources.register({
+      name: CLAUDE_TELEMETRY_SOURCE,
+      plugin: PLUGIN_NAME,
+      summary: 'Claude Code OTLP telemetry receiver: projects its event stream into ai_gateway_messages',
+      configSection: CLAUDE_CONFIG_SECTION,
+      start: createStartClaudeTelemetrySource({
+        gateway,
+        clientName: CLIENT_NAME,
+        stateFile,
+        // The same shared-state-root list every other capture seam above gets.
+        // The listener is a capture seam too, and this is the arm of the policy
+        // that no `.hypignore` dotfile expresses.
+        // @ref LLP 0254#policy-inline [implements]: the machine-local list is in
+        //   scope at ingest, not only the committable dotfile
+        localOnlyListPath: localOnlyList,
+        ignoredSessions,
+      }),
+    })
+  } else {
+    logger.warn('claude.telemetry.capability_too_old', {
+      hyp_plugin: PLUGIN_NAME,
+      detail: 'the active @hypaware/ai-gateway has no recordProjectedExchange; the telemetry listener is not registered',
+    })
+  }
 
   ctx.commands.register({
     name: 'claude-hook session-context',
@@ -264,14 +522,8 @@ export async function activate(ctx) {
   for (const skillName of [
     'hypaware-query',
     'hypaware-reference',
-    'hypaware-ignore',
-    'hypaware-unignore',
     'hypaware-privacy',
-    'hypaware-graph',
-    'hypaware-ai-usage-report',
-    'hypaware-report-to-html',
-    'hypaware-publish-report',
-    'hypaware-apply-report-changes',
+    'hypaware-report',
   ]) {
     ctx.skills.register({
       name: skillName,
@@ -301,14 +553,54 @@ export async function activate(ctx) {
 /**
  * Claude runs hooks from arbitrary working directories, so the managed hook
  * must use a concrete CLI entrypoint instead of assuming `hyp` is on PATH.
+ * Daemon reconciliation runs in processor.js, so process.argv[1] is not
+ * necessarily a CLI. Resolve the entrypoint from this installed package.
+ *
+ * Under `npx hypaware` that entrypoint is inside npm's `_npx` cache, and in a
+ * project that depends on `hypaware` it is inside that project's
+ * `node_modules`; `isEphemeralBinPath` reads both as what they are, a copy npm
+ * deletes on a schedule of its own, so recording either writes a path that
+ * outlives what owns it. The hook exits 0 and says nothing when its command is
+ * missing, so the loss is silent: `cwd` and `git_branch` just stop arriving. An
+ * installed CLI is durable, and resolving it here still yields a concrete
+ * absolute path - the PATH lookup is spent once, at attach, which is the point.
+ *
+ * A durable copy found this way may be a different version than the one that
+ * ran this command, which for a project-local entrypoint it usually is. That
+ * is the trade this makes, in the same direction the `$PATH` walk already
+ * makes it: what the hook needs of the path it records is that it still exists
+ * and still runs, months later, from a working directory nobody has chosen
+ * yet, and the recorded command is `cwd` and `git_branch` capture rather than
+ * any version-pinned surface. An operator who does mean a particular copy says
+ * so with `HYPAWARE_BIN`. `repointedFrom` carries the entrypoint the walk
+ * moved off, so the caller can disclose the swap instead of leaving it to be
+ * met later as a subcommand exiting 0 and doing nothing (issue #1623).
+ *
+ * With nothing installed, the ephemeral path still captures until npm removes
+ * it, so it is written and flagged `ephemeral` rather than refused.
+ *
+ * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
+ * operator chose, and second-guessing it would defeat the override.
+ *
+ * `cliBinPath` defaults to this package's own CLI and is a parameter only so a
+ * test can present an ephemeral entrypoint: nothing short of a real `npx` run
+ * or a real project install puts this package inside one of those trees.
  *
  * @param {NodeJS.ProcessEnv} env
+ * @param {string} [cliBinPath]
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string }}
  */
-function resolveHookBinPath(env) {
+export function resolveHookBinPath(env, cliBinPath = CLI_BIN_PATH) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
-  if (explicit) return path.resolve(explicit)
-  if (process.argv[1]) return path.resolve(process.argv[1])
-  return FALLBACK_BIN_PATH
+  if (explicit) return { binPath: path.resolve(explicit), ephemeral: false }
+  if (!isEphemeralBinPath(cliBinPath, env)) return { binPath: cliBinPath, ephemeral: false }
+  const installed = findInstalledHypawareBin(env)
+  if (installed === undefined) return { binPath: cliBinPath, ephemeral: true }
+  return {
+    binPath: installed,
+    ephemeral: false,
+    ...(isSameBinFile(installed, cliBinPath) ? {} : { repointedFrom: cliBinPath }),
+  }
 }
 
 /**
@@ -322,7 +614,35 @@ function firstNonEmpty(...values) {
 }
 
 /**
- * `hyp init claude-and-otel-local`
+ * Read a boolean flag out of a preset's raw argv the way the CLI codec
+ * reads one: a bare `--flag` is true, `--flag=true` / `--flag=false`
+ * carry their value, and any other inline value is a usage error. A
+ * preset is dispatched before flag parsing (src/core/commands/init.js),
+ * so it reads argv itself, and a plain `argv.includes('--dry-run')`
+ * silently drops `--dry-run=true`: a spelling the CLI accepts everywhere
+ * else. Same class as src/core/cli/remote_commands.js's `--no-forward=true`.
+ * Reading `--dry-run=TRUE` as false here wrote the config the operator
+ * asked only to preview (issue #2440), so a malformed value refuses.
+ *
+ * @param {string[]} argv
+ * @param {string} name flag name without the leading dashes
+ * @returns {{ ok: true, value: boolean } | { ok: false, error: string }}
+ */
+function booleanFlag(argv, name) {
+  const bare = `--${name}`
+  const prefix = `${bare}=`
+  /** @type {{ ok: true, value: boolean } | { ok: false, error: string }} */
+  let read = { ok: true, value: false }
+  for (const token of argv) {
+    if (token !== bare && !token.startsWith(prefix)) continue
+    read = booleanFlagValue(name, token === bare ? undefined : token.slice(prefix.length))
+    if (!read.ok) return read
+  }
+  return read
+}
+
+/**
+ * `hyp setup claude-and-otel-local`
  *
  * Writes a v2 config that picks: `@hypaware/ai-gateway`,
  * `@hypaware/otel`, `@hypaware/local-fs`+`@hypaware/format-parquet`,
@@ -331,29 +651,51 @@ function firstNonEmpty(...values) {
  *
  * The preset never overwrites an existing config file silently (pass
  * `--force` to opt into overwrite); otherwise the existing file
- * stays and the command returns 1.
+ * stays and the command returns 1. On `--force` the old file is copied
+ * to `hypaware-config.json.bak-<ts>` first. `--dry-run` reports the path
+ * the preset would write and writes nothing, refusing on an existing
+ * config exactly as a real run would. Both flags are read the way the CLI
+ * codec reads a boolean, so `--force=true` / `--dry-run=true` and
+ * `--force=false` / `--dry-run=false` work as well as the bare flags, and
+ * any other inline value (`--dry-run=TRUE`, `--force=1`) exits 2 before
+ * anything is written, as it does on the no-preset form (issue #2440).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
-  const force = argv.includes('--force')
-  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || '', '.hyp')
+  const dryRunFlag = booleanFlag(argv, 'dry-run')
+  if (!dryRunFlag.ok) {
+    ctx.stderr.write(`hyp setup: ${dryRunFlag.error}\n`)
+    return 2
+  }
+  const forceFlag = booleanFlag(argv, 'force')
+  if (!forceFlag.ok) {
+    ctx.stderr.write(`hyp setup: ${forceFlag.error}\n`)
+    return 2
+  }
+  const dryRun = dryRunFlag.value
+  const force = forceFlag.value
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
+  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   const configPath = ctx.env.HYP_CONFIG
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
 
-  if (!force) {
-    try {
-      await fs.access(configPath)
-      ctx.stderr.write(
-        `hyp init: config already exists at ${configPath} (pass --force to overwrite)\n`
-      )
-      return 1
-    } catch (err) {
-      const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
-      if (code !== 'ENOENT') throw err
-    }
+  // A preset is a scripted non-interactive init (LLP 0011
+  // #non-interactive-entry), so it owes the same overwrite contract as every
+  // other local-layer writer: refuse an existing config, and back it up before
+  // replacing it under `--force`.
+  const guard = await prepareLocalConfigWrite({ targetPath: configPath, force, dryRun })
+  if (!guard.proceed) {
+    ctx.stderr.write(`hyp setup: ${guard.message}\n`)
+    return 1
+  }
+  if (guard.backupPath) {
+    // A dry run copied nothing, so it reports the backup it would have made.
+    ctx.stdout.write(dryRun
+      ? `(dry-run) would back up existing config to ${guard.backupPath}\n`
+      : `  backed up existing config to ${guard.backupPath}\n`)
   }
 
   /** @type {HypAwareV2Config} */
@@ -367,13 +709,17 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
       {
         name: '@hypaware/ai-gateway',
         config: {
-          upstreams: [
-            {
-              name: 'anthropic',
-              base_url: 'https://api.anthropic.com',
-              path_prefix: '/',
-            },
-          ],
+          // No `proxy_mode`: this preset writes literally what the picker fold
+          // composes, and the claude row stopped declaring
+          // `gateway_proxy_mode` when its attach became otel-only. Writing the
+          // key here would mint a CA on first boot that nothing in this
+          // install ever presents, and hand `hyp status` a proxy-trust block
+          // reporting keychain and launchd state no attach on this machine
+          // can ever change.
+          // Claude still requires the gateway capability as its normalized
+          // exchange writer, but OTEL sends no model traffic through it.
+          // @ref LLP 0262#capture [implements]: OTEL is the producer and the gateway capability remains the projection seam
+          upstreams: [],
         },
       },
       {
@@ -382,10 +728,15 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
       },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
-      {
-        name: '@hypaware/claude',
-        config: { proxy: '@hypaware/ai-gateway' },
-      },
+      { name: '@hypaware/claude' },
+      // The graph pair rides the gateway in `hyp setup`'s picker fold
+      // (`compose_with`). This preset writes its plugin list literally, so
+      // it has to name them itself: without this the preset ships a brand
+      // new config with no `node` / `edge`, while `hypaware-query` tells the
+      // model both datasets are there.
+      // @ref LLP 0213#d1 [implements]: a config the gateway reaches carries the graph, whichever path wrote it
+      { name: '@hypaware/context-graph' },
+      { name: '@hypaware/ai-gateway-graph' },
     ],
     sinks: {
       local: {
@@ -404,11 +755,13 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
     },
   }
 
-  await fs.mkdir(path.dirname(configPath), { recursive: true })
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
-  ctx.stdout.write(`✓ Wrote ${configPath}\n`)
+  if (!dryRun) {
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
+  }
+  ctx.stdout.write(dryRun ? `(dry-run) Would write ${configPath}\n` : `✓ Wrote ${configPath}\n`)
   ctx.stdout.write('  plugins: @hypaware/ai-gateway, @hypaware/otel, @hypaware/local-fs, @hypaware/format-parquet, @hypaware/claude\n')
-  ctx.stdout.write('  next: hyp attach --client claude\n')
+  ctx.stdout.write('  next: hyp client attach claude\n')
   return 0
 }
 
@@ -457,6 +810,56 @@ function safeEndpointPort(endpoint) {
 }
 
 /**
+ * Unwind the launchd-environment half of a proxy attach when `hyp client attach
+ * claude` migrates the machine to `otel` mode.
+ *
+ * Mirrors the detach undo's release (`releaseProxyModeLaunchdEnv` in
+ * `client_detach_disk.js`): darwin-only, best-effort, and the same by-hand
+ * hint on failure, because the attach that just migrated must never fail on
+ * residue it can name. The CA and its keychain trust deliberately stay: they
+ * carry the user's once-per-machine password-dialog grant, and only `hyp
+ * detach --purge` or `hyp daemon uninstall` may end it. The migration OFFERS
+ * that step in its output; it never runs it.
+ * @ref LLP 0262#migration [implements]: the launchd env is unwound; the CA trust is offered, never forced
+ * @ref LLP 0239#launchctl-setenv [implements]: the migration is one more path that reverses a proxy attach, so it releases the env too
+ *
+ * @param {{
+ *   homeDir?: string,
+ *   platform?: NodeJS.Platform,
+ *   removeEnv?: typeof removeLaunchdEnv,
+ * }} [args]
+ * @returns {Promise<{ launchdEnvRemoved?: boolean, warnings: string[] }>}
+ */
+export async function unwindProxyLaunchdEnv({
+  homeDir,
+  platform = process.platform,
+  removeEnv = removeLaunchdEnv,
+} = {}) {
+  if (platform !== 'darwin') return { warnings: [] }
+  try {
+    const removal = await removeEnv({ homeDir })
+    if (removal.unset) return { launchdEnvRemoved: true, warnings: [] }
+    return {
+      launchdEnvRemoved: false,
+      warnings: [
+        'NODE_USE_SYSTEM_CA could not be unset from the launchd environment' +
+        `${removal.detail ? ` (${removal.detail})` : ''}; ` +
+        'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand',
+      ],
+    }
+  } catch (err) {
+    return {
+      launchdEnvRemoved: false,
+      warnings: [
+        'the launchd environment could not be released ' +
+        `(${err instanceof Error ? err.message : String(err)}); ` +
+        'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand',
+      ],
+    }
+  }
+}
+
+/**
  * Render attach output: machine-readable JSON when `json` is set on
  * the attach context, otherwise the human prose the V0 adapter
  * emitted. Keeps the JSON shape stable so callers can grep it.
@@ -470,6 +873,13 @@ function safeEndpointPort(endpoint) {
  *   port: number | undefined,
  *   changed: boolean,
  *   prevValue?: string,
+ *   mode?: 'proxy' | 'base_url' | 'otel',
+ *   telemetryPort?: number,
+ *   spoolDir?: string,
+ *   migratedFrom?: 'proxy',
+ *   launchdEnvRemoved?: boolean,
+ *   migrationNotes?: string[],
+ *   migrationResidue?: string,
  *   warnings?: string[],
  * }} fields
  */
@@ -485,27 +895,83 @@ function writeAttachOutput(attachCtx, fields) {
       changed: fields.changed,
     }
     if (fields.port !== undefined) payload.port = fields.port
-    if (fields.prevValue !== undefined) payload.prev_value = fields.prevValue
+    if (fields.mode !== undefined) payload.mode = fields.mode
+    if (fields.telemetryPort !== undefined) payload.telemetry_port = fields.telemetryPort
+    if (fields.spoolDir !== undefined) payload.spool_dir = fields.spoolDir
+    // The typed migration facts, so a scripted caller can tell a migrating
+    // attach from a routine one without parsing prose; the human notes below
+    // stay off this surface.
+    if (fields.migratedFrom !== undefined) payload.migrated_from = fields.migratedFrom
+    if (fields.launchdEnvRemoved !== undefined) payload.launchd_env_removed = fields.launchdEnvRemoved
+    // Named, because `prev_value` alone does not say which key it belonged to
+    // and each mode manages different ones.
+    if (fields.prevValue !== undefined) {
+      payload.prev_value = fields.prevValue
+      payload.prev_value_key = takenOverKey(fields.mode)
+    }
     // Echoed as an array, not folded into a string: the field exists so a
     // scripted caller can see *which* blocks were moved aside.
     if (fields.warnings !== undefined && fields.warnings.length > 0) payload.warnings = fields.warnings
     attachCtx.stdout.write(JSON.stringify(payload) + '\n')
     return
   }
+  // Name the key actually written. Proxy and otel modes do not set a base URL
+  // at all, and reporting one is both wrong and the first thing a user would
+  // check when debugging why their own base URL is still in place.
+  const managedKey = takenOverKey(fields.mode)
   if (fields.dryRun) {
     attachCtx.stdout.write(`(dry-run) Would attach Claude Code via ${fields.settingsPath}\n`)
-    attachCtx.stdout.write(`  Would set ANTHROPIC_BASE_URL to the local gateway endpoint\n`)
+    attachCtx.stdout.write(
+      fields.mode === MODE_OTEL
+        ? `  Would set ${managedKey} to the local telemetry listener\n`
+        : `  Would set ${managedKey} to the local gateway endpoint\n`
+    )
     return
   }
   attachCtx.stdout.write(`✓ Claude Code attached (${fields.settingsPath})\n`)
-  if (fields.port !== undefined) {
-    attachCtx.stdout.write(`  ANTHROPIC_BASE_URL = http://127.0.0.1:${fields.port}\n`)
+  if (fields.mode === MODE_OTEL) {
+    // The two values a user would check: where the events go, and where raw
+    // bodies land until the listener projects and deletes them.
+    if (fields.telemetryPort !== undefined) {
+      attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.telemetryPort}\n`)
+    }
+    if (fields.spoolDir !== undefined) {
+      attachCtx.stdout.write(`  OTEL_LOG_RAW_API_BODIES = file:${fields.spoolDir}\n`)
+    }
+  } else if (fields.port !== undefined) {
+    attachCtx.stdout.write(`  ${managedKey} = http://127.0.0.1:${fields.port}\n`)
   }
+  // Marked `!`, like the residue below: the two lines here that report
+  // something the user did not do or still has to, which is what a caller
+  // that condenses this report (setup's finish step) keeps.
   if (fields.prevValue !== undefined) {
-    attachCtx.stdout.write(`  (previous ANTHROPIC_BASE_URL was ${fields.prevValue})\n`)
+    attachCtx.stdout.write(`  ! previous ${managedKey} was ${fields.prevValue}\n`)
+  }
+  // The migration story, told where the user is looking: what the switch
+  // released, what was unwound, and the one residue that is theirs to end
+  // (the CA trust, offered as `hyp client detach claude --purge`, never run for
+  // them).
+  // @ref LLP 0262#migration [implements]: the offer is a printed step, not an action
+  for (const note of fields.migrationNotes ?? []) {
+    attachCtx.stdout.write(`  ${note}\n`)
+  }
+  if (fields.migrationResidue !== undefined) {
+    attachCtx.stdout.write(`  ! ${fields.migrationResidue}\n`)
   }
   for (const warning of fields.warnings ?? []) {
     attachCtx.stdout.write(`  ! ${warning}\n`)
   }
 }
 
+/**
+ * The env key each attach mode takes over: the one a displaced `prev_value`
+ * belonged to, and the one the human output leads with.
+ *
+ * @param {'proxy' | 'base_url' | 'otel' | undefined} mode
+ * @returns {'HTTPS_PROXY' | 'OTEL_EXPORTER_OTLP_ENDPOINT' | 'ANTHROPIC_BASE_URL'}
+ */
+function takenOverKey(mode) {
+  if (mode === MODE_PROXY) return 'HTTPS_PROXY'
+  if (mode === MODE_OTEL) return 'OTEL_EXPORTER_OTLP_ENDPOINT'
+  return 'ANTHROPIC_BASE_URL'
+}

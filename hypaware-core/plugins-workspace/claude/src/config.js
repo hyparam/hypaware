@@ -2,9 +2,12 @@
 
 /**
  * Config validation for the `@hypaware/claude` plugin's own `config`
- * block. v1 validates the optional `backfill` sub-object that drives
- * backfill-on-join — `{ on_join, window_days }` — and the optional
- * `attach` sub-object that drives attach-on-join — `{ on_join }`. Every
+ * block. It validates the optional `backfill` sub-object that drives
+ * backfill-on-join and the daemon transcript sweep
+ * (`{ on_join, window_days, sweep_cron }`), the optional `attach`
+ * sub-object that drives attach-on-join (`{ on_join }`), and the
+ * optional `telemetry` sub-object that places the Claude telemetry
+ * listener (`{ listen_host, listen_port }`). Every
  * other key (e.g. `proxy`) passes through untouched so existing configs
  * keep working; there is no top-level `backfill`/`attach` section and
  * nothing new for core to validate.
@@ -16,6 +19,8 @@
  * @import { ValidationError, ValidationResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
+import { isCronExpression } from '../../../../src/core/config/validate.js'
+
 /** Manifest `config_sections[].section` name this validator backs. */
 export const CLAUDE_CONFIG_SECTION = 'claude'
 
@@ -26,7 +31,7 @@ export const CLAUDE_CONFIG_SECTION = 'claude'
  * surface.
  *
  * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]:
- *   backfill policy ({ on_join, window_days }) lives in and is validated
+ *   backfill policy ({ on_join, window_days, sweep_cron }) lives in and is validated
  *   by the source plugin's own config section; the kernel reconciler adds
  *   no top-level schema.
  *
@@ -42,6 +47,7 @@ export function validateClaudeConfig(value) {
   const errors = [
     ...validateBackfillSection(raw.backfill, '/backfill'),
     ...validateAttachSection(raw.attach, '/attach'),
+    ...validateTelemetrySection(raw.telemetry, '/telemetry'),
   ]
   if (errors.length > 0) return { ok: false, errors }
   return { ok: true }
@@ -50,10 +56,14 @@ export function validateClaudeConfig(value) {
 /**
  * Validate the optional `backfill` policy block shared by every
  * backfill-capable source plugin: `on_join` (whether to import on join,
- * boolean) and `window_days` (how far back, positive integer). Both are
+ * boolean), `window_days` (how far back, positive integer), and `sweep_cron`
+ * (the scheduled transcript cadence, a five-field cron expression). All are
  * optional; unknown keys are rejected so a typo (`window_day`) surfaces
  * instead of being silently ignored. Pure: the caller chooses where the
  * returned pointers mount.
+ *
+ * @ref LLP 0358#scheduled-sweep [implements]: Claude owns and validates its
+ *   scheduled backfill cadence using the kernel's existing cron grammar
  *
  * @param {unknown} value
  * @param {string} pointer  JSON-pointer prefix for the `backfill` object
@@ -80,9 +90,76 @@ export function validateBackfillSection(value, pointer) {
       })
     }
   }
+  if (raw.sweep_cron !== undefined) {
+    const cron = raw.sweep_cron
+    if (typeof cron !== 'string' || !isCronExpression(cron)) {
+      errors.push({
+        pointer: `${pointer}/sweep_cron`,
+        message: 'backfill.sweep_cron must be a valid 5-field cron expression',
+      })
+    }
+  }
   for (const key of Object.keys(raw)) {
-    if (key !== 'on_join' && key !== 'window_days') {
+    if (key !== 'on_join' && key !== 'window_days' && key !== 'sweep_cron') {
       errors.push({ pointer: `${pointer}/${key}`, message: `unknown backfill key '${key}'` })
+    }
+  }
+  return errors
+}
+
+/**
+ * Validate the optional `telemetry` block: where the Claude telemetry
+ * listener binds (`listen_host`, string; `listen_port`, integer in
+ * `0..65535` where `0` asks for a dynamic port) and how large the raw
+ * body spool may grow (`spool_max_bytes`, positive integer, default
+ * 512 MB). All optional; unknown keys are rejected so a typo
+ * (`listen_ports`) surfaces instead of silently leaving the listener on
+ * its default port while attach writes the address the operator meant.
+ *
+ * @ref LLP 0257#registration [implements]: the listener's port is config with a
+ *   default, and `0` requests a dynamic port
+ * @ref LLP 0253#byte-cap [implements]: the spool cap is a configured byte value
+ *
+ * @param {unknown} value
+ * @param {string} pointer  JSON-pointer prefix for the `telemetry` object
+ * @returns {ValidationError[]}
+ */
+export function validateTelemetrySection(value, pointer) {
+  /** @type {ValidationError[]} */
+  const errors = []
+  if (value === undefined) return errors
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    errors.push({ pointer, message: 'telemetry must be an object' })
+    return errors
+  }
+  const raw = /** @type {Record<string, unknown>} */ (value)
+  if (raw.listen_host !== undefined && (typeof raw.listen_host !== 'string' || raw.listen_host.length === 0)) {
+    errors.push({
+      pointer: `${pointer}/listen_host`,
+      message: 'telemetry.listen_host must be a non-empty string',
+    })
+  }
+  if (raw.listen_port !== undefined) {
+    const port = raw.listen_port
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535) {
+      errors.push({
+        pointer: `${pointer}/listen_port`,
+        message: 'telemetry.listen_port must be an integer between 0 and 65535',
+      })
+    }
+  }
+  if (raw.spool_max_bytes !== undefined) {
+    const cap = raw.spool_max_bytes
+    if (typeof cap !== 'number' || !Number.isInteger(cap) || cap < 1) {
+      errors.push({
+        pointer: `${pointer}/spool_max_bytes`,
+        message: 'telemetry.spool_max_bytes must be a positive integer',
+      })
+    }
+  }
+  for (const key of Object.keys(raw)) {
+    if (key !== 'listen_host' && key !== 'listen_port' && key !== 'spool_max_bytes') {
+      errors.push({ pointer: `${pointer}/${key}`, message: `unknown telemetry key '${key}'` })
     }
   }
   return errors
@@ -93,10 +170,10 @@ export function validateBackfillSection(value, pointer) {
  * config: `on_join` (whether the daemon auto-attaches this client when a
  * joined host confirms a central config that enables it, boolean,
  * default true). Optional; unknown keys are rejected so a typo
- * (`on_joins`) surfaces instead of being silently ignored. Pure — the
+ * (`on_joins`) surfaces instead of being silently ignored. Pure: the
  * caller chooses where the returned pointers mount.
  *
- * @ref LLP 0045#part-4--per-plugin-attach-config--status-surface [implements]:
+ * @ref LLP 0045#part-4-per-plugin-attach-config--status-surface [implements]:
  *   attach.on_join rides the client adapter's own config block, validated
  *   by this plugin's config-section validator beside validateBackfillSection;
  *   no top-level/core schema.

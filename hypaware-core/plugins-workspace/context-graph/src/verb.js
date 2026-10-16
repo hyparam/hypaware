@@ -10,9 +10,6 @@ import { PLUGIN_NAME } from './datasets.js'
  * @import { Direction, TraversalOk, TraversalErr } from './types.js'
  */
 
-/** A graph this large strained the basic in-memory loader; nudge to the index path. */
-const LARGE_GRAPH = 500_000
-
 /**
  * `graph neighbors` as a verb: one declaration projecting the CLI command
  * **and** the `graph_neighbors` MCP tool. The traversal core
@@ -23,10 +20,59 @@ const LARGE_GRAPH = 500_000
  * @ref LLP 0034#verbs [implements]: context-graph registers a verb; `graph_neighbors` becomes a tool with zero core change
  */
 export const graphNeighborsVerb = {
-  name: 'graph neighbors',
+  name: 'query graph neighbors',
+  aliases: ['graph neighbors'],
+  category: 'explore-share',
+  audience: 'everyday',
   tool: 'graph_neighbors',
+  title: 'Find related sessions',
   plugin: PLUGIN_NAME,
   summary: 'Walk the activity graph from a node out to N hops',
+  // The traversal mechanics live here rather than in a skill: they are
+  // deterministic properties of this command, and prose describing a command
+  // from outside it drifts from the command.
+  // @ref LLP 0214#d1 [implements]: a verb explains its own flags instead of a skill narrating them
+  help: [
+    'Walks outward from a seed node and prints what it reaches.',
+    '',
+    'The seed resolves in order: node_id, then natural_key, then label. So a',
+    'session id, a file path or basename, a model id, or a tool / skill /',
+    'program / app name all work. An ambiguous seed lists the candidates',
+    'instead of guessing; narrow it with --type.',
+    '',
+    '  --type <T>        restrict the seed to one node type: Session, App,',
+    '                    Model, Tool, File, Skill, Program, Repo, Commit, and,',
+    '                    where GitHub enrichment is configured, Actor, Issue,',
+    '                    PullRequest, Review',
+    '  --depth <N>       hops to walk (default 1)',
+    '  --direction       out | in | both (default both)',
+    '  --edge-type <T>   only walk these relations; repeatable or comma-separated',
+    '  --limit <N>       cap the output in breadth-first order (default 100)',
+    '  --json            structured result instead of the text table',
+    '',
+    'Direction is load-bearing, because edges point away from the session:',
+    '  out from a Session            what it used, touched, ran, invoked',
+    '  in  from a File/Tool/Skill/…  the sessions that touched or ran it',
+    '  both at --depth 2 from a File co-occurrence: what else those sessions',
+    '                                reached',
+    '',
+    'Truncation is part of the result, so it is printed on stdout with the',
+    'rows (`... - truncated; raise --limit`) and set as `truncated` in --json.',
+    'Reads are scoped to the visited neighborhood. Over-budget walks fail',
+    'explicitly; reduce --depth or narrow --edge-type. --limit caps output,',
+    'not the work needed to count all reachable neighbors.',
+    'JSON totalNodes/totalEdges describe visited ids/examined edges, not the',
+    'size of the entire graph.',
+    'Not-found and ambiguity notes go to stderr instead. Exit 1 is a seed that',
+    'could not be resolved; exit 2 is a usage error.',
+    '',
+    'The bracketed id in the text output is shortened for display and will not',
+    'match anything if pasted into SQL. Take full ids from --json.',
+    '',
+    'Note --json, not --format json: this command renders its own structure.',
+    '',
+    'An empty graph is reported as such. If you see it, run `hyp graph project`.',
+  ].join('\n'),
   authClass: 'read',
   inputSchema: {
     type: 'object',
@@ -75,6 +121,16 @@ export const graphNeighborsVerb = {
     // so on stderr, counts only, whether it succeeded or failed to seed.
     const notice = localOnlyNotice(r.localOnly)
     if (!r.ok) {
+      // An unprojected graph fails every seed. Saying "not found" there sends
+      // the reader hunting for a better seed when the answer is a command.
+      // @ref LLP 0213#d3 [implements]: an empty graph names its own fix instead of reading as a bad seed
+      if (r.graphEmpty) {
+        return {
+          stdout: '',
+          stderr: 'hyp graph neighbors: the graph is empty - run `hyp graph project` to build it\n' + notice,
+          exitCode: 1,
+        }
+      }
       const lines = [`hyp graph neighbors: ${r.error}`]
       for (const c of (r.candidates ?? []).slice(0, 10)) {
         lines.push(`  ${c.node_type}\t${c.natural_key}\t(${shortId(c.node_id)})`)
@@ -107,9 +163,8 @@ function localOnlyNotice(localOnly) {
 }
 
 /**
- * Render a successful traversal as a human-readable list, grouped implicitly
- * by BFS order (hop ascending). Truncation and a large-graph memory note are
- * surfaced, never hidden.
+ * Render a successful traversal in BFS order (hop ascending), with explicit
+ * output truncation and the exact reachable count of the completed walk.
  *
  * @param {TraversalOk & { depth: number, direction: Direction }} result
  * @returns {VerbRenderResult}
@@ -156,6 +211,7 @@ function renderNeighbors(result) {
       shown = `${text} (${disambiguator(n.node)})`
       if (shownCounts.get(shown) > 1) shown = `${text} (${n.node.node_id})`
     }
+    if (n.props?.inferred_call === true) shown += ' (inferred call)'
     out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${shown}`)
   }
   if (result.truncated) {
@@ -163,12 +219,7 @@ function renderNeighbors(result) {
   } else {
     out.push(`${result.reachable} neighbor(s) within ${result.depth} hop(s)`)
   }
-  /** @type {string | undefined} */
-  let stderr
-  if (result.totalNodes + result.totalEdges >= LARGE_GRAPH) {
-    stderr = `hyp graph neighbors: loaded ${result.totalNodes} node(s) + ${result.totalEdges} edge(s) in memory; at this size consider the persisted index path (LLP 0064 §honest-limits)\n`
-  }
-  return { stdout: out.join('\n') + '\n', ...(stderr ? { stderr } : {}) }
+  return { stdout: out.join('\n') + '\n' }
 }
 
 /**

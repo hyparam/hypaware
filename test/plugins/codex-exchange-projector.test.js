@@ -1,6 +1,8 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -8,6 +10,7 @@ import {
   createCodexExchangeProjector,
 } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { sessionMetaCwd } from '../../src/core/codex/rollout_session_meta.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -32,7 +35,7 @@ function ignoringResolver(ignoredDir) {
  * the running version does not implement, so the matcher fail-safe clamps it
  * to `ignore` and carries a `warn` (R3). Used to assert the drop escalates to
  * warn level with the declared token. `local-only` is no longer a fixture for
- * this — it is implemented (LLP 0070/0080) and no longer clamps.
+ * this: it is implemented (LLP 0070/0080) and no longer clamps.
  *
  * @param {string} ignoredDir
  */
@@ -44,14 +47,34 @@ function clampingResolver(ignoredDir) {
   })
 }
 
+/**
+ * A real usage-policy resolver over an fs that holds no `.hypignore` anywhere.
+ * For a test about the cwd *predicate* rather than the gate: without it the
+ * matcher walks the real ancestors of the fixture path, so a `.hypignore`
+ * sitting above the checkout on whatever machine runs the suite would turn the
+ * assertion into a drop.
+ */
+function governsNothingResolver() {
+  return createUsagePolicyResolver({ existsSync: () => false })
+}
+
 // @ref LLP 0050 [tests]: capture-seam drop: an ignored cwd yields no rows so
 // the gateway write guard persists nothing; a clean cwd is unaffected (R1/R2).
-test('project() returns no projection when the exchange cwd is .hypignore-ignored', () => {
+test('project() emits no GitHub repo evidence when the exchange cwd is .hypignore-ignored', () => {
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
   })
   const projection = projector.project(exchange({
     path: '/v1/chat/completions',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        workspaces: {
+          '/work/ignored/sub': {
+            associated_remote_urls: { origin: 'https://github.com/acme/ignored.git' },
+          },
+        },
+      }),
+    }),
     request_body: JSON.stringify({
       cwd: '/work/ignored/sub',
       messages: [{ role: 'user', content: 'secret' }],
@@ -60,7 +83,8 @@ test('project() returns no projection when the exchange cwd is .hypignore-ignore
   }), context())
   // The drop returns the terminal USAGE_POLICY_DROP sentinel (not a bare
   // `undefined` decline), so the dispatcher stops the projector walk and logs
-  // it as a drop. Either way the gateway write guard persists nothing.
+  // it as a drop. The GitHub remote in turn metadata therefore never becomes
+  // an ai_gateway_messages row or evidence for central GitHub enrichment.
   assert.equal(projection, USAGE_POLICY_DROP)
 })
 
@@ -223,6 +247,41 @@ test('project() logs an unusable in-band cwd rather than skipping the gate silen
   )
 })
 
+// @ref LLP 0150#usable-cwd [tests]: the in-band seam and the rollout-stated
+// seam are asked the same question and must answer it identically. Two copies
+// of this exact rule have already drifted and shipped the wrong answer twice
+// (#453, #459), so pin agreement at the seam rather than trusting two
+// independent readings of the same two conjuncts (#478).
+test('the in-band cwd seam answers exactly as the shared sessionMetaCwd predicate does', () => {
+  // The whole of what the in-band predicate can be asked: only a non-empty
+  // string reaches it (`readStringKey` and `firstString` both refuse anything
+  // else upstream), so blank-ish, relative and absolute forms are the cases.
+  const cases = [
+    '/work/repo', // absolute: accepted, byte-identical
+    '/work/repo/', // trailing slash is not ours to normalize
+    '/work/repo/./sub', // an unnormalized absolute path is still absolute
+    'repo', // bare relative
+    './repo',
+    '../elsewhere',
+    ' ', // blank after trim
+    '\t\n',
+    ' /work/repo', // non-blank but not absolute: the trim alone would accept it
+  ]
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  for (const cwd of cases) {
+    const projection = /** @type {any} */ (projector.project(exchange({
+      path: '/v1/chat/completions',
+      request_body: JSON.stringify({ cwd, messages: [{ role: 'user', content: 'hi' }] }),
+      response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+    }), context()))
+    assert.equal(
+      projection.cwd,
+      sessionMetaCwd(cwd),
+      `${JSON.stringify(cwd)}: the in-band seam must not be looser or stricter than sessionMetaCwd`,
+    )
+  }
+})
+
 // ---------------------------------------------------------------------
 // Session opt-out (LLP 0066): a second, independent match key at the same
 // USAGE_POLICY_DROP seam, keyed on the STAMPED session_id
@@ -320,8 +379,8 @@ test('the session opt-out drop is also visible through the gateway message-proje
   // its ignored-session drop through createAiGatewayMessageProjector /
   // projectViaGateway returning `[]` (claude-usage-policy-drop.test.js). This
   // proves the same shape for Codex: the drop must be visible at the seam
-  // callers actually use in production — the gateway dispatcher's
-  // `projectExchange` — not just the adapter-level `USAGE_POLICY_DROP`
+  // callers actually use in production, the gateway dispatcher's
+  // `projectExchange`, not just the adapter-level `USAGE_POLICY_DROP`
   // sentinel a direct `projector.project()` call returns.
   const ignoredSessionId = 'session-optout-gateway'
   const projector = createCodexExchangeProjector()
@@ -543,6 +602,133 @@ test('OpenAI Responses captures top-level instructions into system_text', () => 
   }), context()))
 
   assert.equal(projection.system_text, 'You are Codex, a coding agent.')
+})
+
+// UUIDs generated independently with Python uuid.uuid5(uuid.uuid5(uuid.NAMESPACE_OID,
+// threadId), text), matching Codex rust-v0.162.0 core/src/client.rs.
+const baseInstructionThread = '019a1234-5678-7890-abcd-0123456789ab'
+const baseInstructionText = 'You are Codex, a coding agent.'
+const baseInstructionId = 'msg_e009442f-0c3d-5772-a0f8-bcabf51c1e2b'
+
+/** @param {Record<string, unknown>} [overrides] */
+function baseInstructionMessage(overrides = {}) {
+  return {
+    type: 'message', role: 'developer', id: baseInstructionId,
+    content: [{ type: 'input_text', text: baseInstructionText }],
+    ...overrides,
+  }
+}
+
+/** @param {Record<string, unknown>} [overrides] */
+function baseInstructionRequest(overrides = {}) {
+  return {
+    model: 'gpt-5-codex',
+    client_metadata: {
+      'x-codex-installation-id': 'install-test',
+      session_id: 'parent-session', thread_id: baseInstructionThread,
+    },
+    input: [baseInstructionMessage(), { role: 'user', content: 'hello' }],
+    ...overrides,
+  }
+}
+
+/** @param {Record<string, unknown>} body */
+function projectBaseInstructions(body) {
+  return /** @type {any} */ (createCodexExchangeProjector().project(exchange({
+    path: '/v1/responses',
+    request_body: JSON.stringify(body),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+}
+
+test('Codex base instructions use the thread-derived ID when classification is stripped', () => {
+  const projection = projectBaseInstructions(baseInstructionRequest())
+  assert.equal(projection.system_text, baseInstructionText)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['user', 'assistant'])
+  assert.equal(projection.session_id, 'parent-session')
+  assert.equal(projection.conversation_id, baseInstructionThread)
+})
+
+test('Codex base instructions preserve exact Unicode and whitespace in ID matching', () => {
+  const text = '  café 🦀\n\n'
+  const projection = projectBaseInstructions(baseInstructionRequest({ input: [baseInstructionMessage({
+    id: 'msg_aada349b-5441-5ccf-97f9-3ccd06781f87',
+    content: [{ type: 'input_text', text }],
+  })] }))
+  assert.equal(projection.system_text, text)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['assistant'])
+})
+
+test('Codex explicit base-instruction classification needs no thread ID and allows the tools prefix', () => {
+  const projection = projectBaseInstructions(baseInstructionRequest({
+    client_metadata: { 'x-codex-installation-id': 'install-test' },
+    input: [
+      { type: 'additional_tools', role: 'developer', tools: [] },
+      baseInstructionMessage({
+        id: undefined,
+        internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] },
+      }),
+      { role: 'developer', content: 'Follow AGENTS.md' },
+    ],
+  }))
+  assert.equal(projection.system_text, baseInstructionText)
+  assert.deepEqual(projection.messages.map((m) => m.role), ['developer', 'assistant'])
+  assert.equal(projection.messages[0].content[0].text, 'Follow AGENTS.md')
+})
+
+test('Codex base instructions retain top-level precedence and preserve conflicts', () => {
+  for (const instructions of [baseInstructionText, 'different instructions', '']) {
+    const projection = projectBaseInstructions(baseInstructionRequest({ instructions }))
+    const conflict = instructions === 'different instructions'
+    assert.equal(projection.system_text, instructions || baseInstructionText)
+    assert.deepEqual(projection.messages.map((m) => m.role), conflict
+      ? ['developer', 'user', 'assistant'] : ['user', 'assistant'])
+  }
+  const projection = projectBaseInstructions(baseInstructionRequest({ system: 'system wins', instructions: baseInstructionText }))
+  assert.equal(projection.system_text, 'system wins')
+  assert.equal(projection.messages[0].role, 'developer')
+})
+
+test('Codex base-instruction recognition preserves ambiguous and ordinary developer items', () => {
+  const cases = [
+    ['ordinary ID', { input: [baseInstructionMessage({ id: 'msg_other' })] }],
+    ['missing ID', { input: [baseInstructionMessage({ id: undefined })] }],
+    ['modified text', { input: [baseInstructionMessage({ content: [{ type: 'input_text', text: 'different' }] })] }],
+    ['wrong role', { input: [baseInstructionMessage({ role: 'user' })] }],
+    ['wrong type', { input: [baseInstructionMessage({ type: 'other' })] }],
+    ['mixed content', { input: [baseInstructionMessage({ content: [{ type: 'input_text', text: baseInstructionText }, { type: 'input_image', image_url: 'https://example.test/image' }] })] }],
+    ['explicit other kind', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: ['developer.instructions'] } })] }],
+    ['malformed kind', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: 'model.base_instructions' } })] }],
+    ['multiple kinds', { input: [baseInstructionMessage({ internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions', 'developer.instructions'] } })] }],
+    ['missing thread', { client_metadata: { 'x-codex-installation-id': 'install-test', session_id: baseInstructionThread } }],
+    ['wrong thread', { client_metadata: { 'x-codex-installation-id': 'install-test', thread_id: 'other-thread', session_id: baseInstructionThread } }],
+    ['unrelated Responses client', { client_metadata: { thread_id: baseInstructionThread, session_id: 'parent-session' } }],
+    ['historical message', { input: [{ role: 'user', content: 'earlier' }, baseInstructionMessage()] }],
+  ]
+  for (const [name, overrides] of cases) {
+    const body = baseInstructionRequest(/** @type {Record<string, unknown>} */ (overrides))
+    const projection = projectBaseInstructions(body)
+    assert.equal(projection.system_text, undefined, String(name))
+    assert.equal(projection.messages.length, /** @type {unknown[]} */ (body.input).length + 1, String(name))
+  }
+})
+
+test('Codex prefix removal preserves materialized identities, usage and replay dedupe', async () => {
+  const projector = createCodexExchangeProjector()
+  const makeDispatcher = () => createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+  const legacyBody = baseInstructionRequest({ instructions: baseInstructionText, input: [{ role: 'user', content: 'hello' }] })
+  const input = exchange({
+    path: '/backend-api/codex/responses',
+    request_body: JSON.stringify(legacyBody),
+    response_body: JSON.stringify({ output_text: 'done', usage: { input_tokens: 20, output_tokens: 3, total_tokens: 23 } }),
+  })
+  const before = await makeDispatcher().projectExchange(input)
+  const dispatcher = makeDispatcher()
+  const after = await dispatcher.projectExchange({ ...input, request_body: JSON.stringify(baseInstructionRequest()) })
+  assert.deepEqual(after, before)
+  assert.equal(after.length, 2)
+  assert.deepEqual(await dispatcher.projectExchange(input), [])
+  assert.deepEqual(await dispatcher.projectExchange({ ...input, request_body: JSON.stringify(baseInstructionRequest()) }), [])
 })
 
 test('OpenAI Chat system field still wins over instructions', () => {
@@ -1308,6 +1494,305 @@ test('no workspace-cwd refusal is logged when the key matches or the request sta
     [],
     'an uncontradicted workspace key is not a refusal',
   )
+})
+
+// ---------------------------------------------------------------------
+// The refusal signal reports a discarded guess, not a spelling difference
+// (#481)
+//
+// @ref LLP 0160#decision [tests]: a session running in a subdirectory of its
+// declared workspace is the commonest Codex shape there is, and an ancestor key
+// is a less specific name for the same tree rather than a guess about where the
+// session ran, so the location inference is not in doubt and nothing is
+// reported. NOT because taking the `cwd` can only tighten - it cannot only
+// tighten, and the third test below pins the case where it loosens. A key off
+// the ancestor chain is still a guess about a directory the session never ran
+// in, and still warns.
+// ---------------------------------------------------------------------
+
+test('an ordinary subdirectory-of-workspace session logs no workspace-cwd refusal (#481)', () => {
+  // Real directories and the real shared matcher, with no `.hypignore` anywhere:
+  // nothing privacy-relevant is happening, the row records exactly as it did
+  // before the gate learned to prefer the in-band cwd, and the only question is
+  // whether the warn fires. It must not - once per turn for the life of every
+  // such session devalues the privacy warns beside it.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481-'))
+  const workspace = path.join(root, 'proj')
+  const subdir = path.join(workspace, 'sub')
+  fs.mkdirSync(subdir, { recursive: true })
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  try {
+    const projector = createCodexExchangeProjector()
+    const projection = /** @type {any} */ (projector.project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({
+        'x-codex-turn-metadata': JSON.stringify({
+          thread_id: 'thread-481a',
+          workspaces: { [workspace]: { latest_git_commit_hash: 'feedface' } },
+        }),
+      }),
+      request_body: JSON.stringify({ cwd: subdir, input: 'go' }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    }), { log }))
+    assert.ok(projection && projection !== USAGE_POLICY_DROP, 'nothing governs this tree')
+    assert.equal(projection.cwd, subdir, 'the row still records where the session actually ran')
+    assert.equal(projection.attributes.codex.workspace, workspace, 'and is still enriched from the key')
+    assert.deepEqual(
+      warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+      [],
+      'a subdirectory of the declared workspace is not a refused substitution',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a workspace key off the session cwd ancestry is still a refusal (#481)', () => {
+  // The other side of the narrowing, in both directions the ancestor test can
+  // fail: an unrelated sibling tree, and a key BELOW the cwd. The second one
+  // matters most - the key's own ancestor walk covers strictly more than the
+  // cwd's, so preferring the cwd there can genuinely loosen the verdict, which
+  // is precisely what this signal exists to report.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481b-'))
+  const proj = path.join(root, 'proj')
+  const other = path.join(root, 'other')
+  const deeper = path.join(proj, 'deeper')
+  fs.mkdirSync(deeper, { recursive: true })
+  fs.mkdirSync(other, { recursive: true })
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  try {
+    const projector = createCodexExchangeProjector()
+    for (const [key, cwd] of [[other, proj], [deeper, proj]]) {
+      projector.project(exchange({
+        path: '/backend-api/codex/responses',
+        provider: 'chatgpt',
+        request_headers: JSON.stringify({
+          'x-codex-turn-metadata': JSON.stringify({
+            thread_id: 'thread-481b',
+            workspaces: { [key]: {} },
+          }),
+        }),
+        request_body: JSON.stringify({ cwd, input: 'go' }),
+        response_body: JSON.stringify({ output_text: 'done' }),
+      }), { log })
+    }
+    const refusals = warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused')
+    assert.equal(refusals.length, 2, 'a sibling key and a key below the cwd are both refusals')
+    for (const refusal of refusals) {
+      assert.equal(refusal.fields?.error_kind, 'workspace_cwd_mismatch')
+      assert.ok(!JSON.stringify(refusal.fields).includes(root), 'paths stay hashed')
+      // @ref LLP 0160#decision [tests]: this signal reports a location
+      // inference, never a verdict. It carries no usage class, which is why
+      // narrowing it away on the ancestor chain removes a constant rather than
+      // privacy information - a reader could not have told a nested loosening
+      // from an ordinary subdirectory turn by it either way.
+      assert.equal(refusal.fields?.class, undefined, 'the refusal warn carries no usage class')
+      assert.equal(refusal.fields?.declared, undefined, 'nor a declared token')
+      assert.equal(refusal.fields?.governed_by, undefined, 'nor a governing declaration')
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------
+// The key that COVERS the cwd is picked, not the one listed first (#1189)
+//
+// Selection matched on byte equality while the refusal predicate matches on
+// equal-or-descendant, so a `workspaces` key that genuinely contained the cwd
+// could lose to whichever key the object listed first, and the row was enriched
+// from that unrelated tree. This is a selection defect inside the last-ranked
+// source, not a change to the ranking: LLP 0083#workspace-key-ranks-last still
+// decides which SOURCE supplies the cwd, and the case it priced (no key covers
+// the cwd, the first is substituted, and it still enriches) is pinned unchanged
+// by the #476 and #481 tests above.
+//
+// @ref LLP 0350#evidence [tests]: the reproduction, removed
+// @ref LLP 0049#scope [tests]: nearest-governs picks the key, as it picks the
+// governing declaration
+// ---------------------------------------------------------------------
+
+test('an ignored workspace key does not enrich a row whose cwd a clean key covers (#1189)', () => {
+  // The reported leak, verbatim from LLP 0350#evidence. The session ran in
+  // /work/clean/sub, which /work/clean covers; /work/ignored/secret-proj is
+  // .hypignore'd and merely sorts first. Admission is correct (the session
+  // really did run in a clean tree) - what must not happen is the admitted row
+  // carrying the ignored repository's remote, which under a session_repos
+  // inventory is the evidence authorizing capture of that repository.
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-1189a',
+        workspaces: {
+          '/work/ignored/secret-proj': {
+            associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+            latest_git_commit_hash: 'deadbeef',
+          },
+          '/work/clean': {
+            associated_remote_urls: { origin: 'https://github.com/acme/clean.git' },
+            latest_git_commit_hash: 'feedface',
+          },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: '/work/clean/sub', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), { log }))
+
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'the session ran in a clean tree')
+  assert.equal(projection.cwd, '/work/clean/sub', 'the row still records where it actually ran')
+  assert.equal(
+    projection.git_remote,
+    'https://github.com/acme/clean.git',
+    'the remote comes from the key that covers the cwd, never the ignored tree',
+  )
+  assert.equal(projection.head_sha, 'feedface')
+  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.equal(projection.attributes.codex.git_origin_url, 'https://github.com/acme/clean.git')
+  assert.ok(
+    !JSON.stringify(projection).includes('SECRET'),
+    'no part of the ignored tree reaches the admitted row',
+  )
+  assert.deepEqual(
+    warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+    [],
+    'nothing was substituted: a covering key was selected',
+  )
+})
+
+test('the NEAREST covering workspace key wins, not merely the first one listed (#1189)', () => {
+  // Two covering keys. Taking the shallower one would enrich from the wrong
+  // remote and, because it does cover the cwd, would also silence
+  // refused_workspace_cwd - removing the only signal that a substitution
+  // happened at all. Nearest-governs is the gate's own rule (LLP 0049#scope).
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-1189b',
+        workspaces: {
+          '/work': { associated_remote_urls: { origin: 'git@github.com:acme/outer.git' } },
+          '/work/clean': { associated_remote_urls: { origin: 'git@github.com:acme/inner.git' } },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: '/work/clean/sub', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.equal(projection.git_remote, 'git@github.com:acme/inner.git')
+})
+
+test('a subscription turn with no in-band cwd still falls through to the first key (#1189)', () => {
+  // The guard LLP 0350#options names as the trap: workspaceCoversCwd does not
+  // guard its argument. Reaching it with no cwd would throw on every
+  // subscription turn carrying a workspaces map, and the key's last-resort cwd
+  // role (LLP 0083#workspace-key-ranks-last) would be gone with it. The drop
+  // proves both: the first key is still selected, and it still gates.
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-1189c',
+        workspaces: {
+          '/work/ignored/proj': {},
+          '/work/clean': {},
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ input: 'secret' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP, 'the first key is still the only cwd there is')
+})
+
+test('an ancestor key that resolves MORE restrictively than the cwd is silent (documents the residue, #481)', () => {
+  // The disclosed cost of the ancestor test, pinned so it stays a decision
+  // rather than becoming a surprise. Nearest-governs is NOT monotone down the
+  // chain: `ignore` at the key with `local-only` beneath it resolves the cwd
+  // LESS restrictively than the key would have. The substitution is refused,
+  // the verdict genuinely loosens, and no refusal is reported - because the
+  // warn carries no class field and fired identically on subdirectory turns
+  // that loosen nothing, so it could never have reported this anyway. If this
+  // ever needs reporting it is a different signal, comparing resolve(key)
+  // against resolve(cwd) (LLP 0160#decision).
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481c-'))
+  const workspace = path.join(root, 'private')
+  const subdir = path.join(workspace, 'scratch')
+  fs.mkdirSync(subdir, { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.hypignore'), 'ignore\n')
+  fs.writeFileSync(path.join(subdir, '.hypignore'), 'local-only\n')
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  try {
+    const resolver = createUsagePolicyResolver({})
+    assert.equal(resolver.resolve(workspace).class, 'ignore', 'the key alone would have dropped')
+    assert.equal(resolver.resolve(subdir).class, 'local-only', 'the cwd records, withheld from forwarding')
+    const projection = /** @type {any} */ (createCodexExchangeProjector().project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({
+        'x-codex-turn-metadata': JSON.stringify({
+          thread_id: 'thread-481c',
+          workspaces: { [workspace]: {} },
+        }),
+      }),
+      request_body: JSON.stringify({ cwd: subdir, input: 'go' }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    }), { log }))
+    assert.ok(projection && projection !== USAGE_POLICY_DROP, 'the carve-out records')
+    assert.deepEqual(
+      warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+      [],
+      'the ancestor test reports the location inference, not a verdict change',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {

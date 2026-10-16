@@ -69,7 +69,7 @@ export interface ShardMeta {
   dimension: number
   /** Embedded (deduplicated) vector count. */
   row_count: number
-  /** Cache partition row count at build time — the staleness signal. */
+  /** Cache partition row count at build time: the staleness signal. */
   source_row_count: number
   built_at: string
 }

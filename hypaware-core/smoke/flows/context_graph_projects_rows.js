@@ -18,8 +18,10 @@ import {
 
 /**
  * Context-graph T0 projection smoke. Activates `@hypaware/ai-gateway` (for
- * its dataset registration + cache declaration) and
- * `@hypaware/context-graph`, seeds a small `ai_gateway_messages` fixture
+ * its dataset registration + cache declaration), `@hypaware/context-graph`
+ * (the projection engine) and `@hypaware/ai-gateway-graph` (the connector
+ * carrying the `ai_gateway_messages` contract; with no contract registered
+ * `graph project` is a no-op), seeds a small `ai_gateway_messages` fixture
  * with two file-touching tool calls, runs `hyp graph project`, and asserts:
  *
  * - `select count(*) from node` = 7 (Session, App, Model, 2× Tool, 2× File)
@@ -56,6 +58,7 @@ export async function run({ harness, expect }) {
       const { loaded } = await loadManifests([
         path.join(workspace, 'ai-gateway'),
         path.join(workspace, 'context-graph'),
+        path.join(workspace, 'ai-gateway-graph'),
       ])
       const entries = loaded.map((l) => ({ manifest: l.manifest, rootDir: l.rootDir, config: {} }))
       return activatePlugins({
@@ -94,12 +97,25 @@ export async function run({ harness, expect }) {
     v.Session === 1 && v.App === 1 && v.Model === 1 && v.Tool === 2 && v.File === 2
   )
 
+  // `natural_key` is a declared local-only content column, and a graph row
+  // carries no per-row `cwd`, so a caller below the top of the lattice reads
+  // it back nulled with a notice on stderr. Ask for full fidelity.
+  // @ref LLP 0105#graph-provenance [constrained-by]: unprovenanced graph rows expose structure, never content, unless the caller opts in
   const usedEdges = await runSql(
-    "select t.natural_key as tool from edge e join node t on e.dst_id = t.node_id where e.edge_type = 'used'"
+    "select t.natural_key as tool from edge e join node t on e.dst_id = t.node_id where e.edge_type = 'used'",
+    { includeLocalOnly: true }
   )
   const tools = usedEdges.map((r) => String(r.tool)).sort()
   expect.that("used edges link the session to Read and Edit", tools, (v) =>
     Array.isArray(v) && v.length === 2 && v[0] === 'Edit' && v[1] === 'Read'
+  )
+
+  const walked = JSON.parse(await dispatchOk(
+    ['graph', 'neighbors', 'conv-1', '--direction', 'out', '--edge-type', 'used', '--limit', '1', '--json', '--include-local-only'],
+    { kernel, registry, harness, expect, label: 'bounded_neighbors' }
+  ))
+  expect.that('neighbors preserves exact reachability with bounded output', walked, v =>
+    v.neighbors.length === 1 && v.reachable === 2 && v.truncated === true && v.neighbors[0].edge_id
   )
 
   // Re-run: idempotent (deterministic ids + pre-write dedup → no new rows).
@@ -122,12 +138,31 @@ export async function run({ harness, expect }) {
   const nodeCount3 = await sqlCount('node')
   expect.that('node count unchanged after compaction', nodeCount3, (v) => v === 7)
 
+  // A code-mode action exercises the same contract through plugin activation,
+  // persisted JSON arguments, CLI dispatch and query settlement.
+  await kernel.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], [
+    fixtureRow({ message_id: 'm4', message_index: 3, role: 'assistant', part_type: 'tool_call', tool_name: 'exec', tool_call_id: 'tc4',
+      tool_args: 'text(await tools.exec_command({cmd:"cat /home/test/.agents/skills/review/SKILL.md"}))' }),
+  ])
+  await dispatchOk(['graph', 'project', '--refresh'], { kernel, registry, harness, expect, label: 'refresh_evidence' })
+  const evidenceRows = await runSql("select source_keys, props from edge where edge_type = 'ran'", { includeLocalOnly: true })
+  expect.that('wrapper skill edge retains precise inferred evidence', evidenceRows, (rows) => {
+    const keys = rows[0]?.source_keys
+    const source = typeof keys === 'string' ? JSON.parse(keys) : keys
+    return rows.length === 1 && source?.message_id === 'm4' && source?.part_id === 'm4#0' && source?.inferred_call === true
+  })
+
   // The internal signal: assert the projection path emitted its span with
   // the same counts the SQL assertions saw, per the log-driven-development
   // policy (a silent span break should fail this smoke, not pass it).
   await obs.shutdown()
   const traces = await expect.traces()
   const projectSpans = traces.filter((/** @type {any} */ t) => t.name === 'graph.project')
+  expect.that('traces: scoped traversal records its query and materialization counts', traces, rows => rows.some(t =>
+    t.name === 'graph.neighbors' && t.attributes?.status === 'ok' &&
+    t.attributes?.query_count === 5 && t.attributes?.node_rows === 2 &&
+    t.attributes?.edge_rows === 3 && t.attributes?.payload_bytes > 0
+  ))
   expect.that(
     'traces: graph.project span for the writing run records 7 nodes / 6 edges, status ok',
     projectSpans,
@@ -144,6 +179,7 @@ export async function run({ harness, expect }) {
       t.attributes?.nodes_written === 0 && t.attributes?.edges_written === 0
     )
   )
+  expect.that('traces: explicit evidence refresh ran', projectSpans, (rows) => rows.some(t => t.attributes?.refresh === true && t.attributes?.status === 'ok'))
   expect.that(
     'traces: graph.compact span emitted with nothing skipped',
     traces.filter((/** @type {any} */ t) => t.name === 'graph.compact'),
@@ -161,12 +197,15 @@ export async function run({ harness, expect }) {
 
   /**
    * @param {string} sql
+   * @param {{ includeLocalOnly?: boolean }} [opts]
    * @returns {Promise<any[]>}
    */
-  async function runSql(sql) {
+  async function runSql(sql, opts) {
     const stdout = makeBuf()
     const stderr = makeBuf()
-    const code = await dispatch(['query', 'sql', sql, '--refresh', 'always', '--format', 'json'], {
+    const argv = ['query', 'sql', sql, '--refresh', 'always', '--format', 'json']
+    if (opts?.includeLocalOnly) argv.push('--include-local-only')
+    const code = await dispatch(argv, {
       stdout,
       stderr,
       kernel,

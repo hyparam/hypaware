@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-10
 **Related:** LLP 0153, LLP 0031
+**Extended-by:** LLP 0267 (#d5: a fourth state, `selected-unavailable`, for a plugin the config selects but the boot did not get)
 
 > LLP 0153 settled that a dispatch miss on a known-but-inactive plugin command
 > reports "unavailable + repair" rather than "unknown", with a single repair

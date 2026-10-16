@@ -6,6 +6,8 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0013, LLP 0015, LLP 0016
+**Extended-by:** LLP 0202 (the raw proxy sources remain sources but are no longer offered in the wizard menu),
+LLP 0394 (every field of `SourceStatus`, not only `details`, reaches the status file)
 
 > The source subsystem: how plugins contribute sources and how the kernel drives
 > their lifecycle. Decomposed from `hypaware-design.md#sources`. This is the LLP
@@ -15,7 +17,7 @@
 
 A **source** produces normalized rows and owns a daemon lifecycle. Source
 plugins implement `start` and return a `StartedSource` handle; the kernel owns
-everything around it — registration, lifecycle, status reporting, and the cache
+everything around it: registration, lifecycle, status reporting, and the cache
 write path. A source never sees sinks. Rows go to the intrinsic local query
 cache ([LLP 0013](./0013-local-query-cache.decision.md)) and nowhere else.
 
@@ -23,14 +25,14 @@ cache ([LLP 0013](./0013-local-query-cache.decision.md)) and nowhere else.
 
 In the V1 user-facing wizard the sources divide into:
 
-- **Client source** — a known tool the kernel configures (`claude`, `codex`).
+- **Client source**: a known tool the kernel configures (`claude`, `codex`).
   Adds its gateway upstream *and* its adapter plugin, which attaches the tool,
   installs hooks/skills, and can backfill local history. Only client sources are
   autodetectable (there is an installed tool to find).
-- **Raw proxy source** — `raw-anthropic` / `raw-openai`. Opens the gateway with
+- **Raw proxy source**: `raw-anthropic` / `raw-openai`. Opens the gateway with
   that provider upstream but configures no client; the user points their own SDK
   app at the local gateway. Not autodetectable.
-- **OTEL** — a local OTLP receiver for apps that export OpenTelemetry. Manual,
+- **OTEL**: a local OTLP receiver for apps that export OpenTelemetry. Manual,
   not autodetectable.
 
 (See `CONTEXT.md` for the canonical glossary of `Source`, `Autodetect`,
@@ -70,7 +72,7 @@ contract violation and the kernel rejects it.
 
 ## Lifecycle and reload-context invariant
 
-The kernel — not the plugin — drives `start` / `stop` / `reload` / `status`. Two
+The kernel, not the plugin, drives `start` / `stop` / `reload` / `status`. Two
 invariants matter:
 
 ### reload-context
@@ -86,7 +88,7 @@ core.
 Every lifecycle transition is wrapped in a `source.*` span and ticks the
 `hyp_sources_started` gauge, so `hyp status` can report the active set without
 reaching into plugin internals. A `reload` on a source that omits `reload()` is
-**not** an error — the kernel emits a `status: skipped` span so an operator can
+**not** an error, the kernel emits a `status: skipped` span so an operator can
 grep for "reload requested but not supported" rather than seeing silence.
 
 ## Constraints

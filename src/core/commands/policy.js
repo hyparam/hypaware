@@ -3,16 +3,35 @@
 import path from 'node:path'
 import process from 'node:process'
 
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getActiveSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { LocalOnlyListUnreadableError, localOnlyListPath, readLocalOnlyEntries } from '../usage-policy/index.js'
-import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
+import {
+  ClientSyncListUnreadableError,
+  clientSyncListPath,
+  DEFAULT_FOLDER_ASK_MODE,
+  FOLDER_ASK_MODES,
+  FolderAskUnreadableError,
+  folderAskPath,
+  LocalOnlyListUnreadableError,
+  localOnlyListPath,
+  readClientSyncEntries,
+  readFolderAskMode,
+  readLocalOnlyEntries,
+  writeClientSyncEntries,
+  writeFolderAskMode,
+} from '../usage-policy/index.js'
+import { defaultConfigPath } from '../config/schema.js'
+import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { syncDestinationName } from '../remote/builtin_remotes.js'
+import { centralLayerUnreadable, centralSinkOrigins } from '../remote/gateway_seed.js'
+import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
- * @import { UsageClass } from '../../../src/core/usage-policy/types.js'
+ * @import { ClientSyncEntry, FolderAskMode, UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -20,13 +39,12 @@ import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './cl
  * over the machine-local usage-class store that replaces the
  * `hyp ignore --sync`/`--local-only`/`--private` misnomer. `set` / `show` /
  * `unset` / `list` are thin runners over the marking internals hoisted in
- * `src/core/commands/clients.js`; the `hyp ignore`/`hyp unignore` flag forms
- * keep working as delegating compatibility aliases (see
+ * `src/core/commands/clients.js` (see
  * {@link runMarkMachineLocal}, {@link runUnmarkMachineLocal},
  * {@link runIgnoreCheck}). The store format, the shared resolver, and the
  * three-class lattice are untouched (LLP 0103 #cli). Every human line these
  * runners print goes through {@link PUBLIC_VOCABULARY}, so the verb answers
- * in the vocabulary it teaches; `--json` and the aliases do not.
+ * in the vocabulary it teaches; `--json` keeps the resolver vocabulary.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy` verb surface that retires the `hyp ignore --sync` misnomer
  * @ref LLP 0111#surface [implements]: `policy set` / `show` / `unset` / `list`, registered as a `makeGroupCommand` group
@@ -66,9 +84,7 @@ const STORE_LABEL = 'machine-local policy store'
  * vocabulary the user typed and the hook and the privacy skill teach, never
  * the stored class or the store's file path. `--json` never routes through
  * this, so the machine contract keeps emitting the resolver vocabulary and
- * the real store path; the deprecated `hyp ignore` / `hyp unignore` flag
- * aliases do not pass it and keep their exact legacy output (LLP 0111
- * #aliases). A governing `.hypignore` is still named by its real path: it is
+ * the real store path. A governing `.hypignore` is still named by its real path: it is
  * a file the user can open and edit, not an internal.
  *
  * @ref LLP 0111#tokens [implements]: the class-to-token mapping is a CLI-edge rendering; the store and the JSON keep speaking `full`
@@ -89,9 +105,7 @@ const PUBLIC_VOCABULARY = {
  * which is exactly the internals-leaking vocabulary this verb exists to
  * avoid (LLP 0111 #tokens). Scoped to the four `policy` runners only
  * ({@link runPolicySet}, {@link runPolicyShow}, {@link runPolicyUnset},
- * {@link runPolicyList}): `hyp status` and the deprecated `hyp
- * ignore`/`hyp unignore` aliases keep the resolver's own wording (LLP 0111
- * #aliases).
+ * {@link runPolicyList}): `hyp status` keeps the resolver's own wording.
  *
  * Catching here also means the error never reaches the dispatcher's generic
  * catch, which is what tags the `command.run` span with `error_kind`. So this
@@ -112,10 +126,10 @@ function reportUnreadableStore(ctx, err) {
   return 1
 }
 
-const POLICY_SET_USAGE = 'hyp policy set <path> sync|local-only|ignore'
-const POLICY_SHOW_USAGE = 'hyp policy show [path] [--json]'
-const POLICY_UNSET_USAGE = 'hyp policy unset <path> [sync|local-only|ignore]'
-const POLICY_LIST_USAGE = 'hyp policy list [--json]'
+const POLICY_SET_USAGE = 'hyp privacy set <path> sync|local-only|ignore'
+const POLICY_SHOW_USAGE = 'hyp privacy show [path] [--json]'
+const POLICY_UNSET_USAGE = 'hyp privacy unset <path> [sync|local-only|ignore]'
+const POLICY_LIST_USAGE = 'hyp privacy list [--json]'
 
 /**
  * @param {string[]} argv
@@ -130,7 +144,7 @@ function parsePolicySetArgs(argv) {
     },
     positional: ['path', 'class'],
     required: ['path', 'class'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: `usage: ${POLICY_SET_USAGE}` }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ path: string, class: string }} */ (parsed.params)
@@ -150,7 +164,7 @@ function parsePolicyShowArgs(argv) {
       json: { type: 'boolean', default: false },
     },
     positional: ['path'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_SHOW_USAGE}` }
   if (!parsed.ok) return { ...empty, error: parsed.error }
   const p = /** @type {{ path?: string, json: boolean }} */ (parsed.params)
@@ -170,7 +184,7 @@ function parsePolicyUnsetArgs(argv) {
     },
     positional: ['path', 'class'],
     required: ['path'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: `usage: ${POLICY_UNSET_USAGE}` }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ path: string, class?: string }} */ (parsed.params)
@@ -200,8 +214,7 @@ function parsePolicyListArgs(argv) {
  *
  * Writes a machine-local usage-class marking for `<path>` in the
  * class-per-entry store (LLP 0103), delegating to
- * {@link runMarkMachineLocal}, the internal both this verb and the
- * `hyp ignore --sync`/`--local-only`/`--private` compatibility aliases call.
+ * {@link runMarkMachineLocal}.
  * `<path>` is required (the bare grammar makes it necessary: `hyp policy set
  * sync` would be ambiguous between a path and a class token) and resolved
  * against the command-context cwd, matching the sibling verbs; the resolved
@@ -244,12 +257,10 @@ export async function runPolicySet(argv, ctx) {
  * class, the governing source (`dotfile`/`machine-local`/`none`), the
  * governing file, and the residual already-cached row count with the
  * `hyp purge` hint. Prospective-only, never destructive. `--json` emits the
- * exact field set `hyp ignore --check --json` emits today (byte-compatible),
- * since {@link runIgnoreCheck} is the shared implementation both spellings
- * call.
+ * stable resolver field set from {@link runIgnoreCheck}.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy show`, the `hyp ignore --check` successor
- * @ref LLP 0111#show [implements]: `--json` stays byte-compatible with today's `--check --json` field set
+ * @ref LLP 0111#show [implements]: `--json` keeps the established resolver field set
  * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#reporting [constrained-by]: the report names which source governs (dotfile vs machine-local entry) and the class
  * @ref LLP 0103#cli [constrained-by]: the store, resolver, and class lattice are unchanged; only the verb spelling is new
@@ -280,8 +291,7 @@ export async function runPolicyShow(argv, ctx) {
  * every machine-local entry governing the target is removed, "back to the
  * implicit default" (LLP 0111 #unset), matching the store's one-entry-per-dir
  * shape. An optional trailing class token scopes removal to that class only
- * - the scoped form the `hyp unignore --sync`/`--local-only`/`--private`
- * aliases delegate to. Both forms delegate to {@link runUnmarkMachineLocal}.
+ * through {@link runUnmarkMachineLocal}.
  * `unset` never touches `.hypignore` dotfiles and never touches cached rows
  * (LLP 0104 boundary). Idempotent: nothing governing (of the given class, or
  * of any class) is a no-op success.
@@ -341,6 +351,335 @@ export async function runPolicyUnset(argv, ctx) {
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
+const POLICY_CLIENT_USAGE = 'hyp privacy client [<name>] [sync|local-only] [--json]'
+
+/** How the per-client store is named to a human, mirroring {@link STORE_LABEL}. */
+const CLIENT_STORE_LABEL = 'machine-local client policy store'
+
+/**
+ * The `policy client` edge's wording for a corrupt client-sync store,
+ * mirroring {@link reportUnreadableStore} for the directory store (same
+ * span-tagging rationale, issue #413).
+ *
+ * @param {CommandRunContext} ctx
+ * @param {ClientSyncListUnreadableError} err
+ * @returns {number}
+ */
+function reportUnreadableClientStore(ctx, err) {
+  getActiveSpan()?.setAttribute(Attr.ERROR_KIND, err.error_kind)
+  ctx.stderr.write(`error: the ${CLIENT_STORE_LABEL} at '${err.filePath}' is unreadable or malformed\n`)
+  return 1
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ name?: string, token?: 'sync' | 'local-only', json: boolean, error?: string }}
+ */
+function parsePolicyClientArgs(argv) {
+  const empty = { json: false }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      class: { type: 'string', enum: ['sync', 'local-only'] },
+      json: { type: 'boolean', default: false },
+    },
+    positional: ['name', 'class'],
+  }, STRICT_SHORT_FLAGS)
+  if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_CLIENT_USAGE}` }
+  if (!parsed.ok) return { ...empty, error: parsed.error }
+  const p = /** @type {{ name?: string, class?: 'sync' | 'local-only', json: boolean }} */ (parsed.params)
+  return { name: p.name, token: p.class, json: p.json }
+}
+
+/**
+ * Resolve the catalog and layered config for provenance classification,
+ * best-effort: a broken config layer must not lock the user out of editing
+ * their own opt-out store, so a resolution failure degrades to "provenance
+ * unknown" (`layered: null`), which never blocks a write - only a proven
+ * `'central'` classification does (LLP 0188 #locked); the resolver applies
+ * the same exemption at build time, so a wrongly accepted entry is inert,
+ * never a leak.
+ *
+ * @param {CommandRunContext} ctx
+ */
+async function resolveClientPolicyContext(ctx) {
+  const catalog = await buildAttachPluginCatalog(ctx)
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  /** @type {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | null} */
+  let layered = null
+  try {
+    layered = await resolveLayeredConfigFromDisk({
+      stateRoot: obsEnv.stateDir,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+  } catch { /* provenance degrades to unknown; the write path stays available */ }
+  return { catalog, layered, stateDir: obsEnv.stateDir }
+}
+
+/**
+ * `hyp policy client [<name>] [sync|local-only] [--json]`
+ *
+ * The per-client sibling of the directory verbs (LLP 0188): on an enrolled
+ * machine every configured source syncs by default, and this verb edits the
+ * machine-local opt-out store that keeps a client's rows local. With no
+ * arguments it enumerates the store plus the current syncing/local-only
+ * picture; with a name it reports that client's state; with a trailing
+ * token it writes (`local-only` opts out, `sync` removes the opt-out,
+ * idempotent both ways). A source the central config carries always syncs
+ * and cannot be opted out (LLP 0188 #locked). Flipping back to `sync`
+ * ships only future rows by itself: withholding is drop-but-advance, so the
+ * standing-policy mutation does not retroactively upload anything. The
+ * confirmation points at the separate, consent-gated history replay.
+ *
+ * @ref LLP 0188#opt-out [implements]: the post-onboarding CLI surface over the client-sync store
+ * @ref LLP 0188#locked [implements]: a central-classified source is refused with the managed-by-your-fleet wording
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runPolicyClient(argv, ctx) {
+  const parsed = parsePolicyClientArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+  const { catalog, layered, stateDir } = await resolveClientPolicyContext(ctx)
+  const storePath = clientSyncListPath(stateDir)
+  /** @type {ClientSyncEntry[] | null} */
+  let entries
+  try {
+    entries = await readClientSyncEntries({ stateDir })
+  } catch (err) {
+    if (!(err instanceof ClientSyncListUnreadableError)) throw err
+    return reportUnreadableClientStore(ctx, err)
+  }
+  const optedOut = new Set((entries ?? []).map((e) => e.source))
+  /** @type {(name: string) => 'central' | 'local' | 'absent' | 'unknown'} */
+  const provenanceOf = (name) =>
+    layered ? classifyClientProvenance(name, layered, catalog) : 'unknown'
+
+  if (!parsed.name) {
+    if (parsed.json) {
+      ctx.stdout.write(JSON.stringify({ entries: entries ?? [], path: storePath }) + '\n')
+      return 0
+    }
+    if (optedOut.size === 0) {
+      ctx.stdout.write(`no clients are kept local-only - every configured source syncs by default (${CLIENT_STORE_LABEL}: ${storePath})\n`)
+      return 0
+    }
+    ctx.stdout.write(`clients kept local-only: ${[...optedOut].sort().join(' · ')}\n`)
+    ctx.stdout.write(`(${CLIENT_STORE_LABEL}: ${storePath})\n`)
+    return 0
+  }
+
+  const name = parsed.name
+  const known = catalog.pickerDescriptors.has(name) || catalog.clientDescriptors.has(name)
+  if (!known) {
+    const knownIds = [...catalog.pickerDescriptors.keys()].sort().join(', ')
+    ctx.stderr.write(`error: unknown client '${name}' (known: ${knownIds})\n`)
+    return 2
+  }
+  const provenance = provenanceOf(name)
+
+  if (!parsed.token) {
+    if (parsed.json) {
+      const state = provenance === 'central' ? 'sync' : optedOut.has(name) ? 'local-only' : 'sync'
+      ctx.stdout.write(JSON.stringify({ source: name, state, managed: provenance === 'central', path: storePath }) + '\n')
+      return 0
+    }
+    if (provenance === 'central') {
+      ctx.stdout.write(`${name}: sync (set by your team)\n`)
+    } else if (optedOut.has(name)) {
+      ctx.stdout.write(`${name}: local-only (${CLIENT_STORE_LABEL})\n`)
+    } else {
+      ctx.stdout.write(`${name}: sync (default)\n`)
+    }
+    return 0
+  }
+
+  // Where this machine's rows actually go, from the central layer this command
+  // already resolved: a self-hosted enrollment is a supported lane, so no line
+  // below may call the destination "the cloud".
+  // @ref LLP 0134#custom-url-deferred [constrained-by]: the receipt names the server this machine forwards to, hosted or not
+  const destination = syncDestinationName(centralSinkOrigins(layered?.centralConfig))
+
+  if (parsed.token === 'local-only') {
+    if (provenance === 'central') {
+      ctx.stderr.write(`error: '${name}' is set by your team and always syncs to ${destination}\n`)
+      return 1
+    }
+    const next = [...(entries ?? []), { source: name, class: /** @type {'local-only'} */ ('local-only') }]
+    try {
+      await writeClientSyncEntries({ stateDir, entries: next })
+    } catch (err) {
+      if (!(err instanceof ClientSyncListUnreadableError)) throw err
+      return reportUnreadableClientStore(ctx, err)
+    }
+    ctx.stdout.write(`${name}: local-only${optedOut.has(name) ? ' (unchanged)' : ''}\n`)
+    ctx.stdout.write(`  future ${name} rows stay on this machine; rows already exported are not recalled\n`)
+    if (layered && !layered.centralConfig) {
+      // A layer yielding no config is either verifiably absent or merely
+      // unreadable, and only the first is "not connected": an enrollment
+      // nobody can read is not evidence that there is none (issue #2223).
+      // The opt-out above is already written in both cases.
+      const unreadable = centralLayerUnreadable({ stateDir, centralLoaded: layered.centralLoaded })
+      ctx.stdout.write(unreadable
+        ? `  this machine's central config layer (${unreadable.configPath}) cannot be read, so whether it syncs to a HypAware server cannot be verified; the opt-out is recorded either way\n`
+        : '  this machine is not connected to a HypAware server; the opt-out takes effect if it connects\n')
+    }
+    return 0
+  }
+
+  // token === 'sync': remove the opt-out, idempotent.
+  if (!optedOut.has(name)) {
+    ctx.stdout.write(`${name}: sync${provenance === 'central' ? ' (set by your team)' : ' (default, unchanged)'}\n`)
+    return 0
+  }
+  try {
+    await writeClientSyncEntries({ stateDir, entries: (entries ?? []).filter((e) => e.source !== name) })
+  } catch (err) {
+    if (!(err instanceof ClientSyncListUnreadableError)) throw err
+    return reportUnreadableClientStore(ctx, err)
+  }
+  ctx.stdout.write(`${name}: sync\n`)
+  // @ref LLP 0188#no-retroactive-ship [implements]: changing standing policy remains future-only
+  // @ref LLP 0345#command [implements]: the policy transition points at the separate attended history replay
+  ctx.stdout.write(`  future ${name} rows sync to ${destination}\n`)
+  ctx.stdout.write(`  to upload retained history too: hyp sync --history ${name}\n`)
+  return 0
+}
+
+const POLICY_FOLDERS_USAGE = 'hyp privacy folders [ask|sync] [--json]'
+
+/** How the folder-ask preference is named to a human. */
+const FOLDER_ASK_STORE_LABEL = 'machine-local new-folder preference'
+
+/**
+ * The two modes stated as the consequence the user cares about, not as the
+ * token they typed. `sync` is the default (LLP 0200 #default); `ask` buys
+ * the per-folder session-start question (LLP 0106).
+ *
+ * @type {Record<FolderAskMode, string>}
+ */
+const FOLDER_ASK_STATE_LINE = {
+  ask: 'ask - a session opened in a new folder asks once how to handle it',
+  sync: 'sync - they sync without asking (the default)',
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ mode?: FolderAskMode, json: boolean, error?: string }}
+ */
+function parsePolicyFoldersArgs(argv) {
+  const empty = { json: false }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      mode: { type: 'string', enum: [...FOLDER_ASK_MODES] },
+      json: { type: 'boolean', default: false },
+    },
+    positional: ['mode'],
+  }, STRICT_SHORT_FLAGS)
+  if ('help' in parsed) return { ...empty, error: `usage: ${POLICY_FOLDERS_USAGE}` }
+  if (!parsed.ok) return { ...empty, error: parsed.error }
+  const p = /** @type {{ mode?: FolderAskMode, json: boolean }} */ (parsed.params)
+  return { mode: p.mode, json: p.json }
+}
+
+/**
+ * `hyp policy folders [ask|sync] [--json]`
+ *
+ * The standing answer to the session-start classification question
+ * (LLP 0106): whether opening a session in a folder nobody has classified
+ * asks how to handle it, or lets it sync under the implicit default without
+ * asking. `sync` is the default (LLP 0200 #default) and the wizard's
+ * new-folder step is where most machines set it; this verb is the standing
+ * control afterwards. With no argument it reports the current mode; with
+ * `ask` or `sync` it writes one, idempotently.
+ *
+ * Deliberately narrow: this is a prompt preference, not a policy. `sync`
+ * suppresses the *question*, never a classification - `.hypignore` dotfiles,
+ * every entry `hyp policy set` wrote, and the export seam behave identically
+ * in both modes, so nothing already marked local-only or ignored starts
+ * syncing because the ask was turned off.
+ *
+ * @ref LLP 0200#cli [implements]: the post-onboarding surface over the folder-ask preference, the sibling of `policy client`
+ * @ref LLP 0200#suppression [constrained-by]: the mode gates the ask alone; resolved classes and the export seam are untouched
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runPolicyFolders(argv, ctx) {
+  const parsed = parsePolicyFoldersArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const storePath = folderAskPath(stateDir)
+
+  if (!parsed.mode) {
+    /** @type {FolderAskMode} */
+    let mode
+    try {
+      mode = await readFolderAskMode({ stateDir })
+    } catch (err) {
+      if (!(err instanceof FolderAskUnreadableError)) throw err
+      return reportUnreadableFolderAsk(ctx, err)
+    }
+    if (parsed.json) {
+      ctx.stdout.write(JSON.stringify({ mode, path: storePath }) + '\n')
+      return 0
+    }
+    ctx.stdout.write(`new folders: ${FOLDER_ASK_STATE_LINE[mode]}\n`)
+    ctx.stdout.write(`(${FOLDER_ASK_STORE_LABEL}: ${storePath})\n`)
+    return 0
+  }
+
+  const mode = parsed.mode
+  try {
+    await writeFolderAskMode({ stateDir, mode })
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`error: could not write the ${FOLDER_ASK_STORE_LABEL} at '${storePath}' (${detail})\n`)
+    return 1
+  }
+  if (parsed.json) {
+    ctx.stdout.write(JSON.stringify({ mode, path: storePath }) + '\n')
+    return 0
+  }
+  ctx.stdout.write(`new folders: ${FOLDER_ASK_STATE_LINE[mode]}\n`)
+  // Say what did *not* change: turning the ask off is the surprising one,
+  // and "I stopped being asked" must not read as "everything now syncs".
+  ctx.stdout.write(
+    mode === 'sync'
+      ? "  folders you already marked keep their class; mark one any time with 'hyp privacy set <path> local-only|ignore'\n"
+      : '  a folder that already has a class is never asked about again\n'
+  )
+  return 0
+}
+
+/**
+ * The `policy folders` edge's wording for a corrupt preference file,
+ * mirroring {@link reportUnreadableStore} (same span-tagging rationale).
+ *
+ * @param {CommandRunContext} ctx
+ * @param {FolderAskUnreadableError} err
+ * @returns {number}
+ */
+function reportUnreadableFolderAsk(ctx, err) {
+  getActiveSpan()?.setAttribute(Attr.ERROR_KIND, err.error_kind)
+  ctx.stderr.write(`error: the ${FOLDER_ASK_STORE_LABEL} at '${err.filePath}' is unreadable or malformed\n`)
+  ctx.stderr.write(`  repair or remove it, or run 'hyp privacy folders ask' to rewrite it\n`)
+  return 1
+}
+
 export async function runPolicyList(argv, ctx) {
   const parsed = parsePolicyListArgs(argv)
   if (parsed.error) {
@@ -356,19 +695,67 @@ export async function runPolicyList(argv, ctx) {
     if (!(err instanceof LocalOnlyListUnreadableError)) throw err
     return reportUnreadableStore(ctx, err)
   }
+  // The per-client opt-out store (LLP 0188) is enumerated alongside the
+  // directory entries: `list` answers "what have I marked on this machine",
+  // and a client marking is exactly that. Additive: the `--json` byte-compat
+  // guarantee binds `policy show --json` (LLP 0111 #show), not `list`.
+  const clientStorePath = clientSyncListPath(stateDir)
+  /** @type {ClientSyncEntry[]} */
+  let clientEntries = []
+  try {
+    clientEntries = (await readClientSyncEntries({ stateDir })) ?? []
+  } catch (err) {
+    if (!(err instanceof ClientSyncListUnreadableError)) throw err
+    return reportUnreadableClientStore(ctx, err)
+  }
+
+  // The new-folder preference (LLP 0200) rides along for the same reason:
+  // it is a machine-local answer the user gave, and a machine that stopped
+  // asking should be able to see that here rather than only by opening a
+  // session somewhere new and noticing the silence.
+  /** @type {FolderAskMode} */
+  let folderAsk
+  try {
+    folderAsk = await readFolderAskMode({ stateDir })
+  } catch (err) {
+    if (!(err instanceof FolderAskUnreadableError)) throw err
+    return reportUnreadableFolderAsk(ctx, err)
+  }
 
   if (parsed.json) {
-    ctx.stdout.write(JSON.stringify({ entries, path: listPath }) + '\n')
+    ctx.stdout.write(JSON.stringify({
+      entries,
+      path: listPath,
+      clients: { entries: clientEntries, path: clientStorePath },
+      folders: { mode: folderAsk, path: folderAskPath(stateDir) },
+    }) + '\n')
     return 0
   }
 
-  if (entries.length === 0) {
+  // Only the non-default mode is worth a line here: `list` exists to show
+  // what the user changed, and printing the product default on every run
+  // would be noise. `hyp status` and `hyp policy folders` state the mode
+  // unconditionally for anyone who wants it either way.
+  const folderLine = folderAsk === DEFAULT_FOLDER_ASK_MODE
+    ? null
+    : `new folders: ${FOLDER_ASK_STATE_LINE[folderAsk]}\n`
+
+  if (entries.length === 0 && clientEntries.length === 0) {
+    // The empty-store line still prints: "no machine-local entries" and the
+    // store path are what this run reports, and a non-default folder mode is
+    // an addition to that, not a replacement for it.
     ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
+    if (folderLine) ctx.stdout.write(folderLine)
     return 0
   }
   for (const entry of entries) {
     ctx.stdout.write(`${entry.dir}: ${PUBLIC_VOCABULARY.className(entry.class)}\n`)
   }
-  ctx.stdout.write(`(policy store: ${listPath})\n`)
+  if (entries.length > 0) ctx.stdout.write(`(policy store: ${listPath})\n`)
+  if (clientEntries.length > 0) {
+    ctx.stdout.write(`clients kept local-only: ${clientEntries.map((e) => e.source).sort().join(' · ')}\n`)
+    ctx.stdout.write(`(${CLIENT_STORE_LABEL}: ${clientStorePath})\n`)
+  }
+  if (folderLine) ctx.stdout.write(folderLine)
   return 0
 }

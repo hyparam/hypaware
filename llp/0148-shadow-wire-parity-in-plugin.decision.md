@@ -1,7 +1,7 @@
 # LLP 0148: Wire parity is enforced in the plugin; the gateway stays a recorder
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-29
@@ -10,9 +10,16 @@
 > Steering a turn onto a shadow provider must not change what the model
 > receives or returns. OpenClaw applies its Anthropic-only request shaping
 > through a hook that only runs for the provider *named* `anthropic`, so the
-> shadow provider loses it — and some of what it loses breaks auth and
+> shadow provider loses it, and some of what it loses breaks auth and
 > correctness, not just speed. Parity is a requirement, and it lives in the
 > OpenClaw-side plugin, not the gateway.
+
+> **Superseded-by [LLP 0168](./0168-config-override-replaces-plugin-steering.decision.md):**
+> with the config override the turn stays on the provider *named*
+> `anthropic`, so OpenClaw's own request shaping applies natively and
+> there is no parity to enforce anywhere (verified live: OAuth betas rode
+> a steered turn untouched, LLP 0167#verify-results). The gateway remains
+> a recorder, as this decision required.
 
 ## Context
 
@@ -26,7 +33,7 @@ shadow provider, none of it runs. What that costs per call:
   without them, subscription-authenticated calls fail outright.
 - **Default beta headers** (fine-grained tool streaming, interleaved
   thinking): without them, tool-call streaming and thinking behavior
-  degrade — a correctness change, possibly silent.
+  degrade, a correctness change, possibly silent.
 - **`/fast` service tier**: turns quietly get slower.
 
 A capture layer that changes the behavior being captured undermines its own
@@ -34,7 +41,7 @@ record. So the principle this decision fixes: **a parity gap between the
 steered and unsteered wire is a capture bug, not a documented loss.**
 
 The enforcement point was the real question. An earlier sketch split the
-work — auth-critical headers at the gateway, config-dependent shaping in
+work: auth-critical headers at the gateway, config-dependent shaping in
 the plugin. Reading the existing ai-gateway ruled that out as unnecessary:
 
 - The gateway's `matchUpstream` already supports header-driven per-request
@@ -47,7 +54,7 @@ the plugin. Reading the existing ai-gateway ruled that out as unnecessary:
   so the gateway *couldn't* restore it anyway.
 
 Everything therefore points to one place: the plugin owns the `hypaware-*`
-provider ids, so **its own `wrapStreamFn` runs for them** — the exact seam
+provider ids, so **its own `wrapStreamFn` runs for them**, the exact seam
 OpenClaw's Anthropic plugin uses, available to us for our providers.
 
 ## Decision
@@ -62,7 +69,7 @@ OpenClaw's Anthropic plugin uses, available to us for our providers.
   unchanged: same proxy, same presets mechanism, same recorder, same
   header stripping. No new gateway, no capability bump.
 - Parity gaps discovered later are treated as bugs in the plugin, fixed by
-  extending the mirror — never re-classified as acceptable losses.
+  extending the mirror, never re-classified as acceptable losses.
 - Scope note: parity mirroring is per API shape. `openai-completions`
   currently has no known OpenClaw-side shaping to mirror; if OpenClaw grows
   some, the same rule applies.
@@ -79,11 +86,18 @@ OpenClaw's Anthropic plugin uses, available to us for our providers.
 
 ## Open questions
 
-- The `PI_AI_*` beta constants in OpenClaw's plugin suggest the underlying
+- ~~The `PI_AI_*` beta constants in OpenClaw's plugin suggest the underlying
   `pi-ai` library may add the default betas itself when no wrapper runs
-  (it can detect OAuth by key shape). Unverified — `node_modules` was not
-  available. If true, the mirror shrinks; the merge must dedupe either way
-  so mirroring stays idempotent. Check at implementation.
+  (it can detect OAuth by key shape).~~ **Answered at implementation
+  (LLP 0161 Section 10, LLP 0162 T2), and it is true.** `pi-ai@0.73.1`'s
+  Anthropic provider adds both default betas from its own flags and prepends
+  the two OAuth betas whenever the key matches `sk-ant-oat`, the same
+  predicate OpenClaw uses. The mirror shrank as anticipated: it now installs
+  only under OpenClaw's own `needsAnthropicBetaWrapper` condition, since
+  merging unconditionally would *add* the interleaved beta on adaptive-thinking
+  models that pi-ai deliberately omits it for, which is a parity change in the
+  other direction. The merge is a header-name-keyed `Set` union and stays
+  idempotent regardless.
 
 ## References
 

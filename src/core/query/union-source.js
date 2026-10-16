@@ -1,10 +1,91 @@
 // @ts-check
 
-import { normalizeScanColumn } from './scan-column.js'
+import { isDeepStrictEqual } from 'node:util'
+
+import { rowsToBatches } from 'squirreling'
+
+import { scanColumnOrNulls } from './scan-column.js'
 
 /**
- * @import { AsyncDataSource, ExprNode } from 'squirreling/src/types.js'
+ * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AsyncCells, AsyncRow, AsyncDataSource, ExprNode, PreparedScan, RelationSchema, ScanProperties, ScanRequest } from 'squirreling'
  */
+
+/**
+ * The cell a row gets for a column its partition does not physically carry.
+ * `undefined` is outside `SqlPrimitive`, hence the cast: it is nonetheless
+ * what the row path already reads for such a column (squirreling's `asyncRow`
+ * builds a cell per REQUESTED key and resolves it off an object that has no
+ * such key), so padding introduces no new value.
+ */
+const absentCell = /** @type {AsyncCells[string]} */ (/** @type {unknown} */ (() => Promise.resolve(undefined)))
+
+/**
+ * Re-key one scanned row onto the exact column list the scan advertises,
+ * filling any column the row lacks with an absent cell.
+ *
+ * The SQL engine derives a query's output column names ONCE, from the scan's
+ * advertised list (`options.columns ?? source.columns`), then walks each row's
+ * own `columns` to fill them positionally. A row narrower than the advertised
+ * list therefore slides every later output name onto the wrong value, so
+ * `SELECT *, git_remote` can answer with `git_remote`'s value under the name
+ * of whichever column happens to sit at the star's short width. Aligning here
+ * costs nothing on the common path (a row that already matches is returned
+ * untouched) and makes the row shape match the schema the engine already told
+ * the caller it was returning.
+ *
+ * @ref LLP 0241#alignment [implements]: rows a scan yields carry the scan's advertised column list, not the partition's physical one
+ * @param {AsyncRow} row
+ * @param {string[]} columns
+ * @returns {AsyncRow}
+ */
+export function alignRowColumns(row, columns) {
+  if (row.columns === columns) return row
+  if (row.columns.length === columns.length) {
+    let same = true
+    for (let i = 0; i < columns.length; i++) {
+      if (row.columns[i] !== columns[i]) {
+        same = false
+        break
+      }
+    }
+    if (same) return row
+  }
+  /** @type {AsyncCells} */
+  const cells = {}
+  for (const name of columns) cells[name] = row.cells[name] ?? absentCell
+  // `resolved` is keyed by name and only ever read by name, so the original
+  // object stays correct: a padded column is simply missing from it, which is
+  // the same `undefined` the padded cell resolves to.
+  return row.resolved ? { columns, cells, resolved: row.resolved } : { columns, cells }
+}
+
+/**
+ * `alignRowColumns` over a whole row stream.
+ *
+ * A scan yields many rows sharing one `columns` array (icebird and
+ * `parquetDataSource` both build it once per batch), so the already-aligned
+ * verdict is memoized by array identity: the ordinary case, where every
+ * partition holds every advertised column, then costs one reference compare
+ * per row instead of a name-by-name walk.
+ *
+ * @param {AsyncIterable<AsyncRow>} rows
+ * @param {string[]} columns
+ * @returns {AsyncGenerator<AsyncRow>}
+ */
+export async function* alignRows(rows, columns) {
+  /** @type {string[] | undefined} */
+  let alignedColumns
+  for await (const row of rows) {
+    if (row.columns === alignedColumns) {
+      yield row
+      continue
+    }
+    const out = alignRowColumns(row, columns)
+    if (out === row) alignedColumns = row.columns
+    yield out
+  }
+}
 
 /**
  * Concatenate several `AsyncDataSource`s into one logical source. Columns
@@ -26,24 +107,53 @@ import { normalizeScanColumn } from './scan-column.js'
  * reading the column as null. When a partition can't satisfy the predicate we
  * drop `where` for it and let the engine filter the concatenated stream (it
  * already owns the filter via `appliedWhere: false`). `columns` is always
- * forwarded: projecting an absent column reads as null, never throws.
+ * forwarded, which adds no failure the merged stream did not already have, and
+ * an absent column reads as `undefined` rather than `null` or a throw: every
+ * row is padded out to the scan's advertised column list by `alignRows` below,
+ * so a column a partition physically lacks is still a real cell that resolves
+ * to `undefined` (LLP 0241 §alignment). One consequence is worth stating,
+ * because it is the thing a maintainer gets wrong: `undefined` is outside
+ * `SqlPrimitive` and `JSON.stringify` drops it, so a padded column renders as
+ * an absent key even though the row object owns it. `Object.keys(row).length`
+ * over a star therefore counts the advertised columns, not the physical ones,
+ * and is not a way to discover what a partition holds. What no longer varies is
+ * which ROW path the caller took: reading `resolved`, invoking the cell, and
+ * evaluating the column in a `WHERE`, `ORDER BY`, `GROUP BY`, `DISTINCT` or an
+ * aggregate all agree, where a short row made the last group throw
+ * `ColumnNotFoundError` on the first partition lacking the column. The
+ * `scanColumn` hook below is a DIFFERENT path and padding does not touch it: it
+ * forwards each partition's chunks unchanged, so an absent column's value there
+ * is whatever the partition streams, and a wrapper above the union normalizes
+ * those holes if it wants them uniform (ai-gateway's `withSchemaColumns` maps
+ * them to `null`). LLP 0241 left that `null`/`undefined` split between the two
+ * paths unsettled on purpose. `test/core/union-source.test.js` pins these.
  *
- * @param {AsyncDataSource[]} sources
- * @returns {AsyncDataSource}
+ * Because a sub-source now emits exactly the columns it is asked for (see
+ * `parquet-source.js`), forwarding `columns` also determines what the engine
+ * gets to re-filter on: it relies on squirreling folding the WHERE columns
+ * into the projection it hands to `scan()`, so the predicate's columns are
+ * already present even though `appliedWhere: false` never asks for them
+ * explicitly.
+ *
+ * @param {ScannableDataSource[]} sources
+ * @returns {ScannableDataSource}
  * @ref LLP 0015#multi-partition-union [constrained-by]: the union must not forward limit/offset or offsets apply twice, nor push a filter a partition can't satisfy
  */
 export function unionSources(sources) {
   /** @type {Set<string>} */
   const allColumns = new Set()
   let totalRows = 0
+  let totalRowsKnown = true
   for (const s of sources) {
     for (const col of s.columns) allColumns.add(col)
-    totalRows += s.numRows ?? 0
+    if (s.numRows === undefined) totalRowsKnown = false
+    else totalRows += s.numRows
   }
-  /** @type {AsyncDataSource} */
+  const columns = Array.from(allColumns)
+  /** @type {ScannableDataSource} */
   const union = {
-    columns: Array.from(allColumns),
-    numRows: totalRows,
+    columns,
+    numRows: totalRowsKnown ? totalRows : undefined,
     scan(options) {
       // Defends against a runtime scan() with no options even though the
       // AsyncDataSource contract types it as required.
@@ -52,6 +162,11 @@ export function unionSources(sources) {
       // present but references a construct we can't safely push down (a
       // qualified identifier, subquery, or other non-local construct).
       const predicateColumns = base && base.where ? whereColumns(base.where) : undefined
+      // What the engine will name this scan's output columns. A partition
+      // that physically lacks some of them must still yield rows of this
+      // shape, or the star expansion slides values onto neighbouring names.
+      // @ref LLP 0241#alignment [implements]: the union's rows carry the union's column list, whatever each partition physically holds
+      const scanColumns = base?.columns ?? union.columns
       return {
         appliedWhere: false,
         appliedLimitOffset: false,
@@ -62,17 +177,22 @@ export function unionSources(sources) {
               subOptions = { ...base, where: undefined }
             }
             const scan = source.scan(subOptions)
-            for await (const row of scan.rows()) {
-              yield row
-            }
+            yield* alignRows(scan.rows(), scanColumns)
           }
         },
       }
     },
   }
+  const preparedSchema = commonPreparedSchema(sources, columns)
+  if (preparedSchema) {
+    union.schema = preparedSchema
+    union.prepareScan = (request) => prepareUnionScan({ union, sources, schema: preparedSchema, request })
+  }
   // The column-stream hook is offered only when EVERY partition can stream
-  // the column; a mixed union stays row-based so the engine's fallback owns
-  // correctness.
+  // a column; a mixed union stays row-based so the engine's fallback owns
+  // correctness. A partition that streams but does not carry the requested
+  // column contributes a null per row (LLP 0241's padded cell, on the column
+  // path), never a request the partition would throw on.
   //
   // With no `where`, the union fully owns limit/offset over the CONCATENATED
   // stream (they are not distributive across partitions, the same discipline
@@ -95,10 +215,9 @@ export function unionSources(sources) {
         // until its chunks are consumed) so the merged flags are known
         // before the engine decides whether to re-filter.
         const subs = sources.map((source) => {
-          const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
           const push = canPushWhere(source, predicateColumns)
           const options = push ? { column, where, signal } : { column, signal }
-          const result = normalizeScanColumn(scanColumn(options), options)
+          const result = scanColumnOrNulls(source, options)
           return { result, applied: push && result.appliedWhere }
         })
         return {
@@ -127,7 +246,6 @@ export function unionSources(sources) {
               remainingSkip -= numRows
               continue
             }
-            const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
             const options = {
               column,
               // Per-partition upper bound: this partition can contribute at
@@ -135,7 +253,7 @@ export function unionSources(sources) {
               limit: remaining === Infinity ? undefined : remainingSkip + remaining,
               signal,
             }
-            const sub = normalizeScanColumn(scanColumn(options), options)
+            const sub = scanColumnOrNulls(source, options)
             for await (const chunk of sub.chunks()) {
               signal?.throwIfAborted()
               let start = 0
@@ -167,6 +285,179 @@ export function unionSources(sources) {
     }
   }
   return union
+}
+
+/**
+ * Find one logical schema the union can advertise without changing its
+ * existing column order. Field ids may differ between independent Iceberg
+ * tables, so compatibility is by ordered name, type, and nullability; each
+ * prepared request is remapped to the child table's ids below.
+ *
+ * A drifted union deliberately returns undefined. Its row path owns absent
+ * column padding, whose undefined/null semantics are not part of the native
+ * batch contract (LLP 0261), so native batches must not guess a third answer.
+ *
+ * @param {ScannableDataSource[]} sources
+ * @param {string[]} columns
+ * @returns {RelationSchema | undefined}
+ * @ref LLP 0294#partition-union [implements]: only aligned schemas expose one logical prepared union
+ */
+function commonPreparedSchema(sources, columns) {
+  if (sources.length === 0) return undefined
+  const first = sources[0]
+  if (!first.schema || !first.prepareScan) return undefined
+  if (!schemaMatchesColumns(first.schema, columns)) return undefined
+  for (let i = 1; i < sources.length; i++) {
+    const source = sources[i]
+    if (!source.schema || !source.prepareScan) return undefined
+    if (!schemasAreCompatible(first.schema, source.schema)) return undefined
+  }
+  return first.schema
+}
+
+/**
+ * @param {RelationSchema} schema
+ * @param {string[]} columns
+ * @returns {boolean}
+ */
+function schemaMatchesColumns(schema, columns) {
+  if (schema.fields.length !== columns.length) return false
+  return schema.fields.every((field, index) => field.name === columns[index])
+}
+
+/**
+ * @param {RelationSchema} left
+ * @param {RelationSchema} right
+ * @returns {boolean}
+ */
+function schemasAreCompatible(left, right) {
+  if (left.fields.length !== right.fields.length) return false
+  return left.fields.every((field, index) => {
+    const candidate = right.fields[index]
+    return field.name === candidate.name &&
+      field.nullable === candidate.nullable &&
+      isDeepStrictEqual(field.dataType, candidate.dataType)
+  })
+}
+
+/**
+ * Prepare one native scan over a concatenation. Range hints are never sent to
+ * children because LIMIT/OFFSET are not distributive over partitions. Filter
+ * hints are sent for pruning; native batches are concatenated only when every
+ * child reports the same residual contract. A mixed residual falls back to
+ * the union's established row semantics and adapts those rows to batches.
+ *
+ * @param {object} options
+ * @param {ScannableDataSource} options.union
+ * @param {ScannableDataSource[]} options.sources
+ * @param {RelationSchema} options.schema
+ * @param {ScanRequest} options.request
+ * @returns {PreparedScan}
+ * @ref LLP 0294#partition-union [implements]: remap field ids per child and keep range hints on the concatenated stream
+ */
+function prepareUnionScan({ union, sources, schema, request }) {
+  const fieldsById = new Map(schema.fields.map((field) => [field.id, field]))
+  const requestedFields = request.columns.map((demand) => {
+    const field = fieldsById.get(demand.field)
+    if (!field) throw new Error(`Prepared union requested unknown field id ${demand.field}`)
+    return field
+  })
+  const requestedNames = requestedFields.map((field) => field.name)
+  const childScans = sources.map((source) => {
+    const fieldsByName = new Map(/** @type {RelationSchema} */ (source.schema).fields.map((field) => [field.name, field]))
+    const columns = request.columns.map((demand, index) => ({
+      ...demand,
+      field: /** @type {NonNullable<ReturnType<typeof fieldsByName.get>>} */ (fieldsByName.get(requestedNames[index])).id,
+    }))
+    return /** @type {NonNullable<AsyncDataSource['prepareScan']>} */ (source.prepareScan)({
+      ...request,
+      columns,
+      limit: undefined,
+      offset: undefined,
+    })
+  })
+  const nativeCompatible = childScans.every((scan) => {
+    if (scan.schema.fields.length !== requestedNames.length) return false
+    return scan.schema.fields.every((field, index) => field.name === requestedNames[index])
+  }) && childScans.every((scan) => scan.residual.filter === childScans[0].residual.filter) &&
+    (childScans[0].residual.filter === undefined || childScans[0].residual.filter === request.filter)
+
+  if (!nativeCompatible) {
+    return rowFallbackPreparedScan({ union, schema: { fields: requestedFields }, request })
+  }
+
+  /** @type {ScanProperties} */
+  const properties = {}
+  const exactRows = sumPreparedProperty(childScans, 'exactRows')
+  const maxRows = sumPreparedProperty(childScans, 'maxRows')
+  if (exactRows !== undefined) properties.exactRows = exactRows
+  if (maxRows !== undefined) properties.maxRows = maxRows
+  return {
+    schema: { fields: requestedFields },
+    residual: {
+      filter: childScans[0].residual.filter,
+      limit: request.limit,
+      offset: request.offset,
+    },
+    properties,
+    async *batches(options = {}) {
+      for (const scan of childScans) {
+        options.signal?.throwIfAborted()
+        yield* scan.batches(options)
+      }
+    },
+  }
+}
+
+/**
+ * @param {PreparedScan[]} scans
+ * @param {'exactRows' | 'maxRows'} property
+ * @returns {number | undefined}
+ */
+function sumPreparedProperty(scans, property) {
+  let total = 0
+  for (const scan of scans) {
+    const value = scan.properties[property]
+    if (value === undefined) return undefined
+    total += value
+  }
+  return total
+}
+
+/**
+ * Preserve correctness when otherwise-compatible prepared children disagree
+ * about residual work. The engine still gets a PreparedScan, but its batches
+ * come from the union's established row implementation and the whole request
+ * remains residual.
+ *
+ * @param {object} options
+ * @param {ScannableDataSource} options.union
+ * @param {RelationSchema} options.schema
+ * @param {ScanRequest} options.request
+ * @returns {PreparedScan}
+ */
+function rowFallbackPreparedScan({ union, schema, request }) {
+  const names = schema.fields.map((field) => field.name)
+  return {
+    schema,
+    residual: {
+      filter: request.filter,
+      limit: request.limit,
+      offset: request.offset,
+    },
+    properties: {
+      ...(request.filter === undefined && union.numRows !== undefined ? { exactRows: union.numRows } : {}),
+      ...(union.numRows !== undefined ? { maxRows: union.numRows } : {}),
+    },
+    async *batches({ signal } = {}) {
+      const scan = /** @type {NonNullable<AsyncDataSource['scan']>} */ (union.scan)({
+        columns: names,
+        where: request.filter,
+        signal,
+      })
+      yield* rowsToBatches(scan.rows(), names, { signal })
+    },
+  }
 }
 
 /**
@@ -263,7 +554,7 @@ export function whereColumns(where) {
  * rather than throwing `ColumnNotFoundError`.
  *
  * @param {string[]} columns
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 export function emptySource(columns) {
   return {

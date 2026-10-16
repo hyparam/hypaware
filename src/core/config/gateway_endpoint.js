@@ -21,12 +21,12 @@ export const DEFAULT_GATEWAY_ENDPOINT = 'http://127.0.0.1:18521'
  * gateway source is live in this process (`hyp attach` and the `init`
  * walkthrough). It is the configured-`listen` fallback shared by both so they
  * can never derive a different port from the same config. The daemon's
- * auto-attach path deliberately does *not* use this fallback — involuntary
+ * auto-attach path deliberately does *not* use this fallback: involuntary
  * attach requires a proven-bound `localEndpoint()` so it never records a URL for
  * a port nothing bound (see `resolveClientActionSeam` in `daemon/runtime.js`).
  *
  * Returns `undefined` when the gateway plugin is absent, its config is not an
- * object, or `listen` is missing/malformed — the caller then falls back to a
+ * object, or `listen` is missing/malformed: the caller then falls back to a
  * placeholder or surfaces the gap.
  *
  * @param {HypAwareV2Config} config

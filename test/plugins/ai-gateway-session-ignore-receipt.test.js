@@ -1,0 +1,930 @@
+// @ts-check
+
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+import { createControlHandler } from '../../src/core/control/session_ignore.js'
+import { DEFAULT_GATEWAY_ENDPOINT } from '../../src/core/config/gateway_endpoint.js'
+import { CLAUDE_TELEMETRY_SOURCE } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
+import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
+import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
+
+/**
+ * @import { IncomingMessage, ServerResponse } from 'node:http'
+ */
+
+/**
+ * Regression suite for issue #460: the `POST` receipt claimed a drop it could
+ * not have verified.
+ *
+ * The shared control handler adds an opaque token to a `Set` and answers `ignored: true` for
+ * whatever it was handed; the drop happens later, in the client adapter, keyed
+ * on the `session_id` that adapter stamps on the row. Nothing compares the two,
+ * so the receipt is evidence of a write and of nothing else - yet
+ * `hyp session ignore` printed "the gateway will drop this session", which is
+ * a statement about live traffic the gateway never sees.
+ *
+ * The tests below pin the false-confidence case end to end rather than
+ * asserting a string in isolation: an id that live traffic does not carry is
+ * registered successfully, the REAL projector is then shown recording that
+ * traffic anyway, and the receipt printed over that outcome is required not to
+ * have promised otherwise.
+ *
+ * @ref LLP 0066#receipt-is-membership [tests]: R14 - `ignored: true` is set
+ * membership, so the receipt reports the write and names who owns the key.
+ * @ref LLP 0067#cli-receipt [tests]
+ */
+
+/* ------------------------------------------------------------------ */
+/* 1. The receipt must not promise a drop the gateway cannot verify    */
+/* ------------------------------------------------------------------ */
+
+test('a successful ignore receipt does not claim a drop, for an id live traffic never carries', async () => {
+  // The exact false-confidence case. A Codex SUBAGENT thread inherits the
+  // root's session container and mints its own thread id, and the two are
+  // easy to confuse (they are the same uuid on a root thread). A user - or a
+  // skill resolving on its own - hands the THREAD id to `hyp session ignore`.
+  const threadId = 'thread-subagent'
+  const containerId = 'session-root'
+
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    const code = await runSessionIgnore([threadId], ctx.ctx)
+
+    // The write itself genuinely succeeded: the route holds the token now.
+    assert.equal(code, 0)
+    assert.ok(set.has(threadId), 'the id is in the set - that much is true')
+
+    // And it drops nothing. Proven against the code that performs the drop,
+    // not against a restatement of it: the session's live exchanges are
+    // stamped with the CONTAINER, so the registered thread id matches none of
+    // them and the turn is recorded exactly as if no opt-out had been made.
+    const projector = createCodexExchangeProjector()
+    const recorded = /** @type {any} */ (
+      projector.project(codexExchange({ sessionId: containerId, threadId }), dropContext(set))
+    )
+    assert.ok(
+      recorded && recorded !== USAGE_POLICY_DROP,
+      'precondition: the registered id matches no live traffic, so nothing is dropped'
+    )
+    assert.equal(recorded.session_id, containerId)
+
+    // So the receipt printed over that outcome must not have claimed a drop.
+    const out = ctx.stdout()
+    assert.doesNotMatch(
+      out,
+      /will drop this session/,
+      'the gateway never saw an exchange; it cannot promise a drop, and here there is none'
+    )
+    assert.doesNotMatch(out, /gateway will drop/, 'no phrasing of the same promise')
+
+    // What it may claim - the write - it must claim plainly.
+    assert.match(out, /in the gateway drop set/, 'report the membership that IS established')
+  })
+})
+
+test('the --json receipt states its guarantee, so `status: ok` cannot read as "dropped"', async () => {
+  // The skills parse this form, and an agent reads a bare `ok` as done. The
+  // machine-readable receipt therefore says what kind of ok it is.
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['thread-subagent', '--json'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.status, 'ok')
+    assert.equal(out.ignored, true)
+    assert.equal(
+      out.guarantee,
+      'set_membership',
+      'the receipt names the claim it is making, rather than leaving `ok` to be read as a verified drop'
+    )
+  })
+})
+
+test('the unignore receipt reports the removal, not a resumption it cannot verify', async () => {
+  // R14 mirrored. "recording resumed" is the same inference from the same
+  // `Set` answer, read the other way: a token nothing carried was suppressing
+  // nothing to resume, and `.hypignore` is an independent governor (R7) that
+  // can keep the session unrecorded regardless of what this verb just removed.
+  const set = new Set(['thread-subagent'])
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['thread-subagent'], ctx.ctx), 0)
+    assert.ok(!set.has('thread-subagent'), 'the removal itself happened - that much is true')
+    const out = ctx.stdout()
+    assert.match(out, /out of the gateway drop set/, 'report the membership that IS established')
+    assert.doesNotMatch(out, /recording resumed/, 'the gateway cannot know recording resumed')
+  })
+})
+
+test('a confirmed ignore says earlier rows remain and names the purge for this session', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['sess-purge-hint'], ctx.ctx), 0)
+    const out = ctx.stdout()
+    assert.match(out, /To delete what this session already recorded/)
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint`/, 'the exact command, with the real id')
+    assert.match(out, /also deletes copies on configured remotes/, 'the remote reach of a session purge is not hidden')
+    assert.match(out, /`hyp privacy purge --session sess-purge-hint --local-only`/)
+  })
+})
+
+test('the --json ignore receipt carries the purge command an agent can run', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(["it's odd", '--json'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.deepEqual(out.purge, {
+      earlier_rows: 'retained',
+      command: "hyp privacy purge --session 'it'\\''s odd'",
+      command_deletes_remote: true,
+      local_only_command: "hyp privacy purge --session 'it'\\''s odd' --local-only",
+    })
+  })
+})
+
+test('a dash-led session id binds to --session with = so the purge command parses', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionIgnore(['--json', '--', '--opaque-id'], ctx.ctx), 0)
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.purge.command, 'hyp privacy purge --session=--opaque-id')
+    assert.equal(out.purge.local_only_command, 'hyp privacy purge --session=--opaque-id --local-only')
+  })
+})
+
+test('the unignore receipt carries no purge hint', async () => {
+  const set = new Set(['sess-purge-hint'])
+  await withControlServer(set, async (base) => {
+    const human = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint'], human.ctx), 0)
+    assert.doesNotMatch(human.stdout(), /privacy purge/)
+    set.add('sess-purge-hint')
+    const json = fakeCtx({ endpoint: base })
+    assert.equal(await runSessionUnignore(['sess-purge-hint', '--json'], json.ctx), 0)
+    assert.equal(JSON.parse(json.stdout()).purge, undefined)
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* 2. The skills that call the route directly validate the reply       */
+/* ------------------------------------------------------------------ */
+
+// Only the privacy skills still post to the control route from shell. The
+// `hypaware-ignore` / `hypaware-unignore` skills were retired (LLP 0212): the
+// session opt-out is `hyp session ignore` now, whose receipt is held to R14 by
+// section 1 above, so there is no second shell implementation of it to bind.
+const SKILLS = [
+  'claude/skills/hypaware-privacy/SKILL.md',
+  'codex/skills/hypaware-privacy/SKILL.md',
+]
+
+/**
+ * The sentence each copy must carry to scope its shell fallback, pinned per copy
+ * because the two fallbacks can serve different failures (issue #1628).
+ *
+ * The claude script is never the right answer to an id-resolution failure: with
+ * `CLAUDE_CODE_SESSION_ID` unset it exits 1 before any POST, and the one such
+ * refusal that happens with the variable set (a second client also stating an
+ * id) Step 1 routes to the stated-id re-run rather than here, because that
+ * re-run reaches every recorder where the script reaches the gateway alone.
+ * A missing `hyp` is the whole of what its fallback covers, so a sentence
+ * licensing more of them contradicts the routing further down Step 1.
+ *
+ * The codex script resolves the container by walking every rollout for a `cwd`
+ * match, where `resolveSessionIdForCli` refuses once that scan hits its
+ * `MAX_ROLLOUT_SCAN` bound, so there a verb that cannot resolve the session is
+ * a case the script really can serve and the wider scoping is accurate.
+ *
+ * @type {Record<string, RegExp>}
+ */
+const FALLBACK_SCOPE = {
+  'claude/skills/hypaware-privacy/SKILL.md':
+    /Only where it is unavailable \(`command not found`\) does the script below apply/,
+  'codex/skills/hypaware-privacy/SKILL.md':
+    /Only where it is unavailable, or cannot resolve the session, does the script below apply/,
+}
+
+/** @param {string} rel */
+function skillText(rel) {
+  return fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../hypaware-core/plugins-workspace', rel),
+    'utf8'
+  )
+}
+
+/**
+ * Just the "Protect this session first" section. Every assertion about the
+ * opt-out recipe is scoped to it, so a later step mentioning the verb in
+ * passing can neither satisfy nor break one.
+ *
+ * @param {string} rel
+ * @returns {string}
+ */
+function privacyStep1(rel) {
+  const text = skillText(rel)
+  const start = text.indexOf('## Step 1')
+  const end = text.indexOf('## Step 2')
+  assert.ok(start >= 0 && end > start, 'Step 1 must still be a section of its own')
+  return text.slice(start, end)
+}
+
+for (const rel of SKILLS) {
+  test(`${rel} checks the control reply is about the session it posted`, () => {
+    // R14's second half. The JS resolver refuses a reply naming a different
+    // session (`validateControlResponse`); the shell paths in the skills
+    // printed `opt-out confirmed` off whatever came back, so a reply about
+    // another session - or from whatever else now owns that port - read as
+    // this session's success. That does not prove the drop (nothing here
+    // does), but without it a second overclaim stacks on the first.
+    const text = skillText(rel)
+
+    // The verifier compares the echoed id against the one that was posted,
+    // rather than printing the value the responder chose to send back.
+    assert.match(
+      text,
+      /r\.get\("session_id"\) != expected/,
+      'the echoed session_id must be compared with the id that was sent'
+    )
+    assert.match(text, /isinstance\(r\.get\("total"\), int\)/, 'and `total` must be a real number')
+    // `isinstance(True, int)` is True in Python, so the int test alone is
+    // weaker than the CLI's `typeof total !== "number"` it claims to mirror:
+    // a responder answering `total: true` would pass here and fail there.
+    assert.match(
+      text,
+      /isinstance\(r\.get\("total"\), bool\)/,
+      'and a JSON `true` must not satisfy the numeric check the CLI applies'
+    )
+    assert.doesNotMatch(
+      text,
+      /opt-out confirmed for session %s[^\n]*% \(r\.get\("session_id"\)/,
+      'the confirmation must not echo the responder-supplied id as if it were verified'
+    )
+
+    // And the reply is described as the membership receipt it is.
+    assert.match(text, /drop set, and nothing more/, 'state the narrow contract plainly')
+  })
+}
+
+/**
+ * The verifier each fallback pipes the reply through, run rather than read
+ * (issue #533). It prints `opt-out confirmed` for a reply that passes, and
+ * nothing it checks authenticates whoever answered on that port, so the copies
+ * print a caveat line under it saying so. The caveat has to ride the success
+ * line and only that line: printed on a refusal, it would sit beside an error
+ * as though something had been confirmed. Each case below is a synthetic reply
+ * on stdin, so no control endpoint is reached.
+ *
+ * @ref LLP 0066#receipt-is-membership [tests]: the success output states the
+ * membership bound itself, rather than leaving it to the prose around it.
+ */
+const hasPython = spawnSync('python3', ['--version']).status === 0
+
+/** @param {string} rel */
+function receiptVerifier(rel) {
+  const m = skillText(rel).match(/printf '%s' "\$response" \| python3 -c '\n([\s\S]*?)\n' "\$/)
+  assert.ok(m, `${rel} must still pipe the reply through its embedded verifier`)
+  return m[1]
+}
+
+const CAVEAT = /^caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped$/m
+
+for (const rel of SKILLS) {
+  test(`${rel} verifier confirms a valid reply with the responder caveat, and refuses the rest without it`, { skip: !hasPython && 'python3 is not on PATH' }, () => {
+    const code = receiptVerifier(rel)
+    const sent = 'sess-A'
+    /** @param {string} reply */
+    const verify = (reply) => spawnSync('python3', ['-c', code, sent], { input: reply, encoding: 'utf8' })
+
+    const valid = verify(JSON.stringify({ session_id: sent, ignored: true, total: 3 }))
+    assert.equal(valid.status, 0, valid.stderr)
+    assert.match(valid.stdout, /^opt-out confirmed for session sess-A \(total ignored: 3\)\n/, 'the success phrase leads, unchanged')
+    assert.match(valid.stdout, CAVEAT, 'and the caveat travels with it in the same output')
+
+    const refusals = {
+      'wrong id': [JSON.stringify({ session_id: 'sess-B', ignored: true, total: 3 }), /about session "sess-B", not "sess-A"/],
+      'string ignored': [JSON.stringify({ session_id: sent, ignored: 'true', total: 3 }), /NOT confirmed/],
+      'boolean total': [JSON.stringify({ session_id: sent, ignored: true, total: true }), /NOT confirmed/],
+      'invalid JSON': ['<html>not the gateway</html>', /was not JSON/],
+    }
+    for (const [name, [reply, why]] of Object.entries(refusals)) {
+      const result = verify(/** @type {string} */ (reply))
+      assert.notEqual(result.status, 0, `${name}: a reply that fails a check must exit nonzero`)
+      assert.match(result.stderr, /** @type {RegExp} */ (why), `${name}: and say why`)
+      assert.equal(result.stdout, '', `${name}: and print neither the success line nor the caveat`)
+    }
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Both privacy skills lead with the CLI verb, not the shell POST   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A privacy review's Step 1 opts the review session out before it discusses the
+ * machine's most sensitive content, so which surface it reaches for decides
+ * whether the opt-out reaches every recorder. `hyp session ignore` addresses
+ * each one advertising the control route (LLP 0256 #cli-posts-to-both); a shell
+ * `curl` reaches one, and since LLP 0262 the recorder capturing a Claude
+ * session is usually the OTHER one, the `@hypaware/claude` telemetry listener.
+ *
+ * Nothing downstream can catch that: the control route holds the id as an
+ * opaque token and answers `ignored: true` for whatever it was handed, so a
+ * recorder that was never asked is indistinguishable from a confirmed opt-out.
+ * The choice is a property of the markdown, which is why it is pinned here.
+ *
+ * @ref LLP 0212#cli-is-the-verb [tests]: the CLI verb is the opt-out; a shell
+ * POST may only appear below it, as the documented fallback.
+ */
+for (const rel of SKILLS) {
+  test(`${rel} reaches for the CLI verb before any shell POST`, () => {
+    const step1 = privacyStep1(rel)
+
+    const verbAt = step1.indexOf('hyp session ignore')
+    const postAt = step1.indexOf('/_hypaware/ignore/session')
+    assert.ok(verbAt >= 0, '`hyp session ignore` must be named in Step 1')
+    assert.ok(
+      postAt < 0 || verbAt < postAt,
+      'the CLI verb must come before the shell POST, which is the fallback and not the path'
+    )
+
+    // Framed as the preference, not offered as one of two equals: a model given
+    // two interchangeable recipes will pick either.
+    assert.match(
+      step1,
+      /Prefer `hyp session ignore --json`/,
+      'Step 1 must state the preference in words, not just mention the verb'
+    )
+    assert.match(
+      step1,
+      FALLBACK_SCOPE[rel],
+      'the shell block must be scoped to where the verb cannot serve, and to no more than that'
+    )
+  })
+}
+
+/**
+ * The expansion each copy's fallback default sits in. The claude script defaults
+ * `ANTHROPIC_BASE_URL` directly; the codex one defaults `BASE`, after
+ * `OPENAI_BASE_URL` and the `config.toml` read have both missed. So the positive
+ * assertion is per-copy. The negative one is not, and that is the point: #1620
+ * corrected the literal in the claude copy and pinned it with a claude-only
+ * `doesNotMatch`, leaving the codex copy on the same stale default with nothing
+ * to catch it (issue #1631).
+ *
+ * @type {Record<string, string>}
+ */
+const FALLBACK_DEFAULT = {
+  'claude/skills/hypaware-privacy/SKILL.md': `ANTHROPIC_BASE_URL:-${DEFAULT_GATEWAY_ENDPOINT}`,
+  'codex/skills/hypaware-privacy/SKILL.md': `BASE:-${DEFAULT_GATEWAY_ENDPOINT}`,
+}
+
+for (const rel of SKILLS) {
+  test(`${rel} fallback names the real default gateway endpoint`, () => {
+    // LLP 0212 recorded `http://127.0.0.1:8787` as a shipped defect: it is not
+    // the port an unpinned gateway binds, and where nothing sets a base url
+    // there is nothing to mask it, so the fallback addressed a closed port.
+    // Pinned to the constant rather than the literal so the two cannot drift.
+    const text = skillText(rel)
+    const expansion = FALLBACK_DEFAULT[rel]
+    assert.ok(
+      text.includes(expansion),
+      `${rel} must default its base to DEFAULT_GATEWAY_ENDPOINT, as ${expansion}`
+    )
+    // Naming the right port somewhere is weaker than not naming the wrong one:
+    // the stale literal reintroduced in any other arm of the chain would leave
+    // the assertion above satisfied and the fallback still pointing nowhere.
+    assert.doesNotMatch(text, /127\.0\.0\.1:8787/, 'and the stale 8787 default must be gone from the file')
+  })
+}
+
+// @ref LLP 0403#contract [tests]: both hosts describe durable opt-out and forks.
+for (const rel of SKILLS) {
+  test(`${rel} names persistence and the fork boundary`, () => {
+    const step1 = privacyStep1(rel)
+    const at = step1.indexOf('The opt-out is saved locally')
+    assert.ok(at >= 0, 'Step 1 must state that exclusions are saved')
+    const para = step1.slice(at).split(/\n\s*\n/)[0]
+    assert.match(para, /survives recorder and daemon restarts/)
+    assert.match(para, /until explicitly removed/)
+    assert.match(para, rel.startsWith('claude/') ? /claude --fork-session/ : /codex fork/)
+    assert.match(para, /Transcript backfill honors the saved exclusion/)
+    assert.doesNotMatch(step1, /restart.{0,40}drops it/i)
+  })
+}
+
+/** The words the claude copy's Step 1 opens its stop list with, bolded as it writes them. */
+const CLAUDE_STOP_LIST_OPENER = '**Stop on any of these**'
+
+/** The words the claude copy's Step 1 opens the two-clients-state-an-id refusal with. */
+const CLAUDE_AMBIGUITY_OPENER = '**If the verb refuses because more than one client states an id**'
+
+/**
+ * The receipt tells the agent to stop unless the recorder that captures THIS
+ * session appears in `recorders`, which only works if the skill names the id
+ * that recorder actually reports. `runMutation` fills `recorders[].recorder`
+ * from the live snapshot's `source.name`, which for the telemetry listener is
+ * `CLAUDE_TELEMETRY_SOURCE` - so the skill and the source must not drift.
+ *
+ * Checked because the failure is silent in the direction that matters: a skill
+ * naming a recorder id nothing reports would find it missing from every
+ * receipt and stop on a session that was in fact covered, and the obvious
+ * "fix" for that noise is to delete the check that makes the opt-out real.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: the listener is a recorder in its
+ * own right, so the skill's coverage check has to be able to find it.
+ */
+test('the claude privacy skill names the recorder id the listener reports', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  // The check has to be a stop condition, not an observation: the whole bug
+  // this skill's Step 1 was rewritten for is an `ok` over a recorder that was
+  // never addressed (issue #1615).
+  const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
+  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
+  const rest = step1.slice(at)
+  const end = rest.search(/\n\s*\n/)
+  const stopList = end < 0 ? rest : rest.slice(0, end)
+
+  // Scoped to the stop list itself. Step 1 names `claude-telemetry` twice more,
+  // in the receipt bullet above the list and in the stated-id re-run below it,
+  // so a Step-1-wide `includes` is satisfied by either bystander and an edit
+  // demoting the recorder check to commentary passes it (issue #1627).
+  //
+  // It pins the clause rather than the bare id for the same reason one level
+  // down: an aside inside this paragraph names the id too ("for reference,
+  // `"recorders"` usually lists `claude-telemetry`"), so a bare `includes`
+  // survives deleting the stop it is supposed to be guarding. The phrase is
+  // built from the imported id, which is what keeps skill and source pinned
+  // together.
+  const missingEntryClause = `no \`${CLAUDE_TELEMETRY_SOURCE}\` entry`
+  assert.ok(
+    stopList.includes(missingEntryClause),
+    `"${missingEntryClause}" must be one of the stop conditions, not an aside that only mentions the id`
+  )
+  assert.match(
+    stopList,
+    /a `"session_id_source"` other than `claude_env`/,
+    'an id resolved off disk for another session must be one of them'
+  )
+  // And the one documented exception to that stop, or Step 1 routes the
+  // ambiguous case to a re-run whose receipt trips the stop it just set: the
+  // re-run states the id, so it reports `argument` by construction.
+  assert.match(
+    stopList,
+    /\bexception\b[\s\S]*`argument`/,
+    'the stated-id re-run reports `argument`, so the stop must carry it as the exception'
+  )
+})
+
+/**
+ * Issue #1626: the stop above fires on ABSENCE, and absence has two causes the
+ * receipt cannot tell apart. A recorder missing from `recorders` was not
+ * addressed, which is either a running listener the verb did not reach or a
+ * listener that is not running at all - and the second is the ordinary reading
+ * (LLP 0256 #cli-posts-to-both: a listener that is not running is not a
+ * failure, it is recording nothing). It is reachable in shipped code: an
+ * `@hypaware/ai-gateway` with no `recordProjectedExchange` leaves the listener
+ * unregistered (`claude.telemetry.capability_too_old`), so an unconditional
+ * stop tells a user whose machine is capturing nothing that the review session
+ * is still being recorded.
+ *
+ * The answer is to condition the stop on a second observation, not to delete
+ * it, so both directions are pinned here: a live listener still stops the
+ * review, no live listener says plainly that nothing is capturing, and a
+ * cross-check that cannot be read fails closed.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: only a running recorder that was
+ * skipped or refused is a failure.
+ */
+test('the claude privacy skill stops on a missing claude-telemetry entry only while that listener is live', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
+  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
+  const rest = step1.slice(at)
+  const end = rest.search(/\n\s*\n/)
+  const stopList = end < 0 ? rest : rest.slice(0, end)
+
+  // The condition rides the list item itself, before the comma that ends it:
+  // an agent acting on the list must not be able to reach the stop without
+  // reading it. The clause carries no regex metacharacter, so it is its own
+  // pattern.
+  const clause = `no \`${CLAUDE_TELEMETRY_SOURCE}\` entry in \`"recorders"\``
+  assert.ok(stopList.includes(clause), `"${clause}" must still be one of the stop conditions`)
+  assert.match(
+    stopList,
+    new RegExp(clause + '[^,]{0,200}\\b(?:live|running)\\b'),
+    'and it must carry its own liveness condition: absence alone is also what a listener that is not running looks like'
+  )
+
+  // The second observation, and both of its answers.
+  const opener = `**Cross-check a missing \`${CLAUDE_TELEMETRY_SOURCE}\` entry`
+  const from = step1.indexOf(opener)
+  assert.ok(from >= 0, `Step 1 must settle the two readings, opening "${opener}"`)
+  const to = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
+  assert.ok(to > from, 'and must do it before it routes the ambiguous id')
+  const crossCheck = step1.slice(from, to)
+
+  assert.match(crossCheck, /hyp status --json/, 'the cross-check must name the command that answers it')
+  // The keys that command really carries, proven against the collector and
+  // renderer in test/plugins/ai-gateway-session-both-recorders.test.js.
+  assert.ok(
+    crossCheck.includes('capture_health') && crossCheck.includes('listener_started_at'),
+    'and the keys it reads: capture_health.listener_started_at'
+  )
+  assert.match(
+    crossCheck,
+    /non-null[\s\S]{0,400}still being recorded/,
+    'a listener the daemon started is one that was skipped, so the stop must still fire on it'
+  )
+  assert.match(
+    crossCheck,
+    /listener is not running, so nothing is capturing this session/,
+    'and where nothing is running the user must be told that, not told they are still being recorded'
+  )
+  assert.match(
+    crossCheck,
+    /(?:cannot read|do not recognise|nonzero)[\s\S]{0,200}\bstop\b/,
+    'an observation that could not be made is not an answer, so it must fail closed'
+  )
+  assert.match(
+    crossCheck,
+    /daemon[\s\S]{0,200}"error"/,
+    'listener_started_at and control_routes come from one status.json read, so a daemon object carrying an error must read as the live case, not as "not running"'
+  )
+  assert.match(
+    crossCheck,
+    /"error"[\s\S]{0,40}"running":\s*false|"running":\s*false[\s\S]{0,40}"error"/,
+    'a daemon reporting "running": false beside an "error" is down, however unreadably, so the gate must name that shape as safe to read as "not running", not just gate on any bare daemon.error'
+  )
+})
+
+/**
+ * Where Step 1 sends the one id-resolution refusal that happens with
+ * `CLAUDE_CODE_SESSION_ID` set: a second client stating an id too, so the verb
+ * will not guess. The answer is the same verb with the id stated, which still
+ * addresses every recorder; the shell block below reaches the gateway alone, so
+ * rerouting this refusal there reports an opt-out of the machine over a live
+ * telemetry listener - the `ok`-over-a-skipped-recorder failure Step 1 exists
+ * to prevent.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: the re-run belongs here because it
+ * reaches both recorders where the script reaches one.
+ */
+test('the claude privacy skill answers an ambiguous id with the stated-id re-run, not the fallback', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  const at = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
+  assert.ok(at >= 0, `Step 1 must still route the ambiguous case, opening "${CLAUDE_AMBIGUITY_OPENER}"`)
+  const rest = step1.slice(at)
+  const open = rest.indexOf('```')
+  const close = rest.indexOf('```', open + 3)
+  assert.ok(open > 0 && close > open, 'and must still answer it with a command block')
+  // Every paragraph after the fence down to the one that licenses the
+  // fallback, not just to the fence (issue #1627) and not just the first
+  // paragraph past it (issue #1685): a reroute reads as naturally one
+  // paragraph further on as it does in the next sentence after the answer.
+  //
+  // `command not found` is the boundary because it is the one condition this
+  // file licenses the fallback on, so the paragraph carrying it is the one
+  // whose subject is that route: it may name the destination and say when to
+  // take it, and a rewording of it ("a stop, not a reason to drop to the
+  // script below") stays green. Everything above it is still answering the
+  // ambiguous id, so a pointer to that destination there is a reroute
+  // whichever paragraph carries it.
+  //
+  // The condition, rather than a paragraph count, is what keeps that paragraph
+  // editable: reflow it, or split it after the condition, and both halves still
+  // sit at or below the condition, where a count would red the half that kept
+  // the word `fallback`. Split it the other way round and the half left holding
+  // "sends you to the fallback" above the condition reds - correctly, by this
+  // slice's own rule, because that is a pointer to the fallback written above
+  // the sentence that licenses it.
+  //
+  // Keying on content rather than on a count has its own residual, measured:
+  // this reads the FIRST `command not found` below the answer, so a reroute
+  // that names the condition on its way past ("treat it like `command not
+  // found` and drop to the script below") moves the boundary above itself and
+  // escapes. That is the one narrowing here that is silent: the phrase going
+  // missing entirely reds on the assertion just below, and the phrase landing
+  // in the first paragraph after the fence reds on `follows`. It is no wider
+  // than what the paragraph count it replaces already let through.
+  //
+  // That `follows` red has two causes, so it names both: the receipt and the
+  // condition merged into one paragraph, and the receipt paragraph mentioning
+  // the phrase in passing without rerouting anything. Only the first is the
+  // receipt losing its own paragraph, so a message naming only that one sends
+  // an editor who did the second looking for a blank line that is still there.
+  //
+  // The search is unbounded the other way too: move the condition down into the
+  // fallback paragraph and the slice widens over it, then reds on that
+  // paragraph's own `script` as though the routing prose had named it. That
+  // direction is loud rather than silent, but the message misdescribes it.
+  // Bounding the search to where the routing prose ends fixes the diagnosis and
+  // closes the narrowing with it, and is a change to the slice mechanism rather
+  // than to what issue #1685 asked for (issue #1731).
+  const afterFence = rest.slice(close + 3)
+  const licensed = afterFence.indexOf('command not found')
+  assert.ok(licensed > 0, 'Step 1 must still license the fallback on `command not found`, below the answer')
+  const PARAGRAPH = /\n\s*\n/g
+  let follows = 0
+  for (let m = PARAGRAPH.exec(afterFence); m && m.index < licensed; m = PARAGRAPH.exec(afterFence)) follows = m.index
+  assert.ok(follows > 0, 'and the first `command not found` below the answer must sit below the receipt in a paragraph of its own: this one is in the first paragraph after the answer, either because the blank line below the receipt is gone or because the receipt paragraph names the phrase in passing')
+  const routing = rest.slice(0, close + 3 + follows)
+  const trailing = afterFence.slice(0, follows)
+  // The one sentence this slice is licensed to write about the fallback, in the
+  // one form it is written in. Both predicates below drop it before matching,
+  // or they disagree about where it may sit: the name check exempts it and the
+  // position check would red it for its own `below`, so restating the refusal
+  // after the answer would fail on the sentence the file requires.
+  const LICENSED_REFUSAL = /do \*{0,2}not\*{0,2} drop to the script below/g
+  // The forward directions both position rules below read. One vocabulary in
+  // one place: written out twice, the two rules drift apart.
+  const FORWARD = '\\bbelow\\b|\\bbeneath\\b|\\bfurther down\\b|\\b(?:end of|later in) th(?:is|e) step\\b'
+
+  // Scoped to that block. Both `hyp session ignore` and the fallback are named
+  // throughout Step 1, so a Step-1-wide match says nothing about where THIS
+  // refusal is sent: a reroute that names the re-run in a later aside passes it.
+  assert.match(
+    routing,
+    /hyp session ignore --json "\$CLAUDE_CODE_SESSION_ID"/,
+    'the answer is the verb again with the id stated, which still reaches every recorder'
+  )
+  // The emphasis is optional because this copy bolds the refusal already
+  // (`do **not** drop`), and an unbolded rewrite is the same sentence.
+  assert.match(
+    routing,
+    /do \*{0,2}not\*{0,2} drop to the script below/,
+    'and the gateway-only script must be refused in words, not left standing as the other option'
+  )
+  // The refusal is licensed to name the script, to refuse it. Any other pointer
+  // to it in this block is a reroute whichever sentence carries it, so every
+  // instance of the licensed phrase is dropped before the block is held to
+  // that: restating the refusal is stronger prose, not a second route.
+  //
+  // The destination is pinned, not the sentence: a reroute has to name where it
+  // sends the reader, and this file names that one destination four ways
+  // (`script`, `fall back` / `fallback`, `shell block`, `control route` /
+  // `post to`), while a bare forward reference ("state the id as below") names
+  // a direction and no destination.
+  // Enumerating sentences instead let a reroute worded any other way through
+  // (issue #1686). Every inflection of the verb and every run of spaces,
+  // hyphens or newlines between the two words is carried, so the guard does not
+  // turn on which form of the file's own verb an editor reached for, nor on
+  // where a reflow happened to break the line.
+  //
+  // Only the licensed phrase verbatim is stripped, so what this enforces is
+  // narrower than "no reroute": the block may name that destination once, in
+  // the refusal, and naming it a second time reds even to argue against it.
+  // That is deliberate, and it reaches the bare verb too: `fall back` reds here
+  // with no destination attached, so even "there is nothing to fall back on"
+  // trips it. The reasons not to drop are already written in the paragraphs on
+  // either side of this slice, which is where this file already puts them (the
+  // paragraph after the slice carries "a stop, not a reason to fall back"), so
+  // rationale that trips this belongs there rather than being a reason to
+  // loosen it.
+  //
+  // `control route` and `post to` come from the sentence that introduces the
+  // destination this refusal refuses ("The script below posts to the gateway
+  // control route directly"). They are what closes "POST to the control route
+  // directly", which names no direction for the positional rule below to catch
+  // (issue #1724). They are not clean names for it, though: this file uses
+  // both of the verb as well ("every recorder advertising the control route",
+  // "it already posted to the gateway"), so accurate prose about the verb reds
+  // here too. That is an accepted cost with the same answer as the one above:
+  // it belongs in the paragraphs on either side of this slice.
+  //
+  // `shell block` deliberately stays narrow. Bare `block` was measured and
+  // rejected: it buys nothing the positional rule below does not already
+  // catch, because "run the bash block below" and "the block below is your
+  // answer" both point forward and red without it, while it costs a false red
+  // on the answer fence's own noun ("Run the block above", a backward
+  // reference to the block this step wants run). What it would add is one
+  // wording of an opener-side reroute, "use the bash block further down", and
+  // only that wording: the same sentence saying "recipe" passes either way, so
+  // it closes a slice of an open class rather than the class.
+  assert.doesNotMatch(
+    routing.replace(LICENSED_REFUSAL, ''),
+    /\bscripts?\b|\b(?:fall(?:s|ing|en)?|fell)[\s-]*backs?\b|\bshell[\s-]*blocks?\b|\bcontrol[\s_-]*routes?\b|\bpost(?:s|ed|ing)?[\s-]+to\b/i,
+    'nothing else in this block may name the gateway-only script, or reach for the verb that means it, whatever sentence carries it: this file uses `control route` and `post to` of the licensed verb as well, so accurate prose about what the re-run reaches reds here too and belongs in the paragraphs either side of this slice'
+  )
+  assert.doesNotMatch(
+    routing,
+    /_hypaware\/ignore\/session|curl /,
+    'an ambiguous id must not be answered with a gateway-only POST'
+  )
+  // Structural: no paragraph between the answer fence and the licensing
+  // condition may point forward.
+  // This one turns on direction rather than on the destination's name, so it
+  // reaches the reroute shape that needs no noun at all, which is the shape the
+  // name list above cannot have (issue #1724). Position is what makes that
+  // affordable: before the fence a forward reference resolves to the fence
+  // itself, which is why "state the id as below" is ordinary prose on the
+  // opener line and why #1686 measured a slice-wide `\bbelow\b` as a false red.
+  // After the fence the answer has been given and its receipt read, and the
+  // nearest thing down the page is the gateway-only fallback the opener just
+  // refused.
+  //
+  // This is a rule about position, not a deduction from it: the fallback is not
+  // the only thing below. Step 1's own receipt list points past it ("the bound
+  // on all of it, spelled out below" reaches the guarantee paragraph), and
+  // Steps 2-6 are below as well, so a legitimate forward reference from this
+  // paragraph reds too. That cost is real and it is bounded to what sits
+  // above the licensing condition: material that has to point forward belongs
+  // at or below that paragraph, outside the slice, which is where this file
+  // already keeps that material ("One nonzero exit, and only that one, sends
+  // you to the fallback").
+  //
+  // Backward references stay legal, which is what keeps this paragraph's own
+  // "Read that receipt exactly as above" green: the gateway-only route lies
+  // below the slice, so nothing above it is that destination.
+  //
+  // What the three still do NOT catch, measured, because a green here is
+  // narrower than "no reroute": a forward pointer worded without any of these
+  // four directions ("the last recipe in this section is your answer", "see the
+  // next code fence"), and a forward pointer in the opener paragraph that names
+  // no block ("if that refuses too, keep reading further down", "use the recipe
+  // further down"), which this predicate does not read and the block rule below
+  // does not name. Reading the opener with a bare direction is what #1686
+  // measured as a false red, so that half of the residual is deliberate. Both
+  // survive displacement into a paragraph of their own, and so does a reroute
+  // written below the licensing condition, where the file's own introduction
+  // of the destination makes naming it legitimate again.
+  assert.doesNotMatch(
+    trailing.replace(LICENSED_REFUSAL, ''),
+    new RegExp(FORWARD, 'i'),
+    'no paragraph between the answer and the condition that licenses the fallback may point further down the page, where the nearest thing is the fallback this refusal refused: a forward reference belongs at or below that paragraph, outside this slice'
+  )
+  // The same directions, gated on a block noun standing next to one, over the
+  // whole slice. The rule above reads the trailing paragraphs only, so the
+  // opener paragraph gets no direction check at all, and #1686 measured a bare
+  // direction there as a false red ("state the id as below" is ordinary prose
+  // on that line). The noun is what makes the opener affordable, and it is what
+  // reds "run the bash block below" and "the block below is your answer"
+  // wherever in the slice they are written, which is what issue #1724 asked for
+  // and neither other rule gives: this file's own name for the fallback fence
+  // is `shell block`, so a bare `block` is not on the name list, and the rule
+  // above never reads the opener.
+  //
+  // Direction keeps this off that noun's honest uses and adjacency keeps it off
+  // sentences that merely mention both. Measured green: "Run the block above"
+  // (backward), "a block of ids is not supported" (no direction), and "the
+  // command block above is the one to run, and the bound is spelled out below"
+  // (both, too far apart to read as one pointer). That is the narrow form bare
+  // `block` was rejected for not being.
+  assert.doesNotMatch(
+    routing.replace(LICENSED_REFUSAL, ''),
+    new RegExp(`\\bblocks?\\b[^.\\n]{0,20}(?:${FORWARD})|(?:${FORWARD})[^.\\n]{0,20}\\bblocks?\\b`, 'i'),
+    'no part of this block may point forward to a block: the fence this step wants run is above it, so a block further down the page is the gateway-only fallback'
+  )
+})
+
+/** The words both copies open their stop list with. */
+const STOP_LIST_OPENER = '**Stop on any of these**'
+
+/**
+ * The one receipt reading whose substance is host-agnostic, so it is pinned
+ * over both copies rather than per copy: `runMutation` reports `partial`
+ * (exit 3) when a recorder it addressed refused, and the recorder that refused
+ * is the one still recording, whichever client the session belongs to. Which
+ * sources and which recorder are right do differ by host, and are pinned in
+ * each copy's own suite.
+ *
+ * Looped because the per-copy guard is what let this drift: the check #1620
+ * added names `claude_env` and `claude-telemetry`, so it could only ever have
+ * run on one copy, and the codex copy carried no stop at all (issue #1633).
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: partial is not swallowed, so the
+ * surface reading the receipt must not swallow it either.
+ */
+const PARTIAL_RECEIPT_BULLET =
+  /- exit `0` with `"status": "ok"`\. `"status": "partial"` \(exit 3\) means an addressed recorder \*\*refused and is still recording\*\*\./
+
+for (const rel of SKILLS) {
+  test(`${rel} stops on a partial receipt, where an addressed recorder kept recording`, () => {
+    const step1 = privacyStep1(rel)
+
+    assert.match(
+      step1,
+      PARTIAL_RECEIPT_BULLET,
+      'Step 1 must say what `partial` means: a recorder refused and is still recording'
+    )
+
+    // Scoped to the stop paragraph itself. Explaining `partial` in a bullet
+    // while leaving it out of the list the agent acts on is the shape that
+    // ships a documented-but-unenforced stop, so the whole-of-Step-1 match
+    // above cannot stand in for this one.
+    const at = step1.indexOf(STOP_LIST_OPENER)
+    assert.ok(at >= 0, `Step 1 must gather its stops under "${STOP_LIST_OPENER}"`)
+    const rest = step1.slice(at)
+    const end = rest.search(/\n\s*\n/)
+    const stops = end < 0 ? rest : rest.slice(0, end)
+    assert.match(stops, /`"status": "partial"`/, '`partial` must be one of the stops, not only an explanation')
+    assert.match(
+      stops,
+      /the review session is still being recorded/,
+      'and the stop must say what the user is being told'
+    )
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @param {Set<string>} set
+ * @param {(base: string) => Promise<void>} fn
+ */
+async function withControlServer(set, fn) {
+  const handler = createControlHandler({ ignoredSessions: set })
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    handler(/** @type {IncomingMessage} */ (req), /** @type {ServerResponse} */ (res), url)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
+  const addr = server.address()
+  const port = typeof addr === 'object' && addr ? addr.port : 0
+  try {
+    await fn(`http://127.0.0.1:${port}`)
+  } finally {
+    await new Promise((resolve) => server.close(() => resolve(undefined)))
+  }
+}
+
+/**
+ * Minimal `CommandRunContext` stand-in, with the endpoint threaded through the
+ * gateway plugin's configured `listen` (how the CLI resolves it when no live
+ * daemon status file is present).
+ *
+ * @param {{ endpoint: string, env?: Record<string, string> }} args
+ */
+function fakeCtx(args) {
+  let out = ''
+  let err = ''
+  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-receipt-home-'))
+  const ctx = {
+    stdout: { write: (/** @type {string} */ s) => { out += s; return true } },
+    stderr: { write: (/** @type {string} */ s) => { err += s; return true } },
+    env: { HYP_HOME: hypHome, ...(args.env ?? {}) },
+    cwd: '/repo/here',
+    config: {
+      version: 2,
+      plugins: [{ name: '@hypaware/ai-gateway', config: { listen: args.endpoint.replace(/^https?:\/\//, '') } }],
+    },
+  }
+  return { ctx: /** @type {any} */ (ctx), stdout: () => out, stderr: () => err }
+}
+
+/**
+ * One live Codex exchange carrying the turn metadata a subagent turn has: its
+ * own thread id, and the session container holding it. This is the input the
+ * drop sees, so the test asserts against the real projector rather than a
+ * restatement of what it matches.
+ *
+ * @param {{ sessionId: string, threadId: string }} ids
+ */
+function codexExchange(ids) {
+  return /** @type {any} */ ({
+    exchange_id: 'ex-460',
+    ts_start: '2026-07-31T10:00:00.000Z',
+    ts_end: '2026-07-31T10:00:00.250Z',
+    provider: 'chatgpt',
+    method: 'POST',
+    path: '/backend-api/codex/responses',
+    status_code: 200,
+    is_sse: false,
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ session_id: ids.sessionId, thread_id: ids.threadId }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_headers: JSON.stringify({}),
+    response_body: JSON.stringify({ output_text: 'done' }),
+    stream_events: [],
+  })
+}
+
+/**
+ * The projector context the gateway dispatcher supplies, with the
+ * ignored-session predicate backed by the live control-route set.
+ *
+ * @param {Set<string>} ignored
+ */
+function dropContext(ignored) {
+  return {
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    isSessionIgnored: (/** @type {string} */ id) => ignored.has(id),
+  }
+}

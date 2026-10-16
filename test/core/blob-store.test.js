@@ -9,6 +9,8 @@ import path from 'node:path'
 import { Buffer } from 'node:buffer'
 import { Readable } from 'node:stream'
 
+import { compareStrings } from '../../src/core/util/compare_strings.js'
+
 import {
   collectStream,
   createLocalFsBlobStore,
@@ -59,6 +61,47 @@ test('local-fs BlobStore puts and gets bytes by key', async () => {
     assert.equal(got.contentLength, payload.byteLength)
     const bytes = await collectStream(got.body)
     assert.deepEqual(Array.from(bytes), Array.from(payload))
+  } finally {
+    await fs.rm(base, { recursive: true, force: true })
+  }
+})
+
+test('local-fs BlobStore serves byte ranges from the opened file', async () => {
+  const base = await makeTempBase()
+  try {
+    const store = createLocalFsBlobStore({ baseDir: base })
+    await store.putObject({ key: 'data', body: Buffer.from('0123456789') })
+    for (const [range, expected, contentRange] of [
+      ['bytes=0-0', '0', 'bytes 0-0/10'],
+      ['bytes=9-9', '9', 'bytes 9-9/10'],
+      ['bytes=0-9', '0123456789', 'bytes 0-9/10'],
+      ['bytes=0-', '0123456789', 'bytes 0-9/10'],
+      ['bytes=2-4', '234', 'bytes 2-4/10'],
+      ['bytes=-3', '789', 'bytes 7-9/10'],
+      ['bytes=8-', '89', 'bytes 8-9/10'],
+      ['bytes=8-99', '89', 'bytes 8-9/10'],
+      ['bytes=-99', '0123456789', 'bytes 0-9/10'],
+    ]) {
+      const got = await store.getObject({ key: 'data', range })
+      assert.ok(got)
+      assert.equal(got.contentRange, contentRange)
+      assert.equal(got.contentLength, expected.length)
+      assert.equal(Buffer.from(await collectStream(got.body)).toString(), expected)
+    }
+    for (const range of [
+      'bytes=-', 'bytes=1-2,4-5', 'bytes=10-', 'bytes=10-10', 'bytes=5-2', 'bytes=-0',
+      'BYTES=0-1', 'bytes= 0-1', 'bytes=+0-1', 'bytes=1e1-', 'bytes 0-1', '',
+      'bytes=0-9007199254740992', 'bytes=9007199254740992-',
+    ]) {
+      await assert.rejects(store.getObject({ key: 'data', range }), /range/i)
+    }
+    assert.equal(await store.getObject({ key: 'missing', range: 'bytes=-8' }), null)
+    await store.putObject({ key: 'empty', body: new Uint8Array() })
+    await assert.rejects(store.getObject({ key: 'empty', range: 'bytes=-8' }), { code: 'InvalidRange' })
+    const held = await store.getObject({ key: 'data', range: 'bytes=2-4' })
+    assert.ok(held)
+    await fs.unlink(path.join(base, 'data'))
+    assert.equal(Buffer.from(await collectStream(held.body)).toString(), '234')
   } finally {
     await fs.rm(base, { recursive: true, force: true })
   }
@@ -196,6 +239,11 @@ test('local-fs BlobStore ifNoneMatch="*" succeeds when the key is new', async ()
     assert.equal(result.key, 'iceberg/metadata/v3.json')
     const got = await store.getObject({ key: 'iceberg/metadata/v3.json' })
     assert.ok(got)
+    // Drain the body so the held FileHandle is released, same discipline as
+    // the delete test above. Node 26 turns a FileHandle closed by the garbage
+    // collector into a hard error rather than a deprecation warning, so a
+    // discarded body fails the whole file rather than leaking quietly.
+    await collectStream(got.body)
   } finally {
     await fs.rm(base, { recursive: true, force: true })
   }
@@ -274,7 +322,7 @@ function createInMemoryBlobStore() {
         async *[Symbol.asyncIterator]() {
           const entries = Array.from(objects.entries())
             .filter(([k]) => prefix.length === 0 || k.startsWith(prefix))
-            .sort((a, b) => a[0].localeCompare(b[0]))
+            .sort((a, b) => compareStrings(a[0], b[0]))
           for (const [key, { bytes, lastModified }] of entries) {
             yield { key, size: bytes.byteLength, lastModified }
           }
@@ -300,6 +348,30 @@ async function drain(body) {
   }
   return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)))
 }
+
+test('the in-memory BlobStore double lists keys in byte order, the way a bucket does', async () => {
+  // This double stands in for S3 everywhere a test needs a BlobStore without
+  // one, so its listing order is part of what it stands for: a test that
+  // passes here because the double sorted the way the host collates would be
+  // a test about the box it ran on.
+  //
+  // Four keys chosen so byte order and collation disagree twice over, on the
+  // two pairs `compare-strings.test.js` names: the characters put `B` before
+  // `a` and `-` before `_`, and every collation probed (`en-US`, `de-DE`,
+  // `lt-LT`, `az`, `tr-TR`) reverses both. So this listing tells a
+  // byte-ordered double from a collated one on any box with ICU data, which is
+  // the fidelity no assertion in the tree made when the doubles moved to
+  // `compareStrings` (#1148 item 3). A bucket really does answer in this
+  // order: for a general-purpose bucket S3 returns keys sorted by UTF-8 byte
+  // value, and for these keys that is the same as UTF-16 code unit order.
+  const store = createInMemoryBlobStore()
+  for (const key of ['ds/x_1.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/B.parquet']) {
+    await store.putObject({ key, body: new Uint8Array([1]) })
+  }
+  const seen = []
+  for await (const entry of store.listObjects({ prefix: 'ds/' })) seen.push(entry.key)
+  assert.deepEqual(seen, ['ds/B.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/x_1.parquet'])
+})
 
 test('in-memory BlobStore satisfies the BlobStore contract end-to-end', async () => {
   const store = createInMemoryBlobStore()

@@ -9,6 +9,7 @@ import path from 'node:path'
 import { bootKernel } from '../../src/core/runtime/boot.js'
 import { buildConfigApplyDeps } from '../../src/core/config/apply_deps.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
  * Apply-time validation must dispatch to the per-plugin `config_sections`
@@ -182,6 +183,83 @@ test('introduced-plugin discovery rejects a malformed block even without the liv
     assert.equal(res.ok, false, 'disk discovery rejects the malformed block with no live registry')
     const kinds = /** @type {Array<{ errorKind?: string }>} */ (res.errors).map((e) => e.errorKind)
     assert.ok(kinds.includes('config_section_invalid'), JSON.stringify(kinds))
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+// An installed copy of a bundled name never activates (LLP 0380), so
+// apply-time section discovery must not import its entrypoint either. Before
+// this filter the discovery pass ran the stale module's top-level body inside
+// the live daemon and then failed its duplicate registration into a spurious
+// `config.section_discovery_failed` warning on every apply. The path is only
+// reachable since the shadow stopped rejecting boot, so it is guarded here.
+// The stub below both records its import and rejects every document, so a
+// clean pass proves the shadow was neither loaded nor consulted.
+// @ref LLP 0380#bundled-copy-wins [tests]: the shadowed copy is not imported by section discovery either
+test('apply-time section discovery never imports an installed copy a bundled name shadows', async () => {
+  const fx = await bootWith(['@hypaware/ai-gateway'])
+  try {
+    const installDir = path.join(fx.stateRoot, 'plugins', '@hypaware', 'github')
+    await fs.mkdir(installDir, { recursive: true })
+    const sentinel = path.join(fx.hypHome, 'installed-shadow-was-imported')
+    await fs.writeFile(
+      path.join(installDir, 'hypaware.plugin.json'),
+      JSON.stringify({
+        schema_version: 1,
+        name: '@hypaware/github',
+        version: '0.9.0',
+        hypaware_api: '^1.0.0',
+        runtime: 'node',
+        entrypoint: './index.js',
+        contributes: { config_sections: [{ section: 'github' }] },
+      })
+    )
+    // Importing this module is the failure the filter prevents: the body runs
+    // at import time, before any registration can be refused.
+    await fs.writeFile(
+      path.join(installDir, 'index.js'),
+      'import fs from \'node:fs\'\n' +
+      `fs.writeFileSync(${JSON.stringify(sentinel)}, 'imported')\n` +
+      'export const configSection = {\n' +
+      '  section: \'github\',\n' +
+      '  validate: () => ({ ok: false, errors: [{ pointer: \'/\', message: \'the shadow answered\' }] }),\n' +
+      '}\n' +
+      'export async function activate() {}\n'
+    )
+    await writeLock(fx.stateRoot, {
+      schema_version: 1,
+      plugins: {
+        '@hypaware/github': {
+          name: '@hypaware/github',
+          version: '0.9.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-08-31T00:00:00.000Z',
+        },
+      },
+    })
+
+    const deps = buildConfigApplyDeps({
+      stateRoot: fx.stateRoot,
+      configRegistry: fx.boot.runtime.configRegistry,
+    })
+    const res = await deps.validateDocument({
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway' },
+        { name: '@hypaware/github', config: { inventory: 'all_visible' } },
+      ],
+    })
+
+    assert.equal(
+      await fs.access(sentinel).then(() => true, () => false),
+      false,
+      'the shadowed installed entrypoint must never be imported'
+    )
+    assert.equal(res.ok, true, `the shadow's validator must not answer: ${JSON.stringify(res.errors)}`)
   } finally {
     await fx.cleanup()
   }

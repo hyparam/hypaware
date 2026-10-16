@@ -1,0 +1,219 @@
+// @ts-check
+
+import { parseCoreCommandArgv } from '../cli/command_args.js'
+import { readObservabilityEnv } from '../observability/env.js'
+import { readSelfPackageIdentity, readSelfUpdateState, runSelfUpdatePass } from '../update/self_update.js'
+import { processIsAlive, readPidFile } from '../daemon/pid.js'
+
+/**
+ * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { restartServiceDaemon as restartServiceDaemonFn } from '../../../src/core/daemon/install.js'
+ * @import { serviceDaemonStatus as serviceDaemonStatusFn } from '../../../src/core/daemon/install.js'
+ */
+
+/**
+ * `hyp update`: check the registry and apply a newer HypAware release
+ * now. The manual lane beside the daemon's automatic one, and the
+ * repair path when auto-update is off, degraded, or skipped by the
+ * provenance guard.
+ *
+ * @ref LLP 0309#cli-surface [implements]: applies immediately, then restarts the daemon so running code matches
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+export async function runUpdate(argv, ctx) {
+  const parsed = parseCoreCommandArgv('update', argv, ctx)
+  if (!parsed.ok) return parsed.code
+
+  const stateRoot = readObservabilityEnv(ctx.env).stateDir
+  // The daemon's own lane may be mid-`npm install -g` right now, and that
+  // briefly leaves this package root without a package.json. Unguarded,
+  // `hyp update` would die on a raw ENOENT instead of reaching the
+  // apply-lock message that explains what is actually happening.
+  /** @type {{ name: string, version: string }} */
+  let identity
+  try {
+    identity = readSelfPackageIdentity()
+  } catch {
+    identity = { name: 'hypaware', version: 'unknown' }
+  }
+
+  // Load the restart helpers *before* the install runs. `npm install -g`
+  // replaces this very package directory underneath the running process,
+  // so a dynamic import issued afterwards can resolve a path that no
+  // longer exists - failing exactly between a successful install and the
+  // restart that makes it take effect, the one window where a crash
+  // leaves the daemon on stale code with no message saying so.
+  const daemonInstall = await import('../daemon/install.js')
+
+  // What the live daemon loaded, if there is one: the pass compares the
+  // registry against the running code as well as the disk, so a root that
+  // moved ahead without a restart still gets one here.
+  const livePid = readPidFile(stateRoot)
+  const runningVersion = livePid && processIsAlive(livePid.pid)
+    ? readSelfUpdateState(stateRoot).running_version
+    : undefined
+
+  const result = await runSelfUpdatePass({
+    stateRoot,
+    env: ctx.env,
+    force: true,
+    runningVersion,
+    // The pass never throws: an unexpected failure (an unwritable run
+    // directory, a lock this machine cannot take) collapses into a bare
+    // `unexpected_error` reason that names nothing an operator can act
+    // on, and the daemon's file log is not where a hand-typed command
+    // reports. Pass the diagnostic events through; the routine ones are
+    // already this command's own output.
+    log: (event, fields) => {
+      if (event !== 'self_update.error' && event !== 'self_update.registry_override_ignored' &&
+          event !== 'self_update.skills_install_failed' && event !== 'self_update.skills_install_warning') return
+      try { ctx.stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`) } catch { /* stderr gone */ }
+    },
+  })
+
+  if (result.action === 'checked' && !result.reason) {
+    ctx.stdout.write(`hypaware ${identity.version} is up to date\n`)
+    return 0
+  }
+  // The root is current but the daemon is not: a hand-typed
+  // `npm install -g`, or an apply that could not restart. The install is
+  // done; what is owed is the restart.
+  if (result.action === 'updated' && result.reason === 'restart_only') {
+    ctx.stdout.write(`hypaware ${identity.version} is installed but the daemon is still running an older version\n`)
+    return restartDaemonIfRunning(ctx, identity.version, daemonInstall)
+  }
+  if (result.reason === 'apply_locked') {
+    ctx.stderr.write(
+      "hyp update: another update is already running (the daemon's own check, most likely); " +
+      'try again in a minute\n'
+    )
+    return 1
+  }
+  if (result.reason === 'probe_failed') {
+    ctx.stderr.write('hyp update: could not reach the npm registry; try again later\n')
+    return 1
+  }
+  // Not an install failure: the updater declined to install at all,
+  // because npm_config_registry names somewhere it will not fetch a
+  // tarball from and installing from anywhere else would swap this
+  // package's supply out from under whoever configured that registry.
+  // The generic branch below would blame the install and tell the
+  // operator to rerun npm by hand with the same variable still set.
+  //
+  // Two refusals land on this one reason: an override the updater will
+  // not fetch a tarball from, and two spellings of the variable that
+  // disagree (`registry_ambiguous` in the log). Naming plain http as the
+  // cause, and "an https URL" as the repair, is false and unactionable
+  // for the second, whose two values are usually https already; the
+  // `self_update.registry_override_ignored` line already on stderr says
+  // which of the two happened.
+  if (result.reason === 'registry_untrusted') {
+    ctx.stderr.write(
+      `hyp update: ${result.latest ?? 'an update'} is available, but npm_config_registry does not ` +
+      'name a registry this updater will install from, and it will not silently install from a ' +
+      'different one instead.\n' +
+      "  point it at a single https URL, or configure the registry in .npmrc, " +
+      "then run 'hyp update' again\n"
+    )
+    return 1
+  }
+  // Held, not failed: this version was already installed here once and
+  // its entrypoint could not run, so it was rolled back. The generic
+  // branch below would blame the install and hand the operator
+  // `npm install -g <name>@latest`, which reinstalls that exact version
+  // and undoes the rollback.
+  if (result.reason === 'held') {
+    ctx.stderr.write(
+      `hyp update: ${result.latest ?? 'that release'} was installed here and could not start, so it was ` +
+      `rolled back to ${identity.version} and is held until a newer release publishes.\n`
+    )
+    return 1
+  }
+  // The entrypoint on disk could not be proven to start, so repeating the
+  // install is the one thing that cannot help: the generic branch below
+  // hands over `npm install -g <name>@latest`, which puts back the exact
+  // version that would not run. Reached from the apply lane (whose
+  // rollback has already restored the previous version, or tried to) and
+  // from the restart-only lane, which installed nothing at all.
+  if (result.reason === 'preflight_failed' || result.reason === 'preflight_inconclusive') {
+    const what = result.latest ?? 'that release'
+    ctx.stderr.write(
+      result.reason === 'preflight_inconclusive'
+        ? `hyp update: could not check whether ${what} starts on this machine, so the daemon was left on the ` +
+          'version it is already running. Try again.\n'
+        : `hyp update: ${what} could not start on this machine, so the daemon was left on the version it is ` +
+          "already running. It is held until a newer release publishes; 'hyp status' has the detail.\n"
+    )
+    return 1
+  }
+  // None of the three is the global root `npm install -g` replaces, so each is
+  // told which copy it is running rather than that an install failed.
+  //
+  // The third arm names the tree and stops there, for the reason
+  // `describeEphemeralBinPath` does (issue #1625): `project-local` is decided
+  // by a manifest beside the outermost `node_modules`, and pnpm's `global/<n>`
+  // and yarn's `config/yarn/global` carry one too, so asserting a project here
+  // would send those users looking for a checkout they do not have. The repair
+  // named below is right for all of them.
+  if (result.reason === 'checkout' || result.reason === 'npx' || result.reason === 'project-local') {
+    const how = result.reason === 'checkout'
+      ? 'a source checkout'
+      : result.reason === 'npx' ? 'an npx cache' : 'a node_modules tree'
+    ctx.stderr.write(
+      `hyp update: ${result.latest} is available but this install runs from ${how}, ` +
+      `which never self-updates. Install with 'npm install -g ${identity.name}' instead.\n`
+    )
+    return 1
+  }
+  if (result.action !== 'updated') {
+    ctx.stderr.write(
+      `hyp update: install of ${result.latest ?? 'the update'} failed ` +
+      `(${result.reason ?? 'unknown error'}). ` +
+      `Run 'npm install -g ${identity.name}@latest' manually.\n`
+    )
+    return 1
+  }
+
+  ctx.stdout.write(`hypaware updated: ${identity.version} -> ${result.latest}\n`)
+  return restartDaemonIfRunning(ctx, result.latest ?? '', daemonInstall)
+}
+
+/**
+ * After a manual update the running daemon is still the old code, so
+ * finish by restarting it when one is present. A missing daemon is not
+ * an error; a foreground daemon cannot be relaunched from here, so it
+ * gets a hint instead.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {string} version
+ * @param {{
+ *   restartServiceDaemon: typeof restartServiceDaemonFn,
+ *   serviceDaemonStatus: typeof serviceDaemonStatusFn,
+ * }} daemonInstall
+ * @returns {Promise<number>}
+ */
+async function restartDaemonIfRunning(ctx, version, daemonInstall) {
+  const { restartServiceDaemon, serviceDaemonStatus } = daemonInstall
+  const status = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
+  if (status.installed) {
+    try {
+      await restartServiceDaemon({ homeDir: ctx.env.HOME })
+      ctx.stdout.write(`daemon: restarted on ${version}\n`)
+      return 0
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp update: installed ${version} but the daemon restart failed: ${message}\n`)
+      ctx.stderr.write("  run 'hyp daemon restart' to finish\n")
+      return 1
+    }
+  }
+  const stateRoot = readObservabilityEnv(ctx.env).stateDir
+  const pid = readPidFile(stateRoot)
+  if (pid && processIsAlive(pid.pid)) {
+    ctx.stdout.write(
+      `daemon: running in the foreground on the old version; restart it to load ${version}\n`
+    )
+  }
+  return 0
+}

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/openclaw",
   "version": "1.0.0",
-  "description": "OpenClaw client adapter for HypAware. Injects a dedicated 'hypaware' model provider into OpenClaw's openclaw.json to route Anthropic traffic through the local AI gateway, and projects the captured Anthropic Messages exchanges into ai_gateway_messages.",
+  "description": "OpenClaw client adapter for HypAware. Captures OpenClaw conversations in two tiers: live capture through the local gateway once attached (this adapter writes the anthropic/openai provider overrides into openclaw.json's models.providers itself, no separate package), plus a periodic sweep of local OpenClaw session transcripts that backfills every provider within the sweep interval. Projects the Anthropic Messages and OpenAI Chat Completions exchanges the gateway captures into ai_gateway_messages, and settles them onto the session file's native identity.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -10,8 +10,7 @@
   "permissions": [
     "read_home",
     "write_home",
-    "read_state",
-    "write_openclaw_settings"
+    "read_state"
   ],
   "requires": {
     "capabilities": {
@@ -25,16 +24,18 @@
       "attach_probe": {
         "format": "json_path",
         "settings_file": ".openclaw/openclaw.json",
-        "marker_path": "models.providers.hypaware",
-        "marker_record": "headers.x-hypaware-marker"
+        "container_path": "models.providers",
+        "provider_keys": ["anthropic", "openai"],
+        "marker_header": "x-hypaware-upstream",
+        "cache_glob": "agents/*/agent/models.json"
       },
-      "required_upstreams": ["anthropic"]
+      "required_upstreams": ["anthropic", "openai"]
     },
     "picker": [
       {
         "name": "openclaw",
-        "label": "capture OpenClaw conversations",
-        "summary": "Configures OpenClaw to route Anthropic traffic through the local gateway and records the captured exchanges.",
+        "label": "OpenClaw",
+        "summary": "Records OpenClaw conversations live and imports its session history. Setup edits OpenClaw's gateway config; finish with 'openclaw gateway restart'.",
         "detect": { "settings_file": ".openclaw/openclaw.json" },
         "compose": {
           "plugin": { "name": "@hypaware/openclaw" },
@@ -43,10 +44,16 @@
         }
       }
     ],
+    "skills": [
+      { "name": "hypaware-query", "clients": ["openclaw"] },
+      { "name": "hypaware-reference", "clients": ["openclaw"] },
+      { "name": "hypaware-privacy", "clients": ["openclaw"] },
+      { "name": "hypaware-report", "clients": ["openclaw"] }
+    ],
     "config_sections": [
       {
         "section": "openclaw",
-        "summary": "OpenClaw adapter config, including the optional attach-on-join policy { on_join }."
+        "summary": "OpenClaw adapter config, including the optional attach-on-join policy { on_join } and the optional backfill policy { on_join, window_days }."
       }
     ]
   }

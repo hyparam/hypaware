@@ -8,35 +8,105 @@ import path from 'node:path'
 
 import { readRolloutSessionMeta } from '../../../../src/core/codex/rollout_session_meta.js'
 import { configuredGatewayEndpoint } from '../../../../src/core/config/gateway_endpoint.js'
-import { resolveLiveGatewayEndpointFromStatus } from '../../../../src/core/daemon/status.js'
+import { SESSION_IGNORE_ROUTE } from '../../../../src/core/control/session_ignore.js'
+import {
+  resolveLiveControlRouteEndpointsFromStatus,
+  resolveLiveGatewayEndpointFromStatus,
+} from '../../../../src/core/daemon/status.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 
 /**
  * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { SessionEndpointResolution, SessionIdResolution, SessionStatusReport } from './types.js'
+ * @import { SessionEndpointResolution, SessionIdResolution, SessionMutationOutcome, SessionStatusOutcome, SessionStatusReport } from './types.js'
  */
 
 const CONTROL_PATH = '/_hypaware/ignore/session'
 
-/** The other, independent governor. LLP 0066 R7: either match suppresses. */
-const FOLDER_GOVERNOR_NOTE = 'folder:  see `hyp policy show` (this verb reports the session set only)'
+/**
+ * The recorder's `total`, worded so it cannot be read as a second verdict on
+ * this session: "not ignored (1 ignored)" looked like a contradiction.
+ *
+ * @param {number | null | undefined} total
+ * @returns {string}
+ */
+function ignoreListCount(total) {
+  return `${total} session${total === 1 ? '' : 's'} on its ignore list`
+}
 
 /**
- * Printed next to every confirmed `ignored`, by the writer and the reader
- * alike, so the two cannot drift apart.
- *
- * LLP 0066 §readable lists **two** ways the opt-out stops applying while the
- * user still believes it holds: the gateway restart that drops the set, and the
- * client minting a new `session_id` for what the user experiences as one
- * conversation. Naming only the restart reads as an exhaustive list, so a user
- * who forks is taught that the other way cannot happen. A fork mints the new id
- * (`claude --fork-session`, `codex fork`); a plain resume reuses it.
- *
- * @ref LLP 0066#readable [implements]: R9 - both ways an opt-out can stop
- * applying are named, so neither is discovered in the cache instead.
+ * The same lifetime note appears beside every confirmed read and write.
+ * @ref LLP 0403#contract [implements]: persistence replaces restart expiry.
  */
-const EPHEMERAL_NOTE =
-  'this opt-out is in-memory only: a gateway restart drops it, and a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
+const SESSION_IGNORE_NOTE =
+  'this opt-out survives daemon restarts until `hyp session unignore`; a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers.'
+
+/**
+ * The opt-out is prospective: rows captured before it stay in the cache (and
+ * on any remote they already reached). The receipt names the exact purge
+ * command, with the resolved id, so removing them is one deliberate step
+ * rather than a search through the docs. A session purge also deletes from
+ * remotes, so the remote reach is stated rather than hidden behind the hint.
+ *
+ * @param {string} sessionId
+ * @returns {{ command: string, localOnlyCommand: string }}
+ */
+function sessionPurgeCommands(sessionId) {
+  // A dash-led id would parse as a flag after a space, so it binds with `=`.
+  const sep = sessionId.startsWith('-') ? '=' : ' '
+  const command = `hyp privacy purge --session${sep}${shellArg(sessionId)}`
+  return { command, localOnlyCommand: `${command} --local-only` }
+}
+
+/**
+ * @param {string} sessionId
+ * @returns {string}
+ */
+function sessionPurgeNote(sessionId) {
+  const { command, localOnlyCommand } = sessionPurgeCommands(sessionId)
+  return `To delete what this session already recorded, run \`${command}\`. It also deletes copies on configured remotes; \`${localOnlyCommand}\` keeps those.`
+}
+
+/**
+ * The `--json` twin of `sessionPurgeNote`, for an agent to act on.
+ *
+ * @param {string} sessionId
+ */
+function sessionPurgeJson(sessionId) {
+  const { command, localOnlyCommand } = sessionPurgeCommands(sessionId)
+  return {
+    earlier_rows: 'retained',
+    command,
+    command_deletes_remote: true,
+    local_only_command: localOnlyCommand,
+  }
+}
+
+/**
+ * Quote an argument for a POSIX shell only when it needs it, so the common
+ * uuid prints bare.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function shellArg(value) {
+  return /^[A-Za-z0-9._:@%+=,/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * What a confirmed `ignored` establishes, carried by the write verbs'
+ * `--json` receipt. The control route is a `Set` over opaque tokens: `POST`
+ * adds whatever it was handed and `GET` is the same `Set.has`, so neither can
+ * establish that the id is one live traffic carries. `status: 'ok'` on its
+ * own reads as "done" to the skills that parse it. The human output no longer
+ * spells this out (LLP 0463); its headline still says "in the drop set".
+ *
+ * The reader's `--json` needs no equivalent: it already reports `status` as
+ * `ignored` / `not_ignored` / `unknown` beside a tri-state `ignored`, which is
+ * a membership answer on its face.
+ *
+ * @ref LLP 0066#receipt-is-membership [implements]: R14
+ */
+const MEMBERSHIP_GUARANTEE = 'set_membership'
 
 /**
  * `hyp session status` exit code for a **confirmed** "this session is NOT
@@ -69,7 +139,7 @@ const MAX_ROLLOUT_SCAN = 5000
  * Hard cap on a control response body. The route's own answers are a few dozen
  * bytes; anything larger is not the gateway, and buffering it unbounded lets
  * whatever owns the port balloon the CLI's memory. Mirrors the server-side
- * `MAX_BODY_BYTES` in control.js.
+ * `MAX_BODY_BYTES` in src/core/control/session_ignore.js.
  */
 const MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -98,6 +168,16 @@ const MAX_ROLLOUT_AGE_MS = 30 * 60 * 1000
  * @ref LLP 0067#cli-session-id
  */
 const CODEX_THREAD_ENV = 'CODEX_THREAD_ID'
+
+/**
+ * Said on the one refusal a plain terminal reaches: no client stated an id AND
+ * nothing on disk records this cwd, so the likeliest cause is that the command
+ * was not run inside a session. Deliberately NOT said on the ambiguous refusal
+ * below, where rollouts DO record this cwd: there the shell may well be inside
+ * one of them, and the remedy is to name the id, not to move.
+ */
+const NOT_IN_SESSION_HINT =
+  'This shell does not look like an AI session: run the command inside the Claude Code or Codex session you mean.'
 
 const IGNORE_USAGE = 'usage: hyp session ignore [session-id] [--json]'
 const UNIGNORE_USAGE = 'usage: hyp session unignore [session-id] [--json]'
@@ -138,7 +218,7 @@ export async function runSessionUnignore(argv, ctx) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
- * @ref LLP 0067#cli [implements]: the reader for the ephemeral opt-out set
+ * @ref LLP 0067#cli [implements]: the reader for the session opt-out set
  */
 export async function runSessionStatus(argv, ctx) {
   const parsed = parseArgv(argv)
@@ -163,6 +243,7 @@ export async function runSessionStatus(argv, ctx) {
       endpoint: null,
       endpoint_source: null,
       reason: resolvedId.error,
+      recorders: [],
     })
   }
 
@@ -178,8 +259,8 @@ export async function runSessionStatus(argv, ctx) {
     thread_id: resolvedId.threadId ?? null,
   }
 
-  const endpoint = resolveGatewayEndpointForCli(ctx)
-  if (!endpoint.ok) {
+  const resolvedTargets = resolveRecorderTargetsForCli(ctx)
+  if (resolvedTargets.targets.length === 0) {
     return writeStatus(ctx, parsed.json, {
       ...who,
       status: 'unknown',
@@ -187,43 +268,91 @@ export async function runSessionStatus(argv, ctx) {
       total: null,
       endpoint: null,
       endpoint_source: null,
-      reason: endpoint.error,
+      reason: resolvedTargets.gatewayError ?? 'no live recorder advertises session control',
+      recorders: [],
     })
   }
-
-  const result = await controlRequest({
-    endpoint: endpoint.endpoint,
-    method: 'GET',
-    sessionId: resolvedId.sessionId,
-  })
-  if (!result.ok) {
-    return writeStatus(ctx, parsed.json, {
-      ...who,
-      status: 'unknown',
-      ignored: null,
-      total: null,
-      endpoint: endpoint.endpoint,
-      endpoint_source: endpoint.source,
-      reason: result.error,
-    })
+  // A resolvable extra recorder with no resolvable gateway narrows what this
+  // answer covers, so say it out loud here for the same reason `runMutation`
+  // does: an `ignored` that never asked the gateway must not read as an
+  // `ignored` everywhere. stderr, so the `--json` document stays parseable.
+  // @ref LLP 0266#milestones [implements]: status and mutations report the same recorder inventory, gaps included
+  if (resolvedTargets.gatewayError) {
+    ctx.stderr.write(`hyp session: gateway not addressed: ${resolvedTargets.gatewayError}\n`)
   }
 
-  const ignored = result.body.ignored
+  /** @type {SessionStatusOutcome[]} */
+  const outcomes = []
+  for (const target of resolvedTargets.targets) {
+    const result = await controlRequest({
+      endpoint: target.endpoint,
+      method: 'GET',
+      sessionId: resolvedId.sessionId,
+    })
+    outcomes.push(result.ok
+      ? {
+          recorder: target.recorder,
+          endpoint: target.endpoint,
+          endpoint_source: target.endpointSource,
+          endpoint_authenticated: false,
+          status: result.body.ignored ? 'ignored' : 'not_ignored',
+          ignored: result.body.ignored,
+          total: result.body.total,
+          reason: null,
+        }
+      : {
+          recorder: target.recorder,
+          endpoint: target.endpoint,
+          endpoint_source: target.endpointSource,
+          endpoint_authenticated: false,
+          status: 'unknown',
+          ignored: null,
+          total: null,
+          reason: result.error,
+        })
+  }
+
+  const recording = outcomes.find((outcome) => outcome.status === 'not_ignored')
+  const unknown = outcomes.filter((outcome) => outcome.status === 'unknown')
+  const status = recording
+    ? 'not_ignored'
+    : unknown.length > 0
+      ? 'unknown'
+      : 'ignored'
+  const primary = recording ?? outcomes.find((outcome) => outcome.status !== 'unknown') ?? outcomes[0]
   return writeStatus(ctx, parsed.json, {
     ...who,
-    status: ignored ? 'ignored' : 'not_ignored',
-    ignored,
-    total: result.body.total,
-    endpoint: endpoint.endpoint,
-    endpoint_source: endpoint.source,
-    reason: null,
+    status,
+    ignored: status === 'unknown' ? null : status === 'ignored',
+    total: status === 'unknown' ? null : primary.total,
+    endpoint: primary.endpoint,
+    endpoint_source: primary.endpoint_source,
+    reason: unknown.length > 0
+      ? unknown.map((outcome) => `${outcome.recorder} at ${outcome.endpoint}: ${outcome.reason}`).join('; ')
+      : null,
+    recorders: outcomes,
   })
 }
 
 /**
- * Shared body for `ignore` / `unignore`: resolve the id, resolve the
- * endpoint, then toggle. Mutations fail closed the same way `status` does -
- * an unreachable gateway is an error, never a quiet success.
+ * Shared body for `ignore` / `unignore`: resolve the id, resolve every
+ * recorder hosting the control route, then toggle on each. Mutations fail
+ * closed the same way `status` does - an unreachable recorder is an error,
+ * never a quiet success - and a PARTIAL success is reported as partial, so
+ * "the gateway took it but the claude listener refused" never reads as done.
+ *
+ * Two kinds of recorder, resolved differently on purpose:
+ *
+ * - **The gateway** keeps its own two-rung resolution (live daemon status,
+ *   else the pinned `listen`), unchanged, because it can run outside a
+ *   daemon this command can see.
+ * - **Additional recorders** (the claude telemetry listener) are discovered
+ *   by the `control_routes` advertisement in a LIVE daemon snapshot. One
+ *   that does not appear there is not running, and a listener that is not
+ *   running is recording nothing, so it is not addressed and its absence is
+ *   not a failure. One that IS addressed and refuses is.
+ * @ref LLP 0256#cli-posts-to-both [implements]: every listener that offers
+ * the route is addressed, each outcome is reported, partial is not swallowed
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -246,47 +375,111 @@ async function runMutation(argv, ctx, method, usage) {
     return SESSION_EXIT_UNKNOWN
   }
 
-  const endpoint = resolveGatewayEndpointForCli(ctx)
-  if (!endpoint.ok) {
-    ctx.stderr.write(`hyp session: ${endpoint.error}\n`)
+  const resolvedTargets = resolveRecorderTargetsForCli(ctx)
+
+  // NO recorder at all is the old no-gateway error: nothing would hold the
+  // token, so nothing may read as success.
+  if (resolvedTargets.targets.length === 0) {
+    ctx.stderr.write(`hyp session: ${resolvedTargets.gatewayError ?? 'no live recorder advertises session control'}\n`)
     return SESSION_EXIT_UNKNOWN
   }
-
-  const result = await controlRequest({
-    endpoint: endpoint.endpoint,
-    method,
-    sessionId: resolvedId.sessionId,
-  })
-  if (!result.ok) {
-    ctx.stderr.write(`hyp session: ${result.error}\n`)
-    return SESSION_EXIT_UNKNOWN
+  // A resolvable extra recorder with no resolvable gateway is possible only
+  // when the live snapshot carries the listener but no bound gateway port:
+  // the gateway is not listening, so it records nothing and is not
+  // addressed - said out loud rather than silently narrowed.
+  if (resolvedTargets.gatewayError) {
+    ctx.stderr.write(`hyp session: gateway not addressed: ${resolvedTargets.gatewayError}\n`)
   }
 
-  const ignored = result.body.ignored
-  const total = result.body.total
+  /** @type {SessionMutationOutcome[]} */
+  const outcomes = []
+  for (const target of resolvedTargets.targets) {
+    const result = await controlRequest({
+      endpoint: target.endpoint,
+      method,
+      sessionId: resolvedId.sessionId,
+    })
+    outcomes.push(
+      result.ok
+        ? { ...target, ok: true, ignored: result.body.ignored, total: result.body.total }
+        : { ...target, ok: false, error: result.error }
+    )
+  }
+
+  // Each failure is reported next to the successes, never instead of them:
+  // the failed recorder is the one still recording, which is exactly what
+  // the user asked to stop.
+  for (const outcome of outcomes) {
+    if (!outcome.ok) {
+      ctx.stderr.write(`hyp session: ${outcome.recorder} at ${outcome.endpoint}: ${outcome.error}\n`)
+    }
+  }
+  const confirmed = outcomes.filter((o) => o.ok)
+  if (confirmed.length === 0) return SESSION_EXIT_UNKNOWN
+  const allOk = confirmed.length === outcomes.length
+
+  // The first confirmed recorder (the gateway whenever it was addressed)
+  // keeps the legacy top-level receipt shape; every recorder's outcome rides
+  // beside it, so a consumer of the old fields loses nothing and a consumer
+  // of the new field sees the whole write.
+  const primary = confirmed[0]
   if (parsed.json) {
     ctx.stdout.write(
       JSON.stringify({
-        status: 'ok',
+        // `partial` and exit UNKNOWN when an addressed recorder refused: an
+        // `ok` over a recorder that is still recording would be the
+        // fail-open receipt this verb exists to prevent.
+        status: allOk ? 'ok' : 'partial',
+        // What the `ok` above is an `ok` about, for the agent parsing this.
+        guarantee: MEMBERSHIP_GUARANTEE,
         session_id: resolvedId.sessionId,
         session_id_source: resolvedId.source,
         session_id_evidence: resolvedId.evidence ?? null,
         thread_id: resolvedId.threadId ?? null,
-        ignored,
-        total,
-        endpoint: endpoint.endpoint,
-        endpoint_source: endpoint.source,
+        ignored: primary.ignored,
+        total: primary.total,
+        endpoint: primary.endpoint,
+        endpoint_source: primary.endpointSource,
+        // Same field, same constant, on the verbs whose output reads as done.
+        // @ref LLP 0166#stated-not-proved [implements]
+        endpoint_authenticated: false,
+        ...(primary.ignored ? { purge: sessionPurgeJson(resolvedId.sessionId) } : {}),
+        recorders: outcomes.map((o) => ({
+          recorder: o.recorder,
+          endpoint: o.endpoint,
+          endpoint_source: o.endpointSource,
+          endpoint_authenticated: false,
+          ...(o.ok
+            ? { status: 'ok', ignored: o.ignored, total: o.total }
+            : { status: 'error', error: o.error }),
+        })),
       }) + '\n'
     )
-    return 0
+    return allOk ? 0 : SESSION_EXIT_UNKNOWN
   }
+  // The headline states the write that happened, not a drop nobody verified:
+  // the route added an opaque token to a set (LLP 0066#receipt-is-membership).
+  // The removal says no more than that either. "recording resumed" was the same
+  // overclaim mirrored: a token nothing carried suppressed nothing to resume,
+  // and folder policy is a separate reason a session stays unrecorded.
   ctx.stdout.write(
-    ignored
-      ? `session ${resolvedId.sessionId}: ignored - the gateway will drop this session (${total} ignored)\n`
-      : `session ${resolvedId.sessionId}: not ignored - recording resumed (${total} ignored)\n`
+    primary.ignored
+      ? `session ${resolvedId.sessionId}: ignored - this id is in the ${primary.recorder} drop set (${ignoreListCount(primary.total)})\n`
+      : `session ${resolvedId.sessionId}: not ignored - this id is out of the ${primary.recorder} drop set (${ignoreListCount(primary.total)})\n`
   )
-  if (ignored) {
-    ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
+  // Every further confirmed recorder gets its own line: "ignored" on one
+  // recorder is not ignored while a second one records, so each write is
+  // named rather than folded into the headline.
+  for (const outcome of confirmed.slice(1)) {
+    ctx.stdout.write(
+      outcome.ignored
+        ? `also ${outcome.recorder} at ${outcome.endpoint}: ignored - this id is in its drop set (${ignoreListCount(outcome.total)})\n`
+        : `also ${outcome.recorder} at ${outcome.endpoint}: not ignored - this id is out of its drop set (${ignoreListCount(outcome.total)})\n`
+    )
+  }
+  if (primary.ignored) {
+    ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
+    ctx.stdout.write(`${sessionPurgeNote(resolvedId.sessionId)}\n`)
   }
   // The write verbs carry the same provenance caveats as the read: "ignored"
   // printed off an inferred id is a claim about a session the user may not be
@@ -295,12 +488,60 @@ async function runMutation(argv, ctx, method, usage) {
     idSource: resolvedId.source,
     idEvidence: resolvedId.evidence ?? null,
     threadId: resolvedId.threadId ?? null,
-    endpointSource: endpoint.source,
   })) {
     ctx.stdout.write(`${note}\n`)
   }
-  ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
-  return 0
+  return allOk ? 0 : SESSION_EXIT_UNKNOWN
+}
+
+/**
+ * Resolve the recorder set shared by status, ignore, and unignore. The gateway
+ * remains the primary target when it can be resolved. Every additional live
+ * recorder advertising the shared route follows it, with duplicate endpoints
+ * removed by `resolveAdvertisedRecordersForCli`.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {{ targets: Array<{ recorder: string, endpoint: string, endpointSource: 'daemon_status' | 'config_listen' }>, gatewayError?: string }}
+ * @ref LLP 0266#milestones [implements]: session status and mutations use one recorder inventory
+ */
+function resolveRecorderTargetsForCli(ctx) {
+  const gateway = resolveGatewayEndpointForCli(ctx)
+  const advertised = resolveAdvertisedRecordersForCli(ctx, gateway.ok ? gateway.endpoint : undefined)
+  /** @type {Array<{ recorder: string, endpoint: string, endpointSource: 'daemon_status' | 'config_listen' }>} */
+  const targets = []
+  if (gateway.ok) targets.push({ recorder: 'gateway', endpoint: gateway.endpoint, endpointSource: gateway.source })
+  for (const extra of advertised) {
+    targets.push({ recorder: extra.source, endpoint: extra.endpoint, endpointSource: 'daemon_status' })
+  }
+  return gateway.ok ? { targets } : { targets, gatewayError: gateway.error }
+}
+
+/**
+ * The recorders beyond the gateway that host the session-ignore control
+ * route, discovered by their own `control_routes` advertisement in a live
+ * daemon snapshot (`resolveLiveControlRouteEndpointsFromStatus`).
+ *
+ * An advertised endpoint equal to the gateway's is dropped: the gateway is
+ * already a target through its own resolution, and posting one mutation
+ * twice would double every log line and confuse the receipt. Errors reading
+ * the snapshot resolve to "no additional recorders", which is exact: with
+ * no live snapshot there is no daemon, and these listeners only run inside
+ * one.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {string | undefined} gatewayEndpoint
+ * @returns {Array<{ source: string, endpoint: string }>}
+ */
+function resolveAdvertisedRecordersForCli(ctx, gatewayEndpoint) {
+  /** @type {Array<{ source: string, endpoint: string }>} */
+  let list
+  try {
+    const stateRoot = readObservabilityEnv(ctx.env).stateDir
+    list = resolveLiveControlRouteEndpointsFromStatus({ stateRoot, route: SESSION_IGNORE_ROUTE })
+  } catch {
+    return []
+  }
+  return list.filter((entry) => entry.endpoint !== gatewayEndpoint)
 }
 
 /**
@@ -313,37 +554,52 @@ async function runMutation(argv, ctx, method, usage) {
  */
 function writeStatus(ctx, json, report) {
   if (json) {
-    ctx.stdout.write(JSON.stringify({ ...report, folder_policy: 'hyp policy show' }) + '\n')
+    ctx.stdout.write(
+      JSON.stringify({
+        ...report,
+        // The human note's machine-readable twin, so a JSON consumer does not
+        // have to parse prose (or, worse, infer authenticity from silence).
+        // Constant by contract, `unknown` reports included: it is `false`
+        // because no answer this verb can obtain is authenticated, not because
+        // this particular one failed a check.
+        // @ref LLP 0166#stated-not-proved [implements]
+        endpoint_authenticated: false,
+        folder_policy: 'hyp privacy show',
+      }) + '\n'
+    )
   } else if (report.status === 'unknown') {
     const who = report.session_id ?? '(unresolved)'
     ctx.stdout.write(`session ${who}: UNKNOWN - cannot confirm the opt-out is in effect\n`)
     ctx.stdout.write(`reason:  ${report.reason ?? 'unknown'}\n`)
-    ctx.stdout.write('assume this session IS being recorded until a check succeeds.\n')
-    ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
+    // With no id there is no session this warning is about: a plain terminal
+    // reaches here, and "this session IS being recorded" names one that may
+    // not exist. The fail-closed advice stays for anyone who is inside one.
+    ctx.stdout.write(report.session_id === null
+      ? 'no session was identified, so nothing was checked. If you are inside an AI session, assume it IS being recorded.\n'
+      : 'assume this session IS being recorded until a check succeeds.\n')
+    writeRecorderStatusLines(ctx, report.recorders)
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
-    ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
+    ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
+    writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
-      endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
     }
-    ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else {
-    ctx.stdout.write(`session ${report.session_id}: not ignored - this session IS being recorded\n`)
+    ctx.stdout.write(`session ${report.session_id}: not ignored\n`)
     ctx.stdout.write('run `hyp session ignore` to opt out.\n')
+    writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
-      endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
     }
-    ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   }
 
   if (report.status === 'ignored') return 0
@@ -352,12 +608,51 @@ function writeStatus(ctx, json, report) {
 }
 
 /**
+ * The per-recorder rows the headline has NOT already spoken for.
+ *
+ * The headline reports one outcome (`report.endpoint` / `endpoint_source` and
+ * `total` are that outcome's), and it is not always `recorders[0]`: the
+ * aggregate takes the first `not_ignored` answer, so with the gateway
+ * `ignored` and a second recorder `not_ignored` the headline describes the
+ * second recorder. A blind `slice(1)` then re-printed that recorder and
+ * dropped the gateway's answer from the output entirely. Matching on
+ * `endpoint` is exact because the inventory carries no duplicate endpoints:
+ * `resolveAdvertisedRecordersForCli` drops any advertised endpoint equal to
+ * the gateway's.
+ *
+ * @param {SessionStatusReport} report
+ * @returns {SessionStatusOutcome[]}
+ * @ref LLP 0256#cli-posts-to-both [implements]: every addressed recorder's answer is reported, exactly once
+ */
+function secondaryRecorders(report) {
+  const spokenFor = report.recorders.findIndex((outcome) => outcome.endpoint === report.endpoint)
+  if (spokenFor === -1) return report.recorders
+  return report.recorders.filter((_, index) => index !== spokenFor)
+}
+
+/**
+ * @param {CommandRunContext} ctx
+ * @param {SessionStatusOutcome[]} outcomes
+ */
+function writeRecorderStatusLines(ctx, outcomes) {
+  for (const outcome of outcomes) {
+    if (outcome.status === 'unknown') {
+      ctx.stdout.write(`recorder ${outcome.recorder} at ${outcome.endpoint}: UNKNOWN - ${outcome.reason ?? 'no answer'}\n`)
+    } else {
+      ctx.stdout.write(
+        `recorder ${outcome.recorder} at ${outcome.endpoint}: ${outcome.status === 'ignored' ? 'ignored' : 'not ignored'} (${ignoreListCount(outcome.total)})\n`
+      )
+    }
+  }
+}
+
+/**
  * Notes qualifying a CONFIRMED answer, printed next to it.
  *
- * A membership answer rests on two claims the verb cannot always prove: that
- * the id is this session's, and that the endpoint is the gateway. An explicit
- * argument, or a client-set `CLAUDE_CODE_SESSION_ID`, states the first outright;
- * every Codex path only INFERS it from a rollout on disk, so both get a note.
+ * A membership answer rests on a claim the verb cannot always prove: that the
+ * id is this session's. An explicit argument, or a client-set
+ * `CLAUDE_CODE_SESSION_ID`, states it outright; every Codex path only INFERS it
+ * from a rollout on disk, so both Codex paths get a note.
  * `CODEX_THREAD_ID` does not exempt its path: Codex states the **thread**, and
  * the container the drop keys on still has to be read out of that thread's
  * rollout (LLP 0067#cli-session-id). What the variable buys is liveness, not the
@@ -367,12 +662,6 @@ function writeStatus(ctx, json, report) {
  * OUTLIVES its spawn keeps the variable - but it is far narrower than the mtime
  * bound, and qualifying it too would train the reader to skip the caveat on the
  * paths where it is load-bearing.
- *
- * A live daemon's `status.json` proves the second; a
- * pinned `listen` only asserts it, and `validateControlResponse` can prove the
- * responder saw our token but not that it is the gateway. Naming the weaker
- * evidence in the output is the only remedy available at this layer, and it is
- * this change's own thesis: a control that can be wrong must at least say so.
  *
  * A Codex answer also carries a **grain** disclosure, which is not about weak
  * evidence but about the key itself: the resolved id is the session container,
@@ -388,12 +677,11 @@ function writeStatus(ctx, json, report) {
  *   idSource: SessionStatusReport['session_id_source'],
  *   idEvidence: string | null,
  *   threadId: string | null,
- *   endpointSource: SessionStatusReport['endpoint_source'],
  * }} args
  * @returns {string[]}
  */
 function provenanceNotes(args) {
-  const { idSource, idEvidence, threadId, endpointSource } = args
+  const { idSource, idEvidence, threadId } = args
   /** @type {string[]} */
   const notes = []
   if (idSource === 'codex_rollout') {
@@ -403,17 +691,12 @@ function provenanceNotes(args) {
   }
   if (idSource === 'codex_env_rollout') {
     notes.push(
-      `session id: the session containing the thread ${CODEX_THREAD_ENV} states, read from ${idEvidence ?? 'that rollout'} on disk. Codex states the thread, not the session, so the container had to be read rather than stated.`
+      `session id: the session containing the thread ${CODEX_THREAD_ENV} states, read from ${idEvidence ?? 'that rollout'} on disk.`
     )
   }
   if (threadId) {
     notes.push(
       `scope:   the gateway drops by SESSION, so every Codex thread in this session is covered - sibling and subagent threads too, not only thread ${threadId}.`
-    )
-  }
-  if (endpointSource === 'config_listen') {
-    notes.push(
-      'endpoint:  from the pinned `listen`, not a live daemon - nothing proved the gateway still owns that port.'
     )
   }
   return notes
@@ -482,7 +765,7 @@ export function resolveGatewayEndpointForCli(ctx) {
   return {
     ok: false,
     error:
-      'could not resolve the HypAware gateway endpoint: no running daemon reported a bound port and no `listen` is pinned for @hypaware/ai-gateway. Start the daemon (`hyp start`) or pin a port with `hyp init`.',
+      'could not resolve the HypAware gateway endpoint: no running daemon reported a bound port and no `listen` is pinned for @hypaware/ai-gateway. Start the daemon (`hyp daemon start`) or configure it with `hyp setup`.',
   }
 }
 
@@ -499,12 +782,15 @@ export function resolveGatewayEndpointForCli(ctx) {
  *
  * Order:
  *
- * 1. `CLAUDE_CODE_SESSION_ID`. For Claude the session IS the conversation
+ * 1. `PI_SESSION_ID`. Pi states its session id in the environment it gives
+ *    its shell tools, and for Pi the session IS the conversation, so a stated
+ *    id is already the drop key.
+ * 2. `CLAUDE_CODE_SESSION_ID`. For Claude the session IS the conversation
  *    (LLP 0066 §scope), so a stated id is already the drop key.
- * 2. `CODEX_THREAD_ID`, used as a **selector, not an answer**: it names the
+ * 3. `CODEX_THREAD_ID`, used as a **selector, not an answer**: it names the
  *    live thread, so it picks the rollout without the mtime liveness proxy, and
  *    the session container is then read out of that rollout's `session_meta`.
- * 3. Otherwise the rollout whose `payload.cwd` matches the invocation cwd
+ * 4. Otherwise the rollout whose `payload.cwd` matches the invocation cwd
  *    (`$CODEX_HOME/sessions/**\/rollout-<ts>-<uuid>.jsonl`), with the staleness
  *    bound below standing in for the liveness the environment would have given.
  *
@@ -544,6 +830,17 @@ export function resolveSessionIdForCli(args) {
   // passed on byte-identical; only the emptiness test trims.
   const claudeSessionId = statedEnv(args.env.CLAUDE_CODE_SESSION_ID)
   const codexThreadId = statedEnv(args.env[CODEX_THREAD_ENV])
+  const piSessionId = statedEnv(args.env.PI_SESSION_ID)
+  if (piSessionId && (claudeSessionId || codexThreadId)) {
+    const stated = [`PI_SESSION_ID=${piSessionId}`]
+    if (claudeSessionId) stated.push(`CLAUDE_CODE_SESSION_ID=${claudeSessionId}`)
+    if (codexThreadId) stated.push(`${CODEX_THREAD_ENV}=${codexThreadId}`)
+    return {
+      ok: false,
+      error: `could not resolve a session id: more than one client states one for this invocation - ${stated.join(', ')}. Only one of them is the session this command is in, and picking either would act on the wrong one while reporting success. Pass the intended session id explicitly: hyp session status <session-id>.`,
+    }
+  }
+  if (piSessionId) return { ok: true, sessionId: piSessionId, source: 'pi_env' }
   if (claudeSessionId && codexThreadId) {
     return {
       ok: false,
@@ -576,7 +873,13 @@ export function resolveSessionIdForCli(args) {
     }
   }
 
-  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
+  // Recording the cwd is the whole of what makes a rollout a candidate here.
+  // Nothing further about it may filter the list, because the list is counted
+  // below and the count is the uniqueness claim: a header dropped for a field
+  // this path does not resolve on would take the ambiguity with it and leave a
+  // confident answer behind. Whether a candidate is usable is decided after the
+  // count, one candidate at a time.
+  /** @type {{ threadId: string | undefined, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
   const candidates = []
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
@@ -603,6 +906,27 @@ export function resolveSessionIdForCli(args) {
         error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) was last written ${describeAge(ageMs)} ago, so it is a finished session rather than this one. Acting on it would report the WRONG session as covered while this one keeps being recorded. Pass the intended session id explicitly: hyp session status <session-id>.`,
       }
     }
+    // Every `session_meta` Codex writes states `payload.id`, so a header
+    // without one is a file nothing accounts for - truncated, hand-edited, or
+    // written by something that is not Codex. Its `session_id` reads like an
+    // answer and there is no second field left to check it against, and this
+    // one goes to a privacy control that reports success for whatever token it
+    // is handed. Unconfirmable is unresolvable, the same rule that refuses a
+    // blank container.
+    //
+    // This is asked BEFORE the missing-container question, because
+    // `legacyRolloutError` diagnoses one specific file - a Codex old enough to
+    // predate `session_id` - and names the thread id it does carry as the thing
+    // not to key on. A header stating neither field is not an old Codex, so
+    // answering it with "Upgrade Codex" would send the user after a fix for a
+    // problem this file does not have. Both refuse either way; only the
+    // diagnosis differs.
+    if (only.threadId === undefined) {
+      return {
+        ok: false,
+        error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) states no thread id (payload.id), which every session_meta Codex writes carries, so the header cannot be vouched for and nothing it states about the session is evidence of the session you are in. Pass the session id explicitly: hyp session status <session-id>.`,
+      }
+    }
     if (only.sessionId === undefined) {
       return { ok: false, error: legacyRolloutError(`recording cwd ${args.cwd}`, name) }
     }
@@ -617,13 +941,18 @@ export function resolveSessionIdForCli(args) {
   if (candidates.length === 0) {
     return {
       ok: false,
-      error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
+      error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. ${NOT_IN_SESSION_HINT} Or pass the session id explicitly: hyp session status <session-id>.`,
     }
   }
-  const named = candidates.map((c) => `${c.threadId} (${path.basename(c.file)})`).join(', ')
+  // A candidate with no thread id still has to appear: it is one of the reasons
+  // the answer is ambiguous, and a user reading the list needs to see the file
+  // rather than wonder why the count exceeds the names.
+  const named = candidates
+    .map((c) => `${c.threadId ?? 'no thread id'} (${path.basename(c.file)})`)
+    .join(', ')
   return {
     ok: false,
-    error: `could not resolve a session id: ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
+    error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
   }
 }
 
@@ -666,8 +995,13 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
     if (!meta) continue
-    if (meta.threadId !== threadId) continue
-    matches.push({ ...meta, file })
+    // Unlike the cwd scan, this path is an identity test rather than a count,
+    // so a header stating no thread cannot be a match and cannot be missing
+    // one either: it names nothing to compare.
+    const found = meta.threadId
+    if (found === undefined) continue
+    if (found !== threadId) continue
+    matches.push({ ...meta, threadId: found, file })
   }
 
   if (matches.length === 0) {
@@ -711,6 +1045,12 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
  * resolution exists to remove, and it would be invisible: on a root thread the
  * two coincide, so the wrong key only shows up on the subagent threads nobody
  * tests by hand.
+ *
+ * Both callers establish a thread id before reaching this, which the message
+ * relies on twice: "upgrade Codex" is only the right advice for a rollout old
+ * enough to predate the field, and "its thread id is NOT that container" names
+ * a value the header has to be carrying. A header stating neither field is a
+ * different failure and gets its own refusal.
  *
  * @param {string} which  how the rollout was selected, for the message
  * @param {string} names  rollout basename(s) the refusal is about
@@ -801,7 +1141,19 @@ function describeAge(ms) {
 
 /**
  * The thread id, session container and cwd a rollout's `session_meta` header
- * states, or `undefined` when the file states no thread at all.
+ * states, or `undefined` when the file's first line is not that header at all.
+ *
+ * **`undefined` means "this file establishes nothing about any session", and
+ * nothing else.** It used to also swallow a header that states a `cwd` and a
+ * container but no `payload.id`, which made such a rollout invisible to the
+ * caller rather than unresolvable to it. The cwd scan counts its candidates to
+ * decide whether the match is unique, so a discarded match did not merely fail
+ * to resolve, it removed the evidence that the survivor was not alone: two
+ * rollouts recording one cwd resolved confidently to whichever of them happened
+ * to carry a thread id. That is the artefact-of-the-bound failure LLP 0067
+ * §cli-session-id refuses on, reached by discard instead of by truncation.
+ * Judging a header is the caller's job, so a header is now returned whenever it
+ * is one and the callers refuse on what they need.
  *
  * The read itself is `readRolloutSessionMeta`, shared with `@hypaware/codex`'s
  * live cwd resolver, which asks this exact line the same question for the
@@ -832,13 +1184,13 @@ function describeAge(ms) {
  * rollout whose header records no usable `cwd` still answers it.
  *
  * @param {string} file
- * @returns {{ threadId: string, sessionId: string | undefined, cwd: string | undefined } | undefined}
+ * @returns {{ threadId: string | undefined, sessionId: string | undefined, cwd: string | undefined } | undefined}
  * @ref LLP 0067#cli-session-id [implements]: an absent or unusable session_id is
  * unresolvable, never the back-filled thread id
  */
 function readRolloutMeta(file) {
   const meta = readRolloutSessionMeta(file)
-  if (meta?.threadId === undefined) return undefined
+  if (!meta) return undefined
   return { threadId: meta.threadId, sessionId: meta.sessionId, cwd: meta.cwd }
 }
 

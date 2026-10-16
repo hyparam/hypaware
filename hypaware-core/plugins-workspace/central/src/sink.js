@@ -1,15 +1,21 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { gzip } from 'node:zlib'
+import { promisify } from 'node:util'
+import { openReceipts } from './receipts.js'
 
-import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
+import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail } from './backoff.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation, SourceHistoryReplayRequest, SourceHistoryReplayPreview, SourceHistoryReplayResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
- * @import { IdentityClient } from './identity_client.js'
- * @import { CentralSinkConfig } from './types.js'
+ * @import { IdentityClient } from '../../../../hypaware-core/plugins-workspace/central/src/identity_client.js'
+ * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
+ * @import { MissingSyncRequest, MissingSyncResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
+
+const compress = promisify(gzip)
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 
@@ -23,6 +29,15 @@ const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 // already-delivered prefix (server LLP 0001#idempotency-before-backpressure).
 const MAX_BACKPRESSURE_WAIT_MS = 5 * 60_000
 
+// A chunk POST whose connection drops under it (the edge closing an HTTP/2
+// connection with GOAWAY, a reset socket) is re-sent on a fresh connection
+// a few times before the chunk is given up. Every chunk carries an
+// idempotent batch id. Retrying in place also avoids restarting the local
+// partition scan after a transient failure (issue #2581). The chunk's
+// one 330s deadline still bounds every attempt together.
+const MAX_TRANSPORT_RETRIES = 3
+const TRANSPORT_RETRY_DELAY_MS = 2_000
+
 // A partition is streamed to the server in bounded chunks so a large
 // backlog never materializes in memory (a gateway joining with months
 // of cache would otherwise OOM serializing the whole table into one
@@ -31,13 +46,21 @@ const MAX_BACKPRESSURE_WAIT_MS = 5 * 60_000
 const MAX_CHUNK_ROWS = 5000
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
+// Slice size for the streamed chunk body (see `postNdjson`).
+const BODY_STREAM_SLICE_BYTES = 64 * 1024
+
+// An older server answers the additive registration route with 404/405. Hold
+// the dataset locally and probe infrequently so normal client-before-server
+// version skew does not create an outbox and warning every sink tick.
+const DATASET_REGISTRATION_REPROBE_MS = 5 * 60_000
+
 /**
  * Build the `forward` Sink. The sink's `exportBatch` forwards each
- * driver partition independently: it resolves the partition's ingest
- * signal (via the dataset's `sourceSignal`, defaulting to the dataset
- * name), streams the partition's rows as NDJSON in bounded chunks, and
- * POSTs each chunk to `/v1/ingest/{signal}`. One POST carries one
- * signal. Auth comes from the supplied IdentityClient.
+ * driver partition independently. Legacy datasets resolve their fixed ingest
+ * signal from `sourceSignal`; eligible open datasets register their schema and
+ * ingest under the dataset name. Each partition's rows stream as NDJSON in
+ * bounded chunks to `/v1/ingest/{signal}`. One POST carries one signal. Auth
+ * comes from the supplied IdentityClient.
  *
  * The kernel's sink driver owns retry-via-outbox; this sink reports
  * `failed` / `retryPartitions` on transport failure and the driver
@@ -49,29 +72,83 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024
  *   query: QueryRegistry,
  *   storage: QueryStorageService,
  *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
  *   log: PluginLogger,
  *   fetchFn?: typeof fetch,
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
+ *   nowFn?: () => number,
+ *   receiptsDir?: string,
  * }} args
  * @returns {Sink}
  */
 export function createForwardSink(args) {
-  const { config, identityClient, query, storage, watermarks, log } = args
+  const { config, identityClient, query, storage, watermarks, rollouts, log } = args
   const fetchFn = args.fetchFn ?? fetch
   // Injectable so tests drive backpressure pacing without real waits.
   const sleepFn = args.sleepFn ?? abortableSleep
+  const nowFn = args.nowFn ?? Date.now
+  const transport = { gzip: false }
+  const receiptRoot = args.receiptsDir
+  const registeredDatasets = new Set()
+  // Datasets this sink instance has already reported as ineligible, so a
+  // permanent verdict is stated once rather than once per tick forever.
+  const withheldDatasets = new Set()
+  /** @type {Map<string, Promise<void>>} */
+  const datasetRegistrations = new Map()
+  /** @type {Map<string, number>} */
+  const unsupportedDatasetsUntil = new Map()
+  /** @type {Map<string, Promise<void>>} */
+  const datasetRolloutLocks = new Map()
+  /** @type {Map<string, Promise<number>>} */
+  const partitionExports = new Map()
 
-  // Aborts an in-flight backpressure wait when the sink is closed, so a
-  // chunk paused on `Retry-After` cannot wedge daemon shutdown.
+  // Signal every owned central request/body/wait on close. Actual operation
+  // settlement, including history replay, is awaited before releasing the sink.
   const abortController = new AbortController()
+  /** @type {Set<Promise<unknown>>} */
+  const activeForwards = new Set()
+  /** @param {Parameters<typeof forwardPartition>[0]} args */
+  function forwardOwned(args) {
+    const pending = forwardPartition({ ...args, transport, receiptsDir: args.receiptsDir ?? receiptRoot })
+    activeForwards.add(pending)
+    const settled = () => { activeForwards.delete(pending) }
+    pending.then(settled, settled)
+    return pending
+  }
 
   return {
     /**
+     * @ref LLP 0501#missing [implements]: one bounded explicit repair leaves normal watermarks untouched
+     * @param {MissingSyncRequest} request
+     */
+    async restoreMissingRows(request) {
+      if (!request.rows.length || request.rows.length > 1000 || !/^[a-f0-9]{64}$/.test(request.revision)) throw new Error('invalid missing-row selection')
+      const target = forwardingTarget(query, { dataset: 'ai_gateway_messages', partition: {} })
+      if ('withheld' in target) throw new Error(`missing-row repair withheld: ${target.withheld}`)
+      const lines = []
+      let bytes = 0
+      for (const row of request.rows) {
+        const line = JSON.stringify(serializeRow(row)) + '\n'
+        bytes += Buffer.byteLength(line)
+        if (bytes > MAX_CHUNK_BYTES) throw new Error('missing-row selection exceeds 4 MiB; narrow --from/--to')
+        lines.push(line)
+      }
+      const pending = postNdjson({ centralUrl: config.url, signal: 'ai_gateway_messages', body: lines.join(''),
+        batchId: randomUUID(), identityClient, fetchFn, log, abortSignal: abortController.signal, sleepFn,
+        hyp_dataset: 'ai_gateway_messages', chunkIndex: 0, transport: { gzip: false }, missing: request })
+      activeForwards.add(pending)
+      try {
+        const result = await pending
+        if (typeof result !== 'object') throw new Error('server did not acknowledge missing-row repair')
+        return result
+      } finally { activeForwards.delete(pending) }
+    },
+    /**
      * @param {ExportBatch} batch
-     * @param {ExportOptions} _opts
+     * @param {ExportOptions} [opts]
      * @returns {Promise<ExportResult>}
      */
-    async exportBatch(batch, _opts) {
+    async exportBatch(batch, opts) {
       if (!Array.isArray(batch?.partitions) || batch.partitions.length === 0) {
         return { status: 'exported', partitionsExported: 0, bytesWritten: 0 }
       }
@@ -88,29 +165,103 @@ export function createForwardSink(args) {
       // partition-granular outbox. Streaming-per-partition (rather than
       // grouping every partition's rows up front) is what keeps memory
       // bounded on a large backlog.
-      for (const partition of batch.partitions) {
-        const signal = signalForPartition(query, partition)
+      // @ref LLP 0471#chunk-lifetime [implements]: no original Error/chunk frame crosses the next partition await
+      /** @param {QueryPartition} partition */
+      const exportPartition = async (partition) => {
+        // Resolved INSIDE the try: `forwardingTarget` throws for a partition
+        // whose dataset the local registry cannot resolve, and a throw that
+        // escapes `exportBatch` costs the whole batch (the driver respools
+        // every partition, including the ones already POSTed, and reports
+        // zero exported). Per-partition isolation is the contract above.
+        /** @type {{ ingestName: string, registration?: DatasetRegistration } | undefined} */
+        let target
+        let phase = 'dataset resolution'
         try {
-          bytesWritten += await forwardPartition({
-            partition, signal, config, identityClient, storage, watermarks, fetchFn, log,
-            abortSignal: abortController.signal, sleepFn,
+          const resolved = forwardingTarget(query, partition)
+          // A withheld dataset is a settled verdict, not a transport failure: it
+          // can never succeed, so routing it through `retry` would write one
+          // outbox file per tick forever (the driver writes one on every non-ok
+          // result and nothing drains it, src/core/sinks/driver.js persistOutbox)
+          // and hold the sink at `partial` for a condition LLP 0305 calls
+          // correct. `@hypaware/context-graph` is default-bundled, so on a joined
+          // machine that is every tick. Skip the partition, say so once, and
+          // leave the batch's health signal honest.
+          // @ref LLP 0305#eligibility [implements]: an ineligible dataset is withheld, never announced, never ingested, and never retried
+          if ('withheld' in resolved) {
+            if (!withheldDatasets.has(partition.dataset)) {
+              withheldDatasets.add(partition.dataset)
+              const fields = { hyp_dataset: partition.dataset, reason: resolved.withheld }
+              if (resolved.level === 'warn') log.warn('central.forward.dataset_withheld', fields)
+              else log.info('central.forward.dataset_withheld', fields)
+            }
+            return { success: true, bytesWritten: 0, withheld: true }
+          }
+          target = resolved
+          // Scheduled ticks may overlap. Serialize one logical partition so two
+          // scans cannot POST the same suffix concurrently or race a later
+          // watermark backward over an earlier write.
+          // @ref LLP 0040#watermark-contract [constrained-by]: a partition has one ordered ship-then-advance sequence even when daemon ticks overlap.
+          const exportKey = partition.tablePath ?? `${partition.dataset}:${JSON.stringify(partition.partition ?? {})}`
+          const previous = partitionExports.get(exportKey) ?? Promise.resolve(0)
+          const pending = previous.catch(() => 0).then(async () => {
+            if (resolved.registration) {
+              phase = 'local rollout'
+              await ensureOpenDatasetPartition({
+                partition,
+                rolloutPartitions: batch.partitions.filter((candidate) => candidate.dataset === partition.dataset),
+                dataset: resolved.registration,
+                storage,
+                watermarks,
+                rollouts,
+                log,
+                datasetRolloutLocks,
+              })
+            }
+            phase = 'forwarding'
+            return forwardOwned({
+              partition, signal: resolved.ingestName, config, identityClient, storage, watermarks, fetchFn, log,
+              abortSignal: abortController.signal, sleepFn,
+              registration: resolved.registration,
+              registeredDatasets,
+              datasetRegistrations,
+              unsupportedDatasetsUntil,
+              nowFn,
+              requireWatermark: resolved.registration !== undefined,
+              onProgress: opts?.onProgress,
+            })
           })
-          partitionsExported += 1
+          partitionExports.set(exportKey, pending)
+          try {
+            const bytes = await pending
+            return { success: true, bytesWritten: bytes }
+          } finally {
+            if (partitionExports.get(exportKey) === pending) partitionExports.delete(exportKey)
+          }
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          firstError = firstError ?? message
-          retry.push(partition)
+          const message = failureMessage(err, phase)
           // `forwardPartition` annotates the error with the failing
           // chunk's id and the count that already landed (undefined for
-          // pre-stream failures like an unknown signal).
-          const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err ?? {})
+          // pre-stream failures like an unresolvable dataset or a rejected
+          // schema registration, which throw before any chunk is built).
+          const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number, hyp_bytes_written?: number }} */ (err ?? {})
           log.warn('central.forward.failed', {
-            hyp_sink_signal: signal,
+            hyp_sink_signal: target?.ingestName ?? partition.dataset,
             hyp_dataset: partition.dataset,
             message,
             batch_id: e.hyp_batch_id,
             chunks_sent: e.hyp_chunks_sent,
           })
+          return { success: false, bytesWritten: e.hyp_bytes_written ?? 0, message }
+        }
+      }
+      for (const partition of batch.partitions) {
+        const outcome = await exportPartition(partition)
+        bytesWritten += outcome.bytesWritten
+        if (outcome.success) {
+          if (!outcome.withheld) partitionsExported += 1
+        } else {
+          retry.push(partition)
+          firstError ??= outcome.message
         }
       }
 
@@ -135,46 +286,479 @@ export function createForwardSink(args) {
       }
     },
 
+    /**
+     * Count the retained AI-gateway rows this sink can explicitly replay for
+     * one client. The scan uses the export seam, so directory-level
+     * local-only policy remains in force and is disclosed separately.
+     *
+     * @ref LLP 0345#central [implements]: preview retained attributed rows without touching the incremental watermark
+     * @param {{ source: string }} request
+     * @returns {Promise<SourceHistoryReplayPreview>}
+     */
+    async previewSourceHistory(request) {
+      const partitions = await sourceHistoryPartitions({ query, storage, source: request.source })
+      let rows = 0
+      let withheldRows = 0
+      for (const partition of partitions) {
+        if (!partition.tablePath || !storage.tableExists(partition.tablePath)) continue
+        await flushPartition(storage, partition.tablePath, 'central_history_preview')
+        for await (const entry of storage.readRowsSince(partition.tablePath, {
+          since: { v: 1, seq: '0' },
+          includeLegacy: true,
+        })) {
+          if (entry.dropped) {
+            withheldRows += 1
+            continue
+          }
+          if (entry.row.client_name === request.source) rows += 1
+        }
+      }
+      return { rows, withheldRows }
+    },
+
+    /**
+     * Replay one client's retained AI-gateway history without changing the
+     * ordinary incremental cursor. Central's org-scoped part-id index makes a
+     * retry, or overlap with a scheduled tick, row-idempotent.
+     *
+     * @ref LLP 0345#central [implements]: central replays attributed history through its normal wire path while leaving incremental progress intact
+     * @param {SourceHistoryReplayRequest} request
+     * @returns {Promise<SourceHistoryReplayResult>}
+     */
+    async replaySourceHistory(request) {
+      const partitions = await sourceHistoryPartitions({ query, storage, source: request.source })
+      let rowsReplayed = 0
+      let bytesWritten = 0
+      for (const partition of partitions) {
+        const stats = { rows: 0, bytes: 0 }
+        try {
+          const target = forwardingTarget(query, partition)
+          // A withheld verdict sends nothing, and the preview above already
+          // quoted a row count for this partition. Say so rather than letting
+          // the command report `exported (rows=0)` with no reason anywhere
+          // (LLP 0345 #scope: a replay's failure direction is stated).
+          if ('withheld' in target) {
+            log.info('central.forward.history_replay_withheld', {
+              hyp_sink_source: request.source,
+              hyp_dataset: partition.dataset,
+              reason: target.withheld,
+            })
+            continue
+          }
+          bytesWritten += await forwardOwned({
+            partition,
+            signal: target.ingestName,
+            config,
+            identityClient,
+            storage,
+            watermarks,
+            fetchFn,
+            log,
+            abortSignal: abortController.signal,
+            sleepFn,
+            registration: target.registration,
+            registeredDatasets,
+            datasetRegistrations,
+            unsupportedDatasetsUntil,
+            nowFn,
+            requireWatermark: false,
+            sinceOverride: { v: 1, seq: '0' },
+            includeLegacyOverride: true,
+            persistWatermark: false,
+            rowFilter: (row) => row.client_name === request.source,
+            replayStats: stats,
+            replaySource: request.source,
+            onProgress: request.onProgress,
+          })
+          rowsReplayed += stats.rows
+        } catch (err) {
+          // Both counts come from `stats`, which `flushChunk` updates as each
+          // chunk is acked. Reading bytes off the error instead would report
+          // `bytes=0` beside a non-zero row count for any throw raised outside
+          // `flushChunk` (a corrupt privacy list failing the scan closed
+          // mid-partition, say), which is the one thing a partial-transfer
+          // report must not get wrong.
+          rowsReplayed += stats.rows
+          bytesWritten += stats.bytes
+          const message = failureMessage(err)
+          log.warn('central.forward.history_replay_failed', {
+            hyp_sink_source: request.source,
+            hyp_rows_replayed: rowsReplayed,
+            message,
+          })
+          return { status: 'failed', rowsReplayed, bytesWritten, error: message }
+        }
+      }
+      log.info('central.forward.history_replay_finished', {
+        hyp_sink_source: request.source,
+        hyp_rows_replayed: rowsReplayed,
+        hyp_bytes_written: bytesWritten,
+      })
+      return { status: 'exported', rowsReplayed, bytesWritten }
+    },
+
+    /**
+     * The same verdict `exportBatch` acts on, stated instead of acted on, so
+     * `hyp sync`'s consent prompt does not quote rows this sink will refuse to
+     * send. It shares `datasetForwardingVerdict` with the export path rather
+     * than restating the rule, because a second copy of a privacy verdict is a
+     * copy that can drift toward promising less egress than occurs.
+     *
+     * Everything withheld is `skips`: a local-only-content dataset and a name a
+     * legacy ingest path has reserved alike, because from the prompt's side
+     * both are rows that never leave. Everything else is `forwards`, legacy
+     * signal and eligible open dataset alike.
+     *
+     * An eligible open dataset answers `forwards` and not `starts-from-now`.
+     * This sink is not a start-now sink: it baselines at creation
+     * (LLP 0307#rollout-instant), so a partition with no durable cursor is
+     * post-rollout and its backlog forwards in full, and a start-now answer
+     * would quote that backlog as zero at the consent prompt while the next
+     * export shipped it. LLP 0327 is the decision of record; the
+     * `starts-from-now` clause of LLP 0324#disposition-seam's mapping is
+     * superseded there, and the answer stays on the seam for a sink whose
+     * baseline is not written at creation.
+     *
+     * @ref LLP 0324#disposition-seam [implements]: central answers from the predicate its forwarding path already enforces
+     * @ref LLP 0327#central-answers-forwards [implements]: an eligible open dataset answers forwards; the start-now clause of the LLP 0324 mapping is superseded there
+     * @ref LLP 0327#uncursored-forwards [constrained-by]: an uncursored partition here is post-rollout and forwards from seq 0, so a start-now zero would under-disclose
+     * @ref LLP 0305#eligibility [constrained-by]: the eligibility rule stays declared on the dataset and enforced here, so the preview asks rather than reimplements
+     * @param {DatasetRegistration} dataset
+     * @returns {DatasetDisposition}
+     */
+    datasetDisposition(dataset) {
+      return 'withheld' in datasetForwardingVerdict(dataset, dataset.name) ? 'skips' : 'forwards'
+    },
+
     async close() {
-      // No background loops to stop here: the config pull loop wraps
-      // this sink's close() in index.js, and identity refresh is lazy
-      // (every authenticated call refreshes inside the 24h window). The
-      // one thing to interrupt is a chunk paused on server backpressure.
       abortController.abort(new Error('central.forward sink closed'))
+      await Promise.allSettled([...partitionExports.values(), ...activeForwards])
     },
   }
 }
 
 /**
- * The ingest signal a partition forwards under: each dataset declares
- * its `sourceSignal`, defaulting to the dataset name.
+ * Discover the AI-gateway source partition that belongs to one client. The
+ * dataset's source partition chooses `client_name` first, so a named partition
+ * is attribution proof; payload rows are checked again before sending.
+ *
+ * @ref LLP 0345#scope [constrained-by]: the first replay surface is limited to attributed ai_gateway_messages rows
+ * @param {{ query: QueryRegistry, storage: QueryStorageService, source: string }} args
+ * @returns {Promise<QueryPartition[]>}
+ */
+async function sourceHistoryPartitions({ query, storage, source }) {
+  if (typeof source !== 'string' || source.length === 0) return []
+  const dataset = query.getDataset('ai_gateway_messages')
+  if (!dataset || typeof dataset.discoverPartitions !== 'function') return []
+  const partitions = await discoverRolloutPartitions(dataset, storage)
+  return partitions.filter((partition) => partition.partition?.source === source)
+}
+
+/**
+ * Resolve the wire target for a partition. The four legacy signals keep their
+ * stable `/v1/ingest/{signal}` paths. Every other eligible dataset uses the
+ * open-dataset protocol: announce its schema, then POST under the dataset name
+ * so the server's catalog can resolve it. A dataset declaring local-only
+ * content columns cannot safely use this raw-row protocol and is withheld, as
+ * is one whose name a legacy ingest path has reserved.
+ *
+ * Throws only for a partition whose dataset the local registry cannot resolve,
+ * which is a real and retryable inconsistency. A permanent verdict is RETURNED
+ * instead: the caller skips it rather than retrying it forever.
  *
  * @param {QueryRegistry} query
  * @param {QueryPartition} partition
- * @returns {string}
+ * @returns {{ ingestName: string, registration?: DatasetRegistration } | { withheld: string, level: 'info' | 'warn' }}
  */
-function signalForPartition(query, partition) {
+// @ref LLP 0305#routing [implements]: legacy signals keep fixed paths while eligible open datasets register and ingest under their dataset name.
+function forwardingTarget(query, partition) {
   const dataset = query.getDataset(partition.dataset)
-  return dataset?.sourceSignal ?? partition.dataset
+  if (!dataset) {
+    throw new Error(`central.forward: dataset '${partition.dataset}' is not registered locally`)
+  }
+  return datasetForwardingVerdict(dataset, partition.dataset)
+}
+
+/**
+ * The forwarding rule itself, over a resolved registration. Split out from
+ * {@link forwardingTarget} so `datasetDisposition` can answer the `hyp sync`
+ * preview from this exact predicate: the preview's whole claim is that it
+ * quotes what the export would do, and two copies of this rule would let the
+ * prompt drift into promising less egress than the export performs.
+ *
+ * `name` is passed rather than read off `dataset`, because the export path
+ * resolves the registration by the partition's dataset name and must keep
+ * routing by that name.
+ *
+ * @param {DatasetRegistration} dataset
+ * @param {string} name
+ * @returns {{ ingestName: string, registration?: DatasetRegistration } | { withheld: string, level: 'info' | 'warn' }}
+ */
+function datasetForwardingVerdict(dataset, name) {
+  // A built-in dataset claims its reserved route explicitly. Without this
+  // ordering, an unrelated open dataset named `logs` with no sourceSignal
+  // falls through the default and silently impersonates the legacy endpoint.
+  if (KNOWN_SIGNALS.has(name) && dataset.sourceSignal !== name) {
+    // A plugin bug rather than a policy outcome, so it reports at warn: the
+    // dataset silently forwards nothing until the name is changed.
+    return { withheld: 'name is reserved by a legacy ingest path', level: 'warn' }
+  }
+  const signal = dataset.sourceSignal ?? name
+  if (KNOWN_SIGNALS.has(signal)) return { ingestName: signal }
+  // @ref LLP 0305#eligibility [implements]: fail closed when a dataset declares unprovenanced local-only content that this raw-row protocol cannot suppress.
+  // @ref LLP 0105#graph-provenance [constrained-by]: unprovenanced derived content cannot leave through a raw-row export path that has no column-suppression seam.
+  if ((dataset.localOnlyContentColumns?.length ?? 0) > 0) {
+    // Expected and correct, not a fault: LLP 0305 names this outcome, so it
+    // reports at info.
+    return { withheld: 'declares local-only content columns', level: 'info' }
+  }
+  return { ingestName: name, registration: dataset }
+}
+
+/**
+ * Establish the start-now boundary while the sink is being created, before a
+ * cold machine can capture its first post-rollout row. Existing materialized
+ * partitions are baselined; an empty dataset gets an initialized empty
+ * manifest, so a partition created later starts at zero and forwards its first
+ * row. An existing manifest is authoritative and is never reconstructed from
+ * watermarks.
+ *
+ * @param {{
+ *   query: QueryRegistry,
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
+ *   log: PluginLogger,
+ * }} args
+ */
+export async function initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log }) {
+  for (const dataset of query.listDatasets()) {
+    if (!isEligibleOpenDataset(dataset)) continue
+    const existing = await rollouts.read(dataset.name)
+    if (existing) continue
+    const partitions = await discoverRolloutPartitions(dataset, storage)
+    await initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log })
+  }
+}
+
+/** @param {DatasetRegistration} dataset */
+function isEligibleOpenDataset(dataset) {
+  if (KNOWN_SIGNALS.has(dataset.name)) return false
+  if (KNOWN_SIGNALS.has(dataset.sourceSignal ?? dataset.name)) return false
+  return (dataset.localOnlyContentColumns?.length ?? 0) === 0
+}
+
+/**
+ * Make one open partition safe to read. The dataset lock serializes manifest
+ * initialization and future-partition admission across overlapping ticks.
+ *
+ * @param {{
+ *   partition: QueryPartition,
+ *   rolloutPartitions: QueryPartition[],
+ *   dataset: DatasetRegistration,
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
+ *   log: PluginLogger,
+ *   datasetRolloutLocks: Map<string, Promise<void>>,
+ * }} args
+ */
+async function ensureOpenDatasetPartition(args) {
+  const { partition, rolloutPartitions, dataset, storage, watermarks, rollouts, log, datasetRolloutLocks } = args
+  return withDatasetRolloutLock(dataset.name, datasetRolloutLocks, async () => {
+    let rollout = await rollouts.read(dataset.name)
+    if (!rollout) {
+      let partitions = rolloutPartitions
+      if (typeof dataset.discoverPartitions === 'function') {
+        partitions = await discoverRolloutPartitions(dataset, storage)
+      }
+      rollout = await initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log })
+    }
+
+    if (!partition.tablePath || !storage.tableExists(partition.tablePath)) return
+    await flushPartition(storage, partition.tablePath, 'central_rollout_partition')
+    if (!storage.tableExists(partition.tablePath)) return
+    const key = watermarks.keyFor(storage.cacheRoot, partition.tablePath)
+    const known = new Set(rollout.partitions)
+    // @ref LLP 0307#missing-progress [implements]: known partition plus absent or invalid progress is an integrity failure, never a new baseline
+    if (known.has(key.partitionKey)) {
+      const progress = await watermarks.read(key)
+      if (!progress) {
+        throw new Error(
+          `central.forward: rollout progress for '${dataset.name}' partition '${key.partitionKey}' is missing or invalid`
+        )
+      }
+      return
+    }
+
+    // New partitions are post-rollout by definition. Persist zero progress
+    // before admitting the key to the manifest. A crash in between retries the
+    // manifest update without moving the zero boundary; the first rows remain
+    // forwardable. Once admitted, missing progress fails closed above.
+    // @ref LLP 0307#future-partitions [implements]: zero progress commits before the manifest admits a post-rollout partition
+    let progress = await watermarks.read(key)
+    if (!progress) {
+      progress = await watermarks.write(key, {
+        continuation: { v: 1, seq: '0' },
+        exportedRowCount: 0,
+      })
+    }
+    known.add(key.partitionKey)
+    await rollouts.write(dataset.name, [...known], rollout)
+    log.info('central.forward.rollout_partition_added', {
+      hyp_dataset: dataset.name,
+      partition_key: key.partitionKey,
+      baseline_seq: progress.continuation.seq,
+    })
+  })
+}
+
+/**
+ * @param {{
+ *   dataset: DatasetRegistration,
+ *   partitions: QueryPartition[],
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   rollouts: DatasetRolloutStore,
+ *   log: PluginLogger,
+ * }} args
+ * @returns {Promise<DatasetRolloutRecord>}
+ */
+async function initializeDatasetRollout({ dataset, partitions, storage, watermarks, rollouts, log }) {
+  const existing = await rollouts.read(dataset.name)
+  if (existing) return existing
+
+  /** @type {Set<string>} */
+  const partitionKeys = new Set()
+  for (const partition of partitions) {
+    if (!partition.tablePath || !storage.tableExists(partition.tablePath)) continue
+    const key = watermarks.keyFor(storage.cacheRoot, partition.tablePath)
+    partitionKeys.add(key.partitionKey)
+    const progress = await watermarks.read(key)
+    if (progress) continue
+    await writeHistoryBaseline({
+      dataset: dataset.name,
+      tablePath: partition.tablePath,
+      storage,
+      watermarks,
+      watermarkKey: key,
+      log,
+    })
+  }
+
+  // Every baseline is durable before the manifest becomes authoritative. If a
+  // crash happens before this write, retry preserves any baseline already on
+  // disk instead of scanning it again and moving the rollout boundary.
+  // @ref LLP 0307#existing-partitions [implements]: every existing partition baseline is durable before the manifest becomes authoritative
+  const rollout = await rollouts.write(dataset.name, [...partitionKeys], null)
+  log.info('central.forward.rollout_initialized', {
+    hyp_dataset: dataset.name,
+    partitions_count: partitionKeys.size,
+  })
+  return rollout
+}
+
+/**
+ * Flush pending spool rows, then rediscover because an undeclared dataset can
+ * move from its advertised `all` spool into a committed `source=unknown`
+ * partition during that flush.
+ *
+ * @param {DatasetRegistration} dataset
+ * @param {QueryStorageService} storage
+ * @returns {Promise<QueryPartition[]>}
+ */
+async function discoverRolloutPartitions(dataset, storage) {
+  const discover = async () => dataset.discoverPartitions({
+    config: /** @type {HypAwareV2Config} */ ({ version: 2 }),
+    scope: { limit: 1_000_000 },
+    cacheDir: storage.cacheRoot,
+  })
+  const first = await discover()
+  for (const partition of first ?? []) {
+    if (!partition.tablePath) continue
+    const extended = /** @type {QueryStorageService & { hasPendingSync?: (tablePath: string) => boolean }} */ (storage)
+    if (extended.hasPendingSync?.(partition.tablePath)) {
+      await flushPartition(storage, partition.tablePath, 'central_rollout_initialize')
+    }
+  }
+  const second = await discover()
+  /** @type {Map<string, QueryPartition>} */
+  const unique = new Map()
+  for (const partition of [...(first ?? []), ...(second ?? [])]) {
+    if (!partition.tablePath || !storage.tableExists(partition.tablePath)) continue
+    unique.set(partition.tablePath, partition)
+  }
+  return [...unique.values()]
+}
+
+/**
+ * @param {{
+ *   dataset: string,
+ *   tablePath: string,
+ *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
+ *   watermarkKey: SinkWatermarkKey,
+ *   log: PluginLogger,
+ * }} args
+ */
+async function writeHistoryBaseline({ dataset, tablePath, storage, watermarks, watermarkKey, log }) {
+  /** @type {SinkContinuation} */
+  let continuation = { v: 1, seq: '0' }
+  let skippedRowCount = 0
+  // Nothing but the continuation is read, so ask for no payload columns:
+  // otherwise establishing this watermark decodes the whole local history,
+  // large text columns included, to count rows it discards. The withholding
+  // rules' own columns are forced into the scan whatever the caller projects,
+  // so the verdicts, and the seq each entry carries, are unchanged.
+  for await (const entry of storage.readRowsSince(tablePath, { includeLegacy: false, columns: [] })) {
+    continuation = entry.after
+    skippedRowCount += 1
+  }
+  await watermarks.write(watermarkKey, { continuation, exportedRowCount: 0 })
+  log.info('central.forward.initial_history_skipped', {
+    hyp_dataset: dataset,
+    skipped_row_count: skippedRowCount,
+    baseline_seq: continuation.seq,
+  })
+}
+
+/**
+ * @template T
+ * @param {string} dataset
+ * @param {Map<string, Promise<void>>} locks
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+function withDatasetRolloutLock(dataset, locks, fn) {
+  const previous = locks.get(dataset) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(fn)
+  const settled = current.then(() => undefined, () => undefined)
+  locks.set(dataset, settled)
+  return current.finally(() => {
+    if (locks.get(dataset) === settled) locks.delete(dataset)
+  })
 }
 
 /**
  * Stream one partition's rows to `/v1/ingest/{signal}` in bounded
  * chunks, never materializing the whole table. Only rows added since the
  * last durable export are read: the `(sink instance, partition)`
- * watermark is loaded up front and handed to `readRowsSince({ since })`,
- * so a tick with no new rows reads zero rows and sends zero chunks. Each
+ * watermark is loaded up front and handed to `readRowsSince({ since })`.
+ * A newly eligible open dataset has already established its dataset-level
+ * rollout manifest and partition watermark, while a legacy signal keeps LLP
+ * 0040's full first export. A tick with no new rows reads zero rows and sends
+ * zero chunks. Each
  * chunk POSTs with an `X-Hyp-Batch-Id` derived from the signal, the
  * partition identity, the chunk's position, and its bytes (see
  * {@link batchIdForChunk}): stable across retries of that exact chunk,
- * yet distinct for any other chunk — so two byte-identical chunks never
+ * yet distinct for any other chunk, so two byte-identical chunks never
  * collide. When the driver re-hands a partition after a transport
  * failure, re-streaming from the same watermark reproduces the same chunk
  * boundaries, so the unchanged prefix chunks hash to the same ids and the
  * server's idempotency ledger (server LLP 0001) acks them `202` without
  * re-storing. The watermark advances ONCE, after the whole partition's chunks
- * are acked (ship first, advance second), to the partition's high-water `after`
- * — never mid-partition. A partial partition (an early chunk acked, a later one
+ * are acked (ship first, advance second), to the partition's high-water `after`,
+ * never mid-partition. A partial partition (an early chunk acked, a later one
  * failed) therefore never checkpoints, so a crash/failure re-reads the whole
  * partition next tick and the server ledger dedupes the already-acked prefix.
  * Mid-partition advance is unsafe because the scan is NOT seq-ordered (LLP 0040
@@ -193,13 +777,26 @@ function signalForPartition(query, partition) {
  *   log: PluginLogger,
  *   abortSignal: AbortSignal,
  *   sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
+ *   registration?: DatasetRegistration,
+ *   registeredDatasets: Set<string>,
+ *   datasetRegistrations: Map<string, Promise<void>>,
+ *   unsupportedDatasetsUntil: Map<string, number>,
+ *   nowFn: () => number,
+ *   requireWatermark: boolean,
+ *   sinceOverride?: SinkContinuation,
+ *   includeLegacyOverride?: boolean,
+ *   persistWatermark?: boolean,
+ *   rowFilter?: (row: Record<string, unknown>) => boolean,
+ *   replayStats?: { rows: number, bytes: number },
+ *   onProgress?: ExportOptions['onProgress'],
+ *   receiptsDir?: string,
+ *   replaySource?: string,
+ *   transport?: { gzip: boolean },
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn }) {
-  if (!KNOWN_SIGNALS.has(signal)) {
-    throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
-  }
+async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats, onProgress, receiptsDir, replaySource, transport = { gzip: false } }) {
+  abortSignal.throwIfAborted()
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
@@ -207,28 +804,79 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   const tablePath = partition.tablePath
   await flushPartition(storage, tablePath, 'sink_export')
 
-  // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip.
+  // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a legacy signal still reads from the start when progress is absent.
+  // @ref LLP 0307#missing-progress [constrained-by]: an open partition named by its rollout manifest must fail closed when progress is absent or invalid.
   /** @type {SinkContinuation | undefined} */
   let since
   /** @type {SinkWatermarkKey | undefined} */
   let watermarkKey
   let exportedRowCount = 0
-  try {
-    watermarkKey = watermarks.keyFor(storage.cacheRoot, tablePath)
-    const record = await watermarks.read(watermarkKey)
-    since = record?.continuation
-    exportedRowCount = record?.exportedRowCount ?? 0
-  } catch (err) {
-    // An underivable key or unreadable watermark must not wedge the sink:
-    // fall back to a full scan (the server ledger dedupes the redelivery)
-    // and skip watermark writes for this partition this tick.
-    watermarkKey = undefined
-    since = undefined
-    exportedRowCount = 0
-    log.warn('central.forward.watermark_read_failed', {
-      hyp_dataset: partition.dataset,
-      message: err instanceof Error ? err.message : String(err),
+  if (sinceOverride) {
+    since = sinceOverride
+  } else {
+    try {
+      watermarkKey = watermarks.keyFor(storage.cacheRoot, tablePath)
+      const record = await watermarks.read(watermarkKey)
+      if (record) {
+        since = record.continuation
+        exportedRowCount = record.exportedRowCount
+      } else if (requireWatermark) {
+        throw new Error(
+          `central.forward: rollout progress for '${partition.dataset}' partition '${watermarkKey.partitionKey}' is missing or invalid`
+        )
+      }
+    } catch (err) {
+      // An initialized open-dataset partition must never turn missing or corrupt
+      // progress into either a full replay or a new baseline. Keep it retryable
+      // until an operator repairs the state.
+      if (requireWatermark) {
+        log.warn('central.forward.rollout_progress_failed', {
+          hyp_dataset: partition.dataset,
+          message: err instanceof Error ? err.message : String(err),
+        })
+        throw err
+      }
+      // An underivable key or unreadable watermark must not wedge the sink:
+      // fall back to a full scan (the server ledger dedupes the redelivery)
+      // and skip watermark writes for this partition this tick.
+      watermarkKey = undefined
+      since = undefined
+      exportedRowCount = 0
+      log.warn('central.forward.watermark_read_failed', {
+        hyp_dataset: partition.dataset,
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  // The rollout boundary is durable before the remote capability handshake.
+  // If registration is temporarily unavailable, later rows remain pending and
+  // forward on retry rather than being absorbed into a new baseline.
+  if (registration) {
+    const supported = await ensureDatasetRegistered({
+      centralUrl: config.url,
+      dataset: registration,
+      registeredDatasets,
+      datasetRegistrations,
+      unsupportedDatasetsUntil,
+      identityClient,
+      fetchFn,
+      log,
+      nowFn,
+      abortSignal,
     })
+    if (!supported) return 0
+  }
+
+  // @ref LLP 0497#receipts [implements]: exact chunk acknowledgements survive interruption; the partition cursor still moves only after the complete scan
+  let receipts = await openReceipts(undefined, [])
+  try {
+    const gateway = identityClient.identity?.gateway_id
+    receipts = await openReceipts(gateway ? receiptsDir : undefined, [
+      config.url, gateway ?? '', tablePath, signal, replaySource ?? 'incremental',
+    ])
+  } catch {
+    log.warn('central.forward.receipts_unavailable', { hyp_dataset: partition.dataset })
   }
 
   let bytesWritten = 0
@@ -244,7 +892,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // is acked.
   /** @type {SinkContinuation | undefined} */
   let lastAfter
-  // The seq this chunk starts AFTER — the `since` watermark for the first
+  // The seq this chunk starts AFTER: the `since` watermark for the first
   // chunk, then the previous chunk's last `after` seq. The idempotency key is
   // derived from THIS (not the per-tick `chunkIndex`) so a chunk's id is stable
   // across watermark advances: once an earlier chunk is acked and the watermark
@@ -255,29 +903,46 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // double-storing it on the server.
   let chunkStartSeq = since?.seq ?? '0'
 
+  // @ref LLP 0471#chunk-lifetime [implements]: flush clears each settled chunk on both success and failure
   const flushChunk = async () => {
     if (lines.length === 0) return
-    const body = lines.join('\n') + '\n'
+    let body = lines.join('\n') + '\n'
     // @ref LLP 0040#applying-it-to-both-sinks [implements]: stable per-chunk batch id keyed by the chunk's start seq, so a post-watermark-advance respool reproduces the same id and the server ledger dedupes.
     const batchId = batchIdForChunk(signal, tablePath, chunkStartSeq, body)
     const bytes = Buffer.byteLength(body, 'utf8')
     const rows = lines.length
     const after = lastAfter
+    const receipt = receipts.key(batchId)
+    const resumed = receipts.has(receipt)
+    let wireBytes = 0
     try {
-      await postNdjson({
+      // @ref LLP 0471#chunk-lifetime [constrained-by]: a saved receipt skips the POST, not the per-chunk cancellation boundary the POST carried
+      if (resumed) abortSignal.throwIfAborted()
+      if (!resumed) wireBytes = /** @type {number} */ (await postNdjson({
         centralUrl: config.url, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn,
-        hyp_dataset: partition.dataset, chunkIndex,
-      })
+        hyp_dataset: partition.dataset, chunkIndex, transport, onProgress,
+      }))
+      if (!resumed) {
+        try { await receipts.record(receipt) } catch {
+          log.warn('central.forward.receipts_unavailable', { hyp_dataset: partition.dataset })
+          receipts = await openReceipts(undefined, [])
+        }
+      }
     } catch (err) {
       // Annotate so the partition-level failure log (exportBatch) can
       // name the failing chunk and how many already landed: the new
       // chunk loop is otherwise invisible against the server ledger.
       if (err && typeof err === 'object') {
-        const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err)
+        const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number, hyp_bytes_written?: number }} */ (err)
         e.hyp_batch_id = batchId
         e.hyp_chunks_sent = chunkIndex
+        e.hyp_bytes_written = bytesWritten
       }
       throw err
+    } finally {
+      lines = []
+      body = ''
+      pendingBytes = 0
     }
     log.debug('central.forward.chunk', {
       hyp_sink_signal: signal,
@@ -286,23 +951,28 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       chunk_index: chunkIndex,
       rows,
       bytes,
+      wire_bytes: wireBytes,
+      resumed,
     })
-    bytesWritten += bytes
+    bytesWritten += resumed ? 0 : bytes
     chunkIndex += 1
     shippedRowCount += rows
+    onProgress?.({ rows, bytes: resumed ? 0 : bytes, wireBytes, ...(resumed ? { resumedRows: rows } : {}) })
+    if (replayStats) {
+      replayStats.rows += rows
+      replayStats.bytes += resumed ? 0 : bytes
+    }
     // The next chunk starts after this chunk's last row, so its batch id keys
-    // off this chunk's `after` — keeping ids stable whether a tick streams the
+    // off this chunk's `after`: keeping ids stable whether a tick streams the
     // whole partition or a respool replays only the un-acked suffix.
     if (after) chunkStartSeq = after.seq
-    lines = []
-    pendingBytes = 0
   }
 
   // @ref LLP 0040#storage-api-extension [implements]: pre-upgrade null-seq rows
   // are "new" only on a sink with no durable watermark (export the backlog once);
   // once a watermark exists they are already shipped, so exclude them and the
   // legacy backlog never re-exports every tick (LLP 0040 §6 risk #1).
-  const includeLegacy = since === undefined
+  const includeLegacy = includeLegacyOverride ?? since === undefined
   // Rows the export seam withheld as `local-only` (LLP 0070): never buffered,
   // never shipped, but each still advances `lastAfter` so the watermark moves
   // across them.
@@ -318,6 +988,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       droppedRowCount += 1
       continue
     }
+    if (rowFilter && !rowFilter(entry.row)) continue
     const line = JSON.stringify(serializeRow(entry.row))
     lines.push(line)
     // Count UTF-8 bytes (not UTF-16 code units) so the budget bounds the
@@ -328,6 +999,9 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     }
   }
   await flushChunk()
+  // A close() during the scan must not finish as a success: leave the
+  // watermark and the receipts for the next run to resume from.
+  abortSignal.throwIfAborted()
 
   // @ref LLP 0040#watermark-contract [implements]: ship first, advance second,
   // but advance ONLY at end-of-partition (like the blob sink). Every chunk is
@@ -335,19 +1009,23 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // before this), so persisting the partition's high-water `after` can never
   // checkpoint past an un-acked row. A between-chunk failure leaves the
   // watermark untouched: the next tick re-reads the whole partition and the
-  // server ledger dedupes the already-acked prefix. Advancing per chunk to the
+  // receipts skip exact acknowledged chunks; the server ledger handles other
+  // redelivery. Advancing per chunk to the
   // running-max `after` would skip lower-seq rows in a later un-acked chunk
   // whenever the scan is not seq-ordered (LLP 0040 §4 risk #3).
   // @ref LLP 0070#incremental [constrained-by]: widen the gate so a tick that
   // only dropped rows (shipped nothing) still checkpoints: otherwise a partition
   // ending in a run of local-only rows would never advance past them and every
   // tick would re-scan-and-re-drop the same tail forever. `exportedRowCount`
-  // still counts only rows actually shipped — a dropped row was never exported.
-  if (watermarkKey && lastAfter && (shippedRowCount > 0 || droppedRowCount > 0)) {
+  // still counts only rows actually shipped: a dropped row was never exported.
+  if (persistWatermark && watermarkKey && lastAfter && (shippedRowCount > 0 || droppedRowCount > 0)) {
     await watermarks.write(watermarkKey, {
       continuation: lastAfter,
       exportedRowCount: exportedRowCount + shippedRowCount,
     })
+  }
+  try { await receipts.clear() } catch {
+    log.warn('central.forward.receipts_cleanup_failed', { hyp_dataset: partition.dataset })
   }
   if (droppedRowCount > 0) {
     log.debug('central.forward.dropped', {
@@ -367,7 +1045,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
  * Keying on `chunkStartSeq` (the watermark the chunk resumes from) rather than a
  * per-tick ordinal is what keeps the id stable across a watermark advance: when
  * an earlier chunk is acked the watermark moves, and a respool re-reads only the
- * un-acked suffix — which reproduces the same `[startSeq, body]` and so the same
+ * un-acked suffix, which reproduces the same `[startSeq, body]` and so the same
  * id, letting the server ledger dedupe a chunk that committed but whose ack was
  * lost. (An ordinal would re-number the suffix from 0 and mint a fresh id for an
  * already-stored chunk, double-storing it.) Two byte-identical chunks at
@@ -442,8 +1120,10 @@ function serializeValue(value) {
 /**
  * POST one NDJSON chunk to `/v1/ingest/{signal}`, carrying its
  * idempotency key as `X-Hyp-Batch-Id`. Re-sends the *same* body + key on
- * two transient conditions, so every retry stays idempotent:
+ * transient conditions, so every retry stays idempotent:
  *
+ * - `502`/`504` and transport failures: three retries sharing one budget.
+ * - `415` for gzip: retry once in plain form.
  * - `401`: refresh the JWT once and retry (a second `401` escalates).
  * - `429`/`503`: server backpressure. Honor `Retry-After` (falling back
  *   to the linear ladder when it is absent or garbage), sleep, and retry
@@ -470,121 +1150,384 @@ function serializeValue(value) {
  *   sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   hyp_dataset: string,
  *   chunkIndex: number,
+ *   transport: { gzip: boolean },
+ *   onProgress?: ExportOptions['onProgress'],
+ *   missing?: MissingSyncRequest,
  * }} args
  */
 async function postNdjson(args) {
-  const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn, hyp_dataset, chunkIndex } = args
-  if (!KNOWN_SIGNALS.has(signal)) {
-    throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
-  }
-  const url = joinUrl(centralUrl, `/v1/ingest/${signal}`)
+  const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal: parentSignal, sleepFn, hyp_dataset, chunkIndex, transport, onProgress } = args
+  // Escaped the same way `ensureDatasetRegistered` escapes the registration
+  // path: since the open-dataset protocol puts an arbitrary dataset name here
+  // (not one of the four fixed signals), the two paths would otherwise be able
+  // to name different resources, and `joinUrl`'s `new URL()` would normalize a
+  // `..` segment out of the ingest path. The four legacy signals are
+  // encode-invariant, so their URLs are byte-identical to before.
+  const url = joinUrl(centralUrl, `/v1/${args.missing ? 'ingest-missing' : 'ingest'}/${encodeURIComponent(signal)}`)
 
-  /** @param {string} jwt */
-  const send = (jwt) => fetchFn(url, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${jwt}`,
-      'content-type': 'application/x-ndjson',
-      'x-hyp-batch-id': batchId,
-    },
-    body,
-  })
-
-  let refreshed = false
-  let waitedMs = 0
-  let backpressureRetries = 0
-  for (;;) {
-    const response = await send(await identityClient.getCurrentJwt())
-
-    if (response.status === 202 || response.ok) return
-
-    // One-shot refresh + retry on the first 401; a second falls through
-    // to the throw below as an auth failure (proto.md "Refresh window").
-    if (response.status === 401 && !refreshed) {
-      refreshed = true
-      await identityClient.refresh()
-      continue
-    }
-
-    // @ref LLP 0014#forward-sink-backpressure [implements]: 429/503 is backpressure, not failure: pace the same chunk in place, bounded inline, respool past budget.
-    if (response.status === 429 || response.status === 503) {
-      // Honor only a *positive* Retry-After. A legal `Retry-After: 0` or a
-      // past HTTP-date parses to 0 (not undefined) and carries no useful
-      // pacing: taking it verbatim would retry with zero delay, never
-      // advance `waitedMs`, and spin this loop forever. `||` (not `??`)
-      // falls a zero through to the ladder, so every wait progresses and
-      // the inline budget can bound the retries.
-      const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
-      const delaySeconds = retryAfter || RETRY_BACKOFF_SECONDS[
-        Math.min(backpressureRetries, RETRY_BACKOFF_SECONDS.length - 1)
-      ]
-      const delayMs = delaySeconds * 1000
-      if (waitedMs + delayMs > MAX_BACKPRESSURE_WAIT_MS) {
-        const detail = await readErrorDetail(response)
-        throw new Error(`central.forward POST ${url} backpressure exceeded ${MAX_BACKPRESSURE_WAIT_MS / 1000}s inline: ${detail}`)
+  // The chunk goes out as a stream, not one string. Node 26's fetch speaks
+  // HTTP/2, and its HTTP/2 client keeps a request body's unsent remainder
+  // counted against the connection's 10 MB session budget when the server
+  // answers before the upload finishes, which the server does for every
+  // ledger hit (a re-sent chunk is acked 202 before the body is read). Two
+  // early-acked 4 MB string bodies exhausted the budget and the client then
+  // reset every later response on the connection with ENHANCE_YOUR_CALM, so
+  // a retry after any partial failure died on its third chunk forever. A
+  // streamed body queues at most one flow-control window, which stays far
+  // under the budget however many chunks are re-sent. `content-length` is
+  // set explicitly because a streamed body carries none by default and the
+  // server charges backpressure from it. Each attempt builds a fresh stream:
+  // a ReadableStream is single-use and the loop below re-sends the same
+  // chunk after a 401 refresh or 429/503 pause.
+  const lifetime = centralLifetime(parentSignal, 'central chunk')
+  const abortSignal = lifetime.signal
+  let bytes = Buffer.from(body, 'utf8')
+  const decodedLength = bytes.length
+  let compressed = false
+  try {
+    // @ref LLP 0497#compression [implements]: negotiate once, compress once per chunk, reuse the exact encoded bytes on retries
+    if (transport.gzip) {
+      const packed = await compress(bytes, { level: 1 })
+      abortSignal.throwIfAborted()
+      if (packed.length < bytes.length) {
+        bytes = packed
+        compressed = true
       }
-      log.debug('central.forward.backpressure', {
-        hyp_sink_signal: signal,
-        hyp_dataset,
-        batch_id: batchId,
-        chunk_index: chunkIndex,
-        http_status: response.status,
-        retry_after_seconds: delaySeconds,
-        retry: backpressureRetries + 1,
-      })
-      // Release the throttle response before parking: undici keeps the
-      // socket out of the pool until the body is read or cancelled, so a
-      // multi-minute pause (and every retry that piles up) would
-      // otherwise pin it.
-      await discardBody(response)
-      await sleepFn(delayMs, abortSignal)
-      waitedMs += delayMs
-      backpressureRetries += 1
-      continue
     }
+    const streamBody = () => {
+      let offset = 0
+      return new ReadableStream({
+        pull(controller) {
+          if (offset >= bytes.byteLength) return controller.close()
+          controller.enqueue(bytes.subarray(offset, offset += BODY_STREAM_SLICE_BYTES))
+        },
+      })
+    }
+    /** @param {string} jwt */
+    const send = (jwt) => fetchFn(url, {
+      method: 'POST',
+      signal: abortSignal,
+      ...(args.missing ? { redirect: /** @type {const} */ ('error') } : {}),
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'content-type': 'application/x-ndjson',
+        'content-length': String(bytes.byteLength),
+        'x-hyp-batch-id': batchId,
+        ...(compressed ? { 'content-encoding': 'gzip', 'x-hyp-uncompressed-length': String(decodedLength) } : {}),
+        ...(args.missing ? { 'x-hyp-sync-revision': args.missing.revision, 'x-hyp-sync-org': args.missing.org } : {}),
+      },
+      body: streamBody(),
+      duplex: 'half',
+    })
 
-    const detail = await readErrorDetail(response)
-    throw new Error(`central.forward POST ${url} failed: ${detail}`)
+    let refreshed = false
+    let waitedMs = 0
+    let backpressureRetries = 0
+    let transportRetries = 0
+    for (;;) {
+      const jwt = await identityClient.getCurrentJwt(abortSignal)
+      if (args.missing) {
+        // This decode can only refuse. The server verifies the signature and
+        // independently binds the repair to the gateway's authenticated org.
+        const claims = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString('utf8'))
+        if ((claims.org ?? '') !== args.missing.org) throw new Error('read remote and sink belong to different organizations')
+        await args.missing.validate()
+        abortSignal.throwIfAborted()
+      }
+      /** @type {Response} */
+      let response
+      try {
+        response = await send(jwt)
+      } catch (error) {
+        // The deadline or a close aborted the attempt: that is the caller's
+        // verdict, not a dropped connection, and it is never retried here.
+        abortSignal.throwIfAborted()
+        const code = transportFailureCode(error)
+        if (code === null || transportRetries >= MAX_TRANSPORT_RETRIES) {
+          throw new Error(`central.forward POST ${url} transport failed: ${code ?? 'unknown'}`, { cause: error })
+        }
+        transportRetries += 1
+        log.debug('central.forward.transport_retry', {
+          hyp_sink_signal: signal,
+          hyp_dataset,
+          batch_id: batchId,
+          chunk_index: chunkIndex,
+          error_kind: code,
+          retry: transportRetries,
+        })
+        onProgress?.({ rows: 0, bytes: 0, waitMs: TRANSPORT_RETRY_DELAY_MS * transportRetries })
+        await sleepFn(TRANSPORT_RETRY_DELAY_MS * transportRetries, abortSignal)
+        continue
+      }
+
+      abortSignal.throwIfAborted()
+      if (response.status === 202 || response.ok) {
+        if (args.missing) {
+          const reader = response.body?.getReader()
+          if (!reader) throw new Error('empty repair acknowledgement')
+          const chunks = []
+          let size = 0
+          try {
+            for (;;) {
+              const { value, done } = await reader.read()
+              if (done) break
+              size += value.byteLength
+              if (size > 4096) throw new Error('repair acknowledgement exceeds byte budget')
+              chunks.push(value)
+            }
+          } finally { await reader.cancel() }
+          const result = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          if (response.status !== 202 || result.syncRestore !== 1 || !['accepted', 'already_accepted'].includes(result.status)) throw new Error('unsupported repair acknowledgement')
+          if (result.status === 'accepted' && (![result.restored, result.present, result.purged].every(n => Number.isSafeInteger(n) && n >= 0) ||
+            result.restored + result.present + result.purged !== args.missing.rows.length)) throw new Error('incomplete repair acknowledgement')
+          abortSignal.throwIfAborted()
+          return /** @type {MissingSyncResult} */ (result)
+        }
+        await discardBody(response)
+        abortSignal.throwIfAborted()
+        if (response.headers.get('accept-encoding')?.split(',').some((value) => value.trim() === 'gzip')) transport.gzip = true
+        return bytes.length
+      }
+
+      // Mixed-version servers can reject an encoding negotiated on another
+      // backend. Retry plain once with the same id, then remember the fallback.
+      if (response.status === 415 && compressed) {
+        await discardBody(response)
+        transport.gzip = false
+        compressed = false
+        bytes = Buffer.from(body, 'utf8')
+        continue
+      }
+
+      // @ref LLP 0497#retry [implements]: transient edge errors share the bounded transport retry budget and chunk lifetime
+      if ((response.status === 502 || response.status === 504) && transportRetries < MAX_TRANSPORT_RETRIES) {
+        transportRetries += 1
+        await discardBody(response)
+        const delayMs = TRANSPORT_RETRY_DELAY_MS * transportRetries
+        log.debug('central.forward.http_retry', { hyp_dataset, batch_id: batchId, http_status: response.status, retry: transportRetries })
+        onProgress?.({ rows: 0, bytes: 0, waitMs: delayMs })
+        await sleepFn(delayMs, abortSignal)
+        continue
+      }
+
+      // One-shot refresh + retry on the first 401; a second falls through
+      // to the throw below as an auth failure (proto.md "Refresh window").
+      if (response.status === 401 && !refreshed) {
+        refreshed = true
+        await discardBody(response)
+        await identityClient.refresh(abortSignal)
+        continue
+      }
+
+      // @ref LLP 0014#forward-sink-backpressure [implements]: 429/503 is backpressure, not failure: pace the same chunk in place, bounded inline, respool past budget.
+      if (response.status === 429 || response.status === 503) {
+        // Honor only a *positive* Retry-After. A legal `Retry-After: 0` or a
+        // past HTTP-date parses to 0 (not undefined) and carries no useful
+        // pacing: taking it verbatim would retry with zero delay, never
+        // advance `waitedMs`, and spin this loop forever. `||` (not `??`)
+        // falls a zero through to the ladder, so every wait progresses and
+        // the inline budget can bound the retries.
+        const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
+        const delaySeconds = retryAfter || RETRY_BACKOFF_SECONDS[
+          Math.min(backpressureRetries, RETRY_BACKOFF_SECONDS.length - 1)
+        ]
+        const delayMs = delaySeconds * 1000
+        if (waitedMs + delayMs > MAX_BACKPRESSURE_WAIT_MS) {
+          const detail = await readErrorDetail(response, abortSignal)
+          throw new Error(`central.forward POST ${url} backpressure exceeded ${MAX_BACKPRESSURE_WAIT_MS / 1000}s inline: ${detail}`)
+        }
+        log.debug('central.forward.backpressure', {
+          hyp_sink_signal: signal,
+          hyp_dataset,
+          batch_id: batchId,
+          chunk_index: chunkIndex,
+          http_status: response.status,
+          retry_after_seconds: delaySeconds,
+          retry: backpressureRetries + 1,
+        })
+        // Release the throttle response before parking: undici keeps the
+        // socket out of the pool until the body is read or cancelled, so a
+        // multi-minute pause (and every retry that piles up) would
+        // otherwise pin it.
+        await discardBody(response)
+        onProgress?.({ rows: 0, bytes: 0, waitMs: delayMs })
+        await sleepFn(delayMs, abortSignal)
+        waitedMs += delayMs
+        backpressureRetries += 1
+        continue
+      }
+
+      const detail = await readErrorDetail(response, abortSignal)
+      throw new Error(`central.forward POST ${url} failed: ${detail}`)
+    }
+  } finally {
+    lifetime.abort(new Error('central chunk settled'))
+    bytes = Buffer.alloc(0)
+    lifetime.dispose()
   }
 }
 
 /**
+ * Announce one non-legacy dataset before its first ingest on this sink
+ * instance. Registration is idempotent server-side, so a daemon restart may
+ * announce it again. A 401 refreshes once through the same identity seam as
+ * ingest; any other failure leaves the partition retryable in the outbox.
+ *
+ * @param {{
+ *   centralUrl: string,
+ *   dataset: DatasetRegistration,
+ *   registeredDatasets: Set<string>,
+ *   datasetRegistrations: Map<string, Promise<void>>,
+ *   unsupportedDatasetsUntil: Map<string, number>,
+ *   identityClient: IdentityClient,
+ *   fetchFn: typeof fetch,
+ *   log: PluginLogger,
+ *   nowFn: () => number,
+ *   abortSignal: AbortSignal,
+ * }} args
+ * @returns {Promise<boolean>}
+ */
+async function ensureDatasetRegistered(args) {
+  const { centralUrl, dataset, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn, abortSignal } = args
+  if (registeredDatasets.has(dataset.name)) return true
+  if ((unsupportedDatasetsUntil.get(dataset.name) ?? 0) > nowFn()) return false
+
+  let pending = datasetRegistrations.get(dataset.name)
+  if (!pending) {
+    pending = registerDataset({
+      centralUrl,
+      dataset,
+      registeredDatasets,
+      unsupportedDatasetsUntil,
+      identityClient,
+      fetchFn,
+      log,
+      nowFn,
+      abortSignal,
+    })
+      .finally(() => {
+        if (datasetRegistrations.get(dataset.name) === pending) datasetRegistrations.delete(dataset.name)
+      })
+    datasetRegistrations.set(dataset.name, pending)
+  }
+  await pending
+  const supported = registeredDatasets.has(dataset.name)
+  if (!supported && datasetRegistrations.get(dataset.name) === pending) {
+    datasetRegistrations.delete(dataset.name)
+  }
+  return supported
+}
+
+/**
+ * @param {{
+ *   centralUrl: string,
+ *   dataset: DatasetRegistration,
+ *   registeredDatasets: Set<string>,
+ *   unsupportedDatasetsUntil: Map<string, number>,
+ *   identityClient: IdentityClient,
+ *   fetchFn: typeof fetch,
+ *   log: PluginLogger,
+ *   nowFn: () => number,
+ *   abortSignal: AbortSignal,
+ * }} args
+ */
+async function registerDataset(args) {
+  const { centralUrl, dataset, registeredDatasets, unsupportedDatasetsUntil, identityClient, fetchFn, log, nowFn, abortSignal } = args
+
+  const lifetime = centralLifetime(abortSignal, 'central registration')
+  const signal = lifetime.signal
+  try {
+    signal.throwIfAborted()
+    const body = {
+      schema: dataset.schema,
+      ...(dataset.sourceSignal ? { sourceSignal: dataset.sourceSignal } : {}),
+      ...(dataset.primaryTimestampColumn
+        ? { primaryTimestampColumn: dataset.primaryTimestampColumn }
+        : {}),
+    }
+    const url = joinUrl(centralUrl, `/v1/datasets/${encodeURIComponent(dataset.name)}`)
+    const send = (jwt) => fetchFn(url, {
+      method: 'PUT',
+      signal,
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+
+    let response = await send(await identityClient.getCurrentJwt(signal))
+    if (response.status === 401) {
+      await discardBody(response)
+      await identityClient.refresh(signal)
+      response = await send(await identityClient.getCurrentJwt(signal))
+    }
+    if (response.status === 404 || response.status === 405) {
+      await discardBody(response)
+      unsupportedDatasetsUntil.set(dataset.name, nowFn() + DATASET_REGISTRATION_REPROBE_MS)
+      log.warn('central.forward.dataset_unsupported', {
+        hyp_dataset: dataset.name,
+        http_status: response.status,
+        reprobe_after_ms: DATASET_REGISTRATION_REPROBE_MS,
+      })
+      return
+    }
+    if (!response.ok) {
+      const detail = await readErrorDetail(response, signal)
+      throw new Error(`central.forward PUT ${url} failed: ${detail}`)
+    }
+    await discardBody(response)
+    signal.throwIfAborted()
+    unsupportedDatasetsUntil.delete(dataset.name)
+    registeredDatasets.add(dataset.name)
+    log.info('central.forward.dataset_registered', {
+      hyp_dataset: dataset.name,
+      hyp_sink_signal: dataset.sourceSignal ?? dataset.name,
+    })
+  } finally {
+    lifetime.abort(new Error('central registration settled'))
+    lifetime.dispose()
+  }
+}
+
+/**
+ * Redundant trailing slashes in the base collapse, so a url an operator typed
+ * as `https://host//` reaches the same single-slash route product telemetry's
+ * `safeDestination` targets, not the doubled-slash path the receiver will not
+ * route.
+ *
  * @param {string} base
  * @param {string} suffix
  */
 function joinUrl(base, suffix) {
-  const baseWithSlash = base.endsWith('/') ? base : `${base}/`
+  const baseWithSlash = `${base.replace(/\/+$/, '')}/`
   return new URL(suffix.replace(/^\//, ''), baseWithSlash).toString()
 }
 
-/** @param {Response} response */
-async function readErrorDetail(response) {
-  let body
-  try { body = await response.text() } catch { body = '' }
-  if (body.length > 0) {
-    try {
-      const parsed = JSON.parse(body)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const error = typeof /** @type {Record<string, unknown>} */ (parsed).error === 'string'
-          ? /** @type {string} */ (/** @type {Record<string, unknown>} */ (parsed).error)
-          : undefined
-        if (error) return `${response.status} ${error}`
-      }
-    } catch {
-      // plain text: fall through
-    }
-    return `${response.status} ${body.trim().slice(0, 200)}`
-  }
-  return `${response.status} ${response.statusText || ''}`.trim()
+/**
+ * The short code of a connection-level fetch failure, or `null` when the
+ * error is anything else (an abort, a thrown non-transport error). Node's
+ * fetch rejects with a `TypeError('fetch failed')` whose `cause` carries the
+ * undici or socket code (`UND_ERR_INFO` for an HTTP/2 GOAWAY, `ECONNRESET`,
+ * `UND_ERR_SOCKET`); the code is what a diagnostic needs and all it keeps.
+ *
+ * @param {unknown} error
+ * @returns {string | null}
+ */
+function transportFailureCode(error) {
+  if (!(error instanceof TypeError)) return null
+  const cause = /** @type {{ code?: unknown, name?: unknown } | undefined} */ (error.cause)
+  if (typeof cause?.code === 'string' && cause.code) return cause.code
+  if (typeof cause?.name === 'string' && cause.name) return cause.name
+  return 'fetch_failed'
 }
 
-/**
- * Discard a response body we will not read (a 429/503 we are about to
- * retry past), so undici returns the socket to the pool. Cancelling is
- * best-effort: a missing or already-settled body is a no-op.
- *
- * @param {Response} response
- */
-async function discardBody(response) {
-  try { await response.body?.cancel() } catch { /* already settled or no body */ }
+/** @param {unknown} error @param {string} [phase] */
+function failureMessage(error, phase = 'forwarding') {
+  // Transport/runtime errors may carry payloads, causes or huge strings. Keep
+  // only locally generated central categories, never a remote body or stack.
+  if (error instanceof Error && /^(central\.forward|central chunk|central registration|identity refresh|central response)/.test(error.message)) {
+    return error.message.slice(0, 200)
+  }
+  return `central.forward ${phase} failed`
 }

@@ -1,0 +1,231 @@
+// @ts-check
+
+import { Attr, getLogger } from '../observability/index.js'
+import { NO_FETCH_MESSAGE, trimSlash } from './identity_client.js'
+
+/**
+ * Poll-based login completion (LLP 0342). The client prints/opens the
+ * `/login/start` URL and *pulls* the outcome from the server instead of
+ * listening for a loopback redirect: the flight parks when the browser opens
+ * the start URL, the callback holds the one-time code (or the D7 refusal) on
+ * the flight, and `GET /login/poll?state=` hands it over exactly once. This
+ * replaced the ephemeral 127.0.0.1 receiver, whose redirect only delivered
+ * when the browser and the CLI shared a loopback interface (broken over SSH).
+ *
+ * Exposes the same `{ waitForCode, close }` seam the loopback receiver did,
+ * so `loginWithBrowser` swaps delivery mechanisms without changing shape.
+ */
+
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
+const DEFAULT_INTERVAL_MS = 2000
+// One poll is bounded on its own, the way `identity_client.js` bounds its token
+// POST: an endpoint that accepts the connection and never answers would
+// otherwise eat the whole 5-minute budget inside a single request, since the
+// deadline is only consulted between polls. Aborting just retries on the next
+// tick, which is exactly what a transient hang deserves.
+const POLL_REQUEST_TIMEOUT_MS = 10 * 1000
+// The floor a 429 backs off to when the limiter sends no usable `retry-after`.
+// Polling on at the normal cadence through a rate limit is what walks the
+// source into the escalating lockout (the server rate-limits this endpoint,
+// LLP 0342#d4), so an unreadable hint must not mean no backoff at all.
+const RATE_LIMITED_BACKOFF_MS = 10 * 1000
+const CLOSED_MESSAGE = 'login poller closed before a code arrived'
+
+/**
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Start the login poller. `waitForCode()` polls the identity base's
+ * `/login/poll` until the flight settles: it resolves `{ code }` on
+ * `status: complete`, rejects with a `callbackError`-carrying error on
+ * `status: failed` (the D7 code the redirect's `error=` used to carry), and
+ * rejects on timeout or on a server that predates the poll endpoint.
+ *
+ * `unknown_state` is NOT terminal: the flight parks only when the browser
+ * opens the start URL, so every poll before the user clicks legitimately
+ * answers 404 unknown_state, and the poller keeps going to the deadline. A
+ * stale server is told apart by the *shape* of its 404: the server's own
+ * generic `unknown_path` body, which a poll-capable server never returns on
+ * this path. Any other 404 came from something between us and the server, so
+ * it is transient.
+ *
+ * Transient trouble (a network error, a hung request, a 5xx, a 429) never
+ * fails the login: the poller keeps polling to the deadline, backing off on a
+ * 429 (to `retry-after` when it is readable, to `RATE_LIMITED_BACKOFF_MS`
+ * otherwise) so it cannot poll itself into the limiter's escalating lockout.
+ * Each poll is aborted after `POLL_REQUEST_TIMEOUT_MS` so one silent socket
+ * cannot swallow the whole budget, and `close()` cuts a wait that is already
+ * in flight.
+ *
+ * @param {{
+ *   identityBase: string,
+ *   state: string,
+ *   timeoutMs?: number,
+ *   intervalMs?: number,
+ *   requestTimeoutMs?: number,
+ *   fetchImpl?: typeof fetch,
+ *   sleep?: (ms: number) => Promise<void>,
+ * }} args
+ * @returns {{ waitForCode: () => Promise<{ code: string }>, close: () => void }}
+ * @ref LLP 0342#d3 [implements]: 2s cadence, 5-minute budget, single delivery consumed on pickup; the token exchange downstream is untouched
+ * @ref LLP 0342#d4 [constrained-by]: `state` is all the poll URL carries; PKCE at redemption, not a second poll secret, is what makes that safe
+ */
+export function startLoginPoller({
+  identityBase,
+  state,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  intervalMs = DEFAULT_INTERVAL_MS,
+  requestTimeoutMs = POLL_REQUEST_TIMEOUT_MS,
+  fetchImpl,
+  sleep = defaultSleep,
+}) {
+  const log = getLogger('remote')
+  const doFetch = fetchImpl ?? /** @type {typeof fetch | undefined} */ (globalThis.fetch)
+  let closed = false
+  /** The controller of the poll currently in flight, so `close()` can cut it. */
+  let inFlight = /** @type {AbortController | undefined} */ (undefined)
+  let wake = /** @type {() => void} */ (() => {})
+  // Resolved by `close()`. Raced against the inter-poll sleep so a close lands
+  // at once rather than up to `intervalMs` later.
+  const closedSignal = new Promise((resolve) => { wake = () => resolve(undefined) })
+
+  const pollUrl = new URL(`${trimSlash(identityBase)}/login/poll`)
+  pollUrl.searchParams.set('state', state)
+
+  /** @param {string} message @param {string} kind @param {string} [callbackError] */
+  function fail(message, kind, callbackError) {
+    log.warn('remote.login_poll_error', {
+      [Attr.COMPONENT]: 'remote-oidc',
+      [Attr.OPERATION]: 'remote.login_poll',
+      [Attr.STATUS]: 'failed',
+      [Attr.ERROR_KIND]: kind,
+      smoke_step: 'login_poll',
+    })
+    const err = new Error(message)
+    if (callbackError) Object.assign(err, { callbackError })
+    return err
+  }
+
+  return {
+    async waitForCode() {
+      if (typeof doFetch !== 'function') throw new Error(NO_FETCH_MESSAGE)
+      log.info('remote.login_poll_start', {
+        [Attr.COMPONENT]: 'remote-oidc',
+        [Attr.OPERATION]: 'remote.login_poll',
+        [Attr.STATUS]: 'ok',
+        smoke_step: 'login_poll_start',
+      })
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        if (closed) throw new Error(CLOSED_MESSAGE)
+
+        /** @type {Response | undefined} */
+        let response
+        /** @type {any} */
+        let body
+        const controller = new AbortController()
+        inFlight = controller
+        // Never overshoot the overall budget either: the last poll before the
+        // deadline gets only what is left of it.
+        const perPollMs = Math.max(1, Math.min(requestTimeoutMs, deadline - Date.now()))
+        const timer = setTimeout(() => controller.abort(), perPollMs)
+        try {
+          response = await doFetch(pollUrl.toString(), {
+            headers: { accept: 'application/json' },
+            signal: controller.signal,
+          })
+          body = JSON.parse(await response.text())
+        } catch {
+          // A network error, a hung request we aborted, or an unparseable body
+          // is transient: keep polling to the deadline rather than failing a
+          // login the human may be mid-completing in the browser.
+          body = undefined
+        } finally {
+          clearTimeout(timer)
+          inFlight = undefined
+        }
+        if (closed) throw new Error(CLOSED_MESSAGE)
+
+        // Honor the limiter's hint before anything else: polling through a
+        // 429 would walk the source into the escalating lockout.
+        let delayMs = intervalMs
+        if (response) {
+          if (response.status === 200 && body?.status === 'complete' && typeof body.code === 'string') {
+            log.info('remote.login_poll_complete', {
+              [Attr.COMPONENT]: 'remote-oidc',
+              [Attr.OPERATION]: 'remote.login_poll',
+              [Attr.STATUS]: 'ok',
+              smoke_step: 'login_poll_complete',
+            })
+            return { code: body.code }
+          }
+          if (response.status === 200 && body?.status === 'failed') {
+            // The D7 refusal, riding the poll body where the redirect's
+            // `error=` used to carry it. Bound it before it reaches the error
+            // message, the log ERROR_KIND, and the terminal.
+            const safeError = sanitizeErrorCode(typeof body.error === 'string' ? body.error : '')
+            throw fail(`login failed: ${safeError}`, safeError, safeError)
+          }
+          if (response.status === 404 && body?.error === 'unknown_path') {
+            // The stale-server tell is the server's *own* generic 404 body,
+            // which is what a server predating this endpoint answers here
+            // (LLP 0342#d2). Fail loudly on that, not by timeout.
+            // Matched positively on purpose: any other 404 came from something
+            // between us and the server - an ingress serving an HTML error
+            // page, or its own JSON `{"message":"Not Found"}`, during a
+            // rolling deploy - which is transient and must not end a login the
+            // human may be mid-completing.
+            throw fail('this server does not support poll login yet - upgrade hypaware-server', 'no_poll_endpoint')
+          }
+          if (response.status === 429) {
+            // `retry-after` is only readable in its delta-seconds form; the
+            // HTTP-date form (and an absent header) reads as NaN. Back off to
+            // the floor there rather than polling straight back into the
+            // limiter at the normal cadence.
+            const retryAfter = Number(response.headers?.get?.('retry-after'))
+            const hinted = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : RATE_LIMITED_BACKOFF_MS
+            delayMs = Math.max(delayMs, hinted)
+          }
+          // 200 pending, 404 unknown_state (the browser has not opened the
+          // start URL yet), and transient 5xx all just keep polling.
+        }
+
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) {
+          throw fail('timed out waiting for the browser login to complete', 'timeout')
+        }
+        // Floor at 1ms so a non-positive intervalMs (test seam) cannot
+        // busy-spin; cap at the remaining budget so we never oversleep it.
+        await Promise.race([sleep(Math.max(1, Math.min(delayMs, remaining))), closedSignal])
+      }
+    },
+
+    close() {
+      closed = true
+      // Cut the in-flight poll and the sleep, so a caller that closes mid-wait
+      // gets its rejection now instead of one poll interval later (or never,
+      // behind a hung request).
+      inFlight?.abort()
+      wake()
+    },
+  }
+}
+
+/**
+ * Reduce a server-reported login error to a bounded, log-safe token. RFC 6749
+ * error codes are `%x20-21 / %x23-5B / %x5D-7E`; we keep that printable range,
+ * drop control chars (newlines especially), and cap the length so a hostile
+ * response can't inject lines into logs or the terminal.
+ *
+ * @param {string} error
+ * @returns {string}
+ */
+function sanitizeErrorCode(error) {
+  const cleaned = error.replace(/[^\x20-\x7E]/g, '').replace(/["\\]/g, '').trim().slice(0, 80)
+  return cleaned || 'unknown_error'
+}

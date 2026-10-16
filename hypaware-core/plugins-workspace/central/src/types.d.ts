@@ -70,7 +70,7 @@ export interface CentralSinkConfig {
   }
   /**
    * Poll cadence (seconds) for the config-pull loop. Default 300s
-   * (5 minutes) — 304s are cheap, and propagation latency equals this
+   * (5 minutes): 304s are cheap, and propagation latency equals this
    * cadence (no push channel in V1). The running config's etag is
    * kernel-managed (LLP 0025); the plugin reads it through the
    * `configControl` facade, so there is no plugin-side sidecar path.
@@ -78,3 +78,33 @@ export interface CentralSinkConfig {
   poll_interval_seconds?: number
 }
 
+/** Durable rollout boundary for one open dataset on one sink instance. */
+export interface DatasetRolloutRecord {
+  v: 1
+  /** Stable logical partition keys already initialized for forwarding. */
+  partitions: string[]
+  initializedAt: string
+  updatedAt: string
+}
+
+export interface DatasetRolloutStore {
+  filePath(dataset: string): string
+  /** Missing means never initialized; malformed state rejects. */
+  read(dataset: string): Promise<DatasetRolloutRecord | null>
+  write(
+    dataset: string,
+    partitionKeys: string[],
+    previous?: DatasetRolloutRecord | null,
+  ): Promise<DatasetRolloutRecord>
+}
+
+/** Internal shared refresh ownership, not a server wire contract. */
+export interface RefreshLease {
+  finish(error?: unknown): void
+}
+
+export interface RefreshOperation {
+  lifetime: { signal: AbortSignal, abort(reason: unknown): void, dispose(): void }
+  consumers: Set<RefreshLease>
+  cancelled?: RefreshLease
+}

@@ -1,3 +1,5 @@
+import type { Statement } from 'squirreling/src/ast.js'
+
 import type {
   HypAwareV2Config,
   PluginLogger,
@@ -156,14 +158,102 @@ export interface OverviewRows {
   toolRows: Record<string, unknown>[]
   window?: OverviewWindow
   sql?: { models: string; daily: string; repos: string; tools: string }
+  /**
+   * The sections this run set out to fill, stamped by `collectOverview`
+   * before it runs anything. It is what tells an empty section that was
+   * never requested from one that did not finish, which is the difference
+   * between the two sentences LLP 0135 #overrun insists on. Absent on a
+   * result nobody collected into, where all four are assumed.
+   */
+  sections?: readonly ('models' | 'daily' | 'repos' | 'tools')[]
 }
 
 /**
  * Something the overview must say alongside its numbers, tagged by kind so
  * each caller can route it. `local-only` is required disclosure (LLP 0105);
- * `freshness` is advisory. `line` is preformatted and newline-terminated.
+ * `refresh-failed` is required too (LLP 0321: the result must never claim to
+ * be current when waiting rows could not be committed); `freshness` is the
+ * advisory debounce line and is the only kind a caller may drop. `line` is
+ * preformatted and newline-terminated.
  */
 export interface OverviewNotice {
-  kind: 'local-only' | 'freshness'
+  kind: 'local-only' | 'freshness' | 'refresh-failed'
   line: string
+}
+
+/**
+ * One column a relation exposes, as the LLP 0272 literal rewrite needs to see
+ * it: the name a reference can use, and whether that name is a TIMESTAMP. A
+ * dataset answers from its declared schema; a CTE or derived table answers
+ * from the inner select LLP 0280 walks to build the same list.
+ */
+export interface InferredColumn {
+  name: string
+  isTimestamp: boolean
+}
+
+/**
+ * One relation a select binds, reduced to what the LLP 0272 rewrite asks of
+ * it. Exactly one of `table` (a dataset or a CTE) and `query` (a derived
+ * table) is set; neither is set for a relation whose columns nothing here can
+ * enumerate, such as a table function.
+ */
+export interface RelationRef {
+  table?: string
+  query?: Statement
+  alias?: string
+}
+
+/**
+ * How a select resolves a column reference to a declared TIMESTAMP, for the
+ * LLP 0272 literal rewrite. `agreed` answers an unqualified reference (the
+ * names every relation in scope types the same way); `byRelation`
+ * answers a qualified one, keyed by the lower-cased name a qualifier can
+ * actually reach the relation by (its alias when it has one, otherwise its
+ * table name).
+ * `bound` holds every relation this select binds including the ones whose
+ * columns cannot be read (a table function, a CTE over an unregistered
+ * table), so a qualifier resolved through `outer` can be stopped here
+ * rather than borrowing an enclosing relation's types.
+ */
+export interface TimestampScope {
+  agreed: Set<string>
+  byRelation: Map<string, Set<string>>
+  bound: Set<string>
+  /** The enclosing select's scope, for a correlated reference; absent at the top level. */
+  outer?: TimestampScope
+}
+
+/**
+ * One line the person types again and again, with what the agent did
+ * after it (LLP 0398 #one-signal).
+ */
+export interface FirstAskCandidate {
+  /** The line, lower-cased, first 42 characters. */
+  line: string
+  sessions: number
+  days: number
+  typed: number
+  /** The earliest occurrence in the sampled sessions, as typed. */
+  example?: { date: string; text: string }
+  /** Sessions that returned tool calls after the line: drawn from the newest sample of them, not every session that typed it, and only those the shared row budget reached. */
+  sessionsWithCalls: number
+  /** Procedure commands that ran after it, most sessions first. */
+  steps: { command: string; sessions: number }[]
+  /** Other tool activity after it, for context. */
+  other: { head: string; sessions: number }[]
+  /** How one such session ended: the first substantial reply after the procedure. */
+  ending?: { date: string; text: string }
+}
+
+/** What `prepareFirstAskEvidence` produced. */
+export interface FirstAskEvidence {
+  /** The folder the client is started in. */
+  dir: string
+  from: string
+  files: string[]
+  record?: { sessions: number; sessionDays: number }
+  /** Whether the record cleared RECORD_FLOOR; false means the answer stops at "not enough yet". */
+  enough?: boolean
+  candidates?: FirstAskCandidate[]
 }

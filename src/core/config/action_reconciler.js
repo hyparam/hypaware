@@ -40,6 +40,28 @@ const CONTROL_DIRNAME = 'config-control'
 const CLIENT_ACTIONS_BASENAME = 'client-actions.json'
 
 /**
+ * The re-arm generation this build stamps on every `refused` marker it writes.
+ *
+ * A stored marker below it was written before a release that changed how some
+ * refusal is classified, so what it records may no longer be a refusal at all.
+ * It gets exactly one re-`perform()`, and a pass that refuses again stamps
+ * this generation and is terminal from there (a pass that *fails* instead
+ * writes LLP 0041's ordinary retryable marker, short-circuited by nothing, the
+ * same path a host that never recorded a refusal is already on). That single
+ * retry is the whole mechanism: the marker carries no error code, so nothing
+ * on disk can tell a refusal a later release made retryable (the LLP 0258
+ * version floor) from one still true (a JSONC settings file), and asking the
+ * handler once is the only way to know.
+ *
+ * Bump it in the same release that moves a throw site out of
+ * `markActionRefused`, which is what makes the markers already on disk wrong.
+ * Generation 1 is the LLP 0363 reclassification of the Claude version floor.
+ *
+ * @ref LLP 0364#the-generation-bit [implements]: one integer, bumped by the release that reclassifies a refusal, is what re-arms the markers already on disk
+ */
+export const REFUSAL_REARM_GENERATION = 1
+
+/**
  * Build the generic, daemon-constructed action reconciler. It is the
  * run-once / reconcile-on-config machinery and knows nothing about Claude
  * vs Codex: only the {@link ActionHandler} interface. The daemon wires
@@ -71,8 +93,10 @@ export function createActionReconciler(opts) {
   /**
    * Level-triggered reconcile (LLP 0036): for each handler, diff `desired()`
    * against the persisted markers and act only on the gap. A `done` marker
-   * short-circuits, so the pass is safe to call repeatedly and a run missed
-   * while probation was outstanding is recovered on the next call.
+   * short-circuits, and so does a `refused` one at this build's re-arm
+   * generation (LLP 0186, LLP 0364), so the pass
+   * is safe to call repeatedly and a run missed while probation was outstanding
+   * is recovered on the next call.
    *
    * @param {ReconcileInput} input
    * @returns {Promise<ReconcileReport>}
@@ -80,11 +104,11 @@ export function createActionReconciler(opts) {
    */
   async function reconcile(input) {
     // Thread the daemon-resolved client seam (LLP 0045 §Part 1) onto the
-    // context unchanged — the reconciler core stays ignorant of what they mean
+    // context unchanged: the reconciler core stays ignorant of what they mean
     // ("knows nothing about Claude vs Codex"); only a client handler
     // (`action_attach`) reads `clientDescriptors`/`clients`/`endpoint`. Absent
     // on a plain CLI boot, so any client handler stays inert.
-    // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements]: clientDescriptors/clients/endpoint live on the context, not a handler closure
+    // @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: clientDescriptors/clients/endpoint live on the context, not a handler closure
     /** @type {ActionContext} */
     const ctx = {
       config: input.config,
@@ -95,6 +119,7 @@ export function createActionReconciler(opts) {
       endpoint: input.endpoint,
       skills: input.skills,
       agents: input.agents,
+      failedPlugins: input.failedPlugins,
       now,
       log,
     }
@@ -128,7 +153,7 @@ export function createActionReconciler(opts) {
 
       // Forward gap: run-once / retry the desired units not yet `done`. A
       // `done` marker short-circuits, UNLESS the handler's optional freshness
-      // predicate reports it stale — then the still-desired unit is a forward
+      // predicate reports it stale, then the still-desired unit is a forward
       // gap and re-`perform()`s this pass. That is how an attach re-fires after
       // the gateway rebinds to a new ephemeral port: the marker is `done` but no
       // longer current (issue #277 / LLP 0086). Handlers without `isCurrent`
@@ -136,6 +161,38 @@ export function createActionReconciler(opts) {
       // @ref LLP 0086#re-attach-on-drift [implements]: a done marker the handler reports stale is a forward gap, not a permanent skip
       for (const action of desired) {
         const existing = markers[action.requestKey]
+        // A `refused` marker skips FIRST: it records a precondition only the
+        // user can fix (a conflicting provider entry, a JSONC settings file),
+        // so re-`perform()`ing it every pass is the forever-retry LLP 0184
+        // reports. `markerIsCurrent()` is deliberately not consulted - the
+        // freshness hook answers "did the input drift?", which says nothing
+        // about whether the refusal was resolved.
+        // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: refused short-circuits unconditionally, done short-circuits through markerIsCurrent()
+        //
+        // The skip is unconditional against the machine, not against the build.
+        // A marker below `REFUSAL_REARM_GENERATION` was written by a release
+        // that classified some refusal wrongly, so it is re-`perform()`ed once
+        // here, and the marker that pass writes carries the current generation:
+        // a refusal that is still true costs one retry ever, not one per boot.
+        // An explicit `hyp attach` re-run still clears one at any generation.
+        // @ref LLP 0364#the-generation-bit [implements]: a refused marker below this build's generation is re-armed by the pass itself, with no manual command
+        if (existing && existing.status === 'refused') {
+          const generation = markerRearmGeneration(existing)
+          if (generation >= REFUSAL_REARM_GENERATION) {
+            results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
+            continue
+          }
+          log.info('client_action.refusal_rearmed', {
+            [Attr.COMPONENT]: 'action-reconciler',
+            [Attr.OPERATION]: 'client_action.rearm',
+            kind,
+            request_key: action.requestKey,
+            [Attr.STATUS]: 'ok',
+            from_generation: generation,
+            to_generation: REFUSAL_REARM_GENERATION,
+            detail: typeof existing.reason === 'string' ? existing.reason : 'unknown',
+          })
+        }
         if (existing && existing.status === 'done' && markerIsCurrent(handler, existing, action, ctx)) {
           results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
           continue
@@ -183,6 +240,56 @@ export function createActionReconciler(opts) {
             [Attr.STATUS]: 'ok',
             ...(typeof outcome.rows === 'number' ? { rows: outcome.rows } : {}),
           })
+        } else if (outcome.status === 'refused') {
+          // A refusal is terminal, so the marker records no `attempts`: nothing
+          // will ever increment one. `at` carries the terminal-state time the
+          // way `done` uses it, `reason` the way `failed` uses it, and the
+          // absence of a retry counter is itself part of the fix - a refused
+          // marker that grew `attempts: 17` is exactly the field bug this
+          // branch exists to stop (LLP 0184).
+          // @ref LLP 0186#writing-it [implements]: third outcome branch, terminal refused marker (at + reason, no attempts), logged as loudly as a failure
+          const reason = outcome.reason ?? 'unknown'
+          /** @type {ActionMarker} */
+          const marker = {
+            status: 'refused',
+            request_key: action.requestKey,
+            reason,
+            at,
+            ...(outcome.detail ?? {}),
+            // After the detail spread, like `prior_done` below: a handler's
+            // detail must not erase the bit that makes this marker terminal.
+            rearm_generation: REFUSAL_REARM_GENERATION,
+          }
+          // Same carry-forward the `done` and `failed` branches make: a refusal
+          // on a re-`perform()` does not un-install what an earlier successful
+          // attach copied, and the marker is the only record naming those files
+          // (LLP 0138 #marker-undo). Dropping it here would orphan them past
+          // any later reversal.
+          const carried = readInstalledAssets(existing)
+          if (carried.length > 0) {
+            marker.installed_assets = [...new Set([...carried, ...readInstalledAssets(marker)])]
+          }
+          // The other half of the same record. A settings-only attach copies no
+          // files, so `installed_assets` says nothing about whether an effect
+          // was applied; without this bit the rewrite would hand the reverse gap
+          // a marker that looks exactly like a refusal that never touched the
+          // disk, and the settings write would be dropped along with it. Set
+          // after the detail spread so a handler's `detail` cannot erase
+          // reconciler bookkeeping about an effect that is really on disk.
+          // @ref LLP 0250#the-bit [implements]: a terminal rewrite records the
+          //   effect it overwrites, not only the assets it copied
+          if (markerRecordsPriorDone(existing)) marker.prior_done = true
+          markers[action.requestKey] = marker
+          results.push({ kind, requestKey: action.requestKey, outcome: 'refused', reason })
+          log.error('client_action.refused', {
+            [Attr.COMPONENT]: 'action-reconciler',
+            [Attr.OPERATION]: 'client_action.perform',
+            kind,
+            request_key: action.requestKey,
+            [Attr.STATUS]: 'failed',
+            [Attr.ERROR_KIND]: 'action_refused',
+            detail: reason,
+          })
         } else {
           // Not advanced to `done` on failure (LLP 0041 §failure is
           // surfaced, not fatal): record `failed` + bump attempts so the
@@ -206,6 +313,11 @@ export function createActionReconciler(opts) {
             ...(existing?.installed_assets ? { installed_assets: existing.installed_assets } : {}),
             ...(outcome.detail ?? {}),
           }
+          // The settings half of that same record, for a client whose attach
+          // copies no files: see the `refused` branch above.
+          // @ref LLP 0250#the-bit [implements]: a terminal rewrite records the
+          //   effect it overwrites, not only the assets it copied
+          if (markerRecordsPriorDone(existing)) marker.prior_done = true
           markers[action.requestKey] = marker
           results.push({ kind, requestKey: action.requestKey, outcome: 'failed', reason, attempts })
           log.error('client_action.failed', {
@@ -250,9 +362,32 @@ export function createActionReconciler(opts) {
           // the asset-removal half degrades to naming-and-releasing
           // (#refusal-is-not-failure); the settings half cannot, because
           // nothing else on disk would own the settings it left written.
+          //
+          // A `refused` marker is treated exactly like a `failed` one here: the
+          // refusal itself wrote nothing (attach refuses *before* touching the
+          // client's settings), so an assetless one for a key the config stops
+          // naming is dropped rather than handed to a `reverse()` that has
+          // nothing to undo, while one carrying `installed_assets` from an
+          // earlier successful attach takes the reverse path below.
+          //
+          // `installed_assets` is not the whole evidence, though, and reading it
+          // as if it were is what made this gate unsound for a settings-only
+          // client. An attach that reached `done`, wrote the client's settings
+          // and copied no files, then re-`perform()`ed into `failed`/`refused`,
+          // has an assetless terminal marker over a settings write that is still
+          // there. `prior_done` is what tells the two apart, so the drop needs
+          // both halves to be empty (LLP 0250).
           // @ref LLP 0138#marker-undo [implements]: a marker is never dropped
           //   over an effect it recorded, whichever status it carries
-          if (!marker || (marker.status === 'failed' && readInstalledAssets(marker).length === 0)) {
+          // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: the reverse gap treats refused the way it treats failed
+          // @ref LLP 0250#the-drop-condition [implements]: the drop reads the
+          //   settings half of the record too, not just the asset half
+          if (
+            !marker ||
+            ((marker.status === 'failed' || marker.status === 'refused') &&
+              readInstalledAssets(marker).length === 0 &&
+              !markerRecordsPriorDone(marker))
+          ) {
             delete markers[requestKey]
             mutated = true
             continue
@@ -276,6 +411,20 @@ export function createActionReconciler(opts) {
           } else {
             // Reverse failed: keep the marker so the next pass retries the
             // undo; surface but do not escalate.
+            //
+            // `refused` lands here too, deliberately. `ActionOutcome` is one
+            // type across both hooks, so widening it for `perform()` made the
+            // status expressible on `reverse()` as well, but no handler returns
+            // it there and this design does not settle what a terminal *undo*
+            // refusal would mean: dropping the marker would destroy the only
+            // record naming settings and files that are still on disk (the
+            // orphaning #212 and LLP 0138#marker-undo both refuse to accept),
+            // while keeping it is the retry-forever this document removes from
+            // the forward gap. Retrying is the safe half of that pair, so an
+            // unexpected `refused` reverse degrades to a visible retry rather
+            // than a silent drop. A reverse that genuinely needs to refuse
+            // needs its own branch, and its own decision about the marker,
+            // first (LLP 0186 §Explicitly out of scope).
             results.push({ kind, requestKey, outcome: 'failed', reason: outcome.reason ?? 'unknown' })
             log.error('client_action.reverse_failed', {
               [Attr.COMPONENT]: 'action-reconciler',
@@ -314,10 +463,16 @@ export function createActionReconciler(opts) {
 /**
  * Decide whether a `done` marker still short-circuits its still-desired action,
  * by consulting the handler's optional `isCurrent` freshness predicate. A
- * handler without one (backfill) is always current — a `done` marker is
+ * handler without one (backfill) is always current: a `done` marker is
  * permanently done. A predicate that throws is treated as *current* (skip): an
  * unexpected error must never spuriously re-perform a `done` effect on a loop,
  * so it degrades to the pre-LLP-0086 level-triggered behavior.
+ *
+ * Only `done` markers reach here. A `refused` marker short-circuits before this
+ * is consulted (LLP 0186), or, when it is stamped below this build's
+ * `REFUSAL_REARM_GENERATION`, is re-performed by the forward gap without any
+ * freshness predicate being consulted (LLP 0364). Either way its gate is the
+ * user's precondition, which no `isCurrent` can observe.
  *
  * @param {ActionHandler} handler
  * @param {ActionMarker} marker
@@ -340,13 +495,25 @@ function markerIsCurrent(handler, marker, action, ctx) {
  * `{ status: 'failed' }`: the marker records the failure and the next pass
  * retries.
  *
+ * `refused` is an accepted shape beside `done` and `failed`, but only when a
+ * handler says so in its return value: a bare throw stays `failed`, because a
+ * refusal is a claim about the user's preconditions that nothing can infer
+ * from an exception alone (an adapter that means it marks the Error and its
+ * handler translates it, `action_refusal.js`).
+ *
  * @param {() => Promise<ActionOutcome>} fn
  * @returns {Promise<ActionOutcome>}
+ * @ref LLP 0186#the-widened-handler-outcome-type-across-the-reconciler-seam [implements]: the accepted-shape check widens to refused; an unmigrated handler still defaults to failed
  */
 async function runOutcome(fn) {
   try {
     const outcome = await fn()
-    if (outcome && (outcome.status === 'done' || outcome.status === 'failed')) return outcome
+    if (
+      outcome &&
+      (outcome.status === 'done' || outcome.status === 'failed' || outcome.status === 'refused')
+    ) {
+      return outcome
+    }
     return { status: 'failed', reason: 'handler returned no outcome' }
   } catch (err) {
     return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
@@ -409,6 +576,47 @@ export function readInstalledAssets(marker) {
 }
 
 /**
+ * The re-arm generation a stored `refused` marker was written at, defensively:
+ * the store is persisted JSON, and every marker written before LLP 0364 lacks
+ * the field entirely. Absent (or anything that is not a finite number) reads as
+ * generation 0, the pre-LLP-0364 fleet, which is below every generation this
+ * build stamps and is therefore re-armed once.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {number}
+ * @ref LLP 0364#the-generation-bit [implements]: a missing field is generation 0, so the shipped fleet re-arms without any migration step
+ */
+export function markerRearmGeneration(marker) {
+  const raw = marker?.rearm_generation
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0
+}
+
+/**
+ * Did an earlier pass at this request key reach `done`, i.e. apply an effect
+ * that is still on disk?
+ *
+ * `installed_assets` answers this only for an attach that copied files. An
+ * attach that writes the client's settings and copies nothing (openclaw, and
+ * any settings-only client) leaves no such trace, so a `done` marker later
+ * rewritten to `failed`/`refused` used to be byte-indistinguishable from one
+ * whose attach never applied anything. `prior_done` is the missing half of the
+ * evidence, read defensively because the store is persisted JSON that a
+ * pre-LLP-0250 daemon (or a hand edit) wrote without the field.
+ *
+ * Read off the *existing* marker when writing a terminal rewrite, and off the
+ * stored marker when deciding whether the reverse gap may drop it.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {boolean}
+ * @ref LLP 0250#the-bit [implements]: one accessor for "an earlier pass applied
+ *   something here", beside the one that reads the asset half
+ */
+export function markerRecordsPriorDone(marker) {
+  if (!marker) return false
+  return marker.status === 'done' || marker.prior_done === true
+}
+
+/**
  * Read-only view of the client-action markers for `hyp status`: usable
  * from any process (the CLI is not the daemon), so it never constructs the
  * reconciler or takes its handlers. Mirrors `readConfigControlStatus`.
@@ -450,7 +658,7 @@ export function readClientActionStatus({ stateRoot }) {
  *
  * @param {{ stateRoot: string, kind: string, requestKey: string, now?: () => number }} args
  * @returns {boolean} whether a marker was found and the store rewritten
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
+ * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
  */
 export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
@@ -459,6 +667,81 @@ export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Dat
   const markers = store[kind]
   if (!markers || !(requestKey in markers)) return false
   delete markers[requestKey]
+  // Drop an emptied bucket so a no-op namespace never lingers (mirrors reconcile).
+  if (Object.keys(markers).length > 0) {
+    store[kind] = markers
+  } else {
+    delete store[kind]
+  }
+  atomicWriteJsonSync(markerPath, store, { mode: 0o600, dirMode: 0o700 })
+  return true
+}
+
+/**
+ * Re-arm a `refused` marker after an explicit `hyp attach` fixed the
+ * precondition it refused on, without destroying anything the marker is the
+ * only record of. Called by the manual attach command path; a no-op returning
+ * `false` for a missing marker, or for one in any other state (a `done` marker
+ * is a live undo record, and a `failed` one is not short-circuited by anything,
+ * so neither needs or may get this).
+ *
+ * Two shapes, because "re-arm" and "retract" are only the same operation when
+ * the marker records no effect:
+ *
+ *  - **No `installed_assets`.** Dropped outright. The next reconcile pass's
+ *    `existing` lookup returns `undefined`, the request key is a fresh forward
+ *    gap, and `perform()` writes a correct `done` marker itself.
+ *
+ *    What makes that safe is the *call site*, not the marker: this runs only
+ *    after an explicit `hyp attach` that already succeeded and rewrote the
+ *    client's settings, and a hand-attached client is undone by `hyp detach`
+ *    reading the client's own file, with no marker needed. So do not read the
+ *    drop as "this marker recorded nothing". Such a marker may carry
+ *    `prior_done: true` (a settings-only attach that reached `done` and was
+ *    later rewritten to `refused`), and that bit is exactly the evidence the
+ *    reconciler's reverse gap must not drop over. Here it may be dropped, and
+ *    the asset half below may not, because the settings name themselves on
+ *    disk and org-installed asset paths are named by nothing but this marker.
+ *    Only the *asset* half of the record outlives an explicit re-attach.
+ *  - **With `installed_assets`.** Those name files an *earlier* successful
+ *    org-driven attach copied, carried onto the marker across its rewrite to
+ *    `refused`; the marker is the only thing on disk naming them, and
+ *    `hyp detach` / `hyp leave` / `reverse()` all read exactly it to know what
+ *    to remove (LLP 0138#marker-undo). Dropping it would strand them, which is
+ *    the same harm the `refused` write branch's own carry-forward exists to
+ *    prevent. So the marker is rewritten to `failed` with the undo record
+ *    intact: `failed` is short-circuited by nothing, so it re-arms the forward
+ *    gap exactly as a cleared marker does, and the next successful
+ *    `perform()` unions the carried assets onto the fresh `done` marker.
+ *
+ * Atomic (tmp+rename, mode 0600), like {@link clearClientActionMarker}.
+ *
+ * @param {{ stateRoot: string, kind: string, requestKey: string, now?: () => number }} args
+ * @returns {boolean} whether a `refused` marker was found and the store rewritten
+ * @ref LLP 0186#re-arm-explicit-hyp-attach-re-run-only [implements]: an explicit hyp attach re-arms a refused marker, and only a refused one
+ * @ref LLP 0138#marker-undo [implements]: the re-arm keeps the record of an applied effect, so a later reversal can still remove what an org-driven attach installed
+ * @ref LLP 0250 [constrained-by]: the re-arm is deliberately left reading only the asset half, so an assetless marker carrying `prior_done` is still dropped here
+ */
+export function rearmRefusedActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const markerPath = path.join(controlDir, CLIENT_ACTIONS_BASENAME)
+  const store = readMarkerStore(markerPath)
+  const markers = store[kind]
+  const marker = markers?.[requestKey]
+  if (!markers || !marker || marker.status !== 'refused') return false
+  const installedAssets = readInstalledAssets(marker)
+  if (installedAssets.length === 0) {
+    delete markers[requestKey]
+  } else {
+    const previous = typeof marker.reason === 'string' && marker.reason.length > 0 ? marker.reason : 'unknown'
+    markers[requestKey] = {
+      ...marker,
+      status: 'failed',
+      installed_assets: installedAssets,
+      reason: `re-armed by an explicit 'hyp client attach ${requestKey}', awaiting the next reconcile pass (previous refusal: ${previous})`,
+      last_attempt: new Date(now()).toISOString(),
+    }
+  }
   // Drop an emptied bucket so a no-op namespace never lingers (mirrors reconcile).
   if (Object.keys(markers).length > 0) {
     store[kind] = markers

@@ -1,0 +1,1272 @@
+// @ts-check
+
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { test } from 'node:test'
+import {
+  createProductResource,
+  createRuntimeSummary,
+  productEvent,
+  productBatch,
+  PRODUCT_VERSION
+} from '../../src/core/product_telemetry/collection.js'
+import {
+  validateBatch,
+  COMMANDS
+} from '../../src/core/product_telemetry/contract.js'
+import {
+  createOutbox,
+  QUEUE_BYTES,
+  QUEUE_SLOTS
+} from '../../src/core/product_telemetry/outbox.js'
+import {
+  effectivePolicy,
+  safeDestination,
+  writePolicy,
+  productRoot
+} from '../../src/core/product_telemetry/policy.js'
+import {
+  createDelivery,
+  retryAfterMs
+} from '../../src/core/product_telemetry/delivery.js'
+import { dispatch } from '../../src/core/cli/dispatch.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
+import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { createProductClient } from '../../src/core/product_telemetry/client.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
+import { productStatus, runTelemetry } from '../../src/core/product_telemetry/commands.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
+
+/** @param {any} t */
+function temp(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-product-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  return dir
+}
+const NOW = Date.parse('2026-09-08T12:00:00.000Z')
+const binding = 'a'.repeat(64)
+/** @param {number} [now] */
+function batch(now = NOW) {
+  return productBatch(
+    createProductResource(),
+    [
+      /** @type {any} */ (
+        productEvent(
+          'cli.invocation',
+          {
+            command: 'query sql',
+            invocation_kind: 'execution',
+            outcome: 'success',
+            exit_class: 'zero',
+            duration_ms: 12
+          },
+          now
+        )
+      )
+    ],
+    now
+  )
+}
+
+/** @param {string} dir @param {string} [org] */
+function enroll(dir, org = 'org-a') {
+  const identityPath = path.join(dir, 'identity.json')
+  const jwt = `header.${Buffer.from(JSON.stringify({ org })).toString('base64url')}.signature`
+  fs.writeFileSync(
+    identityPath,
+    JSON.stringify({
+      central_url: 'https://example.invalid',
+      gateway_id: randomUUID(),
+      jwt,
+      expires_at: NOW / 1000 + 86400
+    })
+  )
+  return writePolicy(dir, 'organization', {
+    url: 'https://example.invalid',
+    identityPath
+  })
+}
+const capability = () =>
+  new Response(
+    JSON.stringify({
+      schema_versions: [1],
+      max_records: 100,
+      max_batch_bytes: 32768,
+      max_queue_age_seconds: 604800,
+      dedup_seconds: 691200
+    }),
+    { status: 200 }
+  )
+
+// Construction fixtures deliberately mix every forbidden class into a record.
+test('product construction drops forbidden fields and normalizes finite labels', () => {
+  const secret =
+    '/Users/private/repo select prompt response hostname token https://secret.invalid'
+  const event = productEvent(
+    'cli.invocation',
+    {
+      command: secret,
+      invocation_kind: secret,
+      outcome: secret,
+      exit_class: secret,
+      duration_ms: 4,
+      argv: [secret],
+      sql: secret,
+      error: secret,
+      stack: secret,
+      plugin: secret,
+      resource: secret
+    },
+    NOW
+  )
+  assert.equal(JSON.stringify(event).includes(secret), false)
+  assert.equal(event?.attributes.command, 'unknown')
+  assert.equal(
+    validateBatch(
+      productBatch(createProductResource(), [/** @type {any} */ (event)], NOW),
+      NOW
+    ),
+    null
+  )
+  assert.equal(productEvent('anything-private', { secret }, NOW), null)
+  const injected = batch()
+  assert(injected)
+  injected.records[0].attributes.path = secret
+  assert.equal(validateBatch(injected, NOW), 'invalid_event')
+})
+
+test('resource is actual package version and finite platform, role, test traffic', () => {
+  const resource = createProductResource({
+    role: 'daemon',
+    env: {
+      HYP_DEV_TELEMETRY: '1',
+      OTEL_RESOURCE_ATTRIBUTES: 'user.name=secret',
+      OTEL_SERVICE_NAME: 'private'
+    }
+  })
+  assert.equal(resource['service.version'], PRODUCT_VERSION)
+  assert.equal(resource['service.role'], 'daemon')
+  assert.equal(resource['deployment.environment'], 'test')
+  assert.equal(JSON.stringify(resource).includes('private'), false)
+  assert.equal(JSON.stringify(resource).includes('secret'), false)
+  const server = createProductResource({ role: 'server', version: '2.3.4' })
+  assert.equal(server['hypaware.version'], PRODUCT_VERSION)
+})
+
+test('basic sampler measures interval CPU and weighted average, peak and latest', () => {
+  let wall = NOW
+  let mono = 0
+  let cpu = 0
+  let memory = 100
+  const sampler = createRuntimeSummary({
+    now: () => wall,
+    monotonicNow: () => mono,
+    cpuUsage: () => ({ user: cpu, system: 0 }),
+    memoryUsage: () => ({ rss: memory, heapUsed: memory / 2 })
+  })
+  mono += 30000
+  wall += 30000
+  cpu += 15000000
+  sampler.sample()
+  memory = 300
+  mono += 15000
+  wall += 15000
+  cpu += 15000000
+  sampler.sample()
+  const points = sampler.flush()
+  const rss = points.find((p) => p.name === 'process.rss')
+  assert(rss)
+  assert.equal(rss.average, 500 / 3)
+  assert.equal(rss.max, 300)
+  assert.equal(rss.value, 300)
+  assert.equal(rss.coverageMs, 45000)
+  const cpuPoint = points.find((p) => p.name === 'process.cpu')
+  assert.equal(cpuPoint?.average, 2 / 3)
+  assert.equal(cpuPoint?.value, 1)
+  assert.equal(cpuPoint?.max, 1)
+  assert.equal(
+    validateBatch(productBatch(createProductResource(), points, wall), wall),
+    null
+  )
+  assert.deepEqual(sampler.flush(), [])
+})
+
+test('sampler omits stalls, invalid memory, and missing samples rather than zero-filling', () => {
+  let now = NOW
+  const sampler = createRuntimeSummary({
+    now: () => now,
+    monotonicNow: () => now,
+    cpuUsage: () => ({ user: 0, system: 0 }),
+    memoryUsage: () => ({ rss: NaN, heapUsed: Infinity })
+  })
+  now += 30000
+  sampler.sample()
+  assert.deepEqual(
+    sampler.flush().map((p) => p.name),
+    ['process.cpu']
+  )
+  now += 70000
+  sampler.sample()
+  assert.deepEqual(sampler.flush(), [])
+})
+
+// A window whose samples never move is the ordinary idle daemon, and summing
+// equal products can put the weighted mean one ulp above the observed peak.
+test('a flat sample window still validates instead of discarding the batch', () => {
+  for (let trial = 0; trial < 200; trial++) {
+    let wall = NOW
+    let mono = 0
+    const rss = 60_000_000 + trial * 4096
+    const sampler = createRuntimeSummary({
+      now: () => wall,
+      monotonicNow: () => mono,
+      cpuUsage: () => ({ user: 0, system: 0 }),
+      memoryUsage: () => ({ rss, heapUsed: rss / 3 })
+    })
+    for (let i = 0; i < 10; i++) {
+      // performance.now() deltas are fractional, so the per-sample products
+      // are inexact and their sum need not divide back to the flat value.
+      mono +=
+        29_990 + ((trial * 7 + i * 13) % 21) + ((i * 37 + trial * 11) % 97) / 97
+      wall += 30_000
+      sampler.sample()
+    }
+    const points = sampler.flush()
+    assert.equal(points.length, 3)
+    assert.equal(
+      validateBatch(
+        productBatch(createProductResource({ role: 'daemon' }), points, wall),
+        wall
+      ),
+      null
+    )
+  }
+})
+
+test('concurrent writers share an aggregate fixed byte and count cap', async (t) => {
+  const root = temp(t)
+  const url = new URL(
+    '../../src/core/product_telemetry/outbox.js',
+    import.meta.url
+  ).href
+  const b = batch()
+  const script = `import {createOutbox} from ${JSON.stringify(url)}; const q=createOutbox(process.argv[1],{now:()=>${NOW}});const b=JSON.parse(process.argv[2]);for(let i=0;i<100;i++)q.append(b,${JSON.stringify(binding)})`
+  await Promise.all(
+    Array.from({ length: 6 }, () =>
+      child(['--input-type=module', '-e', script, root, JSON.stringify(b)])
+    )
+  )
+  const queue = createOutbox(root, { now: () => NOW })
+  const status = queue.status()
+  assert.equal(status.queue_batches, QUEUE_SLOTS)
+  assert(status.queue_bytes <= QUEUE_BYTES)
+  assert.equal(status.dropped_lower_bound, 1)
+  assert.equal(fs.readdirSync(path.join(root, 'queue-v1')).length, QUEUE_SLOTS)
+})
+
+test('queue survives restart with immutable bytes and expires after seven days', (t) => {
+  const root = temp(t)
+  const queue = createOutbox(root, { now: () => NOW })
+  const b = batch()
+  assert(queue.append(b, binding))
+  const entry = createOutbox(root, { now: () => NOW }).entries()[0]
+  assert.equal(entry.wire, JSON.stringify(b))
+  assert.equal(queue.prune(binding), 0)
+  assert.equal(
+    createOutbox(root, { now: () => NOW + 7 * 86400000 + 1 }).prune(binding),
+    1
+  )
+  assert.equal(queue.entries().length, 0)
+})
+
+test('queue rejects oversized, malformed and non-allowlisted batches without throwing', (t) => {
+  const root = temp(t)
+  const queue = createOutbox(root, { now: () => NOW })
+  assert.equal(queue.append({ secret: 'sql' }, binding), false)
+  fs.writeFileSync(path.join(root, 'not-directory'), 'x')
+  assert.equal(
+    createOutbox(path.join(root, 'not-directory')).append(
+      batch(Date.now()),
+      binding
+    ),
+    false
+  )
+})
+
+// The state root has one derivation, and this is what keeps it that way: a
+// nuance added to readObservabilityEnv, or a local copy reintroduced in
+// productRoot, fails here on whichever spelling of HYP_HOME diverges.
+test('the product telemetry root is the shared state root, however HYP_HOME is spelled', () => {
+  for (const env of [
+    { HYP_HOME: path.join(os.tmpdir(), 'hyp-root-absolute') },
+    {},
+    { HYP_HOME: path.join('relative', 'state') },
+    { HYP_HOME: '' }
+  ])
+    assert.equal(
+      productRoot(env),
+      path.join(readObservabilityEnv(env).stateDir, 'product-telemetry')
+    )
+  // The loop above still passes if both sides move together, so pin the
+  // default spelling itself.
+  assert.equal(
+    productRoot({}),
+    path.join(os.homedir(), '.hyp', 'hypaware', 'product-telemetry')
+  )
+  // And pin a set HYP_HOME too: the default pin covers only the unset branch,
+  // so a helper-side change to the set branch would pass both halves above.
+  // The relative spelling also fails on added normalization (a path.resolve
+  // would rewrite it), which an absolute pin cannot see.
+  assert.equal(
+    productRoot({ HYP_HOME: path.join('relative', 'state') }),
+    path.join('relative', 'state', 'hypaware', 'product-telemetry')
+  )
+})
+
+// The default has to be pinned through the CLI, not only through the policy
+// reader: a standalone installation has no queue to preview later.
+test('a standalone installation with no policy queues nothing and creates no telemetry state', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  await dispatch(['--version'], {
+    env,
+    stdout: { write() {} },
+    stderr: { write() {} }
+  })
+  await dispatch(['query', 'sql', 'select secret from t'], {
+    env,
+    stdout: { write() {} },
+    stderr: { write() {} }
+  })
+  assert.equal(effectivePolicy(root).mode, 'off')
+  assert.equal(fs.existsSync(root), false)
+  assert.deepEqual(createOutbox(root).entries(), [])
+})
+
+/** @param {string} home @param {boolean} [customPath] */
+function remoteEnrollment(home, customPath = false) {
+  const stateRoot = path.join(home, 'hypaware')
+  const identityPath = customPath ? path.join(home, 'custom-identity.json') :
+    path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
+  const configPath = centralSeedPath(stateRoot)
+  const identity = {
+    central_url: 'https://example.invalid/',
+    gateway_id: randomUUID(),
+    jwt: `header.${Buffer.from(JSON.stringify({ org: 'org-a' })).toString('base64url')}.signature`
+  }
+  const config = {
+    version: 2,
+    sinks: { central: { plugin: '@hypaware/central', config: {
+      url: identity.central_url,
+      identity: customPath ? { persisted_path: identityPath } : {}
+    } } }
+  }
+  fs.mkdirSync(path.dirname(identityPath), { recursive: true })
+  fs.mkdirSync(path.dirname(configPath), { recursive: true })
+  fs.writeFileSync(identityPath, JSON.stringify(identity))
+  fs.writeFileSync(configPath, JSON.stringify(config))
+  return { identityPath, configPath, identity, config }
+}
+
+for (const applied of [false, true]) {
+  test(`enrolled users automatically collect and deliver with ${applied ? 'applied config and custom identity' : 'join seed'}`, async (t) => {
+    const home = temp(t)
+    const env = { HYP_HOME: home }
+    const root = productRoot(env)
+    const remote = remoteEnrollment(home, applied)
+    const initial = effectivePolicy(root)
+    if (applied) {
+      fs.renameSync(remote.configPath, path.join(path.dirname(remote.configPath), 'config.a.json'))
+      fs.symlinkSync('config.a.json', path.join(path.dirname(remote.configPath), 'active'))
+    }
+    assert.equal(productStatus(env).policy, 'enrolled_organization')
+    assert.equal(effectivePolicy(root).binding, initial.binding)
+    await dispatch(['--version'], { env, stdout: { write() {} }, stderr: { write() {} } })
+    assert.equal(fs.existsSync(path.join(root, 'policy.json')), false)
+    const queue = createOutbox(root)
+    assert.equal(queue.entries().length, 1)
+    const requests = []
+    const fetchFn = /** @type {typeof fetch} */ (async (url, options) => {
+      requests.push({ url, options })
+      assert.equal(url, 'https://example.invalid/v1/telemetry')
+      assert.equal(new Headers(options?.headers).get('authorization'), `Bearer ${remote.identity.jwt}`)
+      return options?.method === 'POST' ?
+        new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 }) : capability()
+    })
+    await createDelivery(root, { fetchFn }).drain()
+    assert.equal(requests.length, 2)
+    assert.equal(queue.entries().length, 0)
+  })
+}
+
+test('automatic reporting honors off, local and malformed saved preferences', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  remoteEnrollment(home)
+  const client = createProductClient({ env })
+  client.emit([/** @type {any} */ (productEvent('heartbeat', { uptime_s: 1 }))])
+  assert.equal(createOutbox(root).entries().length, 1)
+  await runTelemetry(['off'], /** @type {any} */ ({ env, stdout: { write() {} }, stderr: { write() {} } }))
+  assert.equal(effectivePolicy(root).mode, 'off')
+  assert.equal(createOutbox(root).entries().length, 0)
+  client.emit([/** @type {any} */ (productEvent('heartbeat', { uptime_s: 2 }))])
+  client.close()
+  assert.equal(createOutbox(root).entries().length, 0)
+  writePolicy(root, 'local')
+  assert.equal(effectivePolicy(root).mode, 'local')
+  fs.writeFileSync(path.join(root, 'policy.json'), '{broken')
+  assert.equal(effectivePolicy(root).mode, 'off')
+})
+
+// A failed opt-out must name what it left running, and only when collection
+// really survived it.
+for (const enrolled of [true, false]) {
+  test(`an opt-out whose preference write fails reports collection ${enrolled ? 'is still enabled' : 'is off'}`, {
+    skip: process.getuid?.() === 0 && 'root writes through a mode-500 directory anyway'
+  }, async (t) => {
+    const home = temp(t)
+    const env = { HYP_HOME: home }
+    const root = productRoot(env)
+    if (enrolled) remoteEnrollment(home)
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+    assert.equal(productStatus(env).collection, enrolled ? 'organization' : 'off')
+    fs.chmodSync(root, 0o500)
+    let errors = ''
+    try {
+      await assert.rejects(runTelemetry(['off'], /** @type {any} */ ({
+        env,
+        stdout: { write() {} },
+        stderr: { write: (/** @type {string} */ text) => { errors += text } }
+      })), { code: 'EACCES' })
+    } finally {
+      // Restore before any assertion can fail: a mode-500 root also defeats
+      // the temp-home cleanup this test registered.
+      fs.chmodSync(root, 0o700)
+    }
+    assert.equal(fs.existsSync(path.join(root, 'policy.json')), false)
+    assert.equal(productStatus(env).collection, enrolled ? 'organization' : 'off')
+    assert.equal(/product telemetry remains enabled/.test(errors), enrolled, errors)
+  })
+}
+
+test('automatic bindings survive refresh and stop on leave or an organization change', async (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const remote = remoteEnrollment(home)
+  const before = effectivePolicy(root)
+  remote.identity.jwt = `header.${Buffer.from(JSON.stringify({ org: 'org-a', exp: 123 })).toString('base64url')}.signature`
+  fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+  assert.equal(effectivePolicy(root).binding, before.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (before.binding)))
+  remote.identity.jwt = `header.${Buffer.from(JSON.stringify({ org: 'org-b' })).toString('base64url')}.signature`
+  fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+  assert.notEqual(effectivePolicy(root).binding, before.binding)
+  let requests = 0
+  await createDelivery(root, { now: () => NOW, fetchFn: /** @type {typeof fetch} */ (async () => {
+    requests++
+    return capability()
+  }) }).drain()
+  assert.equal(requests, 0)
+  assert.equal(queue.entries().length, 0)
+  fs.unlinkSync(remote.configPath)
+  assert.equal(effectivePolicy(root).mode, 'off')
+})
+
+for (const broken of ['missing identity', 'invalid identity', 'wrong destination', 'unsafe destination', 'missing org', 'ambiguous sinks', 'invalid config', 'fragment destination', 'query destination']) {
+  test(`automatic reporting stays off with ${broken}`, (t) => {
+    const home = temp(t)
+    const remote = remoteEnrollment(home)
+    if (broken === 'missing identity') fs.unlinkSync(remote.identityPath)
+    if (broken === 'invalid identity') fs.writeFileSync(remote.identityPath, 'null')
+    if (broken === 'wrong destination') remote.config.sinks.central.config.url = 'https://other.invalid'
+    if (broken === 'unsafe destination') remote.config.sinks.central.config.url = 'http://example.invalid'
+    if (broken === 'missing org') {
+      remote.identity.jwt = 'header.e30.signature'
+      fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+    }
+    if (broken === 'ambiguous sinks') Object.assign(remote.config.sinks, { other: remote.config.sinks.central })
+    // A bare `#`/`?` suffix parses and leaves `hash`/`search` empty, so it
+    // survives a truthiness check while making the POST target the server root.
+    for (const [kind, suffix] of [['fragment destination', '#'], ['query destination', '?']])
+      if (broken === kind) {
+        remote.config.sinks.central.config.url = 'https://example.invalid' + suffix
+        remote.identity.central_url = 'https://example.invalid' + suffix
+        fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+      }
+    fs.writeFileSync(remote.configPath, broken === 'invalid config' ? '{bad' : JSON.stringify(remote.config))
+    assert.equal(effectivePolicy(productRoot({ HYP_HOME: home })).mode, 'off')
+  })
+}
+
+// The serialized destination becomes the POST target's prefix, so shapes a parse
+// accepts still move `/v1/telemetry` off the path: a bare `?`/`#` turns the
+// receiver path into a query or fragment, and a doubled trailing slash survives
+// a single-slash strip.
+for (const [shape, url, target] of /** @type {[string, string, string|null][]} */ ([
+  ['a fragment after a path', 'https://example.invalid/receiver#', null],
+  ['a query after a path', 'https://example.invalid/receiver?', null],
+  ['a doubled trailing slash', 'https://example.invalid//', 'https://example.invalid/v1/telemetry']
+])) {
+  test(`${shape} ${target ? 'normalizes to one receiver path' : 'is not a usable destination'}`, async (t) => {
+    const home = temp(t)
+    const root = productRoot({ HYP_HOME: home })
+    const remote = remoteEnrollment(home)
+    remote.config.sinks.central.config.url = url
+    remote.identity.central_url = url
+    fs.writeFileSync(remote.configPath, JSON.stringify(remote.config))
+    fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+    // Enrollment derives this destination with no opt-in, so the automatic and
+    // explicit paths must reach the same verdict, and a refusal must say which
+    // half of the opt-in it rejected.
+    assert.equal(effectivePolicy(root).mode, target ? 'organization' : 'off')
+    if (!target) {
+      assert.throws(
+        () => writePolicy(root, 'organization', { url, identityPath: remote.identityPath }),
+        /destination/
+      )
+      return
+    }
+    const explicit = writePolicy(root, 'organization', { url, identityPath: remote.identityPath })
+    assert.equal(explicit.mode, 'organization')
+    createOutbox(root, { now: () => NOW }).append(batch(), /** @type {string} */ (explicit.binding))
+    const seen = []
+    let unauthorized = true
+    const fetchFn = /** @type {typeof fetch} */ (async (requested, init) => {
+      seen.push(requested)
+      if (String(requested).endsWith('/v1/identity/refresh'))
+        return new Response(JSON.stringify({ jwt: remote.identity.jwt }), { status: 200 })
+      if (unauthorized) {
+        unauthorized = false
+        return new Response(null, { status: 401 })
+      }
+      return init?.method === 'POST'
+        ? new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+        : capability()
+    })
+    await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+    // Both routes carry the receiver path, and the 401 refresh inherits it.
+    assert.deepEqual(seen, [target, 'https://example.invalid/v1/identity/refresh', target, target])
+    assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
+  })
+}
+
+// The refusal must name the actual reason: `hyp join` persists the url as
+// typed, so a destination that merely spells itself differently from its parse
+// must not be accused of credentials, a query or a fragment it never carried.
+test('a refused destination is described by its actual defect', (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const remote = remoteEnrollment(home)
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://example.invalid/receiver?', identityPath: remote.identityPath }),
+    /no credentials, query or fragment/
+  )
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://Example.Invalid/receiver', identityPath: remote.identityPath }),
+    /the way the URL parser normalizes it/
+  )
+})
+
+// Both producers refuse a url that spells itself differently from its parse, so
+// a saved policy carrying one was hand-edited or foreign-written. The read guard
+// still accepts it by its parse, so delivery must send to the parse: the raw
+// string resolves to the doubled slash the receiver will not route.
+test('a saved destination that does not round-trip is delivered and reported where the guard accepted it', async (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const url = 'https://example.invalid/receiver\\'
+  const identityPath = path.join(home, 'identity.json')
+  const gatewayId = randomUUID()
+  fs.writeFileSync(
+    identityPath,
+    JSON.stringify({
+      central_url: url,
+      gateway_id: gatewayId,
+      jwt: `header.${Buffer.from(JSON.stringify({ org: 'org-a' })).toString('base64url')}.signature`
+    })
+  )
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url,
+      identity_path: identityPath,
+      enrollment: createHash('sha256')
+        .update(JSON.stringify([url, gatewayId, 'org-a']))
+        .digest('hex')
+    })
+  )
+  const effective = effectivePolicy(root)
+  assert.equal(effective.mode, 'organization')
+  createOutbox(root, { now: () => NOW }).append(batch(), /** @type {string} */ (effective.binding))
+  const seen = []
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (requested, init) => {
+      seen.push(String(requested))
+      return init?.method === 'POST'
+        ? new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+        : capability()
+    }
+  )
+  await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+  const target = safeDestination(url) + '/v1/telemetry'
+  assert.equal(target, 'https://example.invalid/receiver/v1/telemetry')
+  assert.deepEqual(seen, [target, target])
+  assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
+  // Status names one place with delivery: the backslash form is not somewhere
+  // the batch this pass just delivered was ever sent.
+  const reported = productStatus({ HYP_HOME: home }).organization_destination
+  assert.equal(reported, 'https://example.invalid/receiver')
+  assert.equal(target, reported + '/v1/telemetry')
+})
+
+// Both producers require the saved string to equal its own parse apart from
+// trailing slashes, so that is the whole difference a legitimate policy can
+// show. One unconditional rule covers those too: a reported destination is
+// always the one the POST target is built from, never sometimes the saved
+// spelling, so reading the line needs no knowledge of which case it hit.
+test('a producer-written destination is reported as delivery resolves it', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const remote = remoteEnrollment(home)
+  assert.equal(remote.identity.central_url, 'https://example.invalid/')
+  const automatic = productStatus(env)
+  assert.equal(automatic.policy, 'enrolled_organization')
+  assert.equal(automatic.organization_destination, 'https://example.invalid')
+  const explicit = writePolicy(root, 'organization', {
+    url: remote.identity.central_url,
+    identityPath: remote.identityPath
+  })
+  assert.equal(explicit.mode, 'organization')
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(root, 'policy.json'), 'utf8')).url,
+    'https://example.invalid/'
+  )
+  assert.equal(
+    productStatus(env).organization_destination,
+    'https://example.invalid'
+  )
+})
+
+// A saved url the guard resolves to no destination is reported as none: the
+// neighbouring reason says why collection is off, and a url this far outside
+// the contract can carry the credentials `writePolicy` already refuses to echo.
+test('a destination that resolves to nothing is reported as none', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url: 'https://user:secret@example.invalid/receiver',
+      identity_path: path.join(home, 'missing.json'),
+      enrollment: 'a'.repeat(64)
+    })
+  )
+  const status = productStatus(env)
+  assert.equal(status.collection, 'off')
+  assert.equal(status.organization_destination, null)
+})
+
+// Local mode is a preview queue, not a network permission.
+test('local collection queues copies but never contacts a destination', async (t) => {
+  const root = temp(t)
+  writePolicy(root, 'local')
+  const local = effectivePolicy(root)
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (local.binding)))
+  let requests = 0
+  const fetchFn = /** @type {typeof fetch} */ (
+    async () => {
+      requests++
+      return capability()
+    }
+  )
+  await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+  assert.equal(requests, 0)
+  assert.equal(queue.entries().length, 1)
+})
+
+test('local identity exists only after enable, and consent/enrollment changes invalidate copies', (t) => {
+  const root = temp(t)
+  assert.equal(effectivePolicy(root).mode, 'off')
+  assert.deepEqual(fs.readdirSync(root), [])
+  const local = writePolicy(root, 'local')
+  assert.match(local.policy.installation_id, /^[0-9a-f-]{36}$/)
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (local.binding)))
+  const org = enroll(root)
+  queue.prune(org.binding)
+  assert.equal(queue.entries().length, 0)
+  assert(queue.append(batch(), /** @type {string} */ (org.binding)))
+  const newOrg = enroll(root, 'org-b')
+  assert.notEqual(org.binding, newOrg.binding)
+  queue.prune(newOrg.binding)
+  assert.equal(queue.entries().length, 0)
+  const before = effectivePolicy(root)
+  const id = JSON.parse(
+    fs.readFileSync(path.join(root, 'identity.json'), 'utf8')
+  )
+  id.gateway_id = randomUUID()
+  fs.writeFileSync(path.join(root, 'identity.json'), JSON.stringify(id))
+  assert.equal(effectivePolicy(root).reason, 'enrollment_changed')
+  assert(before.binding)
+  writePolicy(root, 'off')
+  assert.equal(effectivePolicy(root).mode, 'off')
+})
+
+test('lost acknowledgement retries byte-identically after sender restart', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  let now = NOW
+  const queue = createOutbox(root, { now: () => now })
+  queue.append(batch(), /** @type {string} */ (policy.binding))
+  const sent = []
+  let lost = true
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (_, init) => {
+      if (!init?.method) return capability()
+      sent.push(init.body)
+      if (lost) {
+        lost = false
+        throw new Error('lost ack')
+      }
+      return new Response(JSON.stringify({ status: 202, duplicate: true }), {
+        status: 202
+      })
+    }
+  )
+  await createDelivery(root, {
+    fetchFn,
+    now: () => now,
+    random: () => 0
+  }).drain()
+  assert.equal(queue.entries().length, 1)
+  now += 10000
+  await createDelivery(root, { fetchFn, now: () => now }).drain()
+  assert.equal(queue.entries().length, 0)
+  assert.equal(sent.length, 2)
+  assert.equal(sent[0], sent[1])
+})
+
+for (const status of [404, 401, 429, 503, 413, 422, 409]) {
+  test(`receiver ${status} is bounded and ${[413, 422, 409].includes(status) ? 'terminal' : 'retained'}`, async (t) => {
+    const root = temp(t)
+    const policy = enroll(root)
+    const queue = createOutbox(root, { now: () => NOW })
+    queue.append(batch(), /** @type {string} */ (policy.binding))
+    const fetchFn = /** @type {typeof fetch} */ (
+      async (_, init) =>
+        !init?.method
+          ? capability()
+          : new Response('{}', { status, headers: { 'retry-after': '60' } })
+    )
+    await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+    assert.equal(
+      queue.entries().length,
+      [413, 422, 409].includes(status) ? 0 : 1
+    )
+    if ([429, 503].includes(status))
+      assert(queue.readDelivery().next_at >= NOW + 60000)
+  })
+}
+
+test('disable between capability and POST prevents sending the old copy', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  const queue = createOutbox(root, { now: () => NOW })
+  queue.append(batch(), /** @type {string} */ (policy.binding))
+  let posts = 0
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (_, init) => {
+      if (init?.method) posts++
+      writePolicy(root, 'off')
+      return capability()
+    }
+  )
+  await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+  assert.equal(posts, 0)
+})
+
+test('Retry-After supports seconds and HTTP dates with a bounded maximum', () => {
+  assert.equal(retryAfterMs('60', NOW), 60000)
+  assert.equal(retryAfterMs(new Date(NOW + 120000).toUTCString(), NOW), 120000)
+  assert.equal(retryAfterMs('0', NOW), 0)
+  assert.equal(retryAfterMs('garbage', NOW), 0)
+  assert.equal(retryAfterMs('9999999999', NOW), 86400000)
+})
+
+for (const [argv, expected] of [
+  [['--version'], ['version', 'version', 'success']],
+  [['--help'], ['help', 'help', 'success']],
+  [
+    ['private-command', 'secret'],
+    ['unknown', 'unknown', 'failure']
+  ]
+]) {
+  test(`outer dispatch covers ${argv[0]} with exactly one summary`, async (t) => {
+    const home = temp(t)
+    const env = { HYP_HOME: home, HYP_DEV_TELEMETRY: '1' }
+    const root = productRoot(env)
+    writePolicy(root, 'local')
+    await dispatch(argv, {
+      env,
+      stdout: { write() {} },
+      stderr: { write() {} }
+    })
+    const records = createOutbox(root)
+      .entries()
+      .flatMap((e) => JSON.parse(e.wire).records)
+    const invocations = records.filter((r) => r.name === 'cli.invocation')
+    assert.equal(invocations.length, 1)
+    assert.deepEqual(
+      ['command', 'invocation_kind', 'outcome'].map(
+        (k) => invocations[0].attributes[k]
+      ),
+      expected
+    )
+    assert.equal(JSON.stringify(records).includes('private-command'), false)
+  })
+}
+
+test('canonical aliases, nested setup commands and cancellation count only the outer invocation', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  const registry = createCommandRegistry()
+  registry.register({
+    name: 'setup',
+    aliases: ['init'],
+    summary: '',
+    usage: '',
+    run: async (_, ctx) => {
+      await ctx.commands?.run('version', [])
+      return 130
+    }
+  })
+  registry.register({
+    name: 'version',
+    summary: '',
+    usage: '',
+    run: async () => 0
+  })
+  const kernel = createKernelRuntime({ cacheRoot: path.join(home, 'cache') })
+  assert.equal(
+    await dispatch(['init'], {
+      registry,
+      kernel,
+      env,
+      stdout: { write() {} },
+      stderr: { write() {} }
+    }),
+    130
+  )
+  const records = createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+  const summaries = records.filter((r) => r.name === 'cli.invocation')
+  assert.equal(summaries.length, 1)
+  assert.equal(summaries[0].attributes.command, 'setup')
+  assert.equal(summaries[0].attributes.outcome, 'cancelled')
+  assert.equal(records.filter((r) => r.name === 'setup.step').length, 1)
+  assert(COMMANDS.includes('setup'))
+})
+
+/** @param {string[]} args */
+function child(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(process.execPath, args, {
+      stdio: ['ignore', 'ignore', 'pipe']
+    })
+    let stderr = ''
+    proc.stderr.on('data', (b) => {
+      stderr += b
+    })
+    proc.on('error', reject)
+    proc.on('exit', (code) =>
+      code === 0 ? resolve(undefined) : reject(new Error(stderr))
+    )
+  })
+}
+
+test('close aborts in-flight delivery immediately without waiting for the receiver', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  createOutbox(root, { now: () => NOW }).append(
+    batch(),
+    /** @type {string} */ (policy.binding)
+  )
+  let started
+  const ready = new Promise((resolve) => {
+    started = resolve
+  })
+  let aborted = false
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (_, init) =>
+      new Promise((resolve, reject) => {
+        started()
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            aborted = true
+            reject(new Error('aborted'))
+          },
+          { once: true }
+        )
+      })
+  )
+  const delivery = createDelivery(root, { fetchFn, now: () => NOW })
+  const pending = delivery.drain()
+  await ready
+  assert.equal(delivery.close(), undefined)
+  await pending
+  assert(aborted)
+  assert.equal(createOutbox(root).entries().length, 1)
+})
+
+test('a durable-looking HTTP response without the exact receipt does not acknowledge', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  const queue = createOutbox(root, { now: () => NOW })
+  queue.append(batch(), /** @type {string} */ (policy.binding))
+  await createDelivery(root, {
+    now: () => NOW,
+    fetchFn: /** @type {typeof fetch} */ (
+      async (_, init) =>
+        init?.method ? new Response('{}', { status: 202 }) : capability()
+    )
+  }).drain()
+  assert.equal(queue.entries().length, 1)
+})
+
+test('sender lock survives a live owner and recovers a dead owner after restart', (t) => {
+  const root = temp(t)
+  const queue = createOutbox(root)
+  const release = queue.claim()
+  assert(release)
+  assert.equal(createOutbox(root).claim(), null)
+  release()
+  fs.symlinkSync('2147483647-dead', path.join(root, 'sender.lock'))
+  const recovered = createOutbox(root).claim()
+  assert(recovered)
+  recovered()
+})
+
+test('construction rejects coerced version and metric names rather than throwing', () => {
+  const version = batch()
+  assert(version)
+  version.resource['service.version'] = /** @type {any} */ (['1.31.0'])
+  assert.equal(validateBatch(version, NOW), 'invalid_resource')
+  const metric = batch()
+  assert(metric)
+  metric.records = [
+    {
+      kind: 'metric',
+      name: ['process.cpu'],
+      timestamp: new Date(NOW).toISOString()
+    }
+  ]
+  assert.equal(validateBatch(metric, NOW), 'invalid_metric')
+})
+
+test('import/bootstrap failure inside the outer boundary has one failure summary', async (t) => {
+  const { withProductInvocation } = await import(
+    '../../src/core/product_telemetry/client.js'
+  )
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  await assert.rejects(
+    withProductInvocation(['query', 'sql', 'secret'], env, async () => {
+      throw new Error('secret config path')
+    })
+  )
+  const records = createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+  assert.equal(records.filter((r) => r.name === 'cli.invocation').length, 1)
+  assert.equal(
+    records.find((r) => r.name === 'cli.invocation').attributes.outcome,
+    'failure'
+  )
+  assert.equal(JSON.stringify(records).includes('secret'), false)
+})
+
+test('a custom plugin command is other and whole invocation duration includes work', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  writePolicy(root, 'local')
+  const registry = createCommandRegistry()
+  // The work is timed on the clock withProductInvocation reads, not taken as
+  // the 20 ms asked of setTimeout: Node timers can fire a fraction of a
+  // millisecond early, and a loaded CI runner recorded under 20 against `>= 20`.
+  // The invocation window opens before the command starts and closes after
+  // it returns, so it covers the measured work exactly, with no margin.
+  let workMs = 0
+  registry.register({
+    name: 'customer-private-command',
+    summary: '',
+    usage: '',
+    run: async () => {
+      const workStart = performance.now()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      workMs = performance.now() - workStart
+      return 0
+    }
+  })
+  const kernel = createKernelRuntime({ cacheRoot: path.join(home, 'cache') })
+  await dispatch(['customer-private-command'], {
+    registry,
+    kernel,
+    env,
+    stdout: { write() {} },
+    stderr: { write() {} }
+  })
+  const record = createOutbox(root)
+    .entries()
+    .flatMap((e) => JSON.parse(e.wire).records)
+    .find((r) => r.name === 'cli.invocation')
+  assert.equal(record.attributes.command, 'other')
+  assert(workMs > 0)
+  assert(
+    record.attributes.duration_ms >= workMs,
+    `invocation took ${record.attributes.duration_ms} ms, its work ${workMs} ms`
+  )
+})
+
+test('24-hour simulated receiver outage stays bounded and never starts a new retry window', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  let now = NOW
+  const queue = createOutbox(root, { now: () => now })
+  let attempts = 0
+  const delivery = createDelivery(root, {
+    now: () => now,
+    random: () => 0.5,
+    fetchFn: /** @type {typeof fetch} */ (
+      async () => {
+        attempts++
+        return new Response('{}', {
+          status: 503,
+          headers: { 'retry-after': '3600' }
+        })
+      }
+    )
+  })
+  for (let i = 0; i < 288; i++) {
+    queue.append(batch(now), /** @type {string} */ (policy.binding))
+    await delivery.drain()
+    now += 300000
+  }
+  const status = queue.status()
+  assert(status.queue_bytes <= QUEUE_BYTES)
+  assert.equal(status.queue_batches, QUEUE_SLOTS)
+  assert(attempts <= 24)
+  assert.equal(status.dropped_lower_bound, 1)
+  delivery.close()
+})
+
+test('replay validates the on-disk payload before any network request', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  const queue = createOutbox(root, { now: () => NOW })
+  queue.append(batch(), /** @type {string} */ (policy.binding))
+  const entry = queue.entries()[0]
+  const file = path.join(root, 'queue-v1', `${entry.slot}.json`)
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const body = JSON.parse(stored.wire)
+  body.records[0].attributes.argv = 'private SQL'
+  stored.wire = JSON.stringify(body)
+  fs.writeFileSync(file, JSON.stringify(stored))
+  let requests = 0
+  await createDelivery(root, {
+    now: () => NOW,
+    fetchFn: /** @type {typeof fetch} */ (
+      async () => {
+        requests++
+        return capability()
+      }
+    )
+  }).drain()
+  assert.equal(requests, 0)
+  assert.equal(queue.entries().length, 0)
+})
+
+test('corrupt complete JSON slots and torn writes are reclaimed after the grace period', (t) => {
+  const root = temp(t)
+  const queue = createOutbox(root, { now: () => NOW })
+  fs.mkdirSync(path.join(root, 'queue-v1'))
+  for (const [slot, body] of ['{"binding":"x","wire":"{}"}', '{'].entries()) {
+    const file = path.join(root, 'queue-v1', `${slot}.json`)
+    fs.writeFileSync(file, body)
+    fs.utimesSync(file, (NOW - 120000) / 1000, (NOW - 120000) / 1000)
+  }
+  assert.equal(queue.prune(binding), 2)
+  assert.deepEqual(fs.readdirSync(path.join(root, 'queue-v1')), [])
+})
+
+for (const phase of ['capability', 'post', 'refresh']) {
+  test(`delivery aborts unread ${phase} error bodies when the pass ends`, async (t) => {
+    const root = temp(t)
+    const policy = enroll(root)
+    assert(policy.binding)
+    createOutbox(root, { now: () => NOW }).append(batch(), policy.binding)
+    let signal
+    const fetchFn = /** @type {typeof fetch} */ (async (_, init) => {
+      signal = init?.signal
+      if (phase === 'post' && !init?.method) return capability()
+      if (phase === 'refresh' && !init?.method)
+        return new Response(null, { status: 401 })
+      return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new Uint8Array(8192)) }
+      }), { status: 503 })
+    })
+    const delivery = createDelivery(root, { fetchFn, now: () => NOW })
+    await delivery.drain()
+    assert.equal(signal?.aborted, true)
+    delivery.close()
+  })
+}
+
+test('organization startup and persisted backoff do not read queue payloads', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  const policy = enroll(root)
+  assert(policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  queue.append(batch(), policy.binding)
+  queue.saveDelivery({ binding: policy.binding, next_at: NOW + 86400000 })
+  const open = fs.openSync
+  let queueReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      queueReads++
+    return Reflect.apply(open, fs, args)
+  })
+  const client = createProductClient({ env, now: () => NOW })
+  client.close()
+  assert.equal(queueReads, 0, 'startup must not scan the queue')
+  for (let i = 0; i < 3; i++) {
+    const delivery = createDelivery(root, {
+      now: () => NOW,
+      fetchFn: async () => { throw new Error('backoff must prevent requests') }
+    })
+    await delivery.drain()
+    delivery.close()
+  }
+  assert.equal(queueReads, 0, 'backoff must survive new senders without queue reads')
+})
+
+test('eligible delivery scans once and sends the oldest surviving batch', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  queue.append(batch(NOW - 1000), policy.binding)
+  const oldest = batch(NOW - 2000)
+  queue.append(oldest, policy.binding)
+  queue.append(batch(), binding)
+  const oldQueue = createOutbox(root, { now: () => NOW - 8 * 86400000 })
+  oldQueue.append(batch(NOW - 8 * 86400000), policy.binding)
+  const open = fs.openSync
+  let queueReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      queueReads++
+    return Reflect.apply(open, fs, args)
+  })
+  let sent
+  await createDelivery(root, {
+    now: () => NOW,
+    fetchFn: /** @type {typeof fetch} */ (async (_, init) => {
+      if (!init?.method) return capability()
+      sent = JSON.parse(String(init.body))
+      return new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+    })
+  }).drain()
+  assert.equal(sent?.batch_id, oldest?.batch_id)
+  // One enumeration plus identity checks before unlinking three copies.
+  assert.equal(queueReads, QUEUE_SLOTS + 3)
+  assert.equal(queue.entries().length, 1)
+})
+
+// With telemetry off there is no queue directory, so the fixed slot sweep is
+// 160 failing opens on every `hyp status`. The reported status must not change
+// because they stopped happening.
+test('status reads no slot when the queue directory does not exist', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const open = fs.openSync
+  let slotReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      slotReads++
+    return Reflect.apply(open, fs, args)
+  })
+  assert.equal(fs.existsSync(path.join(root, 'queue-v1')), false)
+  let rendered = ''
+  await runTelemetry(
+    ['status'],
+    /** @type {any} */ ({
+      env,
+      stdout: { write: (/** @type {string} */ s) => (rendered += s) },
+      stderr: { write() {} }
+    })
+  )
+  // Byte-identical to the pre-guard rendering of the same rendered queue.
+  assert.equal(
+    rendered,
+    JSON.stringify(
+      {
+        collection: 'off',
+        policy: 'disabled',
+        organization_destination: null,
+        vendor_sharing: 'unavailable',
+        standalone_delivery: 'unavailable',
+        queue_bytes: 0,
+        queue_batches: 0,
+        oldest_age_seconds: 0,
+        dropped_lower_bound: 0,
+        delivery: null
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  assert.equal(JSON.stringify(productStatus(env), null, 2) + '\n', rendered)
+  assert.equal(slotReads, 0)
+
+  const policy = writePolicy(root, 'local')
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (policy.binding)))
+  const bytes = queue.entries()[0].bytes
+  slotReads = 0
+  const status = createOutbox(root, { now: () => NOW + 5000 }).status()
+  assert.equal(status.queue_batches, 1)
+  assert.equal(status.queue_bytes, bytes)
+  assert.equal(status.oldest_age_seconds, 5)
+  assert.equal(status.dropped_lower_bound, 0)
+  assert.equal(slotReads, QUEUE_SLOTS)
+  assert.equal(productStatus(env).collection, 'local')
+})

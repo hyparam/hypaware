@@ -2,12 +2,13 @@
 
 import path from 'node:path'
 
-import { createInstanceWatermarkStore } from '../../../src/core/sinks/incremental.js'
+import { createInstanceWatermarkStore, instanceWatermarkStateDir } from '../../../src/core/sinks/incremental.js'
 
 import { validateCentralConfig } from './src/config.js'
 import { createConfigPullLoop } from './src/config_client.js'
 import { IdentityClient } from './src/identity_client.js'
-import { createForwardSink } from './src/sink.js'
+import { createDatasetRolloutStore } from './src/rollout.js'
+import { createForwardSink, initializeOpenDatasetRollouts } from './src/sink.js'
 
 /**
  * @import { PluginActivationContext, SinkCreateContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -64,12 +65,20 @@ export async function activate(ctx) {
 
       // Per-(sink instance, partition) incremental-read watermarks. The plugin
       // `stateDir` is per-PLUGIN, so two `@hypaware/central` instances would
-      // share — and clobber — one watermark file and skip each other's rows;
+      // share, and clobber, one watermark file and skip each other's rows;
       // `createInstanceWatermarkStore` namespaces by the instance name, matching
       // local-fs/s3. Each forward instance then reads only rows added since its
       // own last successful export.
       // @ref LLP 0040#watermark-contract [implements]: one watermark per (sink instance, partition), scoped by instance name
       const watermarks = createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name })
+      const rollouts = createDatasetRolloutStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name })
+
+      // Establish open-dataset rollout state during sink creation. On an
+      // upgraded machine this baselines partitions already on disk; on a cold
+      // machine it durably records an empty dataset before the first captured
+      // row can be mistaken for rollout history.
+      // @ref LLP 0307#rollout-instant [implements]: initialize dataset rollout state before scheduled exports can observe a first partition
+      await initializeOpenDatasetRollouts({ query, storage, watermarks, rollouts, log: sinkCtx.log })
 
       const sink = createForwardSink({
         config,
@@ -77,6 +86,8 @@ export async function activate(ctx) {
         query,
         storage,
         watermarks,
+        rollouts,
+        receiptsDir: path.join(instanceWatermarkStateDir(sinkCtx.paths.stateDir, sinkCtx.name), 'receipts'),
         log: sinkCtx.log,
       })
 
@@ -97,8 +108,9 @@ export async function activate(ctx) {
       return {
         ...sink,
         async close() {
-          await pullLoop.stop()
-          await sink.close()
+          const closing = sink.close()
+          const results = await Promise.allSettled([closing, pullLoop.stop()])
+          for (const result of results) if (result.status === 'rejected') throw result.reason
         },
       }
     },

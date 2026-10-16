@@ -12,8 +12,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { trackedFiles } from '../helpers/tracked_files.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const LLP_DIR = path.join(REPO_ROOT, 'llp')
@@ -116,26 +116,28 @@ const MARKED_FILES = new Set([
 
 /**
  * Broken references this test tolerates because a held pull request already owns
- * them: PR #461 (issue #457) names the `cli` and `reporting` anchors in LLP 0103
- * and rewraps the LLP 0135 line that split `#interactive-walkthrough` across a
- * line break. Entries are tolerated, never required, so pruning them once #461
- * lands is a cleanup and not a failure.
+ * the repair. **Empty, and the empty state is the point**: every reference in the
+ * corpus resolves, so the gate has no exceptions to read past. The last entries
+ * covered the `cli` and `reporting` anchors in LLP 0103 and the LLP 0135 line that
+ * split `#interactive-walkthrough` across a line break; PR #461 (issue #457)
+ * landed both repairs and left the entries behind, and issue #639 later read
+ * them back out as live breakage. A tolerance outlives its defect
+ * silently, so an entry is worth adding only while the pull request that removes
+ * it is open, and an entry that has stopped forgiving anything now fails the
+ * suite rather than sitting here as the last claim that a live reference is
+ * broken.
  *
  * Keyed on the file and what the annotation cites, with how many of them are
  * known, rather than on `file:line`: a line number is not a property of the
  * defect, so an unrelated edit anywhere above one of these sites used to turn a
- * tolerated reference into a suite failure, and `clients.js` and `policy.js` are
- * both edited routinely. The count is what keeps that from being a loosening. It
- * is a ceiling, so a seventh broken `LLP 0103#cli` in `clients.js` is new
+ * tolerated reference into a suite failure, and the files that carried them were
+ * edited routinely. The count is what keeps that from being a loosening. It is a
+ * ceiling, so a sixth broken `LLP 0103#cli` under a budget of five is new
  * breakage and still fails.
+ *
+ * @type {Map<string, number>}
  */
-const TOLERATED_BROKEN = new Map([
-  ['llp/0111-hyp-policy-verb.design.md  LLP 0103#cli', 2],
-  ['llp/0112-hyp-policy-verb.plan.md  LLP 0103#cli', 2],
-  ['llp/0135-install-experience-overhaul.design.md  LLP 0011#interactive-', 1],
-  ['src/core/commands/clients.js  LLP 0103#cli', 6],
-  ['src/core/commands/policy.js  LLP 0103#cli', 5],
-])
+const TOLERATED_BROKEN = new Map()
 
 /**
  * The line-independent identity of an annotation: the file it sits in and the
@@ -154,12 +156,15 @@ function refIdentity(ref) {
  * with a given identity are tolerated and every later one is not, so a new
  * occurrence cannot hide behind the known ones.
  *
+ * The ledger is the caller's, so a run can be asked afterwards which tolerances
+ * it actually needed: an entry nobody spent is a defect that healed without
+ * anyone noticing, and the stale entry left behind reads as live breakage.
+ *
  * @param {Map<string, number>} budgets
+ * @param {Map<string, number>} spent filled in with how much of each budget was used
  * @returns {(ref: { file: string, llp: string | null, docPath: string | null, anchor: string | null }) => boolean}
  */
-function toleranceSpender(budgets) {
-  /** @type {Map<string, number>} */
-  const spent = new Map()
+function toleranceSpender(budgets, spent = new Map()) {
   return ref => {
     const id = refIdentity(ref)
     const used = spent.get(id) ?? 0
@@ -219,28 +224,68 @@ function documentAnchors(text) {
 }
 
 /**
+ * A gloss does not have to fit on one line, so neither can the scan that
+ * polices it. Everything from the `@ref` line up to the end of the gloss is one
+ * string: the annotation's line plus the wrapped continuation lines under it.
+ *
+ * A continuation is a line that carries on the same comment or paragraph and
+ * says nothing new: not blank, not a fresh `@` tag or a second annotation, not
+ * the close of a block comment, and, in Markdown, not the start of a new list
+ * item, heading, table row or quote. The stripped shape is what is joined, so
+ * the caller sees the gloss and not the comment furniture around it.
+ *
+ * @param {string[]} lines
+ * @param {number} index the `@ref` line
+ * @param {boolean} markdown
+ * @param {('start' | 'end' | 'line' | null)[]} markers
+ * @returns {string}
+ */
+function glossLines(lines, index, markdown, markers) {
+  const strip = (/** @type {string} */ line) =>
+    line.replace(/^\s*(?:\/\/+|\*(?!\/)|>)?\s*/, '').trimEnd()
+  const parts = [lines[index].trim()]
+  for (let i = index + 1; i < lines.length; i++) {
+    const raw = lines[i]
+    if (markers[i] !== null) break
+    if (/^\s*(?:\*\/|\/\*)/.test(raw)) break
+    const body = strip(raw)
+    if (body === '') break
+    if (/^@/.test(body) || body.includes('@ref')) break
+    if (markdown && /^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\||>)/.test(raw)) break
+    // A source line that left the comment behind ends the gloss.
+    if (!markdown && !/^\s*(?:\/\/|\*)/.test(raw)) break
+    parts.push(body)
+  }
+  return parts.join(' ')
+}
+
+/**
  * Extract the annotations from one file's text, honoring the ignore markers.
  *
  * @param {string} relPath
  * @param {string} text
- * @returns {{ file: string, line: number, text: string, llp: string | null, docPath: string | null, anchor: string | null }[]}
+ * @returns {{ file: string, line: number, text: string, gloss: string, llp: string | null, docPath: string | null, anchor: string | null }[]}
  */
 function extractRefs(relPath, text) {
-  /** @type {{ file: string, line: number, text: string, llp: string | null, docPath: string | null, anchor: string | null }[]} */
+  /** @type {{ file: string, line: number, text: string, gloss: string, llp: string | null, docPath: string | null, anchor: string | null }[]} */
   const refs = []
   let ignoring = false
   const lines = text.split('\n')
+  const markdown = path.extname(relPath) === '.md'
   const markers = markersFor(relPath, lines)
   lines.forEach((line, index) => {
     const marker = markers[index]
     if (marker === 'start') ignoring = true
     else if (marker === 'end') ignoring = false
     else if (!ignoring && marker === null) {
-      for (const m of line.matchAll(REF_PATTERN)) {
+      const matches = [...line.matchAll(REF_PATTERN)]
+      const gloss = matches.length === 0 ? '' : glossLines(lines, index, markdown, markers)
+      for (const m of matches) {
         refs.push({
           file: relPath,
           line: index + 1,
           text: line.trim(),
+          gloss,
           llp: m[1] ? String(Number(m[1])) : null,
           docPath: m[2] ?? null,
           anchor: m[3] ? m[3].slice(1) : null,
@@ -249,14 +294,6 @@ function extractRefs(relPath, text) {
     }
   })
   return refs
-}
-
-/**
- * @returns {string[]} repo-relative paths of the tracked files worth scanning
- */
-function trackedFiles() {
-  const out = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' })
-  return out.split('\0').filter(f => f !== '' && SCANNED_EXTENSIONS.has(path.extname(f)))
 }
 
 /**
@@ -288,7 +325,7 @@ function llpIndex() {
   return index
 }
 
-const REFS = trackedFiles().flatMap(f => extractRefs(f, fs.readFileSync(path.join(REPO_ROOT, f), 'utf8')))
+const REFS = trackedFiles(REPO_ROOT, SCANNED_EXTENSIONS).flatMap(f => extractRefs(f, fs.readFileSync(path.join(REPO_ROOT, f), 'utf8')))
 const INDEX = llpIndex()
 
 test('the scan finds the corpus and its annotations', () => {
@@ -296,10 +333,19 @@ test('the scan finds the corpus and its annotations', () => {
   assert.ok(INDEX.size > 100, `expected the LLP corpus, found ${INDEX.size} numbers`)
 })
 
-test('every @ref resolves to a live LLP document and one of its anchors', () => {
+/**
+ * Resolve every annotation against the corpus, spending the tolerance budget on
+ * the way. Shared so that what the gate reports and what the staleness check
+ * reads are the same pass over the same references.
+ *
+ * @param {Map<string, number>} budgets
+ * @param {Map<string, number>} spent filled in with how much of each budget was used
+ * @returns {string[]} the unforgiven breakage, formatted for a failure message
+ */
+function brokenRefs(budgets, spent) {
   /** @type {string[]} */
   const broken = []
-  const tolerated = toleranceSpender(TOLERATED_BROKEN)
+  const tolerated = toleranceSpender(budgets, spent)
   for (const ref of REFS) {
     const site = `${ref.file}:${ref.line}`
     /** @param {string} why */
@@ -325,7 +371,31 @@ test('every @ref resolves to a live LLP document and one of its anchors', () => 
     ]
     if (!candidates.some(c => fs.existsSync(c))) fail(`no such file ${ref.docPath}`)
   }
+  return broken
+}
+
+test('every @ref resolves to a live LLP document and one of its anchors', () => {
+  const broken = brokenRefs(TOLERATED_BROKEN, new Map())
   assert.deepEqual(broken, [], `${broken.length} broken @ref annotations:\n  ${broken.join('\n  ')}`)
+})
+
+// Issue #639 read the tolerance list as a list of live defects and asked for
+// repairs PR #461 had already made. A tolerance is invisible from the outside
+// once it stops being fully spent: the suite is green either way, so the
+// unspent balance survives as a standing claim that the reference is broken
+// by more than it is. Repairs land one reference at a time, not all at once,
+// so a budget of five against one remaining break is the exact shape that
+// produced the stale list this test exists to catch: it has to expire with
+// the defect, at the same rate the defect shrinks, and nothing but a check
+// notices when it does not.
+test('every tolerated reference forgives no more than is still broken', () => {
+  /** @type {Map<string, number>} */
+  const spent = new Map()
+  brokenRefs(TOLERATED_BROKEN, spent)
+  const stale = [...TOLERATED_BROKEN.entries()]
+    .filter(([id, budget]) => (spent.get(id) ?? 0) < budget)
+    .map(([id, budget]) => `${id}  tolerance forgives ${budget} but only ${spent.get(id) ?? 0} are broken`)
+  assert.deepEqual(stale, [], `${stale.length} tolerances forgive more than is still broken:\n  ${stale.join('\n  ')}`)
 })
 
 test('a tolerated reference is tolerated only as often as it is listed', () => {
@@ -342,11 +412,38 @@ test('a tolerated reference is tolerated only as often as it is listed', () => {
   assert.equal(tolerated({ file: 'b.js', llp: '103', docPath: null, anchor: 'cli' }), false)
 })
 
-test('no @ref annotation separates its gloss with an em dash', () => {
+// The check reads the whole gloss, not the line the `@ref` token happens to sit
+// on. Scanning one line left a standing blind spot: a gloss that wrapped could
+// carry the character on its second line and no gate saw it, which is how three
+// of them survived the sweep that was supposed to remove them.
+test('no @ref annotation carries an em dash, on its first line or a later one', () => {
   const offenders = REFS
-    .filter(ref => ref.text.includes(EM_DASH))
-    .map(ref => `${ref.file}:${ref.line}  ${ref.text}`)
+    .filter(ref => ref.gloss.includes(EM_DASH))
+    .map(ref => `${ref.file}:${ref.line}  ${ref.gloss}`)
   assert.deepEqual(offenders, [], `${offenders.length} annotations carry an em dash:\n  ${offenders.join('\n  ')}`)
+})
+
+test('a gloss spans its continuation lines, and stops where the gloss stops', () => {
+  const gloss = (/** @type {string} */ file, /** @type {string[]} */ lines) =>
+    extractRefs(file, lines.join('\n'))[0].gloss
+  // A JSDoc gloss wrapped over three lines is one gloss.
+  assert.equal(
+    gloss('x.js', [' * @ref LLP 0001#tooling: the extractor', ' * plus the resolver,', ' * wired into `npm test`', ' */']),
+    '* @ref LLP 0001#tooling: the extractor plus the resolver, wired into `npm test`',
+  )
+  // It stops at the next tag, at a blank line, and at the end of the comment.
+  assert.equal(gloss('x.js', ['// @ref LLP 0001#tooling: short', '// @param {string} x']), '// @ref LLP 0001#tooling: short')
+  assert.equal(gloss('x.js', [' * @ref LLP 0001#tooling: short', ' *', ' * unrelated']), '* @ref LLP 0001#tooling: short')
+  assert.equal(gloss('x.js', ['// @ref LLP 0001#tooling: short', 'const x = 1']), '// @ref LLP 0001#tooling: short')
+  // In Markdown the next bullet is a new thought, not a continuation.
+  assert.equal(
+    gloss('x.md', ['- @ref LLP 0001#tooling: the extractor', '  plus the resolver', '- something else']),
+    '- @ref LLP 0001#tooling: the extractor plus the resolver',
+  )
+  // The regression the widening exists for: the character on a later line.
+  const wrapped = ['// @ref LLP 0001#tooling: the extractor', `// plus the resolver ${EM_DASH} wired in`]
+  assert.equal(extractRefs('x.js', wrapped.join('\n'))[0].gloss.includes(EM_DASH), true)
+  assert.equal(extractRefs('x.js', wrapped.join('\n'))[0].text.includes(EM_DASH), false)
 })
 
 // @ref LLP 0156#renumber [tests]: a collision is repaired by renumbering the later claimant, so every number has exactly one document
@@ -425,7 +522,7 @@ test('a marker shown as documentation or as a code sample does not activate it',
 test('suppression is confined to the syntax documentation and every region closes', () => {
   /** @type {string[]} */
   const offenders = []
-  for (const file of trackedFiles()) {
+  for (const file of trackedFiles(REPO_ROOT, SCANNED_EXTENSIONS)) {
     const lines = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').split('\n')
     let openedAt = 0
     markersFor(file, lines).forEach((marker, index) => {

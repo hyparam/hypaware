@@ -1,8 +1,9 @@
 // @ts-check
 
-import { isAbsolute } from 'node:path'
+import { createHash } from 'node:crypto'
 
-import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
+import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
+import { createUsagePolicyResolver, isEqualOrDescendant, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
   copyNumberAlias,
@@ -132,11 +133,32 @@ export function createCodexExchangeProjector(opts = {}) {
       // rollout lookup LAZY (a fresh in-band cwd never scans), and it is keyed on
       // a Codex thread id (only a real Codex thread has a rollout), so
       // non-codex traffic never scans.
+      //
+      // @ref LLP 0083#workspace-key-ranks-last [implements]: three sources, in
+      // this order: in-band, rollout, workspace key (#480).
+      // The key ranks LAST because it is the only one of the three that can be a
+      // guess: `selectCodexWorkspace` substitutes the first `workspaces` entry
+      // when none matches, while `session_meta.cwd` is what Codex itself wrote
+      // at session start. Ranking the key above the rollout meant a declared
+      // `workspaces` map satisfied the first `??` and the rollout was never
+      // consulted, so on the subscription route (the route this fallback exists
+      // for) a first-key guess turned a correct `.hypignore` drop into a record.
+      // It is still a real source, not a discarded one: with no rollout it is
+      // the only cwd there is, and refusing it outright would remove `.hypignore`
+      // coverage from that route. Held to the same usability checks as the
+      // in-band value, which is where it used to be checked.
       const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? resolveRolloutCwd(rolloutCwd, codexContext)
+        ?? usableInBandCwd(codexContext?.workspace_cwd, ctx)
       // @ref LLP 0083#decision [implements]: a refused workspace substitution is
-      // observable, not silent - it means the gate is measuring a different
-      // directory than it would have. Paths are hashed: this seam sees LLM traffic.
+      // observable, not silent - it means the key named a tree the session did
+      // not run in, so the location inference behind it is in doubt.
+      // @ref LLP 0160#decision [constrained-by]: which is narrower than "a
+      // different directory", so this stays rare enough to be worth a `warn`.
+      // Note this reports the location inference, NOT "the verdict changed":
+      // nearest-governs is not monotone down the chain, so an ancestor key can
+      // still resolve more restrictively than the cwd and that stays silent.
+      // Paths are hashed: this seam sees LLM traffic.
       if (codexContext?.refused_workspace_cwd) {
         ctx?.log?.warn?.('plugin.codex.usage_policy_workspace_cwd_refused', {
           component: 'codex',
@@ -186,7 +208,11 @@ export function createCodexExchangeProjector(opts = {}) {
 
       const responseBody = parseMaybeJson(input.response_body)
       const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
-      const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
+      const baseInstructions = resolveBaseInstructions(reqBody,
+        Boolean(codexContext) && !isOpenAiChatPath(path) && !Array.isArray(reqBody.messages),
+        codexContext?.thread_id)
+      const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents,
+        skipInputIndex: baseInstructions.skipInputIndex })
       if (messages.length === 0) return undefined
 
       const recordedContext = resolveRecordedContext(reqBody, codexContext, cwd)
@@ -226,7 +252,7 @@ export function createCodexExchangeProjector(opts = {}) {
         request_id: resolveRequestId(input),
         prompt_id: codexContext?.turn_id,
         model: resolveModel(reqBody, responseBody),
-        system_text: extractSystemText(reqBody.system ?? reqBody.instructions),
+        system_text: baseInstructions.systemText,
         tools: /** @type {any} */ (reqBody.tools),
         attributes: projectionAttributes,
         messages,
@@ -367,6 +393,7 @@ function isCodexNamespacePath(path) {
  *   reqBody: Record<string, unknown>,
  *   responseBody: unknown,
  *   streamEvents: Array<{ event: string, data: string }>,
+ *   skipInputIndex: number,
  * }} ctx
  * @returns {AiGatewayProjectedMessage[]}
  */
@@ -378,7 +405,7 @@ function messagesForTransport(ctx) {
   if (isOpenAiChatPath(ctx.path) || Array.isArray(ctx.reqBody.messages)) {
     return openAiChatMessages(ctx.reqBody, ctx.responseBody)
   }
-  return openAiResponsesMessages(ctx.reqBody, ctx.responseBody, ctx.streamEvents)
+  return openAiResponsesMessages(ctx.reqBody, ctx.responseBody, ctx.streamEvents, ctx.skipInputIndex)
 }
 
 /**
@@ -457,11 +484,12 @@ function openAiChatMessageToProjected(message) {
  * @param {Record<string, unknown>} reqBody
  * @param {unknown} responseBody
  * @param {Array<{ event: string, data: string }>} streamEvents
+ * @param {number} skipInputIndex
  * @returns {AiGatewayProjectedMessage[]}
  */
-function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
+function openAiResponsesMessages(reqBody, responseBody, streamEvents, skipInputIndex) {
   /** @type {AiGatewayProjectedMessage[]} */
-  const messages = responsesInputMessages(reqBody.input)
+  const messages = responsesInputMessages(reqBody.input, skipInputIndex)
   let assistant = responsesAssistantMessagesFromBody(responseBody)
   if (assistant.length === 0) assistant = responsesAssistantMessagesFromStream(streamEvents)
   const usageAttributes = openAiUsageAttributes(
@@ -480,9 +508,10 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
  * backfilled session.
  *
  * @param {unknown} input
+ * @param {number} [skipInputIndex]
  * @returns {AiGatewayProjectedMessage[]}
  */
-function responsesInputMessages(input) {
+function responsesInputMessages(input, skipInputIndex = -1) {
   if (typeof input === 'string') {
     if (input.length === 0) return []
     return [{ role: 'user', content: [{ type: 'text', text: input }] }]
@@ -490,7 +519,9 @@ function responsesInputMessages(input) {
   if (!Array.isArray(input)) return []
   /** @type {AiGatewayProjectedMessage[]} */
   const out = []
-  for (const item of input) {
+  for (let index = 0; index < input.length; index++) {
+    if (index === skipInputIndex) continue
+    const item = input[index]
     if (!isPlainObject(item)) continue
     const itemType = stringValue(item.type)
     if (itemType === 'function_call' || itemType === 'custom_tool_call') {
@@ -877,12 +908,23 @@ function resolveCodexContext(input, provider, path, reqBody) {
     // substitutes the first `workspaces` key when none matches, which is a guess
     // about a directory the session may never have run in, so it must not decide
     // a `.hypignore` verdict. The key still enriches (`attributes.codex.workspace`,
-    // git_*) and still supplies the cwd on the subscription route, where the
-    // request states none and the key is the only in-band source there is.
-    cwd: firstString(inBandCwd, workspace?.path),
+    // git_*) and still supplies the cwd on the subscription route as a last
+    // resort, below: see `workspace_cwd`.
+    cwd: inBandCwd,
+    // The key as a LAST-RESORT cwd, carried apart from the in-band one so the
+    // call site can rank it BELOW the rollout (#480). Set only when the request
+    // stated no cwd at all: when it stated one, the key is a substitution over a
+    // value the client actually sent, and a substitution never decides the
+    // verdict (#476 case c, where the stated cwd is unusable and the key must
+    // still not stand in for it).
+    // @ref LLP 0083#workspace-key-ranks-last [implements]: in-band, then
+    // rollout, then the key
+    workspace_cwd: inBandCwd ? undefined : workspace?.path,
     // Set only when the substitution was refused, so the caller can log it
-    // rather than let a discarded guess vanish.
-    refused_workspace_cwd: workspace && inBandCwd && !pathsEqual(workspace.path, inBandCwd)
+    // rather than let a discarded guess vanish. Refused is narrower than
+    // "different bytes": see `workspaceCoversCwd`.
+    // @ref LLP 0160#decision [implements]: an ancestor key was never a guess.
+    refused_workspace_cwd: workspace && inBandCwd && !workspaceCoversCwd(workspace.path, inBandCwd)
       ? workspace.path
       : undefined,
     client_version: client.version,
@@ -1089,13 +1131,14 @@ function codexClientFromUserAgent(userAgent) {
 
 /**
  * @param {Record<string, unknown> | undefined} metadata
+ * @param {string | undefined} cwd
  * @returns {{ path: string, info?: Record<string, unknown> } | undefined}
  */
 function selectCodexWorkspace(metadata, cwd) {
   const workspaces = readKey(metadata, 'workspaces')
   if (!isPlainObject(workspaces)) return undefined
   const workspacePaths = Object.keys(workspaces).filter((key) => key.length > 0)
-  const workspacePath = workspacePaths.find((key) => pathsEqual(key, cwd)) ?? workspacePaths[0]
+  const workspacePath = nearestCoveringWorkspace(workspacePaths, cwd) ?? workspacePaths[0]
   if (!workspacePath) return undefined
   const info = readKey(workspaces, workspacePath)
   return {
@@ -1243,23 +1286,43 @@ function readRecordedCwd(reqBody) {
  * A drop that only holds while the daemon runs from the right directory is what
  * fail-closed would have to replace, and that is the larger call above.
  *
- * The same two checks guard the rollout-stated cwd as `sessionMetaCwd`
- * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`). They are
- * restated here rather than borrowed from there: LLP 0150 scopes the in-band path
- * out of its own mandate (in-band is a separate source, and its value is also
- * stamped on the row), and the `error_kind` split below needs the two conjuncts
- * apart, which that predicate's single answer does not give.
+ * The answer itself is not computed here. It comes from `sessionMetaCwd`
+ * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`), the one
+ * predicate that also guards the rollout-stated cwd, so the two sources that
+ * feed this gate cannot answer "is this a usable container?" differently. What
+ * stays local is only the refusal *diagnosis*: `error_kind` needs blank told
+ * apart from relative, and a single `undefined` does not carry that. Splitting
+ * the conjuncts for the log is safe because they are not the verdict; the
+ * verdict is whatever the shared predicate returned.
  *
- * One thing this does NOT reach, so nobody reads it as the whole gate: on the
- * Codex route the value passed in is usually not the request's `cwd` but the
- * workspace key `selectCodexWorkspace` picked for it, and that falls back to the
- * first workspace when none matches, which is absolute and so accepted here even
- * when the session ran elsewhere (#476). The rollout fallback at the call site
- * sits outside this call, but it is not unguarded: `rollout-cwd.js` reads it
- * through `readRolloutSessionMeta`, which applies `sessionMetaCwd`.
+ * LLP 0150 scoped the in-band path out of its own mandate (in-band is a separate
+ * source with its own trust story, and its value is also stamped on the row), so
+ * this reuse is a de-duplication rather than an invariant it imposed (#478). It
+ * changes no behavior: only a non-empty string reaches here (`readStringKey` and
+ * `firstString` refuse the rest upstream), and over that whole domain the two
+ * former copies agreed.
+ *
+ * One thing this does NOT reach, so nobody reads it as the whole gate: it bounds
+ * the SHAPE of a value, never its provenance. The call site also passes the
+ * workspace key `selectCodexWorkspace` picked through here - a separate call
+ * since #480, where it used to arrive folded into the in-band value - and that
+ * key falls back to the first workspace when none matches, which is absolute and
+ * so accepted here even when the session ran elsewhere. A request that DOES
+ * state a `cwd` no longer reaches here through the key at all (#476, closed);
+ * the key is offered only when the request stated none. What keeps such a guess
+ * from deciding a verdict is then the RANKING at the call site (in-band,
+ * rollout, key), not this predicate: the key lost its precedence over the
+ * rollout in #480, which is where the residual ranking question used to sit. The
+ * rollout fallback sits between the two and is not unguarded either:
+ * `rollout-cwd.js` reads it through `readRolloutSessionMeta`, which applies
+ * `sessionMetaCwd`.
+ * @ref LLP 0160#corrections-0083 [constrained-by]: LLP 0083's own statement of
+ * this limit predates its amendment landing, so read that correction with it.
  *
  * @ref LLP 0083#decision [implements]: an unusable in-band cwd counts as a miss,
  * so the rollout fallback still gets its turn
+ * @ref LLP 0150#usable-cwd [implements]: both cwd sources for this gate share
+ * the one predicate; this wrapper adds only the refusal diagnosis
  * @param {string | undefined} cwd
  * @param {{
  *   log?: {
@@ -1271,12 +1334,11 @@ function readRecordedCwd(reqBody) {
  */
 function usableInBandCwd(cwd, ctx) {
   if (cwd === undefined) return undefined
-  // Byte-identical when it passes: the trim is only the emptiness test, and a
-  // path is not ours to normalize. The trim gates nothing on its own - a blank
-  // string is never absolute on either platform, so `isAbsolute` already refuses
-  // it - it is here to split `error_kind` below, which is the only thing that
-  // tells blank apart from relative. Keep both conjuncts or that split dies.
-  if (cwd.trim().length > 0 && isAbsolute(cwd)) return cwd
+  // Byte-identical when it passes: `sessionMetaCwd` trims only to test
+  // emptiness and returns the value unchanged, because a path is not ours to
+  // normalize.
+  const usable = sessionMetaCwd(cwd)
+  if (usable !== undefined) return usable
   // Never silently: a refused cwd means this exchange reached the gate with
   // nothing to match, which is indistinguishable from "no cwd at all" in the
   // row. Hash it - a cwd is user data (LLP 0049), and the drop log above uses
@@ -1286,6 +1348,9 @@ function usableInBandCwd(cwd, ctx) {
   // refused upstream with no log. Same outcome (absent cwd, NULL column, and it
   // was already absent before this predicate existed), no diagnostic. Closing it
   // means loosening a helper with 16 other callers here, which is not worth it.
+  // The trim below re-tests a conjunct the shared predicate already weighed, but
+  // it decides nothing: the refusal is settled above. It only says WHICH way the
+  // value was unusable, which is the one thing a single `undefined` cannot carry.
   ctx?.log?.warn?.('plugin.codex.usage_policy_cwd_unusable', {
     component: 'codex',
     operation: 'usage_policy_cwd',
@@ -1303,12 +1368,166 @@ function resolveRequestId(input) {
 }
 
 /**
- * @param {string} candidate
- * @param {string | undefined} wanted
+ * Whether the selected `workspaces` key is the directory the session ran in or
+ * an ancestor of it, i.e. whether the key was ever a *guess about where the
+ * session ran* rather than a less specific name for the same tree.
+ *
+ * This is the predicate behind `refused_workspace_cwd` and, since #1189, behind
+ * *selection* as well (`nearestCoveringWorkspace`), which is what stops the two
+ * sides disagreeing about what "matches" means. It is deliberately
+ * not byte-equality. When the key is an ancestor of the in-band `cwd` it names
+ * the same tree, less specifically, and the `cwd` is strictly the better answer
+ * to the question the key stood in for; under the resolver's nearest-governs
+ * rule the most specific declaration is authoritative for the `cwd`, so the key
+ * never held authority over it and there is nothing about the location to
+ * report. A session running in a subdirectory of its declared workspace is
+ * exactly that shape, and it is the commonest Codex shape there is, so reporting
+ * it warned once per turn on the common case and devalued the privacy warns
+ * beside it (#481). Off the ancestor chain the key names a tree the session
+ * never ran in - a sibling, or a key *below* the `cwd` - and that doubt is what
+ * the signal exists for.
+ *
+ * What this does NOT mean, because the obvious reading is wrong: it is not that
+ * an ancestor key would have resolved the same or more loosely. Nearest-governs
+ * is not monotone down the chain (see `selectGoverning`'s "a nested loosening"),
+ * so an `ignore` at the key with a `local-only` or explicit `full` beneath it
+ * resolves the `cwd` LESS restrictively, and this predicate stays silent on
+ * that. Accepted because the warn carries no class field and fires identically
+ * on a subdirectory turn that loosens nothing: it could never have told the two
+ * apart, so narrowing it removes a constant, not information (LLP 0160#decision
+ * records which nested declarations are the user's own and which need not be).
+ * A real verdict-change detector would have to compare `resolve(key)` with
+ * `resolve(cwd)`; this is not that.
+ *
+ * Trailing slashes are trimmed on both sides, the one normalization the old
+ * byte comparison did; a path is not otherwise ours to normalize, and the
+ * spelling-agnostic predicates next door (`scopeGoverns`) buy their extra reach
+ * with `realpath` syscalls this per-exchange seam must not spend (LLP 0049 R6).
+ * So this compares paths, not directories, in both directions: a symlinked
+ * spelling of one tree reads as a refusal, and a lexical descendant that is
+ * really a symlink out of the key's tree reads as covered. The gate itself
+ * still resolves over every spelling, so no verdict turns on this. Selection
+ * now does, which is new since #1189 and is the reason this paragraph no longer
+ * says "reporting-only": where the `cwd` and a key spell one tree differently,
+ * nothing covers, selection falls back to the first key, and the #1189 leak
+ * survives at that spelling. Knowingly retained, for the hot-path reason above
+ * (LLP 0160#decision retains it here; #479 is closed only at the gate).
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the one shared equal-or-descendant
+ * test, never a second copy of the path rule
+ * @ref LLP 0160#decision [implements]: the refusal signal reports a discarded
+ * guess, not a spelling difference
+ * @param {string} workspacePath
+ * @param {string} cwd
+ * @returns {boolean}
  */
-function pathsEqual(candidate, wanted) {
-  if (!wanted) return false
-  return trimTrailingSlash(candidate) === trimTrailingSlash(wanted)
+function workspaceCoversCwd(workspacePath, cwd) {
+  return isEqualOrDescendant(trimTrailingSlash(cwd), trimTrailingSlash(workspacePath))
+}
+
+/**
+ * The `workspaces` key that best accounts for `cwd`: the longest one the `cwd`
+ * is equal to or nested under, or `undefined` when none covers it.
+ *
+ * Selection and the refusal predicate used to disagree about what "matches"
+ * means. Selection asked for byte equality (a since-removed `pathsEqual`) while
+ * `workspaceCoversCwd` refuses on equal-or-descendant, so a key that genuinely
+ * contained the `cwd` could still lose to whichever key the JSON object
+ * happened to list first. The row was then enriched
+ * (`attributes.codex.workspace`, `git_remote`, `head_sha`) from an unrelated
+ * tree while the projector simultaneously reported that same substitution as
+ * refused. When the first-listed key named a `.hypignore`-ignored tree, an
+ * admitted row carried the ignored repository's remote although a covering key
+ * was sitting in the same map (#1189). Running the one equal-or-descendant rule
+ * on both sides removes every case where a covering key existed and lost.
+ *
+ * It does not remove every ignored-tree remote, and the residue is worth
+ * stating rather than reading "whole class" for it. Besides the substitution
+ * LLP 0083 priced, where no key covers the `cwd` at all (the `@ref` below), two
+ * further cases survive, and neither is created here.
+ *
+ * The larger one is the whole **subscription route**. The `cwd` passed in is the
+ * in-band one, which that route never states, so the guard below returns
+ * `undefined` and the first key is selected even when a covering key is sitting
+ * in the map: the row is admitted on the *rollout* `cwd` and still carries the
+ * first key's remote, and, because `refused_workspace_cwd` is also computed from
+ * the in-band value, with no warn either. This fix therefore covers the in-band
+ * half of #1189 only. Reaching the other half means running the predicate
+ * against the rollout `cwd`, which LLP 0350#evidence names as the open half of
+ * every option and LLP 0083#workspace-key-ranks-last leaves silent on purpose,
+ * so it is not a selection defect to fix here.
+ *
+ * The smaller one: a covering key is an ancestor of the `cwd`, and
+ * nearest-governs is not monotone down that chain (`LLP 0160#decision`), so an
+ * ancestor that itself resolves `ignore` under a nested loosening still enriches
+ * the admitted row, and, because it does cover, does so with no
+ * `refused_workspace_cwd`. This one is NOT merely de-randomised, and calling it
+ * that understates it: where the ignored ancestor already sorted first,
+ * `master` produced the identical row, but where a NON-covering key sorted
+ * first `master` enriched from that key and warned, so in those orderings the
+ * row is new here and the warn is gone with it. Verified both ways (`ignore`
+ * at `/work/outer`, `local-only` at `/work/outer/proj`, cwd
+ * `/work/outer/proj/sub`): with `/work/clean` listed first, `master` stamps
+ * `acme/clean` and warns, this stamps `acme/SECRET` and does not. Accepted
+ * rather than overlooked: withholding it is LLP 0350 (C), which costs a second
+ * usage-policy resolution per exchange that LLP 0049 R6 does not budget for,
+ * and the remote it now names is at least the tree the session ran in.
+ *
+ * Both are the enrichment question LLP 0350 (B)/(C) is open on, so both are
+ * deliberately left unpinned by a test: pinning them would be the accepted-test
+ * problem LLP 0350#consequences already warns (B) about.
+ *
+ * Longest-wins rather than first-covering, because `workspaces` may declare
+ * nested trees: for a `cwd` of `/work/proj/sub` with both `/work` and
+ * `/work/proj` declared, `/work` covers too, and taking it would enrich from
+ * the wrong remote AND silence `refused_workspace_cwd`, since a covering key is
+ * not a refusal. Nearest-governs is how the gate itself resolves a `cwd`
+ * (`matchDepth` in core's matcher), so this reuses that rule rather than
+ * inventing a tie-break.
+ *
+ * Equality is the deepest cover there can be (no strict descendant of `cwd`
+ * contains `cwd`), so an exactly-equal key still wins exactly as byte equality
+ * made it win. What changes is only which key is picked when none is equal.
+ *
+ * The `cwd` guard is load-bearing: the old equality test refused a missing
+ * value and `workspaceCoversCwd` does not, and this is called with the in-band
+ * cwd, which is absent for the whole subscription route. Without the guard,
+ * every subscription turn carrying a `workspaces` map would throw here. With
+ * it, that route falls through to the first key exactly as before, which is
+ * what keeps the key's last-resort `cwd` role intact.
+ *
+ * The guard tests presence, not usability. `inBandCwd` is any non-empty
+ * string, and absoluteness is checked later and elsewhere, at the gate
+ * (`usableInBandCwd`), so a relative `cwd` reaches the ancestor test and a
+ * relative key can cover it: selection moves, and `refused_workspace_cwd` is
+ * silenced, on a value this same projector goes on to refuse as a directory.
+ * Byte equality could not do that. Left as is because Codex states absolute
+ * paths and because the answer is to validate once at one seam, not to grow a
+ * second usability rule here.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the one shared
+ * equal-or-descendant test, never a second copy of the path rule
+ * @ref LLP 0049#scope [implements]: nearest-governs, the depth rule the gate
+ * resolves a cwd by, applied to picking the key that describes that cwd
+ * @ref LLP 0350#options: option (F). This changes WHICH key the last-ranked
+ * source picks, not the RANK of the sources, which is what
+ * LLP 0083#workspace-key-ranks-last settled and which is untouched here: the
+ * key still loses the cwd to in-band and to the rollout, still enriches, and is
+ * still substituted when no key covers the cwd at all.
+ *
+ * @param {readonly string[]} workspacePaths
+ * @param {string | undefined} cwd
+ * @returns {string | undefined}
+ */
+function nearestCoveringWorkspace(workspacePaths, cwd) {
+  if (!cwd) return undefined
+  /** @type {string | undefined} */
+  let best
+  for (const key of workspacePaths) {
+    if (!workspaceCoversCwd(key, cwd)) continue
+    if (best === undefined || trimTrailingSlash(key).length > trimTrailingSlash(best).length) best = key
+  }
+  return best
 }
 
 /** @param {string} value */
@@ -1325,10 +1544,9 @@ function resolveModel(reqBody, responseBody) {
 }
 
 /**
- * Accepts the Chat Completions `system` field (string or content blocks)
- * or the Responses API top-level `instructions` string. Codex traffic
- * uses the latter, so without it `system_text` is empty for every
- * Responses-shaped exchange.
+ * Accepts the legacy top-level `system` (string or content blocks) and
+ * Responses `instructions` fields. New Codex request prefixes are handled
+ * separately by resolveBaseInstructions.
  *
  * @param {unknown} system
  */
@@ -1342,6 +1560,58 @@ function extractSystemText(system) {
     if (parts.length > 0) return parts.join('\n')
   }
   return undefined
+}
+
+/**
+ * Codex rust-v0.162.0 core/src/client.rs prepends base instructions, after an
+ * optional additional_tools item. Providers may strip content_item_kinds, but
+ * the msg_ UUIDv5 survives: its namespace is UUIDv5(OID, thread_id), and its
+ * name is the exact, untrimmed base-instruction text. Check only that prefix,
+ * never historical developer messages. Unknown shapes remain captured.
+ *
+ * @param {Record<string, unknown>} reqBody
+ * @param {boolean} codexResponses
+ * @param {string | undefined} threadId
+ * @returns {{ systemText: string | undefined, skipInputIndex: number }}
+ */
+// @ref LLP 0429#content [constrained-by]: base instructions belong in system_text; ordinary developer instructions remain messages
+function resolveBaseInstructions(reqBody, codexResponses, threadId) {
+  const systemText = extractSystemText(reqBody.system ?? reqBody.instructions)
+  const unchanged = { systemText, skipInputIndex: -1 }
+  if (!codexResponses || !Array.isArray(reqBody.input)) return unchanged
+  const first = reqBody.input[0]
+  const index = isPlainObject(first) && first.type === 'additional_tools' && first.role === 'developer' ? 1 : 0
+  const item = reqBody.input[index]
+  if (!isPlainObject(item) || item.type !== 'message' || item.role !== 'developer' ||
+      !Array.isArray(item.content) || item.content.length !== 1) return unchanged
+  const block = item.content[0]
+  if (!isPlainObject(block) || block.type !== 'input_text' ||
+      typeof block.text !== 'string' || block.text.length === 0) return unchanged
+  const text = block.text
+  if (systemText && systemText !== text) return unchanged
+  const kinds = readKey(item.internal_chat_message_metadata_passthrough, 'content_item_kinds')
+  if (kinds != null) {
+    if (!Array.isArray(kinds) || kinds.length !== 1 || kinds[0] !== 'model.base_instructions') return unchanged
+  } else {
+    // @ref LLP 0151#body-is-authority [constrained-by]: use the resolved thread, never substitute the session container or a synthetic conversation id
+    if (!threadId || typeof item.id !== 'string' ||
+        !/^msg_[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(item.id)) return unchanged
+    const namespace = uuidV5Bytes(CODEX_PREFIX_OID_NAMESPACE, threadId)
+    const hex = uuidV5Bytes(namespace, text).toString('hex')
+    const expectedId = `msg_${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+    if (item.id !== expectedId) return unchanged
+  }
+  return { systemText: systemText || text, skipInputIndex: index }
+}
+
+const CODEX_PREFIX_OID_NAMESPACE = Buffer.from('6ba7b8129dad11d180b400c04fd430c8', 'hex')
+
+/** @param {Buffer} namespace @param {string} name */
+function uuidV5Bytes(namespace, name) {
+  const bytes = createHash('sha1').update(namespace).update(name, 'utf8').digest().subarray(0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  return bytes
 }
 
 // ---------------------------------------------------------------------

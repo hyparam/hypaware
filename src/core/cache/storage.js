@@ -9,6 +9,7 @@ import {
   tableUrl as icebergTableUrl,
 } from './iceberg/store.js'
 import {
+  appendRefusalReason,
   appendRowsToPartition as appendRowsToPartitionImpl,
   appendRowsToSourceTable as appendRowsToSourceTableImpl,
   discoverCachePartitions as discoverCachePartitionsImpl,
@@ -17,16 +18,20 @@ import {
   resolveSourceSegments,
   sanitizePathSegment,
   validateIcebergPartitionFields,
+  withPartitionMutationLocks,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
+import { createIngestSeqAllocator } from './ingest-seq.js'
+import { reconcileCacheRows } from './reconcile.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
+import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
 
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 /**
- * @import { SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ScannableDataSource, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
@@ -106,13 +111,34 @@ export function resolveIcebergDir(tablePath) {
 export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
+  const sessionPurges = createSessionPurgeStore(cacheRoot)
+  /** @param {Record<string, unknown>[]} rows */
+  function survivingRows(rows) {
+    sessionPurges.refresh()
+    return sessionPurges.size ? rows.filter((row) => !sessionPurges.has(row)) : rows
+  }
   const meter = getMeter('cache')
   const partitionDropCounter = meter.createCounter('hyp_partition_validation_drops', {
     description: 'Rows dropped due to missing required Iceberg partition fields',
   })
+  const seqAllocator = createIngestSeqAllocator({ cacheRoot })
+  /**
+   * @param {Record<string, unknown>[]} rows
+   * @param {bigint} first
+   */
+  function stampRun(rows, first) {
+    rows.forEach((row, index) => { row[INGEST_SEQ_COLUMN.name] = first + BigInt(index) })
+  }
+  /** @param {Record<string, unknown>[]} rows */
+  async function stampRows(rows) {
+    stampRun(rows, await seqAllocator.reserve(rows.length))
+  }
   const spool = createCacheSpool({
     cacheRoot,
     async appendChunk(tablePath, columns, rows) {
+      const beforePurge = rows.length
+      rows = survivingRows(rows)
+      let purgedCount = beforePurge - rows.length
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
       // @ref LLP 0027#decision: flush-time settlement: the owning dataset
       // may upgrade provisional (fallback) row identity and dedupe before
@@ -122,10 +148,13 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       if (settle) {
         rows = await settle(rows, { storage: service })
       }
+      const beforeSecondCheck = rows.length
+      rows = survivingRows(rows)
+      purgedCount += beforeSecondCheck - rows.length
       const declaration = getDeclaration?.(dataset)
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
-      let droppedCount = 0
+      let droppedCount = purgedCount
       /** @type {Map<string, number>} */
       const missingFieldCounts = new Map()
       for (const row of rows) {
@@ -135,10 +164,6 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
             droppedCount++
             const missingKey = missing.join(',')
             missingFieldCounts.set(missingKey, (missingFieldCounts.get(missingKey) ?? 0) + 1)
-            partitionDropCounter.add(1, {
-              [Attr.DATASET]: dataset,
-              missing_fields: missing.join(','),
-            })
             continue
           }
         }
@@ -153,25 +178,157 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         }
         group.rows.push(row)
       }
-      let totalBytes = 0
-      const opts = declaration ? { declaration } : undefined
-      for (const { segments, rows: groupRows } of groups.values()) {
-        const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
-        totalBytes += result.bytesWritten
+      // Every partition this chunk touches is asked before any of them is
+      // committed, because the flush checkpoints the chunk as a unit: it
+      // records its resume offset only once `appendChunk` has returned
+      // (`drainFlushFiles` in `src/core/cache/spool.js`). A refusal raised
+      // partway down the loop below would leave the groups ahead of it
+      // committed and no checkpoint written, so the next flush would replay
+      // the chunk and commit them a second time, and a third, once per flush
+      // tick for as long as the refusal stood. Nothing downstream dedupes
+      // rows that already carry their native identity, so those duplicates
+      // are permanent and they ship onward through the sinks.
+      //
+      // Only a chunk that fans out to more than one partition can half-commit
+      // like that: a single-group chunk either commits or does not, and the
+      // unwritten checkpoint then replays rows none of which landed.
+      // @ref LLP 0347#rows-wait [implements]: the whole chunk waits, so a refusal costs no partial commit to replay
+      if (groups.size > 1) {
+        for (const { segments } of groups.values()) {
+          const refusal = appendRefusalReason(cacheTablePath(cacheRoot, dataset, segments))
+          if (refusal) throw new Error(refusal)
+        }
       }
-      if (droppedCount > 0) {
+      let totalBytes = 0
+      const opts = { declaration, stampRows, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
+        const kept = survivingRows(rows)
+        const removed = rows.length - kept.length
+        droppedCount += removed
+        purgedCount += removed
+        return kept
+      } }
+      // The cursor probe above only catches a refusal already on record; it
+      // says nothing about a partition a foreign process holds the mutation
+      // guard for right now. That guard is the second thing a multi-partition
+      // chunk must hold for every partition before it commits to any: claim
+      // every one, sorted, up front, so a guard that is busy on partition B
+      // unwinds the whole commit instead of leaving partition A committed
+      // with no checkpoint written to keep it from replaying.
+      // @ref LLP 0347#rows-wait [implements]: the whole chunk waits, so guard contention costs no partial commit to replay
+      if (groups.size > 1) {
+        const dirs = Array.from(groups.values(), ({ segments }) => cacheTablePath(cacheRoot, dataset, segments))
+        await withPartitionMutationLocks(dirs, async () => {
+          // The seq counter is a third thing that can refuse, so it is asked
+          // once for the whole chunk before any partition commits, and each
+          // partition is stamped from its own contiguous slice of that run.
+          // Every guard is already held, so no other process can commit to
+          // these partitions between this reservation and the commits below.
+          // Rows the purge re-check drops inside the loop leave a gap.
+          // @ref LLP 0347#rows-wait [implements]: counter contention, too, costs no partial commit to replay
+          // @ref LLP 0492#whole-chunk [implements]: one reservation per multi-partition chunk, sliced per partition
+          let next = await seqAllocator.reserve(Array.from(groups.values()).reduce((sum, group) => sum + group.rows.length, 0))
+          const stampSlice = {
+            /** @param {Record<string, unknown>[]} rows */
+            async stampRows(rows) {
+              stampRun(rows, next)
+              next += BigInt(rows.length)
+            },
+          }
+          for (const { segments, rows: groupRows } of groups.values()) {
+            const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, { ...opts, ...stampSlice, mutationLockHeld: true })
+            totalBytes += result.bytesWritten
+          }
+        })
+      } else {
+        for (const { segments, rows: groupRows } of groups.values()) {
+          const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
+          totalBytes += result.bytesWritten
+        }
+      }
+      // Counted here rather than in the grouping loop above, because the
+      // refusal at the gate can send this chunk back to the spool to be
+      // replayed on the next flush tick, and a per-attempt count would climb
+      // for the same rows once a minute for as long as a cursor stayed
+      // broken. Past the commit loop the chunk has landed exactly once, so
+      // each dropped row is counted once too.
+      for (const [fields, count] of missingFieldCounts) {
+        partitionDropCounter.add(count, {
+          [Attr.DATASET]: dataset,
+          missing_fields: fields,
+        })
+      }
+      // Rows removed by the session-purge fence are a normal, expected drop
+      // (a session purge with unflushed spool rows), not a validation
+      // problem, so they must not trip this warn or inflate the reported
+      // missing-field drop count; only the non-purge remainder does.
+      const validationDroppedCount = droppedCount - purgedCount
+      if (validationDroppedCount > 0) {
         logger.warn('cache.partition_validation_drops', {
           [Attr.DATASET]: dataset,
-          dropped_count: droppedCount,
+          dropped_count: validationDroppedCount,
           row_count: rows.length,
           missing_fields: Array.from(missingFieldCounts.entries())
             .map(([fields, count]) => `${fields}:${count}`)
             .join(';'),
+          ...(purgedCount > 0 ? { purged_count: purgedCount } : {}),
         })
       }
       return { bytesWritten: totalBytes, droppedCount }
     },
   })
+
+  /**
+   * The per-row withholding verdict `readRowsSince` applies after its purge
+   * fence and dataset-wide source verdict, shared with `exportWithheld` so a
+   * caller revalidating rows it already read gets the export seam's answer,
+   * not a copy of it. The attribution and entrypoint columns must already be
+   * on `row`. A corrupt/unreadable list makes `resolve` throw; we let it
+   * propagate so the caller fails closed (LLP 0080 #fail-safe), never a
+   * silent skip.
+   *
+   * @param {Record<string, unknown>} row
+   * @param {string} dataset
+   * @param {string | undefined} attributionColumn
+   * @param {string | undefined} entrypointColumn
+   * @returns {'cwd' | 'source' | 'unattributed' | undefined}
+   */
+  function rowWithholdReason(row, dataset, attributionColumn, entrypointColumn) {
+    // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time (no cache-schema marker, retroactive over already-cached rows); `cwd` is forced into the scan by `readRowsSince` so a caller's `columns` projection can't bypass this filter
+    // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
+    const cwd = row.cwd
+    if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') return 'cwd'
+    // @ref LLP 0188#opt-out [implements]: a row attributed to an
+    // opted-out picker source on a machine with a central layer is
+    // withheld from the payload, and `readRowsSince` drops it with the same
+    // drop-but-advance semantics as the `cwd` filter above, so a sink's
+    // watermark still moves past a withheld row (LLP 0070#incremental).
+    if (!sourceWithholdResolver || attributionColumn === undefined) return undefined
+    const attributionValue = row[attributionColumn]
+    // @ref LLP 0192#fail-closed [implements]: a row with no usable
+    // attribution value cannot be tied to any synced source, so it is
+    // withheld once any of this dataset's declared owners (the picker
+    // sources whose plugin lists the dataset in `contributes.datasets`)
+    // is opted out, instead of shipped (pre-0192, every unattributed
+    // row escaped both withhold rules). Opting out `codex` alone
+    // leaves the unattributed path disarmed. For the bundled catalog,
+    // only an opt-out on a raw gateway row (`raw-anthropic`/
+    // `raw-openai`) arms it.
+    if (typeof attributionValue !== 'string' || attributionValue === '') {
+      return sourceWithholdResolver.shouldWithholdUnattributed?.(dataset) === true ? 'unattributed' : undefined
+    }
+    // @ref LLP 0346#entrypoint-refinement [implements]: a row whose
+    // `client_name` belongs to one client but whose `entrypoint` is
+    // claimed by another (`claude-desktop` stamping `client_name:
+    // "claude"`) is withheld when EITHER source is opted out; the
+    // `client_name` test is unchanged, so nothing that was withheld
+    // before is shipped now.
+    const withholdRow = sourceWithholdResolver.shouldWithhold(attributionValue) ||
+      sourceWithholdResolver.shouldWithholdEntrypoint?.(
+        attributionValue,
+        entrypointColumn === undefined ? undefined : row[entrypointColumn]
+      ) === true
+    return withholdRow ? 'source' : undefined
+  }
 
   /** @type {ExtendedQueryStorageService} */
   const service = {
@@ -193,7 +350,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, rows)
+          const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, survivingRows(rows))
           span.setAttribute('bytes_written', bytesWritten)
           span.setAttribute('pending_bytes', pendingBytes)
           span.setAttribute('spooled', true)
@@ -222,13 +379,35 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // `opts.since`: absent ⇒ byte-for-byte the pre-existing full scan, so every
     // current caller is untouched until it opts in. When set, the scan yields
     // only rows newer than the watermark (null-seq legacy rows always yielded).
+    // @ref LLP 0417#operation [implements]: scope survives the first fence; long streams refresh at bounded intervals
     async *readRows(tablePath, columns, opts) {
+      sessionPurges.refresh()
       const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      const scanColumns = projected ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
       const scanOpts = since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : undefined
-      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, scanOpts)) {
+      let scanned = 0
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, scanOpts)) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
+        if (sessionPurges.has(row)) continue
         for (const f of INTERNAL_FIELDS) delete row[f]
-        yield row
+        yield projected ? projectRow(row, projected) : row
+      }
+    },
+
+    // Exact lookup sibling for plugin hot paths. Keeping this separate from
+    // the incremental read options prevents a pruning hint from being
+    // confused with a predicate whose result callers rely on.
+    async *readRowsWhere(tablePath, columns, whereIn) {
+      sessionPurges.refresh()
+      const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      const scanColumns = projected ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
+      let scanned = 0
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { whereIn })) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
+        if (sessionPurges.has(row)) continue
+        for (const f of INTERNAL_FIELDS) delete row[f]
+        yield projected ? projectRow(row, projected) : row
       }
     },
 
@@ -242,6 +421,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // has a watermark it passes false (the backlog is already shipped), so the
     // one-time migration never re-exports on every tick (LLP 0040 §6 risk #1).
     async *readRowsSince(tablePath, opts = {}) {
+      sessionPurges.refresh()
       const since = continuationToSeq(opts.since)
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
       const projected = opts.columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
@@ -251,12 +431,12 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // cwd-less, the filter would treat it as cwd-less, and a local-only row
       // would be FORWARDED. So when a resolver is configured, force `cwd` into
       // the scan regardless of `columns`, then strip it back off the yielded row
-      // if the caller didn't ask for it — the projection contract is honored,
+      // if the caller didn't ask for it: the projection contract is honored,
       // but the guarantee never rides on callers remembering to include `cwd`.
       // (`projected === undefined` means "all columns", which already carries
       // `cwd`; no forcing and no stripping needed.)
       const forceCwd = usagePolicyResolver !== undefined && projected !== undefined && !projected.includes('cwd')
-      // @ref LLP 0132#source-scoped-withholding [implements]: same not-bypassable-by-projection
+      // @ref LLP 0188#opt-out [implements]: same not-bypassable-by-projection
       // guarantee as `cwd` above, but the forced column is dataset-specific
       // (`attributionColumnFor`) rather than a fixed name; `undefined` means
       // this dataset declared no `attribution_column`, so nothing is forced
@@ -264,13 +444,31 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const attributionColumn = sourceWithholdResolver?.attributionColumnFor(dataset)
       const forceAttribution =
         attributionColumn !== undefined && projected !== undefined && !projected.includes(attributionColumn)
+      // @ref LLP 0346#entrypoint-refinement [implements]: the second
+      // attribution axis, forced in on the same not-bypassable-by-projection
+      // terms as the first. A dataset without the column costs one ignored
+      // name in the projection (icebird intersects the wanted set with the
+      // table schema) and the refinement then never fires.
+      const entrypointColumn = sourceWithholdResolver?.entrypointColumnFor?.(dataset)
+      const forceEntrypoint =
+        entrypointColumn !== undefined && projected !== undefined && !projected.includes(entrypointColumn)
+      // @ref LLP 0188#enforcement-scope [implements]: a dataset with no
+      // attribution column, all of whose contributing sources are opted out,
+      // is withheld wholesale; per-row filtering can never fire for it, so
+      // this dataset-scoped verdict is the only way its opt-out is honored.
+      // Evaluated per read (not hoisted further) so the resolver's live
+      // withheld set applies; a corrupt-store throw here propagates like the
+      // per-row one below and fails the partition read closed.
+      const withholdDataset = sourceWithholdResolver?.shouldWithholdDataset?.(dataset) === true
       /** @type {string[] | undefined} */
       let scanColumns = projected
-      if (forceCwd || forceAttribution) {
+      if (forceCwd || forceAttribution || forceEntrypoint) {
         scanColumns = [...(/** @type {string[]} */ (projected))]
         if (forceCwd) scanColumns.push('cwd')
         if (forceAttribution) scanColumns.push(/** @type {string} */ (attributionColumn))
+        if (forceEntrypoint) scanColumns.push(/** @type {string} */ (entrypointColumn))
       }
+      if (scanColumns) scanColumns = [...new Set([...scanColumns, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])]
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
       // row never advances the watermark and progress never regresses even when
@@ -280,62 +478,105 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       /** @type {Set<string>} */
       const droppedCwdHashes = new Set()
       let droppedSourceRowCount = 0
+      let droppedUnattributedRowCount = 0
+      let purgedRowCount = 0
+      let scanned = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
         for (const f of INTERNAL_FIELDS) delete row[f]
         /** @type {SinkContinuation} */
         const after = { v: 1, seq: high.toString() }
-        // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time (no cache-schema marker, retroactive over already-cached rows); `cwd` is forced into the scan above so a caller's `columns` projection can't bypass this filter
-        // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
-        // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
-        // A corrupt/unreadable list makes `resolve` throw; we let it propagate
-        // so the partition read fails and the sink's per-partition retry leaves
-        // the watermark untouched (LLP 0080 #fail-safe) — never a silent skip.
-        const cwd = row.cwd
-        if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') {
-          droppedRowCount += 1
-          droppedCwdHashes.add(hashCwd(cwd))
+        if (sessionPurges.has(row)) {
+          purgedRowCount += 1
           yield { after, dropped: true }
           continue
         }
-        // @ref LLP 0132#source-scoped-withholding [implements]: a row attributed
-        // to a picker source classified `'local'` on a machine with a central
-        // layer is dropped from the payload here, same drop-but-advance
-        // continuation semantics as the `cwd` filter above, so a sink's
-        // watermark still moves past a withheld row (LLP 0070#incremental).
-        if (sourceWithholdResolver && attributionColumn !== undefined && sourceWithholdResolver.shouldWithhold(row[attributionColumn])) {
+        // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
+        // A corrupt/unreadable list makes `resolve` throw; we let it propagate
+        // so the partition read fails and the sink's per-partition retry leaves
+        // the watermark untouched (LLP 0080 #fail-safe), never a silent skip.
+        if (withholdDataset) {
           droppedRowCount += 1
           droppedSourceRowCount += 1
           yield { after, dropped: true }
           continue
         }
-        // We forced `cwd`/the attribution column in for the filters only;
-        // don't leak either into a payload the caller's projection didn't ask
-        // for.
+        const withheld = rowWithholdReason(row, dataset, attributionColumn, entrypointColumn)
+        if (withheld !== undefined) {
+          droppedRowCount += 1
+          if (withheld === 'cwd') droppedCwdHashes.add(hashCwd(/** @type {string} */ (row.cwd)))
+          else droppedSourceRowCount += 1
+          if (withheld === 'unattributed') droppedUnattributedRowCount += 1
+          yield { after, dropped: true }
+          continue
+        }
+        // We forced `cwd`/the attribution column/the entrypoint column in for
+        // the filters only; don't leak any of them into a payload the caller's
+        // projection didn't ask for.
         if (forceCwd) delete row.cwd
         if (forceAttribution) delete row[/** @type {string} */ (attributionColumn)]
+        if (forceEntrypoint) delete row[/** @type {string} */ (entrypointColumn)]
+        if (projected) for (const key of ['session_id', 'org', 'node_id', 'src_id', 'dst_id']) {
+          if (!projected.includes(key)) delete row[key]
+        }
         yield { row, after }
       }
       // Per-partition aggregate on the export read; cwds are hashed, never raw
       // paths in dev telemetry (LLP 0080 #telemetry). Emitted only when the scan
       // completes normally, so a corrupt-list throw reports no partial drop.
-      if (droppedRowCount > 0) {
+      if (droppedRowCount > 0 || purgedRowCount > 0) {
         logger.debug('usage_policy.export_drop', {
           [Attr.COMPONENT]: 'cache',
           [Attr.DATASET]: dataset,
           dropped_row_count: droppedRowCount,
           distinct_cwd_count: droppedCwdHashes.size,
+          // Purge-fence drops are not a usage-policy withholding; kept
+          // separate so neither count is read as the other.
+          ...(purgedRowCount > 0 ? { purged_row_count: purgedRowCount } : {}),
           ...(droppedSourceRowCount > 0 ? { dropped_source_row_count: droppedSourceRowCount } : {}),
+          // Separate count so the fail-closed rule's over-withholding is
+          // observable in the field, not inferred (LLP 0192 #consequences).
+          ...(droppedUnattributedRowCount > 0 ? { dropped_unattributed_row_count: droppedUnattributedRowCount } : {}),
         })
       }
     },
 
+    // Bounded to the rows handed in: one purge-store stat, one dataset
+    // verdict, then the shared per-row verdict, whose `cwd` walk is memoized
+    // per directory inside the resolver's TTL.
+    exportWithheld(tablePath, rows) {
+      sessionPurges.refresh()
+      const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
+      if (sourceWithholdResolver?.shouldWithholdDataset?.(dataset) === true) return rows.length
+      const attributionColumn = sourceWithholdResolver?.attributionColumnFor(dataset)
+      const entrypointColumn = sourceWithholdResolver?.entrypointColumnFor?.(dataset)
+      let withheld = 0
+      for (const row of rows) {
+        if (sessionPurges.has(row) || rowWithholdReason(row, dataset, attributionColumn, entrypointColumn) !== undefined) withheld += 1
+      }
+      return withheld
+    },
+
+    // Cheap, no cache I/O: two small machine-local reads at most. Consumers
+    // that derive durable state from `readRowsSince`'s withholding verdicts
+    // (the GitHub observed-repos sidecar) compare this digest across ticks to
+    // notice a policy change without re-reading history; a machine with no
+    // resolver configured reads as a constant policy.
+    // @ref LLP 0367#policy-fingerprint [implements]: the storage seam that composes the resolver halves into one comparable digest
+    exportPolicyFingerprint() {
+      const usage = usagePolicyResolver?.fingerprint?.() ?? 'none'
+      const source = sourceWithholdResolver?.fingerprint?.() ?? 'none'
+      return `v1 usage:${usage} source:${source}`
+    },
+
     async dataSourceForTable(tablePath) {
-      const source = await dataSourceForTable(resolveIcebergDir(tablePath))
-      if (!source) return null
+      const unfiltered = await dataSourceForTable(resolveIcebergDir(tablePath))
+      if (!unfiltered) return null
+      const source = filterPurgedSessions(unfiltered, sessionPurges)
       const publicColumns = source.columns.filter((c) => !INTERNAL_FIELDS.includes(c))
-      /** @type {AsyncDataSource} */
+      /** @type {ScannableDataSource} */
       const wrapped = {
         numRows: source.numRows,
         columns: publicColumns,
@@ -366,6 +607,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // request one here.
       if (typeof source.scanColumn === 'function') {
         wrapped.scanColumn = (options) => /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)(options)
+      }
+      // Icebird's prepared scan is safe to expose after applying the same
+      // internal-field projection to its logical schema. Squirreling plans
+      // requests from this schema, so no prepared demand can name an internal
+      // field and the inner source returns only the requested public fields.
+      // @ref LLP 0294#transparent-wrappers [implements]: storage preserves native batches without advertising internal cache fields
+      if (source.schema && source.prepareScan) {
+        const prepareScan = source.prepareScan
+        wrapped.schema = {
+          fields: source.schema.fields.filter((field) => !INTERNAL_FIELDS.includes(field.name)),
+        }
+        wrapped.prepareScan = (request) => prepareScan.call(source, request)
       }
       return wrapped
     },
@@ -431,12 +684,22 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, rows)
+          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, survivingRows(rows), { filterRows: survivingRows })
           span.setAttribute('bytes_written', result.bytesWritten)
           span.setAttribute('appended', result.appended)
         },
         { component: 'cache' }
       )
+    },
+
+    async reconcileRows(dataset, columns, rows, scope) {
+      // Drain legacy captured rows before reconciling them, so they cannot
+      // reappear on the next flush. New snapshot writes bypass the spool.
+      for (const table of await discoverSpoolTables(cacheRoot)) {
+        if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
+      }
+      return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
+        declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
     discoverCachePartitions(scope) {
@@ -449,6 +712,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // rotates or advances flush progress, so it is safe alongside live capture.
     async *readSpooledRows(dataset, columns) {
       if (!dataset) return
+      sessionPurges.refresh()
       /** @type {string[]} */
       let tables = []
       try {
@@ -456,9 +720,12 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       } catch {
         return
       }
+      let scanned = 0
       for (const tablePath of tables) {
         if (datasetForTablePath(cacheRoot, tablePath) !== dataset) continue
         for await (const row of spool.readSpooledRows(tablePath)) {
+          if (scanned++ % 1024 === 0) sessionPurges.refresh()
+          if (sessionPurges.has(row)) continue
           for (const f of INTERNAL_FIELDS) delete row[f]
           yield columns ? projectRow(row, columns) : row
         }

@@ -5,14 +5,14 @@ The central HypAware server is implemented in a separate package
 the TypeScript types in [`src/types.d.ts`](./src/types.d.ts); this
 document is the wire-level reference.
 
-The contract has three surfaces: identity (bootstrap + refresh), config
-pull (operator-defined config delivered to gateways), and ingest (cache
-partitions forwarded as NDJSON, per signal).
+The contract covers identity (bootstrap + refresh), config pull
+(operator-defined config delivered to gateways), ingest (cache partitions
+forwarded as NDJSON, per signal), and human-authorized session purging.
 
 All endpoints are HTTPS in production. Bodies are UTF-8 JSON unless
 explicitly NDJSON (`application/x-ndjson`). Errors return a JSON object
 with at least `{ "error": "<kind>" }`; `<kind>` is a short snake_case
-tag the client uses for diagnostics — humans read the HTTP status.
+tag the client uses for diagnostics, humans read the HTTP status.
 
 ## Versioning
 
@@ -103,13 +103,13 @@ install and treats a mismatch as an apply failure (LLP 0025).
 
 `ETag: <hex>` accompanies every 200 response. Clients persist the etag
 of the *running* config in kernel-managed state (it transitions
-atomically with the operative config on apply and rollback — LLP 0025)
+atomically with the operative config on apply and rollback: LLP 0025)
 so a restart short-circuits to 304 instead of re-pulling and
 re-validating.
 
 Response 304: no body. The gateway keeps its current config.
 
-Response 404: legacy-only branch — every token now references a config
+Response 404: legacy-only branch, every token now references a config
 at mint (server LLP 0009), so gateways enrolled under that flow always
 resolve. Kept for conformance against older servers: back off to
 5 minutes and log once until the state clears.
@@ -121,16 +121,77 @@ backs off linearly (30s → 60s → 120s → 300s).
 
 ## Ingest
 
+### PUT `/v1/datasets/{dataset}`
+
+Bearer-authenticated. Announces one dataset's schema so the server's
+catalog can resolve rows POSTed under that name. Body is JSON:
+
+```json
+{ "schema": { "columns": [ { "name": "…", "type": "STRING", "nullable": true } ] },
+  "sourceSignal": "claude_telemetry",
+  "primaryTimestampColumn": "event_timestamp" }
+```
+
+`sourceSignal` and `primaryTimestampColumn` are sent only when the
+dataset declares them. `{dataset}` is URL-escaped, and the ingest POST
+below escapes it identically, so the two calls always name one resource.
+
+Datasets declaring `localOnlyContentColumns` are not eligible for this raw-row
+protocol: those columns may contain local-only content without per-row `cwd`
+provenance, and registration cannot make the server enforce the machine's
+local usage policy. The client withholds such a dataset before either request.
+The withhold is permanent, not an error: the partition is skipped (and named
+once per sink instance in `central.forward.dataset_withheld`) rather than
+retried, so it never fills the driver's outbox. A dataset whose name collides
+with a reserved legacy signal is withheld the same way, at warn.
+
+Registration is expected to be idempotent: the client announces an eligible
+dataset once per sink instance, before that dataset's first ingest chunk, and
+a daemon restart (or a second concurrent tick) may announce it again.
+
+When the sink instance starts, the client initializes a durable rollout
+manifest for every eligible open dataset. It flushes and rediscovers pending
+spools, records every existing partition's current sequence high-water without
+sending its rows, then commits the manifest. Establishing that boundary locally
+first means a registration outage cannot absorb later rows into a delayed
+baseline. An empty dataset still commits an empty manifest, so a partition
+created later starts at sequence zero and forwards its first rows.
+
+Once the manifest names a partition, missing or invalid progress fails closed:
+it never falls through to either a full-history read or a new baseline. Legacy
+signals keep their existing full first-export behavior. See LLP 0307.
+
+Response 2xx: registered. A `404` or `405` means the server predates this
+additive route: the client holds the dataset locally, logs once, and re-probes
+after five minutes instead of creating an outbox entry every tick. Any other
+status throws, which fails that partition for the driver's outbox retry; the
+dataset is not marked registered until a call succeeds. A `401` refreshes the
+JWT once and retries, exactly as ingest does.
+
+> **Server status:** this route is the fleet server's accepted catalog
+> protocol (server LLP 0001 / 0004) and was exercised against the deployed
+> Hyperparam server on 2026-08-24 with `claude_telemetry_events`. An older
+> server that does not serve it holds the partition locally and emits
+> `central.forward.dataset_unsupported`; no rows are POSTed.
+
 ### POST `/v1/ingest/{signal}`
 
 Bearer-authenticated. Body is NDJSON (one row per line, terminated by
 `\n`). One request carries one signal. The kernel forwards each cache
-partition independently, resolving its signal from the dataset's
-`sourceSignal` (defaulting to the dataset name) and streaming the
-partition's rows as one or more bounded chunks — one POST per chunk (see
-"Batch boundaries").
+partition independently and streams the partition's rows as one or more
+bounded chunks: one POST per chunk (see "Batch boundaries").
 
-`{signal}` is one of:
+`{signal}` is resolved from the dataset in two ways:
+
+- the four **legacy signals** keep their fixed paths, chosen by the
+  dataset's declared `sourceSignal`;
+- every **other eligible** dataset ingests under its own dataset name, after
+  its schema is registered by the `PUT` above. Its `sourceSignal`, if it
+  declares one, travels in the registration body and does **not** select the
+  path. Datasets declaring `localOnlyContentColumns` are ineligible as
+  described above. The names `logs`, `traces`, `metrics`, and `proxy` are
+  reserved by the server's legacy path mapping and cannot be used by an open
+  dataset.
 
 | Signal    | Source                                            |
 |-----------|---------------------------------------------------|
@@ -143,7 +204,7 @@ Headers (request):
 
 - `Authorization: Bearer <jwt>`
 - `Content-Type: application/x-ndjson`
-- `X-Hyp-Batch-Id: <hash>` — idempotency key for this chunk. The client
+- `X-Hyp-Batch-Id: <hash>`, idempotency key for this chunk. The client
   derives it from the signal, the partition identity, the chunk's
   position within the partition, and the chunk's exact bytes: a re-sent
   chunk reproduces the same key, but two byte-identical chunks at
@@ -153,11 +214,31 @@ Headers (request):
   genuinely distinct chunk that merely shares bytes is never dropped
   (server LLP 0001).
 
+Optional compression (LLP 0497): a successful ingest response may advertise
+`Accept-Encoding: gzip`. Until then clients send plain NDJSON. Gzip requests
+carry `Content-Encoding: gzip`, encoded `Content-Length`, and
+`X-Hyp-Uncompressed-Length`. The server rejects missing/invalid/over-limit
+decoded lengths (413), malformed or mismatched compressed bodies (400), and
+unknown encodings (415). Decoding is bounded to the declared length and
+admission charges the larger of encoded and decoded lengths. Ledger hits
+still acknowledge before body decoding and admission. A gzip 415 permits one
+plain retry with the same batch id, for mixed-version deployments.
+
+Row-level dedup complements that ledger for `ai_gateway_messages`: the
+server holds a uniqueness guarantee on `part_id`, keyed by `(org, dataset)`
+rather than by gateway, so it spans the whole org's ingest and survives
+gateway identity churn. A row whose `part_id` the org has already stored is
+dropped before spooling, as is a repeat within the same batch, and a newly
+accepted identity is persisted with fsync before the `202` and rebuilt at
+boot, so it holds across a restart. This is an ingest-time guarantee, not a
+database `UNIQUE` constraint: the duplicate is dropped and the batch is
+still accepted (server LLP 0152 `#org-scope`).
+
 Response 202: batch accepted for processing. Body is empty.
 
 Response 401: see "Refresh window".
 
-Response 400 / 422 (4xx that is not 401 or 429): the batch is poison —
+Response 400 / 422 (4xx that is not 401 or 429): the batch is poison,
 the server saw the request but cannot store it. The gateway drops the
 batch from its outbox and counts it as a permanent failure rather than
 retrying forever.
@@ -166,13 +247,15 @@ Response 429 / 503: server is rate-limiting or temporarily unavailable.
 Client retries the same batch. A *positive* `Retry-After` (seconds or
 HTTP date) is honored; an absent, unparseable, or **non-positive** value
 (a literal `0` or a past date carries no useful pacing) falls back to the
-client's linear backoff ladder — a zero is never taken as an immediate
+client's linear backoff ladder: a zero is never taken as an immediate
 retry.
 
-Response 5xx (other): transient transport failure. Client retries with
-exponential backoff capped at 5 minutes.
+Response 502 / 504: retry the same chunk with the shared transport-error
+budget of three retries at 2, 4, and 6 seconds. All attempts remain inside
+the single 330-second chunk lifetime. Other 5xx fail the partition for the
+driver to retry.
 
-> **Client status:** `429`/`503` are now handled as specified — the sink
+> **Client status:** `429`/`503` are now handled as specified, the sink
 > honors a positive `Retry-After` (falling back to the linear ladder when
 > it is absent, garbage, or non-positive) and **retries the same chunk in
 > place**, sleeping whenever the server's byte-rate
@@ -183,12 +266,11 @@ exponential backoff capped at 5 minutes.
 > (server LLP 0001 idempotency ledger). The wait is abortable, so sink
 > `close()` / daemon shutdown is never wedged by a paused chunk.
 >
-> Two gaps remain, tracked as follow-up: poison (`400`/`422`) is still
-> **not** dropped — it throws like any other failure and the driver
-> retries it — and there is no **forward cursor** or proactive client
-> pacing yet, so each tick re-streams the whole partition (the server
-> dedup keeps that correct and, post the ledger-before-backpressure fix,
-> cheap).
+> Poison (`400`/`422`) is still **not** dropped: it throws and the driver
+> retries it. Ordinary progress uses an end-of-partition watermark. After
+> interruption, bounded durable chunk receipts skip exact acknowledged chunks
+> while rereading through current privacy filters (LLP 0497). Source-history
+> replay uses separate receipts and does not change the ordinary watermark.
 
 ### Batch boundaries
 
@@ -212,8 +294,38 @@ byte-identical chunks never alias onto one ledger entry.
 The body of each NDJSON line is the row as materialized in the local
 Iceberg cache. The server is expected to reconcile dataset schemas by
 name (`logs`, `traces`, …); the gateway does not annotate rows with a
-dataset header. When two datasets map to the same signal (uncommon —
+dataset header. When two datasets map to the same signal (uncommon,
 the canonical mapping is 1:1), the gateway sends one POST per dataset.
 
 `dev_run_id` is preserved end-to-end as a payload attribute so smoke
 tests can correlate ingested rows with the run that produced them.
+
+## Session purge
+
+### POST `/v1/sessions/purge`
+
+Invoked by `hyp privacy purge --session ID` for configured, signed-in, and
+enrolled servers by default. `--remote NAME` limits remote scope;
+`--local-only` opts out. Bearer credentials
+must belong to a live human refresh session with `report-publish` write
+scope. Upload gateway and standalone read credentials are refused. The
+server derives the organization from the credential and permits verified
+session owners or current organization admins.
+
+Request: `{ "session_id": "<exact opaque session id>" }`.
+
+Response 200 includes `session_id`, `org`, `status: "completed"`,
+`stage: "completed"`, `cache_rows_deleted`, `archive_rows_deleted`,
+`scope: "session_keyed_rows"`, and `retained`. Counts describe this attempt;
+retrying an already completed purge can return zero. Completion covers
+spools and position deletes in session-keyed cache/archive tables, plus a
+durable exclusion against replay. Physical files remain until compaction;
+derived copies without session lineage, including generated report copies,
+are disclosed in `retained` and are outside this operation.
+
+Response 401 means a live human credential is required; 403 means the caller
+cannot purge this session; 404 means no ownership evidence exists. Response
+503 signals busy or incomplete work. An incomplete response includes the
+failed `stage` when available. Retry the same request; a durable receipt
+preserves the authorized owner's retry permission after rows are removed.
+Ordinary ignore never calls this endpoint.

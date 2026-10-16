@@ -13,9 +13,12 @@ export const FALLBACK_LISTEN = '127.0.0.1:0'
 
 /**
  * Validate and normalize the ai-gateway config slice. Returns the
- * compiled shape used by the source/listener. Validation is strict:
- * missing or malformed `upstreams` is rejected loudly because the
- * gateway has nothing useful to do without at least one upstream.
+ * compiled shape used by the source/listener. Missing or malformed
+ * `upstreams` compiles to an empty list rather than an error: adapter
+ * plugins contribute the rest of the routing table as presets after this
+ * runs, and a config that wants the gateway plugin only for its dataset and
+ * materializer (`@hypaware/hermes`) legitimately names no upstream at all.
+ * The source decides what an empty table means, not this function.
  *
  * @param {unknown} raw
  * @returns {AiGatewayConfig}
@@ -29,11 +32,85 @@ export function compileConfig(raw) {
     : DEFAULT_GATEWAY_ID
   const upstreams = compileUpstreams(cfg.upstreams)
   const redactHeaders = compileStringArray(cfg.redact_headers)
+  // Off unless explicitly enabled. Proxy mode installs a machine-local CA and
+  // decrypts traffic, which is a materially larger ask than repointing a base
+  // URL, so it is never something a config silently acquires.
+  // @ref LLP 0233#proxy-mode-is-explicit [implements]
+  const proxyMode = cfg.proxy_mode === true
+  const upstreamProxy = compileUpstreamProxy(cfg.upstream_proxy)
   // @ref LLP 0114#explicit-listen-fails-loudly [constrained-by]: only a defaulted listen may fall back on EADDRINUSE
-  return { listen, listenConfigured, gatewayId, upstreams, redactHeaders }
+  return {
+    listen,
+    listenConfigured,
+    gatewayId,
+    upstreams,
+    redactHeaders,
+    proxyMode,
+    ...(upstreamProxy ? { upstreamProxy } : {}),
+  }
 }
 
 /**
+ * Compile the optional corporate-proxy setting.
+ *
+ * Accepts a URL string (`http://proxy.corp:8080`, optionally with credentials)
+ * because that is the form customers already have in `HTTPS_PROXY`, so the
+ * value can be copied across rather than retyped into fields.
+ *
+ * A malformed value compiles to `undefined` rather than throwing: the source
+ * reports it, and refusing to boot the gateway over a mistyped proxy would take
+ * capture down entirely rather than degrading to a direct connection.
+ *
+ * @param {unknown} raw
+ * @returns {import('./types.js').UpstreamProxy | undefined}
+ */
+export function compileUpstreamProxy(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined
+  /** @type {URL} */
+  let url
+  try {
+    url = new URL(raw)
+  } catch {
+    return undefined
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+  const port = url.port ? Number.parseInt(url.port, 10) : url.protocol === 'https:' ? 443 : 80
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined
+  if (!url.hostname) return undefined
+
+  /** @type {import('./types.js').UpstreamProxy} */
+  const proxy = { host: url.hostname, port }
+  if (url.username) {
+    /** @type {string} */
+    let userinfo
+    try {
+      // `URL` leaves an invalid escape (`p%zz`) in the credential untouched,
+      // and `decodeURIComponent` throws a `URIError` on it. Unguarded, one
+      // mistyped character in `upstream_proxy` propagated out of
+      // `compileConfig` and took the whole gateway source down at start,
+      // which is the outcome this function's contract exists to prevent.
+      userinfo = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+    } catch {
+      return undefined
+    }
+    proxy.authorization = `Basic ${Buffer.from(userinfo).toString('base64')}`
+  }
+  return proxy
+}
+
+/**
+ * Compile the configured upstream entries into routing-table rows, skipping
+ * any entry that lacks a `name` or a `base_url`.
+ *
+ * The skip is silent by design at this layer: this function has no logger and
+ * no way to tell a typo from a shape the caller meant to ignore. It is not
+ * silent overall. The source compares this list's length against the raw entry
+ * count and both logs the difference and publishes it as
+ * `details.upstreams_dropped`, from which `hyp status` warns
+ * (`gateway_upstreams_dropped`, or `gateway_idle_no_upstreams` when nothing
+ * survived at all). Anything that starts calling this without making that
+ * comparison reopens the blind spot.
+ *
  * @param {unknown} raw
  * @returns {UpstreamConfig[]}
  */

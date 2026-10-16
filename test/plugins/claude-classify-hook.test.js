@@ -21,7 +21,7 @@ test('an unclassified interactive session gets a SessionStart additionalContext 
   const code = await runClaudeClassifyHook(
     ['classify-cwd'],
     ctx({ stdout, stdin: stdinFor({ session_id: 's1', cwd: '/work/fresh', source: 'startup' }) }),
-    { evaluate: async ({ cwd }) => ({ prompt: true, reason: 'unclassified', cwd, enrolled: true, governed: false, promptText: `classify ${cwd}` }) }
+    { evaluate: async ({ cwd }) => ({ prompt: true, reason: 'unclassified', cwd, enrolled: true, governed: false, askMode: 'ask', promptText: `classify ${cwd}` }) }
   )
   assert.equal(code, 0)
   const out = JSON.parse(stdout.text())
@@ -35,7 +35,7 @@ test('a classified / unenrolled / non-interactive evaluation emits nothing', asy
     const code = await runClaudeClassifyHook(
       ['classify-cwd'],
       ctx({ stdout, stdin: stdinFor({ session_id: 's1', cwd: '/work/x', source: 'startup' }) }),
-      { evaluate: async ({ cwd }) => ({ prompt: false, reason, cwd, enrolled: reason !== 'unenrolled', governed: reason === 'classified' }) }
+      { evaluate: async ({ cwd }) => ({ prompt: false, reason, cwd, enrolled: reason !== 'unenrolled', governed: reason === 'classified', askMode: 'ask' }) }
     )
     assert.equal(code, 0)
     assert.equal(stdout.text(), '', `no output for reason=${reason}`)
@@ -48,7 +48,7 @@ test('a session-start event with no cwd is a passthrough (no evaluation, no outp
   const code = await runClaudeClassifyHook(
     ['classify-cwd'],
     ctx({ stdout, stdin: stdinFor({ session_id: 's1', source: 'startup' }) }),
-    { evaluate: async () => { evaluated = true; return { prompt: true, reason: 'unclassified', cwd: '', enrolled: true, governed: false, promptText: 'x' } } }
+    { evaluate: async () => { evaluated = true; return { prompt: true, reason: 'unclassified', cwd: '', enrolled: true, governed: false, askMode: 'ask', promptText: 'x' } } }
   )
   assert.equal(code, 0)
   assert.equal(stdout.text(), '')

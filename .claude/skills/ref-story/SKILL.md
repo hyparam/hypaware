@@ -5,16 +5,16 @@ description: Generate a "rationale-order" view of a source file organized by des
 
 # ref-story
 
-Use this skill to generate a literate-programming view of a source file. Where the normal view of a file is ordered by language syntax (imports at the top, function definitions in whatever order the author chose), the rationale-order view is ordered by **why** — grouped by the LLP sections that explain each construct, with the relevant prose interleaved between the code fragments.
+Use this skill to generate a literate-programming view of a source file. Where the normal view of a file is ordered by language syntax (imports at the top, function definitions in whatever order the author chose), the rationale-order view is ordered by **why**: grouped by the LLP sections that explain each construct, with the relevant prose interleaved between the code fragments.
 
 This is the capability LLP 0000 describes as "annotated source generation" and the README calls "the killer feature." It realizes the promise of literate programming (Knuth) without the maintenance burden of interleaving prose and code in the source file itself, because the prose lives in LLP documents and the code lives in source files, and `@ref` annotations are the bridge.
 
 Invoke as:
 
-- `/ref-story <file>` — generate a rationale-order view of a source file
-- `/ref-story <file> --format=markdown` — emit as a markdown document suitable for publishing
-- `/ref-story <file> --format=terminal` — emit as terminal-ready text with section dividers
-- `/ref-story <file> --output=<path>` — save the generated view to a file
+- `/ref-story <file>`: generate a rationale-order view of a source file
+- `/ref-story <file> --format=markdown`: emit as a markdown document suitable for publishing
+- `/ref-story <file> --format=terminal`: emit as terminal-ready text with section dividers
+- `/ref-story <file> --output=<path>`: save the generated view to a file
 
 ## Ground rules
 
@@ -53,14 +53,14 @@ Walk the file's constructs. For each:
 - If it has one or more `@ref` annotations, add it to the group for its primary reference. The primary reference is usually the first `@ref` that appears above the construct, unless the user has a convention for marking primary refs differently.
 - If it has no annotations, add it to the "Unreferenced" group.
 
-A construct may appear in multiple groups if it has multiple references — repeat it with a note that this is the same construct seen under a different lens.
+A construct may appear in multiple groups if it has multiple references: repeat it with a note that this is the same construct seen under a different lens.
 
 ### 4. Order the groups
 
 Order the groups to tell a story:
 
 - **Most referenced first.** Sections that explain the most code come first.
-- **Within a section, ordered by LLP position.** If LLP 0042 has sections A, B, C in that order and the file has code for sections C, A, B, render them as A, B, C — the LLP's own structure becomes the outline.
+- **Within a section, ordered by LLP position.** If LLP 0042 has sections A, B, C in that order and the file has code for sections C, A, B, render them as A, B, C: the LLP's own structure becomes the outline.
 - **Unreferenced last.** Helper functions, utility code, and anything not tied to a specific design decision goes at the bottom.
 
 ### 5. Render the view
@@ -83,7 +83,7 @@ This file is the token management implementation. It references 3 LLP
 sections. Below is the file organized by design intent rather than source
 order.
 
-## LLP 0042#token-strategy — Session tokens must be rotated on privilege escalation
+## LLP 0042#token-strategy - Session tokens must be rotated on privilege escalation
 
 > When a session gains elevated privileges (admin actions, payment
 > confirmation, or access to sensitive resources), the session token
@@ -122,7 +122,7 @@ pub fn rotate_token_on_grant(session: &Session, grant: Grant) -> Result<Session>
 
 ---
 
-## LLP 0074#focus-management — Focus trapping, restoration, custom order
+## LLP 0074#focus-management - Focus trapping, restoration, custom order
 
 > When a modal UI element is presented, focus must be trapped within
 > the modal. Tab and Shift-Tab cycle through the focusable elements
@@ -146,7 +146,7 @@ impl Modal {
 ## Unreferenced
 
 The following constructs have no `@ref` annotations. This is not
-necessarily wrong — utility functions and straightforward
+necessarily wrong - utility functions and straightforward
 implementations do not always need references. But if any of these
 implement non-obvious design decisions, consider adding a reference.
 
@@ -215,4 +215,4 @@ The idea of organizing code by design intent rather than compiler order is liter
 - Do not modify the source file. This skill is read-only.
 - Do not modify LLP documents.
 - Do not attempt to "improve" the source file's annotations or structure. Just render the view.
-- Do not generate views for files with only trivial references (e.g., a single LLP 0000 reference at the top of every file) — ask the user if they really want the view, since it won't be informative.
+- Do not generate views for files with only trivial references (e.g., a single LLP 0000 reference at the top of every file): ask the user if they really want the view, since it won't be informative.

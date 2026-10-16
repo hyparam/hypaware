@@ -163,7 +163,7 @@ test('graph project usage errors exit 2 and report the offending argv on stderr'
 test('usage errors exit 2 and report the offending argv on stderr', async () => {
   /** @type {[string[], RegExp][]} */
   const cases = [
-    [[], /usage: hyp graph neighbors <node>/],
+    [[], /usage: hyp query graph neighbors <node>/],
     [['a', 'b'], /unexpected argument 'b' \(quote multi-word values\)/],
     [['x', '--bogus'], /unknown flag --bogus/],
     [['x', '--depth'], /--depth expects a value/],
@@ -178,7 +178,7 @@ test('usage errors exit 2 and report the offending argv on stderr', async () => 
     const code = await runGraphNeighbors(argv, ctx)
     assert.equal(code, 2, `argv ${JSON.stringify(argv)} should be a usage error`)
     assert.match(errs.join(''), pattern)
-    assert.match(errs.join(''), /^hyp graph neighbors: /)
+    assert.match(errs.join(''), /^hyp query graph neighbors: /)
     assert.equal(out.join(''), '', 'usage errors write nothing to stdout')
   }
 })

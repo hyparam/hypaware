@@ -71,6 +71,12 @@ serving one path (`/callback`), and uses `http://127.0.0.1:<port>/callback` as t
 matches. Rejected a fixed port (collisions, and the server would have to allowlist it).
 The listener is bound for one login, with a short timeout, then closed.
 
+> **Superseded by [LLP 0342](./0342-poll-login-completion.decision.md).** The
+> loopback redirect only delivers when the browser and the CLI share a
+> loopback interface, which an SSH session breaks. The client now polls the
+> server for the code instead of listening for a redirect; `loopback.js` is
+> deleted. The server keeps its redirect lane for released clients.
+
 ### D3: The client owns the downstream PKCE leg
 
 <a id="d3"></a> 
@@ -180,6 +186,12 @@ usable; the existing `--token-file`/stdin static-token path stays as the documen
 fallback. We do **not** build a device-code flow: hypaware-server's chunk-1 token
 endpoint exposes only the `authorization_code` and `refresh_token` grants, so a device
 flow would require new server work and is out of scope.
+
+> **Extended by [LLP 0342](./0342-poll-login-completion.decision.md).** The
+> static-token fallback stands for unattended cases, but the SSH/headless
+> browser login this clause gave up on now works: the client polls the server
+> for completion (not RFC 8628, whose typed user code stays rejected). The
+> "no reachable loopback" premise is retired along with the loopback itself.
 
 ## Consequences
 

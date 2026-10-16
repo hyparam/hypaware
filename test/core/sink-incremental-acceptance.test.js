@@ -5,7 +5,7 @@
 // The T4/T5 unit suites (`sink-incremental`, `central-forward-chunking`) wire
 // each sink against a STUBBED storage that hands back fixed rows and a hand-rolled
 // `readRowsSince`. They prove the wiring; they cannot prove the design's load-bearing
-// claim — that a row-resident `_hyp_ingest_seq` watermark survives the two cache
+// claim: that a row-resident `_hyp_ingest_seq` watermark survives the two cache
 // rewrites that motivate the whole design (LLP 0039 "why this is a design"):
 //
 //   - a retention FRONT-PRUNE (position-delete of the oldest rows), and
@@ -14,7 +14,7 @@
 // This suite drives the REAL kernel cache (`createQueryStorageService`), the REAL
 // retention enforcer, the REAL `maintainCache` compaction, BOTH real sinks (the
 // central `forward` request sink and the core `local-fs` blob sink), and the REAL
-// sink driver's outbox respool — end to end — and asserts exactly-once across both
+// sink driver's outbox respool, end to end, and asserts exactly-once across both
 // rewrites, ≈0 bytes on a no-new-rows tick, ≈N on an N-new tick, and that the
 // per-(sink, partition) watermark composes with the driver's outbox replay.
 //
@@ -32,6 +32,7 @@ import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
+import { compareStrings } from '../../src/core/util/compare_strings.js'
 import { readCursorSync, discoverCachePartitions } from '../../src/core/cache/partition.js'
 import { createInstanceWatermarkStore } from '../../src/core/sinks/incremental.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
@@ -39,6 +40,7 @@ import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { createSinkDriver } from '../../src/core/sinks/driver.js'
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { activate as activateLocalFs } from '../../hypaware-core/plugins-workspace/local-fs/src/index.js'
+import { readRequestBody } from '../helpers/request_body.js'
 
 /**
  * @import { ColumnSpec, QueryPartition, SinkEncoder } from '../../hypaware-plugin-kernel-types.d.ts'
@@ -83,7 +85,7 @@ function noopLog() {
 /**
  * Append a batch to the live spool then flush it: this routes through the
  * `decorateRow` chokepoint that stamps `_hyp_ingest_seq` (T1), so the committed
- * rows carry real monotonic seqs — the precondition for incremental reads.
+ * rows carry real monotonic seqs, the precondition for incremental reads.
  *
  * @param {ReturnType<typeof createQueryStorageService>} svc
  * @param {string} spoolPath
@@ -96,7 +98,7 @@ async function flushBatch(svc, spoolPath, batch) {
 
 /**
  * Resolve the single committed logical partition the spool flush produced.
- * `.path` is the stable `<cacheRoot>/datasets/<ds>/source=<src>` dir — the
+ * `.path` is the stable `<cacheRoot>/datasets/<ds>/source=<src>` dir: the
  * watermark key the design keys on, NOT the physical `tableDir`.
  *
  * @param {string} cacheRoot
@@ -111,7 +113,7 @@ async function logicalPartition(cacheRoot) {
 
 /**
  * Build a committed partition table DIRECTLY at the stable logical partition
- * path (no spool, no cursor) so the seq values — including pre-upgrade nulls —
+ * path (no spool, no cursor) so the seq values, including pre-upgrade nulls,
  * are controlled exactly. This reproduces a migration-era cache: some rows
  * pre-date the `_hyp_ingest_seq` column (null), some carry real seqs. `seq:null`
  * stamps a legacy row; a bigint stamps a real one.
@@ -146,7 +148,7 @@ function makeForwardSink({ storage, watermarks, responder, query }) {
   /** @type {typeof fetch} */
   const fetchFn = /** @type {any} */ (async (url, init) => {
     const headers = /** @type {Record<string, string>} */ (init?.headers ?? {})
-    const body = String(init?.body ?? '')
+    const body = await readRequestBody(init?.body)
     const ids = body.split('\n').filter((l) => l.length > 0).map((l) => Number(JSON.parse(l).id))
     const status = responder ? responder({ url: String(url) }) : 202
     calls.push({ url: String(url), batchId: headers['x-hyp-batch-id'], ids, status })
@@ -165,6 +167,7 @@ function makeForwardSink({ storage, watermarks, responder, query }) {
     query: query ?? /** @type {any} */ ({ getDataset: () => ({ sourceSignal: SIGNAL }) }),
     storage,
     watermarks,
+    rollouts: /** @type {any} */ ({ async read() { return null }, async write() { throw new Error('unused') } }),
     log: /** @type {any} */ (noopLog()),
     fetchFn,
     sleepFn: async () => {},
@@ -250,7 +253,7 @@ async function listBlobs(destDir) {
     }
   }
   await walk(destDir)
-  return out.sort((a, b) => a.name.localeCompare(b.name))
+  return out.sort((a, b) => compareStrings(a.name, b.name))
 }
 
 // ==========================================================================
@@ -649,7 +652,7 @@ test('forward sink: a pure-legacy partition re-exports the null-seq backlog exac
     assert.deepEqual(ackedIds(calls).sort((a, b) => a - b), [0, 1, 2])
     assert.ok((r1.bytesWritten ?? 0) > 0)
 
-    // Tick 2: the backlog does NOT re-export — zero POSTs, zero bytes.
+    // Tick 2: the backlog does NOT re-export, zero POSTs, zero bytes.
     calls.length = 0
     const r2 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
     assert.equal(r2.status, 'exported')
@@ -763,7 +766,7 @@ test('forward sink: two instances on one partition keep independent watermarks (
     await flushBatch(svc, spoolPath, rows([0, 1, 2], isoDaysAgo(1)))
     const part = await logicalPartition(cacheRoot)
 
-    // SAME plugin stateDir, two instance names — the per-plugin store would
+    // SAME plugin stateDir, two instance names: the per-plugin store would
     // collapse these onto one file and let A's advance clobber B's cursor.
     const stateDir = path.join(cacheRoot, 'state')
     const wmA = createInstanceWatermarkStore({ paths: /** @type {any} */ ({ stateDir }), instanceName: 'fleet-a' })
@@ -780,7 +783,7 @@ test('forward sink: two instances on one partition keep independent watermarks (
     assert.equal(ra.status, 'exported')
     assert.deepEqual(ackedIds(a.calls).sort((x, y) => x - y), [0, 1, 2])
 
-    // Instance B, fresh: must STILL see all three rows — A's advance must not
+    // Instance B, fresh: must STILL see all three rows, A's advance must not
     // have clobbered B's (independent) watermark.
     const b = makeForwardSink({ storage: svc, watermarks: wmB })
     const rb = await b.sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))

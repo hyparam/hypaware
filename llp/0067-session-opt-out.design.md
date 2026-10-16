@@ -1,4 +1,4 @@
-# LLP 0067: session opt-out — technical design
+# LLP 0067: session opt-out (technical design)
 
 **Type:** design
 **Status:** Active
@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-06
 **Related:** LLP 0066, LLP 0049, LLP 0050, LLP 0051, LLP 0052
+**Extended-by:** LLP 0403 (persistent session exclusions and Claude hook identity); LLP 0463 (human output drops the endpoint and folder lines).
 
 > Buildable design for the ephemeral per-session opt-out.
 > @ref LLP 0066 [implements]: realizes the session-opt-out spec (control route + session_id drop).
@@ -17,16 +18,28 @@
 > (`hypaware-core/plugins-workspace/claude/skills/hypaware-ignore/SKILL.md`) is
 > the contract and is **not changed**.
 
+**Extended-by: [LLP 0212 #cli-is-the-verb](./0212-session-opt-out-is-a-cli-verb.decision.md#cli-is-the-verb)**
+(2026-08-12), on the *surface* only. The design below is unchanged and still
+built: the control route, the adapter drop, and `hyp session ignore` /
+`hyp session unignore` are exactly as specified. What changed is that the
+`hypaware-ignore` and `hypaware-unignore` skills were retired, having become a
+second implementation of the same route call. Two consequences for reading this
+document: the header note above names a `SKILL.md` path that no longer exists
+(the CLI verb is now the contract), and every passage below describing what
+"the skill" reads, asserts, or prints (notably
+[§cli-response-check](#cli-response-check) and the `hypaware-unignore`
+paragraph under it) describes the behaviour as it now lives in the verb.
+
 ## Overview
 
 Two seams, three change sets. **(1) Gateway:** a new *local control request*
-concept — requests under the reserved `/_hypaware/` prefix are handled
-in-process, never proxied — serving `POST` / `DELETE /_hypaware/ignore/session`
+concept, requests under the reserved `/_hypaware/` prefix are handled
+in-process, never proxied, serving `POST` / `DELETE /_hypaware/ignore/session`
 over an in-memory `Set<string>` of opaque session ids
 ([LLP 0066 R1–R3](./0066-session-opt-out.spec.md#requirements)). **(2)
 Adapters:** the Claude and Codex exchange projectors test their own resolved
 `session_id` against that set and return the existing terminal
-`USAGE_POLICY_DROP` sentinel (R4, R5) — the same seam `.hypignore` uses
+`USAGE_POLICY_DROP` sentinel (R4, R5), the same seam `.hypignore` uses
 ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md),
 [LLP 0052 §enforcement](./0052-hypignore-usage-policy.design.md#enforcement)).
 **(3) Tests** covering the R8 matrix. Nothing touches the cache schema, the
@@ -54,13 +67,13 @@ if (isControlPath(parsedUrl.pathname)) {
 }
 ```
 
-- `isControlPath(p)` = `p === '/_hypaware' || p.startsWith('/_hypaware/')` —
+- `isControlPath(p)` = `p === '/_hypaware' || p.startsWith('/_hypaware/')`:
   same segment-boundary discipline as `pathMatchesPrefix`.
 - `ProxyOptions` (`ai-gateway/src/types.d.ts`) gains
   `onControlRequest?(req, res, url): void`. `proxy.js` stays single-purpose
   network code; the actual route logic lives in a new module (below).
 - Control requests **never start an exchange**: no `recorder.startExchange`,
-  no `onExchangeFinished`, no row — the opt-out request itself is not recorded
+  no `onExchangeFinished`, no row, the opt-out request itself is not recorded
   and does not appear in `ai_gateway_messages`.
 - The prefix is reserved for this and future control endpoints; unknown
   `/_hypaware/*` paths get a local 404, never a proxy attempt.
@@ -82,8 +95,8 @@ callback. One route in V1:
   `/_hypaware/*` path → 404.
 - Both verbs are idempotent by `Set` semantics (R1): re-POSTing an ignored id
   or DELETEing an unknown id is a 200 no-op.
-- Response (both verbs): `{ "session_id": "...", "ignored": <bool>, "total": <int> }`
-  — the skill reads `.total`; `ignored` reports current membership.
+- Response (both verbs): `{ "session_id": "...", "ignored": <bool>, "total": <int> }`,
+  the skill reads `.total`; `ignored` reports current membership.
 - The gateway never interprets the id: it is an opaque token
   ([LLP 0066 §enforcement](./0066-session-opt-out.spec.md#enforcement)). No
   parsing of provider bodies or headers happens here, so
@@ -108,17 +121,17 @@ transitions (restart, changed session id) from silent into detectable.
 ## The ignored-session set and its lifetime {#set}
 
 ```js
-// api.js createGatewayState() — one per plugin activation (index.js activate())
+// api.js createGatewayState() - one per plugin activation (index.js activate())
 // @ref LLP 0066#ephemeral: in-memory only: no file, no cache column; dies with
 // the daemon process. Lives on GatewayState (NOT per-listener) so a config
-// reload() — which tears down and relaunches the listener (source.js) — does
+// reload() - which tears down and relaunches the listener (source.js) - does
 // not silently re-enable recording mid-session.
 ignoredSessions: /** @type {Set<string>} */ (new Set()),
 ```
 
 Placement is the one judgment call R3 leaves open: `source.js reload()`
 rebuilds the listener on config change, and a per-listener set would drop
-opt-outs on every reload — a silent privacy leak the user never asked for
+opt-outs on every reload, a silent privacy leak the user never asked for
 (same failure shape as the resolver-cache leak LLP 0052 §matcher fixed).
 `GatewayState` is created once in `activate()` (`ai-gateway/src/index.js`) and
 lives exactly as long as the daemon process, which is what the skill's
@@ -131,7 +144,7 @@ to `details` so an operator can see a live opt-out without grepping logs.
 ## Threading membership to the adapters {#predicate}
 
 The drop is the adapter's (R4), but the set is gateway memory. The bridge is a
-read-only predicate on the projector context — the gateway hands adapters a
+read-only predicate on the projector context: the gateway hands adapters a
 membership test, never an id it resolved itself:
 
 - `AiGatewayExchangeProjectorContext` (`hypaware-plugin-kernel-types.d.ts`)
@@ -157,12 +170,12 @@ dispatchProjector` / `projectExchange`). The session drop adds a **second
 independent match key feeding the same sentinel** (R7: either match
 suppresses; the checks do not merge or interact).
 
-### Claude — `claude/src/projector.js`
+### Claude: `claude/src/projector.js`
 
 The canonical id is resolved at `resolveClaudeSessionId(reqBody, headers)`
 (body-first `metadata.user_id.session_id`, falling back to the
 `x-claude-code-session-id` header). The check goes immediately after that
-resolution — before session-context/transcript loading, so an ignored
+resolution: before session-context/transcript loading, so an ignored
 exchange does no fs work:
 
 ```js
@@ -189,7 +202,7 @@ For Claude `session_id == the conversation`
 ([LLP 0066 §scope](./0066-session-opt-out.spec.md#scope)), so the drop is
 exact. The existing cwd `.hypignore` check stays where it is, unchanged.
 
-### Codex — `codex/src/exchange-projector.js`
+### Codex: `codex/src/exchange-projector.js`
 
 The stamped id is `stringValue(codexContext?.session_id) ?? conversationId`
 (today computed *after* message building). `resolveConversationId(reqBody,
@@ -209,7 +222,7 @@ if (ctx?.isSessionIgnored?.(sessionId)) { /* log + return USAGE_POLICY_DROP */ }
 
 Log shape mirrors Claude: `plugin.codex.usage_policy_drop` with
 `policy_source: 'session_opt_out'` and the matched `session_id` (a UUID, not
-customer content — unlike `cwd`, which stays hashed in the `.hypignore` drop
+customer content; unlike `cwd`, which stays hashed in the `.hypignore` drop
 logs).
 
 ## The CLI surface: `hyp session ignore` / `unignore` / `status` {#cli}
@@ -253,6 +266,60 @@ must never render as `false`
 mode also names `hyp policy show` as the folder governor this verb does not
 cover (R11 / R7).
 
+### The write verbs report a write, not a drop {#cli-receipt}
+
+`hyp session ignore` used to print "ignored - the gateway will drop this
+session". The gateway cannot know that
+([LLP 0066 §receipt-is-membership](./0066-session-opt-out.spec.md#receipt-is-membership),
+issue #460): it added an opaque token to a set, and whether any exchange carries
+that token is settled later, in the adapter. The claim was load-bearing in the
+wrong direction, because the surfaces most likely to be handed the wrong key
+(a Codex thread id, a dead session) are exactly the ones that read the line as
+proof they got it right.
+
+So the receipt states the write and names where the guarantee comes from:
+
+```
+session <id>: ignored - this id is in the gateway drop set (N ignored)
+<ephemeral note>
+what this proves: the gateway holds this exact id in its drop set, and nothing
+more. It never inspects traffic, so an exchange is dropped only where the client
+adapter stamps it with this same session_id ...
+```
+
+`unignore` is held to the same bound, since it is the same `Set` answer read the
+other way. It used to print "recording resumed", which the route cannot know
+either: a token no exchange carried was suppressing nothing to resume, and
+`.hypignore` is an independent governor (R7) that can keep the session
+unrecorded whatever this verb just removed. It now reports the removal - "this
+id is out of the gateway drop set, so this opt-out suppresses nothing now".
+
+The `hypaware-unignore` skill is bound by the same two rules, being the one
+surface in the family that calls the route directly for the removal. It printed
+`Recording re-enabled for session <id>` off `--fail-with-body` alone, with the
+response body sent to `/dev/null`: the mirrored overclaim, and R14's last bullet
+unapplied entirely rather than merely weakly
+([§cli-response-check](#cli-response-check)). It now reads the reply, asserts
+`ignored` is a real boolean `false` with the `session_id` echoed byte-exactly,
+and reports the removal in the CLI's words.
+
+`--json` carries `guarantee: "set_membership"` beside its `status: "ok"`, since
+an agent parsing the receipt reads a bare `ok` as "done" (the skills are the
+consumer here). The reader prints the same qualifier next to a confirmed
+`ignored`, for the reason `EPHEMERAL_NOTE` is shared: two statements of one
+contract drift, one constant does not. Its `--json` needs no new field - it
+already reports `status` as `ignored` / `not_ignored` / `unknown` beside a
+tri-state `ignored`, which is a membership answer on its face.
+
+**This is accept-and-document, deliberately.** The alternative considered was
+having the route resolve and echo the *grain* it recorded (which container, which
+threads), so a caller could compare it against what it meant. That is the most
+informative answer and it is the one thing this route may not do: it would put
+client-grain knowledge in a deliberately provider-agnostic control surface
+([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)). Correctness stays
+where [§cli-session-id](#cli-session-id) puts it - the caller resolves the
+container before it calls - and the receipt's job is to not obscure that.
+
 ### The answer is validated before it is believed {#cli-response-check}
 
 Reaching *something* on the resolved endpoint is not the same as reaching the
@@ -293,6 +360,13 @@ dependency for one check makes it a separate design decision rather than a
 hardening tweak. Recorded, not adopted; the residual stays mitigated by the
 `endpoint_source` disclosure ([§cli-provenance](#cli-provenance)).
 
+> **Extended-by: [LLP 0166 §stated-not-proved](./0166-session-control-plane-states-its-guarantees.decision.md#stated-not-proved).**
+> Issue #451 settled the deferred question as **accept and document**: the
+> residual is not closed, and every confirmed answer now states that the
+> responder was never authenticated (`trust:` in the human output,
+> `endpoint_authenticated: false` in `--json`) beside the `endpoint_source`
+> disclosure this section points at.
+
 ### Endpoint resolution: disk, then config, never a guess {#cli-endpoint}
 
 The daemon's live bound port from `status.json` wins
@@ -329,8 +403,10 @@ drop matches the `session_id` the adapter stamps
 the session container. A thread id is the same uuid on a **root** thread and a
 different one on a **subagent** thread, so resolving to a thread id is a control
 that works everywhere it is casually tested and silently does nothing where it
-matters: `hyp session ignore` from inside a subagent tool call printed "the
-gateway will drop this session" for an id the gateway never sees.
+matters: `hyp session ignore` from inside a subagent tool call printed a
+confirmed opt-out for an id the gateway never sees. (The wording it printed then,
+"the gateway will drop this session", was the second half of the same defect and
+is gone: [§cli-receipt](#cli-receipt).)
 
 **Liveness versus the correct key.** `CODEX_THREAD_ID` is the better *liveness*
 signal (Codex sets it on the process it spawns for a tool call, so a finished
@@ -451,6 +527,46 @@ the `hypaware-privacy` skill body does. Guessing here would opt out the wrong
 session while telling the user they are covered: the same fail-open shape this
 change exists to remove.
 
+**Recording the cwd is the whole of what makes a rollout a candidate.** The
+count *is* the uniqueness claim, so nothing else may filter the list before it
+is taken: a `session_meta` header dropped for a field this path does not resolve
+on takes the ambiguity with it and leaves a confident answer behind. Whether a
+candidate is *usable* (a live enough mtime, a readable container, a header the
+resolver can vouch for) is decided after the count, on the one candidate. This
+was wrong in the first implementation, which discarded a header stating no
+`payload.id` inside the reader wrapper: two rollouts recording one cwd resolved
+at `ok: true` to whichever of them carried a thread id, with no disclosure that
+a rival had been thrown away
+([issue #499](https://github.com/hyparam/hypaware/issues/499) §1). That is the
+artefact failure of the paragraph below, reached by a discard rather than by the
+bound.
+
+A lone such header still **refuses** rather than resolving the container it
+states: every `session_meta` Codex writes carries `payload.id`, so a header
+without one is a file nothing accounts for, there is no second field left to
+check its `session_id` against, and the control route reports `ignored: true`
+for whatever token it is handed. Counting an unvouchable header is not trusting
+it, exactly as the missing-`session_id` refusal below reads the raw line without
+trusting it.
+
+That refusal is the one asked **second**. A header stating neither field is not
+a pre-field Codex - the back-fill that rule exists to defeat needs an `id` to
+back-fill *from* - so answering it with "upgrade Codex" would name a fix for a
+problem the file does not have. Both are fail-closed, so only the diagnosis is
+at stake, and the diagnosis is the whole value of a refusal a user has to act
+on.
+
+**The rule holds for this verb only, and the Codex `hypaware-privacy` skill body
+is now the exception.** Its Step 1 disk scan still drops an id-less header
+before its own count (`not payload.get('id')`), so on the two-rollouts fixture
+above the verb refuses while the script resolves and POSTs the survivor. That is
+the divergence round 4 of [#456](https://github.com/hyparam/hypaware/pull/456)
+predicted, live now rather than hypothetical, and it is a fail-open on the
+script path alone. It is left standing because
+[#435](https://github.com/hyparam/hypaware/issues/435) retires that script onto
+this verb rather than repairing it, so until then the skill body must not be
+read as a second implementation of the rule above.
+
 The rollout walk is bounded so a very large history cannot turn a privacy check
 into a long directory scan. **A truncated walk also refuses**: "exactly one cwd
 match" over a partial listing is an artefact of the bound, not a fact, since
@@ -467,9 +583,9 @@ now. The ambiguity rule only fires at two or
 more matches, so a cwd where Codex ran exactly once, days ago, has exactly one
 match and would otherwise resolve confidently to a **dead** session id. That is
 the wrong-session failure of [§cli-response-check](#cli-response-check) arriving
-through the other input: `hyp session ignore` would opt out the dead id, print
-"the gateway will drop this session", and the session the user is actually in
-would keep being recorded. A rollout is therefore only usable as "the session I
+through the other input: `hyp session ignore` would opt out the dead id, print a
+confirmed opt-out, and the session the user is actually in would keep being
+recorded. A rollout is therefore only usable as "the session I
 am in" when it was written to recently (30 minutes): a running Codex session
 appends on every turn, and the tool call invoking `hyp` is itself preceded by
 rollout writes, so the legitimate case is seconds-to-minutes old. A stale-only
@@ -546,23 +662,44 @@ against live rows.
 ### What is deliberately not covered
 
 - **Live LLM call untouched (R6):** the drop runs at projection time, after
-  the response has streamed; only persistence is suppressed — structurally
+  the response has streamed; only persistence is suppressed, structurally
   identical to the `.hypignore` drop (LLP 0052 §live).
 - **Backfill:** the set is gateway memory; `hyp backfill` is a separate
   process reading local transcripts, so an opted-out session that Claude/Codex
   still wrote to disk **is re-imported by a later backfill**. This is the
   ephemerality contract, not a defect
-  ([LLP 0066 §ephemeral](./0066-session-opt-out.spec.md#ephemeral), non-goal 2
-  — no persistence): the durable mechanism is `.hypignore`. Recorded here so
+  ([LLP 0066 §ephemeral](./0066-session-opt-out.spec.md#ephemeral), non-goal 2,
+  no persistence): the durable mechanism is `.hypignore`. Recorded here so
   nobody "fixes" it by persisting the set.
+
+  > **Extended-by: [LLP 0395 #sweep-consults-the-set](./0395-session-ignore-binds-the-claude-sweep.decision.md#sweep-consults-the-set)**
+  > (2026-09-10), on the lane this bullet did not have. LLP 0358 later gave the
+  > Claude transcript provider an automatic in-daemon sweep, so "a separate
+  > process" stopped describing every re-import and the opt-out expired in
+  > under five minutes. `@hypaware/claude` now shares one activation-scoped
+  > set between its recorder and that sweep. The bullet still holds for the
+  > lane it was written about: `hyp backfill claude` runs in its own process
+  > with its own empty set and re-imports. The set is still not persisted.
 - **Raw-proxy / OTEL traffic:** no adapter, no resolved `session_id`, so no
-  session drop — the same structural blindness as `.hypignore`
+  session drop, the same structural blindness as `.hypignore`
   ([LLP 0050 §why-not-the-gateway](./0050-ignore-enforced-in-adapters.decision.md)).
 
 ## Test plan {#tests}
 
 Traditional tests (root `test/`, alongside the existing suites):
 
+- `test/plugins/ai-gateway-session-ignore-receipt.test.js` (new, R14, issue
+  #460): the false-confidence case end to end rather than a string in
+  isolation - `hyp session ignore <thread-id>` succeeds, the id genuinely lands
+  in the set, and `codex/src/exchange-projector.js` is then shown RECORDING the
+  session's traffic anyway (the row is stamped with the container), so the
+  receipt printed over that outcome is required not to have promised a drop. It
+  must state the membership it does establish, `--json` must carry
+  `guarantee: "set_membership"`, and the reader must print the same qualifier so
+  the two cannot drift. The skills that call the route directly are pinned on
+  the echo check ([§cli-response-check](#cli-response-check)): each compares the
+  returned `session_id` against the one it posted rather than printing whatever
+  came back.
 - `test/plugins/ai-gateway-control-route.test.js` (new): POST adds +
   idempotent re-POST, DELETE removes + idempotent, `.total` correct across a
   sequence; 400 malformed/missing `session_id`; 405 wrong method (`allow:
@@ -625,7 +762,7 @@ Traditional tests (root `test/`, alongside the existing suites):
   passes `isSessionIgnored` through ctx; default predicate is false.
 - `test/plugins/claude-usage-policy-drop.test.js` (extend): resolved session
   in set → `USAGE_POLICY_DROP` + drop log with
-  `policy_source: 'session_opt_out'`; not in set → rows unchanged — Claude
+  `policy_source: 'session_opt_out'`; not in set → rows unchanged, Claude
   session == conversation (R8).
 - `test/plugins/codex-exchange-projector.test.js` (extend): two
   `conversation_id` threads under one ignored `session_id` → **both** dropped
@@ -646,7 +783,7 @@ Traditional tests (root `test/`, alongside the existing suites):
 Hermetic smoke (`hypaware-core/smoke/flows/session_optout_capture_drop.js`,
 mirroring `hypignore_capture_drop.js`): boot the daemon, `POST` an ignore for
 a fixture session id, drive one exchange with that session id and one with a
-different id — assert only the clean row lands, the drop telemetry
+different id, assert only the clean row lands, the drop telemetry
 (`aigw.usage_policy_drop` + adapter `usage_policy_drop` with
 `policy_source: 'session_opt_out'`) is emitted, then `DELETE` and assert
 recording resumes. Stable `DEV_RUN_ID` / `smoke_step` per the log-driven house

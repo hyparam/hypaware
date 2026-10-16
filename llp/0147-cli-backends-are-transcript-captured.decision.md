@@ -36,7 +36,7 @@ Consequences that matter here, all verified against OpenClaw source:
 - The transcript is partitioned by the agent's workspace directory, so a
   multi-agent OpenClaw setup scatters across one `~/.claude/projects/<slug>`
   directory per workspace.
-- The CLI backend receives no OpenClaw tool calls at all — OpenClaw's own
+- The CLI backend receives no OpenClaw tool calls at all: OpenClaw's own
   tool executions, approvals, routing and queueing are absent from that
   transcript by design.
 
@@ -44,7 +44,7 @@ None of LLP 0152's steering applies: the child process resolves its own
 credentials, makes its own HTTP calls, and never consults OpenClaw's
 provider catalog.
 
-LLP 0141 settled the analogous case for Codex Desktop — a client whose
+LLP 0141 settled the analogous case for Codex Desktop: a client whose
 traffic is already covered by an existing adapter, where the work was making
 the coverage fact legible rather than adding capture.
 
@@ -66,7 +66,7 @@ the coverage fact legible rather than adding capture.
 
 - CLI-backend turns are **out of scope** for the OpenClaw gateway capture
   path, permanently, not as a v1 limitation.
-- They are covered — to the extent they are covered at all — by the existing
+- They are covered, to the extent they are covered at all, by the existing
   Claude and Codex adapters reading the child's own transcript. A machine
   running OpenClaw with a CLI backend wants the corresponding client adapter
   enabled as well.
@@ -77,7 +77,7 @@ the coverage fact legible rather than adding capture.
   CLI session it spawned. OpenClaw passes the child a `--session-id` it
   generates, so a correlation key exists in principle; whether either
   adapter can observe it has not been investigated, and the decision not to
-  correlate stands regardless — see the open question below.
+  correlate stands regardless: see the open question below.
 
 ## Consequences
 

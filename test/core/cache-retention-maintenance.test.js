@@ -3,20 +3,43 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 import { createRetentionEnforcer, DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../src/core/cache/maintenance.js'
-import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
+import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync, withPartitionMutationLock, writeCursor } from '../../src/core/cache/partition.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
-import { loadLatestFileCatalogMetadata } from 'icebird'
+import { createCacheSpool } from '../../src/core/cache/spool.js'
+import { TracerProvider } from '../../src/core/observability/runtime.js'
+import { fileCatalog, icebergRewrite, loadLatestFileCatalogMetadata } from 'icebird'
+import { parquetMetadata } from 'hyparquet'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
+ * @import { Span } from '../../src/core/observability/runtime.js'
  */
+
+/**
+ * Row-group count of every data file in a table directory, in name order.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<number[]>}
+ */
+async function rowGroupCounts(tableDir) {
+  const dataDir = path.join(tableDir, 'data')
+  const names = (await fs.readdir(dataDir)).filter((n) => n.endsWith('.parquet')).sort()
+  const counts = []
+  for (const name of names) {
+    const bytes = await fs.readFile(path.join(dataDir, name))
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    counts.push(parquetMetadata(buffer).row_groups.length)
+  }
+  return counts
+}
 
 /** @param {string} prefix */
 async function makeTmpDir(prefix) {
@@ -31,6 +54,26 @@ async function pathExists(p) {
   } catch {
     return false
   }
+}
+
+/** @type {ColumnSpec[]} */
+const NO_TIMESTAMP_COLUMNS = [
+  { name: 'id', type: 'INT32', nullable: false },
+  { name: 'message', type: 'STRING', nullable: true },
+]
+
+/**
+ * A spool wired for capture only. `appendChunk` is the flush seam and
+ * nothing here flushes; these tests are about what a partition holds when
+ * retention arrives, not about draining it.
+ *
+ * @param {string} cacheRoot
+ */
+function captureOnlySpool(cacheRoot) {
+  return createCacheSpool({
+    cacheRoot,
+    appendChunk: async () => ({ bytesWritten: 0 }),
+  })
 }
 
 /** @type {ColumnSpec[]} */
@@ -104,6 +147,24 @@ test('retention commits Iceberg deletes on source-table rows older than cutoff',
     assert.ok(cursor.retention?.lastCutoffDate)
     assert.ok(cursor.retention?.lastDeletedAt)
     assert.equal(cursor.retention?.rowsDeleted, 2)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention deletes more expired rows in one file than fit in a call stack', async () => {
+  const cacheRoot = await makeTmpDir('retention-large')
+  try {
+    const oldTimestamp = isoDateDaysAgo(45)
+    const count = 200_000
+    const rows = Array.from({ length: count }, (_, id) => ({ id, value: null, timestamp: oldTimestamp }))
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, rows)
+
+    const enforcer = createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } })
+    const result = await enforcer.tick()
+
+    assert.equal(result.sourceTableResults.length, 1)
+    assert.equal(result.sourceTableResults[0].rowsDeleted, count)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
@@ -491,13 +552,60 @@ test('retention uses dataset primaryTimestampColumn for source tables', async ()
   }
 })
 
+test('retention expires rows in a data file written before the timestamp column existed', async () => {
+  // Regression for the hyparquet 1.29 projection rule. The candidate list
+  // (`primaryTimestampColumn` then the fallbacks) is narrowed to the TABLE
+  // schema, which is the union of every generation, so a file written before
+  // `event_time` was added is narrower still. hyparquet used to drop the
+  // absent name and let `extractTimestampMs` fall through to `created_at`;
+  // 1.29 throws, and `scanFileForExpiredRows`'s catch reads that as an
+  // unreadable file, so retention silently stopped expiring the older file
+  // and its rows stayed cached forever.
+  const cacheRoot = await makeTmpDir('retention-drifted-ts')
+  try {
+    /** @type {CachePartitioningDeclaration} */
+    const declaration = {
+      source: { columns: ['source'], fallback: 'unknown' },
+      iceberg: { fields: [{ column: 'day', transform: 'identity', required: true }] },
+    }
+    /** @type {ColumnSpec[]} */
+    const v1 = [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'day', type: 'STRING', nullable: false },
+      { name: 'created_at', type: 'STRING', nullable: true },
+    ]
+    /** @type {ColumnSpec[]} */
+    const v2 = [...v1, { name: 'event_time', type: 'STRING', nullable: true }]
+
+    await appendRowsToSourceTable(cacheRoot, 'event_ds', ['source=test'], v1, [
+      { id: 1, day: '2026-04-01', created_at: '2026-04-01T00:00:00.000Z' },
+    ], { declaration })
+    await appendRowsToSourceTable(cacheRoot, 'event_ds', ['source=test'], v2, [
+      { id: 2, day: '2026-04-01', created_at: '2026-04-01T00:00:00.000Z', event_time: '2026-04-01T00:00:00.000Z' },
+    ], { declaration })
+
+    const enforcer = createRetentionEnforcer({
+      cacheRoot,
+      config: { default_days: 30 },
+      getDataset: (dataset) => dataset === 'event_ds'
+        ? { primaryTimestampColumn: 'event_time', fallbackTimestampColumns: ['created_at'] }
+        : undefined,
+    })
+
+    const result = await enforcer.tick({ now: new Date('2026-05-28T00:00:00.000Z') })
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 2, 'the narrow file expires too')
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'event_ds', 'source=test')
+    assert.deepEqual(await readRowsFromTable(path.join(sourceDir, 'table')), [])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('retention evicts source table by mtime when no timestamp column is resolvable', async () => {
   const cacheRoot = await makeTmpDir('retention-mtime-fallback')
   try {
-    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], [
-      { name: 'id', type: 'INT32', nullable: false },
-      { name: 'message', type: 'STRING', nullable: true },
-    ], [
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
       { id: 1, message: 'no timestamp' },
     ])
 
@@ -592,6 +700,8 @@ test('normalizeMaintenanceConfig honours an explicit compact_batch_bytes', () =>
   assert.equal(cfg.compact_batch_bytes, 1234)
 })
 
+// @ref LLP 0209#row-groups [tests]: the byte budget still bounds a batch, but
+// what it produces is a row group, not a data file.
 test('compaction flushes by byte budget so a fat column cannot blow up one batch', async () => {
   const cacheRoot = await makeTmpDir('maint-bytecap')
   try {
@@ -604,7 +714,7 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
     }
 
     // A 150KB byte budget forces a flush roughly every two rows, so the
-    // compacted output spans many data files instead of one giant batch.
+    // rewrite never holds more than a couple of rows at once.
     const report = await maintainCache({
       cacheRoot,
       force: true,
@@ -614,13 +724,20 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
 
     assert.ok(report.totalCompacted > 0)
     const p = report.partitions[0]
-    assert.ok(p.dataFilesAfter > 1, `expected multiple flushed files, got ${p.dataFilesAfter}`)
+    // The blob compresses far below `target_file_bytes`, so the many flushes
+    // land as many row groups in ONE file.
+    assert.equal(p.dataFilesAfter, 1)
 
-    // All rows survive the split, and the data round-trips intact.
     const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
     const cursor = readCursorSync(sourceDir)
     assert.equal(cursor.rowCount, 20)
     const liveDir = path.join(sourceDir, cursor.tableDir ?? 'table')
+    assert.ok(
+      (await rowGroupCounts(liveDir))[0] > 1,
+      'expected the byte budget to flush more than one row group'
+    )
+
+    // All rows survive the split, and the data round-trips intact.
     const rows = await readRowsFromTable(liveDir)
     assert.equal(rows.length, 20)
     assert.equal(rows.every((r) => r.value === blob), true)
@@ -629,7 +746,7 @@ test('compaction flushes by byte budget so a fat column cannot blow up one batch
   }
 })
 
-test('a generous byte budget compacts the same input into a single file', async () => {
+test('a generous byte budget compacts the same input into a single row group', async () => {
   const cacheRoot = await makeTmpDir('maint-bigcap')
   try {
     const blob = 'x'.repeat(40_000)
@@ -648,6 +765,10 @@ test('a generous byte budget compacts the same input into a single file', async 
 
     const p = report.partitions[0]
     assert.equal(p.dataFilesAfter, 1)
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const cursor = readCursorSync(sourceDir)
+    const liveDir = path.join(sourceDir, cursor.tableDir ?? 'table')
+    assert.deepEqual(await rowGroupCounts(liveDir), [1])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
@@ -773,6 +894,830 @@ test('legacy epoch compaction preserves the table sort order', async () => {
       [{ column: 'id', direction: 'asc' }],
       'the epoch swap must carry the declared sort order'
     )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- convergence: baseline gate and neediest-first order (LLP 0199) ---
+
+test('an already-compacted partition is not recompacted until new data flushes', async () => {
+  const cacheRoot = await makeTmpDir('maint-baseline')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-01')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await writeCursor(partDir, { epoch: 0, rowCount: 3, compaction: null, layout: 'epoch' })
+
+    // Tiny files: the avg-file-size heuristic marks the partition due.
+    const first = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(first.totalCompacted, 1)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+
+    // The rewrite's output files are still below compact_avg_file_bytes,
+    // but nothing has flushed since: the partition has converged.
+    const second = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(second.totalCompacted, 0)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+
+    // New data moves the file count off the baseline: due again.
+    await appendRowsToTable(path.join(partDir, 'epoch=1'), COLUMNS, [
+      { id: 99, value: 'fresh', timestamp: new Date().toISOString() },
+    ])
+    const third = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(third.totalCompacted, 1)
+    assert.equal(readCursorSync(partDir).epoch, 2)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- foreign sorted replace recognition (LLP 0207) ---
+
+/**
+ * Commit the central server's export-time rewrite shape onto a live
+ * generation dir: an in-place `replace` snapshot through icebird, no
+ * cursor touch (the server knows nothing about kernel cursors).
+ *
+ * @param {string} tableDir
+ */
+async function commitForeignReplace(tableDir) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+  await icebergRewrite({ catalog, tableUrl: tableUrlForDir(tableDir), targetFileRows: 100_000 })
+}
+
+/**
+ * The id of a table's current snapshot.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<string>}
+ */
+async function currentSnapshotId(tableDir) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const { metadata } = await loadLatestFileCatalogMetadata({
+    tableUrl: tableUrlForDir(tableDir), resolver, lister,
+  })
+  return String(metadata['current-snapshot-id'])
+}
+
+// A `replace` the kernel's own in-place compactor committed is not foreign.
+// Before LLP 0311 no cache table declared a sort order, so "replace +
+// declared sort order" could only be the server's compactor; the cache table
+// declares one now, and LLP 0310's in-place merge commits `replace` on it.
+// The cursor's recorded snapshot id is what still tells them apart.
+test('a replace this kernel committed in place is not recognized as foreign', async () => {
+  const cacheRoot = await makeTmpDir('maint-own-replace')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // Same on-disk shape as the foreign case above; the only difference is
+    // that the cursor claims this snapshot as ours.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: {
+        compactedAt: '2026-08-08T00:00:00.000Z',
+        resettleBaselineFiles: 99,
+        inPlaceSnapshotId: await currentSnapshotId(epoch0),
+      },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalRebaselined, 0, 'our own replace must not be blessed as a foreign layout')
+    assert.equal(report.totalCompacted, 1, 'the partition gets the rewrite it is due')
+    assert.equal(readCursorSync(partDir).epoch, 1)
+    assert.equal((await readRowsFromTable(path.join(partDir, 'epoch=1'))).length, 3, 'lossless')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a foreign sorted replace re-baselines the cursor instead of being rewritten', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-replace')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // A kernel cursor whose baseline no longer matches the live count: the
+    // replace read as growth before LLP 0207.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    // A dry run predicts the recognition without writing anything.
+    const preview = await maintainCache({ cacheRoot, compactOnly: true, dryRun: true })
+    assert.equal(preview.totalCompacted, 0)
+    assert.equal(preview.totalRebaselined, 1, 'the report-level rebaseline count mirrors totalCompacted')
+    assert.equal(preview.partitions[0].rebaselined, true)
+    assert.equal(
+      /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction).resettleBaselineFiles,
+      99,
+      'dry run must not touch the cursor'
+    )
+
+    const first = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(first.totalCompacted, 0)
+    assert.equal(first.totalRebaselined, 1, 're-baselining one partition must be reflected in the report total')
+    assert.equal(first.partitions[0].rebaselined, true)
+    const cursor = readCursorSync(partDir)
+    assert.equal(cursor.epoch, 0, 'no rewrite: the generation must not advance')
+    const compaction = /** @type {{ compactedAt: string, resettleBaselineFiles: number }} */ (cursor.compaction)
+    assert.equal(compaction.resettleBaselineFiles, first.partitions[0].dataFilesBefore, 're-baselined to the live data-file count')
+    assert.equal(compaction.compactedAt, '2026-08-08T00:00:00.000Z', 'recognition is not a compaction')
+    assert.equal((await readRowsFromTable(epoch0)).length, 3, 'the foreign generation keeps its rows')
+
+    // Converged: the baseline gate now blocks before any metadata load.
+    const second = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(second.totalCompacted, 0)
+    assert.equal(second.totalRebaselined, 0, 'converged: no rebaseline happened this tick')
+    assert.notEqual(second.partitions[0].rebaselined, true)
+
+    // A late append flips the current snapshot off `replace` and moves the
+    // count off the baseline: genuinely due again, unchanged behavior.
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 99, value: 'fresh', timestamp: new Date().toISOString() },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    const third = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(third.totalCompacted, 1)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0220#walk-survives-a-partition [tests]: a rebaseline is a cursor
+// write with no rewrite behind it, and `writeCursor` can throw same as any
+// other write in this loop. `r.rebaselined` must not be set until that write
+// has actually landed, or a tick that lost this partition would still print
+// "rebaselined" and count it in `totalRebaselined` for a cursor that never
+// changed (round-1 review finding 2).
+test('a rebaseline that fails to persist is not reported as rebaselined, and is not counted', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-replace-write-fail')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // Same stale-baseline cursor as the passing recognition test: this is
+    // the fixture that would otherwise re-baseline cleanly.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    // `writeCursor` writes `cursor.json` directly into the partition dir,
+    // so making the dir read-only fails exactly that write and nothing
+    // upstream of it (the read of the epoch dir's own metadata is
+    // unaffected).
+    await fs.chmod(partDir, 0o555)
+    try {
+      const report = await maintainCache({ cacheRoot, compactOnly: true })
+      assert.equal(report.partitions[0].failed, true, 'fixture invariant: the cursor write must fail')
+      assert.notEqual(
+        report.partitions[0].rebaselined, true,
+        'a rebaseline that never landed on disk must not be reported as one'
+      )
+      assert.equal(report.totalRebaselined, 0, 'an unpersisted rebaseline must not be counted')
+    } finally {
+      await fs.chmod(partDir, 0o755)
+    }
+
+    // The cursor on disk still carries the pre-rebaseline baseline: the
+    // write failure must not have partially landed.
+    const compaction = /** @type {{ resettleBaselineFiles: number }} */ (readCursorSync(partDir).compaction)
+    assert.equal(compaction.resettleBaselineFiles, 99)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('foreign sorted replace recognition works on the source-table layout', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-source')
+  try {
+    // Same recognition claim as above, but for the layout where the live
+    // generation is `tableDir` rather than `epoch=N`: the server's day
+    // compactor resolves and rewrites both layouts in prod.
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const tableDir = path.join(partDir, 'table')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(tableDir, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(tableDir)
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+      layout: 'source-table',
+      tableDir: 'table',
+      retention: { lastCutoffDate: '2026-05-01' },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalCompacted, 0)
+    assert.equal(report.partitions[0].rebaselined, true)
+    const cursor = readCursorSync(partDir)
+    assert.equal(cursor.tableDir, 'table', 'no generation swap: the cursor keeps pointing at the foreign rewrite')
+    assert.equal(cursor.retention?.lastCutoffDate, '2026-05-01', 'the rebaseline preserves the retention state')
+    const compaction = /** @type {{ resettleBaselineFiles: number }} */ (cursor.compaction)
+    assert.equal(compaction.resettleBaselineFiles, report.partitions[0].dataFilesBefore)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('recognition outranks the re-settle force: a fallback row does not undo the sorted layout', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-resettle')
+  try {
+    // A committed provisional fallback row (LLP 0027 marker) normally
+    // forces a rewrite so the sweep can re-settle it. Under a foreign
+    // sorted replace that force must lose, or one leftover unmatchable
+    // fallback re-shreds the sorted layout every night (LLP 0207).
+    /** @type {ColumnSpec[]} */
+    const columns = [...COLUMNS, { name: 'attributes', type: 'STRING', nullable: true }]
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, columns, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString(), attributes: JSON.stringify({ gateway: { identity_source: 'gateway_fallback' } }) },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      storage: /** @type {any} */ ({}),
+      getSettleHook: () => () => {
+        throw new Error('the sweep must not run: recognition should skip the rewrite entirely')
+      },
+    })
+    assert.equal(report.totalCompacted, 0)
+    assert.equal(report.partitions[0].rebaselined, true)
+    assert.equal(readCursorSync(partDir).epoch, 0, 'the fallback row must not force a shredding rewrite')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a foreign replace without a declared sort order is not blessed', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-unsorted')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 3, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalCompacted, 1, 'an arbitrary replace earns no convergence credit')
+    assert.notEqual(report.partitions[0].rebaselined, true)
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('force still rewrites a foreign sorted replace', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-force')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString() },
+    ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    assert.equal(report.totalCompacted, 1, 'an explicit force is an operator override')
+    assert.equal(readCursorSync(partDir).epoch, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a foreign sorted replace tags the maintenance.partition span with rebaselined', async () => {
+  const cacheRoot = await makeTmpDir('maint-foreign-span')
+  /** @type {Span[]} */
+  const captured = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch(/** @type {Span[]} */ spans) { captured.push(...spans) } }],
+  })
+  provider.register()
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: { compactedAt: '2026-08-08T00:00:00.000Z', resettleBaselineFiles: 99 },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.partitions[0].rebaselined, true, 'sanity: this tick recognized the foreign replace')
+
+    const partitionSpan = captured.find((span) => span.name === 'maintenance.partition')
+    assert.ok(partitionSpan, 'maintenance.partition span must be exported')
+    assert.equal(
+      partitionSpan?.attributes.rebaselined,
+      true,
+      'the span, not just the hyp_rebaselines counter, must name which partition re-baselined'
+    )
+  } finally {
+    await provider.shutdown()
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a partition already due for compaction skips the resettle-candidate row scan', async (t) => {
+  // @ref LLP 0207#outranks-resettle [tests]: once the cheap file-count/size
+  // check alone makes compaction due, the resettle scan's answer cannot
+  // change `shouldCompact`, so it must not run at all. `hasResettleCandidate`
+  // is module-private and its `scanRowsFromTable` is an unpatchable ESM named
+  // import, so there is no direct call-count hook to assert against; instead
+  // this mocks `fs.stat` and captures a stack per Parquet reader construction,
+  // then asserts none of those stacks pass through `hasResettleCandidate`.
+  // That frame name survives the async boundary between the scan and the
+  // read, so it attributes each read to its caller instead of only counting
+  // reads tick-wide (a second legitimate read elsewhere in the tick, e.g. a
+  // footer-stats probe, would not falsely implicate the scan).
+  //
+  // A stack-based observation can go blind: the deciding frame sits ~8 frames
+  // below the mock, and V8's default `Error.stackTraceLimit` of 10 leaves only
+  // two frames of headroom. Three more frames anywhere between the mock and
+  // the caller (an icebird refactor, extra node:test mock internals, a wrapper
+  // in `resolver.js`) would drop it, and a negative "no stack mentions
+  // `hasResettleCandidate`" assertion passes vacuously on truncated stacks.
+  // Two guards keep that from happening silently:
+  //   1. raise `Error.stackTraceLimit` while the mock is installed (restored
+  //      below even if the test throws), which removes the hazard outright;
+  //   2. assert positively that some stack names `compactGeneration`, the
+  //      legitimate reader. It calls `scanRowsFromTable` from exactly the same
+  //      depth as `hasResettleCandidate` does, so any truncation deep enough
+  //      to hide the frame the negative assertion hunts for also hides this
+  //      one, and the test fails loudly instead of going quiet. Asserting on
+  //      `scanRowsFromTable` itself would not do: it sits one frame shallower
+  //      and survives truncation that has already blinded the real check.
+  // Guard 2 also catches the `?? ''` fallback below storing an unattributable
+  // empty string.
+  const cacheRoot = await makeTmpDir('maint-scan-skip')
+  const originalStackTraceLimit = Error.stackTraceLimit
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    await appendRowsToTable(epoch0, COLUMNS, [
+      { id: 1, value: 'v1', timestamp: new Date().toISOString() },
+    ])
+    // Never compacted: `grewSinceCompaction` is true unconditionally, so the
+    // only thing standing between the old code and a resettle scan is the
+    // `compactionDue` gate under test.
+    await writeCursor(partDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    /** @type {string[]} */
+    const stacks = []
+    const original = fs.stat
+    Error.stackTraceLimit = 50
+    t.mock.method(fs, 'stat', function (p, ...rest) {
+      if (String(p).endsWith('.parquet')) stacks.push(new Error().stack ?? '')
+      return original.call(this, p, ...rest)
+    })
+
+    const report = await maintainCache({
+      cacheRoot,
+      compactOnly: true,
+      // compact_file_count: 0 makes `needsCompaction` (and so
+      // `compactionDue`) true on file count alone, with no size heuristic
+      // involved: dueness is settled before the resettle scan would run.
+      config: { compact_file_count: 0 },
+      storage: /** @type {any} */ ({}),
+      getSettleHook: () => async (rows) => rows,
+    })
+    assert.equal(report.totalCompacted, 1, 'sanity: compaction actually ran')
+
+    assert.ok(stacks.length > 0, 'sanity: the data file was read at all')
+    assert.ok(
+      stacks.some((s) => s.includes('compactGeneration')),
+      'sanity: captured stacks must be deep enough to name the reader, or the assertion below passes vacuously'
+    )
+    assert.deepEqual(
+      stacks.filter((s) => s.includes('hasResettleCandidate')),
+      [],
+      'the resettle scan must not read the data file'
+    )
+  } finally {
+    Error.stackTraceLimit = originalStackTraceLimit
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('maintenance walks partitions neediest-first, not directory order', async () => {
+  const cacheRoot = await makeTmpDir('maint-order')
+  try {
+    // `aaa_light` sorts first in directory order but has one data file;
+    // `zzz_heavy` sorts last but is the most fragmented.
+    const lightDir = path.join(cacheRoot, 'datasets', 'aaa_light', 'date=2026-08-01')
+    await appendRowsToTable(path.join(lightDir, 'epoch=0'), COLUMNS, [
+      { id: 1, value: 'v', timestamp: new Date().toISOString() },
+    ])
+    await writeCursor(lightDir, { epoch: 0, rowCount: 1, compaction: null, layout: 'epoch' })
+
+    const heavyDir = path.join(cacheRoot, 'datasets', 'zzz_heavy', 'date=2026-08-01')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(path.join(heavyDir, 'epoch=0'), COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await writeCursor(heavyDir, { epoch: 0, rowCount: 3, compaction: null, layout: 'epoch' })
+
+    const report = await maintainCache({ cacheRoot, dryRun: true })
+    assert.equal(report.partitions.length, 2)
+    assert.equal(report.partitions[0].dataset, 'zzz_heavy')
+    assert.equal(report.partitions[1].dataset, 'aaa_light')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('neediest-first order reads the live table dir for source-table partitions', async () => {
+  const cacheRoot = await makeTmpDir('maint-order-source')
+  try {
+    // Same ordering claim as above, but for the layout where the live
+    // generation is `tableDir` rather than `epoch=N`: a source-table cursor
+    // never advances its epoch, so file count is the only priority signal.
+    const lightDir = path.join(cacheRoot, 'datasets', 'aaa_light', 'source=test')
+    await appendRowsToTable(path.join(lightDir, 'table'), COLUMNS, [
+      { id: 1, value: 'v', timestamp: new Date().toISOString() },
+    ])
+    await writeCursor(lightDir, {
+      epoch: 0,
+      rowCount: 1,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+    })
+
+    const heavyDir = path.join(cacheRoot, 'datasets', 'zzz_heavy', 'source=test')
+    for (let i = 0; i < 4; i++) {
+      await appendRowsToTable(path.join(heavyDir, 'table'), COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ])
+    }
+    await writeCursor(heavyDir, {
+      epoch: 0,
+      rowCount: 4,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+    })
+
+    const report = await maintainCache({ cacheRoot, dryRun: true })
+    assert.equal(report.partitions.length, 2)
+    assert.equal(report.partitions[0].dataset, 'zzz_heavy')
+    assert.equal(report.partitions[1].dataset, 'aaa_light')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- LLP 0336#a-live-delete-carries-the-gates: the gates this wire made live ---
+
+test('an unreadable cursor is not a licence to delete: the live generation survives', async () => {
+  const cacheRoot = await makeTmpDir('retention-poisoned-cursor')
+  try {
+    // A legacy epoch partition whose live generation is epoch=1 and whose
+    // retired epoch=0 is old enough to be past any window. Written through
+    // the epoch layout so `evictLegacyPartition` is the branch under test.
+    const segments = ['client=a', 'date=2026-01-01']
+    await appendRowsToPartition(cacheRoot, 'legacy_ds', segments, COLUMNS, [
+      { id: 1, value: 'epoch0-old', timestamp: isoDateDaysAgo(400) },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'legacy_ds', ...segments)
+    await writeCursor(partitionDir, { ...readCursorSync(partitionDir), epoch: 1, rowCount: 0 })
+    await appendRowsToPartition(cacheRoot, 'legacy_ds', segments, COLUMNS, [
+      { id: 2, value: 'epoch1-written-today', timestamp: isoDateDaysAgo(0) },
+    ])
+    const staleDataDir = path.join(partitionDir, 'epoch=0', 'data')
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    for (const name of await fs.readdir(staleDataDir)) {
+      await fs.utimes(path.join(staleDataDir, name), stale, stale)
+    }
+
+    // Poison the cursor exactly the way LLP 0326 describes: a `tableDir`
+    // that names a generation outside its own partition makes the WHOLE
+    // cursor unreadable. `readCursorSync` answers epoch 0 for it, and epoch
+    // 0 here is the retired generation.
+    const cursorPath = path.join(partitionDir, 'cursor.json')
+    const poisoned = JSON.parse(await fs.readFile(cursorPath, 'utf8'))
+    poisoned.tableDir = '../escape'
+    await fs.writeFile(cursorPath, JSON.stringify(poisoned))
+
+    const enforcer = createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } })
+    const result = await enforcer.tick()
+
+    assert.deepEqual(result.evicted, [], 'a partition whose cursor does not read is not evicted')
+    assert.equal(
+      await pathExists(path.join(partitionDir, 'epoch=1')),
+      true,
+      'the live generation, holding rows written today, is still there - reading the ' +
+      'unreadable cursor as epoch 0 would have weighed epoch=0 and removed the whole partition'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a source-table with no resolvable timestamp column is removed whole, and says so', async () => {
+  const cacheRoot = await makeTmpDir('retention-no-cursor-file')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
+      { id: 1, message: 'no timestamp' },
+    ])
+    const sourceDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } })
+      .tick({ now: new Date('2100-01-01T00:00:00.000Z') })
+
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1)
+    assert.equal(
+      result.sourceTableResults[0].evictedPartition,
+      true,
+      'a whole-directory eviction says so, so the daemon can log it as one (LLP 0336#durable-line)'
+    )
+    assert.equal(await pathExists(sourceDir), false)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a symlink at datasets/ refuses the whole pass rather than deleting through it', async () => {
+  const home = await makeTmpDir('retention-planted-datasets')
+  try {
+    const real = path.join(home, 'elsewhere')
+    // A partition with no resolvable timestamp column: the branch that
+    // removes a whole directory, which is what must not happen off-root.
+    await appendRowsToSourceTable(real, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
+      { id: 1, message: 'no timestamp' },
+    ])
+    const victim = path.join(real, 'datasets', 'no_ts_ds', 'source=test')
+
+    const cacheRoot = path.join(home, 'cache')
+    await fs.mkdir(cacheRoot, { recursive: true })
+    await fs.symlink(path.join(real, 'datasets'), path.join(cacheRoot, 'datasets'), 'dir')
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } })
+      .tick({ now: new Date('2100-01-01T00:00:00.000Z') })
+
+    assert.deepEqual(result, { evicted: [], sourceTableResults: [] })
+    assert.equal(
+      await pathExists(victim),
+      true,
+      'nothing outside the cache root is removed through a planted datasets/ link'
+    )
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('an ordinary cache root is not refused for the shape of the path it lives at', async () => {
+  // The control that dies under a blanket refusal: `isConfirmedSymlink` asks
+  // only about `datasets/`, so a cache reached THROUGH a symlinked ancestor
+  // (a $HYP_HOME on another volume, /tmp on macOS) still enforces.
+  const home = await makeTmpDir('retention-symlinked-ancestor')
+  try {
+    const realHome = path.join(home, 'real')
+    const cacheRoot = path.join(realHome, 'cache')
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(120) },
+    ])
+    await fs.symlink(realHome, path.join(home, 'link'), 'dir')
+
+    const result = await createRetentionEnforcer({
+      cacheRoot: path.join(home, 'link', 'cache'),
+      config: { default_days: 30 },
+    }).tick()
+
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a partition carrying NO cursor.json at all is still evicted', async () => {
+  // The control the `!part.legacy` clause exists for, and the one that dies
+  // first if the LLP 0323 gate above it is ever widened to "any cursor that
+  // does not read is a partition retention skips". `discoverCachePartitions`
+  // sets `legacy` for a table under `datasets/` with no cursor file beside
+  // it - the pre-cursor on-disk shape - and for that partition
+  // `tryReadCursorSync` answers null because the file is ABSENT, not because
+  // it is corrupt. A blanket refusal reads the two as the same answer and
+  // silently stops reclaiming every such partition forever, which is this
+  // series' standing failure and not one the poisoned-cursor test can see:
+  // that one writes a cursor file.
+  const cacheRoot = await makeTmpDir('retention-cursorless-legacy')
+  try {
+    const partitionDir = path.join(cacheRoot, 'datasets', 'legacy_ds', 'client=a', 'date=2026-01-01')
+    await appendRowsToTable(partitionDir, COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(400) },
+    ])
+    assert.equal(
+      await pathExists(path.join(partitionDir, 'cursor.json')),
+      false,
+      'the fixture only means anything while there is genuinely no cursor file'
+    )
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+
+    assert.deepEqual(
+      result.evicted,
+      [{ dataset: 'legacy_ds', partition: 'client=a/date=2026-01-01', rowCount: 1 }],
+      'an over-age partition with no cursor file is reclaimed, not skipped'
+    )
+    assert.equal(await pathExists(partitionDir), false)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention rewrites a cursor from disk under the lock, not from its own snapshot', async () => {
+  // Retention reads a partition's cursor, then spends the length of a scan,
+  // a delete commit and a rescan away from it while live ingest appends to
+  // the same partition. Writing its pre-pass snapshot back reverts whatever
+  // landed in between - `rowCount` cosmetically and `pendingFallbacks` not,
+  // since a dropped increment strands provisional rows against the settle
+  // sweep. Holding the lock stands in for that interleaving deterministically.
+  const cacheRoot = await makeTmpDir('retention-cursor-rebase')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(120) },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'test_ds', 'source=claude')
+
+    let released = false
+    const held = withPartitionMutationLock(partitionDir, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      await writeCursor(partitionDir, { ...readCursorSync(partitionDir), pendingFallbacks: 3 })
+      released = true
+    })
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } }).tick()
+    // Asked HERE, not after `held`: re-reading the cursor without taking the
+    // lock still passes the assertion below by luck, because the holder's
+    // write happens to land last. Only "the pass had not returned while the
+    // lock was held" distinguishes serialization from a narrower window.
+    const waited = released
+    await held
+
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1, 'the pass still deletes what the policy names')
+    assert.equal(waited, true, 'retention waited for the lock instead of writing through it')
+    const cursor = readCursorSync(partitionDir)
+    assert.equal(
+      cursor.pendingFallbacks,
+      3,
+      'the field another mutator wrote during the pass survives retention\'s cursor write'
+    )
+    assert.ok(cursor.retention?.rowsDeleted === 1, 'and retention still recorded its own pass')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention waits for the partition mutation lock before removing a partition', async () => {
+  const cacheRoot = await makeTmpDir('retention-evict-lock')
+  try {
+    const segments = ['client=a', 'date=2026-01-01']
+    await appendRowsToPartition(cacheRoot, 'legacy_ds', segments, COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(400) },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'legacy_ds', ...segments)
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'epoch=0', 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+
+    let released = false
+    const held = withPartitionMutationLock(partitionDir, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      released = true
+    })
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+    assert.equal(
+      released,
+      true,
+      'an `rm -rf` of a live partition is a partition mutation, so it queues behind one'
+    )
+    assert.equal(result.evicted.length, 1, 'and it still happens')
+    assert.equal(await pathExists(partitionDir), false)
+    await held
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a whole-partition eviction weighs the capture spool, not only the committed files', async () => {
+  // The removal takes `part.path`, and `<part.path>/_hypaware_spool` is
+  // inside it. Committed files stale, source alive and spooling: the rows
+  // captured a minute ago are in the window and must not go with the
+  // directory.
+  const cacheRoot = await makeTmpDir('retention-spool-fresh')
+  try {
+    const spool = captureOnlySpool(cacheRoot)
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
+      { id: 1, message: 'committed long ago' },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'table', 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+    await spool.append(partitionDir, NO_TIMESTAMP_COLUMNS, [
+      { id: 2, message: 'captured a minute ago, not committed yet' },
+    ])
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+
+    assert.equal(await pathExists(partitionDir), true, 'the partition survives')
+    assert.equal(
+      await pathExists(path.join(partitionDir, '_hypaware_spool', 'active.jsonl')),
+      true,
+      'rows captured inside the window are not removed with the directory that holds them'
+    )
+    assert.equal(result.sourceTableResults[0]?.evictedPartition, undefined)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a spool whose own captured rows are past the window does not stop the eviction', async () => {
+  // The control against the other failure: weighing the spool must not turn
+  // a stranded flush into a partition that never reclaims again.
+  const cacheRoot = await makeTmpDir('retention-spool-stale')
+  try {
+    const spool = captureOnlySpool(cacheRoot)
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
+      { id: 1, message: 'committed long ago' },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    await spool.append(partitionDir, NO_TIMESTAMP_COLUMNS, [{ id: 2, message: 'stranded long ago' }])
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'table', 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+    const spoolDir = path.join(partitionDir, '_hypaware_spool')
+    for (const name of await fs.readdir(spoolDir)) {
+      await fs.utimes(path.join(spoolDir, name), stale, stale)
+    }
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+
+    assert.equal(result.sourceTableResults[0].evictedPartition, true)
+    assert.equal(await pathExists(partitionDir), false, 'nothing here has been written since the cutoff')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

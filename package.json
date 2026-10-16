@@ -1,8 +1,18 @@
 {
   "name": "hypaware",
-  "version": "1.19.0",
+  "version": "1.43.0",
   "type": "module",
-  "description": "HypAware: modular logs and telemetry collector with a plugin kernel. Captures Claude Code, Codex, OTEL, and raw AI gateway traffic locally, queryable from a single CLI.",
+  "description": "The improvement loop for all your agents.",
+  "mcpName": "ai.hypaware/hypaware",
+  "license": "MIT",
+  "homepage": "https://hypaware.ai/?utm_source=npm&utm_medium=package",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hyparam/hypaware.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hyparam/hypaware/issues"
+  },
   "bin": {
     "hypaware": "./bin/hypaware.js",
     "hyp": "./bin/hypaware.js"
@@ -21,6 +31,10 @@
       "types": "./types/core/observability/index.d.ts",
       "import": "./src/core/observability/index.js"
     },
+    "./core/product-telemetry": {
+      "types": "./types/core/product_telemetry/index.d.ts",
+      "import": "./src/core/product_telemetry/index.js"
+    },
     "./core/sinks": {
       "types": "./types/core/sinks/index.d.ts",
       "import": "./src/core/sinks/index.js"
@@ -28,6 +42,13 @@
     "./core/query": {
       "types": "./types/core/query/index.d.ts",
       "import": "./src/core/query/index.js"
+    },
+    "./core/search": {
+      "types": "./types/core/search/index.d.ts",
+      "import": "./src/core/search/index.js"
+    },
+    "./core/search/types.js": {
+      "types": "./src/core/search/types.d.ts"
     },
     "./core/util": {
       "types": "./types/core/util/index.d.ts",
@@ -49,6 +70,7 @@
     "bin/",
     "src/",
     "hypaware-core/",
+    "packages/pi-extension/",
     "types/",
     "hypaware-plugin-kernel-types.d.ts"
   ],
@@ -59,23 +81,31 @@
     "test": "node scripts/run-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:types": "tsc -p tsconfig.build.json",
+    "bench:icebird-real": "node --expose-gc benchmarks/icebird-real-data.mjs",
+    "bench:normal-cpu": "node benchmarks/normal-usage-cpu.mjs",
     "prepare": "npm run build:types",
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1096.0",
-    "@aws-sdk/credential-provider-ini": "3.973.7",
-    "hyparquet": "1.26.2",
-    "hyparquet-compressors": "1.1.1",
-    "icebird": "0.8.15",
-    "squirreling": "0.15.0"
+    "@aws-sdk/client-s3": "3.1147.0",
+    "@aws-sdk/credential-provider-ini": "3.973.17",
+    "hyparquet": "1.31.2",
+    "hyparquet-compressors": "1.1.2",
+    "hysnappy": "1.1.1",
+    "icebird": "0.8.35",
+    "squirreling": "0.16.8"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.16.1",
+    "hyparquet-writer": "0.16.10",
     "hypvector": "0.2.2"
   },
+  "overrides": {
+    "hyparquet-writer@0.16.10": {
+      "hyparquet": "1.31.2"
+    }
+  },
   "devDependencies": {
-    "@types/node": "26.1.2",
-    "typescript": "6.0.3"
+    "@types/node": "26.6.4",
+    "typescript": "7.0.2"
   }
 }

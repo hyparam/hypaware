@@ -7,10 +7,11 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { createAttachHandler, attachHandler } from '../../src/core/config/action_attach.js'
+import { markActionRefused } from '../../src/core/config/action_refusal.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 
 /**
- * T6 (LLP 0044/0045/0046): the attach action handler — the reversible
+ * T6 (LLP 0044/0045/0046): the attach action handler, the reversible
  * instance of the client-action reconciler, the `action_backfill.js` twin.
  * These tests drive the handler hooks directly with injected fake
  * `clientDescriptors` + `clients` + filesystem, the way the plan prescribes;
@@ -71,6 +72,27 @@ const CODEX_DESCRIPTOR = {
   skillDir: 'skills/codex',
   attachProbe: { format: 'toml', settings_file: '.codex/config.toml', marker_header: '[model_providers.hypaware]' },
 }
+
+test('Codex migration settles once without an endpoint and reopens when mode changes', async () => {
+  const handler = createAttachHandler()
+  const registration = { ...attachRegistration('codex', { prose: 'no JSON' }), requiresEndpoint: false }
+  const ctx = makeCtx({
+    plugins: [{ name: '@hypaware/codex', config: {} }],
+    descriptors: descriptorMap([CODEX_DESCRIPTOR]),
+    clients: clientsWith({ codex: registration }),
+  })
+  ctx.endpoint = undefined
+  const action = handler.desired(ctx)[0]
+  assert.ok(action)
+  assert.equal(handler.isCurrent?.(/** @type {any} */ ({ status: 'done' }), action, ctx), false)
+  const result = await handler.perform(action, ctx)
+  assert.equal(result.status, 'done')
+  const marker = /** @type {any} */ ({ status: 'done', ...result.detail })
+  assert.equal(marker.mode, 'transcript', 'mode is recorded even without a parsed report')
+  assert.equal(handler.isCurrent?.(marker, action, ctx), true)
+  ctx.config.plugins = [{ name: '@hypaware/codex', config: { capture_mode: 'gateway' } }]
+  assert.equal(handler.isCurrent?.(marker, action, ctx), false)
+})
 
 /**
  * A client descriptor with **no `attachProbe`**. perform() can attach it (it
@@ -243,6 +265,34 @@ test('desired() honors an explicit attach.on_join:false opt-out (no action)', ()
   assert.deepEqual(desired, [])
 })
 
+test('desired() never names a detached client, even one detached after boot', async () => {
+  const handler = createAttachHandler()
+  // @ref LLP 0466#reattach-paths [tests]: the reconciler skips a detached client
+  const inBoot = handler.desired(makeCtx({
+    plugins: [{ name: '@hypaware/claude', enabled: true, recording: false, config: {} }],
+    descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+    clients: clientsWith({ claude: attachRegistration('claude') }),
+  }))
+  assert.deepEqual(inBoot, [])
+  // The daemon booted before `hyp client detach` wrote the switch: the
+  // in-memory entry still records, the file on disk does not.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'action-attach-detached-'))
+  try {
+    await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({
+      version: 2, plugins: [{ name: '@hypaware/claude', recording: false }],
+    }))
+    const afterBoot = handler.desired(makeCtx({
+      env: { HOME: hypHome, HYP_HOME: hypHome },
+      plugins: [{ name: '@hypaware/claude', enabled: true, config: {} }],
+      descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+      clients: clientsWith({ claude: attachRegistration('claude') }),
+    }))
+    assert.deepEqual(afterBoot, [])
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 test('desired() does not fail open on a non-boolean on_join (treats it as opt-out)', () => {
   const handler = createAttachHandler()
   // The typo'd JSON string `"false"` is not a boolean; it must suppress, not
@@ -317,7 +367,7 @@ test('perform() attaches via the registry (endpoint + json mode) and records set
   )
   assert.deepEqual(outcome, {
     status: 'done',
-    detail: { endpoint: ENDPOINT, settings_path: '/home/u/.claude/settings.json', prev_value: 'https://foreign.example/api' },
+    detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 4, settings_path: '/home/u/.claude/settings.json', prev_value: 'https://foreign.example/api' },
   })
   // The adapter was invoked with the gateway endpoint, an empty config, and
   // the machine-readable json flag.
@@ -326,7 +376,7 @@ test('perform() attaches via the registry (endpoint + json mode) and records set
   assert.deepEqual(attachCtx.config, {})
 })
 
-test('perform() records done with only settings_path when the attach had no prior value to back up', async () => {
+test('perform() records Claude OTEL mode with settings_path when the attach had no prior value to back up', async () => {
   const registration = attachRegistration('claude', {
     payload: {
       status: 'attached', action: 'attach', client: 'claude', dry_run: false,
@@ -338,10 +388,10 @@ test('perform() records done with only settings_path when the attach had no prio
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, settings_path: '/home/u/.claude/settings.json' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 4, settings_path: '/home/u/.claude/settings.json' } })
 })
 
-test('perform() records done (endpoint only) on an idempotent re-attach (changed:false)', async () => {
+test('perform() records Claude OTEL mode on an idempotent re-attach (changed:false)', async () => {
   const registration = attachRegistration('claude', {
     payload: { status: 'noop', action: 'attach', client: 'claude', dry_run: false, changed: false },
   })
@@ -350,17 +400,17 @@ test('perform() records done (endpoint only) on an idempotent re-attach (changed
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 4 } })
 })
 
-test('perform() records done (endpoint only) when the adapter emits an unparseable payload', async () => {
+test('perform() records Claude OTEL mode when the adapter emits an unparseable payload', async () => {
   const registration = attachRegistration('claude', { prose: 'attached claude (human prose)\n' })
   const handler = createAttachHandler()
   const outcome = await handler.perform(
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 4 } })
 })
 
 test('perform() parses the last non-empty line when prose precedes the JSON', async () => {
@@ -376,7 +426,7 @@ test('perform() parses the last non-empty line when prose precedes the JSON', as
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, settings_path: '/p' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 4, settings_path: '/p' } })
 })
 
 test('perform() returns failed when the adapter throws (file not writable)', async () => {
@@ -388,6 +438,19 @@ test('perform() returns failed when the adapter throws (file not writable)', asy
   )
   assert.equal(outcome.status, 'failed')
   assert.match(String(outcome.reason), /EACCES/)
+})
+
+test('perform() returns refused when the adapter throws a marked refusal', async () => {
+  const registration = attachRegistration('claude', {
+    throws: markActionRefused(new Error('models.providers.anthropic already exists and was not written by HypAware')),
+  })
+  const handler = createAttachHandler()
+  const outcome = await handler.perform(
+    { requestKey: 'claude', params: { client: 'claude' } },
+    makeCtx({ clients: clientsWith({ claude: registration }) }),
+  )
+  assert.equal(outcome.status, 'refused')
+  assert.match(String(outcome.reason), /already exists/)
 })
 
 test('perform() returns failed when the registry has no such client', async () => {
@@ -610,7 +673,7 @@ test('reverse() of a marker with no installed_assets touches no files', async ()
 test('reverse() invokes the disk-driven undo once and never consults ctx.clients', async () => {
   /** @type {any[]} */
   const calls = []
-  // A registry that explodes if the handler ever touches it — proving reverse
+  // A registry that explodes if the handler ever touches it: proving reverse
   // is adapter-independent (the dropped client is gone after the restart).
   const poisonClients = {
     getClient() { throw new Error('reverse() must not consult ctx.clients') },
@@ -632,12 +695,71 @@ test('reverse() invokes the disk-driven undo once and never consults ctx.clients
   assert.equal(calls[0].descriptor, CLAUDE_DESCRIPTOR)
 })
 
+test('reverse() reports a replayed malformed-block backup by path, and never its contents', async () => {
+  // The reconciler half of #500 finding 3. `hyp detach` prints a line per
+  // restored path; this reverse is an org config drop with nobody at a
+  // terminal, so the log is the only place a rewrite of the user's settings
+  // file can be recorded - and the failure half of the same replay was already
+  // logged here while the success half was not.
+  /** @type {{ event: string, attrs: any }[]} */
+  const records = []
+  /** @type {any} */
+  const log = {
+    debug() {},
+    info(/** @type {string} */ event, /** @type {any} */ attrs) { records.push({ event, attrs }) },
+    warn(/** @type {string} */ event, /** @type {any} */ attrs) { records.push({ event, attrs }) },
+    error() {},
+  }
+  const handler = createAttachHandler({
+    detach: async () => ({
+      changed: true,
+      settingsPath: '/home/u/.claude/settings.json',
+      restoredPaths: ['env', 'hooks.SessionStart'],
+    }),
+  })
+  const outcome = await reverseOf(handler)('claude', makeCtx({
+    descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+    log,
+  }))
+
+  assert.deepEqual(outcome, { status: 'done' })
+  const restored = records.find((r) => r.event === 'client_action.attach_reverse_restored')
+  assert.ok(restored, 'a replayed backup is named before the marker drops')
+  assert.equal(restored.attrs.client, 'claude')
+  for (const dotted of ['env', 'hooks.SessionStart']) {
+    assert.ok(String(restored.attrs.detail).includes(dotted), `${dotted} is named`)
+  }
+})
+
+test('reverse() says nothing about a restore that did not happen', async () => {
+  // The guard on the line above: `restoredPaths` is absent on every undo that
+  // replayed no backup, which is nearly all of them, and an org-driven detach
+  // must not emit a restore record for one.
+  /** @type {string[]} */
+  const events = []
+  /** @type {any} */
+  const log = {
+    debug() {},
+    info(/** @type {string} */ event) { events.push(event) },
+    warn(/** @type {string} */ event) { events.push(event) },
+    error() {},
+  }
+  const handler = createAttachHandler({ detach: async () => ({ changed: true }) })
+  const outcome = await reverseOf(handler)('claude', makeCtx({
+    descriptors: descriptorMap([CLAUDE_DESCRIPTOR]),
+    log,
+  }))
+
+  assert.deepEqual(outcome, { status: 'done' })
+  assert.equal(events.includes('client_action.attach_reverse_restored'), false)
+})
+
 test('reverse() replays the real core undo from disk with no adapter loaded (fs round-trip)', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-action-attach-'))
   try {
     const settingsPath = path.join(home, '.claude', 'settings.json')
     await fs.mkdir(path.dirname(settingsPath), { recursive: true })
-    // A hand-written self-describing marker — what claude `attach()` records:
+    // A hand-written self-describing marker, what claude `attach()` records:
     // the managed env value plus the prior base URL to restore (LLP 0045 §Part 3).
     const original = JSON.stringify({
       env: { ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_BASE_URL: ENDPOINT },
@@ -648,7 +770,7 @@ test('reverse() replays the real core undo from disk with no adapter loaded (fs 
     }, null, 2) + '\n'
     await fs.writeFile(settingsPath, original)
 
-    // No ctx.clients at all — the adapter is unloaded post-restart. Bind the
+    // No ctx.clients at all: the adapter is unloaded post-restart. Bind the
     // fixture home through the injected (real) detach.
     const handler = createAttachHandler({
       detach: ({ descriptor }) => detachClientFromDisk({ descriptor, homeDir: home }),

@@ -113,7 +113,7 @@ test('write advances the watermark in place (latest wins)', async () => {
   assert.deepEqual(read.continuation, cont('25'))
   assert.equal(read.exportedRowCount, 25)
 
-  // One file per (dataset, partition) — no per-write accumulation.
+  // One file per (dataset, partition): no per-write accumulation.
   const dir = path.join(stateDir, 'watermarks', 'proxy')
   const entries = await fs.readdir(dir)
   assert.deepEqual(entries, ['source=claude.json'])
@@ -135,11 +135,11 @@ test('write rejects a malformed continuation before touching disk', async () => 
   const store = createSinkWatermarkStore({ stateDir })
   const key = deriveWatermarkKey('/cache', '/cache/datasets/proxy/source=claude')
 
-  // Type-valid token, but `seq` is not a decimal string — only the runtime
+  // Type-valid token, but `seq` is not a decimal string: only the runtime
   // guard catches it.
   await assert.rejects(() => store.write(key, { continuation: { v: 1, seq: 'not-a-number' } }))
   await assert.rejects(
-    // @ts-expect-error — wrong version
+    // @ts-expect-error: wrong version
     () => store.write(key, { continuation: { v: 2, seq: '1' } })
   )
   // Nothing was persisted.
@@ -169,6 +169,6 @@ test('keyFor matches deriveWatermarkKey', () => {
 })
 
 test('createSinkWatermarkStore requires a stateDir', () => {
-  // @ts-expect-error — exercising the runtime guard
+  // @ts-expect-error: exercising the runtime guard
   assert.throws(() => createSinkWatermarkStore({}))
 })

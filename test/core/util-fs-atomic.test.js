@@ -52,7 +52,7 @@ test('atomicWriteFile leaves no temp file behind on success or failure', async (
   }
 })
 
-test('atomicWriteFile applies the requested file mode', async () => {
+test('atomicWriteFile applies the requested file mode', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
   const dir = await makeTmpDir()
   try {
     const target = path.join(dir, 'secret.json')
@@ -81,7 +81,7 @@ test('atomicWriteFile enforces expectedMtimeMs (CONCURRENT_EDIT)', async () => {
 
     // Stale mtime: rejected, file untouched. Force a guaranteed-distinct
     // on-disk mtime instead of relying on the write above having landed in
-    // a later filesystem mtime tick — on a fast runner both writes can share
+    // a later filesystem mtime tick: on a fast runner both writes can share
     // one tick, leaving the mtime unchanged so the guard never fires (#272).
     const bumped = new Date(mtimeMs + 1000)
     await fs.utimes(target, bumped, bumped)
@@ -151,8 +151,46 @@ test('readFileIfExists/readJsonIfExists return null only for ENOENT', async () =
     // A non-ENOENT error (path through a file) propagates.
     const file = path.join(dir, 'plain.txt')
     await fs.writeFile(file, 'x')
-    await assert.rejects(readFileIfExists(path.join(file, 'child')))
+    // win32 reports a path through a file as ENOENT, not ENOTDIR, so this
+    // scenario cannot probe the non-ENOENT contract there.
+    if (process.platform !== 'win32') await assert.rejects(readFileIfExists(path.join(file, 'child')))
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
+})
+
+// @ref LLP 0417#cache-reclamation [tests]: admission rejects failed directory durability
+test('durable publication syncs file before rename and the immediate parent directory afterward, and a failing parent sync propagates', async t => {
+  const dir = await makeTmpDir()
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const target = path.join(dir, 'new', 'nested', 'journal.json')
+  const events = []
+  let failDirectory = true
+  const io = { ...fs,
+    async rename(from, to) {
+      events.push('rename')
+      return fs.rename(from, to)
+    },
+    async open(file, flags, mode) {
+      const handle = await fs.open(file, flags, mode)
+      return {
+        writeFile: (data, encoding) => handle.writeFile(data, encoding),
+        async sync() {
+          events.push(flags === 'w' ? 'file-sync' : `dir-sync:${file}`)
+          if (flags === 'r' && failDirectory) throw new Error('injected directory sync failure')
+          await handle.sync()
+        },
+        async close() { await handle.close() },
+      }
+    },
+  }
+  const options = { fsync: true, fs: /** @type {typeof fs} */ (io) }
+  await assert.rejects(atomicWriteJson(target, { admitted: true }, options), /directory sync failure/)
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
+  assert.deepEqual(await fs.readdir(path.dirname(target)), ['journal.json'])
+  failDirectory = false
+  events.length = 0
+  await atomicWriteJson(target, { admitted: true }, options)
+  // Exactly one directory sync, of the immediate parent only, not every ancestor.
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
 })

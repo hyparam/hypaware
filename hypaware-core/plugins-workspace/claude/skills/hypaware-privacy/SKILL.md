@@ -1,19 +1,44 @@
 ---
 name: hypaware-privacy
-description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first fleet sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync" or "what will ship to the server". Covers this machine's local cache only, not rows already forwarded to a remote server.
+description: 'Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Also use for "don''t record this", "pause logging", or "resume recording"; handle direct recording controls without a full audit. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine''s first org sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync", "what will ship to the server", or "what will sync to the cloud". Surveys this machine''s local cache; rows already forwarded are out of scope except where a session purge deletes them.'
 ---
 
 # HypAware privacy review: audit what was captured, decide what leaves
 
-<!-- @ref LLP 0100#skill [implements]: the six-step agent-assisted privacy review the deferred first sync directs the user to run (R3-R8) -->
-<!-- @ref LLP 0142#any-time [constrained-by]: the description advertises the audit itself, not the first-sync window; enrolled-ness gates behavior, not presence (LLP 0107#gating) -->
-<!-- @ref LLP 0142#local-cache-scope [constrained-by]: this machine's cache only; scanning an org server's rows is deliberately out of scope, not an oversight -->
-
-This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. The six steps run the same way whenever the user asks; only the stakes change.
+This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. For a privacy review, the six steps run the same way; only the stakes change.
 
 The one moment they are time-critical is enrollment. When `hyp remote login` enrolls this machine, the first sync to the org server is **held until a printed deadline** rather than run immediately, and the whole captured history (backfill included) ships at that deadline unless you refine it first. Doing nothing is a valid choice there - at the deadline everything forwards, which is the documented default. On a machine that was never enrolled there is no pending export at all, and the same steps simply bound what gets recorded and what stays in the local cache.
 
-Run the six steps below **in order**. Steps 4 and 5 (explain, then confirm) gate every marking: never mark or purge without first explaining the classes and getting per-item confirmation.
+For an audit, run the six steps below **in order**. Steps 4 and 5 (explain, then confirm) gate audit-driven markings: never mark or purge without first explaining the classes and getting per-item confirmation.
+
+## Direct recording controls
+
+For an explicit recording-control request, perform only the requested action;
+do not start the six-step audit. The six-step requirements above apply to a
+privacy review. Verify the command receipt and report failures accurately.
+
+- Opt a folder out of recording - `hyp privacy ignore <path>` writes a committable
+  `.hypignore`; `hyp privacy set <path> ignore` marks it machine-local instead,
+  with no repo breadcrumb.
+- Stop recording *this conversation* - `hyp session ignore` drops this session's
+  exchanges at every local recorder (the gateway, and the Claude telemetry
+  listener when one is running); `hyp session unignore` resumes, and
+  `hyp session status` reports which it is right now. Each resolves the
+  session id itself (Claude and Codex) and fails closed rather than guessing.
+  The opt-out survives restarts until explicitly unignored and is honored by
+  transcript backfill. Forks (`claude --fork-session`, `codex fork`) need a new
+  exclusion. Ignoring does not purge prior records; unignoring permits older
+  transcript content to be imported again.
+  The managed Claude SessionStart hook exports the ID to Bash commands in
+  attached local Desktop Code sessions. Start or resume after upgrading so it
+  runs. If `CLAUDE_CODE_SESSION_ID` is absent, use an explicitly verified Claude
+  ID or report that opt-out is unconfirmed. A recent transcript or matching cwd
+  cannot establish the current Claude conversation; never substitute a Codex ID
+  from the same folder.
+- Decide what happens in new folders - by default they sync with no
+  question; `hyp privacy folders ask` asks once per new folder instead, and
+  `hyp privacy folders sync` returns to the default. It gates the question
+  only, never an existing class.
 
 ## Scope honesty (say this up front)
 
@@ -22,6 +47,44 @@ This flow governs **HypAware's own surfaces only** - what the local cache holds 
 ## Step 1 - Protect this session first (R3)
 
 The review conversation will discuss the most sensitive content on the machine, so it must never itself become a captured, forwardable transcript. **Before surveying anything**, opt this Claude session out of capture and **verify it took effect**. On failure, say so plainly and continue **only** with the user's explicit consent.
+
+Prefer `hyp session ignore --json`, which resolves the id and verifies the opt-out in one tested implementation and refuses rather than guessing. It resolves this session's id from `CLAUDE_CODE_SESSION_ID`, addresses **every** recorder advertising the control route, validates each reply the same three ways, and fails closed: it exits nonzero and prints no success when it cannot establish the right id, which is the answer this step needs. Only where it is unavailable (`command not found`) does the script below apply. A `hyp` that ran and refused is not a fallback: with `CLAUDE_CODE_SESSION_ID` unset the script exits before it posts anything, and the one id-resolution refusal that happens with it set (a second client stating one too) goes to the stated-id re-run below, not here.
+
+Reading the receipt is not optional. The verb fails closed on the questions it can answer, but two of its **successes** are narrower than they look, and both are checked below.
+
+```bash
+hyp session ignore --json
+```
+
+**Why the verb and not a `curl`.** Claude Code attaches over OTEL, so this session is recorded by the `@hypaware/claude` telemetry listener, whose ignored-session set is a **different object on a different port** from the gateway's. The verb addresses each recorder that advertises `control_routes` in live daemon status, plus the gateway by its own resolution; one `curl` reaches one of them, so on the default OTEL attach it can report a confident success over a listener that keeps recording. `"status": "ok"` means every recorder it *addressed* took the write, which is not the same claim as "you are covered". So read the receipt rather than only the exit code:
+
+- exit `0` with `"status": "ok"`. `"status": "partial"` (exit 3) means an addressed recorder **refused and is still recording**.
+- `"session_id_source"` is `claude_env`, so `"session_id"` is this conversation's own `CLAUDE_CODE_SESSION_ID`. Any other source means the verb could not read that variable and resolved **a different session** off disk instead (`codex_rollout` / `codex_env_rollout` find a Codex session sharing this directory). It then confirms a real opt-out, `"status": "ok"` and all, for a session you are not in, while this one keeps being recorded. That write already happened, so undo it before you stop - `hyp session unignore "<the session_id it reported>"` - or the bystander session stays suppressed until explicitly unignored.
+- `"recorders"` contains an entry for `claude-telemetry`, the listener that captures this session. A list holding only `gateway` means the listener was not addressed, and absence has two readings the receipt cannot tell apart: the listener is running and the verb did not reach it, or it is not running at all - a stopped daemon, or an `@hypaware/ai-gateway` too old to give it the record seam, both leave it out of the live snapshot the verb reads. A skipped **live** listener is the exact failure this step exists to prevent; a listener that is not running is recording nothing, so there is nothing about this session to notify. The cross-check below settles which one you have. A `gateway not addressed:` line on **stderr** narrows the answer the same way from the other side.
+- every entry in `"recorders"` reports `"status": "ok"` with `"ignored": true`. Name them to the user rather than saying "the machine".
+- `"guarantee": "set_membership"` is the bound on all of it, spelled out below.
+
+**Stop on any of these** and tell the user the review session is still being recorded: `"status": "partial"`, a `"session_id_source"` other than `claude_env` (the stated-id re-run just below is the one exception, and reports `argument`), no `claude-telemetry` entry in `"recorders"` while the cross-check below says that listener is live, or a nonzero exit the fallback does not cover. Only proceed if they explicitly accept that risk.
+
+**Cross-check a missing `claude-telemetry` entry before you stop on it.** The receipt reports who was addressed, which is one observation and cannot say which of the two readings above it is reporting. `hyp status --json` is the second one, and the stop is conditioned on it rather than dropped: it reads a different field of the same daemon snapshot - `listener_started_at` rather than the `control_routes` advertisement the verb resolves recorders by - together with the daemon-readability check below, and it reports that only while the daemon process is alive.
+
+```bash
+hyp status --json
+```
+
+Read the `capture_health` entry whose `"client"` is `claude`. A non-null `"listener_started_at"` is a listener the running daemon started: it is receiving this session's telemetry, it was skipped, and the stop above applies - say the review session is still being recorded. A null `"listener_started_at"`, or no `capture_health` entry for `claude` at all, means no live listener is receiving this session's telemetry only when the same payload's `daemon` object carries no `"error"`, or carries an `"error"` beside `"running": false`: both readings come from one liveness-gated read of the same status snapshot, so a snapshot the command could not read nulls `listener_started_at` for a listener that is in fact still running, and `"running": true` with an `"error"` beside it is exactly that case - it is the live case, so stop. With no `daemon.error`, or an `"error"` beside `"running": false`, read the null as intended: tell the user the listener is not running, so nothing is capturing this session, and read the rest of the receipt as usual (the `gateway` entry still has to report `ok`). Anything you cannot read that way - `hyp status` exiting nonzero, no `capture_health` key, a `daemon` object reporting `"running": true` with an `"error"`, a shape you do not recognise - is not an observation, so treat it as the live case and stop.
+
+**If the verb refuses because more than one client states an id** for this shell (`CLAUDE_CODE_SESSION_ID` and `CODEX_THREAD_ID` are both set, so it will not guess which session you are in), do **not** drop to the script below. `hyp` is installed and working here, and its own error names the fix: state the id, which still reaches every recorder.
+
+```bash
+hyp session ignore --json "$CLAUDE_CODE_SESSION_ID"
+```
+
+Read that receipt exactly as above, with one substitution: `"session_id_source"` is now `argument`, so check `"session_id"` equals `$CLAUDE_CODE_SESSION_ID` byte for byte instead. Every other stop still applies, the `claude-telemetry` one included.
+
+One nonzero exit, and only that one, sends you to the fallback: `hyp` **not installed** (`command not found`). A `hyp` that ran and failed any other way is a stop, not a reason to fall back: either it already posted to the gateway the script is about to post to, or it could not resolve a gateway at all - and in that case the script's default address is a guess (`resolveGatewayEndpointForCli` reads the live daemon port and a pinned `listen`, and deliberately never assumes the default) rather than a route the verb overlooked.
+
+**Fallback, only where `hyp` is unavailable.** The script below posts to the gateway control route directly. It reaches the **gateway alone**: if a telemetry listener is live, this does not cover it, so report an opt-out of the gateway rather than of the machine, and treat that as the failure the top of this step describes - say it plainly and get the user's explicit consent before surveying.
 
 ```bash
 #!/usr/bin/env bash
@@ -32,7 +95,10 @@ if [ -z "${CLAUDE_CODE_SESSION_ID:-}" ]; then
   exit 1
 fi
 
-BASE="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8787}"
+# The default is DEFAULT_GATEWAY_ENDPOINT (src/core/config/gateway_endpoint.js),
+# which is what an unpinned gateway binds. On a plain OTEL attach there is no
+# ANTHROPIC_BASE_URL at all, so this fallback is the whole of the address.
+BASE="${ANTHROPIC_BASE_URL:-http://127.0.0.1:18521}"
 URL="${BASE%/}/_hypaware/ignore/session"
 
 response="$(curl --fail-with-body --silent --show-error \
@@ -40,19 +106,37 @@ response="$(curl --fail-with-body --silent --show-error \
   -H 'content-type: application/json' \
   --data "$(printf '{"session_id":"%s"}' "$CLAUDE_CODE_SESSION_ID")")"
 
-# Verify the gateway reports this session as ignored. `ignored` must be true.
+# Verify the gateway accepted the opt-out, and that the reply is about THIS
+# session. Same three checks `hyp session ignore` applies (validateControlResponse
+# in ai-gateway/src/session_command.js): `ignored` a real boolean true, `total` a
+# real number, and `session_id` echoed back byte-for-byte. The route echoes the
+# token verbatim, so a reply naming a different session establishes nothing about
+# this one, and reaching *something* on the port is not reaching the gateway.
 printf '%s' "$response" | python3 -c '
 import json, sys
-r = json.load(sys.stdin)
-if r.get("ignored") is not True:
+expected = sys.argv[1]
+try:
+    r = json.load(sys.stdin)
+except Exception:
+    sys.exit("opt-out NOT confirmed: the reply was not JSON, so it is not the control route")
+# bool is excluded because isinstance(True, int) is True in Python: the CLI
+# check this mirrors is `typeof total !== "number"`, which a JSON true fails.
+if not isinstance(r, dict) or r.get("ignored") is not True or isinstance(r.get("total"), bool) or not isinstance(r.get("total"), int):
     sys.exit("opt-out NOT confirmed: " + json.dumps(r))
-print("opt-out confirmed for session %s (total ignored: %s)" % (r.get("session_id"), r.get("total")))
-'
+if r.get("session_id") != expected:
+    sys.exit("opt-out NOT confirmed: the reply is about session %s, not %s" % (json.dumps(r.get("session_id")), json.dumps(expected)))
+print("opt-out confirmed for session %s (total ignored: %s)" % (expected, r["total"]))
+# Printed only here, after every check passed, so the bound travels with the
+# success line: nothing above authenticates the responder.
+print("caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped")
+' "$CLAUDE_CODE_SESSION_ID"
 ```
 
 If the `curl` fails (gateway not running, wrong port) or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session is still being recorded**. Only proceed if they explicitly accept that risk.
 
-The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`claude --fork-session`; a plain `--resume` / `--continue` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point. Reverse later with `/hypaware-unignore`.
+**What a confirmed opt-out proves, exactly.** Each recorder holds the id as an opaque token: `ignored: true` means the id is in that recorder's drop set, and nothing more. No recorder inspects traffic, so none can tell you the id is one your exchanges carry - that match happens later, in the client adapter, against the `session_id` it stamps on the row. For Claude the session *is* the conversation and `CLAUDE_CODE_SESSION_ID` is that same id, so sending it is what makes the opt-out real; the reply is a receipt for the write, not a verified drop. Do not report it to the user as more than that, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question. Nor does anything prove the responder on that port is HypAware, so the answer is only as trustworthy as the machine; the `caveat:` line the script prints under `opt-out confirmed` says so, and belongs in what you report.
+
+The opt-out is saved locally and survives recorder and daemon restarts until explicitly removed with `hyp session unignore`. A fork (`claude --fork-session`, `codex fork`) creates a new session ID that needs its own exclusion; a plain resume reuses the ID. Transcript backfill honors the saved exclusion. Unignoring permits earlier transcript content to be imported again. Use `hyp session status` to check the current answer.
 
 ## Step 2 - Check that backfill has settled (before surveying)
 
@@ -60,14 +144,14 @@ The picker this skill replaces failed because it surveyed a cache the backfill w
 
 ```bash
 hyp status --json          # daemon running? enrolled (a central sink present)?
-hyp query status           # cache state and last refresh
+hyp cache status           # cache state and last refresh
 ```
 
 Then run the enumeration query (Step 3) **twice, a short interval apart** (say ~30-60s). If the per-directory `rows` counts are still climbing, backfill is still landing: **warn the user and offer to wait** until counts stabilize before proposing any markings. Surveying mid-backfill risks marking against an incomplete picture. There is no deadline pressure here: on an enrolled machine the first-sync hold gives hours, and on an unenrolled one nothing is waiting to leave. Note that an enrolled user can also end that window early at any time with `hyp sync` (it prints what would leave and asks first), so if they say they are in a hurry, finishing the review is what unblocks them, not waiting.
 
 ## Step 3 - Survey the captured directories, then sample content (R4 applies)
 
-Enumerate the distinct working directories this machine has captured (the LLP 0069 enumerate query over `ai_gateway_messages`):
+Enumerate the distinct working directories this machine has captured (an enumerate query over `ai_gateway_messages`):
 
 ```bash
 hyp query sql "SELECT cwd, repo_root, COUNT(*) AS rows, MAX(date) AS last_seen \
@@ -97,9 +181,9 @@ WHERE cwd = '<dir>' ORDER BY date DESC LIMIT 40" --format json --output /tmp/sam
 
 Before you propose or apply **anything**, explain the classes in plain language, including what the org can and cannot see in each case:
 
-- **ignore** (`hyp policy set <dir> ignore`): never recorded going forward; the machine-local rule stops capture at the source. Existing cached rows are **purgeable** (Step 6) but are not removed by marking alone. The org sees **nothing** from this directory.
-- **local-only** (`hyp policy set <dir> local-only`): recorded and queryable **here** on this machine, but **never forwarded**. Withheld at the export seam. The org sees **nothing**, while you keep local history.
-- **sync** (`hyp policy set <dir> sync`): the explicit "this ships" choice - forwarded to the org server like the default. Marking it `sync` records an explicit decision so this directory is not asked about again. The org sees this directory's captured exchanges.
+- **ignore** (`hyp privacy set <dir> ignore`): never recorded going forward; the machine-local rule stops capture at the source. Existing cached rows are **purgeable** (Step 6) but are not removed by marking alone. The org sees **nothing** from this directory.
+- **local-only** (`hyp privacy set <dir> local-only`): recorded and queryable **here** on this machine, but **never forwarded**. Withheld at the export seam. The org sees **nothing**, while you keep local history.
+- **sync** (`hyp privacy set <dir> sync`): the explicit "this ships" choice - forwarded to the org server like the default. Marking it `sync` records an explicit decision so this directory is not asked about again. The org sees this directory's captured exchanges.
 
 Name the trade honestly: `local-only` keeps your history usable locally; `ignore` is stronger (nothing is even recorded once marked) but you lose local queryability too.
 
@@ -113,37 +197,43 @@ Present findings as **short, redacted excerpts** and a proposed class per direct
 
 Then **apply nothing without per-item user confirmation.** Propose, wait for a yes on each item, then mark. Do not batch-apply.
 
+Keep the response tight: a clear list of candidate directories with the proposed
+class for each, minimal prose, no restating of the steps. Flag individual
+sessions separately only when a directory is otherwise fine but one session is not.
+
 ## Step 6 - Apply only via `hyp` verbs, and offer purge for every ignore (R6, R7)
 
 Apply each confirmed decision **only** through the `hyp` verbs below. **Never** author policy files or write anything into the user's repositories - the machine-local store is the only target.
 
 ```bash
-hyp policy set <dir> ignore      # class: ignore  (stop recording this dir)
-hyp policy set <dir> local-only  # class: local-only (record here, never forward)
-hyp policy set <dir> sync        # class: sync (explicit "this ships")
-hyp policy show <dir>            # report the governing source + class, and residual cached rows; never writes
-hyp policy unset <dir> [class]   # remove markings (class-neutral by default; a trailing class scopes it)
+hyp privacy set <dir> ignore      # class: ignore  (stop recording this dir)
+hyp privacy set <dir> local-only  # class: local-only (record here, never forward)
+hyp privacy set <dir> sync        # class: sync (explicit "this ships")
+hyp privacy show <dir>            # report the governing source + class, and residual cached rows; never writes
+hyp privacy unset <dir> [class]   # remove markings (class-neutral by default; a trailing class scopes it)
 ```
 
-`hyp policy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
+`hyp privacy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
 
-**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive and cache-only (it never contacts the server); confirm each purge on its own.
+**For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp privacy purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive. A directory or `--ignored` purge touches only the local cache; a `--session` purge also deletes that session on configured and signed-in remotes and enrolled servers unless you add `--local-only`. Confirm each purge on its own.
 
 ```bash
-hyp purge <dir>              # delete cached rows for a directory subtree
-hyp purge --session <id>     # delete all cached rows for one session (cheapest: session is the partition key)
-hyp purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
+hyp privacy purge <dir>              # delete cached rows for a directory subtree
+hyp privacy purge --session <id>     # delete one session here and on configured, signed-in and enrolled servers (cheapest: session is the partition key)
+hyp privacy purge --session <id> --local-only   # same, but skip the server-side delete
+hyp privacy purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
 ```
 
-Purge prompts for confirmation on a TTY; it errors on a bare `hyp purge` with no target. Sequencing matters: **mark the directory `ignore` first, then purge** - purging a directory that still resolves to `sync`/default warns that the next backfill will re-import it. Once a directory is `ignore`d, the capture seam blocks re-import, so the purge is durable. A common close-out for a directory the user wants fully gone:
+Purge prompts for confirmation on a TTY; it errors on a bare `hyp privacy purge` with no target. Sequencing matters: **mark the directory `ignore` first, then purge** - purging a directory that still resolves to `sync`/default warns that the next backfill will re-import it. Once a directory is `ignore`d, the capture seam blocks re-import, so the purge is durable. A common close-out for a directory the user wants fully gone:
 
 ```bash
-hyp policy set <dir> ignore && hyp purge <dir>
+hyp privacy set <dir> ignore && hyp privacy purge <dir>
 ```
 
 ## After the review
 
-- Nothing you did contacts the server. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
+- Nothing you did sends captured data anywhere: markings stay on this machine, and a `--session` purge sends only the session id to configured, signed-in and enrolled servers so they delete that session there. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
 - On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.
+- New folders the user has not marked sync without asking (the default). If they want to be asked once per new folder instead, `hyp privacy folders ask` turns that on and `hyp privacy folders sync` turns it back off. It moves the question only - every directory marked here keeps its class either way.

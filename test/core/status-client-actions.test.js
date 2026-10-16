@@ -104,7 +104,7 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
   assert.equal(m.get('@hypaware/codex')?.state, 'n/a') // backfill on_join:false → suppressed
 
   // The backfill rows are namespaced under the backfill handler kind, keyed by
-  // owning-plugin name; the only other kind present is `attach` (T9 — the
+  // owning-plugin name; the only other kind present is `attach` (T9: the
   // joined claude/codex client adapters are default-on attach targets with no
   // marker, so they surface `pending`, keyed by *client* name).
   const backfillRows = report.clientActions.actions.filter((a) => a.kind === 'backfill')
@@ -114,7 +114,33 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
     report.clientActions.actions.filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
   )
   assert.equal(attach.get('claude')?.state, 'pending')
-  assert.equal(attach.get('codex')?.state, 'pending') // no `attach` block → default-on
+  // A transcript-mode codex is a REAL pending attach target, not `n/a`: the
+  // settings block it declines to write is not the marker this surface reads.
+  // `desired()` names it (it declares an `attach_probe`), the attach removes
+  // the managed provider block and succeeds, and the reconciler's own `done`
+  // marker lands - so `pending` resolves. Reporting `n/a` here would say the
+  // reconciler is a no-op over exactly the migration this release performs.
+  // @ref LLP 0229#status-derives-by-the-same-gate [tests]: status names the target the reconciler names, and no other
+  assert.equal(attach.get('codex')?.state, 'pending')
+
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      { name: '@hypaware/claude', config: { backfill: { on_join: true, window_days: 30 } } },
+      { name: '@hypaware/codex', config: { capture_mode: 'gateway', backfill: { on_join: false } } },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  const gatewayReport = await collectHypAwareStatus({ env: env(hypHome) })
+  const gatewayAttach = new Map(
+    (gatewayReport.clientActions?.actions ?? []).filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
+  )
+  // Both halves pinned at `pending`: `capture_mode` decides what the attach
+  // writes, never whether the reconciler has an attach to run. A gate that
+  // reads capture mode here would show one of these two as `n/a`.
+  assert.equal(gatewayAttach.get('codex')?.state, 'pending')
 })
 
 test('a malformed on_join block renders n/a (not pending) on a joined host', async () => {
@@ -178,6 +204,61 @@ test('a default-on backfill target (enabled client, no explicit block) shows pen
   assert.equal(m.has('@hypaware/ai-gateway'), false)
 })
 
+// The backfill twin of the probe-less attach gate (LLP 0229): `desired()`
+// enumerates the runtime backfill registry, so a client adapter whose manifest
+// says it registers no provider (`backfill_provider: false`) is a target the
+// reconciler never names, and no marker will ever clear a `pending` derived
+// for it. Claude Desktop's history is imported by the `@hypaware/claude`
+// provider; its own line must read `n/a`, present rather than dropped, while
+// the provider that does the work stays `pending`.
+// @ref LLP 0379#status-derives-by-the-provider-gate [tests]: a provider-less client adapter is n/a, never pending, and is not dropped
+test('a client adapter that declares no backfill provider is n/a on a joined host, not a permanent pending', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      { name: '@hypaware/claude' },
+      { name: '@hypaware/claude-desktop' },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(report.clientActions, 'the joined host surfaces its targets')
+  const backfill = byKey(report.clientActions.actions.filter((a) => a.kind === 'backfill'))
+  assert.equal(backfill.get('@hypaware/claude')?.state, 'pending')
+  assert.equal(backfill.get('@hypaware/claude-desktop')?.state, 'n/a', 'present as n/a, not dropped and not pending')
+
+  // An explicit block on the provider-less plugin does not make it a target
+  // either: the gate is the registry, not the config.
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      { name: '@hypaware/claude' },
+      { name: '@hypaware/claude-desktop', config: { backfill: { window_days: 30 } } },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  const withBlock = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(withBlock.clientActions)
+  const backfill2 = byKey(withBlock.clientActions.actions.filter((a) => a.kind === 'backfill'))
+  assert.equal(backfill2.get('@hypaware/claude-desktop')?.state, 'n/a')
+
+  const stdout = makeBuf()
+  renderStatusText({ report: withBlock, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  assert.match(stdout.text(), /backfill @hypaware\/claude\s+\[pending\]/)
+  assert.match(stdout.text(), /backfill @hypaware\/claude-desktop\s+\[n\/a\]/)
+})
+
 test('a default-on client on a NON-joined host keeps the V1 surface (no spurious action)', async () => {
   // The reconciler never runs on a non-joined host, so a bare local claude
   // install must not grow a new status line.
@@ -214,6 +295,41 @@ test('a failed backfill does not flip overall to degraded', async () => {
   assert.ok(!report.diagnostics.some((d) => d.message.includes('boom')))
 })
 
+test('a mixed done/failed/refused marker store renders all three; overall stays healthy (LLP 0186)', async () => {
+  const hypHome = await makeHome()
+
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+  await writeMarkers(hypHome, {
+    backfill: {
+      '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude', rows: 42, at: '2026-06-25T00:00:00.000Z' },
+      '@hypaware/codex': { status: 'failed', request_key: '@hypaware/codex', reason: 'boom', last_attempt: '2026-06-25T01:00:00.000Z', attempts: 3 },
+      acme: { status: 'refused', request_key: 'acme', reason: 'ownership conflict', at: '2026-06-25T02:00:00.000Z' },
+    },
+  })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.overall, 'healthy')
+  assert.ok(report.clientActions)
+  const m = byKey(report.clientActions.actions)
+
+  assert.equal(m.get('@hypaware/claude')?.state, 'done')
+  assert.equal(m.get('@hypaware/codex')?.state, 'failed')
+
+  const refused = m.get('acme')
+  assert.equal(refused?.state, 'refused')
+  assert.equal(refused?.reason, 'ownership conflict')
+  assert.equal(refused?.at, '2026-06-25T02:00:00.000Z')
+  assert.equal(refused?.rows, undefined)
+  assert.equal(refused?.attempts, undefined)
+  assert.equal(refused?.lastAttempt, undefined)
+
+  // The refusal is its own section, never a degrading diagnostic.
+  assert.ok(!report.diagnostics.some((d) => d.message.includes('ownership conflict')))
+})
+
 test('an ordinary host with no markers reports clientActions null (V1 surface unchanged)', async () => {
   const hypHome = await makeHome()
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
@@ -242,6 +358,7 @@ test('JSON renderer emits a stable client_actions block', async () => {
     backfill: {
       '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude', rows: 42, at: '2026-06-25T00:00:00.000Z' },
       '@hypaware/codex': { status: 'failed', request_key: '@hypaware/codex', reason: 'nope', last_attempt: '2026-06-25T02:00:00.000Z', attempts: 1 },
+      acme: { status: 'refused', request_key: 'acme', reason: 'ownership conflict', at: '2026-06-25T03:00:00.000Z' },
     },
   })
 
@@ -252,8 +369,10 @@ test('JSON renderer emits a stable client_actions block', async () => {
   const rows = /** @type {any[]} */ (json.client_actions)
   const claude = rows.find((r) => r.request_key === '@hypaware/claude')
   const codex = rows.find((r) => r.request_key === '@hypaware/codex')
+  const refused = rows.find((r) => r.request_key === 'acme')
   assert.deepEqual(claude, { kind: 'backfill', request_key: '@hypaware/claude', state: 'done', rows: 42, at: '2026-06-25T00:00:00.000Z' })
   assert.deepEqual(codex, { kind: 'backfill', request_key: '@hypaware/codex', state: 'failed', reason: 'nope', last_attempt: '2026-06-25T02:00:00.000Z', attempts: 1 })
+  assert.deepEqual(refused, { kind: 'backfill', request_key: 'acme', state: 'refused', reason: 'ownership conflict', at: '2026-06-25T03:00:00.000Z' })
 })
 
 test('text renderer prints the client actions section with per-state detail', async () => {
@@ -275,6 +394,7 @@ test('text renderer prints the client actions section with per-state detail', as
     backfill: {
       '@acme/done-plugin': { status: 'done', request_key: '@acme/done-plugin', rows: 7, at: '2026-06-25T00:00:00.000Z' },
       '@acme/failed-plugin': { status: 'failed', request_key: '@acme/failed-plugin', reason: 'transcript dir missing', last_attempt: '2026-06-25T01:00:00.000Z', attempts: 2 },
+      '@acme/refused-plugin': { status: 'refused', request_key: '@acme/refused-plugin', reason: 'ownership conflict', at: '2026-06-25T02:00:00.000Z' },
     },
   })
 
@@ -288,9 +408,39 @@ test('text renderer prints the client actions section with per-state detail', as
   assert.match(text, /backfill @acme\/failed-plugin\s+\[failed\]\s+\(transcript dir missing, last attempt 2026-06-25T01:00:00\.000Z, 2 attempts\)/)
   assert.match(text, /backfill @hypaware\/claude\s+\[pending\]/)
   assert.match(text, /backfill @hypaware\/codex\s+\[n\/a\]/)
+  // The repair-hint line's exact text (LLP 0186#hyp-status-attention-needed-surface).
+  assert.match(
+    text,
+    /backfill @acme\/refused-plugin {2}\[refused\] {2}\(ownership conflict\) {2}run 'hyp client attach @acme\/refused-plugin' after fixing the cause/
+  )
 })
 
-// T9 — the declared-attach-targets derivation (LLP 0044 / 0045), symmetric to
+// The repair hint is what makes `refused` actionable rather than merely loud,
+// so it does not ride on the reason being present. A marker whose `reason` is
+// missing or empty (a hand edit, an adapter that threw an Error with no
+// message) must still say what to do.
+// @ref LLP 0186#hyp-status-attention-needed-surface [tests]: the concrete next
+//   step is part of the state's rendering, not part of its detail bits
+test('a refused marker with no reason still renders the repair hint, never a bare [refused]', async () => {
+  const hypHome = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+  await writeMarkers(hypHome, {
+    attach: {
+      claude: { status: 'refused', request_key: 'claude', reason: '', at: '2026-06-25T02:00:00.000Z' },
+    },
+  })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const stdout = makeBuf()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+
+  assert.match(
+    stdout.text(),
+    /attach claude {2}\[refused\] {2}run 'hyp client attach claude' after fixing the cause/
+  )
+})
+
+// T9: the declared-attach-targets derivation (LLP 0044 / 0045), symmetric to
 // backfill but keyed by *client* name (the attach handler's request key). Status
 // reads the marker file and never runs a pass; a failed/pending attach is loud
 // but never flips `overall` to `degraded`.
@@ -327,7 +477,7 @@ test('attach declared targets read mixed done/failed/pending/n-a cleanly (T9)', 
 
   // Attach markers from a prior pass, keyed by CLIENT name (the attach handler's
   // request key). A done (= attached) and a failed entry, even for a client
-  // whose descriptor is not in the catalog — markers surface regardless.
+  // whose descriptor is not in the catalog: markers surface regardless.
   await writeMarkers(hypHome, {
     attach: {
       'acme-done': { status: 'done', request_key: 'acme-done', at: '2026-06-25T00:00:00.000Z' },
@@ -419,7 +569,7 @@ test('a failed attach does not flip overall to degraded (T9)', async () => {
   assert.ok(!report.diagnostics.some((d) => d.message.includes('boom')))
 })
 
-test('a done attach marker renders attached and collapses with the declared target — no double row (T9)', async () => {
+test('a done attach marker renders attached and collapses with the declared target - no double row (T9)', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')
   const seedPath = centralSeedPath(stateRoot)
@@ -436,7 +586,7 @@ test('a done attach marker renders attached and collapses with the declared targ
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
 
   // claude is a declared (default-on) attach target AND has a done marker keyed
-  // by client name. The two must collapse into a single `done` row — proving the
+  // by client name. The two must collapse into a single `done` row: proving the
   // declared-target key matches the handler's request key (the client name), so
   // the marker is not double-counted as both done and pending.
   await writeMarkers(hypHome, {

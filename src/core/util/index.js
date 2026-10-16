@@ -14,15 +14,23 @@ export {
   readJsonIfExists,
   readJsonIfExistsSync,
 } from './fs_atomic.js'
+export { compareStrings } from './compare_strings.js'
 export { copyDir } from './fs_copy.js'
 export {
+  MAX_LABEL_CHARS,
   VOLATILE_BLOCK_FIELDS,
   canonicalJson,
   errCode,
+  escapeForDisplay,
   isPlainObject,
   parseMaybeJson,
+  redactUrlUserinfo,
+  sanitizeLabel,
   sha256Hex,
   sortKeys,
   stringValue,
   stripVolatileBlockFields,
 } from './json_util.js'
+export { withFileLock } from './file_lock.js'
+export { openBrowser } from './open_browser.js'
+export { canonicalOrigin } from '../remote/builtin_remotes.js'

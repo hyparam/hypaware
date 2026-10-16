@@ -13,23 +13,33 @@ import {
   validateToolArguments,
 } from '../../src/core/cli/verb_codec.js'
 
-/** A query_sql-shaped schema: one greedy string positional. */
+/**
+ * @import { VerbInputSchema } from '../../hypaware-plugin-kernel-types.js'
+ */
+
+/**
+ * A query_sql-shaped schema: one greedy string positional.
+ * @type {VerbInputSchema}
+ */
 const SQL_SCHEMA = {
-  type: /** @type {const} */ ('object'),
-  properties: { sql: { type: /** @type {const} */ ('string'), greedy: true } },
+  type: 'object',
+  properties: { sql: { type: 'string', greedy: true } },
   required: ['sql'],
   positional: ['sql'],
 }
 
-/** A graph_neighbors-shaped schema: positional + typed flags. */
+/**
+ * A graph_neighbors-shaped schema: positional + typed flags.
+ * @type {VerbInputSchema}
+ */
 const NEIGHBORS_SCHEMA = {
-  type: /** @type {const} */ ('object'),
+  type: 'object',
   properties: {
-    node: { type: /** @type {const} */ ('string') },
-    depth: { type: /** @type {const} */ ('integer'), default: 1, minimum: 1 },
-    edge_type: { type: /** @type {const} */ ('array'), items: { type: /** @type {const} */ ('string') } },
-    direction: { type: /** @type {const} */ ('string'), enum: ['out', 'in', 'both'], default: 'both' },
-    limit: { type: /** @type {const} */ ('integer'), default: 100, minimum: 1 },
+    node: { type: 'string' },
+    depth: { type: 'integer', default: 1, minimum: 1 },
+    edge_type: { type: 'array', items: { type: 'string' } },
+    direction: { type: 'string', enum: ['out', 'in', 'both'], default: 'both' },
+    limit: { type: 'integer', default: 100, minimum: 1 },
   },
   required: ['node'],
   positional: ['node'],
@@ -140,4 +150,21 @@ test('validateToolArguments coerces, applies defaults, enforces required + unkno
   assert.equal(/** @type {any} */ (ok).params.direction, 'both') // default
   assert.equal(validateToolArguments(NEIGHBORS_SCHEMA, {}).ok, false) // missing node
   assert.equal(validateToolArguments(NEIGHBORS_SCHEMA, { node: 'n', bogus: 1 }).ok, false)
+})
+
+// An argument name is refused for being undeclared, not for being unfamiliar:
+// an `Object.prototype` member resolved through the prototype and passed the
+// truthiness test, so the MCP path accepted a junk argument the CLI path
+// refuses. `__proto__` is parsed rather than written as a literal key: an
+// object literal's `__proto__: v` sets the prototype instead of adding the
+// own property JSON.parse gives an MCP request.
+test('validateToolArguments refuses a prototype-named argument like any other unknown', () => {
+  for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    const out = validateToolArguments(NEIGHBORS_SCHEMA, { node: 'n', [name]: 'x' })
+    assert.equal(out.ok, false, `${name}: expected a refusal`)
+    assert.equal(/** @type {any} */ (out).error, `unknown argument '${name}'`)
+  }
+  const proto = validateToolArguments(NEIGHBORS_SCHEMA, JSON.parse('{"node":"n","__proto__":"x"}'))
+  assert.equal(proto.ok, false)
+  assert.equal(/** @type {any} */ (proto).error, "unknown argument '__proto__'")
 })

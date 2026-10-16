@@ -198,10 +198,12 @@ function datasetActivate(slug) {
     `  ctx.query.registerDataset({\n` +
     `    name: '${ds}',\n` +
     `    plugin: PLUGIN_NAME,\n` +
-    `    schema: [\n` +
-    `      { name: 'event_time', type: 'TIMESTAMP', nullable: false },\n` +
-    `      { name: 'message', type: 'STRING', nullable: true },\n` +
-    `    ],\n` +
+    `    schema: {\n` +
+    `      columns: [\n` +
+    `        { name: 'event_time', type: 'TIMESTAMP', nullable: false },\n` +
+    `        { name: 'message', type: 'STRING', nullable: true },\n` +
+    `      ],\n` +
+    `    },\n` +
     `    primaryTimestampColumn: 'event_time',\n` +
     `    async discoverPartitions() {\n` +
     `      return []\n` +

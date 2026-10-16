@@ -108,10 +108,21 @@ export function foldPath(p, { caseInsensitive = false } = {}) {
  * (LLP 0104 §spellings): in a deletion predicate a wrong widening destroys data,
  * so the fold may only ever *propose* a spelling and the filesystem decides.
  *
- * Never throws. A spelling that cannot be `stat`ed (the usual reason: the
- * directory no longer exists, which is routine for a recorded `cwd`) is not the
- * same directory as anything, which is the conservative answer in both
- * directions of a deletion.
+ * Never throws, and swallows the errno **deliberately**. A spelling that cannot
+ * be `stat`ed is not the same directory as anything, which is the conservative
+ * answer in both directions of a deletion, and that is true whatever stopped
+ * the `stat`: `ENOENT` (the usual reason, the directory no longer exists, which
+ * is routine for a recorded `cwd`) is not privileged over `EACCES` on an
+ * ancestor, `ELOOP`, or `ENOTDIR`. Widening on a failed probe to "assume same"
+ * would delete rows under a directory nobody identified with the target, so
+ * every error has to collapse to the same `false`.
+ *
+ * What the collapse costs is **precision of explanation, not of decision**: a
+ * caller only ever learns "unproven", so a caller that renders the retention to
+ * a user must not narrate it as "no longer on disk" (LLP 0104 #spellings names
+ * all three causes; `src/core/commands/purge.js` renders them). The errno that
+ * was actually seen is not discarded, only kept out of the return value: it
+ * goes to the `usage_policy.alias_probe_skipped` log line below.
  *
  * `statSync` follows symlinks, so this also answers `true` for a symlink
  * spelling; that overlaps `canonicalSpellings` and costs nothing.

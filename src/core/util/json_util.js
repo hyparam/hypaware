@@ -27,6 +27,154 @@ export function stringValue(value) {
 }
 
 /**
+ * Default ceiling for a display label lifted off captured data. Long
+ * enough that no real client surface is truncated (`local-agent`,
+ * `codex-tui`, `Codex Desktop` are all well under it), short enough that
+ * a status file holding a bounded number of them stays small.
+ */
+export const MAX_LABEL_CHARS = 120
+
+// Everything a captured value may contain that either drives the terminal
+// or occupies no width on it. Three groups, named separately because two
+// different policies are built out of them (strip, in `sanitizeLabel`;
+// escape, in `escapeForDisplay`), and a second hand-written character class
+// would be a second chance for the two to disagree about what "unsafe"
+// means.
+//
+// @ref LLP 0225#one-vocabulary: one class, two policies over its named groups
+
+//   C0/DEL/C1 and the Unicode line/paragraph separators, so a value can
+//   never move the cursor, erase a line, open an escape sequence, or split
+//   into a second line.
+const TERMINAL_CONTROL_CHARS = '\\u0000-\\u001F\\u007F-\\u009F\\u2028-\\u2029'
+
+//   Bidirectional formatting (embeddings, overrides, isolates, marks).
+//   These print nothing but reorder what follows, and an unterminated one
+//   keeps reordering past the end of the value into the rest of the line. A
+//   value that renders as a different string than the one it stores defeats
+//   the point of showing it at all.
+const BIDI_FORMATTING_CHARS = '\\u061C\\u200E-\\u200F\\u202A-\\u202E\\u2066-\\u2069'
+
+//   Zero-width and default-ignorable formatting (ZWSP/ZWNJ/ZWJ, word
+//   joiner, BOM, soft hyphen, variation selectors). These render as
+//   nothing, so keeping them lets two labels be distinct map keys while
+//   being indistinguishable on screen, which is what would otherwise dilute
+//   the tracker's eviction cap.
+const INVISIBLE_FORMATTING_CHARS = '\\u00AD\\u180E\\u200B-\\u200D\\u2060-\\u2064\\uFE00-\\uFE0F\\uFEFF'
+
+// Confusables are deliberately out of scope: this bounds what a value
+// *does*, not what it looks like. Two labels built from different but
+// similar-looking real letters stay distinct, as they must.
+const UNSAFE_LABEL_CHARS = new RegExp(
+  `[${TERMINAL_CONTROL_CHARS}${BIDI_FORMATTING_CHARS}${INVISIBLE_FORMATTING_CHARS}]`,
+  'g'
+)
+
+// What a rendered cell may not contain: a strict subset of
+// `UNSAFE_LABEL_CHARS` holding only the characters that drive or reorder a
+// terminal. The zero-width group is deliberately left alone here, unlike in
+// a label, for two reasons. A query cell is prose, not a map key, so nothing
+// downstream is diluted by two cells looking alike. And ZWJ and the
+// variation selectors are load-bearing inside ordinary emoji (a family emoji
+// is a ZWJ sequence), so escaping them would visibly corrupt legitimate
+// captured text on a large fraction of real rows, to defend against a
+// character that cannot repaint anything.
+//
+// @ref LLP 0225#escape-class [implements]: display escapes control and bidi, not zero-width
+const DISPLAY_UNSAFE_CHARS = new RegExp(`[${TERMINAL_CONTROL_CHARS}${BIDI_FORMATTING_CHARS}]`, 'g')
+
+// The three C0 characters an operator reads more easily by name than by code
+// point. Everything else in the class falls through to a `\uXXXX` escape.
+const DISPLAY_NAMED_ESCAPES = new Map([
+  ['\n', '\\n'],
+  ['\r', '\\r'],
+  ['\t', '\\t'],
+])
+
+// A high surrogate left stranded by the clamp below. Slicing counts UTF-16
+// code units, so a cut can land between the halves of an astral character
+// and leave behind a string that is not well-formed.
+const TRAILING_HIGH_SURROGATE = /[\uD800-\uDBFF]$/
+
+const TRUNCATION_MARKER = '...'
+
+/**
+ * Make a captured string safe to write into a status file and print to a
+ * terminal: strip control and invisible formatting characters, and clamp
+ * the length.
+ *
+ * Values like `entrypoint` are captured verbatim from whatever the client
+ * put on the wire or wrote into a transcript file on disk, so they carry
+ * no guarantee of being short, printable, or single-line. A raw value
+ * reaching a TTY lets a client repaint the operator's screen (an `ESC`
+ * sequence, or a newline that forges a plausible extra status line),
+ * reorder it (a bidi override), or hide inside it (a zero-width run), and
+ * an arbitrarily long one bloats every file the label lands in. None of
+ * this is hypothetical: transcript-sourced values are ordinary JSON
+ * strings with no parser bounding them.
+ *
+ * The result is at most `max` characters *including* the truncation
+ * marker, which is a plain ASCII ellipsis so the result stays
+ * single-byte-safe in a terminal. `max` counts UTF-16 code units, not
+ * bytes: a label of astral characters is still roughly 4x `max` bytes
+ * once encoded, which is why callers cap the count of labels too.
+ *
+ * Sibling policy: `escapeForDisplay`, for the places where the value *is*
+ * the payload rather than a name for one, and losing bytes would be worse
+ * than showing them.
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string | undefined} Cleaned non-empty string, else `undefined`.
+ */
+export function sanitizeLabel(value, max = MAX_LABEL_CHARS) {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  const stripped = value.replace(UNSAFE_LABEL_CHARS, '')
+  if (stripped.length === 0) return undefined
+  if (stripped.length <= max) return stripped
+  const head = stripped
+    .slice(0, Math.max(0, max - TRUNCATION_MARKER.length))
+    .replace(TRAILING_HIGH_SURROGATE, '')
+  return head.length === 0 ? undefined : `${head}${TRUNCATION_MARKER}`
+}
+
+/**
+ * Make a captured string safe to *print* without losing any of it: replace
+ * every character that drives or reorders a terminal with a visible escape,
+ * and change nothing else.
+ *
+ * This is the display-plane sibling of `sanitizeLabel`, over the same
+ * character vocabulary but under a different policy, because the two have
+ * different jobs. A label *names* a surface, so a stripped name is still a
+ * usable name and the shortest safe answer is to drop the bytes. A rendered
+ * cell *is* the captured payload the operator asked to see, so silently
+ * dropping bytes turns a query into a lie about what was captured: the row
+ * must stay honest about the ESC that was there. Hence escape, not strip,
+ * and hence no truncation and no `undefined` for empty (a cell that held an
+ * empty string is a cell, and the caller has already applied its own
+ * `--max-cell` clip).
+ *
+ * Escapes are the familiar JavaScript spellings: `\n`, `\r`, `\t`, and
+ * `\uXXXX` for everything else. The output is pure ASCII, one column per
+ * character, so a caller that pads to a computed column width stays aligned.
+ * A backslash already in the value is deliberately *not* doubled: captured
+ * data is full of Windows paths, regexes and JSON blobs, and mangling every
+ * one of them to disambiguate a literal two-character `\n` from an escaped
+ * newline would cost far more legibility than the ambiguity does. The
+ * ambiguity is cosmetic; neither spelling can move a cursor.
+ *
+ * @ref LLP 0225#escape-not-strip [implements]: the display plane escapes where the label plane strips
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function escapeForDisplay(value) {
+  return value.replace(DISPLAY_UNSAFE_CHARS, (ch) => {
+    return DISPLAY_NAMED_ESCAPES.get(ch) ?? `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+  })
+}
+
+/**
  * Parse `value` as JSON when it is a string, falling back to the
  * original value when it is not a string or does not parse. Projectors
  * use this for fields that may arrive either encoded or already
@@ -143,4 +291,33 @@ export function stripVolatileBlockFields(content) {
     for (const field of VOLATILE_BLOCK_FIELDS) delete rest[field]
     return rest
   })
+}
+
+/**
+ * A URL with any `user:pass@` userinfo replaced by `***@`, for anything that
+ * displays, logs or serialises the value rather than using it.
+ *
+ * Proxy URLs are the case this exists for. A `HTTPS_PROXY` a user already had
+ * routinely carries corporate credentials, and attach reports what it displaced
+ * while detach reports what it gave back - to stdout, into `--json` output, and
+ * into a log record that an operator's own sink may ship off the machine. The
+ * value still has to be *stored* verbatim, because the marker is the only copy
+ * and detach restores from it; it is only the copies a human or a sink reads
+ * that must not carry the secret.
+ *
+ * `***@` rather than a bare strip, so the reader can still tell that the value
+ * they are being asked to recognise had credentials on it at all. The scheme,
+ * host, port and path survive untouched, which is what makes the notice usable.
+ *
+ * The pattern spans exactly the userinfo: RFC 3986 forbids `@`, `/`, `?` and
+ * `#` inside it, so requiring their absence stops the match running past the
+ * authority into a path or query that happens to contain an `@`. A value that
+ * is not a URL, or a URL with no userinfo, is returned unchanged.
+ *
+ * @param {string} value
+ * @returns {string} the input unchanged when it is not a non-empty string
+ */
+export function redactUrlUserinfo(value) {
+  if (typeof value !== 'string' || value.length === 0) return value
+  return value.replace(/^([a-z][a-z0-9+.\-]*:\/\/)[^@/?#\s]*@/i, '$1***@')
 }

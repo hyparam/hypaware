@@ -5,7 +5,7 @@ import zlib, { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } f
 
 // zstd landed in node 22.15 / 23.8; feature-detect so older runtimes
 // fall through to decodeBody's unknown-codec path instead of crashing.
-const zstdDecompress = /** @type {((buf: Buffer) => Buffer) | undefined} */ (
+const zstdDecompress = /** @type {((buf: Buffer, opts?: { maxOutputLength: number }) => Buffer) | undefined} */ (
   /** @type {Record<string, unknown>} */ (zlib).zstdDecompressSync
 )
 
@@ -52,6 +52,12 @@ export function createRecorder(options = {}) {
     startExchange(init) {
       const exchange = new Exchange({ redactSet, init })
       active.add(exchange)
+      // Membership in `active` means "row not yet finalized". Without this
+      // removal every finished exchange (with its buffered bodies and
+      // stream events) is retained for the life of the listener, which on
+      // a busy daemon grows without bound (gigabytes per day).
+      // @ref LLP 0204#fix [implements]: finished exchanges leave the set
+      exchange.finishedSignal.then(() => active.delete(exchange))
       return exchange
     },
     /** @returns {number} */
@@ -72,16 +78,29 @@ export function createRecorder(options = {}) {
       const settled = Promise.all(
         Array.from(active).map((e) => e.finishedSignal.catch(() => undefined))
       )
+      /** @type {NodeJS.Timeout | undefined} */
+      let handle = undefined
       /** @type {Promise<'timeout'>} */
       const timeout = new Promise((resolve) => {
-        const handle = setTimeout(() => resolve('timeout'), timeoutMs)
-        if (typeof handle.unref === 'function') handle.unref()
+        handle = setTimeout(() => resolve('timeout'), timeoutMs)
       })
-      const outcome = await Promise.race([settled.then(() => 'done'), timeout])
-      if (outcome === 'timeout') {
-        for (const exchange of Array.from(active)) {
-          try { exchange.finalize() } catch { /* swallow */ }
+      // An unref'd timer can be dropped by the event loop before it fires
+      // whenever nothing else is keeping the process alive, leaving this
+      // await pending forever instead of racing to the timeout. drain()
+      // runs while the listener socket is still open in production, but
+      // that's incidental, not a guarantee; ref the timer so the race
+      // always settles, and clear it once it does so drain() doesn't hold
+      // the process open past its own return.
+      // @ref LLP 0204#fix [implements]: drain always settles within timeoutMs
+      try {
+        const outcome = await Promise.race([settled.then(() => 'done'), timeout])
+        if (outcome === 'timeout') {
+          for (const exchange of Array.from(active)) {
+            try { exchange.finalize() } catch { /* swallow */ }
+          }
         }
+      } finally {
+        clearTimeout(handle)
       }
     },
   }
@@ -105,6 +124,11 @@ export class Exchange {
     this.tsStartMs = Date.now()
     /** @type {string} */
     this.tsStart = new Date(this.tsStartMs).toISOString()
+    /** @type {string | undefined} */
+    this.recordingGeneration = init.recordingGeneration
+    this.captureLimit = init.captureLimit
+    this.recording = true
+    this.captureChunks = 0
     /** @type {string} */
     this.upstream = init.upstream
     /** @type {string | undefined} */
@@ -113,6 +137,14 @@ export class Exchange {
     this.method = init.method
     /** @type {string | undefined} */
     this.path = init.path
+    /**
+     * The path the gateway forwarded on, set only when a routing rewrite
+     * moved it off `path`. Two genuinely different facts share this row:
+     * what shape the message was (the door it arrived at) and where the
+     * bytes went. @ref LLP 0313#the-row-records-where-the-request-was-sent
+     * @type {string | undefined}
+     */
+    this.upstreamPath = init.upstreamPath
     /** @type {Record<string, string | string[] | undefined>} */
     this.requestHeaders = redactHeaders(init.requestHeaders, redactSet)
     /** @type {Record<string, string | string[] | undefined>} */
@@ -174,6 +206,7 @@ export class Exchange {
    * @param {Buffer | Uint8Array} chunk
    */
   appendRequestChunk(chunk) {
+    if (!this.admitChunk(chunk)) return
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     this.requestChunks.push(buf)
     this.requestBytes += buf.byteLength
@@ -201,7 +234,7 @@ export class Exchange {
    * @param {Buffer | Uint8Array} chunk
    */
   appendResponseChunk(chunk) {
-    if (this.isSse) return
+    if (this.isSse || !this.admitChunk(chunk)) return
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     this.responseChunks.push(buf)
     this.responseBytes += buf.byteLength
@@ -222,9 +255,12 @@ export class Exchange {
    * @param {Buffer | Uint8Array} chunk
    */
   consumeStreamChunk(chunk) {
+    if (!this.admitChunk(chunk)) return
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     this.responseBytes += buf.byteLength
-    if (parseEncodings(this.responseContentEncoding).length > 0) {
+    // Bounded native captures retain stream bytes for adapter admission,
+    // avoiding event-object amplification from a foreign stream dialect.
+    if (this.captureLimit || parseEncodings(this.responseContentEncoding).length > 0) {
       this.responseChunks.push(buf)
       return
     }
@@ -240,6 +276,31 @@ export class Exchange {
         ...(event.id !== undefined ? { id: event.id } : {}),
       })
     }
+  }
+
+  /** @param {Buffer | Uint8Array} chunk */
+  admitChunk(chunk) {
+    if (!this.recording || this.error === 'capture_limit') return false
+    if (this.captureLimit && (++this.captureChunks > 4096 || this.requestBytes + this.responseBytes + chunk.byteLength > this.captureLimit)) {
+      this.error = 'capture_limit'
+      this.releaseCaptureBodies()
+      return false
+    }
+    return true
+  }
+
+  releaseCaptureBodies() {
+    this.requestChunks = []
+    this.responseChunks = []
+    this.streamEvents = []
+    this.sseParser = new SseParser()
+  }
+
+  cancelCapture() {
+    this.recording = false
+    this.releaseCaptureBodies()
+    this.finished = true
+    this._resolveFinished()
   }
 
   /**
@@ -280,11 +341,12 @@ export class Exchange {
     this.finished = true
 
     const tsEndMs = Date.now()
+    const decode = (buf, encoding) => decodeBody(buf, encoding, this.captureLimit, () => { this.error = 'capture_limit' })
     // The proxy is a pass-through, so a body carries whatever
     // `content-encoding` the upstream applied; decode it before parsing
     // or a gzip/br/deflate body lands as mojibake.
     const decodedResponse = this.responseChunks.length > 0
-      ? decodeBody(Buffer.concat(this.responseChunks), this.responseContentEncoding)
+      ? decode(Buffer.concat(this.responseChunks), this.responseContentEncoding)
       : ''
 
     // Header-blind SSE detection. Some upstreams stream Server-Sent
@@ -305,7 +367,7 @@ export class Exchange {
     // pass. Event `t_ms` is stamped at finalize; per-chunk arrival times
     // aren't recoverable after deferred decoding and nothing depends on
     // them being exact.
-    if (this.isSse && decodedResponse.length > 0 && this.streamEvents.length === 0) {
+    if (this.isSse && !this.captureLimit && decodedResponse.length > 0 && this.streamEvents.length === 0) {
       const events = new SseParser().feed(decodedResponse)
       this.streamEventCount = events.length
       for (const event of events) {
@@ -319,10 +381,15 @@ export class Exchange {
         })
       }
     }
-    const requestBody = decodeBody(
+    const requestBody = decode(
       Buffer.concat(this.requestChunks),
       headerValue(this._rawRequestHeaders, 'content-encoding')
     )
+    // The decoded strings on the row are the durable copies; drop the raw
+    // chunk buffers so a finalized exchange does not hold every body twice
+    // for as long as anything still references it. @ref LLP 0204#fix
+    this.requestChunks = []
+    this.responseChunks = []
     const responseBody = this.isSse
       ? null
       : (decodedResponse.length > 0 ? decodedResponse : null)
@@ -330,6 +397,10 @@ export class Exchange {
     /** @type {Record<string, unknown>} */
     const metadata = {}
     if (devRunId) metadata.dev_run_id = devRunId
+    // Present iff the gateway rerouted this request, so "how many requests
+    // did the gateway reroute" is a query rather than an inference from a
+    // path/provider mismatch. @ref LLP 0313#the-row-records-where-the-request-was-sent
+    if (this.upstreamPath) metadata.upstream_path = this.upstreamPath
 
     /** @type {FinishedRow} */
     const row = {
@@ -385,24 +456,28 @@ function looksLikeSse(body) {
  *
  * @param {Buffer} buf
  * @param {string | string[] | undefined} encodingHeader
+ * @param {number} [limit]
+ * @param {() => void} [onLimit]
  * @returns {string}
  */
-function decodeBody(buf, encodingHeader) {
+function decodeBody(buf, encodingHeader, limit, onLimit) {
   if (buf.byteLength === 0) return ''
   const encodings = parseEncodings(encodingHeader)
   if (encodings.length === 0) return buf.toString('utf8')
   let current = buf
+  const opts = limit ? { maxOutputLength: limit } : undefined
   // `content-encoding` lists transforms in the order they were applied;
   // decode in reverse to undo them.
   for (let i = encodings.length - 1; i >= 0; i--) {
     const enc = encodings[i]
     try {
-      if (enc === 'gzip' || enc === 'x-gzip') current = gunzipSync(current)
-      else if (enc === 'br') current = brotliDecompressSync(current)
-      else if (enc === 'deflate') current = inflateOrRaw(current)
-      else if (enc === 'zstd' && zstdDecompress) current = zstdDecompress(current)
+      if (enc === 'gzip' || enc === 'x-gzip') current = gunzipSync(current, opts)
+      else if (enc === 'br') current = brotliDecompressSync(current, opts)
+      else if (enc === 'deflate') current = inflateOrRaw(current, opts)
+      else if (enc === 'zstd' && zstdDecompress) current = zstdDecompress(current, opts)
       else return current.toString('utf8') // unknown codec: stop, keep what we have
-    } catch {
+    } catch (err) {
+      if (limit && /** @type {NodeJS.ErrnoException} */ (err).code === 'ERR_BUFFER_TOO_LARGE') { onLimit?.(); return '' }
       return buf.toString('utf8') // undecodable: fall back to the raw bytes
     }
   }
@@ -414,13 +489,15 @@ function decodeBody(buf, encodingHeader) {
  * conformant decoder first, then the headerless variant.
  *
  * @param {Buffer} buf
+ * @param {{ maxOutputLength: number }} [opts]
  * @returns {Buffer}
  */
-function inflateOrRaw(buf) {
+function inflateOrRaw(buf, opts) {
   try {
-    return inflateSync(buf)
-  } catch {
-    return inflateRawSync(buf)
+    return inflateSync(buf, opts)
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ERR_BUFFER_TOO_LARGE') throw err
+    return inflateRawSync(buf, opts)
   }
 }
 
@@ -505,4 +582,39 @@ function headerValue(headers, name) {
     }
   }
   return undefined
+}
+
+/**
+ * An exchange that records nothing.
+ *
+ * In reverse-proxy mode every request that reaches the listener was routed
+ * there by a client we attached, so recording all of it is the same aperture
+ * the user opted into. Proxy mode breaks that equivalence: a `HTTPS_PROXY`
+ * client sends its whole conversation with the host through us, including
+ * update checks, MCP registry fetches and other side channels that have
+ * nothing to do with model traffic. Those requests still have to be proxied
+ * faithfully, but buffering their bodies would be both a privacy widening the
+ * user never asked for and, for a multi-hundred-kilobyte registry response, a
+ * pointless allocation.
+ *
+ * This stands in for a real {@link Exchange} on that path so the request
+ * handler stays one code path. Nothing accumulates and no row is ever
+ * produced; callers must skip `onExchangeFinished` for it.
+ *
+ * @ref LLP 0234#recording-is-opt-in-per-path [implements]: unmatched proxy-mode paths pass through unrecorded
+ * @returns {{ isSse: boolean, response: undefined, appendRequestChunk(): void, setResponseStart(): void, appendResponseChunk(): void, consumeStreamChunk(): void, setError(): void, recording: false }}
+ */
+export function createNullExchange() {
+  return {
+    // `false` keeps the handler on the buffered branch, which for this object
+    // is a no-op either way.
+    isSse: false,
+    response: undefined,
+    recording: false,
+    appendRequestChunk() {},
+    setResponseStart() {},
+    appendResponseChunk() {},
+    consumeStreamChunk() {},
+    setError() {},
+  }
 }

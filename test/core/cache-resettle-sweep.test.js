@@ -6,7 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { maintainCache } from '../../src/core/cache/maintenance.js'
+import { estimateRowBytes, maintainCache } from '../../src/core/cache/maintenance.js'
+import { readCursorSync } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { aiGatewayDatasetRegistration, DATASET_NAME } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
@@ -162,6 +163,256 @@ test('re-settle sweep leaves the fallback row untouched when the transcript is u
   }
 })
 
+// @ref LLP 0301#bounded-resettle [tests]: compaction's row batch is also the
+// upper bound for gateway rows retained while the re-settle hook runs. A
+// history-sized fallback array makes the hourly daemon rewrite heap-sized even
+// though its ordinary parquet output batches are bounded.
+test('re-settle sweep sends fallback rows to the hook in byte-bounded batches', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    const payload = 'x'.repeat(64 * 1024)
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      ...fallbackRow(),
+      message_id: `fallback-${i}`,
+      part_id: `fallback-${i}#0`,
+      content_text: `${i}:${payload}`,
+    }))
+    await storage.appendRows(tablePath, COLUMNS, rows)
+    await storage.flushTable(tablePath, { force: true })
+
+    /** @type {number[]} */
+    const batchSizes = []
+    /** @type {number[]} */
+    const batchBytes = []
+    const report = await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      getSettleHook: () => async (batch) => {
+        batchSizes.push(batch.length)
+        batchBytes.push(batch.reduce((total, row) => total + estimateRowBytes(row), 0))
+        return batch
+      },
+      config: { compact_batch_bytes: 256 * 1024 },
+    })
+
+    assert.equal(report.totalFailed, 0)
+    assert.ok(batchSizes.length > 1, `expected bounded re-settle batches, got ${JSON.stringify(batchSizes)}`)
+    assert.ok(Math.max(...batchBytes) <= 256 * 1024, `a re-settle batch exceeded the byte cap: ${JSON.stringify(batchBytes)}`)
+    assert.equal((await readRows(storage, tablePath)).length, rows.length)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an early fallback batch collapses onto a native twin later in scan order', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    const fallback = { ...fallbackRow(), message_id: 'fallback-early', part_id: 'fallback-early#0' }
+    const native = { ...nativeRow(), message_id: 'native-later', provider_uuid: 'native-later', part_id: 'native-later#0' }
+    await storage.appendRows(tablePath, COLUMNS, [fallback, native])
+    await storage.flushTable(tablePath, { force: true })
+
+    /** @type {number[]} */
+    const batchSizes = []
+    await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      getSettleHook: () => async (batch) => {
+        batchSizes.push(batch.length)
+        return batch.map((row) => upgradedRow(row, 'native-later'))
+      },
+      config: { compact_batch_bytes: 1 },
+    })
+
+    assert.deepEqual(batchSizes, [1], 'the fallback settles before the later native row is rewritten')
+    assert.deepEqual(await readPartIds(storage, tablePath), ['native-later#0'], 'the native twin wins')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a later settle batch collapses onto an upgraded key emitted by an earlier batch', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    const rows = [
+      { ...fallbackRow(), message_id: 'fallback-first', part_id: 'fallback-first#0' },
+      { ...fallbackRow(), message_id: 'fallback-second', part_id: 'fallback-second#0' },
+    ]
+    await storage.appendRows(tablePath, COLUMNS, rows)
+    await storage.flushTable(tablePath, { force: true })
+
+    /** @type {number[]} */
+    const batchSizes = []
+    await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      getSettleHook: () => async (batch) => {
+        batchSizes.push(batch.length)
+        return batch.map((row) => upgradedRow(row, 'shared-native'))
+      },
+      config: { compact_batch_bytes: 1 },
+    })
+
+    assert.deepEqual(batchSizes, [1, 1], 'the fallbacks settle in separate bounded batches')
+    assert.deepEqual(await readPartIds(storage, tablePath), ['shared-native#0'], 'the earlier upgraded survivor wins')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0027#re-settle-sweep [tests]: "A row whose identity did not change
+// is never dropped." The settle pass hands back a FRESH OBJECT for work that
+// leaves identity alone - a relinked predecessor (LLP 0440), a late-resolved
+// cwd, a spawned_by stamp - so a new object is not evidence of an upgrade.
+// Only a moved part identity is, and a row that never moved has no native
+// twin to collapse onto.
+test('a relink-only fallback row is not dropped as a twin of an already-emitted row', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    /** @type {ColumnSpec[]} */
+    const columns = [...COLUMNS, { name: 'previous_message_id', type: 'JSON', nullable: true }]
+    // Two committed rows under the SAME fallback identity, which the
+    // projector's per-state dedupe does not prevent across a restart.
+    // Neither has a native twin, so the sweep has nothing to collapse.
+    const rows = ['ex-first', 'ex-second'].map((exchangeId) => ({
+      ...fallbackRow(),
+      previous_message_id: ['fallbackhash16aa'],
+      attributes: {
+        gateway: { identity_source: 'gateway_fallback', exchange_id: exchangeId },
+      },
+    }))
+    await storage.appendRows(tablePath, columns, rows)
+    await storage.flushTable(tablePath, { force: true })
+
+    await maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      // The transcript match misses, so identity stands; the predecessor it
+      // names settled in an earlier sweep, so its link is rewritten in place.
+      getSettleHook: () => async (batch) => batch.map((row) => ({ ...row, previous_message_id: ['u-pred'] })),
+    })
+
+    const survivors = await readRows(storage, tablePath)
+    assert.deepEqual(
+      survivors.map((row) => parseAttrs(row.attributes)?.gateway?.exchange_id).sort(),
+      ['ex-first', 'ex-second'],
+      'a relink leaves part_id where it was, so neither row is an upgraded twin of the other'
+    )
+    assert.deepEqual(
+      await readPartIds(storage, tablePath),
+      ['fallbackhash16ab#0', 'fallbackhash16ab#0'],
+      'fixture invariant: one part identity for both rows, unmoved by the relink'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a flush waits for compaction and appends to the replacement generation', async () => {
+  const env = await stageEnv()
+  try {
+    const registration = aiGatewayDatasetRegistration()
+    const compactionPaused = deferred()
+    const releaseCompaction = deferred()
+    const flushAtAppendBoundary = deferred()
+    const releaseFlush = deferred()
+    const storage = createQueryStorageService({
+      cacheRoot: env.cacheRoot,
+      getDeclaration: (dataset) => dataset === DATASET_NAME ? registration.cachePartitioning : undefined,
+      getSettleHook: () => async (rows) => {
+        if (rows.some((row) => row.message_id === 'during-compaction')) {
+          flushAtAppendBoundary.resolve()
+          await releaseFlush.promise
+        }
+        return rows
+      },
+    })
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    const [partition] = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
+    assert.ok(partition)
+    const initialTableDir = readCursorSync(partition.path).tableDir
+
+    const maintenance = maintainCache({
+      cacheRoot: storage.cacheRoot,
+      force: true,
+      compactOnly: true,
+      storage,
+      getSettleHook: () => async (rows) => {
+        compactionPaused.resolve()
+        await releaseCompaction.promise
+        return rows
+      },
+    })
+    await compactionPaused.promise
+
+    const concurrent = {
+      ...nativeRow(),
+      message_id: 'during-compaction',
+      provider_uuid: 'during-compaction',
+      part_id: 'during-compaction#0',
+    }
+    await storage.appendRows(tablePath, COLUMNS, [concurrent])
+    let flushFinished = false
+    const flush = storage.flushTable(tablePath, { force: true }).then((result) => {
+      flushFinished = true
+      return result
+    })
+    await flushAtAppendBoundary.promise
+    releaseFlush.resolve()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(flushFinished, false, 'the append cannot mutate the generation while compaction owns it')
+
+    releaseCompaction.resolve()
+    const [report, flushResult] = await Promise.all([maintenance, flush])
+    assert.equal(report.totalFailed, 0)
+    assert.equal(flushResult.flushed, true)
+    const finalCursor = readCursorSync(partition.path)
+    assert.notEqual(finalCursor.tableDir, initialTableDir, 'the append cannot restore the retired generation cursor')
+    assert.equal(finalCursor.rowCount, 2)
+    assert.deepEqual(
+      await readPartIds(storage, tablePath),
+      ['during-compaction#0', 'fallbackhash16ab#0'],
+      'the waiting append becomes visible through the replacement generation'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // Config under which the file-count/avg-size heuristics never fire, so the
 // ONLY thing that can trigger a compaction is the fallback-marker auto-sweep.
 const NO_NATURAL_COMPACTION = { compact_file_count: 1000, compact_avg_file_bytes: 1 }
@@ -310,6 +561,29 @@ function nativeRow() {
     content_text: CONTENT,
     attributes: { gateway: { exchange_id: 'ex2' } },
   }
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {string} messageId
+ */
+function upgradedRow(row, messageId) {
+  return {
+    ...row,
+    message_id: messageId,
+    provider_uuid: messageId,
+    part_id: `${messageId}#0`,
+    attributes: { gateway: { exchange_id: 'settled' } },
+  }
+}
+
+/** @returns {{ promise: Promise<void>, resolve: () => void }} */
+function deferred() {
+  /** @type {() => void} */
+  let resolve = () => {}
+  /** @type {Promise<void>} */
+  const promise = new Promise((done) => { resolve = () => done() })
+  return { promise, resolve }
 }
 
 function nativeAssistantLine() {

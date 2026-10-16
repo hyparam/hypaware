@@ -7,7 +7,7 @@ import path from 'node:path'
 import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath } from '../config/schema.js'
-import { centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } from '../config/apply.js'
+import { centralLayerResolutionFailure, centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } from '../config/apply.js'
 import { validateConfig } from '../config/validate.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import {
@@ -15,7 +15,9 @@ import {
   readClientActionStatus,
   readInstalledAssets,
 } from '../config/action_reconciler.js'
-import { originOf, readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
+import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
+import { sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
+import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
@@ -45,7 +47,7 @@ import { isTty, readAllStdin } from '../cli/stdio.js'
 export async function runJoin(argv, ctx) {
   const parsed = parseJoinArgs(argv)
   if (parsed.help) {
-    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]\n')
+    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon] [--force]\n')
     ctx.stdout.write('  token sources (pick one): positional argument, --token-file, or stdin\n')
     return 0
   }
@@ -107,6 +109,7 @@ export async function runJoin(argv, ctx) {
   const validation = await validateConfig(seed, {
     knownPlugins: catalogCtx.knownPlugins,
     knownDatasets: catalogCtx.knownDatasets,
+    unloadablePlugins: catalogCtx.unloadablePlugins,
   })
   if (!validation.ok) {
     for (const err of validation.errors) {
@@ -134,6 +137,15 @@ export async function runJoin(argv, ctx) {
       status: 'ok',
     },
     async (span) => {
+      // Stamp the empty client-sync store BEFORE the central seed exists:
+      // the seed itself counts as a central layer on the next boot, and a
+      // boot that sees a central layer with no store runs the LLP 0188
+      // upgrade migration, which would wrongly opt out fresh picks. Best
+      // effort: a failure here under-syncs (the safe direction), never
+      // blocks enrollment.
+      // @ref LLP 0188#migration [implements]: enrollment seeds the empty store before the central seed is written
+      await seedClientSyncStoreBestEffort(ctx, obsEnv.stateDir)
+
       // The token is the only credential on disk until the first
       // bootstrap, so the seed write is atomic and mode 0600.
       await atomicWriteJson(seedPath, seed, { mode: 0o600 })
@@ -158,14 +170,13 @@ export async function runJoin(argv, ctx) {
         return 0
       }
 
-      const installArgv = parsed.binPath !== undefined ? ['--bin', parsed.binPath] : []
-      const code = await runDaemonInstall(installArgv, ctx)
+      const code = await runDaemonInstall(daemonInstallArgv(parsed), ctx)
       if (code !== 0) {
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'daemon_install_failed')
         return code
       }
-      ctx.stdout.write('✓ Joined - the daemon will pull its configuration from the server\n')
+      ctx.stdout.write(`✓ Joined - the daemon will pull its configuration from ${serverDisplayName(/** @type {string} */ (parsed.url))}\n`)
       return 0
     },
     { component: 'join' }
@@ -175,41 +186,49 @@ export async function runJoin(argv, ctx) {
 /**
  * Enroll this machine from an attended `hyp remote login` (LLP 0063 D2/D5):
  * provision the `@hypaware/central` forward sink and finish exactly the way
- * `runJoin` finishes. This is join's enrollment minus the bootstrap token —
+ * `runJoin` finishes. This is join's enrollment minus the bootstrap token:
  * the login-minted gateway credential (LLP 0061), seeded here into the fresh
  * sink's `identity.json`, is the identity, so the written block carries no
  * `identity.bootstrap_token`. Written to the same central-seed layer join uses
  * (LLP 0031): this is server-authored config (server-minted credential,
- * server-owned org), not something the human typed, so provenance — not who
- * ran the command — picks the layer.
+ * server-owned org), not something the human typed, so provenance, not who
+ * ran the command, picks the layer.
  *
- * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean }} args
+ * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean, binPath?: string, force?: boolean }} args `compact` passes through to the daemon install's one-line report; `binPath` and `force` are the caller's CLI decision, forwarded to it verbatim
  * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
  * @ref LLP 0063#d2 [implements]: provision join's exact sink block (minus the bootstrap token) into the central-seed layer, then seed the login-minted identity into it
  * @ref LLP 0063#d5 [implements]: an enrolling login finishes with join's daemon install (join parity); --no-daemon prints the finish-by-hand command
  */
-export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
+export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false, binPath, force }) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const stateRoot = obsEnv.stateDir
   const localPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
-  const targetOrigin = originOf(url)
-
   // D4 re-check just before the write: if a central sink targeting a different
   // origin appeared since login's pre-auth gate (a concurrent first login to
   // another server), abort rather than provision a second enrollment. This is
-  // the non-locked flavor of D4's seed-time check — it closes the common race;
+  // the non-locked flavor of D4's seed-time check: it closes the common race;
   // the cross-process credentials lock (LLP 0065) is a follow-up.
-  const connectedOrigins = await readCentralSinkOrigins({ stateDir: stateRoot, configPath: localPath })
-  const elsewhere = connectedOrigins.find((o) => o !== targetOrigin)
+  //
+  // Same fail-closed reading as the pre-auth gate (#623): a central layer that
+  // appeared but cannot be read - whether it does not parse or its path cannot
+  // even be resolved - leaves this check unable to say whether a second
+  // enrollment is being created, so it must abort. Throwing is the whole
+  // handling: nothing has been written yet, and the caller already reports a
+  // throw here as "signed in, but enrollment failed".
+  const { origins: connectedOrigins, unreadable } = await readCentralEnrollment({ stateDir: stateRoot, configPath: localPath })
+  if (unreadable) {
+    throw new Error(`the central config layer (${unreadable.configPath}) cannot be read, so this machine's enrollment cannot be verified: ${unreadable.message}`)
+  }
+  const elsewhere = connectedOrigins.find((o) => !sameServer(o, url))
   if (elsewhere) return { provisioned: false, connectedElsewhere: elsewhere, daemonCode: 0 }
 
   // Only actually write the seed when no same-origin central sink exists yet
   // (a same-origin sink present means a racing same-server login already
   // provisioned it; fall through to identity-seeding it, which is idempotent).
-  if (targetOrigin === null || !connectedOrigins.includes(targetOrigin)) {
+  if (!connectedOrigins.some((o) => sameServer(o, url))) {
     // `identity: {}` (not absent): the central plugin's own validator requires
     // an identity object (`central.identity is required`), but bootstrap_token
-    // is optional — the login-minted gateway seeded into identity.json is the
+    // is optional, the login-minted gateway seeded into identity.json is the
     // credential (LLP 0063 D2), so the block carries an empty identity, not a
     // token.
     /** @type {HypAwareV2Config} */
@@ -218,6 +237,10 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
       plugins: [{ name: '@hypaware/central' }],
       sinks: { central: { plugin: '@hypaware/central', config: { url, identity: {} } } },
     }
+    // Same ordering constraint as `runJoin`: the client-sync stamp must land
+    // before the seed makes a central layer visible to boot (LLP 0188
+    // #migration); best effort, failure under-syncs.
+    await seedClientSyncStoreBestEffort(ctx, stateRoot)
     const seedPath = centralSeedPath(stateRoot)
     await atomicWriteJson(seedPath, seed, { mode: 0o600 })
     // Inherit join's #139 fix: supersede a stale applied slot so the fresh
@@ -231,7 +254,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   //
   // The seed config is on disk but its credential is not, so a failure here
   // (throw, or nothing seeded) would leave a committed sink with no
-  // identity.json — the daemon would then demand a `hyp join` bootstrap token
+  // identity.json: the daemon would then demand a `hyp join` bootstrap token
   // the login user does not have. Roll the seed back so the machine is cleanly
   // unenrolled rather than half-enrolled and broken.
   let seeded
@@ -247,13 +270,46 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   }
 
   if (noDaemon) return { provisioned: true, daemonCode: 0 }
-  const daemonCode = await runDaemonInstall([], ctx)
+  const daemonCode = await runDaemonInstall(daemonInstallArgv({ binPath, force }), ctx, { compact })
   return { provisioned: true, daemonCode }
+}
+
+/**
+ * The enrollment lanes are wrappers over `hyp daemon install` (LLP 0025), so
+ * the two decisions about the CLI it records travel as its own flags: an
+ * explicit entrypoint, and `--force` for keeping a temporary one (LLP 0404).
+ *
+ * @param {{ binPath?: string, force?: boolean }} opts
+ * @returns {string[]}
+ */
+function daemonInstallArgv({ binPath, force }) {
+  return [
+    ...(binPath !== undefined ? ['--bin', binPath] : []),
+    ...(force ? ['--force'] : []),
+  ]
 }
 
 /**
  * Undo a just-written central seed (best-effort): remove the seed file and
  * clear any applied slot, returning the machine to "no central layer". Used to
+ * Best-effort wrapper over `seedClientSyncStoreIfAbsent` for the two
+ * enrollment writers. A machine that enrolls without the stamp is treated as
+ * pre-upgrade by the next boot and gets its local picks migrated into
+ * opt-outs, so the failure direction is under-sync: warn and proceed.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {string} stateDir
+ */
+async function seedClientSyncStoreBestEffort(ctx, stateDir) {
+  try {
+    await seedClientSyncStoreIfAbsent({ stateDir })
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`warning: could not stamp the client-sync store (${detail}); locally added clients will start local-only until 'hyp privacy client <name> sync'\n`)
+  }
+}
+
+/**
  * roll `enrollCentralSink` back when identity-seeding fails after the seed was
  * committed, so a partial enrollment never lingers on disk.
  *
@@ -266,7 +322,7 @@ async function rollbackCentralSeed(stateRoot) {
 
 /**
  * @param {string[]} argv
- * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }}
+ * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean, force?: boolean }}
  */
 function parseJoinArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -277,12 +333,13 @@ function parseJoinArgs(argv) {
       'token-file': { type: 'string' },
       bin: { type: 'string' },
       'no-daemon': { type: 'boolean', default: false },
+      force: { type: 'boolean', default: false },
     },
     positional: ['url', 'token'],
   })
   if ('help' in parsed) return { help: true }
   if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean }} */ (parsed.params)
+  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean, force: boolean }} */ (parsed.params)
   if (p.url === undefined) return { error: 'missing <url> (see hyp join --help)' }
   // '-' as the token positional means "read from stdin", same as
   // omitting it on a piped invocation.
@@ -290,20 +347,20 @@ function parseJoinArgs(argv) {
   if (token !== undefined && p['token-file'] !== undefined) {
     return { error: 'pass the token either as an argument or via --token-file, not both' }
   }
-  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'] }
+  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'], force: p.force }
 }
 
 /**
- * `hyp leave`: disconnect this machine from its central server — the
+ * `hyp leave`: disconnect this machine from its central server, the
  * level-3 exit verb, the single inverse of both enrollment paths
  * (`hyp join` and an enrolling `hyp remote login`). Reverses what
  * enrollment did to the machine, in dependency order:
  *
- *   1. remove the central config layer — the join/login seed and any
+ *   1. remove the central config layer: the join/login seed and any
  *      applied central slots (the inverse of join's seed write, reusing
  *      the #139 reset machinery);
- *   2. restart the installed daemon service, so the central sink — and
- *      with it the config-pull loop — stops before markers and
+ *   2. restart the installed daemon service, so the central sink, and
+ *      with it the config-pull loop, stops before markers and
  *      credentials are torn down;
  *   3. reverse the centrally-driven client attaches through the single
  *      core disk undo (the LLP 0044 leave contract). Manual attaches
@@ -315,7 +372,7 @@ function parseJoinArgs(argv) {
  * Cascades down, never up: it does NOT log the human out (the
  * query-session store is theirs, not the fleet's), does NOT touch the
  * user-owned local config layer, and does NOT uninstall the daemon
- * service — local-only capture keeps working. Teardown is local-only:
+ * service, local-only capture keeps working. Teardown is local-only:
  * the server-side gateway row is not revoked (the credential expires;
  * revocation is the operator's server-side act).
  *
@@ -336,9 +393,10 @@ export async function runLeave(argv, ctx) {
   const parsedArgv = parseCommandArgv(argv, { type: 'object', properties: {} })
   if ('help' in parsedArgv) {
     ctx.stdout.write('usage: hyp leave\n')
-    ctx.stdout.write('  disconnect this machine from its central server: stop forwarding and\n')
-    ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
-    ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
+    ctx.stdout.write('  disconnect this machine from a HypAware server: stop forwarding\n')
+    ctx.stdout.write('  and config pull, undo org-driven client attaches, and remove the\n')
+    ctx.stdout.write('  forward credential. Keeps query sessions, the local config, and the\n')
+    ctx.stdout.write('  daemon service.\n')
     return 0
   }
   if (!parsedArgv.ok) {
@@ -352,6 +410,14 @@ export async function runLeave(argv, ctx) {
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(obsEnv.hypHome)
   const centralLayerPath = resolveCentralLayerPath({ stateRoot })
+  // A null path is not proof there is nothing here: resolution swallows a
+  // pointer it cannot follow and a control directory it cannot list. The D4
+  // login gate refuses in exactly those states and sends the user here, so
+  // `leave` has to be able to finish the teardown they were told to run;
+  // otherwise the fail-closed gate is a lockout (#623). The teardown below is
+  // already the right one - `resetCentralLayerToSeed` force-removes the
+  // pointer and both slots by name, no resolution required.
+  const unresolvableCentralLayer = centralLayerResolutionFailure({ stateRoot })
   const attachMarkers = readClientActionStatus({ stateRoot }).byKind.attach ?? {}
   const attachedNames = Object.keys(attachMarkers)
 
@@ -359,10 +425,10 @@ export async function runLeave(argv, ctx) {
   // that failed partway leaves its attach markers on disk, so a re-run still
   // lands here with work to do and finishes it - the marker is its own
   // "unfinished teardown" signal, no separate bookkeeping needed.
-  if (centralLayerPath === null && attachedNames.length === 0) {
-    ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
+  if (centralLayerPath === null && unresolvableCentralLayer === null && attachedNames.length === 0) {
+    ctx.stdout.write('hyp leave: this machine is not connected to the cloud - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
-    // and leave never edits the local layer (#111 doctrine) — but a user
+    // and leave never edits the local layer (#111 doctrine), but a user
     // running `leave` to stop forwarding deserves to know where it lives.
     writeLocalCentralSinkNote(ctx, await readCentralSinks(localPath, stateRoot), localPath)
     return 0
@@ -381,7 +447,7 @@ export async function runLeave(argv, ctx) {
     },
     async (span) => {
       let failures = 0
-      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the central server'}\n`)
+      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the cloud'}\n`)
 
       // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
       // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes
@@ -389,32 +455,50 @@ export async function runLeave(argv, ctx) {
 
       // 1. Central layer teardown: drop the seed, then clear the applied
       // slots / pointer / apply state. With both gone the machine has no
-      // central layer at all — the exact inverse of join's write.
-      await fs.rm(centralSeedPath(stateRoot), { force: true })
-      resetCentralLayerToSeed(stateRoot)
-      ctx.stdout.write('✓ removed the central config layer\n')
+      // central layer at all: the exact inverse of join's write.
+      //
+      // Counted-and-reported like every other step rather than an uncaught
+      // throw: the states the D4 gate now refuses on include a control
+      // directory this process cannot read, and that removal raises EACCES.
+      // Aborting there would strand the attach reversal in step 3 and leave
+      // the user with no way to act on the gate's advice.
+      try {
+        await fs.rm(centralSeedPath(stateRoot), { force: true })
+        resetCentralLayerToSeed(stateRoot)
+        ctx.stdout.write('✓ removed the central config layer\n')
+      } catch (err) {
+        failures += 1
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`✗ could not remove the central config layer: ${message}\n`)
+      }
 
       // 2. Restart the service so the running daemon reboots without the
       // central sink: forwarding and the config-pull loop stop here. Restart,
-      // never uninstall — local-only capture keeps working.
+      // never uninstall: local-only capture keeps working.
+      //
+      // The status probe sits INSIDE the try with the restart: every step of
+      // leave is best-effort, so a daemon step that cannot even work out what
+      // is installed has to be a counted, reported failure - never an abort
+      // that strands the attach reversal in step 3 and leaves the user with
+      // a half-torn-down machine and no advice.
       const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
-      const svc = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
-      if (svc.installed) {
-        try {
+      try {
+        const svc = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
+        if (svc.installed) {
           await restartServiceDaemon({ homeDir: ctx.env.HOME })
           // Close the small race in which the old daemon's pull loop applied
           // a config slot between step 1 and the restart.
           await fs.rm(centralSeedPath(stateRoot), { force: true })
           resetCentralLayerToSeed(stateRoot)
           ctx.stdout.write('✓ restarted the daemon - forwarding and config pull are stopped\n')
-        } catch (err) {
-          failures += 1
-          const message = err instanceof Error ? err.message : String(err)
-          ctx.stderr.write(`hyp leave: daemon restart failed: ${message}\n`)
-          ctx.stderr.write("  run 'hyp daemon restart' to stop the central sink\n")
+        } else {
+          ctx.stdout.write('  no daemon service installed - nothing to restart\n')
         }
-      } else {
-        ctx.stdout.write('  no daemon service installed - nothing to restart\n')
+      } catch (err) {
+        failures += 1
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`hyp leave: daemon restart failed: ${message}\n`)
+        ctx.stderr.write("  run 'hyp daemon restart' to stop the central sink\n")
       }
 
       // 3. Reverse the org-driven attaches. Only reconciler-applied attaches
@@ -426,18 +510,20 @@ export async function runLeave(argv, ctx) {
         for (const name of attachedNames) {
           const marker = attachMarkers[name]
           const installedAssets = readInstalledAssets(marker)
-          if (!marker || (marker.status === 'failed' && installedAssets.length === 0)) {
-            // A failed marker that recorded nothing applied no effect; just
-            // drop it, mirroring the reconciler's own reverse pass. A failed
-            // marker CAN still name assets: an attach that went `done` and then
-            // re-`perform()`ed unsuccessfully is rewritten `failed` with its
-            // `installed_assets` carried forward, and those copies are still on
-            // disk. Such a marker falls through to the normal reversal below.
-            try {
-              clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
-            } catch { /* best-effort: a stale failed marker is a status blemish */ }
-            continue
-          }
+          // Every marker leave holds goes to the real reversal, whatever status
+          // it carries. There used to be a shortcut here that skipped the
+          // reversal for a marker whose status "recorded nothing" (a `failed`
+          // one with no assets), and it read the status as a proxy for what is
+          // on disk: a marker that reached `done`, wrote the client's settings
+          // and installed no files, then re-`perform()`ed into a `failed` or
+          // `refused` rewrite, is indistinguishable from one that never applied
+          // anything, so the shortcut skipped a settings edit that was still
+          // there (#627 review round 2). The undo reads the client's own file
+          // instead of the marker's status, is idempotent, and reports
+          // `changed: false` when there is nothing to reverse, so running it
+          // over a marker that really did record nothing costs one stat.
+          // Leave's own no-op is quiet (`quietNoop`), which is what made the
+          // shortcut look worth having in the first place.
           const descriptor = descriptors.get(name)
           if (!descriptor) {
             // Plugin's gone, so we cannot replay its undo - do the best we can:
@@ -451,7 +537,7 @@ export async function runLeave(argv, ctx) {
             // remove, so removal is refused (LLP 0138 #marker-undo) - but the
             // marker is the only thing on disk naming those copies, so print
             // them before it goes.
-            ctx.stdout.write(`  '${name}' plugin not installed - dropped its attach marker (settings left as-is; reinstall + 'hyp detach ${name}' to revert)\n`)
+            ctx.stdout.write(`  '${name}' plugin not installed - dropped its attach marker (settings left as-is; reinstall + 'hyp client detach ${name}' to revert)\n`)
             if (installedAssets.length > 0) {
               ctx.stdout.write(`  it had installed ${installedAssets.length} file(s), left in place - remove them by hand if you want them gone:\n`)
               for (const dest of installedAssets) ctx.stdout.write(`    ${dest}\n`)
@@ -468,19 +554,26 @@ export async function runLeave(argv, ctx) {
           // visible and tells the user how to retry.
           // @ref LLP 0107#reversal [implements]: leave reverses org-installed
           //   assets through the same core detach the CLI verb uses
+          // @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: every marker leave holds takes this undo, which decides what to reverse from the client's own settings file rather than from the marker's status
           try {
             await detachClientViaCore({
               name,
               descriptor,
               dryRun: false,
               json: false,
+              // A sweep, not a request about this client: leave runs the undo
+              // for every marker on disk, so a client with nothing to reverse
+              // must not narrate a settings file the user may never have had.
+              // `hyp detach <client>` keeps saying it, because there the line
+              // is the answer to what the user asked.
+              quietNoop: true,
               ctx,
             })
           } catch (err) {
             failures += 1
             const message = err instanceof Error ? err.message : String(err)
             ctx.stderr.write(`hyp leave: detach '${name}' failed: ${message}\n`)
-            ctx.stderr.write(`  run 'hyp detach ${name}' to finish reversing it\n`)
+            ctx.stderr.write(`  run 'hyp client detach ${name}' to finish reversing it\n`)
           }
         }
       }
@@ -533,7 +626,7 @@ export async function runLeave(argv, ctx) {
  * Read a config layer file and list its `@hypaware/central` sink blocks:
  * instance name, target url, and the resolved forward-identity path (the
  * sink's `identity.persisted_path`, defaulting to the per-plugin state
- * path — the same resolution `seedLoginGateway` uses). Lenient: a missing
+ * path; the same resolution `seedLoginGateway` uses). Lenient: a missing
  * or malformed file is simply no sinks, because `leave` tears down
  * best-effort and must not wedge on a corrupt layer.
  *

@@ -6,6 +6,9 @@
 **Author:** Brendan / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0033, LLP 0058, LLP 0062, LLP 0084, LLP 0104
+**Extended-by:** [LLP 0436](./0436-publish-markdown-report-sources.decision.md) replaces new HTML uploads with Markdown sources rendered by the server.
+**Extended-by:** [LLP 0465](./0465-report-save-store.decision.md) adds `save`, a second local member, a saved section to `list`, and publish by saved name.
+**Superseded-in-part-by:** [LLP 0451](./0451-retire-report-render-command.decision.md) retires `hyp report render`; [LLP 0450](./0450-report-generate-in-current-directory.decision.md) makes `generate` the group's local member.
 
 ## Context
 
@@ -55,6 +58,30 @@ with its ordinary login, and an operator-minted publish token stores as a
 static record via `hyp remote login <target> --token-file`. Reports are
 server-specific (server LLP 0020), so there is no local mode: `--remote`
 selects a server, it never switches one on.
+
+**Extended-by: [LLP 0196 #mechanics-as-code](./0196-skills-state-constraints-not-procedures.rfc.md#mechanics-as-code)**
+(2026-08-06). `hyp report render` joins this group as its one **local** member:
+a build step that turns a reports tree's Markdown into a static site, taking no
+`--remote` and no credential. The paragraph above remains true of the four
+plane operations it was written about (publish, list, get, delete); render is
+not a plane operation. It joins the group because a user's workflow is
+render-then-publish, and splitting those across two command namespaces would
+serve the implementation rather than the reader. The group help states the
+split.
+
+**Superseded-in-part-by: [LLP 0451](./0451-retire-report-render-command.decision.md#server-rendering)**
+(2026-09-29). `hyp report render` is retired: publishing sends Markdown for the
+server to render, so the paragraph above no longer describes a command that
+exists. The renderer itself stays as the shared `hypaware/core/reports` library.
+The group keeps a local member, but it is `hyp report generate`
+([LLP 0450](./0450-report-generate-in-current-directory.decision.md#launch)),
+which starts the report skill in the caller's directory.
+
+**Extended-by: [LLP 0414 #id-is-the-handle](./0414-a-recommendation-is-a-verb.decision.md#id-is-the-handle)**
+(2026-09-14). `hyp report fix <id>` joins the group as a fifth server-facing
+member: it resolves a server-minted recommendation id through the same target
+and credential path, fetches the recommendation page, and starts an attached
+client on it in the current directory.
 
 <a id="endpoint"></a>**The reports endpoint derives from the one registered
 target URL.** Sibling of `deriveIdentityBase` and `deriveMcpEndpoint`

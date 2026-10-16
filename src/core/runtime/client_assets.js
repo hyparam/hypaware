@@ -4,7 +4,15 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { readClientActionStatus, readInstalledAssets } from '../config/action_reconciler.js'
+import { Attr, getLogger } from '../observability/index.js'
 import { copyDir } from '../util/fs_copy.js'
+import {
+  digestClientAsset,
+  inspectClientAsset,
+  readClientAssetLedger,
+  writeClientAssetLedger,
+} from './client_asset_ledger.js'
 import { isWithinDir } from './contribution_names.js'
 
 /**
@@ -28,6 +36,9 @@ import { isWithinDir } from './contribution_names.js'
 /**
  * @import {
  *   ClientAssetInstall,
+ *   ClientAssetLedgerRecord,
+ *   ClientAssetMaterialization,
+ *   ClientAssetRemoval,
  *   MaterializeClientAssetsOptions,
  *   PlannedClientAsset,
  *   ResolvedClientAsset,
@@ -36,22 +47,91 @@ import { isWithinDir } from './contribution_names.js'
  */
 
 /**
+ * Clients HypAware may write assets for only under a named consent, and the
+ * whole of what that consent covers: the registering plugin and the skill
+ * names. `~/.hermes` is Hermes's own directory and LLP 0118 R5 keeps HypAware
+ * out of it; the one extension agreed is these four skill directories, from
+ * the Hermes plugin's own registration. Anything else (another plugin's skill,
+ * a `clients: ['all']` contribution, an agent) never targets the client. A
+ * literal in core rather than a manifest field, so no plugin can widen it.
+ *
+ * @ref LLP 0118#requirements [constrained-by]: the Extended-by line names
+ *   exactly these four directories (consent 2026-10-14T18:34:17Z, Slack 1792002857.742579)
+ * @ref LLP 0494#skills [implements]: hermes accepts only the Hermes plugin's four neutral skills
+ */
+const CONSENTED_SKILLS = new Map([
+  ['hermes', {
+    plugin: '@hypaware/hermes',
+    names: new Set(['hypaware-query', 'hypaware-report', 'hypaware-reference', 'hypaware-privacy']),
+  }],
+])
+
+/**
+ * Whether a ledger record names a path its client's consent does not cover. A
+ * record is evidence HypAware wrote a path, not that the consent covered it,
+ * so neither detach nor retirement removes such a path; both carry its record.
+ * The ledger keeps no plugin, so this asks the names alone; the plugin is
+ * checked at plan time, before anything is copied or recorded.
+ *
+ * @param {ClientAssetLedgerRecord} record
+ * @returns {boolean}
+ */
+function outsideConsent(record) {
+  const consent = CONSENTED_SKILLS.get(record.client)
+  return consent !== undefined && !(record.kind === 'skill' && consent.names.has(record.name))
+}
+
+/**
  * Copy every registered skill and agent that targets one of `clients` into that
- * client's asset directories, replacing any existing copy (idempotent).
+ * client's asset directories, replacing any existing copy (idempotent). A
+ * client under a consent (`CONSENTED_SKILLS`) replaces only a copy the ledger
+ * records HypAware writing.
  *
  * Tolerant by construction: one contribution that cannot be resolved or copied
  * warns and is skipped rather than throwing, so a single bad plugin cannot abort
  * an onboarding run or an org-driven attach midway.
  *
+ * The removals come back alongside the copies, not only as `stdout` lines,
+ * because a caller is allowed to withhold `stdout` and one does: the wizard
+ * finale suppresses the per-copy lines so a dozen paths do not bury its step
+ * summary. Reporting only through the stream it withholds is how a `hyp init`
+ * came to delete a skill and say nothing (LLP 0219 #automatic-not-gated).
+ *
  * @param {MaterializeClientAssetsOptions} options
- * @returns {Promise<ClientAssetInstall[]>} one entry per copy actually made
- *   (or, under `dryRun`, per copy that would be made)
+ * @returns {Promise<ClientAssetMaterialization>} the copies actually made (or,
+ *   under `dryRun`, that would be made), and the retired destinations this run
+ *   removed or left in place
  */
 export async function materializeClientAssets(options) {
   const { dryRun = false, stdout, stderr } = options
+  const planned = planClientAssets(options)
   /** @type {ClientAssetInstall[]} */
   const installed = []
-  for (const { asset, client, dest } of planClientAssets(options)) {
+  /** @type {Map<string, Set<string>> | undefined} */
+  let recorded
+  for (const { asset, client, dest } of planned) {
+    // Under a consent the copy may replace only bytes HypAware itself wrote.
+    // A directory already there that the ledger cannot vouch for, whether a
+    // user's own under a colliding name or our copy the user has since edited,
+    // is left exactly as it is, the same evidence detach removes on.
+    // @ref LLP 0494#skills [implements]: attach never overwrites a hermes skill directory it did not write
+    if (CONSENTED_SKILLS.has(client)) {
+      recorded ??= indexRecordedDigests(options.stateRoot ? await readClientAssetLedger(options.stateRoot) : [])
+      if (!(await mayReplaceAsset(dest, recorded))) {
+        stderr?.write(
+          `warning: ${asset.kind} '${asset.name}' at ${dest} was not installed by HypAware or has changed since; left in place\n`
+        )
+        getLogger('client-assets').warn('client_assets.install_withheld', {
+          [Attr.COMPONENT]: 'client-assets',
+          [Attr.OPERATION]: 'client_assets.install',
+          hyp_client: client,
+          [Attr.STATUS]: 'ok',
+          [Attr.ERROR_KIND]: 'not_installed_by_hypaware',
+          detail: dest,
+        })
+        continue
+      }
+    }
     if (dryRun) {
       stdout?.write(`(dry-run) Would install ${asset.kind} '${asset.name}' → ${dest}\n`)
     } else {
@@ -66,7 +146,8 @@ export async function materializeClientAssets(options) {
     }
     installed.push({ kind: asset.kind, name: asset.name, client, dest, dryRun })
   }
-  return installed
+  const { pruned, withheld } = await reconcileClientAssetLedger({ options, installed })
+  return { installed, pruned, withheld }
 }
 
 /**
@@ -102,6 +183,15 @@ export function planClientAssets(options) {
   for (const asset of resolveAssets(options.skills, options.agents)) {
     for (const client of expandAssetClients(asset, everyClient)) {
       if (wanted && !wanted.has(client)) continue
+      const consent = CONSENTED_SKILLS.get(client)
+      if (consent && !(asset.kind === 'skill' && asset.plugin === consent.plugin && consent.names.has(asset.name))) {
+        // An `all` contribution never meant this client in particular, so
+        // only one that names it is worth a line.
+        if (!asset.clients.includes('all')) {
+          stderr?.write(`warning: ${asset.kind} '${asset.name}' targets ${client}, which accepts only HypAware's own skills; skipped\n`)
+        }
+        continue
+      }
       const descriptor = descriptors.get(client)
       if (!descriptor) {
         stderr?.write(`warning: ${asset.kind} '${asset.name}' targets unknown client '${client}'\n`)
@@ -237,7 +327,9 @@ export async function removeClientAssets(dests, baseDirs) {
     if (!isRemovableAsset(dest, baseDirs)) {
       failed.push({
         dest,
-        reason: "resolves outside this client's asset directories; refusing to remove",
+        reason:
+          "resolves outside this client's asset directories, or deeper into them than HypAware " +
+          'writes; refusing to remove',
         retryable: false,
       })
       continue
@@ -256,27 +348,618 @@ export async function removeClientAssets(dests, baseDirs) {
   return { removed, failed }
 }
 
+/**
+ * Take a probe-less client's own installed assets off the machine on detach.
+ *
+ * A probe-less client has no attach marker, so the marker-driven removal in
+ * `detachClientViaCore` never reaches it. For a client whose asset directories
+ * belong to it alone (Hermes: `~/.hermes/skills`, shared with no other client),
+ * "removed on detach" is still answerable from HypAware's own install record:
+ * the ledger names every path a materialization wrote under this client, with
+ * the digest of the bytes it wrote. A path is removed only when all of these
+ * hold, which is {@link pruneOneAsset}'s gate with the retirement question
+ * replaced by the detach request:
+ *
+ * 1. this client's ledger record names it;
+ * 2. no other client records it or contributes it now;
+ * 3. it is a direct child of this client's asset directories;
+ * 4. the bytes on disk still match a digest HypAware recorded for that path.
+ *
+ * Everything else under the directory (the client's own files, a user's skill,
+ * a copy the user edited) is never a candidate or is reported and left in
+ * place. The ledger keeps the records for what stayed, so a later detach can
+ * name them again, and drops the ones whose path is gone.
+ *
+ * Returns `undefined` when the client shares an asset directory with another
+ * client: there the ledger key is `(client, dest)` and one physical copy can be
+ * two clients' install, so the probe-less client keeps the LLP 0107 behaviour
+ * of leaving its assets for the client that shares them.
+ *
+ * @param {Omit<MaterializeClientAssetsOptions, 'clients' | 'stateRoot'> & { client: string, stateRoot: string }} options
+ * @returns {Promise<{ removed: ClientAssetRemoval[], withheld: ClientAssetRemoval[] } | undefined>}
+ * @ref LLP 0494#skills [implements]: a Hermes detach removes only the
+ *   marker-owned `~/.hermes/skills/hypaware-*` directories HypAware wrote
+ */
+export async function removeOwnedClientAssets(options) {
+  const { client, descriptors, homeDir, stateRoot, dryRun = false, stdout, stderr } = options
+  const descriptor = descriptors.get(client)
+  if (!descriptor || homeDir.length === 0) return undefined
+  const baseDirs = clientAssetBaseDirs(descriptor, homeDir)
+  if (baseDirs.length === 0) return undefined
+  const ownDirs = new Set(baseDirs.map((dir) => path.resolve(dir)))
+  for (const [name, other] of descriptors) {
+    if (name === client) continue
+    if (clientAssetBaseDirs(other, homeDir).some((dir) => ownDirs.has(path.resolve(dir)))) return undefined
+  }
+
+  const ledger = await readClientAssetLedger(stateRoot)
+  /** @type {Set<string>} */
+  const othersHold = new Set()
+  for (const record of ledger) {
+    if (record.client !== client) othersHold.add(record.dest)
+  }
+  for (const planned of planClientAssets({ ...options, clients: 'all', stderr: undefined })) {
+    if (planned.client !== client) othersHold.add(planned.dest)
+  }
+  const recordedDigests = indexRecordedDigests(ledger)
+
+  /** @type {ClientAssetRemoval[]} */
+  const removed = []
+  /** @type {ClientAssetRemoval[]} */
+  const withheld = []
+  /** @type {ClientAssetLedgerRecord[]} */
+  const next = []
+  for (const record of ledger) {
+    if (record.client !== client || othersHold.has(record.dest) || outsideConsent(record)) {
+      next.push(record)
+      continue
+    }
+    // A detach is not a retirement, so the warnings say `installed` and the
+    // progress line is this caller's own.
+    const outcome = await pruneOneAsset({
+      dest: record.dest,
+      record,
+      recorded: recordedDigests.get(record.dest) ?? EMPTY_DIGESTS,
+      client,
+      baseDirs,
+      dryRun,
+      label: 'installed',
+      stdout: undefined,
+      stderr,
+    })
+    if (outcome.carried && !(dryRun && outcome.removed)) next.push(outcome.carried)
+    if (!outcome.removal) continue
+    if (outcome.removed) {
+      removed.push(outcome.removal)
+      stdout?.write(`${dryRun ? '(dry-run) Would remove' : 'removed'} ${record.kind} '${record.name}' → ${record.dest}\n`)
+    } else {
+      withheld.push(outcome.removal)
+    }
+  }
+  if (!dryRun) await writeClientAssetLedger(stateRoot, next)
+  return { removed, withheld }
+}
+
+/**
+ * Take off the machine the client assets HypAware installed and this version's
+ * plugin set no longer contributes, then re-record what it does contribute.
+ *
+ * An in-place upgrade that retires a skill deletes the *source*; the copy under
+ * `~/.claude/skills` stays, still model-invocable, still carrying whatever bug
+ * the retirement was for (#726, #660). Copying is therefore only half of
+ * materialization, and the missing half belongs here rather than in a caller
+ * for the same reason the copy does: four call sites re-deriving what is safe
+ * to delete is four chances to get a recursive delete wrong
+ * (LLP 0138 #one-materializer).
+ *
+ * **Nothing is removed on the strength of "no plugin declares it".** A skill
+ * the user wrote is absent from the registries in exactly the same way a
+ * retired one is, so absence is evidence of nothing. Four conditions must all
+ * hold before a path is touched:
+ *
+ * 1. **HypAware's own record says it wrote that path** - the ledger, or (for
+ *    an org-driven attach, including one made by a version that predates the
+ *    ledger) the `installed_assets` list on the client's attach marker, which
+ *    is already the record `hyp detach` acts on (LLP 0138 #marker-undo).
+ * 2. **No client contributes the path any more** - it is retired, not merely
+ *    a copy that failed, and not a path another client is contributing to.
+ *    Destinations are physical paths and two clients can declare the same asset
+ *    directory (`claude` and `claude-desktop` both declare `.claude/skills`),
+ *    so the question is asked of every client's contributions, re-planned here
+ *    with `clients: 'all'`, and never of the scoped run's own share of them
+ *    (LLP 0288 #candidacy-is-asked-of-every-client).
+ * 3. **It is a direct child of one of this client's own asset directories** -
+ *    the exact shape the copy side writes, and no deeper - checked here and
+ *    again by {@link removeClientAssets}, whose input is persisted JSON either
+ *    way.
+ * 4. **The bytes are still the bytes we wrote**: the recorded digest matches
+ *    what is on disk *now*. No recorded digest is not a match. A mismatch, or
+ *    an absence, is the end of the evidence and the removal becomes a report
+ *    (LLP 0219 #edited-assets-are-not-ours) - as does a copy we could not read
+ *    at all, which is the one case that is neither a match nor a path that has
+ *    already gone (LLP 0219 #unreadable-is-not-absent).
+ *
+ * The client scope is taken from what *landed*, not from what was asked for. A
+ * run that copied nothing for a client - an empty registry, a `--client` filter
+ * matching no contribution - cannot tell "these assets were retired" from "this
+ * boot never saw them", and acting on the second reading would empty a working
+ * install. That guard covers *total* failure only, and the loader's failure
+ * mode is partial: `activatePlugins` catches per plugin and boot returns
+ * normally, so one plugin throwing leaves the client in scope with the failed
+ * plugin's assets missing from the plan and indistinguishable from retired
+ * ones. `failedPlugins` is how the caller says so, and it stands down the whole
+ * prune rather than trying to attribute candidates to plugins the ledger never
+ * recorded (LLP 0219 #incomplete-activation-prunes-nothing).
+ *
+ * @param {{
+ *   options: MaterializeClientAssetsOptions,
+ *   installed: ClientAssetInstall[],
+ * }} args
+ * @returns {Promise<{ pruned: ClientAssetRemoval[], withheld: ClientAssetRemoval[] }>}
+ * @ref LLP 0219#prune-on-materialize [implements]: the one materializer removes
+ *   what this version no longer contributes, gated on its own install record.
+ */
+async function reconcileClientAssetLedger({ options, installed }) {
+  const { descriptors, homeDir, stateRoot, dryRun = false, stdout, stderr } = options
+  /** @type {ClientAssetRemoval[]} */
+  const pruned = []
+  /** @type {ClientAssetRemoval[]} */
+  const withheld = []
+  if (!stateRoot || homeDir.length === 0) return { pruned, withheld }
+  const ledger = await readClientAssetLedger(stateRoot)
+  const scope = new Set(installed.map((item) => item.client))
+  const landed = new Set(installed.map((item) => item.dest))
+  // One plugin that threw in `activate()` is enough: this run's plan is missing
+  // whatever that plugin contributes, and no candidate carries the plugin that
+  // would let us exempt only those. Stand the prune down and keep every record.
+  // @ref LLP 0219#incomplete-activation-prunes-nothing [implements]: the coarse
+  //   rule is chosen over per-plugin attribution because this is a delete path
+  const activationIncomplete = (options.failedPlugins?.length ?? 0) > 0
+
+  // Every destination **any** client's contributions name, not only the ones
+  // this run was scoped to install. A dest is a physical path, two clients can
+  // share an asset directory, and every install path is client-scoped: the
+  // reconciler's attach always passes `clients: [client]`, and `--client` does
+  // the same by hand. Asked of the scoped run's plan, a path only
+  // `claude-desktop` contributes is absent from a `claude` run's plan and so
+  // reads as retired under `claude`'s record, and the prune deletes a copy
+  // another client is contributing right now. Nothing re-copies it: the other
+  // client's `assets_key` did not change, so `isCurrent()` still says its attach
+  // is fresh and the deleted asset stays gone.
+  //
+  // Re-planning with `clients: 'all'` asks the retirement question of the same
+  // live registries the scoped plan came from, so "retired" means "no client
+  // contributes this path any more" rather than "this pass was not asked to".
+  // Pure, no disk, and `stderr` is dropped because the scoped plan already
+  // wrote whatever warnings it had to write.
+  // @ref LLP 0288#candidacy-is-asked-of-every-client [implements]: retirement is
+  //   a fact about a destination, so it is asked of every contribution, never of
+  //   the share of the plan one scoped run happened to carry.
+  const keepAll = new Set(planClientAssets({ ...options, clients: 'all', stderr: undefined }).map(({ dest }) => dest))
+
+  // Every digest the ledger records **for a physical path**, whoever's record
+  // holds it. The ledger is keyed on `(client, dest)` because one path
+  // legitimately belongs to two clients at once, and that keying is what makes
+  // a record go stale: a `claude-desktop`-scoped run rewrites
+  // `~/.claude/skills/<name>` and re-records only its own digest, while the
+  // `claude` record keeps the digest of bytes that are no longer there. Asked
+  // of one record, the evidence gate below then reads HypAware's own rewrite as
+  // the user taking the file over, and reports it that way.
+  //
+  // Which client's record carries the proof is an artifact of the key, not a
+  // fact about the bytes: a digest recorded against a path says HypAware wrote
+  // those bytes there, and that is the whole of what the gate needs to know.
+  // So the digests are indexed by dest and asked as a set. This adds no
+  // evidence the ledger did not already hold and re-records none - a path with
+  // no recorded digest at all still fails the gate, exactly as before.
+  // @ref LLP 0284#digests-are-per-path [implements]: the evidence gate matches
+  //   the bytes against every digest recorded for that path, not only against
+  //   the record whose client this pass happens to be walking.
+  const recordedDigests = indexRecordedDigests(ledger)
+
+  // A client this run did not install for keeps every record it had: this pass
+  // learned nothing about it.
+  /** @type {ClientAssetLedgerRecord[]} */
+  const next = ledger.filter((record) => !scope.has(record.client))
+
+  for (const client of scope) {
+    const descriptor = descriptors.get(client)
+    if (!descriptor) continue
+    const baseDirs = clientAssetBaseDirs(descriptor, homeDir)
+    if (baseDirs.length === 0) continue
+
+    if (activationIncomplete) {
+      // Untouched, not dropped: the record is what a later complete boot will
+      // prune on, and losing it would leave the path unremovable forever. The
+      // dests this run did land are re-recorded with a fresh digest below.
+      for (const record of ledger) {
+        if (record.client !== client || landed.has(record.dest)) continue
+        next.push(record)
+      }
+    } else {
+      /** @type {Map<string, ClientAssetLedgerRecord | undefined>} */
+      const candidates = new Map()
+      for (const record of ledger) {
+        if (record.client !== client || keepAll.has(record.dest)) continue
+        // @ref LLP 0494#skills [implements]: retirement, like detach, never
+        //   removes a Hermes path outside the four consented skills
+        if (outsideConsent(record)) {
+          next.push(record)
+          continue
+        }
+        candidates.set(record.dest, record)
+      }
+      for (const dest of attachMarkerAssets(stateRoot, client)) {
+        if (keepAll.has(dest) || candidates.has(dest)) continue
+        candidates.set(dest, undefined)
+      }
+
+      for (const [dest, record] of candidates) {
+        const outcome = await pruneOneAsset({
+          dest,
+          record,
+          recorded: recordedDigests.get(dest) ?? EMPTY_DIGESTS,
+          client,
+          baseDirs,
+          dryRun,
+          stdout,
+          stderr,
+        })
+        if (outcome.carried) next.push(outcome.carried)
+        if (outcome.removal) (outcome.removed ? pruned : withheld).push(outcome.removal)
+      }
+
+      // A planned copy that failed is not retired and not re-recorded: keep the
+      // record of the copy that is still sitting there from last time, or the
+      // next run would read the path as never ours and leave it forever.
+      //
+      // Asked of **every client's** contributions, exactly as the candidate
+      // loop above is, and for the same reason: a dest is a physical path and
+      // two clients can share an asset directory. Asked of this client's share
+      // alone, a dest that moved to another client whose copy failed is neither
+      // a candidate (the plan contains it) nor carried (this client no longer
+      // plans it), so
+      // its record is dropped and the copy still sitting on disk becomes
+      // permanently unprunable and unreportable - the leave-behind LLP 0219
+      // exists to end. Two records for one dest under two clients is the price,
+      // and it is no price at all: candidates are keyed by dest per client and
+      // `fs.rm` is forced and idempotent.
+      for (const record of ledger) {
+        if (record.client !== client) continue
+        if (!keepAll.has(record.dest) || landed.has(record.dest)) continue
+        next.push(record)
+      }
+    }
+
+    for (const item of installed) {
+      if (item.client !== client) continue
+      const digest = dryRun ? undefined : await digestClientAsset(item.dest)
+      next.push({
+        kind: item.kind,
+        name: item.name,
+        client,
+        dest: item.dest,
+        ...(digest ? { digest } : {}),
+      })
+    }
+  }
+
+  if (dryRun) return { pruned, withheld }
+  await writeClientAssetLedger(stateRoot, next)
+  return { pruned, withheld }
+}
+
+/**
+ * Decide one stale candidate: what to carry forward in the ledger, and what to
+ * report. A `carried` record means "still on disk, still ours to name later";
+ * `undefined` means the path is gone, by our hand or someone else's. `removal`
+ * is the line for the caller's summary, with `removed` saying which of the two
+ * things happened to it; a candidate that was already absent produces neither,
+ * because there is nothing to tell anyone about.
+ *
+ * @param {{
+ *   dest: string,
+ *   record: ClientAssetLedgerRecord | undefined,
+ *   recorded: Set<string>,
+ *   client: string,
+ *   baseDirs: string[],
+ *   dryRun: boolean,
+ *   label?: string,
+ *   stdout?: { write(chunk: string): unknown },
+ *   stderr?: { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<{
+ *   carried: ClientAssetLedgerRecord | undefined,
+ *   removed: boolean,
+ *   removal?: ClientAssetRemoval,
+ * }>}
+ */
+async function pruneOneAsset({ dest, record, recorded, client, baseDirs, dryRun, label = 'retired', stdout, stderr }) {
+  const kind = record?.kind ?? (path.extname(dest) === '.md' ? 'agent' : 'skill')
+  const name = record?.name ?? path.basename(dest, kind === 'agent' ? '.md' : '')
+  /** @type {ClientAssetRemoval} */
+  const removal = { kind, name, client, dest, dryRun }
+
+  // A recorded path outside this client's directories is not this run's to act
+  // on. Kept verbatim rather than dropped: the record is the only thing naming
+  // it, and a home directory that moved back would make it actionable again.
+  //
+  // Said out loud, because this branch returns before {@link removeClientAssets}
+  // and so fires none of its refusal reporting. A record naming `$HOME` or `/`
+  // is the loudest signal available that the install record is corrupt, and a
+  // silent refusal throws that signal away.
+  if (!isRemovableAsset(dest, baseDirs)) {
+    stderr?.write(
+      `warning: recorded ${kind} '${name}' at ${dest} resolves outside ${client}'s asset ` +
+        'directories, or deeper into them than HypAware writes; refusing to remove it - ' +
+        'check the install record\n'
+    )
+    getLogger('client-assets').warn('client_assets.prune_refused', {
+      [Attr.COMPONENT]: 'client-assets',
+      [Attr.OPERATION]: 'client_assets.prune',
+      hyp_client: client,
+      [Attr.STATUS]: 'ok',
+      [Attr.ERROR_KIND]: 'outside_asset_dirs',
+      detail: dest,
+    })
+    return { carried: record, removed: false, removal }
+  }
+
+  // Belt and braces over the digest domains. `kind` says what we wrote there (a
+  // skill is a directory, a subagent a single file), and an object of the other
+  // shape is by definition not the thing the record describes, whatever the
+  // hashes say. The digest already separates the two spaces; this refuses the
+  // question a second time, from the one field the record carries that the
+  // filesystem cannot forge.
+  // @ref LLP 0219#edited-assets-are-not-ours [implements]: an object whose shape
+  //   contradicts the record is not the asset we installed, so it is reported.
+  const shape = await statShape(dest)
+  if (record && shape && shape !== (record.kind === 'agent' ? 'file' : 'dir')) {
+    stderr?.write(
+      `warning: ${label} ${kind} '${name}' at ${dest} is a ${shape === 'dir' ? 'directory' : 'file'} where ` +
+        `HypAware installed a ${record.kind === 'agent' ? 'file' : 'directory'}; left in place - ` +
+        'remove it by hand if you no longer want it\n'
+    )
+    getLogger('client-assets').warn('client_assets.prune_withheld', {
+      [Attr.COMPONENT]: 'client-assets',
+      [Attr.OPERATION]: 'client_assets.prune',
+      hyp_client: client,
+      [Attr.STATUS]: 'ok',
+      [Attr.ERROR_KIND]: 'asset_shape_changed',
+      detail: dest,
+    })
+    return { carried: record, removed: false, removal }
+  }
+
+  const { digest, missing } = await inspectClientAsset(dest)
+  // Already gone (removed by hand, or by an earlier pass whose ledger write
+  // lost the race). Nothing to report and nothing left to record.
+  if (missing) return { carried: undefined, removed: false }
+
+  // Still there, and we could not read it: an `EACCES` on a file inside the
+  // installed skill, a device error, a directory whose mode changed. Dropping
+  // the record here (which is what reading "no digest" as "already gone" does)
+  // takes away the only thing naming the path, and the copy becomes both
+  // unprunable and unreportable forever - the leave-behind LLP 0219 exists to
+  // end. So the record is carried **verbatim**: no digest is taken of what we
+  // could not read, which keeps a later run's removal gated on the digest
+  // recorded when we wrote the bytes and on nothing this run inferred.
+  // @ref LLP 0226#unreadable-is-not-absent [implements]: unreadable is reported
+  //   and kept, never mistaken for absent.
+  if (!digest) {
+    stderr?.write(
+      `warning: ${label} ${kind} '${name}' at ${dest} could not be read to check whether the bytes are ` +
+        'still ours; left in place - check its permissions\n'
+    )
+    getLogger('client-assets').warn('client_assets.prune_withheld', {
+      [Attr.COMPONENT]: 'client-assets',
+      [Attr.OPERATION]: 'client_assets.prune',
+      hyp_client: client,
+      [Attr.STATUS]: 'ok',
+      [Attr.ERROR_KIND]: 'digest_unreadable',
+      detail: dest,
+    })
+    return { carried: record, removed: false, removal }
+  }
+
+  // The user's own edit outranks the retirement. Overwriting a *contributed*
+  // asset's edits is a documented part of `hyp skills install` (the copy is
+  // idempotent replace, and the source is right there to re-copy from); a
+  // retired asset has no source left, so a delete here is unrecoverable. Name
+  // it and leave it: the file stays visible, and the record stays, so the same
+  // report reappears until the user acts on it.
+  //
+  // A candidate no digest was ever recorded for takes the same exit, and that is
+  // the whole of the marker's demotion from a deletion source to a reporting one.
+  // The marker records paths, never bytes, and `installed_assets` is unioned
+  // across every rewrite and never shrinks, so a path that appears there once
+  // is a candidate forever - including after HypAware itself removed it and the
+  // user later authored something of their own under that name. Absence of
+  // evidence is not evidence, so it may not read as a match.
+  // @ref LLP 0219#edited-assets-are-not-ours [implements]: the removal proceeds
+  //   only on a recorded digest that still matches; anything else is a report.
+  if (!recorded.has(digest)) {
+    const reason = recorded.size > 0
+      ? 'changed since HypAware installed it'
+      : 'has no recorded content digest, so nothing proves the bytes are ours'
+    stderr?.write(
+      `warning: ${label} ${kind} '${name}' at ${dest} ${reason}; ` +
+        'left in place - remove it by hand if you no longer want it\n'
+    )
+    getLogger('client-assets').warn('client_assets.prune_withheld', {
+      [Attr.COMPONENT]: 'client-assets',
+      [Attr.OPERATION]: 'client_assets.prune',
+      hyp_client: client,
+      [Attr.STATUS]: 'ok',
+      [Attr.ERROR_KIND]: recorded.size > 0 ? 'asset_modified' : 'digest_unrecorded',
+      detail: dest,
+    })
+    return { carried: record, removed: false, removal }
+  }
+
+  if (dryRun) {
+    stdout?.write(`(dry-run) Would remove ${label} ${kind} '${name}' → ${dest}\n`)
+    return { carried: record, removed: true, removal }
+  }
+
+  const { removed, failed } = await removeClientAssets([dest], baseDirs)
+  if (removed.length > 0) {
+    stdout?.write(`removed ${label} ${kind} '${name}' → ${dest}\n`)
+    getLogger('client-assets').info('client_assets.pruned', {
+      [Attr.COMPONENT]: 'client-assets',
+      [Attr.OPERATION]: 'client_assets.prune',
+      hyp_client: client,
+      [Attr.STATUS]: 'ok',
+      detail: dest,
+    })
+    return { carried: undefined, removed: true, removal }
+  }
+  // Keep the record for a removal that can still succeed, exactly as the detach
+  // path keeps its marker for one (LLP 0138 #refusal-is-not-failure). Here even
+  // a refusal is worth keeping: it costs nothing but a line, and this ledger is
+  // not a `done` marker that a later attach short-circuits on.
+  for (const failure of failed) {
+    stderr?.write(`warning: ${label} ${kind} '${name}' at ${failure.dest} could not be removed: ${failure.reason}\n`)
+  }
+  return { carried: record, removed: false, removal }
+}
+
+/**
+ * Whether `dest` is a directory, a file, or something else (a symlink to
+ * neither, a socket). `undefined` when it cannot be stat'd at all, which the
+ * caller must not read as either shape.
+ *
+ * @param {string} dest
+ * @returns {Promise<'dir' | 'file' | 'other' | undefined>}
+ */
+async function statShape(dest) {
+  try {
+    const stat = await fs.stat(dest)
+    if (stat.isDirectory()) return 'dir'
+    if (stat.isFile()) return 'file'
+    return 'other'
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The destinations an org-driven attach recorded for `client`, or none.
+ *
+ * The second evidence source, and the only one that reaches back before this
+ * ledger existed: the attach marker has recorded `installed_assets` since
+ * LLP 0138 and unions them across every rewrite. It names *paths*, never bytes,
+ * so what it produces is a **reporting** candidate and never a deletion: the
+ * digest gate in {@link pruneOneAsset} has nothing to match against and stops
+ * every one of these at the warning. Detach acts on the same list destructively
+ * because a human asked for exactly that, in one command, now; a prune runs
+ * unattended on every attach, forever, over a list that never shrinks.
+ *
+ * Never throws: an unreadable marker store contributes no candidates.
+ *
+ * @param {string} stateRoot
+ * @param {string} client
+ * @returns {string[]}
+ * @ref LLP 0138#marker-undo [constrained-by]: `installed_assets` never shrinks,
+ *   so a path it names once is a candidate on every later run - which is why
+ *   this source reports and does not delete.
+ */
+function attachMarkerAssets(stateRoot, client) {
+  try {
+    return readInstalledAssets(readClientActionStatus({ stateRoot }).byKind.attach?.[client])
+  } catch {
+    return []
+  }
+}
+
 /* ------------------------------- Internals ------------------------------- */
+
+/**
+ * The evidence about a path no digest was ever recorded for. Shared and never
+ * added to: {@link pruneOneAsset} only ever asks it questions.
+ *
+ * @type {Set<string>}
+ */
+const EMPTY_DIGESTS = new Set()
 
 /** Why a removal is refused when the client has no asset directories at all. */
 const NO_BASE_DIRS_REASON =
   'no asset directories resolved for this client (no home directory, or none declared); refusing to remove'
 
 /**
- * True when `dest` sits strictly beneath one of `baseDirs`. Strictly: a dest
- * equal to a base is the whole skills (or agents) directory, which no write
- * this module makes can produce, so treating it as removable would only ever
- * honour a corrupted marker.
+ * True when `dest` is a **direct child** of one of `baseDirs`. Strictly a
+ * child: a dest equal to a base is the whole skills (or agents) directory,
+ * which no write this module makes can produce, so treating it as removable
+ * would only ever honour a corrupted record.
+ *
+ * Direct, because every write this module makes is `<base>/<name>` or
+ * `<base>/<name>.md` over a name that registration has already forced to a
+ * single safe segment (`isSafeContributionName`). A record naming anything
+ * deeper is therefore a path we did not write, and admitting it lets one entry -
+ * `<skills>/<a-skill-this-run-is-installing>/subdir` - take a subtree out of a
+ * live asset on no authority but the record's. The removal is recursive, so the
+ * predicate has to be as narrow as the writer.
+ *
+ * The equality term is kept rather than folded into the `dirname` comparison:
+ * `path.dirname('/')` is `'/'`, so a degenerate base would otherwise match
+ * itself, and this predicate is only ever allowed to shrink.
+ *
+ * `isWithinDir` is kept as a conjunct alongside the `dirname` check, not
+ * dropped in its favour: `isWithinDir` refuses on a **prefix** test
+ * (`rel.startsWith('..')`), so a basename beginning with `..`
+ * (`<base>/..stash`) is refused by it even though `path.dirname` alone would
+ * admit it as a direct child. Without the conjunct, a `..`-prefixed
+ * user-authored directory name that the old predicate refused becomes
+ * removable, which is a widening, not the narrowing this predicate exists to
+ * be.
  *
  * @param {string} dest
  * @param {string[]} baseDirs
  * @returns {boolean}
+ * @ref LLP 0226#only-direct-children [implements]: the delete side admits
+ *   exactly the shape the copy side writes, and nothing beneath it, without
+ *   widening what the prefix-based containment check already refused.
  */
 function isRemovableAsset(dest, baseDirs) {
   const resolved = path.resolve(dest)
-  return baseDirs.some(
-    (baseDir) => resolved !== path.resolve(baseDir) && isWithinDir(resolved, baseDir)
-  )
+  return baseDirs.some((baseDir) => {
+    const base = path.resolve(baseDir)
+    return resolved !== base && path.dirname(resolved) === base && isWithinDir(resolved, base)
+  })
+}
+
+/**
+ * Every digest the ledger records, indexed by physical path (LLP 0284
+ * #digests-are-per-path).
+ *
+ * @param {ClientAssetLedgerRecord[]} ledger
+ * @returns {Map<string, Set<string>>}
+ */
+function indexRecordedDigests(ledger) {
+  /** @type {Map<string, Set<string>>} */
+  const byDest = new Map()
+  for (const record of ledger) {
+    if (!record.digest) continue
+    const known = byDest.get(record.dest)
+    if (known) known.add(record.digest)
+    else byDest.set(record.dest, new Set([record.digest]))
+  }
+  return byDest
+}
+
+/**
+ * Whether a copy may land on `dest`: nothing is there yet, or what is there
+ * is bytes HypAware recorded writing to that path. An unreadable path is
+ * neither, so it is left alone.
+ *
+ * @param {string} dest
+ * @param {Map<string, Set<string>>} recorded
+ * @returns {Promise<boolean>}
+ */
+async function mayReplaceAsset(dest, recorded) {
+  const { digest, missing } = await inspectClientAsset(dest)
+  if (missing) return true
+  return digest !== undefined && (recorded.get(dest)?.has(digest) ?? false)
 }
 
 /**
@@ -292,10 +975,10 @@ function resolveAssets(skills, agents) {
   /** @type {ResolvedClientAsset[]} */
   const assets = []
   for (const skill of skills?.list() ?? []) {
-    assets.push({ kind: 'skill', name: skill.name, clients: skill.clients, source: skill.sourceDir })
+    assets.push({ kind: 'skill', name: skill.name, clients: skill.clients, source: skill.sourceDir, plugin: skill.plugin })
   }
   for (const agent of agents?.list() ?? []) {
-    assets.push({ kind: 'agent', name: agent.name, clients: agent.clients, source: agent.sourceFile })
+    assets.push({ kind: 'agent', name: agent.name, clients: agent.clients, source: agent.sourceFile, plugin: agent.plugin })
   }
   return assets
 }

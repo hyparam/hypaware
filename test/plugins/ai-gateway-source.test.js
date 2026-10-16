@@ -2,14 +2,30 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import fs from 'node:fs'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { setGatewayProcessTransport } from '../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
+import { bootKernel } from '../../src/core/runtime/boot.js'
+import { activate } from '../../hypaware-core/plugins-workspace/ai-gateway/src/index.js'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
-import { createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { createGatewayState, createAiGatewayApi } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
+import { ollamaNativeRoute } from '../../hypaware-core/plugins-workspace/ollama/src/setup.js'
 import { createStartSource } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
+import { composePickerConfig } from '../../src/core/cli/walkthrough.js'
+import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+import { createOllamaExchangeProjector } from '../../hypaware-core/plugins-workspace/ollama/src/projector.js'
 
-// startProxy requires at least one configured upstream even when a test only
-// exercises the control path (never proxies through it), so the R3 tests
-// below carry this unreachable-but-well-formed one.
+/** @import { LogRecord } from '../../src/core/observability/types.js' */
+
+// A source with an empty routing table binds no listener at all, so a test
+// that needs a live port must give it something to route even when it only
+// exercises the control path (and never proxies through it). Hence this
+// unreachable-but-well-formed upstream on the R3 tests below.
 const ARBITRARY_UPSTREAM = { name: 'unused', base_url: 'http://127.0.0.1:1', path_prefix: '/' }
 
 test('source starts with only adapter-registered upstream presets', async () => {
@@ -149,10 +165,274 @@ test('restart-drops-state: a fresh GatewayState never carries a previous run\'s 
   }
 })
 
-/** @param {Record<string, unknown>} config */
-function fakeCtx(config) {
+// ---------------------------------------------------------------------------
+// An upstream-less gateway is a valid config, not a misconfiguration.
+// `@hypaware/hermes` reads Hermes's own state.db and is "never modified,
+// configured, or proxied" (LLP 0119), but the shared
+// `ai_gateway.projected_exchange` materializer is a hard `requires.plugins`
+// dependency (LLP 0120), so its picker row composes the gateway plugin while
+// contributing no `gateway_upstream`. Picked alone that wrote a gateway slice
+// with `upstreams: []` whose source start threw, i.e. a reachable first-run
+// choice that produced a broken install rather than a working one (#649).
+// ---------------------------------------------------------------------------
+
+/** @param {string[]} sources */
+async function composePicked(sources) {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  return composePickerConfig({
+    sources: /** @type {any} */ (sources),
+    descriptors: catalog.pickerDescriptors,
+    exportChoice: 'local-parquet',
+    retentionDays: 30,
+    hypHome: '/home/tester/.hyp',
+  })
+}
+
+// @ref LLP 0120#consequences [tests]: hermes composes the gateway plugin for the materializer alone, so the config a hermes-only picker run writes must yield a source that starts
+test('the gateway source a hermes-only picker run composes starts, idle', async () => {
+  const config = await composePicked(['hermes'])
+  const gateway = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
+  assert.ok(gateway, 'hermes composes the gateway plugin: its materializer is a hard dependency')
+  assert.deepEqual(gateway.config?.upstreams, [], 'and hermes contributes no upstream of its own')
+
+  // Before the fix this rejected with
+  // "ai-gateway: at least one upstream must be configured before start".
+  const source = await createStartSource(createGatewayState())(fakeCtx(/** @type {any} */ (gateway.config)))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.state, 'ready', 'an idle gateway is not an error state')
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, false, 'no listener was bound')
+    assert.equal(status.details.port, undefined, 'and no port is advertised for one')
+    assert.match(String(status.message ?? ''), /no upstreams/, 'status says why it is idle')
+  } finally {
+    await source.stop()
+  }
+})
+
+// Idling must be recoverable, not a dead end: the daemon reloads the source
+// in place when config changes, so adding an upstream has to bind a listener
+// without a restart.
+test('an idle gateway binds once a reload brings an upstream', async () => {
+  // Idle source first, echo upstream second: if starting it ever regresses to
+  // throwing, this fails without leaking a listening server into the run.
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  const upstream = await startEchoUpstream('reloaded-ok')
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    await source.reload(fakeCtx({
+      listen: '127.0.0.1:0',
+      upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+    }))
+    const status = await source.status()
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, undefined, 'the reloaded source is no longer idle')
+    const body = await fetchText(`http://${status.details.host}:${status.details.port}/anything`)
+    assert.equal(body.status, 200)
+    assert.equal(body.text, 'reloaded-ok')
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// The reverse direction, pinned deliberately: a reload that removes every
+// upstream tears a live listener down and idles, which silently ends capture
+// for clients already attached to that port. It is the same trade #649 made
+// on the way in (an upstream-less gateway is a config, not a failure), and it
+// is why core warns when the config named upstreams and none survived.
+test('a reload that removes every upstream tears the listener down and idles', async () => {
+  const upstream = await startEchoUpstream('still-here')
+  const source = await createStartSource(createGatewayState())(fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+  }))
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    const bound = await source.status()
+    assert.ok(bound.details?.port, 'the source bound a port before the reload')
+    const port = bound.details.port
+
+    // No throw: dropping to zero upstreams is the same valid state a
+    // hermes-only install boots into.
+    assert.equal(await source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] })), undefined)
+
+    const idle = await source.status()
+    assert.equal(idle.state, 'ready', 'idling after a reload is not an error state')
+    assert.equal(idle.details?.listening, false, 'the listener is gone')
+    assert.equal(idle.details?.port, undefined, 'and no port is advertised for it')
+    assert.match(String(idle.message ?? ''), /no upstreams/)
+    // The teardown is real, not just unadvertised: an attached client pointed
+    // at the old port now gets a connection error, with nothing proxied.
+    await assert.rejects(fetchText(`http://127.0.0.1:${port}/anything`))
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// `details.upstreams` is what core's `gateway_idle_no_upstreams` diagnostic
+// reads to tell "configured with nothing" from "configured and dropped", so it
+// has to describe the config in force, not the one the source booted with.
+test('status() reports the reloaded config upstreams, not the boot-time ones', async () => {
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  try {
+    assert.ok(source.reload && source.status, 'source exposes reload() and status()')
+    assert.deepEqual((await source.status()).details?.upstreams, [])
+    // `url` where `base_url` was meant: `compileUpstreams` drops the entry, so
+    // the source stays idle, but the name the user wrote must still show up.
+    await source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'anthropic', url: 'https://x' }] }))
+    const status = await source.status()
+    assert.equal(status.details?.listening, false, 'a dropped upstream leaves the source idle')
+    assert.deepEqual(status.details?.upstreams, ['anthropic'], 'and status names what the config asked for')
+    assert.equal(status.details?.upstreams_configured, 1, 'and counts it')
+  } finally {
+    await source.stop()
+  }
+})
+
+// `name` is the other key `compileUpstreams` drops an entry over, and an entry
+// with no name puts nothing in `details.upstreams` at all. Without the count
+// beside it, this config is indistinguishable from hermes-only and core cannot
+// warn about it.
+test('status() counts a configured upstream it cannot name', async () => {
+  const state = createGatewayState()
+  const source = await createStartSource(state)(fakeCtx({
+    listen: '127.0.0.1:0',
+    // No `name`: the v1 config diagnoser is satisfied by `provider`, the
+    // compiler drops it, and the source idles.
+    upstreams: [{ provider: 'anthropic', base_url: 'https://api.anthropic.com' }],
+  }))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.details?.listening, false, 'nothing compiled, so nothing is bound')
+    assert.deepEqual(status.details?.upstreams, [], 'there is no name to publish')
+    assert.equal(status.details?.upstreams_configured, 1, 'but the config did ask for one upstream')
+  } finally {
+    await source.stop()
+  }
+})
+
+// The hermes-only shape must stay distinguishable from the above: a config
+// that asked for no upstream counts zero, which is what keeps `hyp status`
+// quiet and healthy for it.
+test('status() counts zero upstreams for a config that named none', async () => {
+  const source = await createStartSource(createGatewayState())(fakeCtx({ listen: '127.0.0.1:0', upstreams: [] }))
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.equal(status.details?.upstreams_configured, 0)
+  } finally {
+    await source.stop()
+  }
+})
+
+// Two configs reach the same empty routing table and they are not the same
+// event, so they must not log at the same volume: one is what hermes asked
+// for, the other lost every upstream it named.
+test('the idle log is a warning only when configured upstreams were dropped', async () => {
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const hermesOnly = await createStartSource(createGatewayState())(fakeCtx({ upstreams: [] }, logged))
+  await hermesOnly.stop()
+  const idleLog = logged.find((l) => l.event === 'aigw.idle_no_upstreams')
+  assert.ok(idleLog, 'the idle boot is logged')
+  assert.equal(idleLog.level, 'info', 'a config that wanted no upstream is not a problem')
+
+  logged.length = 0
+  const dropped = await createStartSource(createGatewayState())(fakeCtx({
+    upstreams: [{ name: 'anthropic', url: 'https://api.anthropic.com' }],
+  }, logged))
+  await dropped.stop()
+  const warned = logged.find((l) => l.event === 'aigw.idle_no_upstreams')
+  assert.ok(warned, 'the idle boot is logged')
+  assert.equal(warned.level, 'warn', 'losing every configured upstream is a problem')
+  assert.equal(warned.attrs.configured_upstreams, 1)
+  assert.deepEqual(warned.attrs.configured_upstream_names, ['anthropic'])
+})
+
+// The partial loss is the quiet half of the same fault: the gateway binds, so
+// nothing about the boot looks wrong, and the operator's first move when one
+// provider's rows never arrive is to read the daemon log. It has to say so
+// there, not only in `hyp status`.
+// @ref LLP 0195#visible-when-unintended [tests]: an upstream dropped at compile is reported even when the routing table is not empty
+test('a gateway that lost one of two upstreams warns at boot and reports the drop', async () => {
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const source = await createStartSource(createGatewayState())(fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [
+      { name: 'anthropic', base_url: 'http://127.0.0.1:1', path_prefix: '/anthropic' },
+      // `url` where `base_url` was meant: dropped, silently, per entry.
+      { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+    ],
+  }, logged))
+  try {
+    const warned = logged.find((l) => l.event === 'aigw.upstreams_dropped')
+    assert.ok(warned, 'the drop is logged even though the proxy bound')
+    assert.equal(warned.level, 'warn')
+    assert.equal(warned.attrs.configured_upstreams, 2)
+    assert.equal(warned.attrs.dropped_upstreams, 1)
+    assert.deepEqual(warned.attrs.dropped_upstream_names, ['openai'])
+    assert.equal(warned.attrs.routed_upstreams, 1)
+
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.ok(status.details, 'status carries details')
+    assert.equal(status.details.listening, undefined, 'the gateway is bound, not idle')
+    assert.equal(status.details.upstreams_configured, 2)
+    assert.equal(status.details.upstreams_dropped, 1, 'core reads the loss off this')
+    assert.deepEqual(status.details.upstreams_dropped_names, ['openai'])
+  } finally {
+    await source.stop()
+  }
+})
+
+test('a gateway whose upstreams all compile reports no drop and logs nothing', async () => {
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const source = await createStartSource(createGatewayState())(fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'anthropic', base_url: 'http://127.0.0.1:1', path_prefix: '/anthropic' }],
+  }, logged))
+  try {
+    assert.equal(logged.find((l) => l.event === 'aigw.upstreams_dropped'), undefined)
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.ok(status.details)
+    assert.equal(status.details.upstreams_dropped, 0, 'reported as 0, not omitted')
+    assert.equal(
+      status.details.upstreams_dropped_names,
+      undefined,
+      'and no empty name list riding along in every healthy status file',
+    )
+  } finally {
+    await source.stop()
+  }
+})
+
+/**
+ * @param {Record<string, unknown>} config
+ * @param {{ level: string, event: string, attrs: any }[]} [logged]
+ */
+let fakeCtxSequence = 0
+
+function fakeCtx(config, logged) {
+  /** @param {string} level */
+  const record = (level) => (/** @type {string} */ event, /** @type {any} */ attrs) => {
+    logged?.push({ level, event, attrs })
+  }
   return /** @type {any} */ ({
     config,
+    // Never inspect the developer machine's real CA. A real proxy attach there
+    // correctly turns an otherwise idle source into a tunnel-only listener.
+    env: {
+      HOME: path.join(os.tmpdir(), `hyp-ai-gateway-source-${process.pid}-${fakeCtxSequence}`),
+      HYP_HOME: path.join(os.tmpdir(), `hyp-ai-gateway-source-${process.pid}-${fakeCtxSequence++}`),
+    },
     storage: {
       cacheTablePath(dataset, partitions) {
         return [dataset, ...(partitions ?? [])].join('/')
@@ -160,20 +440,20 @@ function fakeCtx(config) {
       async appendRows() {},
     },
     log: {
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
+      debug: record('debug'),
+      info: record('info'),
+      warn: record('warn'),
+      error: record('error'),
     },
   })
 }
 
-/** @param {string} body */
+/** @param {string | (() => string)} body */
 async function startEchoUpstream(body) {
   const server = http.createServer((req, res) => {
     req.resume()
     res.writeHead(200, { 'content-type': 'text/plain' })
-    res.end(body)
+    res.end(typeof body === 'function' ? body() : body)
   })
   await new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -194,3 +474,355 @@ async function fetchText(url) {
   const res = await fetch(url)
   return { status: res.status, text: await res.text() }
 }
+
+/**
+ * The rollback added for issue #879 has to stay behind the append. The
+ * listener's catch also covers the bookkeeping that runs AFTER the write
+ * (entrypoint activity, counters, the `aigw.exchange` log), and this path
+ * has no `part_id` dedupe in front of `appendRows`, so un-marking messages
+ * that landed makes the conversation's next replay commit a second copy of
+ * every one of them.
+ */
+test('a failure after the append does not roll the dedupe back onto rows that landed', async () => {
+  const upstream = await startEchoUpstream('ok')
+  const state = createGatewayState()
+  state.projectors.push(/** @type {any} */ ({
+    name: 'stub',
+    match: () => true,
+    project: () => ({
+      provider: 'anthropic',
+      session_id: 'sess-post-append',
+      conversation_id: 'conv-post-append',
+      client_name: 'claude',
+      conversation_source: 'claude_code',
+      messages: [
+        { role: 'user', content: 'hello', message_id: 'uuid-user', provider_uuid: 'uuid-user' },
+        { role: 'assistant', content: 'hi', message_id: 'uuid-asst', provider_uuid: 'uuid-asst' },
+      ],
+    }),
+    _seq: 0,
+  }))
+
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  const ctx = /** @type {any} */ ({
+    env: { HOME: path.join(os.tmpdir(), 'post-append-fixture'), HYP_HOME: path.join(os.tmpdir(), 'post-append-fixture') },
+    config: {
+      listen: '127.0.0.1:0',
+      upstreams: [{ name: 'anthropic', base_url: upstream.url, path_prefix: '/v1/messages', provider: 'anthropic' }],
+    },
+    storage: {
+      /** @param {string} dataset @param {string[]} [partitions] */
+      cacheTablePath: (dataset, partitions) => [dataset, ...(partitions ?? [])].join('/'),
+      /** @param {string} _p @param {unknown} _c @param {Record<string, unknown>[]} rows */
+      async appendRows(_p, _c, rows) { appended.push(...rows) },
+    },
+    log: {
+      debug() {},
+      // Stands in for anything after the append that can throw.
+      /** @param {string} event */
+      info(event) { if (event === 'aigw.exchange') throw new Error('log sink exploded') },
+      warn() {},
+      error() {},
+    },
+  })
+
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status, 'source exposes status()')
+    const status = await source.status()
+    assert.ok(status.details, 'status carries details')
+    const url = `http://${status.details.host}:${status.details.port}/v1/messages`
+    const send = () => fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }] }),
+    }).then((r) => r.text())
+
+    await send()
+    await settleFinalizers()
+    assert.deepEqual(appended.map((r) => r.part_id), ['uuid-user#0', 'uuid-asst#0'])
+
+    // The conversation replays its earlier messages on the next exchange.
+    await send()
+    await settleFinalizers()
+    assert.deepEqual(
+      appended.map((r) => r.part_id),
+      ['uuid-user#0', 'uuid-asst#0'],
+      'the replay writes nothing: the rows that landed are still marked seen',
+    )
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+/**
+ * The proxy answers the client before its exchange finalizer resolves, so a
+ * test that asserts on written rows has to let the microtask/IO queue drain.
+ */
+async function settleFinalizers() {
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve))
+}
+
+// @ref LLP 0469#exchange-scope [tests]: source append failure cannot retain snapshot identity or trigger history reads
+test('source appends independent exchange snapshots and reports append failure without seeding', async (t) => {
+  /** @type {LogRecord[]} */
+  const sourceLogs = []
+  // Append failures use getLogger('sources'), independently of ctx.log.
+  const loggerProvider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (records) => { sourceLogs.push(...records) } }],
+  })
+  logs.setGlobalLoggerProvider(loggerProvider)
+  t.after(() => loggerProvider.shutdown())
+  const upstream = await startEchoUpstream('snapshot-ok')
+  const state = createGatewayState()
+  state.projectors.push({
+    name: 'snapshot', _seq: 0, match: () => true,
+    project: (input) => ({
+      provider: 'native', session_id: input.exchange_id, request_id: input.exchange_id,
+      messages: [0, 1].map((index) => ({
+        role: index === 0 ? 'user' : 'assistant', content: 'same text',
+        message_id: `${input.exchange_id}:${index}`,
+        previous_message_id: index === 0 ? [] : [`${input.exchange_id}:0`],
+      })),
+    }),
+  })
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const ctx = fakeCtx({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'echo', base_url: upstream.url, path_prefix: '/' }],
+  }, logged)
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  let appends = 0
+  let discoveries = 0
+  ctx.storage.discoverCachePartitions = async () => { discoveries++; return [] }
+  ctx.storage.readRows = async function* () { throw new Error('unexpected seed read') }
+  ctx.storage.appendRows = async (_path, _columns, rows) => {
+    if (++appends === 1) throw new Error('snapshot append failed')
+    appended.push(...rows)
+  }
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status)
+    const status = await source.status()
+    assert.ok(status.details)
+    const url = `http://${status.details.host}:${status.details.port}/snapshot`
+    for (let i = 0; i < 20; i++) {
+      const response = await fetch(url, { method: 'POST', body: 'same request' })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'snapshot-ok', 'append failure never changes upstream traffic')
+      await settleFinalizers()
+    }
+    assert.equal(appends, 20, 'all finalized exchanges reach append, including the failed first exchange')
+    assert.equal(appended.length, 38)
+    assert.equal(new Set(appended.map((row) => row.session_id)).size, 19)
+    assert.equal(new Set(appended.map((row) => row.part_id)).size, 38)
+    for (let i = 0; i < appended.length; i += 2) {
+      assert.deepEqual(appended[i].previous_message_id, [])
+      assert.deepEqual(appended[i + 1].previous_message_id, [appended[i].message_id])
+      assert.equal(appended[i].request_id, appended[i + 1].request_id)
+    }
+    assert.equal(discoveries, 0, 'success and append failure both bypass committed history')
+    const failures = sourceLogs.filter((record) => record.body === 'aigw.exchange_write_failed')
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].loggerName, 'hypaware.sources')
+    assert.equal(failures[0].severityText, 'ERROR')
+    assert.deepEqual(failures[0].attributes, {
+      hyp_component: 'sources', hyp_plugin: '@hypaware/ai-gateway',
+      upstream: 'echo', error: 'snapshot append failed',
+      ...(process.env.DEV_RUN_ID ? { dev_run_id: process.env.DEV_RUN_ID } : {}),
+    }, 'failure diagnostic carries only component/plugin/upstream/error and optional run ID, no wire payload')
+    assert.equal(logged.filter((entry) => entry.event === 'aigw.exchange').length, 19)
+  } finally {
+    await source.stop()
+    await upstream.close()
+  }
+})
+
+// @ref LLP 0475#t1 [tests]: actual adapter admission and append failure keep forwarded native bytes intact without history reads
+test('Ollama generate source omits media and survives failed append; controls/unsupported captures do not append', async () => {
+  let wire = JSON.stringify({ model: 'fixture', response: 'native answer', done: true, done_reason: 'stop', eval_count: 2 })
+  const upstream = await startEchoUpstream(() => wire)
+  const state = createGatewayState()
+  state.projectors.push({ ...createOllamaExchangeProjector(), _seq: 0 })
+  /** @type {{ level: string, event: string, attrs: any }[]} */
+  const logged = []
+  const ctx = fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', provider: 'ollama', base_url: upstream.url, path_prefix: '/api/generate' }] }, logged)
+  const recordingHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ollama-source-policy-'))
+  ctx.env.HYP_CONFIG = path.join(recordingHome, 'config.json')
+  fs.writeFileSync(ctx.env.HYP_CONFIG, JSON.stringify({ plugins: [{ name: '@hypaware/ollama' }] }))
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  let attempts = 0
+  ctx.storage.discoverCachePartitions = async () => { throw new Error('unexpected history discovery') }
+  ctx.storage.readRows = async function* () { throw new Error('unexpected history read') }
+  ctx.storage.appendRows = async (_path, _columns, rows) => {
+    if (++attempts === 1) throw new Error('fixture append failure')
+    appended.push(...rows)
+  }
+  const source = await createStartSource(state)(ctx)
+  try {
+    assert.ok(source.status)
+    const status = await source.status()
+    assert.ok(status.details)
+    const url = `http://${status.details.host}:${status.details.port}/api/generate`
+    for (let index = 0; index < 21; index++) {
+      const response = await fetch(url, { method: 'POST', headers: { 'x-hyp-dev-run-id': 'ollama-source-t1' }, body: JSON.stringify({ model: 'fixture', prompt: 'same supplied prompt', images: ['SECRET_MEDIA'], stream: false, think: index === 20 }) })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), wire)
+      await settleFinalizers()
+    }
+    assert.equal(attempts, 20)
+    assert.equal(appended.length, 57)
+    assert.equal(new Set(appended.map(row => row.session_id)).size, 19)
+    assert.equal(new Set(appended.map(row => row.part_id)).size, 57)
+    for (let index = 0; index < appended.length; index += 3) {
+      assert.deepEqual(appended[index].previous_message_id, [])
+      assert.deepEqual(appended[index + 2].previous_message_id, [appended[index].message_id])
+      assert.equal(appended[index + 1].part_type, 'image')
+      assert.equal(appended[index + 1].content_text, undefined)
+      assert.equal(/** @type {any} */ (appended[index + 2].attributes).usage.output_tokens, 2)
+      assert.equal(/** @type {any} */ (appended[index].attributes).dev_run_id, 'ollama-source-t1')
+    }
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_projected').length, 20)
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_dropped').length, 1)
+    wire = JSON.stringify({ response: '', done: true, done_reason: 'load' })
+    const control = await fetch(url, { method: 'POST', body: JSON.stringify({ model: 'fixture', prompt: '', think: false }) })
+    assert.equal(await control.text(), wire)
+    await settleFinalizers()
+    assert.equal(attempts, 20, 'load-only traffic never attempts append')
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_control').length, 1)
+    assert.equal(logged.filter(entry => entry.event === 'plugin.ollama.capture_dropped').length, 1)
+    assert.doesNotMatch(JSON.stringify(appended), /SECRET_MEDIA/)
+    assert.doesNotMatch(JSON.stringify(logged.filter(entry => entry.event.startsWith('plugin.ollama.'))), /SECRET_MEDIA|same supplied prompt|native answer/)
+  } finally {
+    await source.stop()
+    await upstream.close()
+    fs.rmSync(recordingHome, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0403#storage [tests]: damaged privacy state must not strand attached clients.
+for (const mode of ['inline', 'gateway']) for (const damage of ['corrupt', 'oversized', 'unreadable']) {
+  test(`gateway forwards without capture when exclusions are ${damage} (${mode})`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-ignore-damage-'))
+    const upstream = await startEchoUpstream('provider-answer')
+    let source
+    try {
+      const store = new SessionIgnoreSet(path.join(root, 'hypaware'))
+      store.add('private')
+      const marker = path.join(store.directory, fs.readdirSync(store.directory)[0])
+      if (damage === 'unreadable') {
+        fs.renameSync(store.directory, `${store.directory}-saved`)
+        fs.writeFileSync(store.directory, 'not a directory')
+      } else fs.writeFileSync(marker, damage === 'corrupt' ? 'broken json' : 'x'.repeat(65537))
+      let startedCapture = 0
+      if (mode === 'gateway') setGatewayProcessTransport({
+        role: 'gateway',
+        recorder: {
+          startExchange() { startedCapture++; throw new Error('must not start capture') },
+          async drain() {},
+        },
+      })
+      const logged = []
+      const ctx = fakeCtx({ listen: '127.0.0.1:0' }, logged)
+      ctx.env.HYP_HOME = root
+      const registrations = new Map()
+      let api
+      ctx.provideCapability = (_name, _version, value) => { api = value }
+      ctx.sources = { register: item => registrations.set(item.name, item) }
+      ctx.commands = { get() {}, register() {} }
+      ctx.query = { getDataset() {}, registerDataset() {} }
+      ctx.backfillMaterializers = { get() {}, register() {} }
+      let projected = 0
+      let appended = 0
+      ctx.storage.appendRows = async () => { appended++ }
+      await activate(ctx)
+      api.registerUpstreamPreset({ name: 'echo', base_url: upstream.url, path_prefix: '/' })
+      api.registerExchangeProjector({ name: 'probe', match: () => true, project() { projected++; return undefined } })
+      source = await registrations.get('ai-gateway').start(ctx)
+      const status = await source.status()
+      const url = `http://${status.details.host}:${status.details.port}`
+      const response = await fetch(`${url}/v1/messages`, { method: 'POST', body: 'private content without session ID' })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'provider-answer')
+      await settleFinalizers()
+      assert.equal(projected, 0)
+      assert.equal(appended, 0)
+      assert.equal(startedCapture, 0)
+      assert.match(status.lastError, /session exclusions.*capture.*disabled/i)
+      assert.ok(logged.some(item => item.event === 'session_ignore_load_failed'))
+      for (const method of ['GET', 'POST', 'DELETE']) {
+        const receipt = await fetch(`${url}/_hypaware/ignore/session?session_id=private`, {
+          method, ...(method === 'GET' ? {} : { body: JSON.stringify({ session_id: 'private' }) }),
+        })
+        assert.equal(receipt.status, 503, method)
+        assert.match(/** @type {any} */ (await receipt.json()).error, /session exclusions/i)
+      }
+    } finally {
+      await source?.stop()
+      setGatewayProcessTransport(undefined)
+      await upstream.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+
+test('damaged exclusions do not prevent gateway or adapter activation in a real kernel boot', async () => {
+  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ignore-adapter-boot-'))
+  try {
+    const store = new SessionIgnoreSet(path.join(hypHome, 'hypaware'))
+    store.add('private')
+    fs.writeFileSync(path.join(store.directory, fs.readdirSync(store.directory)[0]), 'broken json')
+    const names = ['@hypaware/ai-gateway', '@hypaware/claude', '@hypaware/codex', '@hypaware/opencode']
+    const boot = await bootKernel({ hypHome, runId: 'ignore-adapter-boot', bootProfile: { activate: names } })
+    for (const name of names) {
+      const result = boot.activations.find(item => item.plugin.name === name)
+      assert.ok(result?.ok, `${name} activates with unreadable exclusions`)
+    }
+  } finally { fs.rmSync(hypHome, { recursive: true, force: true }) }
+})
+
+test('alias transport facts come from the bound generation, clear on failed reload/stop, and exclude unsafe URLs', async () => {
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamAlias('ollama-native', 'ollama', ollamaNativeRoute())
+  const config = (base_url) => fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url, path_prefix: '/api/chat' }] })
+  const source = await createStartSource(state)(config('http://localhost:21500/service/'))
+  assert.ok(source.status && source.reload)
+  try {
+    const first = await source.status()
+    assert.ok(first.details?.port)
+    assert.deepEqual(first.details.upstream_aliases, [{ name: 'ollama-native', canonical: 'ollama', path_prefix: '/ollama', base_url: 'http://localhost:21500/service/' }])
+    await source.reload(config('http://localhost:21501/changed'))
+    const next = await source.status()
+    assert.deepEqual(next.details?.upstream_aliases, [{ name: 'ollama-native', canonical: 'ollama', path_prefix: '/ollama', base_url: 'http://localhost:21501/changed' }])
+    await source.reload(config('http://user:private-token@localhost:21501/changed?secret=x'))
+    const unsafe = await source.status()
+    assert.deepEqual(unsafe.details?.upstream_aliases, [])
+    assert.equal(JSON.stringify(unsafe).includes('private-token'), false)
+    await assert.rejects(source.reload(fakeCtx({ listen: '127.0.0.1:0', upstreams: [{ name: 'ollama', base_url: 'http://localhost:21501' }, { name: 'ollama-native', base_url: 'http://localhost:2' }] })), /collision/)
+    const failed = await source.status()
+    assert.equal(failed.details?.listening, false)
+    assert.deepEqual(failed.details?.upstream_aliases, [])
+    assert.equal(state.listen, undefined)
+  } finally { await source.stop() }
+  assert.deepEqual((await source.status()).details?.upstream_aliases, [])
+})
+
+test('processing-only desired aliases never report live compiled transport facts', async () => {
+  const state = createGatewayState()
+  createAiGatewayApi(state).registerUpstreamAlias('ollama-native', 'ollama', ollamaNativeRoute())
+  setGatewayProcessTransport({ role: 'processing', endpoint: { host: '127.0.0.1', port: 21522 }, receive() { return async () => {} } })
+  let source
+  try {
+    source = await createStartSource(state)(fakeCtx({ upstreams: [{ name: 'ollama', base_url: 'http://localhost:21500/service/' }] }))
+    assert.ok(source.status)
+    assert.equal((await source.status()).details?.port, 21522)
+    assert.deepEqual((await source.status()).details?.upstream_aliases, [])
+  } finally { await source?.stop(); setGatewayProcessTransport(undefined) }
+})

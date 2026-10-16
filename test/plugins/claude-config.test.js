@@ -24,7 +24,10 @@ test('validateClaudeConfig leaves non-backfill keys (e.g. proxy) untouched', () 
 
 test('validateClaudeConfig accepts a full backfill block', () => {
   assert.deepEqual(
-    validateClaudeConfig({ proxy: '@hypaware/ai-gateway', backfill: { on_join: true, window_days: 30 } }),
+    validateClaudeConfig({
+      proxy: '@hypaware/ai-gateway',
+      backfill: { on_join: true, window_days: 30, sweep_cron: '*/5 * * * *' },
+    }),
     { ok: true }
   )
   assert.deepEqual(validateClaudeConfig({ backfill: { on_join: false } }), { ok: true })
@@ -48,6 +51,8 @@ test('validateClaudeConfig rejects a malformed backfill block', () => {
     [{ backfill: { window_days: -1 } }, '/backfill/window_days'],
     [{ backfill: { window_days: 1.5 } }, '/backfill/window_days'],
     [{ backfill: { window_days: '30' } }, '/backfill/window_days'],
+    [{ backfill: { sweep_cron: 'sometimes' } }, '/backfill/sweep_cron'],
+    [{ backfill: { sweep_cron: 5 } }, '/backfill/sweep_cron'],
     [{ backfill: { bogus: true } }, '/backfill/bogus'],
   ]
   for (const [config, pointer] of cases) {

@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isValidRange, isValidSemver } from '../../src/core/semver.js'
+import { isValidRange, isValidSemver, lowestVersion } from '../../src/core/semver.js'
 
 test('isValidSemver accepts X.Y.Z and rejects junk', () => {
   assert.equal(isValidSemver('1.0.0'), true)
@@ -20,9 +20,34 @@ test('isValidRange accepts the operators the kernel matcher understands', () => 
   }
 })
 
+test('isValidRange accepts the rest of the npm range grammar the matcher reads', () => {
+  for (const r of ['1.x', '1.2', '1.x.2', '>=1.0.0 <2.0.0', '^1.2.3 || ^2.0.0', '1.2.3 - 2.0.0', '>= 1.0.0', '^1.0.0 ||']) {
+    assert.equal(isValidRange(r), true, `${r} should be valid`)
+  }
+})
+
 test('isValidRange rejects empty and unparseable ranges', () => {
   assert.equal(isValidRange(''), false)
   assert.equal(isValidRange('^garbage'), false)
-  assert.equal(isValidRange('1.x'), false)
+  assert.equal(isValidRange('npm:hyparquet@1.0.0'), false)
+  assert.equal(isValidRange('>=1.0.0 <garbage'), false)
+  assert.equal(isValidRange('1.0.0 -'), false)
   assert.equal(isValidRange(undefined), false)
+})
+
+test('lowestVersion reads a bound off every range the matcher reads', () => {
+  for (const [range, low] of [
+    ['1.2.3', '1.2.3'], ['=1.2.3', '1.2.3'], ['^1.2.3', '1.2.3'], ['~1.2.0', '1.2.0'],
+    ['>=1.2.3', '1.2.3'], ['>1.2.3', '1.2.4'], ['>1.2', '1.3.0'], ['1.2', '1.2.0'], ['1.2.x', '1.2.0'],
+    ['>= 1.2.3', '1.2.3'], ['>=1.2.3 <2.0.0', '1.2.3'], ['1.2.3 - 2.0.0', '1.2.3'],
+    ['^2.0.0 || ^1.2.3', '1.2.3'],
+  ]) {
+    assert.equal(lowestVersion(range), low, `${range} bottoms out at ${low}`)
+  }
+})
+
+test('lowestVersion declines a range that is unreadable or unbounded below', () => {
+  for (const range of ['*', 'x', '', '<2.0.0', '<=2.0.0', '^1.2.3 || <2.0.0', '^garbage', 'npm:fork@^1.0.0', undefined]) {
+    assert.equal(lowestVersion(range), undefined, `${range} admits no lower bound this can name`)
+  }
 })

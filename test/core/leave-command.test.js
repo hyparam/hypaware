@@ -10,9 +10,9 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { centralSeedPath, resolveCentralLayerPath } from '../../src/core/config/apply.js'
 
 /**
- * `hyp leave` — the level-3 exit verb (LLP 0063 §prerequisites): removes the
+ * `hyp leave`, the level-3 exit verb (LLP 0063 §prerequisites): removes the
  * central config layer, reverses org-driven attaches via the one core undo,
- * and drops the forward identity — while leaving the query-session store, the
+ * and drops the forward identity, while leaving the query-session store, the
  * user-owned local layer, and the daemon service untouched.
  */
 
@@ -60,7 +60,7 @@ test('leave when not connected is a friendly no-op', async () => {
   const { stdout, opts } = await makeDispatchOpts()
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
 })
 
 test('leave after join removes the seed and reports the server', async () => {
@@ -142,7 +142,9 @@ test('leave reverses org-driven attaches and drops the forward identity', async 
       {
         attach: {
           claude: { status: 'done', request_key: 'claude' },
-          // A failed marker never applied an effect: leave just drops it.
+          // A failed attach takes the same undo every other marker takes; it
+          // finds nothing in codex's settings, says nothing, and the marker
+          // goes with it.
           codex: { status: 'failed', request_key: 'codex', reason: 'boom', attempts: 1 },
         },
         // Backfill is run-once by design: its marker survives leave.
@@ -170,7 +172,7 @@ test('leave reverses org-driven attaches and drops the forward identity', async 
   assert.equal('_hypaware' in settings, false)
   assert.equal(settings.env?.ANTHROPIC_BASE_URL, undefined)
 
-  // Attach markers are gone (done reversed, failed dropped); backfill stays.
+  // Attach markers are gone (both reversed, one of them a no-op); backfill stays.
   const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
   assert.equal(markers.attach, undefined)
   assert.equal(markers.backfill['claude:default'].status, 'done')
@@ -185,7 +187,8 @@ test('leave never edits the local layer, and says so when a local central sink e
   const localPath = path.join(home, 'hypaware-config.json')
   const localConfig = {
     version: 2,
-    plugins: [{ name: '@hypaware/central' }],
+    // An upgraded config isolates leave from the separately tested migration.
+    plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/grep' }],
     sinks: {
       central: {
         plugin: '@hypaware/central',
@@ -199,7 +202,7 @@ test('leave never edits the local layer, and says so when a local central sink e
   // the hand-authored sink instead of leaving the user mystified.
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
   assert.match(stdout.text(), /local config defines a '@hypaware\/central' sink \('central'\)/)
   assert.match(stdout.text(), /never edits the local layer/)
 
@@ -247,7 +250,60 @@ test('leave is idempotent: a second leave is the not-connected no-op', async () 
   )
   assert.equal(await dispatch(['leave'], opts), 0)
   assert.equal(await dispatch(['leave'], opts), 0)
-  assert.match(stdout.text(), /not connected to a central server/)
+  assert.match(stdout.text(), /not connected to the cloud/)
+})
+
+test('leave tears down a central layer whose active-slot pointer does not resolve (#623)', async () => {
+  // The D4 login gate refuses on a machine whose layer it cannot resolve and
+  // tells the user to run `hyp leave`. Resolution swallows a pointer it cannot
+  // follow, so keying leave's "nothing to do" on the resolved path alone would
+  // make that advice a dead end: the gate would refuse forever and leave would
+  // claim there is nothing to disconnect.
+  for (const [name, writePointer] of /** @type {[string, (dir: string) => Promise<unknown>][]} */ ([
+    ['a regular file where the pointer symlink should be', (dir) => fs.writeFile(path.join(dir, 'active'), 'config.a.json')],
+    ['a pointer naming neither slot', (dir) => fs.symlink('config.c.json', path.join(dir, 'active'))],
+    ['a pointer that is a symlink loop', (dir) => fs.symlink('active', path.join(dir, 'active'))],
+  ])) {
+    const { stateRoot, stdout, opts } = await makeDispatchOpts()
+    const controlDir = path.join(stateRoot, 'config-control')
+    await fs.mkdir(controlDir, { recursive: true })
+    // The slot file is intact and still names the org's server: this machine is
+    // enrolled, only its pointer is damaged.
+    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://central.example', identity: {} } } },
+    }))
+    await writePointer(controlDir)
+
+    const code = await dispatch(['leave'], opts)
+    assert.equal(code, 0, `${name}: ${stdout.text()}`)
+    assert.doesNotMatch(stdout.text(), /not connected to the cloud/, name)
+    assert.match(stdout.text(), /removed the central config layer/, name)
+    await assert.rejects(fs.lstat(path.join(controlDir, 'active')), /ENOENT/, name)
+    await assert.rejects(fs.stat(path.join(controlDir, 'config.a.json')), /ENOENT/, name)
+  }
+})
+
+test('leave reports a central layer it cannot remove instead of throwing (#623)', async () => {
+  // An unreadable control directory is one of the states the D4 gate refuses
+  // on, so leave has to reach its later steps and name the problem rather than
+  // aborting on an uncaught EACCES.
+  const { stateRoot, stdout, stderr, opts } = await makeDispatchOpts()
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+  await fs.chmod(controlDir, 0o000)
+  try {
+    const code = await dispatch(['leave'], opts)
+    assert.equal(code, 1, stdout.text() + stderr.text())
+    assert.match(stderr.text(), /could not remove the central config layer/)
+    assert.match(stderr.text(), /EACCES/)
+    // Later steps still ran: an abort here would strand the attach reversal.
+    assert.match(stdout.text(), /nothing to restart/)
+  } finally {
+    await fs.chmod(controlDir, 0o700)
+  }
 })
 
 test('leave still tears down when only a stale attach marker survives a prior partial leave', async () => {
@@ -279,7 +335,7 @@ test('leave still tears down when only a stale attach marker survives a prior pa
 
   const code = await dispatch(['leave'], opts)
   assert.equal(code, 0, stdout.text())
-  assert.doesNotMatch(stdout.text(), /not connected to a central server/)
+  assert.doesNotMatch(stdout.text(), /not connected to the cloud/)
   // The stranded attach is reversed on the re-run, marker and all.
   const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
   assert.equal('_hypaware' in settings, false)
@@ -354,6 +410,137 @@ test('leave removes the assets its attach marker records, and leaves manual copi
   assert.equal(markers.attach, undefined)
 })
 
+test('leave reverses a settings-only attach whose marker was later rewritten to refused', async () => {
+  // The case that decided #627's direction. A marker's status is not a record
+  // of what is on disk: an attach that wrote the client's settings and
+  // installed no files records `done` with no `installed_assets`, and a later
+  // re-perform() that refuses (LLP 0186) rewrites the status in place. Nothing
+  // carries the settings write forward, so the rewritten marker is
+  // byte-indistinguishable from one whose attach never applied anything -
+  // while the settings edit is still there. Leave therefore runs the
+  // disk-driven undo for every marker it holds and lets the client's own file
+  // decide, instead of reading the status as a proxy for it.
+  const { home, stateRoot, stdout, opts } = await makeDispatchOpts()
+  assert.equal(
+    await dispatch(['join', 'https://central.example', 'policy-token-1', '--no-daemon'], opts),
+    0
+  )
+
+  // The attach's whole effect: the managed block and the env it manages. No
+  // assets, which is the normal shape for a client that contributes none.
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify(
+      {
+        attach: {
+          claude: {
+            status: 'refused',
+            request_key: 'claude',
+            reason: 'settings.json is JSONC; refusing to modify',
+            at: '2026-08-04T00:00:00.000Z',
+          },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+
+  // The settings the attach really wrote are reversed, not stranded behind a
+  // marker whose status claimed nothing had happened.
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal('_hypaware' in settings, false)
+  assert.equal(settings.env?.ANTHROPIC_BASE_URL, undefined)
+  // And the user is told, because this reversal changed something.
+  assert.match(stdout.text(), /Detached claude/)
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
+test('leave stays quiet about a marker whose client has nothing left to reverse', async () => {
+  // #627's actual symptom, fixed at the reporting layer rather than by
+  // skipping the undo. Leave sweeps every attach marker on disk, so it reaches
+  // clients that hold nothing of ours: a refusal never wrote the client's
+  // settings at all. The undo still runs (it is what proves the file is
+  // clean), it reports `changed: false`, and a sweep must not turn that into a
+  // line naming a settings file the user never had. `hyp detach codex` still
+  // says it: there the line is the answer to what was asked.
+  const { home, stateRoot, stdout, opts } = await makeDispatchOpts()
+  assert.equal(
+    await dispatch(['join', 'https://central.example', 'policy-token-1', '--no-daemon'], opts),
+    0
+  )
+
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify(
+      {
+        attach: {
+          claude: { status: 'done', request_key: 'claude' },
+          codex: {
+            status: 'refused',
+            request_key: 'codex',
+            reason: 'model_providers.hypaware already exists and was not written by HypAware',
+            at: '2026-08-04T00:00:00.000Z',
+          },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+
+  assert.doesNotMatch(stdout.text(), /No HypAware marker found/)
+  assert.doesNotMatch(stdout.text(), /\.codex/)
+  // The quiet has to come from the reversal finding nothing, not from codex
+  // having no descriptor to reverse through: that path prints its own line.
+  assert.doesNotMatch(stdout.text(), /'codex' plugin not installed/)
+  // A refusal writes no settings file, and probing for one must not create it.
+  await assert.rejects(fs.stat(path.join(home, '.codex', 'config.toml')))
+
+  // The neighbour is unaffected: an attach that did apply still reverses, and
+  // says so, and both markers are gone.
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal('_hypaware' in settings, false)
+  assert.match(stdout.text(), /Detached claude/)
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
 test('leave self-heals an org attach whose plugin is gone: drops the marker, warns, stays clean', async () => {
   const { stateRoot, stdout, opts } = await makeDispatchOpts()
   assert.equal(
@@ -382,6 +569,17 @@ test('leave help exits 0 and rejects unknown arguments', async () => {
     assert.equal(await dispatch(['leave', '--help'], opts), 0)
     assert.match(stdout.text(), /usage: hyp leave/)
     assert.match(stdout.text(), /Keeps query sessions/)
+  }
+  {
+    // A help flag that is not the first token misses dispatch's registry
+    // render and reaches `runLeave`'s own help block, so that copy states the
+    // enrollment premise in the same server vocabulary the registered help
+    // uses; a self-hosted reader must not be told they left "the cloud"
+    // (#2222).
+    const { stdout, opts } = await makeDispatchOpts()
+    assert.equal(await dispatch(['leave', 'x', '--help'], opts), 0)
+    assert.match(stdout.text(), /a HypAware server/)
+    assert.doesNotMatch(stdout.text(), /\bcloud\b/)
   }
   {
     const { stderr, opts } = await makeDispatchOpts()

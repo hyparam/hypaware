@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
 
@@ -38,30 +39,106 @@ export function defaultConfigPath(hypHome) {
 }
 
 /**
+ * Whether a config records a pick answer at all, as opposed to having been
+ * created by a config writer that never asked one. The discriminator is the
+ * `plugins` key: the picker's composer always writes a `plugins` array (a
+ * record-nothing pick still composes the export pair), while the
+ * side-channel writers (`hyp remote add` / `remove`) create-or-augment the
+ * file without ever touching `plugins`.
+ *
+ * `plugins: []` counts as an answer: it cannot be told apart from a
+ * deliberately emptied install, and re-seeding that from detection would
+ * re-consent to capture on the user's behalf.
+ *
+ * It lives here, beside the loader, rather than in the wizard: the pick lane
+ * and `collectHypAwareStatus` both read it, and the daemon must not import
+ * the CLI walkthrough to ask one question about a config document.
+ *
+ * One document is carved out of the plugins-array rule: the exact grep-only
+ * config the v1.36.0 migration's central-only lane forged. No composer output
+ * ever matched it, so classifying it answer-less discards no user's answer;
+ * see {@link isForgedGrepOnlyConfig}.
+ *
+ * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
+ * @ref LLP 0426#readers-classify [implements]: the forged population heals at this read, not by a config rewrite
+ * @param {HypAwareV2Config} config
+ * @returns {boolean}
+ */
+export function configRecordsPickAnswer(config) {
+  return Array.isArray(config.plugins) && !isForgedGrepOnlyConfig(config)
+}
+
+/**
+ * Whether a config is, at the shape level, the one document the v1.36.0
+ * grep migration's central-only lane wrote as a machine's whole local
+ * config: `version: 2` plus a one-entry `plugins` array holding exactly
+ * `{ name: '@hypaware/grep' }`, and nothing else.
+ *
+ * Nothing the product writes matches it. The picker's composer has written
+ * `query.cache.retention.default_days` into every config since its first
+ * release, grep only enters a composed plugin list by riding
+ * `@hypaware/ai-gateway` (its manifest's `compose_with`), the attach lane
+ * appends client-adapter entries onto an existing config, and the migration
+ * itself declines the one append that would produce this document
+ * (grep_migration.js). So a match is the pre-fix migration's write or a
+ * hand-authored document that reproduces it, and reading it as "never
+ * picked" discards no answer a product surface recorded.
+ *
+ * The test is over the recognized keys, not the bytes, and not over whatever
+ * document shape the caller happens to hold: `collectHypAwareStatus` asks
+ * over `parseConfigShape` output (where `parsePluginEntry` has already
+ * dropped any entry key it does not recognize), while the pick lane asks
+ * over a raw `JSON.parse` of the same file. So the entry check ignores
+ * exactly the keys the parser drops, and a decorating key the parser keeps
+ * (`enabled`, `config`, or a pin field) defeats the match in both lanes:
+ * one document, one classification, whichever reader asks.
+ *
+ * @ref LLP 0426#forged-shape [implements]: exactly { version: 2, plugins: [{ name: grep }] } and nothing else is migration residue, not an answer
+ * @param {HypAwareV2Config} config
+ * @returns {boolean}
+ */
+export function isForgedGrepOnlyConfig(config) {
+  if (config.version !== 2) return false
+  if (!Array.isArray(config.plugins) || config.plugins.length !== 1) return false
+  const entry = config.plugins[0]
+  if (entry.name !== '@hypaware/grep') return false
+  const decorated = Object.keys(entry).some((key) => key !== 'name' && RECOGNIZED_PLUGIN_ENTRY_KEYS.has(key))
+  if (decorated) return false
+  return Object.keys(config).every((key) => key === 'version' || key === 'plugins')
+}
+
+// The entry keys `parsePluginEntry` keeps. A raw entry key outside this set
+// is one the parser drops, invisible to the reader holding the parsed
+// document, so the forged-shape test ignores it too. Extend this set and
+// `parsePluginEntry` together.
+const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'version', 'artifact_hash', 'source', 'recording'])
+
+/**
  * Guard a write to the user-owned **local** config layer
  * (`hypaware-config.json`) so `init` cannot silently clobber it: the
  * remaining, non-destructive half of #111 (`join` no longer writes here;
  * `init` still can). Behaviour:
  *
  * - **No existing config** → proceed.
- * - **Existing config, non-interactive** (no `confirmOverwrite`): refuse
- *   unless `force`; on `force`, copy the current file to
- *   `hypaware-config.json.bak-<ts>` first, then proceed.
- * - **Existing config, interactive** (`confirmOverwrite` supplied):
- *   prompt; on confirm, back up and proceed; on decline, abort.
+ * - **Existing config**: refuse unless `force`; on `force`, copy the
+ *   current file to `hypaware-config.json.bak-<ts>` first, then proceed.
+ *   An attended setup run passes `force`: the user just answered every
+ *   question, and the backup keeps the old file (LLP 0433).
  *
  * The helper only decides + backs up; the caller performs the write.
+ * With `dryRun` it only decides: the answer (and the `backupPath` a real
+ * run would write) is the same, and nothing is copied.
  *
  * @param {{
  *   targetPath: string,
  *   force?: boolean,
- *   confirmOverwrite?: (targetPath: string) => Promise<boolean>,
  *   now?: () => number,
+ *   dryRun?: boolean,
  * }} args
  * @returns {Promise<LocalConfigWriteGuard>}
- * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup (non-interactive), prompt (interactive)
+ * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup
  */
-export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwrite, now }) {
+export async function prepareLocalConfigWrite({ targetPath, force, now, dryRun }) {
   let exists = true
   try {
     await fs.access(targetPath)
@@ -70,12 +147,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwr
   }
   if (!exists) return { proceed: true }
 
-  if (confirmOverwrite) {
-    const confirmed = await confirmOverwrite(targetPath)
-    if (!confirmed) {
-      return { proceed: false, message: `keeping existing config at ${targetPath}` }
-    }
-  } else if (!force) {
+  if (!force) {
     return {
       proceed: false,
       message:
@@ -86,7 +158,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwr
 
   const stamp = new Date((now ?? Date.now)()).toISOString().replace(/[:.]/g, '-')
   const backupPath = `${targetPath}.bak-${stamp}`
-  await fs.copyFile(targetPath, backupPath)
+  if (!dryRun) await fs.copyFile(targetPath, backupPath)
   return { proceed: true, backupPath }
 }
 
@@ -269,6 +341,16 @@ export function parseConfigShape(value) {
     }
   }
 
+  /** @type {boolean|undefined} */
+  let autoUpdate
+  if (root.auto_update !== undefined) {
+    if (typeof root.auto_update !== 'boolean') {
+      errors.push({ pointer: '/auto_update', message: 'auto_update must be a boolean' })
+    } else {
+      autoUpdate = root.auto_update
+    }
+  }
+
   for (const key of Object.keys(root)) {
     if (!RECOGNIZED_TOP_KEYS.has(key)) {
       errors.push({ pointer: `/${key}`, message: `unrecognized top-level key '${key}'` })
@@ -283,10 +365,11 @@ export function parseConfigShape(value) {
   if (sinks) config.sinks = sinks
   if (query) config.query = query
   if (disambiguate) config.disambiguate = disambiguate
+  if (autoUpdate !== undefined) config.auto_update = autoUpdate
   return { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`
@@ -375,6 +458,10 @@ export function createConfigRegistry() {
 /* ---------- helpers ---------- */
 
 /**
+ * The keys this parser recognizes are mirrored in
+ * `RECOGNIZED_PLUGIN_ENTRY_KEYS` (the forged-shape test); extend both
+ * together.
+ *
  * @param {unknown} entry
  * @param {string} pointer
  * @param {ValidationError[]} errors
@@ -393,6 +480,9 @@ function parsePluginEntry(entry, pointer, errors) {
   if (obj.enabled !== undefined && typeof obj.enabled !== 'boolean') {
     errors.push({ pointer: `${pointer}/enabled`, message: 'enabled must be a boolean when present' })
   }
+  if (obj.recording !== undefined && typeof obj.recording !== 'boolean') {
+    errors.push({ pointer: `${pointer}/recording`, message: 'recording must be a boolean when present' })
+  }
   if (obj.config !== undefined && !isPlainObject(obj.config)) {
     errors.push({ pointer: `${pointer}/config`, message: 'config must be an object when present' })
   }
@@ -406,6 +496,7 @@ function parsePluginEntry(entry, pointer, errors) {
   /** @type {PluginConfigInstance} */
   const out = { name: obj.name }
   if (typeof obj.enabled === 'boolean') out.enabled = obj.enabled
+  if (typeof obj.recording === 'boolean') out.recording = obj.recording
   if (isPlainObject(obj.config)) out.config = /** @type {JsonObject} */ (obj.config)
   if (isNonEmptyString(obj.version)) out.version = obj.version
   if (isNonEmptyString(obj.artifact_hash)) out.artifact_hash = obj.artifact_hash
@@ -623,6 +714,14 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       const m = /** @type {Record<string, unknown>} */ (cache.maintenance)
       /** @type {QueryCacheMaintenanceConfig} */
       const maint = {}
+      /**
+       * Keys the user wrote that failed their own check. Their value is
+       * gone, so no cross-field rule below can say anything true about
+       * them.
+       *
+       * @type {Set<string>}
+       */
+      const rejected = new Set()
       if (m.enabled !== undefined) {
         if (typeof m.enabled !== 'boolean') {
           errors.push({ pointer: `${pointer}/maintenance/enabled`, message: 'must be a boolean' })
@@ -638,9 +737,34 @@ function parseQueryCacheConfig(cache, pointer, errors) {
         if (m[key] !== undefined) {
           if (typeof m[key] !== 'number' || !Number.isFinite(/** @type {number} */ (m[key])) || /** @type {number} */ (m[key]) < 0) {
             errors.push({ pointer: `${pointer}/maintenance/${key}`, message: `must be a non-negative number` })
+            rejected.add(key)
           } else {
             maint[key] = /** @type {number} */ (m[key])
           }
+        }
+      }
+      // @ref LLP 0312#avg-below-batch [implements]: routine compaction merges
+      // victims in memory, so a merged file never exceeds
+      // `compact_batch_bytes` and its size can never reach an average-size
+      // threshold set above that bound. A partition would converge and still
+      // read as due on every growth tick, forever, with no error anywhere.
+      // Compared on EFFECTIVE values: a config that raises only the average
+      // is paired with the default batch bound, which is the likelier way to
+      // write this mistake.
+      //
+      // Silent when either key already failed its own check: the written
+      // value is gone, so the pairing this rule would report is with a
+      // DEFAULT the user never wrote, and the message would name a bound
+      // absent from their file and blame the wrong key. Fixing the key
+      // that really failed re-runs this rule against the real pair.
+      if (!rejected.has('compact_avg_file_bytes') && !rejected.has('compact_batch_bytes')) {
+        const avg = maint.compact_avg_file_bytes ?? MAINTENANCE_DEFAULTS.compact_avg_file_bytes
+        const batch = maint.compact_batch_bytes ?? MAINTENANCE_DEFAULTS.compact_batch_bytes
+        if (avg > batch) {
+          errors.push({
+            pointer: `${pointer}/maintenance/compact_avg_file_bytes`,
+            message: `must be at or below compact_batch_bytes (${batch}); routine compaction merges in memory, so a merged file never reaches a larger average and the partition would read as permanently due`,
+          })
         }
       }
       out.maintenance = maint

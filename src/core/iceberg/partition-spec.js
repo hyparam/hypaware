@@ -31,6 +31,9 @@ export function partitionSpecForDeclaration(declaration, schema) {
   const fields = []
   let partitionFieldId = PARTITION_FIELD_ID_BASE
   for (const pf of declaration.iceberg.fields) {
+    // @ref LLP 0311#declaration-split [implements]: a sortOnly field is a
+    // lookup/sort column, declared for clustering but not partitioned on.
+    if (pf.sortOnly) continue
     const sf = fieldsByName.get(pf.column)
     if (!sf) {
       if (pf.required) {
@@ -65,12 +68,14 @@ export function validatePartitionSpecStability(declaration, existingSpec, schema
     ? partitionSpecForDeclaration(declaration, schema)
     : {
         'spec-id': existingSpec['spec-id'],
-        fields: declaration.iceberg.fields.map((field, index) => ({
-          'source-id': 0,
-          'field-id': PARTITION_FIELD_ID_BASE + index,
-          name: field.column,
-          transform: /** @type {PartitionTransform} */ (field.transform),
-        })),
+        fields: declaration.iceberg.fields
+          .filter(field => !field.sortOnly)
+          .map((field, index) => ({
+            'source-id': 0,
+            'field-id': PARTITION_FIELD_ID_BASE + index,
+            name: field.column,
+            transform: /** @type {PartitionTransform} */ (field.transform),
+          })),
       }
   const expectedNames = new Set(expectedSpec.fields.map(f => f.name))
   for (const expected of expectedSpec.fields) {
@@ -88,9 +93,65 @@ export function validatePartitionSpecStability(declaration, existingSpec, schema
   }
   for (const existing of existingSpec.fields) {
     if (!expectedNames.has(existing.name)) {
+      // @ref LLP 0311#migration [implements]: a recorded partition field the
+      // declaration now marks sortOnly is a pending re-partition, not drift.
+      // Appends keep landing under the table's recorded spec; the maintenance
+      // tick performs the generation-swap migration.
+      if (declaredSortOnly(declaration, existing.name)) continue
       throw new Error(
         `cache-iceberg: partition field "${existing.name}" was removed - removing a partition field is spec evolution and requires an explicit migration`
       )
     }
   }
+}
+
+/**
+ * @param {CachePartitioningDeclaration} declaration
+ * @param {string} column
+ * @returns {boolean}
+ */
+function declaredSortOnly(declaration, column) {
+  return declaration.iceberg.fields.some(f => f.column === column && f.sortOnly === true)
+}
+
+/**
+ * Does the table's recorded partition spec still partition on a column the
+ * declaration has demoted to sortOnly? True means the table awaits the
+ * one-time generation-swap re-partition; `validatePartitionSpecStability`
+ * tolerates the mismatch in the meantime so appends keep landing under the
+ * recorded spec.
+ *
+ * @ref LLP 0311#migration [implements]: the detection maintenance gates the
+ *   migration rewrite on.
+ * @param {CachePartitioningDeclaration} declaration
+ * @param {PartitionSpec} existingSpec
+ * @returns {boolean}
+ */
+export function partitionSpecMigrationDue(declaration, existingSpec) {
+  return existingSpec.fields.some(f => declaredSortOnly(declaration, f.name))
+}
+
+/**
+ * The declaration's lookup columns in declared order, as the sort-column
+ * shape `appendRowsToTable` accepts. Every declared field participates,
+ * partitioned or sortOnly: within a partition tuple the partitioned columns
+ * are constant, so including them is harmless there and preserves one
+ * clustering rule for every dataset.
+ *
+ * Identity fields only, matching the export's `sortOrderForLookup`
+ * (`format-iceberg/src/partitioning.js`). A cache sort order is recorded as
+ * `transform: 'identity'` on the source column, so carrying a `day`- or
+ * `bucket`-transformed field into it would declare a sort on the raw column
+ * that the declaration never asked for. No dataset declares a non-identity
+ * cache transform today; skipping is what keeps that true by construction.
+ *
+ * @ref LLP 0311#declaration-split [implements]: the fields stay the sort
+ *   axis for the cache table itself, as they already are for the export.
+ * @param {CachePartitioningDeclaration} declaration
+ * @returns {{ column: string, direction: 'asc' }[]}
+ */
+export function sortColumnsForDeclaration(declaration) {
+  return declaration.iceberg.fields
+    .filter(f => f.transform === 'identity')
+    .map(f => ({ column: f.column, direction: 'asc' }))
 }

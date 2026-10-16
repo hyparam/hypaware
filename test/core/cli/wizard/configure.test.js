@@ -55,7 +55,7 @@ function descriptor(over = {}) {
     id: 'claude-desktop',
     label: 'Claude Desktop',
     needsSetup: true,
-    configureCommand: 'claude-desktop install',
+    configureCommand: 'client claude-desktop install',
     ...over,
   })
 }
@@ -64,20 +64,20 @@ function descriptor(over = {}) {
 
 test('runConfigurePhase: a zero exit keeps the source and records ok', async () => {
   const stdout = makeBuf()
-  const { calls, ctx } = fakeCommands({ 'claude-desktop install': 0 })
+  const { calls, ctx } = fakeCommands({ 'client claude-desktop install': 0 })
   const out = await runConfigurePhase(
     { descriptors: [descriptor()] },
     /** @type {any} */ ({ stdout, ctx })
   )
   assert.deepEqual(out.results, [{ id: 'claude-desktop', ok: true, exitCode: 0 }])
-  assert.deepEqual(calls, [{ name: 'claude-desktop install', argv: [] }])
+  assert.deepEqual(calls, [{ name: 'client claude-desktop install', argv: [] }])
   assert.match(stdout.text(), /Setting up Claude Desktop/)
   assert.doesNotMatch(stdout.text(), /Finish later/)
 })
 
 test('runConfigurePhase: only needs_setup descriptors with a configure_command run', async () => {
   const stdout = makeBuf()
-  const { calls, ctx } = fakeCommands({ 'claude-desktop install': 0 })
+  const { calls, ctx } = fakeCommands({ 'client claude-desktop install': 0 })
   const out = await runConfigurePhase(
     {
       descriptors: [
@@ -89,20 +89,20 @@ test('runConfigurePhase: only needs_setup descriptors with a configure_command r
     /** @type {any} */ ({ stdout, ctx })
   )
   assert.deepEqual(out.results, [{ id: 'claude-desktop', ok: true, exitCode: 0 }])
-  assert.deepEqual(calls.map((c) => c.name), ['claude-desktop install'])
+  assert.deepEqual(calls.map((c) => c.name), ['client claude-desktop install'])
 })
 
 // --- drop-on-nonzero-exit branch ---
 
 test('runConfigurePhase: a non-zero exit drops the source and prints the catch-up hint', async () => {
   const stdout = makeBuf()
-  const { ctx } = fakeCommands({ 'claude-desktop install': 3 })
+  const { ctx } = fakeCommands({ 'client claude-desktop install': 3 })
   const out = await runConfigurePhase(
     { descriptors: [descriptor()] },
     /** @type {any} */ ({ stdout, ctx })
   )
   assert.deepEqual(out.results, [{ id: 'claude-desktop', ok: false, exitCode: 3 }])
-  assert.match(stdout.text(), /Finish later with `hyp claude-desktop install`/)
+  assert.match(stdout.text(), /Finish later with `hyp client claude-desktop install`/)
 })
 
 test('runConfigurePhase: a drop does not abort the phase; later sources still run', async () => {
@@ -128,7 +128,7 @@ test('runConfigurePhase: a drop does not abort the phase; later sources still ru
 
 test('runConfigurePhase: a thrown configure drops the source without rethrowing', async () => {
   const stdout = makeBuf()
-  const { ctx } = fakeCommands({ 'claude-desktop install': new Error('sudo bailed') })
+  const { ctx } = fakeCommands({ 'client claude-desktop install': new Error('sudo bailed') })
   const out = await runConfigurePhase(
     { descriptors: [descriptor()] },
     /** @type {any} */ ({ stdout, ctx })
@@ -137,26 +137,26 @@ test('runConfigurePhase: a thrown configure drops the source without rethrowing'
   assert.equal(out.results[0].id, 'claude-desktop')
   assert.equal(out.results[0].ok, false)
   assert.match(String(out.results[0].error), /sudo bailed/)
-  assert.match(stdout.text(), /Finish later with `hyp claude-desktop install`/)
+  assert.match(stdout.text(), /Finish later with `hyp client claude-desktop install`/)
 })
 
 // --- --print-commands passthrough ---
 
 test('runConfigurePhase: --print-commands threads onto the invoked command argv', async () => {
   const stdout = makeBuf()
-  const { calls, ctx } = fakeCommands({ 'claude-desktop install': 0 })
+  const { calls, ctx } = fakeCommands({ 'client claude-desktop install': 0 })
   await runConfigurePhase(
     { descriptors: [descriptor()] },
     /** @type {any} */ ({ stdout, ctx, printCommands: true })
   )
-  assert.deepEqual(calls, [{ name: 'claude-desktop install', argv: ['--print-commands'] }])
+  assert.deepEqual(calls, [{ name: 'client claude-desktop install', argv: ['--print-commands'] }])
 })
 
 // --- attended-only guard ---
 
 test('runConfigurePhase: never runs off a non-interactive opts.picks path', async () => {
   const stdout = makeBuf()
-  const { calls, ctx } = fakeCommands({ 'claude-desktop install': 0 })
+  const { calls, ctx } = fakeCommands({ 'client claude-desktop install': 0 })
   const out = await runConfigurePhase(
     { descriptors: [descriptor()] },
     /** @type {any} */ ({ stdout, ctx, picks: {} })
@@ -164,4 +164,49 @@ test('runConfigurePhase: never runs off a non-interactive opts.picks path', asyn
   assert.deepEqual(out.results, [])
   assert.deepEqual(calls, [])
   assert.equal(stdout.text(), '')
+})
+
+// A reconfigure's carried answer is not a new pick: its setup question was
+// asked the run it was first ticked, so the phase must not re-run its
+// configure command (and re-launch a sign-in) on every reconfigure.
+// @ref LLP 0131#drop-on-failure [tests]: skipping a carried row is not a drop - no catch-up hint prints
+test('a needs_setup row the existing config already composed is skipped, not re-run', async () => {
+  const { calls, ctx } = fakeCommands({})
+  const stdout = makeBuf()
+  const result = await runConfigurePhase(
+    /** @type {any} */ ({
+      descriptors: [descriptor()],
+      previouslyConfigured: ['claude-desktop'],
+    }),
+    /** @type {any} */ ({ stdout, ctx })
+  )
+  assert.deepEqual(calls, [], 'the configure command never runs for a carried row')
+  assert.deepEqual(result.results, [])
+  assert.doesNotMatch(stdout.text(), /Setting up/)
+  assert.doesNotMatch(stdout.text(), /Skipping/)
+})
+
+test('a newly picked needs_setup row still runs when another row is carried', async () => {
+  const { calls, ctx } = fakeCommands({})
+  const stdout = makeBuf()
+  await runConfigurePhase(
+    /** @type {any} */ ({
+      descriptors: [descriptor(), descriptor({ id: 'other-setup', label: 'Other', configureCommand: 'other install' })],
+      previouslyConfigured: ['claude-desktop'],
+    }),
+    /** @type {any} */ ({ stdout, ctx })
+  )
+  assert.deepEqual(calls.map((c) => c.name), ['other install'])
+})
+
+test('Ollama configure runs only for a new attended recording-enabled pick', async () => {
+  for (const mode of ['attended', 'off', 'unattended']) {
+    const { calls, ctx } = fakeCommands({})
+    const result = await runConfigurePhase(/** @type {any} */ ({
+      descriptors: [descriptor({ id: 'ollama', label: 'Ollama', configureCommand: 'ollama setup' })],
+      config: { version: 2, plugins: [{ name: '@hypaware/ollama', recording: mode !== 'off' }] },
+    }), /** @type {any} */ ({ stdout: makeBuf(), ctx, ...(mode === 'unattended' ? { picks: {} } : {}) }))
+    assert.equal(calls.length, mode === 'attended' ? 1 : 0)
+    assert.equal(result.results.length, mode === 'attended' ? 1 : 0)
+  }
 })

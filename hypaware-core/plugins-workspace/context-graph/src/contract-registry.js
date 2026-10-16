@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from 'hypaware/core/util'
+
 /**
  * @import { Contract } from './types.js'
  * @import { PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
@@ -99,6 +101,9 @@ export function createContractRegistry(opts = {}) {
           }
         }
       }
+      if (rule.toRows !== undefined && typeof rule.toRows !== 'function') {
+        throw new TypeError(`registerContract: ${at} toRows must be a function`)
+      }
       if (typeof rule.toRow !== 'function') {
         throw new TypeError(`registerContract: ${at} toRow must be a function`)
       }
@@ -166,7 +171,7 @@ export function createContractRegistry(opts = {}) {
    * @returns {Contract[]}
    */
   function list() {
-    return [...contracts.values()].sort((a, b) => a.name.localeCompare(b.name))
+    return [...contracts.values()].sort((a, b) => compareStrings(a.name, b.name))
   }
 
   return { register, list }

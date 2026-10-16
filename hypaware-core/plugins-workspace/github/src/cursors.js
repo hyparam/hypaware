@@ -1,0 +1,273 @@
+// @ts-check
+
+import fs from 'node:fs'
+import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { withFileLock } from '../../../../src/core/util/file_lock.js'
+
+/**
+ * Per-repo capture cursors, persisted as a single sidecar JSON under the
+ * plugin's state dir (the per-session-watermark pattern from
+ * `@hypaware/context-graph-enrich`, applied to repos).
+ *
+ * **Why a sidecar, not `github_events` columns.** `github_events` is the
+ * append-only activity *skeleton* (LLP 0360) - one event per row, no mutable
+ * bookkeeping. A poll cursor is mutable per-repo control state, not an
+ * observed event, so it lives beside the table, not in it. Backfill and the
+ * ongoing poll share the same cursor, so a backfilled repo's poller resumes
+ * past history rather than re-fetching it.
+ *
+ * @ref LLP 0360#cursoring [implements]: cursored per repo, shared by backfill + poll; cursors are sidecar state, not event columns
+ *
+ * @import { CursorState, GithubCommitTask, GithubPullTask, GithubRepoWork, RepoCursor } from './types.js'
+ */
+
+const STATE_FILE = 'github-cursors.json'
+const SCHEMA_VERSION = 1
+export const MAX_BOUNDARY_IDS = 1000
+
+/**
+ * @param {string} stateDir
+ * @returns {CursorState}
+ */
+export function readCursors(stateDir) {
+  const file = path.join(stateDir, STATE_FILE)
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (parsed && parsed.schema_version === SCHEMA_VERSION && parsed.repos && typeof parsed.repos === 'object') {
+      const nextRepo = typeof parsed.next_repo === 'string' && parsed.next_repo !== '' ? parsed.next_repo : undefined
+      // Absent rather than false on a sidecar written before the verdict had a
+      // home: a reader that cannot tell those apart reads every pre-upgrade
+      // continuation as finished.
+      // @ref LLP 0438#readers [implements]: an unrecorded verdict is distinguishable from a negative one
+      return {
+        schema_version: SCHEMA_VERSION,
+        repos: readRepos(parsed.repos),
+        ...(nextRepo ? { next_repo: nextRepo } : {}),
+        ...(typeof parsed.pending === 'boolean' ? { pending: parsed.pending } : {}),
+      }
+    }
+  } catch {
+    // Missing, malformed, or an older schema - start clean (a fresh poll
+    // re-reads from the configured horizon; backfill ignores cursors anyway).
+  }
+  return { schema_version: SCHEMA_VERSION, repos: {} }
+}
+
+/**
+ * Repos carrying a one-time-import authorization. A caller passes the set it
+ * read back to {@link writeCursors}, which is what distinguishes an
+ * authorization that arrived while it worked from one it has since completed
+ * or retired itself.
+ *
+ * @param {CursorState} state
+ * @returns {Set<string>}
+ */
+export function authorizedImports(state) {
+  /** @type {Set<string>} */
+  const repos = new Set()
+  for (const [repo, cursor] of Object.entries(state.repos)) {
+    if (cursor.one_time_import === true) repos.add(repo)
+  }
+  return repos
+}
+
+/**
+ * Commit the sidecar, adopting under the lock any one-time-import
+ * authorization that landed while the caller worked.
+ *
+ * The file is rewritten whole, so overlapping writers lose each other's edits,
+ * and a capture tick can span `CAPTURE_REQUEST_LIMIT` requests.
+ * `hyp github backfill` commits its authorization before any network work
+ * precisely so it is durable; without the read-back a tick already in flight
+ * closes over it with a stale snapshot, and nothing resumes an import the
+ * command has already reported as bounded work remaining.
+ *
+ * A repo carrying an authorization absent from `known` is adopted whole,
+ * because authorizing resets that repo's cursor to fetch full history: keeping
+ * this caller's advanced cursor would leave a marker that polls rather than
+ * imports. A repo in `known` is this caller's own to complete or retire, so
+ * its state wins and a finished import is not resurrected. Cursor advancement
+ * outside that window still follows the last writer, as before.
+ *
+ * A caller with no verdict of its own (`state.pending === undefined`) takes
+ * whatever verdict is already on disk, newer or not, rather than committing an
+ * absence that reads as "no backlog".
+ *
+ * @ref LLP 0409#one-time-imports [implements]: an authorization written before the network work survives a tick already in flight
+ *
+ * @param {string} stateDir
+ * @param {CursorState} state  mutated in place by an adoption, so the caller's snapshot matches disk
+ * @param {Set<string>} [known] authorizations the caller read before it worked
+ * @returns {Promise<void>}
+ */
+export async function writeCursors(stateDir, state, known) {
+  fs.mkdirSync(stateDir, { recursive: true })
+  const file = path.join(stateDir, STATE_FILE)
+  await withFileLock(`${file}.lock`, async () => {
+    const disk = known || state.pending === undefined ? readCursors(stateDir) : undefined
+    if (known) {
+      for (const [repo, cursor] of Object.entries(/** @type {CursorState} */ (disk).repos)) {
+        if (cursor.one_time_import === true && !known.has(repo)) state.repos[repo] = cursor
+      }
+    }
+    // @ref LLP 0438#writers [implements]: a caller with no verdict of its own takes the one already on disk
+    if (state.pending === undefined && disk?.pending !== undefined) state.pending = disk.pending
+    const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
+    fs.renameSync(tmp, file)
+  })
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, RepoCursor>}
+ */
+function readRepos(value) {
+  /** @type {Record<string, RepoCursor>} */
+  const out = {}
+  for (const [repo, raw] of Object.entries(/** @type {Record<string, unknown>} */ (value))) {
+    const cursor = readRepoCursor(raw)
+    if (cursor) out[repo] = cursor
+  }
+  return out
+}
+
+/**
+ * @param {unknown} value
+ * @returns {RepoCursor | null}
+ */
+function readRepoCursor(value) {
+  if (!value || typeof value !== 'object') return null
+  const v = /** @type {Record<string, unknown>} */ (value)
+  /** @type {RepoCursor} */
+  const cursor = {}
+  if (v.one_time_import === true) cursor.one_time_import = true
+  if (v.since && typeof v.since === 'object') {
+    const s = /** @type {Record<string, unknown>} */ (v.since)
+    /** @type {NonNullable<RepoCursor['since']>} */
+    const since = {}
+    for (const k of /** @type {const} */ (['issues', 'commits', 'comments', 'pulls'])) {
+      if (typeof s[k] === 'string') since[k] = /** @type {string} */ (s[k])
+    }
+    if (Object.keys(since).length > 0) cursor.since = since
+  }
+  if (v.boundary && typeof v.boundary === 'object') {
+    const b = /** @type {Record<string, unknown>} */ (v.boundary)
+    /** @type {NonNullable<RepoCursor['boundary']>} */
+    const boundary = {}
+    for (const k of /** @type {const} */ (['issues', 'commits', 'comments'])) {
+      const ids = readBoundaryIds(b[k])
+      if (ids) boundary[k] = ids
+    }
+    if (Object.keys(boundary).length > 0) cursor.boundary = boundary
+  }
+  if (v.etag && typeof v.etag === 'object') {
+    /** @type {Record<string, string>} */
+    const etag = {}
+    for (const [k, e] of Object.entries(/** @type {Record<string, unknown>} */ (v.etag))) {
+      if (typeof e === 'string') etag[k] = e
+    }
+    if (Object.keys(etag).length > 0) cursor.etag = etag
+  }
+  const pullNumbers = readNumbers(v.pull_numbers)
+  if (pullNumbers) cursor.pull_numbers = pullNumbers
+  // Absent on a sidecar written before the tie guard had its own set, which
+  // capture reads as a fallback to `pull_numbers`.
+  const highNumbers = readNumbers(v.pulls_high_numbers)
+  if (highNumbers) cursor.pulls_high_numbers = highNumbers
+  const work = readWork(v.work)
+  if (work) cursor.work = work
+  return cursor
+}
+
+/** @param {unknown} value @returns {GithubRepoWork | null} */
+function readWork(value) {
+  if (!value || typeof value !== 'object') return null
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (v.mode !== 'backfill' && v.mode !== 'poll') return null
+  if (v.phase !== 'issues' && v.phase !== 'pulls' && v.phase !== 'commits' && v.phase !== 'comments') return null
+  /** @type {GithubRepoWork} */
+  const work = { mode: v.mode, phase: v.phase }
+  if (v.page === null || typeof v.page === 'string') work.page = v.page
+  if (typeof v.baseline_pulls === 'string') work.baseline_pulls = v.baseline_pulls
+  if (typeof v.issues_high === 'string') work.issues_high = v.issues_high
+  if (typeof v.pulls_high === 'string') work.pulls_high = v.pulls_high
+  const highNumbers = readNumbers(v.pulls_high_numbers)
+  if (highNumbers) work.pulls_high_numbers = highNumbers
+  // The cross-page guard is only worth staging if it survives the sidecar, and
+  // a budget-split phase resumes through this reader.
+  const emitted = readNumbers(v.pulls_emitted)
+  if (emitted) work.pulls_emitted = emitted
+  // The gate phases' twin of it, staged for the same reason. `openGate` caps it
+  // on the way out, keeping the newest window rather than this reader's oldest
+  // one, so a set this writer produced is never truncated on the way back in.
+  const gateEmitted = readBoundaryIds(v.gate_emitted)
+  if (gateEmitted) work.gate_emitted = gateEmitted
+  if (typeof v.commits_high === 'string') work.commits_high = v.commits_high
+  if (typeof v.comments_high === 'string') work.comments_high = v.comments_high
+  if (typeof v.pulls_etag === 'string') work.pulls_etag = v.pulls_etag
+  const issuesIds = readBoundaryIds(v.issues_high_ids)
+  if (issuesIds) work.issues_high_ids = issuesIds
+  const commitsIds = readBoundaryIds(v.commits_high_ids)
+  if (commitsIds) work.commits_high_ids = commitsIds
+  const commentsIds = readBoundaryIds(v.comments_high_ids)
+  if (commentsIds) work.comments_high_ids = commentsIds
+  if (Array.isArray(v.pull_tasks)) work.pull_tasks = v.pull_tasks.map(readPullTask).filter((x) => x !== null).slice(0, 100)
+  if (Array.isArray(v.commit_tasks)) work.commit_tasks = v.commit_tasks.map(readCommitTask).filter((x) => x !== null).slice(0, 100)
+  return work
+}
+
+/** A deduped list of positive integers, or null when the value is not one. @param {unknown} value @returns {number[] | null} */
+function readNumbers(value) {
+  if (!Array.isArray(value)) return null
+  return [...new Set(value.filter((n) => Number.isSafeInteger(n) && n > 0))]
+}
+
+/**
+ * Boundary event ids read back from the sidecar, capped like the task lists
+ * are. `openGate` applies the same cap on the way out, so a written set always
+ * survives its own read and the sidecar cannot grow without limit.
+ *
+ * The cap is a bound, not a cure. A boundary set holds one watermark second's
+ * worth of items, so overflowing it means more than `MAX_BOUNDARY_IDS` items
+ * share one second: a bulk sweep, or a rewrite that restamps thousands of
+ * commits. The overflow sits outside the guard, so those items are re-appended,
+ * and re-spend their sub-resource requests, on every tick until something newer
+ * moves the watermark off that second. Better than the unguarded behavior
+ * #1284 reported, but the same shape of loop. Trading it for a bounded loss
+ * (advancing the watermark past a second that will not fit) is a design
+ * decision, not something a cap decides.
+ *
+ * @param {unknown} value @returns {string[] | null}
+ */
+function readBoundaryIds(value) {
+  if (!Array.isArray(value)) return null
+  const ids = [...new Set(value.filter((id) => typeof id === 'string' && id !== ''))].slice(0, MAX_BOUNDARY_IDS)
+  return ids.length > 0 ? ids : null
+}
+
+/** @param {unknown} value @returns {GithubPullTask | null} */
+function readPullTask(value) {
+  if (!value || typeof value !== 'object') return null
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (typeof v.number !== 'number' || !Number.isSafeInteger(v.number) || v.number <= 0) return null
+  if (v.phase !== 'files' && v.phase !== 'reviews' && v.phase !== 'commits') return null
+  /** @type {GithubPullTask} */
+  const task = { number: /** @type {number} */ (v.number), phase: v.phase }
+  if (typeof v.created_at === 'string') task.created_at = v.created_at
+  if (v.page === null || typeof v.page === 'string') task.page = v.page
+  return task
+}
+
+/** @param {unknown} value @returns {GithubCommitTask | null} */
+function readCommitTask(value) {
+  if (!value || typeof value !== 'object') return null
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (typeof v.sha !== 'string' || v.sha === '') return null
+  /** @type {GithubCommitTask} */
+  const task = { sha: v.sha }
+  if (typeof v.created_at === 'string') task.created_at = v.created_at
+  if (v.page === null || typeof v.page === 'string') task.page = v.page
+  return task
+}

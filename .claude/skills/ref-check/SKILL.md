@@ -111,7 +111,9 @@ Scan `llp/` (and any other configured LLP trees) for all documents. For each, ex
 
 Build a map from `(LLP number) → (file path, title, {anchor: heading text})`.
 
-Also record where the same number is claimed by **more than one** file. A duplicate number makes `@ref LLP NNNN#anchor` ambiguous, and a checker that keeps only the last file it walked will report every reference aimed at the other one as broken. Resolve an anchor against **any** claimant, and report the duplicate itself as a `WARNING` on the corpus.
+Also record where the same number is claimed by **more than one** file. A duplicate number makes `@ref LLP NNNN#anchor` ambiguous, and a checker that keeps only the last file it walked will report every reference aimed at the other one as broken. Resolve an anchor against **any** claimant, so that the references keep resolving, and report the duplicate itself as `BROKEN` on the corpus: one number resolving to two documents is a defect in its own right, not a hint, and it is repaired by renumbering the later claimant (LLP 0156).
+
+**The tree you are scanning is one branch of the corpus.** Two branches can each mint the same number cleanly, and nothing in a single tree can see it: the collision appears only when the second one merges (issue #907). `node scripts/llp-numbers.js survey` reports duplicates across every ref, `check` fails when the branch you are on mints a number claimed elsewhere, and `next` gives the number a new document should take. Run `git fetch --prune` first, or the scan only sees the refs you already had.
 
 ### 4. Validate each reference
 
@@ -183,6 +185,7 @@ For scripting (this skill can be invoked from CI):
 
 - Exit 0 if no broken references
 - Exit 1 if any broken references
+- Exit 1 if any LLP number resolves to more than one document
 - Warnings and hints do not cause a non-zero exit code
 
 ## Output formats

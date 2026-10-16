@@ -1,6 +1,7 @@
-import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ColumnSpec, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ParquetWriter } from 'hyparquet-writer'
+import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
-import type { AsyncDataSource } from 'squirreling'
 import type { UsagePolicyResolver } from '../usage-policy/types.d.ts'
 // Partitioning declaration promoted to a neutral core home
 // (LLP 0003 / LLP 0022#shared-core-helpers). Re-exported here so existing
@@ -14,6 +15,15 @@ export interface PartitionCursor {
   compaction: unknown | null
   layout?: 'epoch' | 'source-table'
   tableDir?: string
+  // Committed rows still carrying the gateway provisional-identity marker
+  // (`attributes.gateway.identity_source === 'gateway_fallback'`, LLP 0027).
+  // Incremented by the flush path as marker rows land and reset to the exact
+  // remainder by each generation rewrite, so maintenance gates the re-settle
+  // sweep on this field instead of scanning the table's attributes column
+  // every tick. Absent means unknown (a cursor written before the field
+  // existed): maintenance answers with one legacy scan and writes the
+  // verdict back, so the scan runs at most once per partition.
+  pendingFallbacks?: number
   retention?: {
     lastCutoffDate?: string
     lastCutoffMs?: number
@@ -29,9 +39,19 @@ export interface PartitionCursor {
 // `all` is wholesale.
 export type PurgeTarget =
   | { kind: 'subtree'; path: string }
-  | { kind: 'session'; id: string }
+  | { kind: 'session'; id: string; org?: string }
   | { kind: 'ignored'; resolver: UsagePolicyResolver }
   | { kind: 'all' }
+
+// A durable cache cleanup admission: the partition (cache-relative) whose
+// listed generations must be rewritten and reclaimed, and when it was first
+// requested (kept across repeated admissions, so the grace never restarts).
+export interface CachePurgeCleanupJob {
+  version: number
+  partition: string
+  generations: string[]
+  requestedAt: number
+}
 
 // The result of a `hyp purge` run: how many rows were position-deleted, how
 // many partitions were touched, and the distinct absolute `cwd`s among the
@@ -44,14 +64,26 @@ export type PurgeTarget =
 // of it) which this filesystem does *not* report as the target directory, so
 // they were correctly left in place. Purge widens onto a respelling only when
 // `dev`/`ino` proves the two spellings are one directory; when it cannot -
-// because they really are two directories, or because the respelling is no
-// longer on disk to be `stat`ed at all - retaining is the safe direction, and
-// saying so is what keeps the run distinguishable from "that directory had
-// nothing cached" (LLP 0104 #spellings). A caller rendering these must not
-// claim the filesystem adjudicated: only the first reason is a verdict.
+// because they really are two directories, because the respelling is no longer
+// on disk to be `stat`ed at all, or because the `stat` could not be taken (an
+// `EACCES` on an ancestor, an `ELOOP`, an `ENOTDIR`: `sameDirectoryOnDisk`
+// answers `false` for every error, not only `ENOENT`) - retaining is the safe
+// direction, and saying so is what keeps the run distinguishable from "that
+// directory had nothing cached" (LLP 0104 #spellings). A caller rendering these
+// must not claim the filesystem adjudicated, and must not claim the spelling is
+// absent either: only the first reason is a verdict, and only the second is a
+// statement that the directory is gone.
 export interface PurgeSummary {
+  cacheCleanup?: string[]
   rowsDeleted: number
   partitionsAffected: number
+  /**
+   * Partitions left untouched because another holder had their cross-process
+   * mutation guard, with the refusal each raised. They may still hold rows
+   * matching the target, so a caller owes the operator this list and a
+   * failure; a rerun after the writer finishes takes them.
+   */
+  partitionsSkipped: { partition: string, error: string }[]
   purgedCwds: string[]
   retainedAliasRows: number
   retainedAliasCwds: string[]
@@ -83,12 +115,14 @@ export interface ProgressState {
 
 /**
  * Crash-safe, never-regressing monotonic int64 allocator for the
- * `_hyp_ingest_seq` column. `next()` reserves seq blocks durably
- * (reserve-before-stamp) so a resumed flush never re-issues a seq `<=` one
- * already stamped. See `createIngestSeqAllocator`.
+ * `_hyp_ingest_seq` column. `reserve(count)` durably reserves a contiguous
+ * run of `count` seqs under a cross-process guard and returns its first seq
+ * (reserve-before-stamp), so a resumed flush never re-issues a seq `<=` one
+ * already stamped. Call it inside the partition mutation guard, right before
+ * the rows commit. See `createIngestSeqAllocator`.
  */
 export interface IngestSeqAllocator {
-  next(): Promise<bigint>
+  reserve(count: number): Promise<bigint>
 }
 
 export interface SpoolAppendResult {
@@ -111,9 +145,42 @@ export interface PendingInfo {
   pending: boolean
   pendingBytes: number
   lastFlushAtMs: number | null
+  /**
+   * When this table's last flush attempt threw, if one is recorded and
+   * readable. A pacing record for the automatic query gate, never a verdict
+   * about what the spool or the cache holds (LLP 0322#what-the-stamp-is-not).
+   * Optional so a storage stub that predates the stamp still satisfies the
+   * shape, and read as "no recent failure" when absent.
+   */
+  flushFailedAtMs?: number | null
+  /**
+   * The bounded error message that same stamp recorded, or null when the
+   * stamp carries none this build can read. Rides with `flushFailedAtMs` so
+   * the surface reporting the cooldown says what the flush failed with: the
+   * query gate hands it to the staleness warning's reason line (LLP
+   * 0330#query-quotes-the-reason). It is display text about a past attempt,
+   * and no gate, freshness line, or durability decision reads it (LLP
+   * 0322#what-the-stamp-is-not).
+   */
+  flushFailureMessage?: string | null
 }
 
 export interface CacheSpool {
+  /**
+   * Write one batch into the table's spool, to be committed by a later
+   * `flushTable`. All-or-nothing as far as the caller is concerned: it
+   * resolves once the record is in the spool, and rejects when the record
+   * is not there and no flush will find it. That is what lets a caller
+   * treat a rejection as "nothing landed" and replay the rows without
+   * writing them twice.
+   *
+   * The rollback behind that is best effort, so the guarantee is not
+   * absolute: a torn write whose tail cannot be read back, and a spool
+   * file another process appended to between this append's size probe and
+   * its rollback, can both reject with bytes still in the file. A caller
+   * that must not double-write under a failing device or a shared spool
+   * still needs its own identity check.
+   */
   append(
     tablePath: string,
     columns: readonly ColumnSpec[],
@@ -141,6 +208,71 @@ export interface AppendOptions {
    * Ignored for tables that already exist.
    */
   sortOrder?: readonly { column: string, direction?: 'asc' | 'desc' }[]
+}
+
+/**
+ * A `hyparquet-writer` Writer that can also be discarded without being
+ * finished. `finish()` is the only thing that closes the local writer's
+ * file descriptor and renames its temp file into place, which is fine for
+ * a one-shot append but not for a writer held open across many row
+ * groups: an append that fails part-way has no `finish()` coming.
+ *
+ * `park()` is the other half of that: it hands the descriptor and the
+ * buffer back while keeping the half-written file, so a writer can stay
+ * logically open without costing a descriptor. A writer that does not
+ * implement it can only be retired by closing the file.
+ */
+export interface AbortableWriter extends Writer {
+  abort?(): void
+  park?(): void
+}
+
+/**
+ * One data file a streaming compaction currently has open: the parquet
+ * writer accumulating row groups into it, plus the per-file Iceberg
+ * metrics accumulated so far. Bounds are held as the raw minimum and
+ * maximum seen; serialization happens once, at file close.
+ */
+export interface OpenCompactionFile {
+  dataPath: string
+  writer: AbortableWriter
+  parquet: ParquetWriter
+  partition: Record<string, unknown>
+  rowGroups: number
+  rows: bigint
+  /**
+   * Upper bound on the row-group metadata `ParquetWriter` is pinning for
+   * this file (raw min/max values plus per-chunk overhead), charged
+   * against the append's global stats budget.
+   */
+  statsBytes: number
+  valueCounts: Record<number, bigint>
+  nullCounts: Record<number, bigint>
+  nanCounts: Record<number, bigint>
+  mins: Record<number, unknown>
+  maxes: Record<number, unknown>
+}
+
+export interface StreamingAppendResult {
+  rowCount: number
+  dataFiles: number
+  bytesWritten: number
+}
+
+/**
+ * A multi-batch append that decides its own file boundaries. Each `write`
+ * lands one bounded batch as a parquet row group; `close` commits every
+ * file the append produced in a single snapshot.
+ */
+export interface StreamingTableAppend {
+  write(rows: Record<string, unknown>[]): Promise<void>
+  close(): Promise<StreamingAppendResult>
+  /**
+   * Discard the append without committing. Releases the file descriptors
+   * and temp files of every still-open output file. Safe to call after a
+   * failed `close`, and a no-op once everything is closed.
+   */
+  abort(): Promise<void>
 }
 
 export interface MaintenanceConfig {
@@ -181,17 +313,33 @@ export interface MaintenanceOptions {
   /**
    * Resolve the flush-time settlement hook for a dataset, if any. Threaded
    * through from the runtime that built the cache so compaction can re-run
-   * the same upgrade-and-dedupe over already-committed fallback rows — the
+   * the same upgrade-and-dedupe over already-committed fallback rows: the
    * backstop for a fallback row that flushed before its uuid twin arrived
    * (LLP 0027 "Re-settle sweep").
    */
   getSettleHook?: (dataset: string) => DatasetSettleHook | undefined
+  /**
+   * Resolve a dataset's current `cachePartitioning` declaration, so the
+   * tick can detect a table whose recorded partition spec still carries a
+   * column the declaration has demoted to sortOnly, and run the one-time
+   * generation-swap re-partition (LLP 0311). Absent when the caller has no
+   * registry (tests, bare CLI paths); no migration runs without it.
+   */
+  getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined
 }
 
 /**
  * The dataset's flush-time settlement pass, re-used by the maintenance
  * re-settle sweep. Upgrades provisional fallback rows to native identity
  * and drops any whose `part_id` already exists in a committed partition.
+ *
+ * Maintenance resolves this from the dataset's `resettleBatch`, and calls it
+ * both for real (inside a rewrite) and speculatively (`victimFallbacksSettleable`,
+ * which discards the rows it gets back). The hook must therefore be pure and
+ * idempotent, per the contract stated on `resettleBatch` in
+ * `hypaware-plugin-kernel-types.d.ts`.
+ *
+ * @ref LLP 0312#settle-purity [constrained-by]: the probe calls this and throws the answer away.
  */
 export type DatasetSettleHook = (
   rows: Record<string, unknown>[],
@@ -214,16 +362,79 @@ export interface MaintenancePartitionReport {
   path: string
   snapshotsExpired: number
   compacted: boolean
+  // The partition was converged by a foreign sorted replace snapshot: the
+  // cursor baseline was moved to the live file count instead of rewriting
+  // (LLP 0207). Mutually exclusive with `compacted`.
+  rebaselined?: boolean
+  // The compaction was the one-time re-partition migration: the generation
+  // swap wrote the new generation under the declaration's partition spec
+  // and sort order instead of carrying the recorded ones (LLP 0311).
+  repartitioned?: boolean
+  // The re-partition was due but its target layout could not be derived
+  // from the table's metadata, so this tick deferred it. The partition
+  // still compacts in place under its recorded spec; the layout has not
+  // moved and the mismatch stands until a tick can read the metadata.
+  repartitionDeferred?: boolean
   newEpoch?: number
   rowCount: number
   dataFilesBefore: number
   dataFilesAfter: number
+  /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
+  compactedBytesWritten?: number
+  // Compaction of this partition is known not to reduce its data-file
+  // count under the writer running now: either this run's rewrite
+  // reproduced the count it started from, or a previous one did and the
+  // cursor still records that verdict (LLP 0217). Set with `compacted`
+  // for the first case and without it for the second, where it is the
+  // reason the partition was skipped.
+  compactionIneffective?: boolean
+  // The data-file count the rewrite behind that verdict started from,
+  // which is the recorded count and not necessarily the live one. Set
+  // whenever `compactionIneffective` is.
+  compactionIneffectiveFiles?: number
+  // The partition is skipped because the one retry its writer generation
+  // owed it was spent by a rewrite that threw (LLP 0218). Never set with
+  // `compacted`, and never with `compactionIneffective`: a failed attempt
+  // records no verdict about the partition, so where a verdict exists that
+  // is the reason reported instead.
+  compactionAttemptFailed?: boolean
+  // When that attempt failed, as the cursor records it. Set whenever
+  // `compactionAttemptFailed` is.
+  compactionAttemptFailedAt?: string
+  // Files of the live generation released by the unreferenced-file sweep
+  // (LLP 0310): superseded by an in-place compaction or by snapshot
+  // expiry and no longer named by any retained snapshot, plus the staged
+  // metadata names a crashed publish stranded (LLP 0316), which the sweep
+  // reclaims in a pass that runs ahead of the referenced-set walk.
+  // Absent when the sweep removed nothing or did not run. Present does
+  // NOT mean the sweep finished: the staging pass answers to no
+  // referenced set, so a walk that failed after it still reports what the
+  // pass had already released, and what the walk did not reach is swept
+  // next tick.
+  unreferencedFilesRemoved?: number
+  // THIS tick's work on the partition ended in an error and the walk moved
+  // on (LLP 0220). Distinct from `compactionAttemptFailed`, which is read
+  // off the cursor and says an EARLIER tick's attempt failed and nothing
+  // has been attempted since: the two never appear together, because a
+  // tick that attempted a rewrite is not a tick that skipped one.
+  failed?: boolean
+  // The error's own `errorKind` when it carries one, else
+  // `maintenance_partition_failed`. Set whenever `failed` is.
+  errorKind?: string
+  // The error's message. Set whenever `failed` is.
+  errorMessage?: string
 }
 
 export interface MaintenanceReport {
   partitions: MaintenancePartitionReport[]
   totalSnapshotsExpired: number
   totalCompacted: number
+  totalRebaselined: number
+  // Partitions whose work threw during this tick. Non-zero means the walk
+  // completed but the tick is degraded: it did not maintain everything it
+  // set out to, and its callers report that rather than a clean run
+  // (LLP 0220#tick-reports-degraded).
+  totalFailed: number
   dryRun: boolean
   elapsedMs: number
 }
@@ -255,6 +466,14 @@ export interface RetentionSourceTableResult {
   rowsDeleted: number
   batchCount: number
   candidateFileCount: number
+  /**
+   * True when the pass removed the whole partition directory (the mtime
+   * fallback for a table with no resolvable timestamp column) rather than
+   * position-deleting rows inside it. The two are the same `rowsDeleted`
+   * to a counter and very different things to an operator reading the log
+   * afterwards, and only the pass knows which it did (LLP 0336#durable-line).
+   */
+  evictedPartition?: boolean
 }
 
 export interface RetentionResult {
@@ -263,18 +482,21 @@ export interface RetentionResult {
 }
 
 /**
- * Export-seam source-scoped withholding (LLP 0132 #source-scoped-withholding):
- * a second, optional `readRowsSince` resolver alongside `UsagePolicyResolver`.
- * Where `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
+ * Export-seam source-scoped withholding (LLP 0188): a second, optional
+ * `readRowsSince` resolver alongside `UsagePolicyResolver`. Where
+ * `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
  * dataset-declared **attribution column** (`PluginDatasetManifest.attribution_column`,
- * e.g. `client_name` for `ai_gateway_messages`) and withholds rows attributed
- * to a picker source classified `'local'` on a machine with a central layer
- * (`classifyClientProvenance`, LLP 0132 #rule): a local addition on a managed
- * machine never leaves it, even though it stays fully queryable locally.
+ * e.g. `client_name` for `ai_gateway_messages`) and withholds rows
+ * attributed to an opted-out picker source (the machine-local client-sync
+ * store, LLP 0188 #opt-out) on a machine with a central layer: on an
+ * enrolled machine every source syncs by default, and a source the user
+ * keeps local never leaves it, even though it stays fully queryable
+ * locally.
  *
- * Built once at boot (`createSourceWithholdResolver`, `src/core/cache/source-withhold.js`)
- * and threaded through `createQueryStorageService` the same way
- * `usagePolicyResolver` already is.
+ * Built at boot (`createSourceWithholdResolver`, `src/core/cache/source-withhold.js`)
+ * over a live (TTL-re-read) withheld set, and threaded through
+ * `createQueryStorageService` the same way `usagePolicyResolver` already
+ * is.
  */
 export interface SourceWithholdResolver {
   /**
@@ -282,7 +504,8 @@ export interface SourceWithholdResolver {
    * `dataset`, or `undefined` when the dataset declared no
    * `attribution_column`, the conservative default, matching `local-only`'s
    * original design: a dataset with no declared attribution column is never
-   * subject to source-scoped withholding.
+   * subject to per-row source-scoped withholding (see
+   * `shouldWithholdDataset` for the dataset-scoped rule).
    */
   attributionColumnFor(dataset: string): string | undefined
   /**
@@ -292,15 +515,75 @@ export interface SourceWithholdResolver {
    * continuation semantics).
    */
   shouldWithhold(attributionValue: unknown): boolean
+  /**
+   * The transcript-`entrypoint` column `readRowsSince` should force into
+   * the scan alongside the attribution column, or `undefined` when no
+   * client declares entrypoint ownership or the dataset is not subject to
+   * per-row withholding at all. Optional so a hand-built test resolver
+   * without the ownership map behaves exactly as before.
+   */
+  entrypointColumnFor?(dataset: string): string | undefined
+  /**
+   * True when a row belongs to a withheld picker source that stamps a
+   * DIFFERENT source's `client_name`, identified through the transcript
+   * `entrypoint` value that source's manifest claims
+   * (`contributes.client.transcript_entrypoints`). `claude-desktop` is the
+   * shipped case: its live rows land as `client_name: "claude"` with
+   * `entrypoint: "claude-desktop-3p"` (LLP 0133 #attribution), so the
+   * `client_name` test alone can never enforce its opt-out (LLP 0346).
+   *
+   * Purely additive to `shouldWithhold`, and scoped to rows whose own
+   * `client_name` names a client that declares entrypoint ownership: the
+   * `entrypoint` vocabulary is per-client, so an unscoped read would
+   * withhold a hermes row (entrypoint `cli`) because `claude` claims
+   * `cli`. Optional for the same hand-built-resolver reason as
+   * `shouldWithholdDataset`.
+   */
+  shouldWithholdEntrypoint?(attributionValue: unknown, entrypointValue: unknown): boolean
+  /**
+   * True when `dataset` has no attribution column, has at least one
+   * contributing picker source, and every such source is withheld: the
+   * whole dataset is then withheld (LLP 0188 #enforcement-scope), covering
+   * single-owner datasets (the otel signals) that per-row withholding can
+   * never reach. Optional so a hand-built test resolver without the
+   * dataset-ownership map behaves as before (nothing dataset-withheld).
+   */
+  shouldWithholdDataset?(dataset: string): boolean
+  /**
+   * Fail-closed rule for rows whose attribution value is unusable (not a
+   * non-empty string) in a dataset that DOES declare an attribution
+   * column: true when any picker source whose plugin declares this dataset
+   * (`contributes.datasets`) is withheld, since an unlabeled row cannot be
+   * proven to belong to a synced source (LLP 0192 #fail-closed). A plugin
+   * that only projects rows into the dataset, without declaring it, is not
+   * in that set. Optional for the same hand-built-resolver reason as
+   * `shouldWithholdDataset`.
+   */
+  shouldWithholdUnattributed?(dataset: string): boolean
+  /**
+   * Cheap stable digest of the resolver's mutable input, the live withheld
+   * picker-source set, for consumers that must notice an opt-out change
+   * without re-reading history (LLP 0367 #policy-fingerprint). Optional for
+   * the same hand-built-resolver reason as `shouldWithholdDataset`.
+   */
+  fingerprint?(): string
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {
-  dataSourceForTable(tablePath: string): Promise<AsyncDataSource | null>
+  dataSourceForTable(tablePath: string): Promise<ScannableDataSource | null>
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>
   /** Whether `tablePath` has rows spooled but not yet flushed to Iceberg. */
   hasPendingSync(tablePath: string): boolean
+  /**
+   * How many of `rows`, already read from `tablePath` through `readRowsSince`
+   * with every column, the export seam would withhold now: a purged session,
+   * an opted-out source, or a `cwd` whose current usage class (`.hypignore`
+   * included, within the resolver's TTL) is not `full`. Bounded to the rows
+   * given; no table scan.
+   */
+  exportWithheld(tablePath: string, rows: readonly Record<string, unknown>[]): number
   appendRowsToPartition(
     dataset: string,
     partitionSegments: string[],
@@ -310,7 +593,7 @@ export type ExtendedQueryStorageService = QueryStorageService & {
   discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
   /**
    * Yield rows currently pending in the spool for every table belonging
-   * to `dataset` — rows captured live but not yet flushed to Iceberg, so
+   * to `dataset`: rows captured live but not yet flushed to Iceberg, so
    * invisible to `discoverCachePartitions`/`readRows`. Read-only; degrades
    * to an empty stream on any error.
    */

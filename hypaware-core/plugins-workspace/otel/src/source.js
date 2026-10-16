@@ -1,6 +1,6 @@
 // @ts-check
 
-import { createOtlpServer, listenAndResolve } from './server.js'
+import { createOtlpJsonServer, listenAndResolve } from '../../../../src/core/otlp/server.js'
 import { makeReceiveHandler, stampBoundAddress } from './collector.js'
 
 /**
@@ -9,6 +9,9 @@ import { makeReceiveHandler, stampBoundAddress } from './collector.js'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4318
+
+/** What this listener calls itself on the wire banner and in bind errors. */
+const LISTENER_NAME = 'hypaware/otel'
 
 /**
  * `startOtelSource` is the `SourceContribution.start` callback. It owns
@@ -29,8 +32,9 @@ export async function startOtelSource(ctx) {
   /** @type {{ rowsWritten: number, lastError: string | undefined }} */
   const state = { rowsWritten: 0, lastError: undefined }
   const handler = makeReceiveHandler(ctx, state, ctx.log)
-  const server = createOtlpServer({ handle: handler })
-  const bound = await listenAndResolve(server, host, port)
+  // @ref LLP 0257#registration [implements]: the transport is shared core machinery; only the receive handler below is otel-owned
+  const server = createOtlpJsonServer({ name: LISTENER_NAME, handler: { handle: handler } })
+  const bound = await listenAndResolve(server, host, port, LISTENER_NAME)
   stampBoundAddress(bound.host, bound.port)
   ctx.log.info('otel.listener_started', {
     listen_host: bound.host,

@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveInitExportChoice } from '../../src/core/commands/init.js'
+import { resolveInitExportChoice, resolveInitSources } from '../../src/core/commands/init.js'
 
 /** @import { InitFlags } from '../../src/core/cli/types.js' */
 
@@ -68,4 +68,46 @@ test('explicit --export local-parquet still reports origin=user', () => {
     exportChoice: 'local-parquet',
     origin: 'user',
   })
+})
+
+/* ------------------------------ source picks ------------------------------ */
+
+// The `--yes` default is for the run that named nothing. A `--client` is a
+// pick, and folding it in only *after* the default had already been injected
+// meant `hyp setup --yes --client opencode` composed Claude capture and
+// rewrote the operator's real `~/.claude/settings.json` for a client they
+// never named - a capture surface opened without anyone asking for it.
+// @ref LLP 0011#autodetect-vs-default [tests]: a default fills a silence, it never overrides a pick
+test('--yes alone still captures the Claude + OTEL default', () => {
+  assert.deepEqual(resolveInitSources(flags({ yes: true })), ['claude', 'otel'])
+})
+
+test('a named client suppresses the --yes default instead of being added to it', () => {
+  assert.deepEqual(resolveInitSources(flags({ yes: true, clients: ['opencode'] })), ['opencode'])
+})
+
+test('a named source suppresses the --yes default, as it always did', () => {
+  assert.deepEqual(resolveInitSources(flags({ yes: true, sources: ['otel'] })), ['otel'])
+})
+
+test('--client folds into the sources so a matching --source is not required', () => {
+  assert.deepEqual(
+    resolveInitSources(flags({ yes: true, sources: ['otel'], clients: ['opencode'] })),
+    ['otel', 'opencode'],
+  )
+})
+
+test('a client already named as a source is not duplicated', () => {
+  assert.deepEqual(
+    resolveInitSources(flags({ yes: true, sources: ['opencode'], clients: ['opencode'] })),
+    ['opencode'],
+  )
+})
+
+test('naming nothing without --yes resolves to nothing, which is the usage error', () => {
+  assert.deepEqual(resolveInitSources(flags()), [])
+})
+
+test('a client named without --yes is still a pick, not a usage error', () => {
+  assert.deepEqual(resolveInitSources(flags({ clients: ['claude'] })), ['claude'])
 })

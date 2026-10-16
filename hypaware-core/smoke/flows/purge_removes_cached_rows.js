@@ -38,7 +38,7 @@ const COLUMNS = [
  *   - the purged session's rows are gone from `hyp query` results;
  *   - the other session's rows survive;
  *   - the partition cursor's `rowCount` drops to the live count;
- *   - a second identical purge is a no-op (idempotent, durable — the deletes
+ *   - a second identical purge is a no-op (idempotent, durable: the deletes
  *     don't resurrect), so the query result is unchanged.
  *
  * This is the query-visible half of LLP 0104; the watermark/part_id

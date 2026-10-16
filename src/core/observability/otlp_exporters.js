@@ -3,11 +3,20 @@
 import { hrTimeToUnixNano, SpanStatusCode } from './runtime.js'
 
 /**
- * @import { LogRecord, MetricRecord } from '../../../src/core/observability/types.js'
+ * @import { LogRecord, MetricRecord, OtlpScope } from '../../../src/core/observability/types.js'
  * @import { Span } from './runtime.js'
  */
 
 const OTLP_AGGREGATION_TEMPORALITY_CUMULATIVE = 2
+
+/**
+ * Per-request timeout for every OTLP HTTP export. Lives here, next to the
+ * abort timer that enforces it, because the shutdown budget in
+ * `installObservability` is derived from it: a budget below this number
+ * abandons confirmations the exporter was about to deliver or give up on
+ * anyway (LLP 0339#budget-derived).
+ */
+export const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 class OtlpHttpJsonExporter {
   /**
@@ -32,7 +41,13 @@ class OtlpHttpJsonExporter {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
       signal: controller.signal,
-    }).catch(() => undefined).finally(() => clearTimeout(timer))
+    }).catch(() => undefined).finally(() => {
+      clearTimeout(timer)
+      // Self-drain: without this, a long-lived process that never calls
+      // forceFlush accumulates one settled promise per export forever.
+      const index = this.pending.indexOf(request)
+      if (index !== -1) this.pending.splice(index, 1)
+    })
     this.pending.push(request)
   }
 
@@ -75,7 +90,7 @@ export class OtlpMetricExporter extends OtlpHttpJsonExporter {
  * @param {(span: Span) => object} mapSpan
  */
 function groupByResourceAndScope(spans, mapSpan) {
-  /** @type {Map<string, { resource: object, scopeSpans: Array<{ scope: object, spans: object[] }> }>} */
+  /** @type {Map<string, { resource: object, scopeSpans: Array<{ scope: OtlpScope, spans: object[] }> }>} */
   const byResource = new Map()
   for (const span of spans) {
     const resourceKey = JSON.stringify(span.resource.attributes)
@@ -96,7 +111,7 @@ function groupByResourceAndScope(spans, mapSpan) {
 
 /** @param {LogRecord[]} records */
 function groupLogsByResourceAndScope(records) {
-  /** @type {Map<string, { resource: object, scopeLogs: Array<{ scope: object, logRecords: object[] }> }>} */
+  /** @type {Map<string, { resource: object, scopeLogs: Array<{ scope: OtlpScope, logRecords: object[] }> }>} */
   const byResource = new Map()
   for (const record of records) {
     const resourceKey = JSON.stringify(record.resource.attributes)
@@ -117,7 +132,7 @@ function groupLogsByResourceAndScope(records) {
 
 /** @param {MetricRecord[]} records */
 function groupMetricsByResourceAndScope(records) {
-  /** @type {Map<string, { resource: object, scopeMetrics: Array<{ scope: object, metrics: object[] }> }>} */
+  /** @type {Map<string, { resource: object, scopeMetrics: Array<{ scope: OtlpScope, metrics: object[] }> }>} */
   const byResource = new Map()
   for (const record of records) {
     const resourceKey = JSON.stringify(record.resource.attributes)
@@ -250,7 +265,14 @@ function anyValueToOtlp(value) {
   return { stringValue: '' }
 }
 
-/** @param {Record<string, unknown>} obj */
+/**
+ * Drop undefined-valued keys. The shape is preserved in the type: every key
+ * this can remove was optional to begin with.
+ *
+ * @template {Record<string, unknown>} T
+ * @param {T} obj
+ * @returns {T}
+ */
 function cleanObject(obj) {
-  return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined))
+  return /** @type {T} */ (Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)))
 }

@@ -1,11 +1,12 @@
 # LLP 0099: Codex attach routes by auth.json shape
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Gateway
 **Author:** Kenny / Claude
 **Date:** 2026-07-11
 **Related:** LLP 0016, LLP 0045, LLP 0083
+**Superseded-by:** LLP 0313 (attach writes one neutral route in both auth modes and stops reading `auth.json`; the gateway resolves the upstream per request from the credential). The scope note stands: only the subscription-to-API-key direction is recoverable from a request.
 
 > `hyp attach codex` picks between two gateway routes by reading Codex's
 > `auth.json`. An explicit `auth_mode` wins; when the field is absent, OAuth

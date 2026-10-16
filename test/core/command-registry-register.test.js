@@ -1,0 +1,922 @@
+// @ts-check
+
+/**
+ * `register()` treats its argument as an input, not as the registry's
+ * storage. The registry fills `category`, `audience`, and `bootProfile` at
+ * the boundary so third-party commands participate without boilerplate;
+ * doing that in place made the caller's object part of the mechanism, which
+ * a frozen registration cannot survive and a rejected registration should
+ * never have been subjected to.
+ *
+ * @ref LLP 0248#semantic-boot [tests]: the semantic defaults land on the registry's record, not on whatever object the caller happened to pass
+ */
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
+import { isVerbProjection, verbToCommand } from '../../src/core/cli/verb_command.js'
+import { stderrTextFrom } from '../helpers/stderr_lines.js'
+
+/** @param {object} [over] @returns {any} */
+function makeCommand(over = {}) {
+  return { name: 'demo', summary: 'a demo command', usage: 'hyp demo', run: async () => 0, ...over }
+}
+
+test('register fills the semantic defaults on the stored record', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand())
+  const stored = commands.get('demo')
+  assert.equal(stored?.category, 'demo')
+  assert.equal(stored?.audience, 'everyday')
+  assert.equal(stored?.bootProfile, 'config')
+})
+
+// The defaulting used to write straight into the argument, so a plugin that
+// registered a frozen module-level constant got a TypeError out of the
+// defaulting instead of a registered command.
+test('register accepts a frozen registration object', () => {
+  const commands = createCommandRegistry()
+  const frozen = Object.freeze(makeCommand({ name: 'frozen', aliases: Object.freeze(['fz']) }))
+  assert.doesNotThrow(() => commands.register(frozen))
+  assert.equal(commands.get('frozen')?.audience, 'everyday')
+  assert.equal(commands.get('fz')?.name, 'frozen')
+})
+
+test('register leaves the caller object unmodified on success', () => {
+  const commands = createCommandRegistry()
+  const registration = makeCommand()
+  commands.register(registration)
+  assert.equal('category' in registration, false)
+  assert.equal('audience' in registration, false)
+  assert.equal('bootProfile' in registration, false)
+})
+
+// A rejected registration is a no-op on the caller's side: the object it
+// passed comes back exactly as it went in, so a retry under a different name
+// does not silently inherit defaults derived from the name that lost.
+test('a rejected duplicate leaves the caller object unmutated', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand())
+  const rejected = makeCommand({ summary: 'the loser' })
+  assert.throws(() => commands.register(rejected), /duplicate command name 'demo'/)
+  assert.deepEqual(Object.keys(rejected).sort(), ['name', 'run', 'summary', 'usage'])
+})
+
+test('a rejected alias collision leaves the caller object unmutated', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ aliases: ['d'] }))
+  const rejected = makeCommand({ name: 'other', aliases: ['d'] })
+  assert.throws(() => commands.register(rejected), /collides with an existing command/)
+  assert.deepEqual(Object.keys(rejected).sort(), ['aliases', 'name', 'run', 'summary', 'usage'])
+})
+
+// The copy is shallow on purpose: the stored record must keep pointing at the
+// same `run`, and mutating the caller's object afterwards must not rewrite
+// what dispatch will render.
+test('the stored record keeps the callers run() but not its later edits', () => {
+  const commands = createCommandRegistry()
+  const registration = makeCommand()
+  commands.register(registration)
+  assert.equal(commands.get('demo')?.run, registration.run)
+  registration.summary = 'edited after registration'
+  assert.equal(commands.get('demo')?.summary, 'a demo command')
+})
+
+// The one thing the copy could have broken. `VerbRegistry.unregister` asks
+// `isVerbProjection` whether the command sitting under a released verb name
+// is the one the kernel projected, and the answer has to survive the record
+// the registry actually stored, not just the object `verbToCommand` returned.
+// @ref LLP 0264#verb [tests]: the projection mark rides on the registration, so a released verb name still retracts its own CLI command
+test('a verb projection is still recognizable after the registry copies it', () => {
+  const commands = createCommandRegistry()
+  const projected = verbToCommand(/** @type {any} */ ({
+    name: 'demo verb',
+    tool: 'demo_verb',
+    summary: 'a demo verb',
+    inputSchema: { type: 'object', properties: {}, positional: [] },
+    operation: async () => ({}),
+    render: () => ({ stdout: '' }),
+  }))
+  assert.equal(isVerbProjection(projected), true)
+  commands.register(projected)
+  assert.equal(isVerbProjection(commands.get('demo verb')), true)
+  // A plain command that merely shares the shape is not a projection.
+  commands.register(makeCommand())
+  assert.equal(isVerbProjection(commands.get('demo')), false)
+})
+
+// The copy is `{ ...command }`, which carries own enumerable properties and
+// nothing else, so the object the checks above run on has to *be* the record.
+// Checking the argument and storing the copy let a class instance pass (its
+// `run()` is on the prototype) and then store a record with no `run` at all,
+// which only surfaced as a TypeError inside dispatch, long after the boundary
+// that should have refused it.
+test('the shape checks run on the stored record, not on the argument', () => {
+  const commands = createCommandRegistry()
+  class Prototyped {
+    constructor() {
+      this.name = 'prototyped'
+      this.summary = 'run() lives on the prototype'
+      this.usage = 'hyp prototyped'
+    }
+    async run() {
+      return 0
+    }
+  }
+  assert.throws(() => commands.register(/** @type {any} */ (new Prototyped())), /'prototyped' missing run\(\)/)
+  assert.equal(commands.get('prototyped'), undefined)
+})
+
+// Same rule from the other side: whatever the checks accepted is what dispatch
+// gets, so a getter that answers differently on a second read cannot slip a
+// different `run` past them.
+test('the run() the checks accepted is the run() the registry stores', () => {
+  const commands = createCommandRegistry()
+  const accepted = async () => 0
+  let reads = 0
+  const shifty = {
+    name: 'shifty',
+    summary: 'a moving target',
+    usage: 'hyp shifty',
+    get run() {
+      reads += 1
+      return reads === 1 ? accepted : undefined
+    },
+  }
+  commands.register(/** @type {any} */ (shifty))
+  assert.equal(commands.get('shifty')?.run, accepted)
+})
+
+// The compiler cannot warn about any of this. A class instance whose `run()`
+// lives on the prototype satisfies `CommandRegistration` under `tsc --strict`,
+// because TypeScript's type system has no notion of own or enumerable
+// properties, and `hypaware-plugin-kernel-types.d.ts` is published, so
+// `register` is a third-party API. That leaves the boundary error as the whole
+// diagnosis, read out of a `plugin.activate_failed` log line after the plugin
+// quietly failed to load - and "missing run()" about a registration that
+// visibly declares `run()` sends the author looking in the wrong place.
+test('the boundary error says why a member did not survive the copy', () => {
+  const commands = createCommandRegistry()
+  class Prototyped {
+    constructor() {
+      this.name = 'prototyped'
+      this.summary = 'run() lives on the prototype'
+      this.usage = 'hyp prototyped'
+    }
+    async run() {
+      return 0
+    }
+  }
+  assert.throws(
+    () => commands.register(/** @type {any} */ (new Prototyped())),
+    /'prototyped' missing run\(\).*'run' is reachable on the registration but is not an own enumerable property/s
+  )
+
+  // Same cause, a different member, and reached through `Object.create`
+  // rather than through a class.
+  const inherited = Object.create({ summary: 'inherited', usage: 'hyp inherited', run: async () => 0 })
+  inherited.name = 'inherited'
+  assert.throws(
+    () => commands.register(inherited),
+    /'inherited' missing summary.*'summary' is reachable on the registration but is not an own enumerable property/s
+  )
+
+  // Own, but not enumerable, so the spread does not carry it either.
+  const hidden = makeCommand({ name: 'hidden' })
+  delete hidden.run
+  Object.defineProperty(hidden, 'run', { value: async () => 0, enumerable: false })
+  assert.throws(
+    () => commands.register(hidden),
+    /'hidden' missing run\(\).*is not an own enumerable property/s
+  )
+})
+
+// The diagnosis has to stay off a registration that really is incomplete,
+// or it would send the next author hunting a prototype that is not there.
+test('a genuinely absent member is reported without the copy diagnosis', () => {
+  const commands = createCommandRegistry()
+  const bare = makeCommand()
+  delete bare.run
+  // Anchored: nothing follows "missing run()" when there is nothing to explain.
+  assert.throws(() => commands.register(bare), /'demo' missing run\(\)$/)
+})
+
+// The clause has to read the argument to know the member was reachable, and
+// one of the shapes it exists to diagnose puts that member on a prototype -
+// where reading it can run caller code. A registration this function rejects
+// comes back exactly as it arrived, and a getter that throws must not replace
+// the boundary error with its own.
+test('the copy diagnosis does not run a prototype accessor to make its case', () => {
+  const commands = createCommandRegistry()
+  let reads = 0
+  class Lazy {
+    constructor() {
+      this.name = 'lazy'
+      this.summary = 'run() is built on first read'
+      this.usage = 'hyp lazy'
+    }
+    get run() {
+      reads += 1
+      throw new Error('provider not configured yet')
+    }
+  }
+  assert.throws(
+    () => commands.register(/** @type {any} */ (new Lazy())),
+    /'lazy' missing run\(\).*not an own enumerable property/s
+  )
+  assert.equal(reads, 0, 'the rejection path must not invoke the getter')
+
+  // A Proxy is the same argument through two more doors, and they are
+  // different doors: the spread consults `get`, while `in` consults `has`
+  // and never `get`. Both assertions are anchored, so a clause appended
+  // where none belongs fails them too.
+  const getTrapped = new Proxy(
+    /** @type {any} */ ({ name: 'trapped', summary: 's', usage: 'hyp trapped' }),
+    {
+      get(target, key) {
+        if (key === 'run') throw new Error('trap boom')
+        return target[key]
+      }
+    }
+  )
+  assert.throws(() => commands.register(getTrapped), /'trapped' missing run\(\)$/)
+
+  // `has` is the one trap `in` does reach, so it is the one thing left that
+  // can object. It must not get to replace the boundary error either: the
+  // diagnosis goes quiet and the registry still says what it refused.
+  const hasTrapped = new Proxy(
+    /** @type {any} */ ({ name: 'has-trapped', summary: 's', usage: 'hyp has-trapped' }),
+    {
+      has() {
+        throw new Error('has boom')
+      }
+    }
+  )
+  assert.throws(() => commands.register(hasTrapped), /'has-trapped' missing run\(\)$/)
+})
+
+// The same blind spot with nothing to refuse. An *optional* member the spread
+// left behind fails no shape check, so registration succeeds and the command
+// runs without it: the alias index gets nothing (a dead alias), a command that
+// asked to be `hidden` lists in `hyp --help`, and a lost `plugin` re-derives
+// `category` from the command's own name and `audience` from that. Every
+// symptom is an absence, which is the case LLP 0362 admitted to the mirror
+// LLP 0329 settled, so it reaches a channel that exists on a default install.
+//
+// @ref LLP 0362#absence-not-refusal [tests]: a report on a registration that succeeded takes the mirror, so both an operator and a test can see it
+test('a dropped optional member is warned about at register time', async () => {
+  const commands = createCommandRegistry()
+  let reads = 0
+  class Prototyped {
+    constructor() {
+      this.name = 'proto'
+      this.summary = 'the optional members live on the prototype'
+      this.usage = 'hyp proto'
+      this.run = async () => 0
+    }
+    get plugin() {
+      reads += 1
+      return '@hypaware/demo'
+    }
+    get aliases() {
+      reads += 1
+      return ['pr']
+    }
+    get hidden() {
+      reads += 1
+      return true
+    }
+  }
+  const text = await stderrTextFrom(() => commands.register(/** @type {any} */ (new Prototyped())))
+  // "the declared", because the three defaulted members (`category`,
+  // `audience`, `bootProfile`) do reach the stored record with a value, just
+  // not the declared one, and a bare "registered without 'category'" would be
+  // false about the record the operator can go and read.
+  assert.match(text, /WARN.*CommandRegistry\.register: 'proto' registered without the declared/)
+  assert.match(text, /'plugin', 'aliases', 'hidden'/)
+  assert.match(text, /not an own enumerable property/)
+  // The warning is a presence probe, exactly like the refusal clause: naming a
+  // member must not run the accessor that provides it.
+  assert.equal(reads, 0, 'the warning path must not invoke the getters it names')
+  // And it is a warning, not a refusal: the command is registered, degraded.
+  assert.equal(commands.get('proto')?.name, 'proto')
+})
+
+// The other direction, because the dangerous failure of any new warning is
+// firing on the healthy path: an ordinary registration that simply does not
+// carry the optional members says nothing at all.
+test('a registration with no optional members warns about nothing', async () => {
+  const commands = createCommandRegistry()
+  const text = await stderrTextFrom(() => {
+    commands.register(makeCommand())
+    commands.register(makeCommand({ name: 'full', plugin: '@hypaware/demo', aliases: ['f'], hidden: true }))
+  })
+  assert.equal(text, '')
+})
+
+// `in` is the one trap the probe reaches, and on this path the registration is
+// otherwise valid: a throwing `has` must cost the warning, never the
+// registration it was only commenting on.
+test('a throwing has trap costs the warning, not the registration', async () => {
+  const commands = createCommandRegistry()
+  // The target has to carry a prototype-resident optional member, or the
+  // empty stderr below holds whether or not the throw was contained and the
+  // test pins nothing it is named for. With one, the warning is exactly what
+  // would fire if the probe could reach it, so its absence is the cost.
+  class Trapped {
+    constructor() {
+      this.name = 'has-trapped'
+      this.summary = 'the trap sits over a droppable member'
+      this.usage = 'hyp has-trapped'
+      this.run = async () => 0
+    }
+    get plugin() {
+      return '@hypaware/demo'
+    }
+  }
+  const hasTrapped = new Proxy(/** @type {any} */ (new Trapped()), {
+    has() {
+      throw new Error('has boom')
+    },
+  })
+  const text = await stderrTextFrom(() => commands.register(hasTrapped))
+  assert.equal(text, '')
+  assert.equal(commands.get('has-trapped')?.name, 'has-trapped')
+})
+
+// The saying is separated from the probe so it can wait for the registration
+// to land: the probe must read the copy before the defaulting, but four
+// refusals still stand between there and a registered command, and a WARN
+// naming a command that was refused is false on the one channel LLP 0329
+// guarantees an operator can see.
+test('a refused registration is not warned about as a degraded one', async () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'taken' }))
+  class Prototyped {
+    constructor() {
+      this.name = 'taken'
+      this.summary = 'a duplicate whose optional member is on the prototype'
+      this.usage = 'hyp taken'
+      this.run = async () => 0
+    }
+    get plugin() {
+      return '@hypaware/demo'
+    }
+  }
+  const text = await stderrTextFrom(() => {
+    assert.throws(
+      () => commands.register(/** @type {any} */ (new Prototyped())),
+      /duplicate command name 'taken'/
+    )
+  })
+  assert.equal(text, '', 'a registration that was refused must not be reported as registered')
+})
+
+// The say now runs after `byName.set` and the alias-index loop, which is what
+// makes it true, and is also what makes containment load-bearing from the
+// other side. `copyMiss` already rules that a throwing `has` trap costs the
+// warning and never the registration; a mirror write that throws must cost
+// the same. Unguarded, the throw escapes `register` over a command that is
+// already live in both indexes, so the caller records a `plugin.activate_failed`
+// while the command stays dispatchable under a plugin reported as not loaded.
+test('a throwing mirror write costs the warning, not the registration', () => {
+  const commands = createCommandRegistry()
+  class Prototyped {
+    constructor() {
+      this.name = 'proto'
+      this.summary = 'the optional member lives on the prototype'
+      this.usage = 'hyp proto'
+      this.run = async () => 0
+      this.aliases = ['pr']
+    }
+    get plugin() {
+      return '@hypaware/demo'
+    }
+  }
+  const realWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = () => {
+    throw new Error('the mirror descriptor is gone')
+  }
+  try {
+    assert.doesNotThrow(() => commands.register(/** @type {any} */ (new Prototyped())))
+  } finally {
+    process.stderr.write = realWrite
+  }
+  // And the registration is whole, not half-applied: both indexes carry it.
+  assert.equal(commands.get('proto')?.name, 'proto')
+  assert.equal(commands.get('pr')?.name, 'proto')
+})
+
+// Two loops over `record.aliases` were two questions put to a plugin-controlled
+// `Symbol.iterator`, and nothing made it answer them the same way: the shallow
+// copy carries the caller's value, not its sequence. An iterable that named an
+// unclaimed alias to the collision check and a claimed one to the write passed
+// the check and then overwrote the alias it would have been refused.
+//
+// The statefulness lives in `Symbol.iterator`, which the registry's copy
+// carries by reference, so the fixture survives being copied and cannot pass
+// vacuously the way a one-shot getter would. `passes()` is asserted anyway: a
+// fixture that stopped answering differently per pass proves nothing here, and
+// must say so rather than go quiet.
+/**
+ * An `aliases` value that answers each iteration from `stages` in turn, the
+ * last stage standing for every pass after it.
+ *
+ * @param {(() => Iterable<string>)[]} stages
+ * @returns {{ aliases: Iterable<string>, passes: () => number }}
+ */
+function stagedAliases(...stages) {
+  let passes = 0
+  const aliases = {
+    [Symbol.iterator]() {
+      const stage = stages[Math.min(passes, stages.length - 1)]
+      passes += 1
+      return stage()[Symbol.iterator]()
+    },
+  }
+  return { aliases, passes: () => passes }
+}
+
+test('a stateful aliases iterable cannot displace a registered alias', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'status', aliases: ['st'] }))
+  // Clean to the collision check, then the alias `status` already holds.
+  const staged = stagedAliases(
+    () => ['fresh'],
+    () => ['st']
+  )
+  commands.register(makeCommand({ name: 'hostile', aliases: staged.aliases }))
+  assert.equal(commands.get('st')?.name, 'status', "'st' still belongs to the command that claimed it")
+  assert.equal(commands.get('fresh')?.name, 'hostile', 'the registration lands under the names that were checked')
+  assert.equal(staged.passes(), 1, 'the alias sequence is asked for exactly once, or the fixture proves nothing')
+})
+
+// The other half of reading twice. `byName.set` sat between the two loops, so
+// an iterable that yielded cleanly to the check and threw partway through the
+// write left the command registered under a name whose aliases were partly
+// indexed: `register` reported failure and the registry kept the command.
+test('an aliases iterable that throws on a second pass leaves no half-registration', () => {
+  const commands = createCommandRegistry()
+  const staged = stagedAliases(
+    () => ['half', 'rest'],
+    () =>
+      (function* () {
+        yield 'half'
+        throw new Error('the alias sequence is gone')
+      })()
+  )
+  /** @type {unknown} */
+  let refusal
+  try {
+    commands.register(makeCommand({ name: 'hostile', aliases: staged.aliases }))
+  } catch (err) {
+    refusal = err
+  }
+  // Refusing is allowed. Refusing and keeping the command is not, and neither
+  // is keeping an alias for a command that is not there.
+  assert.equal(commands.has('hostile'), refusal === undefined, 'byName agrees with what register reported')
+  assert.equal(commands.has('half'), refusal === undefined, 'the alias index agrees with what register reported')
+  assert.equal(commands.has('rest'), refusal === undefined)
+  assert.equal(staged.passes(), 1, 'the alias sequence is asked for exactly once, or the fixture proves nothing')
+})
+
+// The drain must not soften the boundary: a non-iterable `aliases` is still a
+// TypeError out of `register`, and still raises it before anything is written.
+//
+// And it must not blur the diagnosis, which is the half `not iterable` alone
+// does not hold: draining with a spread makes V8 name the expression that did
+// the reading ("(record.aliases ?? []) is not iterable") where the loop makes
+// it name the value ("number 7 is not iterable"), and a plugin author has no
+// `record` to go look at. The assertion is the negative rather than the
+// engine's exact wording, which differs by V8 version and by the shape of the
+// expression: what must stay true is that the error names what the caller
+// passed and never how the registry read it.
+test('a non-iterable aliases is still refused at the boundary', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'bad', aliases: 7 })),
+    (err) => err instanceof TypeError && /not iterable/.test(err.message) && !/record\.aliases/.test(err.message)
+  )
+  assert.equal(commands.has('bad'), false)
+  assert.equal(commands.size(), 0)
+})
+
+test('a plain-array aliases registers unchanged', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'status', aliases: ['st', 'stat'] }))
+  commands.register(makeCommand({ name: 'query sql', aliases: ['sql'] }))
+  commands.register(makeCommand({ name: 'demo' }))
+  assert.deepEqual(
+    commands.list().map((c) => c.name),
+    ['demo', 'query sql', 'status']
+  )
+  assert.equal(commands.get('st')?.name, 'status')
+  assert.equal(commands.get('stat')?.name, 'status')
+  assert.equal(commands.get('sql')?.name, 'query sql')
+  assert.deepEqual(commands.get('status')?.aliases, ['st', 'stat'])
+  assert.equal(commands.size(), 3)
+  assert.equal(commands.match(['st', '--json'])?.command.name, 'status')
+})
+
+// What the collision check alone cannot see: values it accepts in full while
+// claiming names the plugin never wrote, with nothing thrown and nothing
+// logged. A string is the ordinary typo for this field, and the cost of
+// accepting it lands on a third party, so the refusal is checked from that
+// side too.
+test('a string aliases is refused instead of spread into one alias per character', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'status', aliases: 'st' })),
+    (err) => err instanceof TypeError && /'status' has invalid aliases 'st'/.test(err.message)
+  )
+  assert.equal(commands.size(), 0)
+  assert.equal(commands.has('status'), false)
+  assert.equal(commands.has('s'), false, "'s' was never claimed")
+  assert.equal(commands.has('t'), false, "'t' was never claimed")
+  // The letters stay free for the plugin that means them.
+  commands.register(makeCommand({ name: 'sync', aliases: ['s'] }))
+  assert.equal(commands.get('s')?.name, 'sync')
+})
+
+// A non-string member goes into `aliasIndex` as a key of that type, and `get`
+// is a Map lookup the CLI only ever hands strings, so `7 !== '7'`: the entry
+// is unreachable forever while still holding the name against every later
+// registration.
+test('a non-string alias member is refused', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'status', aliases: ['st', 7] })),
+    (err) => err instanceof TypeError && /'status' has invalid alias at index 1\b/.test(err.message)
+  )
+  assert.equal(commands.size(), 0)
+  // Refused whole: the good member before the bad one claims nothing either.
+  assert.equal(commands.has('st'), false)
+  assert.equal(commands.has('status'), false)
+})
+
+test('an empty-string alias member is refused', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'status', aliases: [''] })),
+    (err) => err instanceof TypeError && /'status' has invalid alias at index 0\b/.test(err.message)
+  )
+  assert.equal(commands.size(), 0)
+  assert.equal(commands.has(''), false)
+})
+
+// The judgment call, pinned. A non-array iterable stays accepted: the drain
+// exists to read exactly one such sequence exactly once, and the two fixtures
+// that prove it once-only are non-array iterables. What the shape check owes
+// is that "iterable" is not the test, since a string is iterable too.
+test('a non-array iterable aliases is still accepted', () => {
+  const commands = createCommandRegistry()
+  const aliases = (function* () {
+    yield 'st'
+    yield 'stat'
+  })()
+  commands.register(makeCommand({ name: 'status', aliases }))
+  assert.equal(commands.get('st')?.name, 'status')
+  assert.equal(commands.get('stat')?.name, 'status')
+})
+
+// Ordering. Every non-iterable would fail the shape check too, so placing
+// that check before the drain would answer `aliases: 7` in the registry's
+// words instead of the engine's. The author must still get V8's error, which
+// names the value they passed.
+//
+// Asserted as properties, never as V8's sentence: the engine's exact wording
+// is a version detail, which is why the sibling test above pins the negative
+// too. What has to hold is that the error is the engine's (no
+// `CommandRegistry.register` prefix), that it names the value passed (7) and
+// not the expression that read it (`record.aliases`), and that it is the
+// 'not iterable' diagnosis rather than some later failure.
+test('a non-iterable aliases keeps the boundary error the drain raises', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'bad', aliases: 7 })),
+    (err) =>
+      err instanceof TypeError &&
+      /\bnot iterable\b/.test(err.message) &&
+      /\b7\b/.test(err.message) &&
+      !/CommandRegistry\.register/.test(err.message) &&
+      !/record\.aliases/.test(err.message)
+  )
+  assert.equal(commands.has('bad'), false)
+  assert.equal(commands.size(), 0)
+})
+
+// Honest path. Every first-party plugin ships a plain string array, an empty
+// one, or nothing at all, so the shape check must be invisible to all three.
+test('the shape check leaves plain-array registrations untouched', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'status', aliases: ['st', 'stat'] }))
+  commands.register(makeCommand({ name: 'query sql', aliases: ['sql'] }))
+  commands.register(makeCommand({ name: 'daemon', aliases: [] }))
+  commands.register(makeCommand({ name: 'ask' }))
+  commands.register(makeCommand({ name: 'attach', aliases: Object.freeze(['at']) }))
+  assert.deepEqual(
+    commands.list().map((c) => c.name),
+    ['ask', 'attach', 'daemon', 'query sql', 'status']
+  )
+  assert.equal(commands.size(), 5)
+  for (const [alias, name] of [
+    ['st', 'status'],
+    ['stat', 'status'],
+    ['sql', 'query sql'],
+    ['at', 'attach'],
+  ]) {
+    assert.equal(commands.get(alias)?.name, name, `${alias} resolves to ${name}`)
+    assert.equal(commands.has(alias), true)
+  }
+  assert.deepEqual(commands.get('status')?.aliases, ['st', 'stat'])
+  assert.deepEqual(commands.get('daemon')?.aliases, [])
+  assert.equal(commands.get('ask')?.aliases, undefined)
+})
+
+/**
+ * The optional members of `CommandRegistration`, read out of the published
+ * declaration file rather than restated here. Both spellings the file uses
+ * for one, `foo?: T` and the optional method `foo?(...): T`, the type
+ * parameters that method may declare (`foo?<T>(...): T`), and the `readonly`
+ * prefix either may carry, with the whitespace TypeScript allows
+ * around the `?` (nothing formats this file, so no spelling is ruled out): an
+ * optional method is the member shape that always lives on a prototype, so it
+ * is the one the copy drops.
+ *
+ * @param {string} [types] the declaration text to read, the published file by default
+ * @returns {string[]} the optional keys
+ */
+function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')) {
+  // Matched brace to brace, not cut at the first `\n}`: a member whose nested
+  // object type closes in column 0 would end the slice early, and an early cut
+  // is silent, because the warning then names the same short list the parse
+  // found. Comments and quoted spans are blanked to spaces first, same length
+  // so the offsets still index `types`: a lone `}` in JSDoc prose or inside a
+  // string literal type would cut the slice just as early and just as quietly.
+  const literal = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\\n]|\\.)*`/g
+  const scan = types.replace(literal, (span) => span.replace(/[^\n]/g, ' '))
+  // Fail closed when the mask over-runs, and bound the span so it cannot.
+  // The template alternative excludes newlines like the two quote ones do: a
+  // span free to cross lines pairs an unterminated backtick with the next one
+  // anywhere in the file, blanking this interface's closing brace and a later
+  // interface's opening one, so the scan stops on that interface's column-0
+  // `}` and satisfies the check below with members it never read. Left
+  // unbounded, whether that is caught turns on how many backticks happen to
+  // sit below the stray one: an odd count leaves one standing, an even count
+  // pairs off and says nothing, which is no guard at all. Bounded to one line
+  // an unterminated backtick blanks nothing and simply survives, so asserting
+  // that none survives holds at either parity. A template literal type written
+  // across lines is refused along with it, and none is written that way here.
+  //
+  // Asked of the two quotes and of `/*` as well, because bounding the quotes
+  // to a line is not by itself what makes them safe. A `/*` inside an
+  // unterminated quote is not consumed by that span, so the block-comment
+  // alternative, the one still free to cross lines, claims it and blanks
+  // forward to the next `*/`, over-running exactly as the unbounded backtick
+  // did: `sb: "/*` injected above a member of the real declaration file drops
+  // that member and `plugin` with it, and the guard says nothing. A `/*` with
+  // no `*/` after it anywhere reaches the same place from the other side,
+  // masking nothing and leaving its braces to be read as code. The mask blanks
+  // every comment and quoted span, so an opener still standing in `scan` is
+  // one it failed to close, whichever kind it is.
+  assert.equal(/['"`]|\/\*/.test(scan), false, 'a comment or quoted span in hypaware-plugin-kernel-types.d.ts is never terminated (a quote or a template literal must close on its own line): the mask cannot be trusted, so neither can the parse')
+  // Both anchors are found in the blanked copy, not in `types`, or the same
+  // hole reopens one step earlier: a JSDoc quoting the declaration line would
+  // put `start` inside a comment, where the opening brace is already a space,
+  // and the scan would go looking for its match in whatever real code came
+  // next. Every offset is shared, which is what the length preservation buys.
+  const start = scan.indexOf('export interface CommandRegistration {')
+  assert.notEqual(start, -1, 'interface CommandRegistration is not where the test looks for it')
+  let depth = 0
+  let end = -1
+  // Only what the interface declares itself: a nested object type's own
+  // members are blanked as the scan passes them, newlines kept so the member
+  // regex still anchors per line. A parameter list and a bracketed span are
+  // blanked with them, because an optional standing in a member's parameters
+  // (`run(argv, ctx?: Ctx)`) or in a labelled tuple (`[a: string, b?: X]`) is
+  // no more a member of `CommandRegistration` than one nested in an object
+  // type is. Their delimiters are kept: `foo?(): T` is one of the two member
+  // spellings and the reader knows it by that `(`, and a computed name is
+  // left as the `[    ]` the check below refuses rather than vanishing.
+  let body = ''
+  let nested = 0
+  const bodyStart = scan.indexOf('{', start)
+  for (let i = bodyStart; i < scan.length; i += 1) {
+    const char = scan[i]
+    if (char === '{') depth += 1
+    else if (char === '}' && --depth === 0) {
+      end = i
+      break
+    }
+    if (char === ')' || char === ']') nested -= 1
+    body += (depth > 1 || nested > 0) && char !== '\n' ? ' ' : char
+    if (char === '(' || char === '[') nested += 1
+  }
+  assert.notEqual(end, -1, 'interface CommandRegistration is never closed')
+  // Fail closed on the under-run the brace count cannot see. The masking is
+  // regex alternation over backtick pairs, so a region holding an odd number
+  // of them leaves whatever falls between two pairs unmasked, and a stray `}`
+  // there stops the scan inside the interface, silently, on the same short
+  // list the warning then names. A template literal type nested inside
+  // another whose own text holds a `}` does exactly that (`` `${`a}`}` ``),
+  // and `tsc` accepts it, so where the scan stopped is checked rather than
+  // trusted. Over-running stays loud on its own, because it makes `declared`
+  // a superset of what the warning names.
+  assert.equal(types[end - 1], '\n', 'interface CommandRegistration does not close in column 0: the parse stopped early, or the declaration was reformatted onto fewer lines')
+  // A member per `;` and per `,` and per the interface's own `{` as well as
+  // per line, because TypeScript accepts all of those before a member:
+  // anchored at line start alone, this returns `hidden` and nothing else from
+  // `hidden?: boolean; probeZ?: string`, and the under-run is silent, because
+  // the warning then names the same short list the parse found. `,` is the one
+  // separator that also separates a method member's parameters, so it is safe
+  // to anchor on only because the parameter list is blanked above: without
+  // that, `run(argv: string[], ctx?: Ctx)` reports a parameter as a member.
+  // The `{` is the interface's own opening brace and only ever that, since a
+  // nested type's brace is blanked with the type; a first member written on
+  // that line is a reformat the column-0 check above already anticipates, and
+  // read from line start alone it takes the brace into the name and stops the
+  // parse on a member that is spelled perfectly well.
+  //
+  // The name is taken as whatever precedes the `?` and then required to be a
+  // bare identifier, rather than only being matched when it is one. A quoted
+  // member name is legal TypeScript and the mask has already blanked it to
+  // spaces, so an identifier-only pattern matches nothing there and drops the
+  // member just as quietly. The blanked copy cannot give the name back, so an
+  // unreadable one stops the parse rather than shortening its answer.
+  //
+  // The candidate name stops at `:`, and at the `{`, for the same reason it
+  // stops at a separator: neither can stand inside a member name, and past a
+  // `:` the text is a type, where an optional is not a member. Left to run
+  // through the `:`, a conditional type's parenthesised branch reads as a
+  // member name and is refused as unspellable, which breaks the guard on a
+  // declaration file that is perfectly good.
+  //
+  // A conditional type broken across lines still reaches that refusal, and is
+  // left there: `? (c: D) => E` on its own line is the same three characters
+  // as the second line of a member whose name sits on the first
+  // (`hidden` / `?: boolean`), so nothing on that line says which it is.
+  // Refusing is the ambiguity resolved toward noise; reading it as a type is
+  // the same ambiguity resolved toward dropping a member and saying nothing,
+  // which is the failure this guard exists to catch.
+  //
+  // The `?` is followed by `:`, `(`, or `<`: the last is an optional method
+  // that declares type parameters (`foo?<T>(x: T): T`), which `tsc` accepts
+  // and which the two-character form would drop with nothing said.
+  const declared = []
+  for (const match of body.matchAll(/(?:^|[;,{])[ \t]*(?:readonly[ \t]+)?([^\n;,?:{]*?)[ \t]*\?[ \t]*[:(<]/gm)) {
+    const spelled = types.slice(bodyStart + match.index, bodyStart + match.index + match[0].length).trim()
+    assert.match(match[1], /^[A-Za-z_$][\w$]*$/, `an optional member of CommandRegistration is not a bare identifier (${JSON.stringify(spelled)}): a quoted or computed name is blanked by the mask before the member reader runs, so the parse cannot name it`)
+    declared.push(match[1])
+  }
+  return declared
+}
+
+// Left free to pair across lines, the stray backtick joins one in the later
+// JSDoc, blanking `CommandRegistration`'s closing brace and `Other`'s opening
+// one, so the scan stops on `Other`'s column-0 `}`: past `probeZ`, and holding
+// `gone`, which `CommandRegistration` never declared. Asserted at both parities
+// of the backtick count below the stray one, since that count is the whole of
+// what an unbounded span leaves the guard resting on: the closed code span
+// pairs off around the run, the open one pairs with it.
+test('the interface parse fails closed on an unterminated template literal', () => {
+  const unterminated = (tick) => [
+    'export interface CommandRegistration {',
+    '  sb: `',
+    '  probeZ?: string',
+    '}',
+    'export interface Other {',
+    `  /** prose with a \`tick${tick} */`,
+    '  gone?: string',
+    '}',
+  ].join('\n')
+  assert.throws(() => declaredOptionalMembers(unterminated('`')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated('')), /is never terminated/)
+})
+
+// The same under-run reached without a template literal, and the reason
+// bounding the quotes to a line does not by itself close it: an unterminated
+// quote leaves the `/*` inside it to the block-comment alternative, which
+// still crosses lines and blanks forward to the next `*/`, past the member
+// the guard was raised to name. Injected into the real
+// `hypaware-plugin-kernel-types.d.ts`, either quote returns that interface's
+// optionals minus `plugin` and minus the added member, with nothing said. The
+// third shape is the block comment nothing closes, which masks nothing at all.
+test('the interface parse fails closed on an unterminated quote or block comment', () => {
+  const unterminated = (opener, closer) => [
+    'export interface CommandRegistration {',
+    '  name: string',
+    `  ${opener}`,
+    '  probeZ?: string',
+    closer,
+    '  gone?: string',
+    '}',
+  ].join('\n')
+  assert.throws(() => declaredOptionalMembers(unterminated('sb: "/*', '  /** prose */')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated("sb: '/*", '  /** prose */')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated('/* nothing closes this', '  no closer here')), /is never terminated/)
+})
+
+// TypeScript separates interface members with `;` or `,` as readily as with
+// a newline, and the same declaration file already writes them that way (the
+// inline `opts` object type of `readRowsSince`), so nothing stops a future
+// edit spelling two of `CommandRegistration`'s optionals on one line. Read
+// per line only, the second is dropped and the guard passes on the short
+// list it was handed: the under-run of #1248 and #1250 reached through the
+// member reader rather than the mask. Asked of both separators, because
+// closing one and leaving the other leaves the same silent under-run a
+// single character away.
+test('the interface parse reads every optional member sharing a line', () => {
+  const shared = (line) => ['export interface CommandRegistration {', `  ${line}`, '}'].join('\n')
+  assert.deepEqual(declaredOptionalMembers(shared('hidden?: boolean; probeZ?: string')), ['hidden', 'probeZ'])
+  assert.deepEqual(declaredOptionalMembers(shared('hidden?: boolean, probeZ?: string')), ['hidden', 'probeZ'])
+  // The other member spellings the reader accepts, all on the one line: the
+  // `readonly` prefix, the optional method, and the whitespace around `?`.
+  assert.deepEqual(declaredOptionalMembers(shared('readonly a?: string; b ?(): void; c?: string')), ['a', 'b', 'c'])
+  assert.deepEqual(declaredOptionalMembers(shared('readonly a?: string, b ?(): void, c?: string')), ['a', 'b', 'c'])
+  // The interface's own opening brace separates a member too. The column-0
+  // check above already anticipates the declaration being reformatted onto
+  // fewer lines, and this is what that reformat looks like from the reader's
+  // side: read per line, the brace is taken into the first member's name and
+  // the parse stops on a declaration file that is perfectly good.
+  assert.deepEqual(declaredOptionalMembers('export interface CommandRegistration { hidden?: boolean; probeZ?: string\n}'), ['hidden', 'probeZ'])
+})
+
+// An optional that is not a member: a parameter of a method member, a
+// parameter of a function-typed one, or an element of a labelled tuple. Each
+// carries the `?:` the reader looks for, and the first two carry the `,` it
+// now anchors on, so each is a way to read a type as though it were the
+// interface's own member list. Nothing is claimed from them and nothing is
+// refused: they are legal spellings of the declaration file, and a guard
+// that throws on those breaks the suite on good input, naming a mask
+// problem that is not there.
+test('the interface parse claims no optional standing inside a member type', () => {
+  const around = (member) => ['export interface CommandRegistration {', `  ${member}`, '  hidden?: boolean', '}'].join('\n')
+  assert.deepEqual(declaredOptionalMembers(around('run(argv: string[], ctx?: Ctx): Promise<number>')), ['hidden'])
+  assert.deepEqual(declaredOptionalMembers(around('handler: (a: string, b?: number) => void')), ['hidden'])
+  assert.deepEqual(declaredOptionalMembers(around('span: [a: string, b?: number]')), ['hidden'])
+  // The member spellings that do carry one of those, and still read whole.
+  assert.deepEqual(declaredOptionalMembers(around('probeZ?(a: string, b?: number): void')), ['probeZ', 'hidden'])
+  assert.deepEqual(declaredOptionalMembers(around('aliases?: string[]')), ['aliases', 'hidden'])
+  // The same member declaring type parameters: `tsc` accepts it, and looking
+  // only for `?:` or `?(` reads straight past it, dropping an optional method
+  // (the member shape the copy always drops) with nothing said.
+  assert.deepEqual(declaredOptionalMembers(around('probeZ?<T>(a: T, b?: T): void')), ['probeZ', 'hidden'])
+})
+
+// An optional whose `?` opens a line, with nothing before it on that line,
+// is the one shape the reader cannot resolve: the second line of a member
+// whose name sits on the first and the branch line of a conditional type
+// broken across lines are the same characters. It refuses both. Pinned here
+// because the refusal costs a false alarm on the type, and the other
+// resolution costs a dropped member and total silence, which is the failure
+// the guard exists to catch: a later loosening should have to argue with this
+// test rather than pass it by accident.
+test('the interface parse fails closed on an optional whose name is not on its line', () => {
+  const split = ['export interface CommandRegistration {', '  hidden', '    ?: boolean', '}'].join('\n')
+  const conditional = ['export interface CommandRegistration {', '  x: A extends B', '    ? (c: D) => E', '    : F', '  hidden?: boolean', '}'].join('\n')
+  assert.throws(() => declaredOptionalMembers(split), /not a bare identifier/)
+  assert.throws(() => declaredOptionalMembers(conditional), /not a bare identifier/)
+})
+
+// A quoted member name is legal TypeScript and is the one member spelling the
+// mask destroys before the reader sees it: the quoted span is blanked to
+// spaces, leaving no identifier to match, so the member returned nothing and
+// the guard read an interface with one fewer optional. The name cannot be
+// recovered from the blanked copy, so it is refused out loud instead.
+test('the interface parse fails closed on an optional member name the mask blanks', () => {
+  const named = (member) => ['export interface CommandRegistration {', '  name: string', `  ${member}`, '}'].join('\n')
+  assert.throws(() => declaredOptionalMembers(named("'probe-z'?: string")), /not a bare identifier/)
+  assert.throws(() => declaredOptionalMembers(named('"probe-z"?: string')), /not a bare identifier/)
+})
+
+// `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
+// `CommandRegistration`, and nothing keeps the two in step: `tsc` cannot see
+// the list, so a member added to the published interface would go back to
+// being an absence with no sign at all, which is the state the warning exists
+// to end. Asked of the warning rather than of the list, so the guard holds
+// however the coverage is spelled.
+test('the warning covers every optional member CommandRegistration declares', async () => {
+  const declared = declaredOptionalMembers()
+  assert.ok(declared.length > 0, 'the interface parse found no optional members')
+
+  // Every declared optional on the prototype, so the copy drops all of them
+  // at once. The probe invokes no getter, so what they return does not matter.
+  const proto = {}
+  for (const key of declared) {
+    Object.defineProperty(proto, key, { get: () => undefined })
+  }
+  const registration = Object.create(proto)
+  registration.name = 'every-optional'
+  registration.summary = 'every optional member lives on the prototype'
+  registration.usage = 'hyp every-optional'
+  registration.run = async () => 0
+
+  const commands = createCommandRegistry()
+  const text = await stderrTextFrom(() => commands.register(registration))
+  const said = text.slice(text.indexOf('registered without the declared '), text.indexOf(' - reachable'))
+  const named = [...said.matchAll(/'([A-Za-z_$][\w$]*)'/g)].map((match) => match[1])
+  assert.deepEqual(named.sort(), declared.sort())
+  assert.equal(commands.get('every-optional')?.name, 'every-optional')
+})

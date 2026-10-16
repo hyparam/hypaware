@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/ai-gateway",
   "version": "2.0.0",
-  "description": "HTTP/SSE AI gateway plugin: terminates local LLM client traffic, forwards to upstreams matched by adapter-owned presets, and dispatches captured exchanges to adapter-owned projectors that fill the ai_gateway_messages dataset. The gateway itself carries no client/protocol semantics — adapter plugins (@hypaware/claude, @hypaware/codex, ...) own routing and projection through the hypaware.ai-gateway capability.",
+  "description": "HTTP/SSE AI gateway plugin: terminates local LLM client traffic, forwards to upstreams matched by adapter-owned presets, and dispatches captured exchanges to adapter-owned projectors that fill the ai_gateway_messages dataset. The gateway itself carries no client/protocol semantics - adapter plugins (@hypaware/claude, @hypaware/codex, ...) own routing and projection through the hypaware.ai-gateway capability.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -18,15 +18,16 @@
     "datasets": [{ "name": "ai_gateway_messages", "attribution_column": "client_name" }],
     "config_sections": [{ "section": "ai-gateway" }],
     "commands": [
-      { "name": "session ignore", "summary": "Stop recording this AI session (in-memory, until the gateway restarts)" },
-      { "name": "session unignore", "summary": "Resume recording this AI session" },
-      { "name": "session status", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
+      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)" },
+      { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
+      { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
     ],
     "picker": [
       {
         "name": "raw-anthropic",
-        "label": "capture raw Anthropic API traffic",
-        "summary": "Advanced API proxy mode for scripts, SDK apps, or other tools you manually point at HypAware.",
+        "label": "Anthropic API",
+        "summary": "For apps you manually point at HypAware; starts a local gateway listener.",
+        "hidden": true,
         "compose": {
           "requires_gateway": true,
           "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
@@ -34,8 +35,9 @@
       },
       {
         "name": "raw-openai",
-        "label": "capture raw OpenAI API traffic",
-        "summary": "Advanced API proxy mode for OpenAI-compatible clients you manually point at HypAware.",
+        "label": "OpenAI API",
+        "summary": "For apps you manually point at HypAware; starts a local gateway listener.",
+        "hidden": true,
         "compose": {
           "requires_gateway": true,
           "gateway_upstream": { "name": "openai", "base_url": "https://api.openai.com", "path_prefix": "/v1", "provider": "openai" }

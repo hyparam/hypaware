@@ -6,6 +6,13 @@
 **Author:** Brendan / Claude
 **Date:** 2026-06-13
 **Related:** LLP 0013, LLP 0016, LLP 0026
+**Extended-by:** LLP 0312 (#settle-purity: compaction probes the settle hook
+speculatively and discards the answer, so an enricher's `settle` must be free
+of observable side effects and idempotent); [LLP 0319](./0319-resettle-scan-failure-cooldown.decision.md)
+(#re-settle-sweep: the seeding scan that could not read its table is stamped on
+the cursor and retried on a cooldown, so the unknown answer costs one scan per
+window instead of one per tick); LLP 0359 (#bounded-dedupe: scheduled
+backfill probes only candidate identities and isolates in-run state by token)
 
 ## Summary
 
@@ -19,7 +26,7 @@ granularity convergence reduced to clean 1:1 pairs.
 ## Context
 
 The live gateway records a Claude message under a fallback content-hash `message_id`
-when the transcript line for it is not yet on disk — the **finalize-vs-transcript
+when the transcript line for it is not yet on disk, the **finalize-vs-transcript
 race**: an exchange finalizes a few milliseconds before the CLI appends the
 response's JSONL line. The *next* exchange replays that message, now matches the
 transcript, and writes it again under its native uuid. The two rows share
@@ -41,13 +48,13 @@ normally in the same flush window (race gap ~30 s).
 
 **B. Compaction-time pass (rejected).** `maintainCache` receives no dataset-registry
 or storage handle, and compaction's only dedup is a content hash over
-`_hyp_cache_row_id` — which can never collapse a fallback/uuid pair because their
+`_hyp_cache_row_id`, which can never collapse a fallback/uuid pair because their
 differing `message_id` yields different hashes. Adopting it would mean threading the
 registry + storage through compaction and reimplementing `part_id` dedup that already
 lives in the gateway.
 
 **C. Reconstruct content from the stored row at flush (rejected).** A persisted
-fallback row's original content array is gone — per-part expansion keeps only
+fallback row's original content array is gone: per-part expansion keeps only
 `content_text` (text blocks). Reconstructing tool_use/tool_result blocks to recompute
 the match key is fragile.
 
@@ -55,7 +62,7 @@ the match key is fragile.
 
 1. **Match-key at projection.** When the Claude projector emits a message as fallback
    (no transcript match at projection time), it stamps
-   `attributes.claude.match_key = contentKey(role, content)` — the same key
+   `attributes.claude.match_key = contentKey(role, content)`: the same key
    `findTranscriptMatch` uses against the transcript. The wire content is in hand at
    projection, so the stored key is exactly what will match the transcript line once
    it lands. Settlement is then a pure `index.byContentKey` lookup, not a
@@ -64,7 +71,7 @@ the match key is fragile.
 2. **Generic `settleBatch(rows, ctx)` hook** on `DatasetRegistration`, optional.
    Invoked once per flush batch before partition grouping. Datasets without it are
    unaffected; the kernel flush path stays plugin-agnostic. (**Extended-by:
-   [LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)** — `settleBatch`
+   [LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)**, `settleBatch`
    may now also **REMOVE** a row, not only upgrade its identity: a Claude row whose
    `cwd` was unknown at capture (the session-start race) is re-resolved at flush and
    **dropped** when it resolves to a `.hypignore` `ignore`, via a `USAGE_POLICY_DROP`
@@ -78,7 +85,7 @@ the match key is fragile.
 
 4. **Committed row wins.** After an upgrade, the batch is deduped by `part_id` against
    committed partitions and within-batch (reusing `scanExistingPartIds`/`partIdKey`).
-   An upgraded row whose `part_id` already exists is dropped — the flush path has no
+   An upgraded row whose `part_id` already exists is dropped: the flush path has no
    row-delete, so collapsing onto the already-committed canonical uuid row is the only
    achievable and the safe outcome.
 
@@ -93,7 +100,7 @@ the match key is fragile.
   longer fallback, so it short-circuits).
 - The hot path stays cheap: `settleBatch` returns immediately when the batch holds no
   fallback rows (no transcript I/O).
-- Identity becomes **settled-at-flush, not settled-at-capture** — a query against
+- Identity becomes **settled-at-flush, not settled-at-capture**: a query against
   un-flushed spool rows can still see a provisional fallback id. For a local cache
   this is an acceptable contract (continues LLP 0013's spool-is-provisional stance).
 
@@ -101,12 +108,12 @@ the match key is fragile.
 
 Flush-time settlement above only collapses a fallback/uuid twin pair when both
 rows land in the **same flush batch**. The finalize-vs-transcript race can flush
-a fallback row **alone** — its transcript line not yet on disk, so the enricher
+a fallback row **alone**: its transcript line not yet on disk, so the enricher
 can't upgrade it, and its uuid twin is still in a later flush. That row commits
 unsettled, and the flush path (append-only, no row-delete, short-circuits on a
 batch with no fallback rows) can never revisit it. `--refresh always` forces a
 query-time flush that lands in the gap, so it surfaces the duplicate reliably,
-but natural flushing hits the same race — the zero-dup result is empirical, not
+but natural flushing hits the same race: the zero-dup result is empirical, not
 guaranteed. This is the residue Option B (compaction-time) was rejected for; we
 adopt it now as a **backstop**, not a replacement for the flush-time pass.
 
@@ -115,35 +122,61 @@ adopt it now as a **backstop**, not a replacement for the flush-time pass.
 1. **Same partition, guaranteed.** Twins share content/role/conversation/date,
    so they share the Iceberg partition key (`conversation_id`/`cwd`/`date`) and
    always live in the **same** partition. A single-partition compaction rewrite
-   is therefore enough to collapse them — no cross-partition scan.
+   is therefore enough to collapse them: no cross-partition scan.
 2. **Reuse the flush enricher.** The dataset exposes a second hook,
    `resettleBatch`, that the maintenance pass threads in alongside a storage
    handle (resolving Option B's "`maintainCache` has no registry/storage handle"
    blocker: `runDaemon` and `hyp query maintain` now pass
    `getSettleHook: d => query.getDataset(d)?.resettleBatch` + `storage`).
    `resettleBatch` runs the **same** transcript upgrade as `settleBatch` but
-   **omits** the committed-`part_id` dedupe — at sweep time the rows are already
+   **omits** the committed-`part_id` dedupe, at sweep time the rows are already
    committed, so a committed-scan would match a non-upgraded fallback against its
    own committed copy and wrongly drop it. The rewrite owns the de-twin instead.
 3. **De-twin within the rewrite.** During the rewrite, non-fallback rows emit
    immediately (bounded heap) while committed fallback rows are buffered; at
    end-of-scan the buffer is upgraded, and an **upgraded** row whose native
    `part_id` now collides with one already emitted from this partition (its
-   native twin) is dropped — the native twin wins. A row whose identity did not
+   native twin) is dropped: the native twin wins. A row whose identity did not
    change is never dropped.
-4. **Force the rewrite when needed — but only on new data.** A cheap
-   `attributes`-only scan gates the sweep: a partition holding any
-   `identity_source = 'gateway_fallback'` row is rewritten even when file-count
-   heuristics say compaction isn't due, so a split pair in a small,
-   never-compacted partition still gets collapsed. To avoid forcing that rewrite
+4. **Force the rewrite when needed, but only on new data.** A partition
+   holding any `identity_source = 'gateway_fallback'` row is rewritten even
+   when file-count heuristics say compaction isn't due, so a split pair in a
+   small, never-compacted partition still gets collapsed. To avoid forcing that rewrite
    *every* tick, the gate also requires the partition's live data-file count to
-   have moved off the **re-settle baseline** — the file count recorded in the
+   have moved off the **re-settle baseline**: the file count recorded in the
    cursor's `compaction` block at the previous sweep. A fallback row whose
    transcript line never lands (harness aux, wire-only reminders) is genuinely
    unmatchable; without the baseline it would re-trigger a full rewrite forever
    (the marker persists, and after a clean rewrite the forced sweep is the only
    trigger left). The baseline makes an unchanged fallback set retried only when
    new data has flushed.
+
+The sweep's in-memory shape is extended by
+[LLP 0301](./0301-bounded-compaction-resettle.issue.md): native identity keys
+are discovered in a narrow pass, then fallback rows are settled in
+`compact_batch_bytes`-bounded batches instead of one generation-sized buffer.
+
+Point 4's gate originally answered "does this partition hold a marker row?"
+with an `attributes`-only scan of the live table, run each tick the baseline
+gate let through. On a large gateway cache that decoded gigabytes of recorded
+exchanges per tick and OOMed the daemon hourly, and the happy path paid the
+most: a partition with no fallback rows re-derived the same "no" forever. The
+count is now maintained where it is already known, in the partition cursor's
+`pendingFallbacks` field: the flush path tallies marker rows as they land
+(they arrive post-settle, so a surviving marker is genuinely unsettled) and
+every settle-bearing rewrite resets the field to the exact remainder it
+counted. The gate is a cursor read. A cursor written before the field existed
+pays the legacy scan once and caches the verdict, so the scan runs at most
+once per partition. Only a scan that *completed* is a verdict: one that could
+not read the table (an EACCES on a live data file, a half-written parquet)
+leaves the field unknown, because a cached zero is permanent and a false one
+strands that partition's marker rows until an append happens to flip the count
+off zero. Unknown costs another scan, which is the direction every other
+unknown in this gate takes - stamped on the cursor and retried on a cooldown
+rather than on the very next tick, so a permanently unreadable partition pays
+one scan per window instead of one per tick ([LLP
+0319](./0319-resettle-scan-failure-cooldown.decision.md)). What point 4 decided
+is unchanged: the same two conditions still gate the same forced rewrite.
 
 Conservative and bounded: an enricher miss/failure leaves the fallback row
 untouched for a later sweep; a matchable second sweep collapses the twin and the
@@ -160,16 +193,16 @@ coupling between core compaction and the gateway is the documented
   is not merged.~~ **Resolved** by the [re-settle sweep](#re-settle-sweep): a
   committed fallback row is upgraded and de-twinned during compaction.
 - ~~Backfill-vs-spool same-id duplicates (flush spool before `hyp backfill`, or scan
-  spooled rows in the materializer) — separate fix.~~ **Resolved (issue #107):** the
+  spooled rows in the materializer), separate fix.~~ **Resolved (issue #107):** the
   backfill materializer now folds spooled `part_id`s into its pre-write dedupe
   seen-set, so a `hyp backfill` run no longer re-materializes rows that are captured
   live but still sitting unflushed in the spool. The settle path is deliberately
-  **excluded** from this spool scan — the rows it settles at flush *are* the spool
+  **excluded** from this spool scan: the rows it settles at flush *are* the spool
   rows, so seeding them into its seen-set would drop the very rows being flushed.
   See `scanSpooledPartIds` / `createBackfillDedupe` in
   `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js` and the read-only
   `readSpooledRows` surface added to `src/core/cache/storage.js`.
-- Restart-replay seen-set seeding from committed `part_id`s — **resolved (issue
+- Restart-replay seen-set seeding from committed `part_id`s: **resolved (issue
   #108).** The live projector now lazily seeds its in-memory `seenMessages` set
   per conversation from committed `ai_gateway_messages` rows on first replay,
   reusing the same `discoverCachePartitions` + `readRows` scan machinery this
@@ -181,10 +214,10 @@ coupling between core compaction and the gateway is the documented
 
 ## References
 
-- [LLP 0013](./0013-local-query-cache.decision.md) — cache write path / spool
-- [LLP 0016](./0016-ai-gateway.decision.md) — gateway owns schema; adapters contribute
-- [LLP 0026](./0026-claude-native-granularity.decision.md) — granularity convergence
-- `src/core/cache/storage.js` — `appendChunk` flush hook point
-- `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js` — `settleBatch`, `resettleBatch`, dedup
-- `hypaware-core/plugins-workspace/claude/src/settle.js` — the enricher
-- `src/core/cache/maintenance.js` — the re-settle sweep (buffer/upgrade/de-twin during compaction)
+- [LLP 0013](./0013-local-query-cache.decision.md): cache write path / spool
+- [LLP 0016](./0016-ai-gateway.decision.md): gateway owns schema; adapters contribute
+- [LLP 0026](./0026-claude-native-granularity.decision.md): granularity convergence
+- `src/core/cache/storage.js`: `appendChunk` flush hook point
+- `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js`: `settleBatch`, `resettleBatch`, dedup
+- `hypaware-core/plugins-workspace/claude/src/settle.js`: the enricher
+- `src/core/cache/maintenance.js`: the re-settle sweep (buffer/upgrade/de-twin during compaction)

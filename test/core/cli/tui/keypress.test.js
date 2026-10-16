@@ -75,20 +75,23 @@ test('reduce: terminal states ignore further input', () => {
   assert.strictEqual(reduce(cancelled, { name: 'space' }), cancelled)
 })
 
-test('multiselect: arrow down moves cursor and wraps', () => {
+test('multiselect: arrow down moves cursor through the submit row and wraps', () => {
   let s = multiselectState({ cursor: 0 })
   s = /** @type {any} */ (reduce(s, { name: 'down' }))
   assert.equal(s.cursor, 1)
   s = /** @type {any} */ (reduce(s, { name: 'down' }))
   assert.equal(s.cursor, 2)
   s = /** @type {any} */ (reduce(s, { name: 'down' }))
+  // One past the last option: the Submit row.
+  assert.equal(s.cursor, 3)
+  s = /** @type {any} */ (reduce(s, { name: 'down' }))
   assert.equal(s.cursor, 0)
 })
 
-test('multiselect: arrow up wraps to last option', () => {
+test('multiselect: arrow up wraps to the submit row', () => {
   const s = multiselectState({ cursor: 0 })
   const next = /** @type {any} */ (reduce(s, { name: 'up' }))
-  assert.equal(next.cursor, 2)
+  assert.equal(next.cursor, 3)
 })
 
 test('multiselect: j and k are aliases for down and up', () => {
@@ -168,6 +171,32 @@ test('multiselect: digit keys 1-3 jump to in-range index', () => {
 test('multiselect: digit out of range is a no-op', () => {
   const s = multiselectState()
   const next = reduce(s, { name: '9' })
+  assert.strictEqual(next, s)
+})
+
+test('multiselect: space on the submit row resolves', () => {
+  let s = multiselectState({ cursor: 1 })
+  s = /** @type {any} */ (reduce(s, { name: 'space' }))
+  s = /** @type {any} */ (reduce(s, { name: 'up' }))
+  s = /** @type {any} */ (reduce(s, { name: 'up' }))
+  assert.equal(s.cursor, 3)
+  s = /** @type {any} */ (reduce(s, { name: 'space' }))
+  assert.equal(s.status, 'resolved')
+  assert.deepEqual(s.options.map((/** @type {any} */ o) => o.checked), [false, true, false])
+})
+
+test('multiselect: space on the submit row below bounds.min sets error and stays active', () => {
+  const s = multiselectState({ bounds: { min: 1 }, cursor: 3 })
+  const next = /** @type {any} */ (reduce(s, { name: 'space' }))
+  assert.equal(next.status, 'active')
+  assert.match(next.error, /at least 1/)
+})
+
+test('multiselect: digit keys never jump to the submit row', () => {
+  // With 3 options the submit row is index 3, reachable only by cursor
+  // movement; digit 4 stays a no-op.
+  const s = multiselectState()
+  const next = reduce(s, { name: '4' })
   assert.strictEqual(next, s)
 })
 

@@ -1,33 +1,65 @@
+# Four jobs per PR (typecheck, plus a test job per Node version), times the
+# PRs in flight, put enough concurrent cold
+# `npm i` runs against the registry to burn the whole job budget before a test
+# ran, reddening the required gate on PRs that failed nothing (issue #1313), so
+# the npm cache directory is restored across runs. package-lock.json is
+# gitignored here, so the cache key is hashed from package.json:
+# `cache-dependency-path` must name a file that exists or setup-node fails
+# looking for a lock file, and `npm ci` is unavailable for the same reason. The
+# budget absorbs a genuinely cold install rather than killing one mid-install.
 name: CI
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   typecheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    strategy:
-      matrix:
-        node-version: [22, 24]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 26
+          cache: npm
+          cache-dependency-path: package.json
       - run: npm i
       - run: npm run typecheck
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
-        node-version: [22, 24]
+        node-version: [22, 24, 26]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: package.json
       - run: npm i
       - run: npm test
+
+  required:
+    name: CI required
+    if: ${{ always() }}
+    needs: [typecheck, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm required jobs passed
+        env:
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$TYPECHECK_RESULT" = success
+          test "$TEST_RESULT" = success

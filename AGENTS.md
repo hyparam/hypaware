@@ -5,6 +5,33 @@ HypAware is the active codebase. Prefer files under `src/`, `hypaware-core/`,
 repo; do not assume its tests, package scripts, or agent notes are available
 unless a task explicitly provides that context.
 
+## Adding things
+
+Make the smallest change that fixes the problem. When a bigger change looks
+right, land the small one and defer the rest. File a GitHub issue autonomously
+only when the follow-up is concrete, consequential, and clearly outside the
+current task. Do not file issues for speculative improvements, minor cleanup,
+or observations that are adequately captured in the PR description.
+
+- **No new runtime dependencies.** Use the standard library and the code already
+  here. If nothing here can do the job, keep the fix small and apply the same
+  follow-up threshold above.
+- **Do not invent columns, config keys, or schema fields.** Reuse or derive.
+  Add one only when the task calls for it, and a rejected one stays rejected.
+- **Reuse before you add** a file, helper, wrapper, or abstraction, unless the
+  existing one is the wrong home for it.
+- **Stop when tests pass.** Note unasked-for docs, cleanups, or adjacent fixes
+  in the PR description; do not land them.
+
+## Performance
+
+Performance is a product requirement. Keep CPU work and memory use economical
+and bounded, especially in hot paths, per-record work, and long-running
+processes. Every code review must include an explicit CPU and memory pass over
+the changed code and affected paths. Call out avoidable allocation, repeated
+work, unbounded growth, busy loops, and behavior that worsens with data volume
+or uptime; state explicitly when the review finds no CPU or memory concern.
+
 ## Design docs (LLP)
 
 Design rationale lives in numbered **LLP documents** under `llp/`, following
@@ -12,6 +39,9 @@ Linked Literate Programming. Start at [`llp/0000-hypaware.explainer.md`](llp/000
 for the subsystem map, and [LLP 0002](llp/0002-v1-scope.decision.md) for what
 actually shipped in V1.
 
+- **Most changes need no LLP.** Bug fixes, null handling, tests, renames,
+  behavior-preserving refactors, and version bumps get none. Write one when a
+  real design decision is made or changed, not as a record of a fix.
 - **Read before you change.** Before modifying a subsystem, read the LLP tagged
   with its `Systems` value (e.g. `Sources`, `Sinks`, `Plugins`, `Config`).
 - **Annotate non-obvious decisions.** When you implement or change code that
@@ -37,6 +67,14 @@ actually shipped in V1.
   rationale-order view; `/llp-create <title>` scaffolds a new doc; `/llp-list`
   surveys the corpus; `/llp-grill` stress-tests a plan against the LLP corpus
   before you write code.
+- **A new number comes from `node scripts/llp-numbers.js next`**, after a
+  `git fetch --prune`. Numbers are minted on every branch at once, so the tree
+  you have checked out is not the corpus: three branches each read
+  `max(llp/) + 1` and each got the same answer (issue #907). The same script
+  gates it: `check` in the `cross-branch-numbers` CI job, which fetches every
+  branch first, and in `npm test` wherever the clone carries them (a shallow or
+  single-branch checkout skips it and says so). `survey` shows every collision
+  across every ref.
 
 ## Code Style
 
@@ -44,6 +82,11 @@ actually shipped in V1.
 - No em dashes (the U+2014 character) anywhere: code, comments, JSDoc, strings,
   or docs. In prose, use the punctuation the sentence wants (a comma, colon,
   parentheses, or a sentence split); in runtime strings, prefer `-`.
+- No raw NUL bytes (U+0000) in tracked text. grep classifies a file holding one
+  as binary and silently skips it, so the file drops out of every text search
+  with no error to say so. When a string genuinely needs a NUL (a dedup-key
+  separator, say), write the escape `\0`: it yields the same value and keeps the
+  bytes on disk searchable.
 - Types are defined in JSDoc comments, not TypeScript.
 - Never use inline `import('...')` types. Declare type imports at the top of
   the file with `@import` JSDoc comments, then reference the bare names.
@@ -74,39 +117,22 @@ actually shipped in V1.
 - Do not treat the hermetic smokes as the only release gate. They run with a
   temp `HYP_HOME` and `HYP_DEV_TELEMETRY=1`, which is useful for deterministic
   regression checks but does not prove installed-daemon behavior.
+- Use `scripts/sandbox/hyp-sandbox` to exercise install methods (`npx`,
+  `npm install -g`, `hyp init`, `hyp join`/`leave`, attach, daemon install)
+  without touching your own install. It redirects `HOME`, `HYP_HOME`, and the
+  npm global prefix into a throwaway root, and puts mock `launchctl` /
+  `security` / `systemctl` first on `PATH` so those calls never reach your real
+  launchd domain or login keychain (both are per-uid, so a temp `HOME` alone
+  does not sandbox them). See
+  [`scripts/sandbox/README.md`](scripts/sandbox/README.md).
 
 ## Smoke Test Model
 
-Keep three tiers distinct:
+Keep two tiers distinct:
 
 1. Traditional tests: fast, deterministic, and broad over edge cases.
 2. Hermetic smokes: narrow complete workflows in a temp install, good for PR
    confidence and plugin/kernel wiring checks.
-3. Acceptance smokes: heavier release or manual gates that use the packaged CLI,
-   real daemon install/start/stop, real user-home style config, production-ish
-   telemetry defaults, client attach behavior, and bounded disk-growth
-   assertions. Written procedures live in
-   [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md); a human runs them before a
-   release that touched the relevant adapter, and they are never simulated
-   with fixtures.
-
-Written acceptance procedures:
-
-- `codex_desktop_capture`: opt-in/manual, needs Codex Desktop on a real Mac.
-  Proves Desktop traffic reaches `ai_gateway_messages` by both the live
-  gateway route and the `~/.codex/sessions` backfill route, and is
-  attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
-
-Good acceptance smoke candidates (no written procedure yet):
-
-- `installed_daemon_idle_soak`: install/start/status/stop the real daemon path,
-  wait briefly while idle, and assert cache growth stays zero or bounded.
-- `otel_self_loop_guard`: run without `HYP_DEV_TELEMETRY=1` and prove the daemon
-  does not export into its own OTEL listener in a runaway loop.
-- `codex_subscription_capture`: opt-in/manual, using real or path-faithful
-  ChatGPT Codex traffic against `/backend-api/codex/responses`.
-- `configured_sink_roundtrip`: use config-driven sink setup and prove rows land
-  in the configured local destination.
 
 ## Log-Driven Development
 
@@ -151,6 +177,13 @@ npm run smoke -- daemon_foreground_start_stop
 
 ## Edit rules
 
+- **Skill descriptions control discovery.** Agents use the `SKILL.md`
+  description to decide whether to load the skill at all. Preserve existing
+  trigger examples and routing requirements when reorganizing or shortening
+  skills; changes to the body cannot compensate for lost discovery. Treat
+  description rewrites as behavior changes, and do not claim routing is
+  preserved from static checks alone: verify it in fresh sessions or explicitly
+  report it as unverified.
 - Read a file (or the region you will change) before your first Edit to it in
   a session, and re-read it before retrying any failed Edit; the failure
   usually means the file changed underneath you (a formatter or another agent).
@@ -171,10 +204,11 @@ src/
     cli/                # dispatch, walkthrough, core_commands
     config/             # v2 schema, validator
     daemon/             # platform installers (launchd / systemd) + lifecycle
+    otlp/               # shared OTLP http/json listener machinery
     plugin_install/     # resolver, fetch, lock, update_check
     sinks/              # cron driver + encoder utility
 hypaware-core/
-  smoke/                # `hyp smoke <name>` flows
+  smoke/                # `hyp dev smoke <name>` flows
   plugins-workspace/
     ai-gateway/         # @hypaware/ai-gateway
     otel/               # @hypaware/otel
@@ -202,19 +236,27 @@ npm pack --dry-run        # verify the published file set
 Re-run the smoke battery and confirm every one is green:
 
 ```sh
-hyp smoke package_bin_boot
-hyp smoke cli_bundled_plugins_activated
-hyp smoke daemon_foreground_start_stop
-hyp smoke daemon_install_render
-hyp smoke walkthrough_picker_to_first_query
-hyp smoke client_attach_idempotent
-hyp smoke gateway_claude_capture
-hyp smoke gateway_codex_capture
-hyp smoke hypignore_capture_drop
-hyp smoke local_only_export_withhold
-hyp smoke otel_loopback_capture
-hyp smoke local_parquet_export
-hyp smoke status_diagnostics
+hyp dev smoke package_bin_boot
+hyp dev smoke cli_bundled_plugins_activated
+hyp dev smoke daemon_foreground_start_stop
+hyp dev smoke daemon_install_render
+hyp dev smoke walkthrough_picker_to_first_query
+hyp dev smoke client_attach_idempotent
+hyp dev smoke gateway_claude_capture
+hyp dev smoke gateway_codex_capture
+hyp dev smoke claude_telemetry_capture
+hyp dev smoke hypignore_capture_drop
+hyp dev smoke local_only_export_withhold
+hyp dev smoke source_optout_export_withhold
+hyp dev smoke github_local_only_withhold
+hyp dev smoke opencode_capture
+hyp dev smoke cursor_capture
+hyp dev smoke pi_capture
+hyp dev smoke github_local_capture
+hyp dev smoke otel_loopback_capture
+hyp dev smoke local_parquet_export
+hyp dev smoke query_grep_roundtrip
+hyp dev smoke status_diagnostics
 ```
 
 Finally, exercise the manual gate end-to-end on at least one macOS host
@@ -231,9 +273,17 @@ hypaware query sql "select count(*) from logs"
 hypaware daemon uninstall
 ```
 
-If the release touched a client adapter, run the matching procedure in
-[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) and record the result in the
-release notes.
+If the release changes what bounds an automatic import (`backfill.window_days`,
+`backfill.sweep_cron`, or the window the scheduled sweep resolves), say so in
+the release notes and name every adapter the change reaches. The bounding is
+cross-plugin, and one such bound is already in force: as of
+v1.31.0 a provider's positive `backfill.window_days` narrows its scheduled
+recovery sweep as well as its join-time import
+([LLP 0359 #sweep-context](llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)),
+OpenClaw's Lane B transcript sweep included, so a window an operator set only
+to keep the first import small also caps every later recovery. Nothing is
+removed from disk, and widening or dropping the window lets the next sweep
+take the older history.
 
 <!-- neutral:llp-conventions -->
 ## LLP conventions
@@ -241,7 +291,7 @@ release notes.
 Design rationale lives in numbered **LLP** documents under `llp/`, driven by neutral.
 
 - **Immutable docs; change is a new request.** An Accepted/Active LLP is a
-  *record*, not a worksheet — do not edit what it decided or required. To change
+  *record*, not a worksheet: do not edit what it decided or required. To change
   intent, mint a **new request** (`rfc`/`spec`/`issue`) that `@ref`s what it
   supersedes, and append a `Superseded-by:`/`Extended-by: LLP NNNN` forward-ref to
   the applicable parts of the old doc. Trivial editorial fixes (typos, links,

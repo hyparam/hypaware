@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0016, LLP 0044, LLP 0045, LLP 0061, LLP 0086, LLP 0114, LLP 0116, LLP 0117
+**Extended-by:** LLP 0358 (scheduled transcript capture replaces attach as the prerequisite; this profile is optional)
 
 > Claude Desktop (macOS) has a hidden third-party-inference surface that can
 > point the app at a local gateway: Help -> "Enable Developer Mode" unlocks a

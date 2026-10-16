@@ -6,7 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-07
 **Related:** LLP 0016, LLP 0036, LLP 0041, LLP 0044, LLP 0045
-**Extended-by:** LLP 0114 (the default listen port is now fixed; the ephemeral port and this tracking machinery remain as the fallback)
+**Extended-by:** LLP 0114 (the default listen port is now fixed; the ephemeral port and this tracking machinery remain as the fallback), [LLP 0185](./0185-unpicked-client-stays-attached.decision.md) (the client drift family gains `client_attached_not_configured`, the mirror of `client_attach_missing`, for a marker no configured adapter accounts for)
 
 > [Issue #277](https://github.com/hyparam/hypaware/issues/277) (a real user
 > report): the daemon's gateway binds an **ephemeral** port by default
@@ -37,7 +37,10 @@ so "the proven value changes" is the common case, not an edge.
 
 The data to detect the drift already exists on disk: the gateway source's
 `status()` returns `details: { host, port, ... }`, which `startConfiguredSources`
-captures into each `SourceSnapshot.details` in `status.json`; and the client
+captures into each `SourceSnapshot.details` in `status.json` (and, since
+[LLP 0164](./0164-status-names-recent-clients-from-gateway-entrypoints.decision.md),
+the tick loop re-captures on the way past - which changes nothing here, since
+`host` and `port` are fixed at bind time); and the client
 settings marker records the `port` it attached at (`probeClientAttachFromDescriptor`
 reads it back). Nothing compared them.
 

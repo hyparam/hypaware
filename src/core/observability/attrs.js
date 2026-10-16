@@ -30,6 +30,16 @@ export function normalizeKey(key) {
 /**
  * Bound a single attribute value into the shape OTel exporters expect.
  * Strings are truncated, objects are stringified.
+ *
+ * Total, by construction. This runs ahead of the emit guard and ahead of the
+ * stderr mirror in `getLogger`, so a value it cannot describe would throw out
+ * of `warn()` and take the containment refusal below it with it: exactly
+ * hyparam/hypaware#1122, one line earlier and without needing a provider at
+ * all. `String(value)` is not a safe last resort, for the same reason
+ * `describeThrown` does not use one either: it is a `TypeError` for a
+ * null-prototype object, and for anything whose `Symbol.toPrimitive` or
+ * `toString` throws. A value nobody can describe is dropped like a `null`.
+ *
  * @param {unknown} value
  * @returns {string|number|boolean|undefined}
  */
@@ -44,7 +54,11 @@ function normalizeValue(value) {
     const str = JSON.stringify(value)
     return str.length > MAX_VALUE_LENGTH ? str.slice(0, MAX_VALUE_LENGTH) : str
   } catch {
-    return String(value).slice(0, MAX_VALUE_LENGTH)
+    try {
+      return String(value).slice(0, MAX_VALUE_LENGTH)
+    } catch {
+      return undefined
+    }
   }
 }
 

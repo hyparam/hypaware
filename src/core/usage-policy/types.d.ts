@@ -17,8 +17,8 @@ export interface ParseResult {
 }
 
 // The result of resolving a `cwd` against the shared usage-policy resolver
-// (LLP 0050/0070): the nearest governing `.hypignore`, and — when the
-// resolver was constructed with `localOnlyListPath` — the machine-local
+// (LLP 0050/0070): the nearest governing `.hypignore`, and, when the
+// resolver was constructed with `localOnlyListPath`, the machine-local
 // `local-only` list (LLP 0071), whichever verdict is more restrictive.
 // `class` is the resolved, implemented class (`full` when nothing governs);
 // `governedBy` is the absolute path of the governing source (a `.hypignore`
@@ -37,6 +37,19 @@ export interface ResolveResult {
 export interface UsagePolicyResolver {
   resolve(cwd: string): ResolveResult
   isIgnored(cwd: string): boolean
+  /**
+   * Cheap stable digest of the resolver's mutable machine-local input (the
+   * LLP 0071/0103 list file), for consumers that must notice a policy change
+   * without re-reading history (LLP 0367 #policy-fingerprint). Optional so a
+   * hand-built test resolver without it behaves as a constant policy.
+   *
+   * Not pure: reading the bytes is also how the resolver notices that its
+   * memoized verdicts predate them, so this call drops the ones they have
+   * outlived. A consumer that will act on `resolve`'s verdicts must therefore
+   * call this first, or it can stamp a digest over verdicts computed under
+   * the policy that digest already replaced (hyparam/hypaware#1317).
+   */
+  fingerprint?(): string
 }
 
 // On-disk shape of the machine-local `local-only` directory list
@@ -53,7 +66,7 @@ export interface LocalOnlyListFile {
 // A single class-per-entry record in the machine-local list (LLP 0103):
 // `dir` is normalized absolute; `class` is the explicit usage class the user
 // (or a review flow) assigned this directory, independent of any `.hypignore`
-// dotfile. An explicit `full` entry is not the same as "unlisted" — it
+// dotfile. An explicit `full` entry is not the same as "unlisted": it
 // records "asked; syncs" so the classification hook (LLP 0106) can tell
 // "answered" from "never asked".
 export interface LocalOnlyEntry {
@@ -93,6 +106,45 @@ export interface ListScope {
 export interface LocalOnlyListFileV2 {
   version: 2
   entries: LocalOnlyEntry[]
+}
+
+// A single record in the machine-local per-client sync opt-out list
+// (`<stateDir>/usage-policy/client-sync.json`, LLP 0188). `source` is a
+// picker source id (the same id space the withhold seam matches row
+// attribution against); `class` is fixed to `local-only` today and exists
+// for shape symmetry with `LocalOnlyEntry`. On an enrolled machine every
+// configured source syncs by default; a listed source is withheld at the
+// export seam unless it classifies `central` (org-configured sources cannot
+// be opted out, LLP 0188 #locked).
+export interface ClientSyncEntry {
+  source: string
+  class: 'local-only'
+}
+
+// The machine-local answer to "should a session opened in an unclassified
+// folder be asked to classify it?" (LLP 0200, extending LLP 0106). `sync` is
+// the default (LLP 0200 #default): the user has answered that question
+// standing, unclassified folders keep the implicit `full` default (they
+// sync), and the hook stays quiet. `ask` is the opt-in half and is LLP 0106
+// as it shipped: one session-start question per new folder. Only the ask is
+// gated either way - `.hypignore` dotfiles, machine-local entries, and the
+// export seam are untouched by it (LLP 0200 #suppression).
+export type FolderAskMode = 'ask' | 'sync'
+
+// On-disk shape of the machine-local folder-ask preference
+// (`<stateDir>/usage-policy/folder-ask.json`, LLP 0200). File absence means
+// `sync`, the product default, so a machine that never set it is never asked.
+export interface FolderAskFile {
+  version: 1
+  mode: FolderAskMode
+}
+
+// Version-1 on-disk shape of the machine-local client-sync list (LLP 0188).
+// File absence is meaningful (the upgrade-migration marker) and is NOT the
+// same as an empty `entries` list; see `readClientSyncEntries`.
+export interface ClientSyncListFile {
+  version: 1
+  entries: ClientSyncEntry[]
 }
 
 // Terminal sentinel an adapter's exchange projector returns to express an

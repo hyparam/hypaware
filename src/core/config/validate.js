@@ -107,9 +107,10 @@ export function firstPartyPluginMetadata() {
  * work the same way they do for bundled plugins.
  *
  * First-party metadata always wins on collision: the boot path already
- * rejects installed plugins that shadow first-party names, but the
- * helper is defensive in case it is called outside the boot path (e.g.
- * `hyp config validate` from a host that has not booted).
+ * activates the bundled copy over an installed plugin that shadows a
+ * first-party name (LLP 0380), and this helper agrees with it when called
+ * outside the boot path (e.g. `hyp config validate` from a host that has
+ * not booted).
  *
  * @param {LoadedManifest[]} installedManifests
  * @param {Map<PluginName, PluginMetadata>} [base]
@@ -167,7 +168,7 @@ export function collectConfigErrors(config, ctx = {}) {
   /** @type {ConfigValidationError[]} */
   const errors = []
   checkDuplicatePlugins(config, errors)
-  checkPluginsKnown(config, knownPlugins, errors)
+  checkPluginsKnown(config, knownPlugins, errors, ctx.unloadablePlugins)
   checkSinks(config, knownPlugins, errors)
   checkRetention(config, knownDatasets, errors)
   checkCapabilityAmbiguity(config, knownPlugins, errors)
@@ -230,7 +231,12 @@ export async function validateConfig(config, ctx = {}) {
       sink_count: sinkCount,
     },
     async (span) => {
-      const errors = collectConfigErrors(config, { knownPlugins, knownDatasets, configRegistry })
+      const errors = collectConfigErrors(config, {
+        knownPlugins,
+        knownDatasets,
+        configRegistry,
+        unloadablePlugins: ctx.unloadablePlugins,
+      })
 
       for (const e of errors) {
         log.error('config.validate.error', {
@@ -277,15 +283,35 @@ function checkDuplicatePlugins(config, errors) {
 }
 
 /**
+ * A config entry naming no known plugin is one of two faults, and they want
+ * opposite repairs: a name nothing on this machine matches (a typo - rewrite
+ * the config), and a name the install lock does match whose manifest was
+ * rejected (fix the install; the config is right). Both are absent from
+ * `knownPlugins`, which is built from manifests that loaded, so only
+ * `unloadablePlugins` separates them. Callers that do not supply it keep the
+ * single older reading.
+ *
  * @param {HypAwareV2Config} config
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
+ * @param {Set<PluginName>} [unloadablePlugins]
  */
-function checkPluginsKnown(config, knownPlugins, errors) {
+function checkPluginsKnown(config, knownPlugins, errors, unloadablePlugins) {
   if (!config.plugins) return
   for (let i = 0; i < config.plugins.length; i += 1) {
     const entry = config.plugins[i]
     if (!knownPlugins.has(entry.name)) {
+      if (unloadablePlugins?.has(entry.name)) {
+        // Still an error - the plugin captures nothing either way - but the
+        // operator is sent to the install, not the config. The directory is
+        // named by the status surface that owns the repair, not here.
+        errors.push({
+          pointer: `/plugins/${i}/name`,
+          errorKind: 'plugin_installed_unloadable',
+          message: `plugin '${entry.name}' is installed but its manifest will not load, so nothing in it is running`,
+        })
+        continue
+      }
       // For first-party only knowledge this catches typos against
       // declared plugins. Third-party plugins land in Phase 7; this
       // check should not fail then because the merged registry will
@@ -622,6 +648,13 @@ function runPerPluginSectionValidators(config, registry, errors) {
 const AI_GATEWAY_PLUGIN = /** @type {PluginName} */ ('@hypaware/ai-gateway')
 
 /**
+ * The capability the gateway provides. A client adapter that reaches its
+ * client registry through the gateway declares this in its manifest
+ * `requires`, which is the fact {@link clientRegistersViaGateway} reads.
+ */
+const AI_GATEWAY_CAPABILITY = /** @type {CapabilityName} */ ('hypaware.ai-gateway')
+
+/**
  * Fallback client descriptors for first-party clients. `hyp status`
  * uses catalog-derived descriptors when manifest discovery succeeds,
  * but diagnostics should still catch common Claude/Codex wiring gaps
@@ -641,7 +674,6 @@ function firstPartyClientDescriptors() {
         settings_file: '.claude/settings.json',
         marker_key: '_hypaware',
       },
-      requiredUpstreams: ['anthropic'],
     }],
     ['codex', {
       plugin: /** @type {PluginName} */ ('@hypaware/codex'),
@@ -652,9 +684,42 @@ function firstPartyClientDescriptors() {
         settings_file: '.codex/config.toml',
         marker_header: '[model_providers.hypaware]',
       },
-      requiredUpstreams: ['openai', 'chatgpt'],
+      // No `requiredUpstreams`: the manifest dropped them when capture left the
+      // inference path, and this fallback must not warn about upstreams a
+      // default transcript install has no use for.
+      // @ref LLP 0429#default [constrained-by]: onboarding composes no inference upstream for Codex
     }],
   ]))
+}
+
+/**
+ * Would enabling this client with no gateway in the config actually break
+ * its attach? Only for an adapter that registers itself with the
+ * *gateway's* client registry (`@hypaware/claude`, `@hypaware/codex`,
+ * `@hypaware/openclaw`). An endpoint-free adapter registers with the
+ * kernel's own `ctx.clients` and attaches with no gateway present at all,
+ * which is what `src/core/commands/clients.js` means by "endpoint-free
+ * clients do not need the gateway capability".
+ *
+ * Which kind a plugin is, is already stated in its manifest: a
+ * gateway-backed one declares `requires.capabilities['hypaware.ai-gateway']`.
+ * Reading that keeps this from becoming a second list to maintain
+ * alongside the manifests.
+ *
+ * Without the test, `hyp setup --source opencode` composed exactly the one
+ * plugin it was asked for and then reported itself degraded, warning that
+ * attach would fail after attach had already succeeded, and pointing the
+ * operator at a gateway OpenCode does not use.
+ *
+ * A plugin the catalog does not know yields no warning, which is the safe
+ * direction: an unrecognized name is not evidence of a broken wiring.
+ *
+ * @param {Map<PluginName, PluginMetadata>} knownPlugins
+ * @param {PluginName} pluginName
+ * @returns {boolean}
+ */
+function clientRegistersViaGateway(knownPlugins, pluginName) {
+  return knownPlugins.get(pluginName)?.requires?.[AI_GATEWAY_CAPABILITY] !== undefined
 }
 
 /**
@@ -705,7 +770,7 @@ export function diagnoseV1Config(config, ctx = {}) {
     const pluginName = descriptor.plugin
     if (!enabledByName.has(pluginName)) continue
 
-    if (gatewayConfig === undefined) {
+    if (gatewayConfig === undefined && clientRegistersViaGateway(knownPlugins, pluginName)) {
       out.push({
         kind: 'client_without_gateway',
         pointer: pluginPointer(config, pluginName),
@@ -713,8 +778,8 @@ export function diagnoseV1Config(config, ctx = {}) {
           `client plugin '${pluginName}' is enabled but '${AI_GATEWAY_PLUGIN}' is not - ` +
           `attach commands will fail until the gateway is enabled.`,
         repair: [
-          `hyp init --from-file <config.json>  # re-run picker to add the gateway`,
-          `hyp attach --client ${clientName}`,
+          `hyp setup --from-file <config.json>  # re-run picker to add the gateway`,
+          `hyp client attach ${clientName}`,
         ],
       })
     }
@@ -734,8 +799,8 @@ export function diagnoseV1Config(config, ctx = {}) {
             `'${pluginName}' is enabled but the gateway has no ${upstreamList} upstream - ` +
             `${clientName} requests will have nowhere to forward.`,
           repair: [
-            `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
-            `hyp attach --client ${clientName}`,
+            `hyp setup --from-file <config.json>  # re-run picker to add the upstream`,
+            `hyp client attach ${clientName}`,
           ],
         })
       }
@@ -759,7 +824,7 @@ export function diagnoseV1Config(config, ctx = {}) {
           `sink '${name}' targets '${destination}' but no encoder plugin ` +
           `(${[...encoderPlugins].join(' or ')}) is enabled - local export will produce no files.`,
         repair: [
-          `hyp init --from-file <config.json>  # re-run picker and pick "local Parquet export"`,
+          `hyp setup --from-file <config.json>  # re-run picker and pick "local Parquet export"`,
         ],
       })
     }

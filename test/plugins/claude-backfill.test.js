@@ -13,6 +13,11 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
+import { runBackfillProvider } from '../../src/core/commands/backfill.js'
+import {
+  createBackfillMaterializerRegistry,
+  createBackfillRegistry,
+} from '../../src/core/registry/backfills.js'
 
 /**
  * End-to-end tests for the `@hypaware/claude` backfill provider. They
@@ -21,7 +26,7 @@ import { appendSessionContext } from '../../hypaware-core/plugins-workspace/clau
  * `ai_gateway.projected_exchange` materializer, so the assertions cover
  * the exact path `hyp backfill claude` exercises in production.
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  * @import { UsagePolicyResolver } from '../../src/core/usage-policy/types.js'
  */
 
@@ -112,7 +117,7 @@ function captureLog() {
 }
 
 /**
- * @param {{ since?: string, until?: string, retentionDays?: number, log?: any }} [overrides]
+ * @param {{ since?: string, until?: string, retentionDays?: number, log?: any, sweep?: boolean }} [overrides]
  * @returns {{ ctx: BackfillRunContext, entries: any[] }}
  */
 function runContext(overrides = {}) {
@@ -127,8 +132,54 @@ function runContext(overrides = {}) {
     ...(overrides.since !== undefined ? { since: overrides.since } : {}),
     ...(overrides.until !== undefined ? { until: overrides.until } : {}),
     ...(overrides.retentionDays !== undefined ? { retentionDays: overrides.retentionDays } : {}),
+    ...(overrides.sweep !== undefined ? { sweep: overrides.sweep } : {}),
   }
   return { ctx, entries }
+}
+
+/**
+ * Drive the provider through the real kernel runner, so a tick takes the same
+ * scan -> materialize -> write path the daemon sweep takes. The materializer
+ * registry starts empty; registering it between ticks stands in for an
+ * operator repairing a plugin misconfiguration without a daemon restart.
+ *
+ * @param {{ homeDir: string }} env
+ * @param {BackfillContribution} provider
+ */
+function stageRunner(env, provider) {
+  const backfills = createBackfillRegistry()
+  backfills.register(provider)
+  const materializers = createBackfillMaterializerRegistry()
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  const storage = {
+    cacheRoot: path.join(env.homeDir, 'cache'),
+    /** @param {string} dataset @param {string[]} segs */
+    cacheTablePath: (dataset, segs) => path.join(env.homeDir, 'cache', dataset, ...segs),
+    /** @param {string} _tablePath @param {unknown} _columns @param {Record<string, unknown>[]} rows */
+    async appendRows(_tablePath, _columns, rows) { appended.push(...rows) },
+    async flushTable() {},
+  }
+  const query = {
+    /** @param {string} name */
+    getDataset(name) {
+      if (name !== DATASET_NAME) return undefined
+      return { name, plugin: '@hypaware/ai-gateway', schema: { columns: [] } }
+    },
+    registerDataset() {},
+    listDatasets() { return [] },
+  }
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: { HYP_HOME: env.homeDir },
+    config: {},
+    stdout: { write: () => true },
+    stderr: { write: () => true },
+    backfills,
+    backfillMaterializers: materializers,
+    query,
+    storage,
+  }))
+  return { ctx, appended, materializers }
 }
 
 /**
@@ -214,7 +265,126 @@ test('provider advertises a stable contribution shape', async () => {
   assert.equal(provider.name, 'claude')
   assert.equal(provider.plugin, '@hypaware/claude')
   assert.deepEqual(provider.datasets, ['ai_gateway_messages'])
+  assert.deepEqual(provider.sweep, { cron: '*/5 * * * *' })
   assert.equal(typeof provider.run, 'function')
+})
+
+// @ref LLP 0358#scheduled-sweep [tests]: the daemon cadence is plugin-owned,
+// defaults to five minutes, and honors the validated config override.
+test('provider uses the configured scheduled-backfill cadence', () => {
+  const provider = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { sweep_cron: '*/15 * * * *' } },
+  })
+  assert.deepEqual(provider.sweep, { cron: '*/15 * * * *' })
+})
+
+// @ref LLP 0041#consent-gating [tests]: the operator opt-out that suppresses
+// automatic history import suppresses the scheduled lane too, by contributing
+// no `sweep` field for the driver to tick.
+test('backfill.on_join false withholds the scheduled contribution entirely', () => {
+  const off = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { on_join: false, sweep_cron: '*/15 * * * *' } },
+  })
+  assert.equal(off.sweep, undefined)
+  assert.equal(typeof off.run, 'function')
+
+  // A malformed opt-out reads as an opt-out too (readBackfillPolicy), so a
+  // typo cannot fail open into a five-minute import.
+  const typo = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { on_join: 'false' } },
+  })
+  assert.equal(typo.sweep, undefined)
+
+  // An explicit true, and a block that only sets the window, still schedule.
+  const on = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { on_join: true, window_days: 14 } },
+  })
+  assert.deepEqual(on.sweep, { cron: '*/5 * * * *' })
+})
+
+// @ref LLP 0359#file-fingerprints [tests]: an unchanged scheduled pass reads
+// no transcript bodies; appending to one file makes only that file eligible.
+test('scheduled passes skip unchanged transcript files and revisit an append', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeTranscript(env, 'repo-a', 'sess-1', conversationRows('sess-1'))
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const first = runContext({ sweep: true })
+    assert.equal((await collectItems(provider.run(first.ctx))).length, 1)
+    const firstDone = first.entries.find((entry) => entry.message === 'claude.backfill.scan_complete')
+    assert.equal(firstDone?.fields?.files_read, 1)
+    assert.equal(firstDone?.fields?.files_unchanged, 0)
+
+    const second = runContext({ sweep: true })
+    assert.equal((await collectItems(provider.run(second.ctx))).length, 0)
+    const secondDone = second.entries.find((entry) => entry.message === 'claude.backfill.scan_complete')
+    assert.equal(secondDone?.fields?.files_read, 0)
+    assert.equal(secondDone?.fields?.files_unchanged, 1)
+
+    await fs.appendFile(filePath, JSON.stringify({
+      sessionId: 'sess-1',
+      uuid: 'u-asst-2',
+      parentUuid: 'u-asst-1',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'one more' },
+      timestamp: '2026-05-20T10:00:10.000Z',
+    }) + '\n', 'utf8')
+
+    const third = runContext({ sweep: true })
+    const thirdItems = await collectItems(provider.run(third.ctx))
+    assert.equal(thirdItems.length, 1)
+    assert.equal(value(thirdItems[0]).messages.length, 3)
+    const thirdDone = third.entries.find((entry) => entry.message === 'claude.backfill.scan_complete')
+    assert.equal(thirdDone?.fields?.files_read, 1)
+    assert.equal(thirdDone?.fields?.files_unchanged, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0359#file-fingerprints [tests]: the map is deliberately not durable,
+// so a file the runner dropped on one of its three non-throwing failures
+// (missing materializer, dataset mismatch, unregistered dataset) stays eligible
+// instead of staying hidden until the daemon restarts.
+test('a scheduled pass the runner could not write re-reads the file next tick', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'repo-a', 'sess-1', conversationRows('sess-1'))
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const runner = stageRunner(env, provider)
+
+    // Tick 1: no materializer is registered for the yielded kind, so the
+    // runner logs, marks the provider failed, and resumes the generator
+    // without appending a row.
+    const first = await runBackfillProvider({
+      ctx: runner.ctx, provider: 'claude', dryRun: false, sweep: true,
+    })
+    assert.equal(first.ok, false)
+    assert.equal(first.scanned, 1)
+    assert.equal(runner.appended.length, 0)
+
+    // The operator registers the missing materializer. No daemon restart, so
+    // the provider still holds the fingerprint map from tick 1.
+    runner.materializers.register(aiGatewayBackfillMaterializer())
+
+    const second = await runBackfillProvider({
+      ctx: runner.ctx, provider: 'claude', dryRun: false, sweep: true,
+    })
+    assert.equal(second.ok, true)
+    assert.equal(second.scanned, 1, 'the unwritten file must be read again')
+    assert.ok(runner.appended.length > 0, 'the retried tick must land the rows')
+  } finally {
+    await env.cleanup()
+  }
 })
 
 test('fixture transcript projects into canonical ai_gateway_messages rows', async () => {

@@ -1,0 +1,1075 @@
+// @ts-check
+
+// The transport contract of the shared OTLP http/json listener. Two
+// plugins host listeners on this machinery (LLP 0257 #registration), so
+// the routing, content-type, content-encoding and envelope behaviour is
+// pinned here rather than inside either plugin's tests.
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import http from 'node:http'
+import net from 'node:net'
+import os from 'node:os'
+import zlib from 'node:zlib'
+
+import { MAX_DECODED_BODY_BYTES, createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
+import { streamOversizedBody } from '../helpers/oversized_body.js'
+
+/**
+ * @import { PluginLogger } from '../../hypaware-plugin-kernel-types.js'
+ * @import { OtlpJsonServerOptions, OtlpRequest, OtlpSignal } from '../../src/core/otlp/types.js'
+ */
+
+/**
+ * Start a listener on a dynamic loopback port and return an origin plus
+ * the requests the handler saw. `onRequest` lets a test make the handler
+ * fail. The accepted sockets come back too: what a refusal read off one is
+ * only measurable there.
+ *
+ * @param {{
+ *   name?: string,
+ *   host?: string,
+ *   signals?: readonly OtlpSignal[],
+ *   onRequest?: (req: OtlpRequest) => void,
+ *   onControlRequest?: OtlpJsonServerOptions['onControlRequest'],
+ * }} [options]
+ */
+async function startServer(options = {}) {
+  /** @type {OtlpRequest[]} */
+  const seen = []
+  const server = createOtlpJsonServer({
+    name: options.name ?? 'hypaware/test',
+    signals: options.signals,
+    onControlRequest: options.onControlRequest,
+    handler: {
+      async handle(req) {
+        seen.push(req)
+        options.onRequest?.(req)
+      },
+    },
+  })
+  /** @type {net.Socket[]} */
+  const sockets = []
+  server.on('connection', (socket) => sockets.push(socket))
+  const bound = await listenAndResolve(server, options.host ?? '127.0.0.1', 0, 'hypaware/test')
+  return {
+    seen,
+    bound,
+    sockets,
+    origin: `http://127.0.0.1:${bound.port}`,
+    async close() {
+      await new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve(undefined)))
+        server.closeIdleConnections?.()
+        server.closeAllConnections?.()
+      })
+    },
+  }
+}
+
+/**
+ * POST with no `Content-Type` header at all, which `fetch` cannot express.
+ *
+ * @param {number} port
+ * @param {string} path
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function postWithoutContentType(port, path) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method: 'POST' }, (res) => {
+      /** @type {Buffer[]} */
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () =>
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+      )
+    })
+    req.on('error', reject)
+    req.end('{}')
+  })
+}
+
+/**
+ * Send a request with an explicit `Host` header, which `fetch` forbids.
+ *
+ * @param {number} port
+ * @param {{ path: string, host: string, method?: string, connectTo?: string }} options
+ * `connectTo` is the address the request is sent to, and so the address it
+ * arrives on: a wildcard-bound listener is reachable on more than one.
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function requestWithHost(port, options) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: options.connectTo ?? '127.0.0.1',
+        port,
+        path: options.path,
+        method: options.method ?? 'POST',
+        headers: { host: options.host, 'content-type': 'application/json' },
+      },
+      (res) => {
+        /** @type {Buffer[]} */
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        )
+      }
+    )
+    req.on('error', reject)
+    req.end('{}')
+  })
+}
+
+/**
+ * Write a raw request and resolve with its status line. Used for request
+ * lines and header values no HTTP client will build.
+ *
+ * @param {number} port
+ * @param {string} request
+ * @returns {Promise<string>}
+ */
+function rawRequestLine(port, request) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1')
+    let received = ''
+    socket.on('connect', () => socket.write(request))
+    socket.on('data', (chunk) => {
+      received += chunk.toString('utf8')
+      if (received.includes('\r\n')) {
+        socket.destroy()
+        resolve(received.split('\r\n')[0])
+      }
+    })
+    socket.on('error', reject)
+    // A Node that rejected the request at the parser would close with no status
+    // line at all, and waiting on `data` alone would hang the run.
+    socket.on('close', () =>
+      reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`))
+    )
+  })
+}
+
+test('listenAndResolve reports the port a dynamic bind actually got', async () => {
+  const s = await startServer()
+  try {
+    assert.equal(s.bound.host, '127.0.0.1')
+    assert.ok(s.bound.port > 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('GET / answers with the listener name banner', async () => {
+  const s = await startServer({ name: 'hypaware/otel' })
+  try {
+    const res = await fetch(`${s.origin}/`)
+    assert.equal(res.status, 200)
+    assert.equal(await res.text(), 'hypaware/otel OTLP listener\n')
+  } finally {
+    await s.close()
+  }
+})
+
+test('each signal route answers with its own empty partialSuccess envelope', async () => {
+  const s = await startServer()
+  try {
+    /** @type {[string, string][]} */
+    const cases = [
+      ['/v1/logs', 'rejectedLogRecords'],
+      ['/v1/traces', 'rejectedSpans'],
+      ['/v1/metrics', 'rejectedDataPoints'],
+    ]
+    for (const [route, field] of cases) {
+      const res = await fetch(`${s.origin}${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      assert.equal(res.status, 200)
+      assert.equal(res.headers.get('content-type'), 'application/json')
+      assert.deepEqual(await res.json(), { partialSuccess: { [field]: 0 } })
+    }
+    assert.deepEqual(
+      s.seen.map((req) => req.signal),
+      ['logs', 'traces', 'metrics']
+    )
+  } finally {
+    await s.close()
+  }
+})
+
+test('the handler sees the parsed payload and its decoded byte count', async () => {
+  const s = await startServer()
+  try {
+    const body = JSON.stringify({ resourceLogs: [{ resource: {} }] })
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].signal, 'logs')
+    assert.deepEqual(s.seen[0].data, { resourceLogs: [{ resource: {} }] })
+    assert.equal(s.seen[0].payloadBytes, Buffer.byteLength(body))
+  } finally {
+    await s.close()
+  }
+})
+
+test('an empty body reads as an empty object rather than a parse error', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '',
+    })
+    assert.equal(res.status, 200)
+    assert.deepEqual(s.seen[0].data, {})
+    assert.equal(s.seen[0].payloadBytes, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a charset parameter on the content type is still application/json', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: '{}',
+    })
+    assert.equal(res.status, 200)
+  } finally {
+    await s.close()
+  }
+})
+
+test('protobuf and a missing content type are both refused with 415', async () => {
+  const s = await startServer()
+  try {
+    const proto = await fetch(`${s.origin}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-protobuf' },
+      body: 'not json',
+    })
+    assert.equal(proto.status, 415)
+    const protoBody = /** @type {{ code: number, message: string }} */ (await proto.json())
+    assert.equal(protoBody.code, 3)
+    assert.match(protoBody.message, /application\/x-protobuf/)
+
+    // `fetch` always stamps a content type, so the header-less case needs a raw request.
+    const none = await postWithoutContentType(s.bound.port, '/v1/traces')
+    assert.equal(none.status, 415)
+    assert.match(none.body, /'none'/)
+
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('gzip and deflate bodies are decoded before the handler sees them', async () => {
+  const s = await startServer()
+  try {
+    const payload = JSON.stringify({ resourceMetrics: [] })
+    /** @type {[string, Buffer][]} */
+    const cases = [
+      ['gzip', zlib.gzipSync(payload)],
+      ['deflate', zlib.deflateSync(payload)],
+    ]
+    for (const [encoding, compressed] of cases) {
+      const res = await fetch(`${s.origin}/v1/metrics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': encoding },
+        body: compressed,
+      })
+      assert.equal(res.status, 200)
+    }
+    assert.equal(s.seen.length, 2)
+    for (const req of s.seen) {
+      assert.deepEqual(req.data, { resourceMetrics: [] })
+      // The count is of decoded bytes, not of what came off the wire.
+      assert.equal(req.payloadBytes, Buffer.byteLength(payload))
+    }
+  } finally {
+    await s.close()
+  }
+})
+
+// The bound is on decoded bytes, so a compressed body cannot buy its way past
+// it: a few KiB of gzip inflate to whatever the sender chose before the handler
+// ever ran.
+test('a body past the decoded cap is refused with 413 in every encoding, and the listener keeps serving', async () => {
+  const s = await startServer()
+  try {
+    // Valid JSON, so nothing but its size can refuse it.
+    const json = JSON.stringify({ resourceLogs: [] })
+    const oversized = Buffer.from(json + ' '.repeat(MAX_DECODED_BODY_BYTES + 1 - Buffer.byteLength(json)))
+    /** @type {[string, Buffer][]} */
+    const cases = [
+      ['identity', oversized],
+      ['gzip', zlib.gzipSync(oversized)],
+      ['deflate', zlib.deflateSync(oversized)],
+    ]
+    for (const [encoding, body] of cases) {
+      const res = await fetch(`${s.origin}/v1/logs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': encoding },
+        body,
+      })
+      assert.equal(res.status, 413, encoding)
+      const answer = /** @type {{ code: number, message: string }} */ (await res.json())
+      assert.equal(answer.code, 3, encoding)
+      assert.match(answer.message, new RegExp(`${MAX_DECODED_BODY_BYTES} bytes`), encoding)
+    }
+    assert.equal(s.seen.length, 0)
+
+    const after = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resourceLogs: [] }),
+    })
+    assert.equal(after.status, 200)
+    assert.equal(s.seen.length, 1)
+  } finally {
+    await s.close()
+  }
+})
+
+// The shape review used to refuse a 20 MiB limit: an OpenTelemetry SDK's
+// default BatchLogRecordProcessor exports 512 records at a time, and 48 KiB
+// records make that batch about 24 MiB. It has to keep arriving whole.
+// @ref LLP 0478#why [tests]: a default SDK batch fits under the limit
+test('a default 512-record SDK log batch with 48 KiB records still reaches the handler', async () => {
+  const s = await startServer()
+  try {
+    const record = 'x'.repeat(48 * 1024)
+    const batch = {
+      resourceLogs: [{
+        resource: { attributes: [{ key: 'service.name', value: { stringValue: 'sdk-batch' } }] },
+        scopeLogs: [{
+          scope: { name: 'sdk-batch' },
+          logRecords: Array.from({ length: 512 }, (_, i) => ({
+            timeUnixNano: String(1_760_000_000_000_000_000 + i),
+            severityNumber: 9,
+            severityText: 'INFO',
+            body: { stringValue: record },
+            attributes: [{ key: 'seq', value: { intValue: String(i) } }],
+          })),
+        }],
+      }],
+    }
+    const json = JSON.stringify(batch)
+    assert.ok(Buffer.byteLength(json) > 20 * 1024 * 1024, 'the batch is past the limit review refused')
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: zlib.gzipSync(json),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].payloadBytes, Buffer.byteLength(json))
+    const data = /** @type {any} */ (s.seen[0].data)
+    assert.equal(data.resourceLogs[0].scopeLogs[0].logRecords.length, 512)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a body exactly at the decoded cap still reaches the handler', async () => {
+  const s = await startServer()
+  try {
+    const json = JSON.stringify({ resourceLogs: [] })
+    const atCap = json + ' '.repeat(MAX_DECODED_BODY_BYTES - Buffer.byteLength(json))
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: zlib.gzipSync(atCap),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(s.seen.length, 1)
+    assert.equal(s.seen[0].payloadBytes, MAX_DECODED_BODY_BYTES)
+    assert.deepEqual(s.seen[0].data, { resourceLogs: [] })
+  } finally {
+    await s.close()
+  }
+})
+
+test('an identity body past the decoded cap is read only up to about the cap', async () => {
+  const s = await startServer()
+  try {
+    const out = await streamOversizedBody(s.bound.port, {
+      requestLine: 'POST /v1/logs',
+      bytes: MAX_DECODED_BODY_BYTES + 8 * 1024 * 1024,
+    })
+    assert.ok(out.sent < out.total, `read all ${out.total} bytes of a body past the cap`)
+    assert.equal(s.seen.length, 0)
+    const [served] = s.sockets
+    assert.ok(served, 'the upload opened no server connection to measure')
+    if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+    // Up to the cap the body is read as a candidate export, and past it only
+    // the shared drain's bounded discard follows; the margin covers the
+    // socket reads already in flight when each stop lands.
+    assert.ok(
+      served.bytesRead < MAX_DECODED_BODY_BYTES + 2 * 1024 * 1024,
+      `read ${served.bytesRead} of the ${out.total} bytes it refused`
+    )
+    // A sender that reads while it uploads gets the refusal, announced as a
+    // closing connection rather than handed back to a pool.
+    if (out.received) {
+      assert.match(out.received, /^HTTP\/1\.1 413 /, out.received.slice(0, 80))
+      assert.match(out.received, /\r\nconnection: close\r\n/i, out.received.slice(0, 200))
+    }
+  } finally {
+    await s.close()
+  }
+})
+
+test('an unknown content encoding is refused with 415', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'br' },
+      body: '{}',
+    })
+    assert.equal(res.status, 415)
+    const body = /** @type {{ code: number, message: string }} */ (await res.json())
+    assert.equal(body.code, 3)
+    assert.match(body.message, /Content-Encoding: br/)
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('a malformed JSON body is refused with 400 rather than crashing', async () => {
+  const s = await startServer()
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{ not json',
+    })
+    assert.equal(res.status, 400)
+    assert.deepEqual(await res.json(), { code: 3, message: 'Invalid JSON' })
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('an unknown path is 404 and a non-POST method is 405', async () => {
+  const s = await startServer()
+  try {
+    const missing = await fetch(`${s.origin}/v1/nope`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(missing.status, 404)
+    assert.deepEqual(await missing.json(), { code: 5, message: 'Not found' })
+
+    const wrongMethod = await fetch(`${s.origin}/v1/logs`, { method: 'PUT', body: '{}' })
+    assert.equal(wrongMethod.status, 405)
+    assert.deepEqual(await wrongMethod.json(), { code: 12, message: 'Method not allowed' })
+  } finally {
+    await s.close()
+  }
+})
+
+test('a handler failure becomes a 500 carrying its message', async () => {
+  const s = await startServer({
+    onRequest() {
+      throw new Error('persist failed')
+    },
+  })
+  try {
+    const res = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(res.status, 500)
+    assert.deepEqual(await res.json(), { code: 13, message: 'persist failed' })
+  } finally {
+    await s.close()
+  }
+})
+
+// @ref LLP 0256#control-route-on-listener [tests]: the reserved `/_hypaware/`
+// prefix is a local control surface on the shared server too, short-circuited
+// before OTLP routing, so the claude listener can host the session-ignore
+// route with the identical shape the gateway proxy serves.
+test('a registered control handler owns the reserved /_hypaware/ prefix, before OTLP routing', async () => {
+  /** @type {string[]} */
+  const controlPaths = []
+  const s = await startServer({
+    onControlRequest(req, res, url) {
+      controlPaths.push(`${req.method} ${url.pathname}`)
+      req.resume()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    },
+  })
+  try {
+    // All three verbs the session-ignore route serves reach the handler,
+    // including GET, which the OTLP side would have refused with 405.
+    for (const method of ['GET', 'POST', 'DELETE']) {
+      const res = await fetch(`${s.origin}/_hypaware/ignore/session`, {
+        method,
+        ...(method === 'GET' ? {} : { headers: { 'content-type': 'application/json' }, body: '{}' }),
+      })
+      assert.equal(res.status, 200, `${method} reaches the control handler`)
+      assert.deepEqual(await res.json(), { ok: true })
+    }
+    assert.deepEqual(controlPaths, [
+      'GET /_hypaware/ignore/session',
+      'POST /_hypaware/ignore/session',
+      'DELETE /_hypaware/ignore/session',
+    ])
+    assert.equal(s.seen.length, 0, 'a control request never reads as an OTLP export')
+
+    // A look-alike path is NOT a control path, so it still routes as OTLP.
+    const lookAlike = await fetch(`${s.origin}/_hypawarefoo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(lookAlike.status, 404)
+    assert.equal(controlPaths.length, 3, 'the look-alike never reached the control handler')
+  } finally {
+    await s.close()
+  }
+})
+
+test('without a control handler, control paths fall through as unknown OTLP routes', async () => {
+  const s = await startServer()
+  try {
+    const post = await fetch(`${s.origin}/_hypaware/ignore/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(post.status, 404)
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+// A page whose domain re-resolves to 127.0.0.1 is same-origin with this
+// listener, so it needs no preflight and the content-type gate above lets it
+// through; the attacker's name in `Host` is the one signal that separates it
+// from a local exporter.
+test('a Host naming anything but loopback is refused on every route, control surface included', async () => {
+  /** @type {string[]} */
+  const controlPaths = []
+  const s = await startServer({
+    onControlRequest(req, res, url) {
+      controlPaths.push(url.pathname)
+      req.resume()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    },
+  })
+  try {
+    for (const path of ['/v1/logs', '/v1/traces', '/v1/metrics', '/_hypaware/ignore/session']) {
+      const res = await requestWithHost(s.bound.port, { path, host: 'attacker.example' })
+      assert.equal(res.status, 421, `${path} refuses a rebound Host`)
+      assert.match(JSON.parse(res.body).message, /Host/)
+    }
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+    assert.deepEqual(controlPaths, [], 'no control request reached the handler')
+
+    // A GET of the banner is refused too: rebinding reads as easily as it writes.
+    const banner = await requestWithHost(s.bound.port, { path: '/', host: 'attacker.example', method: 'GET' })
+    assert.equal(banner.status, 421)
+  } finally {
+    await s.close()
+  }
+})
+
+test('loopback Hosts keep passing, with any port and in every spelling', async () => {
+  const s = await startServer()
+  try {
+    const hosts = [
+      `127.0.0.1:${s.bound.port}`,
+      '127.0.0.1',
+      '127.0.0.2:9999',
+      `localhost:${s.bound.port}`,
+      'LocalHost',
+      `[::1]:${s.bound.port}`,
+      '[::1]',
+      // What a wildcard bind advertises as its `listen_host`, and therefore
+      // what `hyp session ignore` addresses that recorder by. Refusing it
+      // would leave the opt-out unable to reach a listener whose exports
+      // keep flowing.
+      `0.0.0.0:${s.bound.port}`,
+      '[::]',
+    ]
+    for (const host of hosts) {
+      const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
+      assert.equal(res.status, 200, `Host: ${host} still exports`)
+    }
+    assert.equal(s.seen.length, hosts.length)
+  } finally {
+    await s.close()
+  }
+})
+
+/**
+ * Every non-internal IPv4 address of this machine, in the order the OS lists
+ * them. All of them rather than the first, because the first is often the one
+ * that will not serve: a container bridge, a VPN tunnel, or a link-local
+ * autoconfigured address. Skipping on that one alone would skip a regression
+ * test another interface on the same host can run.
+ *
+ * @returns {string[]}
+ */
+function routableIpv4s() {
+  const found = []
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === 'IPv4' && !address.internal) found.push(address.address)
+    }
+  }
+  return found
+}
+
+/**
+ * Can this machine open a TCP connection to its own routable address? Having
+ * the interface is not a promise of it: a default-drop INPUT chain or a
+ * desktop firewall swallows the SYN, and a request sent into that would never
+ * settle, hanging the test rather than failing it (`node:test` sets no
+ * per-test timeout).
+ *
+ * @param {string} address
+ * @param {number} port
+ * @returns {Promise<boolean>}
+ */
+function canReach(address, port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: address, port })
+    /** @param {boolean} answer */
+    const settle = (answer) => {
+      socket.destroy()
+      resolve(answer)
+    }
+    socket.setTimeout(2000, () => settle(false))
+    socket.once('connect', () => settle(true))
+    socket.once('error', () => settle(false))
+  })
+}
+
+// A wildcard bind is reachable on every address of the machine, and the
+// routable ones are not a deliberate publication under a name: the operator
+// named no address, so nothing here is meant to answer to whatever resolves
+// there. The routable side is judged like the loopback side, and answers to
+// the address the request arrived on rather than to a name.
+test('a wildcard bind is judged on its routable side too', async (t) => {
+  const candidates = routableIpv4s()
+  if (candidates.length === 0) return t.skip('no routable IPv4 interface on this host')
+  const s = await startServer({ host: '0.0.0.0' })
+  try {
+    // Bounded by `canReach` per candidate, so a host that drops on every one
+    // of them still ends the test rather than hanging it.
+    let routable
+    for (const candidate of candidates) {
+      if (await canReach(candidate, s.bound.port)) {
+        routable = candidate
+        break
+      }
+    }
+    if (!routable) return t.skip('no routable address of this host accepts connections')
+    const refused = await requestWithHost(s.bound.port, {
+      path: '/v1/logs',
+      host: 'attacker.example',
+      connectTo: routable,
+    })
+    assert.equal(refused.status, 421, 'a foreign Host is refused on the routable side')
+    assert.match(JSON.parse(refused.body).message, /Host/)
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+
+    // The exporter a wildcard bind exists for: a peer on the network posting
+    // to the address it reached the listener on.
+    const served = await requestWithHost(s.bound.port, {
+      path: '/v1/logs',
+      host: `${routable}:${s.bound.port}`,
+      connectTo: routable,
+    })
+    assert.equal(served.status, 200, 'the address the request arrived on still exports')
+    assert.equal(s.seen.length, 1)
+  } finally {
+    await s.close()
+  }
+})
+
+// The shared predicate this check now calls can be asked to accept the hex
+// form `URL` re-serializes an IPv4-mapped literal into, and the self-updater
+// does ask for it. This listener must not, and the flag is one argument away,
+// so the refusal is pinned at the call site and not only at the predicate: a
+// `Host` is caller-chosen, so the mapped spelling proves nothing about where
+// the request came from, and admitting it would hand a rebound page a
+// spelling that walks straight past this guard.
+test('a Host in the hex-serialized IPv4-mapped spelling is refused', async () => {
+  const s = await startServer()
+  try {
+    const hosts = ['[::ffff:7f00:1]', `[::ffff:7f00:1]:${s.bound.port}`, '[::FFFF:7F00:1]']
+    for (const host of hosts) {
+      const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
+      assert.equal(res.status, 421, `Host: ${host} is refused`)
+    }
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+  } finally {
+    await s.close()
+  }
+})
+
+// `hostnameOfHostHeader` turns away unbalanced brackets only where a port
+// would follow them, so `Host: localhost]` arrives at the predicate whole. It
+// must not be read as `localhost` with the bracket tidied off: the header is
+// caller-chosen, and every spelling this guard admits is a spelling a rebound
+// page's request would be answered under.
+test('a Host carrying a stray bracket is refused, not tidied into a loopback name', async () => {
+  const s = await startServer()
+  try {
+    for (const host of ['localhost]', 'LOCALHOST]', '127.0.0.1]', '[[::1]']) {
+      const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
+      assert.equal(res.status, 421, `Host: ${host} is refused`)
+    }
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+  } finally {
+    await s.close()
+  }
+})
+
+// A `Host` no hostname can be read out of is refused with the foreign ones.
+// Sent over a raw socket because an HTTP client will not put a space in a
+// header value.
+test('a malformed Host is refused rather than parsed', async () => {
+  const s = await startServer()
+  try {
+    const socket = net.connect(s.bound.port, '127.0.0.1')
+    const statusLine = await new Promise((resolve, reject) => {
+      let received = ''
+      socket.on('connect', () => {
+        socket.write(
+          'POST /v1/logs HTTP/1.1\r\nHost: attacker example\r\n' +
+            'Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}'
+        )
+      })
+      socket.on('data', (chunk) => {
+        received += chunk.toString('utf8')
+        if (received.includes('\r\n')) resolve(received.split('\r\n')[0])
+      })
+      socket.on('error', reject)
+      // A Node that rejected the header at the parser would close with no
+      // status line at all, and waiting on `data` alone would hang the run
+      // instead of failing it.
+      socket.on('close', () => reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`)))
+    })
+    socket.destroy()
+    assert.equal(statusLine, 'HTTP/1.1 421 Misdirected Request')
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+// Node's HTTP parser hands the handler request targets `new URL` refuses
+// (`//[`, `http://[::1`), and the throw would leave an `async` handler with no
+// `unhandledRejection` handler anywhere in the repo behind it: one request line
+// would end the daemon. The `Host` is loopback here, so the check above passes
+// it through to the parser.
+test('a request target new URL rejects is answered 400, not thrown out of the handler', async () => {
+  const s = await startServer()
+  try {
+    for (const target of ['//[', 'http://[::1', '//[::1']) {
+      const line = await rawRequestLine(s.bound.port, `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`)
+      assert.equal(line, 'HTTP/1.1 400 Bad Request', `GET ${target} is answered`)
+    }
+    // Still serving, which is the half a status code alone would not prove.
+    const banner = await fetch(`http://127.0.0.1:${s.bound.port}/`)
+    assert.equal(banner.status, 200)
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+// Both refusals above answer before reading anything, and a body they will
+// never read still has to be drained for that answer to reach a caller
+// mid-upload. Draining it with a bare `req.resume()` reads to EOF, which hands
+// the length of that read to the sender; the shared `drainRequestBody` bounds
+// it instead (issue #1351).
+for (const refusal of [
+  {
+    name: 'the misdirected-Host 421',
+    requestLine: 'POST /v1/logs',
+    host: 'attacker.example',
+    status: 421,
+  },
+  {
+    name: 'the invalid-target 400',
+    requestLine: 'POST //[',
+    host: '127.0.0.1',
+    status: 400,
+  },
+]) {
+  test(`${refusal.name} discards an oversized body only up to a cap`, async () => {
+    const s = await startServer()
+    try {
+      const out = await streamOversizedBody(s.bound.port, refusal)
+      assert.ok(
+        out.sent < out.total,
+        `${refusal.name} read all ${out.total} bytes of the body it refused`
+      )
+      // The cap is only visible as bytes the server read off the socket: a
+      // sender cannot tell a paused read from a socket buffer that swallowed
+      // its write.
+      const [served] = s.sockets
+      assert.ok(served, 'the refused upload opened no server connection to measure')
+      if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+      // What this bounds is the read, not which of the drain's two bounds cut
+      // it. A body this large is never promised to fit, so the drain also
+      // answers `connection: close`, and the connection goes as soon as the
+      // refusal flushes; measured, that alone settles the read at the same
+      // ~112 KiB the byte cap would. Isolating MAX_REJECTED_DRAIN_BYTES needs
+      // a body small enough for both socket buffers to take whole, so that
+      // nothing but the cap can stop the read, which is the shape
+      // `test/plugins/opencode-listener.test.js` already pins it with. The
+      // margin below is loose because it is measuring neither bound exactly.
+      assert.ok(
+        served.bytesRead < 512 * 1024,
+        `${refusal.name} read ${served.bytesRead} of the ${out.total} bytes it refused`
+      )
+      // The answer is written before a byte is discarded, so a caller reading
+      // its socket while it uploads still gets the status, and the reset it
+      // meets past the cap is announced rather than handed to a connection
+      // pool.
+      if (out.received) {
+        assert.match(out.received, new RegExp(`^HTTP/1\\.1 ${refusal.status} `), out.received.slice(0, 80))
+        assert.match(out.received, /\r\nconnection: close\r\n/i, out.received.slice(0, 200))
+      }
+    } finally {
+      await s.close()
+    }
+  })
+}
+
+test('the Host check exempts an explicitly routable bind only, and needs a Host to judge', () => {
+  /** @type {PluginLogger} */
+  const log = { debug() {}, info() {}, warn() {}, error() {} }
+  /**
+   * @param {string} localAddress
+   * @param {string} [host]
+   * @param {string} [bind] what the accepting server is bound to; omitted for
+   * a request with no accepting server behind it
+   */
+  const misdirected = (localAddress, host, bind) =>
+    isMisdirectedHost(
+      /** @type {any} */ ({
+        socket: {
+          localAddress,
+          server: bind === undefined ? undefined : { address: () => ({ address: bind, family: 'IPv4', port: 4318 }) },
+        },
+        headers: host === undefined ? {} : { host },
+      }),
+      { name: 'hypaware/test', log }
+    )
+
+  assert.equal(misdirected('127.0.0.1', 'attacker.example', '127.0.0.1'), true)
+  // How a dual-stack bind reports an IPv4 loopback peer. Still loopback.
+  assert.equal(misdirected('::ffff:127.0.0.1', 'attacker.example', '::'), true)
+  assert.equal(misdirected('::1', 'attacker.example', '::1'), true)
+  // Bound to a routable address, the listener is meant to answer to whatever
+  // name resolves there, and a rebound request never lands on that address.
+  assert.equal(misdirected('203.0.113.5', 'collector.example', '203.0.113.5'), false)
+  // libuv hands both the bind and the arrival address back in the mapped
+  // form when the bind was written that way, so the exemption survives the
+  // spelling: one address, one verdict.
+  assert.equal(misdirected('::ffff:203.0.113.5', 'collector.example', '::ffff:203.0.113.5'), false)
+  // The routable side of a wildcard bind is not the same thing: the operator
+  // named no address to publish under, so the side is judged, and answers to
+  // the address the request arrived on rather than to a name.
+  assert.equal(misdirected('203.0.113.5', 'collector.example', '0.0.0.0'), true)
+  assert.equal(misdirected('203.0.113.5', '203.0.113.5:4318', '0.0.0.0'), false)
+  assert.equal(misdirected('::ffff:203.0.113.5', '203.0.113.5', '::'), false)
+  // The same address in the mapped spelling a client reaches it under when it
+  // copies the endpoint back out of a dual-stack tool. One address, one
+  // verdict, on the `Host` side as well as the two socket sides.
+  assert.equal(misdirected('::ffff:203.0.113.5', '[::ffff:203.0.113.5]:4318', '::'), false)
+  assert.equal(misdirected('2001:db8::5', '[2001:db8::5]:4318', '::'), false)
+  // A name that merely resolves to the arrival address is still a name.
+  assert.equal(misdirected('203.0.113.5', 'collector.example', '::'), true)
+  // A bind that cannot be read is no evidence of a deliberate publication, so
+  // it is judged with the wildcards rather than waved through.
+  assert.equal(misdirected('203.0.113.5', 'collector.example'), true)
+  // A local address that cannot be read is not an exemption either, so the
+  // unknown case is judged like a loopback one.
+  assert.equal(misdirected('', 'attacker.example', '0.0.0.0'), true)
+  // No Host at all: HTTP/1.0 clients omit it and a browser never does.
+  assert.equal(misdirected('127.0.0.1', undefined, '127.0.0.1'), false)
+
+  // A `Host` no hostname can be read out of is refused with the foreign ones,
+  // rather than half-read into a loopback name.
+  assert.equal(misdirected('127.0.0.1', '[::1'), true)
+  assert.equal(misdirected('127.0.0.1', '[::1]x'), true)
+  assert.equal(misdirected('127.0.0.1', '127.0.0.1:'), true)
+  assert.equal(misdirected('127.0.0.1', '127.0.0.1:80x'), true)
+  assert.equal(misdirected('127.0.0.1', 'localhost:1:2'), true)
+  assert.equal(misdirected('127.0.0.1', 'user@localhost'), true)
+})
+
+// The bound on the refusal line, which is the half of a refusal a rebound page
+// still controls: it chooses the `Host` and the rate, and the line lands in
+// `logs`.
+test('a refusal is always counted but logged at most once an interval, with the Host bounded', () => {
+  /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+  const lines = []
+  /** @type {PluginLogger} */
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    warn(event, fields) {
+      lines.push({ event, fields: fields ?? {} })
+    },
+  }
+  // Bounded only by Node's header budget, which is not a bound worth writing
+  // a row against.
+  const host = `${'a'.repeat(400)}.example`
+  const refuse = () =>
+    isMisdirectedHost(
+      /** @type {any} */ ({ socket: { localAddress: '127.0.0.1' }, headers: { host } }),
+      // A listener name of its own: the tally is per listener and lives as long
+      // as the process, so sharing one with another test would couple the two.
+      { name: 'hypaware/refusal-bound', log }
+    )
+
+  assert.equal(refuse(), true)
+  assert.equal(refuse(), true)
+  assert.equal(refuse(), true)
+
+  // A page can send these as fast as it likes, so only the first is written:
+  // a line apiece would answer blocked row injection with unbounded row growth
+  // in `logs`.
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.event, 'listener.host_refused')
+  assert.equal(lines[0]?.fields?.refused_total, 1)
+  // The one line that is written cannot carry an unbounded value either.
+  const logged = String(lines[0]?.fields?.host)
+  assert.equal(logged.length, 128)
+  assert.ok(host.startsWith(logged))
+})
+
+// The window bounds a line, and the tally it throttles is keyed by the
+// listener rather than by the logger: an entry outlives the run that filled
+// it in, and a hosting plugin may hold its logger under a type declaring
+// `warn` optional (`ProxyOptions.log` does). A caller that cannot write the
+// line must not spend the window, or the next one that can refuses with
+// nothing in `logs`.
+test('a logger with no warn is counted and refused, but does not consume the log window', () => {
+  /** @type {{ event: string, fields: Record<string, unknown> }[]} */
+  const lines = []
+  /** @type {PluginLogger} */
+  const full = {
+    debug() {},
+    info() {},
+    error() {},
+    warn(event, fields) {
+      lines.push({ event, fields: fields ?? {} })
+    },
+  }
+  // Type-legal today, and silent: the methods a plugin calls, without the one
+  // the refusal writes through.
+  /** @type {Partial<PluginLogger>} */
+  const warnless = { info() {} }
+  /** @param {Partial<PluginLogger>} log */
+  const refuse = (log) =>
+    isMisdirectedHost(
+      /** @type {any} */ ({ socket: { localAddress: '127.0.0.1' }, headers: { host: 'attacker.example' } }),
+      // A listener name of its own: the tally lives as long as the process, so
+      // sharing one with another test would couple the two.
+      { name: 'hypaware/refusal-warnless', log }
+    )
+
+  assert.equal(refuse(warnless), true)
+  assert.equal(refuse(warnless), true)
+  assert.equal(lines.length, 0)
+
+  // The window was never spent, so a caller that can write a line still does,
+  // inside the same interval.
+  assert.equal(refuse(full), true)
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.event, 'listener.host_refused')
+  // Every refusal so far, the two silent ones included.
+  assert.equal(lines[0]?.fields?.refused_total, 3)
+
+  // A line that was written does throttle the next one.
+  assert.equal(refuse(full), true)
+  assert.equal(lines.length, 1)
+})
+
+// The rule the refusal enforces is no longer 'loopback only' everywhere, so a
+// line that says only which `Host` was refused cannot tell an operator which
+// rule refused it. A wildcard bind's routable side and a loopback side produce
+// the same message and the same `error_kind`; the two addresses are what
+// separate a rebinding attempt from an exporter naming the listener by a name
+// the wildcard bind never published.
+test('the refusal line names the address the request arrived on and the bind', () => {
+  /** @type {{ event: string, fields: Record<string, unknown> }[]} */
+  const lines = []
+  /** @type {PluginLogger} */
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    warn(event, fields) {
+      lines.push({ event, fields: fields ?? {} })
+    },
+  }
+  // A server of its own, so the tally is the WeakMap entry for it rather than
+  // one shared by listener name with another test.
+  const server = { address: () => ({ address: '0.0.0.0', family: 'IPv4', port: 4318 }) }
+  const refused = isMisdirectedHost(
+    /** @type {any} */ ({
+      socket: { localAddress: '::ffff:203.0.113.5', server },
+      headers: { host: 'lan.example' },
+    }),
+    { name: 'hypaware/refusal-fields', log }
+  )
+
+  assert.equal(refused, true)
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.fields?.arrived_on, '203.0.113.5', 'the arrival address, in the one spelling')
+  assert.equal(lines[0]?.fields?.bind, '0.0.0.0', 'the bind, which is what denied the exemption')
+})
+
+test('a listener can serve a subset of the signals', async () => {
+  const s = await startServer({ signals: ['logs', 'metrics'] })
+  try {
+    const logs = await fetch(`${s.origin}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(logs.status, 200)
+
+    const traces = await fetch(`${s.origin}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(traces.status, 404)
+    assert.equal(s.seen.length, 1)
+  } finally {
+    await s.close()
+  }
+})

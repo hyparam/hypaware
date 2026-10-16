@@ -16,6 +16,7 @@ import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
+import { discoverBundledPlugins } from '../../../src/core/runtime/bundled.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
@@ -25,29 +26,33 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  */
 
 /**
- * Phase 5 V1-milestone smoke. Drives `hyp init --yes --client claude
- * --client codex --source otel --export local-parquet --retention-days
- * 30 --dry-run --bin <stable-bin>` end-to-end against a tmp HYP_HOME
- * with all six first-party plugins active (ai-gateway, otel, local-fs,
- * format-parquet, claude, codex). Then exercises the resulting
+ * Phase 5 V1-milestone smoke. Drives `hyp setup --yes --client claude
+ * --client codex --client opencode --source otel --export local-parquet
+ * --retention-days 30 --dry-run --bin <stable-bin>` end-to-end against a
+ * tmp HYP_HOME with all seven first-party plugins active (ai-gateway,
+ * otel, local-fs, format-parquet, claude, codex, opencode). Then exercises the resulting
  * install just like Phase 9 did so the `walkthrough_picker_to_first_query`
  * bead's full assertion list lands.
  *
  * Assertions (per bead hy-5oz4):
  *
+ * - The dry run names the config it would write and writes none.
  * - Non-interactive picker selections generate a config matching the
- *   expected v2 shape (both AI upstreams, OTEL, Parquet sink).
+ *   expected v2 shape (both AI upstreams, OTEL, Parquet sink), plus the
+ *   riders those picks pull in (LLP 0213 #d1): the written config is wider
+ *   than the seven plugins this smoke activates by injection. Checked on
+ *   the same picks run for real with `--no-daemon`.
  * - Dry-run daemon install chooses the stable binary path passed via
  *   `--bin <stable-bin>` and outputs a sensible target path.
- * - Claude + Codex attach dry-runs produce expected file edits *without*
- *   touching the per-client settings/config files under the tmp HOME.
+ * - Claude + Codex + OpenCode attach dry-runs produce expected file edits
+ *   *without* touching the per-client settings/config files under the tmp HOME.
  * - One OTLP log POST + one gateway exchange each round-trip through
  *   the running sources with `dev_run_id` preserved.
  * - SQL count(*) on both `logs` and `ai_gateway_messages` returns 1
  *   under the same `dev_run_id`.
  * - The wizard pick-phase span contract (`wizard.pick.start`,
  *   `wizard.pick.write_config`, `daemon.install`, `client.attach`,
- *   `skills.install`, `wizard.pick.finish`) is honored (`hyp init` routes
+ *   `skills.install`, `wizard.pick.finish`) is honored (`hyp setup` routes
  *   through `runInitWizard` -> `runWizardPick` now, LLP 0135).
  *
  * @param {{ harness: any, expect: any }} args
@@ -75,6 +80,7 @@ export async function run({ harness, expect }) {
     parquet: path.join(pluginsRoot, 'format-parquet'),
     claude: path.join(pluginsRoot, 'claude'),
     codex: path.join(pluginsRoot, 'codex'),
+    opencode: path.join(pluginsRoot, 'opencode'),
   }
 
   // Same recipe as gateway_claude_capture: a distinct name so the merge
@@ -101,6 +107,51 @@ export async function run({ harness, expect }) {
   await fs.mkdir(path.join(fakeHome, '.codex'), { recursive: true })
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome
+  // Redirecting HOME is not enough to sandbox OpenCode. `resolveClientSettingsPath`
+  // relocates the `.config/opencode` prefix to `$XDG_CONFIG_HOME/opencode` when
+  // that variable is set, and it is an absolute path that HOME does not move, so
+  // an inherited one sends this run's attach at the developer's real config home:
+  // the assertions below then compare against a path the run never touched, and
+  // the smoke reds on a machine where nothing is wrong.
+  const previousXdgConfigHome = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = path.join(fakeHome, '.config')
+  // Pin the version the LLP 0258 floor check sees, so the init-driven attach
+  // never depends on whatever `claude` binary the machine running it carries.
+  const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
+  process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
+  // Neither HOME nor XDG_CONFIG_HOME sandboxes `opencode` itself: both
+  // setup runs in this flow pick `opencode` and shell out to it, the
+  // earlier --dry-run run included, which still emits
+  // backfill.provider_start{dry_run:true, provider:'opencode'} and an
+  // opencode.backfill.selection log row, so it also executes the host
+  // CLI and reads its session list. That is why PATH has to be planted
+  // before the first dispatch below, not just before the widened real
+  // run. `runOpenCode` (hypaware-core/plugins-workspace/opencode/src/backfill.js)
+  // resolves a bare `opencode` from PATH. An inherited PATH would make this
+  // release-gate smoke read and import whatever real session history is
+  // installed on the machine running it. Plant a fake `opencode` ahead of
+  // it on PATH, the way opencode_capture.js already does.
+  const previousPath = process.env.PATH
+  const fakeOpenCodeBinDir = path.join(harness.tmpDir, 'bin')
+  await fs.mkdir(fakeOpenCodeBinDir, { recursive: true })
+  const fakeOpenCodePath = path.join(fakeOpenCodeBinDir, 'opencode')
+  await fs.writeFile(
+    fakeOpenCodePath,
+    [
+      '#!/usr/bin/env node',
+      'const args = process.argv.slice(2)',
+      "if (args[0] === 'session' && args[1] === 'list') {",
+      '  process.stdout.write(JSON.stringify([]))',
+      '  process.exit(0)',
+      '}',
+      "process.stderr.write('unsupported fake opencode args')",
+      'process.exit(2)',
+      '',
+    ].join('\n'),
+    'utf8'
+  )
+  await fs.chmod(fakeOpenCodePath, 0o755)
+  process.env.PATH = `${fakeOpenCodeBinDir}:${previousPath ?? ''}`
 
   // Pre-existing settings files would let us detect that dry-runs do
   // not modify them. Seed harmless baselines and snapshot them.
@@ -114,7 +165,7 @@ export async function run({ harness, expect }) {
   const stableBinPath = path.join(harness.tmpDir, 'stable', 'hypaware-bin', 'hypaware')
 
   /**
-   * Activate the six workspace plugins with the smoke's injected
+   * Activate the seven workspace plugins with the smoke's injected
    * ai-gateway (echo upstream) and otel (ephemeral port) configs.
    * Called once for the init phase and again into a fresh kernel for
    * the capture phase: init's finale boots the bundled plugins from
@@ -137,9 +188,9 @@ export async function run({ harness, expect }) {
       },
       async () => {
         const { loaded } = await loadManifests(Object.values(pluginDirs))
-        if (loaded.length !== 6) {
+        if (loaded.length !== 7) {
           throw new Error(
-            `walkthrough_picker_to_first_query: expected 6 manifests loaded, got ${loaded.length}`
+            `walkthrough_picker_to_first_query: expected 7 manifests loaded, got ${loaded.length}`
           )
         }
         const resolution = await resolveDependencies(loaded.map((l) => l.manifest))
@@ -176,17 +227,37 @@ export async function run({ harness, expect }) {
   try {
     await activateInjectedPlugins(kernel, 'picker_activate')
 
-    // ----- 1. hyp init via Phase 5 flags -----
+    // @ref LLP 0462#verification [tests]: the guide handoff emits a run-scoped signal and leaves config absent
+    const guideStdout = makeBuf()
+    const guideStderr = makeBuf()
+    const guideCode = await runRoot('smoke.setup.guide', {
+      [Attr.COMPONENT]: 'smoke', [Attr.OPERATION]: 'setup.guide',
+      [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: 'agent_guide',
+      [Attr.DEV_RUN_ID]: harness.devRunId,
+    }, () => dispatch(['setup'], {
+      stdout: guideStdout, stderr: guideStderr, kernel, registry,
+      env: smokeEnv(harness),
+    }))
+    expect.that('guide: guide prints successfully (exit 0)', guideCode, (v) => v === 0)
+    expect.that('guide: detection and browser handoff reach the agent', guideStdout.text(),
+      (v) => typeof v === 'string' && v.includes('Codex (detected)') && v.includes('hyp remote login --no-browser'))
+    expect.that('guide: stderr remains empty', guideStderr.text(), (v) => v === '')
+    const guideConfigExists = await fs.access(defaultConfigPath(harness.hypHome)).then(() => true, () => false)
+    expect.that('guide: no config was written', guideConfigExists, (v) => v === false)
+
+    // ----- 1. hyp setup via Phase 5 flags -----
     const initStdout = makeBuf()
     const initStderr = makeBuf()
     const initCode = await dispatch(
       [
-        'init',
+        'setup',
         '--yes',
         '--client', 'claude',
         '--client', 'codex',
+        '--client', 'opencode',
         '--source', 'claude',
         '--source', 'codex',
+        '--source', 'opencode',
         '--source', 'otel',
         '--export', 'local-parquet',
         '--retention-days', '30',
@@ -201,9 +272,9 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: hyp init Phase 5 flags exited 0', initCode, (v) => v === 0)
+    expect.that('dispatch: hyp setup Phase 5 flags exited 0', initCode, (v) => v === 0)
     expect.that(
-      'stderr: hyp init had no errors',
+      'stderr: hyp setup had no errors',
       initStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
@@ -234,15 +305,31 @@ export async function run({ harness, expect }) {
         v.includes(codexConfigPath) &&
         v.includes('(dry-run) Would attach Codex')
     )
-
-    // ----- 2. Config written matches Phase 5 shape -----
-    const configPath = defaultConfigPath(harness.hypHome)
-    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
-    const expected = goldenPickerConfig(harness.hypHome)
+    const opencodePluginPath = path.join(fakeHome, '.config', 'opencode', 'plugins', 'hypaware.js')
     expect.that(
-      'config: Phase 5 picker config matches expected shape',
-      written,
-      (v) => deepEqual(v, expected)
+      'stdout: dry-run opencode attach referenced the shared CLI/Desktop plugin path',
+      initText,
+      (v) =>
+        typeof v === 'string' &&
+        v.includes(opencodePluginPath) &&
+        v.includes('Would install') &&
+        v.includes('Dry run: nothing was written.')
+    )
+
+    // ----- 2. Dry-run reported the config and did not write it -----
+    const configPath = defaultConfigPath(harness.hypHome)
+    expect.that(
+      'stdout: dry-run named the config it would write',
+      initText,
+      (v) =>
+        typeof v === 'string' &&
+        v.includes('(dry-run) Would save settings') &&
+        v.includes(`(dry-run) Would write ${configPath}`)
+    )
+    expect.that(
+      'dry-run did not write the config',
+      await fs.stat(configPath).then(() => true, () => false),
+      (v) => v === false
     )
 
     // ----- 3. Dry-run did not touch real per-client files -----
@@ -257,6 +344,11 @@ export async function run({ harness, expect }) {
       'dry-run preserved tmp HOME/.codex/config.toml',
       codexAfter,
       (v) => v === codexBaseline
+    )
+    expect.that(
+      'dry-run did not create the OpenCode managed plugin',
+      await fs.stat(opencodePluginPath).then(() => true, () => false),
+      (v) => v === false
     )
 
     // ----- 4. Start the sources and exercise both ingest paths -----
@@ -388,18 +480,23 @@ export async function run({ harness, expect }) {
     // Runs after the capture + SQL phase: init re-boots the kernel from
     // the picker-written config (post-attach one-shot re-boot), which
     // replaces this smoke's injected echo upstream, so the echo
-    // round-trip must complete first. The dry-run above already wrote
-    // the config, and init refuses to overwrite an existing config
-    // without --force (LLP 0129).
+    // round-trip must complete first. The same picks as the dry-run
+    // above, which wrote nothing, so this is the run that writes the
+    // config the golden shape is checked against.
     const realInitStdout = makeBuf()
     const realInitStderr = makeBuf()
     const realInitCode = await dispatch(
       [
-        'init',
+        'setup',
         '--yes',
-        '--force',
+        '--client', 'claude',
+        '--client', 'codex',
+        '--client', 'opencode',
         '--source', 'claude',
-        '--export', 'keep-local',
+        '--source', 'codex',
+        '--source', 'opencode',
+        '--source', 'otel',
+        '--export', 'local-parquet',
         '--retention-days', '30',
         '--no-daemon',
         '--bin', stableBinPath,
@@ -412,11 +509,18 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: real hyp init attach exited 0', realInitCode, (v) => v === 0)
+    expect.that('dispatch: real hyp setup attach exited 0', realInitCode, (v) => v === 0)
     expect.that(
-      'stderr: real hyp init attach had no errors',
+      'stderr: real hyp setup attach had no errors',
       realInitStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
+    )
+    const written = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    const expected = await goldenPickerConfig(harness.hypHome)
+    expect.that(
+      'config: Phase 5 picker config matches expected shape',
+      written,
+      (v) => deepEqual(v, expected)
     )
     // The picker writes no `listen`, so the port the client is wired to is the
     // fixed default the daemon's gateway will bind, not a wizard-pinned one.
@@ -427,10 +531,20 @@ export async function run({ harness, expect }) {
       realClaudeSettings?._hypaware?.port,
       (v) => v === 18521
     )
+    // `otel` attach (LLP 0258): the telemetry block is written and the base
+    // URL is not; the marker's port above is what carries the gateway
+    // endpoint for the drift check.
     expect.that(
-      'real init attach: claude base URL uses the default gateway endpoint',
-      realClaudeSettings?.env?.ANTHROPIC_BASE_URL,
-      (v) => v === 'http://127.0.0.1:18521'
+      'real init attach: the telemetry endpoint points at the loopback listener',
+      realClaudeSettings?.env?.OTEL_EXPORTER_OTLP_ENDPOINT,
+      (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/.test(v)
+    )
+    expect.that(
+      'real init attach: no base URL was written (mode=otel)',
+      realClaudeSettings,
+      (v) =>
+        v?._hypaware?.mode === 'otel' &&
+        !Object.hasOwn(v?.env ?? {}, 'ANTHROPIC_BASE_URL')
     )
 
     // ----- 7. Span + log assertions -----
@@ -438,19 +552,37 @@ export async function run({ harness, expect }) {
 
     const traces = await expect.traces()
 
+    const guideSpan = traces.find((s) => s.name === 'wizard.setup.guide')
+    expect.that('traces: guide emitted its run-scoped skip reason', guideSpan,
+      (v) => v?.attributes?.hyp_reason === 'guide_only' && v.attributes?.exit_code === 0 &&
+        v.resource?.dev_run_id === harness.devRunId)
+    const guideRoot = traces.find((s) => s.name === 'smoke.setup.guide')
+    expect.that('traces: guide smoke step is named', guideRoot?.attributes,
+      (v) => v?.smoke_step === 'agent_guide' && v.dev_run_id === harness.devRunId)
+
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
-    // 8 bundled picker rows: claude, codex, claude-desktop, openclaw,
-    // hermes, raw-anthropic, raw-openai, otel.
+    // Derived from the manifests rather than restated as a literal: a
+    // hardcoded count drifts the moment a plugin adds or drops a picker row
+    // (issue #2075 - a bundled `pi` row shipped with no update here). Reads
+    // `contributes.picker` off the same loaded+excluded buckets the catalog
+    // this run builds draws its descriptor map from, so it stays a check on
+    // the manifests rather than a rerun of the code under test.
+    const expectedSourcesAvailable = await totalPickerRowCount()
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available=8',
+      `traces: wizard.pick.start span emitted with sources_available=${expectedSourcesAvailable} (the shipped picker row count)`,
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 8
+        v.sources_available === expectedSourcesAvailable
     )
 
+    // Two `wizard.pick.write_config` spans have landed by now, both from
+    // runs above: the dry run and the real `--no-daemon` run, in no
+    // asserted order. `dry_run` is the internal signal that proves the dry
+    // run skipped its write, so each span is identified by that tag rather
+    // than by position in the array.
     const writeSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.write_config'
     )
@@ -463,6 +595,28 @@ export async function run({ harness, expect }) {
         v.plugin_count >= 4 &&
         typeof v.config_path === 'string'
     )
+    const dryRunWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run === true
+    )
+    // Not `!Object.hasOwn(..., 'dry_run')`: that couples the smoke to the
+    // omission style one emitter happens to use (wizard/pick.js spreads
+    // `...(dryRun ? { dry_run: true } : {})`), while the sibling
+    // client.attach assertion below asserts an explicit `dry_run === false`.
+    // `!== true` expresses the intent ("not tagged as a dry run") and
+    // survives either emitter style.
+    const realWriteSpans = writeSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run !== true
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span is tagged dry_run (the dry run above)',
+      dryRunWriteSpans.length,
+      (v) => v === 1
+    )
+    expect.that(
+      'traces: exactly one wizard.pick.write_config span has no dry_run attribute (the real run above)',
+      realWriteSpans.length,
+      (v) => v === 1
+    )
 
     const finishSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.finish'
@@ -472,9 +626,9 @@ export async function run({ harness, expect }) {
       finishSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_picked === 3 &&
+        v.sources_picked === 4 &&
         v.export_picked === 'local-parquet' &&
-        v.clients_picked === 2 &&
+        v.clients_picked === 3 &&
         v.retention_days === 30
     )
 
@@ -500,13 +654,13 @@ export async function run({ harness, expect }) {
       dryRunAttachSpans.map((/** @type {any} */ s) => s.attributes?.client_name).filter(Boolean)
     )
     expect.that(
-      'traces: client.attach span emitted for claude AND codex (dry-run)',
+      'traces: client.attach span emitted for claude, codex, and opencode (dry-run)',
       attachClients,
-      (v) => v instanceof Set && v.has('claude') && v.has('codex')
+      (v) => v instanceof Set && v.has('claude') && v.has('codex') && v.has('opencode')
     )
     expect.that(
-      'traces: client.attach dry_run=true for both clients',
-      dryRunAttachSpans.length >= 2 &&
+      'traces: client.attach dry_run=true for all three clients',
+      dryRunAttachSpans.length >= 3 &&
         dryRunAttachSpans.every((/** @type {any} */ s) => s.attributes?.dry_run === true),
       (v) => v === true
     )
@@ -545,42 +699,152 @@ export async function run({ harness, expect }) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = previousXdgConfigHome
+    if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
+    else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
     await echo.close()
   }
 }
 
 /**
+ * Bundled plugins that ride the composed picks rather than being picked:
+ * a manifest whose `compose_with` names plugins that are, transitively,
+ * already composed (picked, or riders composed in an earlier pass) is
+ * written into the config with no picker row and no prompt
+ * ([LLP 0213 #d1](../../../llp/0213-graph-plugin-always-active.decision.md)).
+ *
+ * Derived from the manifests instead of restated by name, because a literal
+ * list here is a second copy of a declaration that lives in the plugins: the
+ * next derived-data plugin would re-red this smoke for correctly doing what
+ * its manifest asks. What the golden keeps literal is what the *picker*
+ * decides (which rows compose, the upstreams, the OTLP port, the sink shape,
+ * retention); a rider is decided by the plugin, so it is read from there.
+ *
+ * Run to a fixpoint, mirroring `ridersFor`: a rider whose `compose_with`
+ * names another rider (rather than a picked plugin) still lands, so the
+ * golden does not go stale the moment a rider rides a rider.
+ *
+ * This deliberately does not call `composePickerConfig` or `ridersFor`: an
+ * expectation that runs the code under test asserts nothing. It reads the
+ * declarations and applies the rule to the literal picked set below, so a
+ * plugin appearing in the config that is neither picked nor declared as a
+ * rider still fails the assertion. The rider *mechanism* (fixpoint, the
+ * unmet-condition case, reconfigure) is unit-tested in
+ * `test/core/compose-picker-config.test.js`.
+ *
+ * Reading only `loaded` keeps the default-activation boundary without
+ * restating it: it agrees with the cut `ridersInDefaultSet` makes, because
+ * the allowlist and the excluded set are disjoint, so nothing in `loaded` is
+ * something that filter drops. A plugin in neither list is invisible to both
+ * sides: it is not in `loaded`, and `loadPickerCatalog` reads only those two
+ * buckets. It is disjointness, not coverage, that does the work here: the
+ * union can span the whole bundled workspace while a name sits in both sets,
+ * and `discoverBundledPlugins` checks the allowlist before the exclude set,
+ * so that name stays in `loaded`. For a rider that is a live disagreement:
+ * this function composes it into the golden while `ridersInDefaultSet` drops
+ * it from what the install writes. A name that declares no `compose_with`
+ * never reaches that filter, so the two reads here still agree and this
+ * smoke stays green; `computeSelectedPlugins` (src/core/runtime/boot.js) is
+ * where an overlap bites in that case.
+ * `test/core/bundled-sets.test.js` guards the disjointness.
+ *
+ * @param {string[]} picked  plugin names the picker composed from its rows
+ * @returns {Promise<string[]>}
+ * @ref LLP 0213#d1 [tests]: the graph pair reaches a default install by riding the gateway pick, asserted by declaration rather than by name
+ */
+async function composedRiders(picked) {
+  const { loaded } = await discoverBundledPlugins()
+  const present = new Set(picked)
+  /** @type {string[]} */
+  const riders = []
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const { manifest } of loaded) {
+      const waitsFor = manifest.compose_with
+      if (!Array.isArray(waitsFor) || waitsFor.length === 0) continue
+      if (present.has(manifest.name)) continue
+      if (!waitsFor.every((name) => present.has(name))) continue
+      present.add(manifest.name)
+      riders.push(manifest.name)
+      grew = true
+    }
+  }
+  return riders
+}
+
+/**
+ * Count every picker row the bundled workspace ships, across both the
+ * default-activated and excluded-from-default manifest buckets. That is the
+ * discovery scope (`[...loaded, ...excluded]`) both catalog builders use:
+ * `loadWizardCatalog` (`src/core/cli/wizard/index.js`), which is the one
+ * `hyp setup` reaches through `runInitWizard` and therefore the one this
+ * smoke drives, and `loadPickerCatalog` (`src/core/cli/walkthrough.js`) on
+ * the legacy path. A row like `claude-desktop`'s stays a picker source
+ * (selectable, just not default-activated) even though its plugin sits in
+ * the excluded bucket, so counting only `loaded` would land back on 10.
+ *
+ * Reads `contributes.picker` off the manifests directly rather than calling
+ * either catalog builder or `buildPluginCatalog`: an expectation built from
+ * the code under test would assert nothing (see `composedRiders` above for
+ * the same reasoning applied to riders).
+ *
+ * @returns {Promise<number>}
+ */
+async function totalPickerRowCount() {
+  const { loaded, excluded } = await discoverBundledPlugins()
+  let total = 0
+  for (const { manifest } of [...loaded, ...excluded]) {
+    total += manifest.contributes?.picker?.length ?? 0
+  }
+  return total
+}
+
+/**
  * @param {string} hypHome
  */
-function goldenPickerConfig(hypHome) {
+async function goldenPickerConfig(hypHome) {
+  /** @type {{ name: string, config?: unknown }[]} */
+  const plugins = [
+    {
+      name: '@hypaware/ai-gateway',
+      config: {
+        // Empty since Codex left the inference path: no bundled picker row
+        // composes an inference upstream any more, but the gateway is still
+        // the shared writer every client's rows land through.
+        // @ref LLP 0429#default [tests]: onboarding composes no inference upstream for Codex
+        upstreams: [],
+        // No `proxy_mode`: no bundled picker row declares proxy attach since
+        // the claude client went otel-only, so the wizard composes a gateway
+        // that mints no CA.
+        // @ref LLP 0262#requirements [tests]: R5 - a composed claude install needs no CA and no keychain trust
+      },
+    },
+    // Ahead of otel: opencode is a first-class client row, and
+    // `PICKER_DISPLAY_ORDER` puts those before the infra receivers.
+    { name: '@hypaware/opencode' },
+    {
+      name: '@hypaware/otel',
+      config: { listen_host: '127.0.0.1', listen_port: 4318 },
+    },
+    { name: '@hypaware/local-fs' },
+    { name: '@hypaware/format-parquet' },
+    { name: '@hypaware/claude' },
+    { name: '@hypaware/codex', config: {} },
+  ]
+
+  // Riders land after every picked plugin, in the order the composer folds
+  // them: `composePickerConfig` appends them last, once the picks are settled.
+  for (const rider of await composedRiders(plugins.map((p) => p.name))) {
+    plugins.push({ name: rider })
+  }
+
   return {
     version: 2,
-    plugins: [
-      {
-        name: '@hypaware/ai-gateway',
-        config: {
-          upstreams: [
-            { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
-            { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
-            { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
-          ],
-        },
-      },
-      {
-        name: '@hypaware/otel',
-        config: { listen_host: '127.0.0.1', listen_port: 4318 },
-      },
-      { name: '@hypaware/local-fs' },
-      { name: '@hypaware/format-parquet' },
-      {
-        name: '@hypaware/claude',
-        config: { proxy: '@hypaware/ai-gateway' },
-      },
-      {
-        name: '@hypaware/codex',
-        config: { proxy: '@hypaware/ai-gateway' },
-      },
-    ],
+    plugins,
     sinks: {
       local: {
         writer: '@hypaware/format-parquet',

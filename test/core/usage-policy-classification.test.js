@@ -1,7 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -10,6 +10,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/matcher.js'
 import { localOnlyListPath } from '../../src/core/usage-policy/local_only.js'
+import { folderAskPath, writeFolderAskMode } from '../../src/core/usage-policy/folder_ask.js'
 import { LocalOnlyListUnreadableError } from '../../src/core/usage-policy/local_only.js'
 import { readObservabilityEnv } from '../../src/core/observability/env.js'
 import {
@@ -29,10 +30,10 @@ import {
 // copy is load-bearing (many users' first contact with the class vocabulary),
 // so it is pinned here like the other consent surfaces.
 
-test('verbArgvForClass maps each class to its hyp policy set token (LLP 0111 #teaching)', () => {
-  assert.deepEqual(verbArgvForClass('full', '/work/repo'), ['policy', 'set', '/work/repo', 'sync'])
-  assert.deepEqual(verbArgvForClass('local-only', '/work/repo'), ['policy', 'set', '/work/repo', 'local-only'])
-  assert.deepEqual(verbArgvForClass('ignore', '/work/repo'), ['policy', 'set', '/work/repo', 'ignore'])
+test('verbArgvForClass maps each class to its hyp privacy set token (LLP 0111 #teaching)', () => {
+  assert.deepEqual(verbArgvForClass('full', '/work/repo'), ['privacy', 'set', '/work/repo', 'sync'])
+  assert.deepEqual(verbArgvForClass('local-only', '/work/repo'), ['privacy', 'set', '/work/repo', 'local-only'])
+  assert.deepEqual(verbArgvForClass('ignore', '/work/repo'), ['privacy', 'set', '/work/repo', 'ignore'])
   assert.throws(() => verbArgvForClass(/** @type {any} */ ('nope'), '/x'), /unknown class/)
 })
 
@@ -41,8 +42,8 @@ test('the three choices are presented least-to-most restrictive with their token
   assert.deepEqual(CLASSIFICATION_CHOICES.map((c) => c.token), ['sync', 'local-only', 'ignore'])
 })
 
-test('buildClassificationPrompt names the folder, all three classes, and each policy set command', () => {
-  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
+test('buildClassificationPrompt names the folder, all three classes, and each privacy set command', () => {
+  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo', origins: [BUILTIN_ORIGIN] })
   assert.match(prompt, /\/work\/secret-repo/)
   assert.match(prompt, /enrolled/)
   // Every class label and its exact command are present so the assistant can
@@ -50,9 +51,9 @@ test('buildClassificationPrompt names the folder, all three classes, and each po
   assert.match(prompt, /sync:/)
   assert.match(prompt, /local-only:/)
   assert.match(prompt, /ignore:/)
-  assert.match(prompt, /hyp policy set \/work\/secret-repo sync/)
-  assert.match(prompt, /hyp policy set \/work\/secret-repo local-only/)
-  assert.match(prompt, /hyp policy set \/work\/secret-repo ignore/)
+  assert.match(prompt, /hyp privacy set \/work\/secret-repo sync/)
+  assert.match(prompt, /hyp privacy set \/work\/secret-repo local-only/)
+  assert.match(prompt, /hyp privacy set \/work\/secret-repo ignore/)
   // Exit criterion (LLP 0110): the hook never teaches an ignore-spelled command
   // for a non-ignore class - the deprecated flag spellings are gone entirely.
   assert.equal(/hyp ignore --sync/.test(prompt), false)
@@ -62,39 +63,373 @@ test('buildClassificationPrompt names the folder, all three classes, and each po
   assert.match(prompt, /selection menu/)
   assert.match(prompt, /AskUserQuestion/)
   assert.match(prompt, /unless no such tool exists/)
-  // Repo style: no em dashes anywhere in the consent copy.
-  assert.equal(prompt.includes('—'), false)
+  // Repo style: no em dashes anywhere in the consent copy. Spelled as an escape
+  // so the assertion survives the repo-wide U+2014 gate that now backs it
+  // (`house-style-em-dash.test.js`) instead of being swept into a hyphen.
+  assert.equal(prompt.includes('\u2014'), false)
 })
 
-test('decideClassification: prompt only when enrolled AND interactive AND unclassified', () => {
+test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
+  // A user who does not want this question at all has to be able to answer
+  // that in the session that asked, not by finding a setting later.
+  const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo', origins: [BUILTIN_ORIGIN] })
+  assert.match(prompt, /hyp privacy folders sync/)
+  assert.match(prompt, /hyp privacy folders ask/)
+})
+
+// #2190's two defects are semantic: the block named its destination two ways,
+// and it hedged a forwarding claim that is unconditional wherever the block
+// renders. Two review rounds tried to pin those semantically, with a clause
+// splitter and a destination extractor, and the result was defeated more than
+// twenty times between them: a destination named after "shared with" or
+// "uploaded into" rather than "forwarded to", one inside parentheses the
+// capture stops at, one in no verb's object at all, a hedge moved into the
+// next sentence, a hedge on an indented continuation line, a hedge with no
+// conditional opener ("network permitting"). Each repair closed some holes and
+// opened others, and the clause boundaries were wrong in three successive
+// attempts. It also failed on copy that was perfectly correct: one adverb
+// ("forwarded to the cloud automatically") reported two destinations, and
+// rendering the bullets flush left reported the destination as "cloud hyp
+// privacy set /work/secret-repo local-only - ignore".
+//
+// A consent surface does not need a pattern that guesses at intent. It needs
+// every reword to be read by a human. So pin the rendered block literally,
+// which is how the sibling destination-naming copy is already pinned
+// (test/core/cli/wizard/sync_scope.test.js asserts nine of these lines with
+// plain equality). Every one of those bypasses changes the copy, so the pin
+// catches all of them, and it cannot false-fail on copy that is fine.
+//
+// This test is meant to fail on any copy edit. Whoever updates a literal is
+// the human the guard exists to summon, and these are the three things to check
+// before doing so:
+//
+//   1. The block names the sync destination exactly one way. Two spellings of
+//      one place ("HypAware Cloud" and "the cloud") still count as two.
+//   2. The forwarding claim carries no connectivity hedge.
+//      `decideClassification` returns prompt only on an enrolled machine, so
+//      the forwarding is unconditionally true wherever this renders and a
+//      hedge understates it.
+//   3. The destination is the one this enrollment actually forwards to, so
+//      every lane is pinned (#2197): a full-block literal for the built-in and
+//      the self-hosted lane, and the header plus occurrence assertions for the
+//      unresolvable-destination fallback. An edit has to land in every lane it
+//      changes, and a reword of the fallback name lands in neither literal.
+const CLASSIFICATION_PROMPT_CWD = '/work/secret-repo'
+
+// The hosted default server, and a self-hosted one. `serverDisplayName` maps
+// the first to the product name and the second to its bare host
+// (test/core/remote-server-display-name.test.js pins both mappings).
+const BUILTIN_ORIGIN = 'https://api.hypaware.ai'
+const SELF_HOSTED_ORIGIN = 'https://hyp.acme.dev/'
+
+const EXPECTED_CLASSIFICATION_PROMPT = [
+  'This machine is enrolled, so by default the AI coding sessions you run here',
+  'are recorded and forwarded to HypAware Cloud.',
+  'The folder /work/secret-repo has not been classified yet, so it would sync by default.',
+  '',
+  'Before continuing, ask the user how this folder should be handled, then run',
+  'the matching command once to record the answer (you will not be asked again',
+  'for this folder):',
+  '',
+  "  - sync: this folder's sessions sync to HypAware Cloud (the current default)",
+  '      hyp privacy set /work/secret-repo sync',
+  '  - local-only: keep sessions on this machine only, never send them to HypAware Cloud',
+  '      hyp privacy set /work/secret-repo local-only',
+  "  - ignore: do not record this folder's sessions at all",
+  '      hyp privacy set /work/secret-repo ignore',
+  '',
+  "Present these three choices as a selection menu using your environment's",
+  'native question tool (in Claude Code, the AskUserQuestion tool); do not ask',
+  'in open-ended text unless no such tool exists. Then run the chosen command.',
+  'If the user is unsure, the safe choice is local-only (recorded here, never',
+  'forwarded). This affects only what HypAware records and forwards; it does',
+  'not change your task.',
+  '',
+  'If the user does not want to be asked about folders at all, run',
+  '`hyp privacy folders sync` instead: new folders then sync without asking,',
+  'and `hyp privacy folders ask` brings the question back.',
+].join('\n')
+
+test('the consent prompt renders exactly the reviewed block (one destination term, no connectivity hedge)', () => {
+  assert.equal(
+    buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD, origins: [BUILTIN_ORIGIN] }),
+    EXPECTED_CLASSIFICATION_PROMPT
+  )
+})
+
+// #2197: the destination is resolved per enrollment, not a constant. Self-hosted
+// enrollment is a supported lane (LLP 0134 #custom-url-deferred: "self-hosted
+// teams use `hyp remote login <name>` by hand"), so a machine enrolled at
+// hyp.acme.dev must not be told its sessions go to a hosted service it does not
+// use. The whole block is pinned literally for each lane, for the same reason
+// the built-in lane is: any reword of a consent surface gets read by a human.
+const EXPECTED_SELF_HOSTED_CLASSIFICATION_PROMPT = [
+  'This machine is enrolled, so by default the AI coding sessions you run here',
+  'are recorded and forwarded to hyp.acme.dev.',
+  'The folder /work/secret-repo has not been classified yet, so it would sync by default.',
+  '',
+  'Before continuing, ask the user how this folder should be handled, then run',
+  'the matching command once to record the answer (you will not be asked again',
+  'for this folder):',
+  '',
+  "  - sync: this folder's sessions sync to hyp.acme.dev (the current default)",
+  '      hyp privacy set /work/secret-repo sync',
+  '  - local-only: keep sessions on this machine only, never send them to hyp.acme.dev',
+  '      hyp privacy set /work/secret-repo local-only',
+  "  - ignore: do not record this folder's sessions at all",
+  '      hyp privacy set /work/secret-repo ignore',
+  '',
+  "Present these three choices as a selection menu using your environment's",
+  'native question tool (in Claude Code, the AskUserQuestion tool); do not ask',
+  'in open-ended text unless no such tool exists. Then run the chosen command.',
+  'If the user is unsure, the safe choice is local-only (recorded here, never',
+  'forwarded). This affects only what HypAware records and forwards; it does',
+  'not change your task.',
+  '',
+  'If the user does not want to be asked about folders at all, run',
+  '`hyp privacy folders sync` instead: new folders then sync without asking,',
+  'and `hyp privacy folders ask` brings the question back.',
+].join('\n')
+
+test('a self-hosted enrollment is told its own server, never the hosted product (#2197)', () => {
+  const prompt = buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD, origins: [SELF_HOSTED_ORIGIN] })
+  assert.equal(prompt, EXPECTED_SELF_HOSTED_CLASSIFICATION_PROMPT)
+  // Not satisfied by an incidental substring: the host stands in all three
+  // destination slots (the header disclosure and both destination-bearing
+  // blurbs), and the pinned cwd does not contain it.
+  assert.equal(CLASSIFICATION_PROMPT_CWD.includes('hyp.acme.dev'), false)
+  assert.equal(countOccurrences(prompt, 'hyp.acme.dev'), 3)
+  // The hosted product's vocabulary is absent in every casing: a blurb that
+  // kept "the cloud" while the header resolved would leak a second
+  // destination into one prompt, which is #2190's defect returning.
+  assert.equal(/cloud/i.test(prompt), false, `a self-hosted block still names a cloud: ${JSON.stringify(prompt)}`)
+})
+
+test('the built-in enrollment is named by its one product name (#2197)', () => {
+  const prompt = buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD, origins: [BUILTIN_ORIGIN] })
+  assert.equal(countOccurrences(prompt, 'HypAware Cloud'), 3)
+  // One spelling of the one place: the generic lower-case "the cloud" the
+  // block used before #2197 is a second spelling, so it must be gone.
+  assert.equal(/the cloud/i.test(prompt), false, `the block spells its destination two ways: ${JSON.stringify(prompt)}`)
+})
+
+test('more than one central origin names every destination, not the first (#2197)', () => {
+  // `readCentralSinkOrigins` can return several, and every one of them
+  // receives the sessions, so naming one would understate the disclosure.
+  const prompt = buildClassificationPrompt({
+    cwd: CLASSIFICATION_PROMPT_CWD,
+    origins: [BUILTIN_ORIGIN, SELF_HOSTED_ORIGIN],
+  })
+  assert.equal(countOccurrences(prompt, 'HypAware Cloud and hyp.acme.dev'), 3)
+  // Still one destination term: neither name appears anywhere on its own.
+  assert.equal(countOccurrences(prompt, 'HypAware Cloud'), 3)
+  assert.equal(countOccurrences(prompt, 'hyp.acme.dev'), 3)
+  // Two origins of the same server (the alias table folds them) are one name.
+  const aliased = buildClassificationPrompt({
+    cwd: CLASSIFICATION_PROMPT_CWD,
+    origins: [BUILTIN_ORIGIN, 'https://hypaware.hyperparam.app'],
+  })
+  assert.equal(aliased, EXPECTED_CLASSIFICATION_PROMPT)
+})
+
+test('an unresolvable destination degrades to a neutral name, never a blank or a cloud (#2197)', () => {
+  // Every in-tree caller prompts only when enrolled, so this is the direct
+  // caller / unreadable-layer case. It must not render "forwarded to ." and
+  // it must not name a hosted service the machine may not be using.
+  // The last entry is the one an equality-typed guard would miss: a non-string
+  // that coerces to a valid URL, which reaches here from a corrupt central
+  // layer and would otherwise print whatever is on disk.
+  const unnameable = [undefined, [], [''], ['not a url'], /** @type {any} */ ([42, null, ['https://sneaky.example']])]
+  for (const origins of unnameable) {
+    const prompt = buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD, origins })
+    assert.match(prompt, /are recorded and forwarded to your HypAware server\.$/m)
+    assert.equal(countOccurrences(prompt, 'your HypAware server'), 3)
+    assert.equal(/cloud/i.test(prompt), false)
+  }
+})
+
+// The blurb is also checked on its own, so the two properties the literal above
+// encodes are still named in code rather than only in a comment. This one is a
+// single string with no structure to parse, so it has none of the clause
+// problems the block-wide version had: it reads the one field a hedge would
+// most naturally be added back to.
+const CONDITIONAL_OPENERS =
+  'when|whenever|while|if|once|unless|until|provided|assuming|as long as|so long as|only|where|subject to|depending on'
+
+const CONNECTIVITY_TOKENS =
+  'connect\\w*|online|offline|reach\\w*|network|signed[- ]in|logged[- ]in|link\\w*|available|availability|internet|connectivity'
+
+const CONNECTION_CONDITIONAL = new RegExp(
+  '\\b(?:' + CONDITIONAL_OPENERS + ')\\b[^.\\n]{0,60}\\b(?:' + CONNECTIVITY_TOKENS + ')\\b',
+  'i'
+)
+
+test('the sync blurb states the forwarding without a connection-conditional hedge', () => {
+  const sync = CLASSIFICATION_CHOICES.find((c) => c.class === 'full')
+  assert.ok(sync, 'the full/sync choice is present')
+  // The disclosure has to be there before its phrasing can be pinned.
+  const blurb = sync.blurb('HypAware Cloud')
+  assert.match(blurb, /\b(?:sync\w*|forward\w*|upload\w*|sen[dt])\b/i)
+  assert.equal(
+    CONNECTION_CONDITIONAL.test(blurb),
+    false,
+    `the sync blurb hedges the forwarding on connectivity: ${JSON.stringify(blurb)}`
+  )
+})
+
+test('decideClassification: with the ask on, prompt only when enrolled AND interactive AND unclassified', () => {
+  const asking = { askMode: /** @type {const} */ ('ask') }
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: false }),
+    decideClassification({ enrolled: true, interactive: true, governed: false, ...asking }),
     { prompt: true, reason: 'unclassified' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: false, interactive: true, governed: false }),
+    decideClassification({ enrolled: false, interactive: true, governed: false, ...asking }),
     { prompt: false, reason: 'unenrolled' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: true }),
+    decideClassification({ enrolled: true, interactive: true, governed: true, ...asking }),
     { prompt: false, reason: 'classified' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: false, governed: false }),
+    decideClassification({ enrolled: true, interactive: false, governed: false, ...asking }),
     { prompt: false, reason: 'non-interactive' }
   )
   // Unenrolled dominates even when interactive+unclassified would otherwise ask.
-  assert.equal(decideClassification({ enrolled: false, interactive: false, governed: false }).prompt, false)
+  assert.equal(decideClassification({ enrolled: false, interactive: false, governed: false, ...asking }).prompt, false)
+  // An omitted askMode is the product default (LLP 0200 #default), which is
+  // sync: the per-folder ask is the opt-in half of the pair.
+  assert.equal(decideClassification({ enrolled: true, interactive: true, governed: false }).reason, 'ask-disabled')
 })
 
-test('evaluateCwdClassification prompts for an enrolled, interactive, unclassified cwd', async () => {
+test('decideClassification: the default sync mode means no ask at all (LLP 0200 #default)', () => {
+  assert.deepEqual(
+    decideClassification({ enrolled: true, interactive: true, governed: false, askMode: 'sync' }),
+    { prompt: false, reason: 'ask-disabled' }
+  )
+  // "Stop asking me" is the broadest answer on the screen, so it outranks
+  // every per-folder reason below it - but never enrollment, which is what
+  // makes the hook exist at all.
+  assert.equal(
+    decideClassification({ enrolled: true, interactive: true, governed: true, askMode: 'sync' }).reason,
+    'ask-disabled'
+  )
+  assert.equal(
+    decideClassification({ enrolled: false, interactive: true, governed: false, askMode: 'sync' }).reason,
+    'unenrolled'
+  )
+  // The explicit `ask` is exactly today's behavior, not a third state.
+  assert.deepEqual(
+    decideClassification({ enrolled: true, interactive: true, governed: false, askMode: 'ask' }),
+    { prompt: true, reason: 'unclassified' }
+  )
+})
+
+test('evaluateCwdClassification honors a standing sync preference and reports it', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-ask-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    await writeFolderAskMode({ stateDir, mode: 'sync' })
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, false)
+    assert.equal(result.reason, 'ask-disabled')
+    assert.equal(result.askMode, 'sync')
+    assert.equal(result.promptText, undefined)
+    assert.equal(result.enrolled, true, 'the machine is still enrolled; only the question is off')
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a machine that never answered is not asked: the default is sync (LLP 0200 #default)', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-default-'))
+  try {
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, false)
+    assert.equal(result.reason, 'ask-disabled')
+    assert.equal(result.askMode, 'sync', 'no preference on disk means the product default, not the ask')
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('turning the ask on restores the per-folder question', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-on-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    await writeFolderAskMode({ stateDir, mode: 'ask' })
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, true)
+    assert.equal(result.reason, 'unclassified')
+    assert.ok(result.promptText?.includes('/work/fresh'))
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a corrupt preference costs a question, never a silent sync', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-folder-corrupt-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    const prefPath = folderAskPath(stateDir)
+    mkdirSync(path.dirname(prefPath), { recursive: true })
+    writeFileSync(prefPath, '{ truncated')
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        readCentralSinkOrigins: async () => ['https://central.example'],
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      },
+    })
+    assert.equal(result.prompt, true)
+    assert.equal(result.askMode, 'ask')
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('evaluateCwdClassification prompts for an enrolled, interactive, unclassified cwd with the ask on', async () => {
   const result = await evaluateCwdClassification({
     cwd: '/work/fresh',
     interactive: true,
     env: { HYP_HOME: '/tmp/does-not-matter' },
     deps: {
       readCentralSinkOrigins: async () => ['https://central.example'],
+      // Injected too, so this stays a pure-dep test: the prompting path now
+      // reads the effective config from disk, and a fixed `HYP_HOME` path is
+      // not a directory this test owns. Empty, and deliberately not a repeat
+      // of the enrollment origin: the count below is what proves the
+      // enrollment origins survive the trip to the copy (#2197), and a stub
+      // that named them again would let a drop of them pass unnoticed.
+      readForwardSinkOrigins: async () => [],
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      readFolderAskMode: async () => 'ask',
     },
   })
   assert.equal(result.prompt, true)
@@ -102,6 +437,11 @@ test('evaluateCwdClassification prompts for an enrolled, interactive, unclassifi
   assert.equal(result.enrolled, true)
   assert.equal(result.governed, false)
   assert.ok(result.promptText && result.promptText.includes('/work/fresh'))
+  // The origins that answered the enrollment question are the ones the copy
+  // names (#2197): dropping them on the way to the prompt would silently
+  // degrade every enrolled machine to the neutral fallback.
+  assert.equal(countOccurrences(result.promptText, 'central.example'), 3)
+  assert.equal(/cloud/i.test(result.promptText), false)
 })
 
 test('evaluateCwdClassification is inert on an unenrolled machine', async () => {
@@ -129,6 +469,7 @@ test('evaluateCwdClassification does not prompt once the folder is classified', 
     deps: {
       readCentralSinkOrigins: async () => ['https://central.example'],
       createResolver: (listPath) => makeResolver({ governedBy: listPath, class: 'full' }),
+      readFolderAskMode: async () => 'ask',
     },
   })
   assert.equal(result.prompt, false)
@@ -144,6 +485,7 @@ test('evaluateCwdClassification passes a non-interactive session through', async
     deps: {
       readCentralSinkOrigins: async () => ['https://central.example'],
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      readFolderAskMode: async () => 'ask',
     },
   })
   assert.equal(result.prompt, false)
@@ -183,7 +525,7 @@ test('the classification answer lands via the real hyp policy set verb (LLP 0106
 
     // Answer "ignore" by running exactly the argv the hook advertises.
     const argv = verbArgvForClass('ignore', root)
-    assert.deepEqual(argv, ['policy', 'set', root, 'ignore'])
+    assert.deepEqual(argv, ['privacy', 'set', root, 'ignore'])
     const res = await runVerb(argv, { cwd: root, hypHome })
     assert.equal(res.code, 0, res.stderr)
 
@@ -197,6 +539,87 @@ test('the classification answer lands via the real hyp policy set verb (LLP 0106
     rmSync(hypHome, { recursive: true, force: true })
   }
 })
+
+// #2208: `mergeConfigLayers` unions a local-layer `@hypaware/central` sink
+// under its own instance name into the effective config the daemon boots, and
+// the plugin honors that block's own `identity.persisted_path`, so a machine
+// enrolled at A with a hand-authored sink to B forwards to both and the copy
+// has to name both. Widening the disclosure is not widening enrollment: the
+// gate still reads the central layer alone (LLP 0063 D4), which the second
+// half of this test pins against exactly the same fixture.
+test('the consent copy names a hand-authored local central sink, not only the enrolled one (#2208)', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-two-layer-'))
+  try {
+    const stateDir = readObservabilityEnv({ HYP_HOME: hypHome }).stateDir
+    writeJsonFile(path.join(hypHome, 'hypaware-config.json'), {
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: {
+        central_b: {
+          plugin: '@hypaware/central',
+          config: { url: 'https://b.dev', identity: { persisted_path: path.join(stateDir, 'b-identity.json') } },
+        },
+      },
+    })
+    const seedPath = path.join(stateDir, 'config-control', 'seed.json')
+    writeJsonFile(seedPath, {
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://a.dev', identity: {} } } },
+    })
+
+    const evaluate = () => evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+        readFolderAskMode: async () => 'ask',
+      },
+    })
+
+    const both = await evaluate()
+    assert.equal(both.prompt, true)
+    const prompt = both.promptText ?? ''
+    // Each destination stands in all three destination slots (the header
+    // disclosure and the two destination-bearing blurbs), so neither is named
+    // only in passing while the promise is made about the other.
+    assert.equal(countOccurrences(prompt, 'a.dev'), 3)
+    assert.equal(countOccurrences(prompt, 'b.dev'), 3)
+
+    // Same fixture minus the enrollment: the widened disclosure must not stand
+    // in for the gate. A machine whose only `@hypaware/central` sink is its own
+    // local one is not enrolled (LLP 0063 D4) and is never asked.
+    rmSync(seedPath)
+    const localSinkOnly = await evaluate()
+    assert.equal(localSinkOnly.prompt, false)
+    assert.equal(localSinkOnly.reason, 'unenrolled')
+    assert.equal(localSinkOnly.enrolled, false)
+    assert.equal(localSinkOnly.promptText, undefined)
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Write `value` as JSON at `filePath`, creating its directory.
+ * @param {string} filePath
+ * @param {unknown} value
+ */
+function writeJsonFile(filePath, value) {
+  mkdirSync(path.dirname(filePath), { recursive: true })
+  writeFileSync(filePath, JSON.stringify(value))
+}
+
+/**
+ * How many times `needle` occurs in `haystack`.
+ * @param {string} haystack
+ * @param {string} needle
+ * @returns {number}
+ */
+function countOccurrences(haystack, needle) {
+  return haystack.split(needle).length - 1
+}
 
 /**
  * A minimal resolver stub returning a fixed resolve result.

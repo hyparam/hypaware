@@ -9,8 +9,13 @@ import {
   computeMessageId,
   createAiGatewayConversationState,
   createAiGatewayMessageProjector,
+  rollbackAiGatewayStateJournal,
+  SESSION_INDEX_REBUILD_MS,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
+import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
+import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { createOpenclawExchangeProjector } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../hypaware-plugin-kernel-types.js'
@@ -522,7 +527,7 @@ test('dispatcher threads a working isSessionIgnored predicate into the projector
 
 test('projector ctx defaults isSessionIgnored to a false predicate when none is supplied', async () => {
   // Absent an isSessionIgnored (backfill materialization, unit-test stubs) the
-  // ctx still carries a predicate, and it always answers false — so existing
+  // ctx still carries a predicate, and it always answers false, so existing
   // behavior is unchanged.
   /** @type {((sessionId: string) => boolean) | undefined} */
   let received
@@ -676,6 +681,17 @@ test('two Codex threads sharing a session_id keep separate start time and tool l
   assert.equal(rowsT2[0].tool_name ?? null, null, 'no cross-thread tool-name resolution on a colliding tool_call id')
 })
 
+test('explicit unknown tool outcomes do not become success, while existing provider defaults remain intact', () => {
+  for (const [flag, expected] of [[undefined, 'success'], [false, 'success'], [true, 'error'], [null, undefined]]) {
+    const rows = aiGatewayRowsFromProjectedExchange({
+      provider: 'unknown', session_id: 'tool-outcome',
+      messages: [{ role: 'tool', content: [{ type: 'tool_result', tool_use_id: 'call', content: 'output',
+        ...(flag === undefined ? {} : { is_error: flag }) }] }],
+    })
+    assert.equal(/** @type {any} */ (rows[0].status)?.tool_status, expected)
+  }
+})
+
 test('per-message model wins over the exchange model; absent it falls back to the exchange model', () => {
   // The projector resolves model as `message.model ?? projection.model`. Drive
   // an exchange whose exchange-level model DIFFERS from a message's own model,
@@ -755,9 +771,307 @@ test('restart replay: seeding scans each session lazily and at most once per lis
     storage,
   })
   await projector.projectExchange(exchange())
+  const afterFirst = scanCalls
+  // First projection pays for the shared committed-session index build plus
+  // this session's own committed-row scan; nothing after it re-scans.
+  assert.equal(afterFirst, 2, 'first projection builds the session index and scans the session once')
   await projector.projectExchange(exchange())
   await projector.projectExchange(exchange())
-  assert.equal(scanCalls, 1, 'a session is scanned for committed part_ids at most once per listener')
+  assert.equal(scanCalls, afterFirst, 'later exchanges for the session trigger no further scans')
+})
+
+test('seeding: sessions with no committed rows share one index build and skip the per-session scan', async () => {
+  // Autonomous clients mint fresh session ids constantly; before the index,
+  // EVERY new session paid a whole-table scan that found nothing. Now the
+  // first projection builds one session index, and every fresh session
+  // resolves against it without touching row data again.
+  let discoverCalls = 0
+  let messageScanReads = 0
+  const committed = [{ message_id: 'uuid-old', session_id: 'sess-old' }]
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: committed.length }]
+    },
+    /** @param {string} tablePath @param {string[]=} columns */
+    async *readRows(tablePath, columns) {
+      if (columns?.includes('message_id')) messageScanReads++
+      for (const row of committed) yield row
+    },
+  }))
+  // One listener, two fresh sessions (a listener is per-daemon, sessions churn).
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: (input) => ({
+          provider: 'native',
+          session_id: String(input.path),
+          messages: [{ role: 'user', content: 'fresh', message_id: `uuid-${input.path}` }],
+        }),
+      }),
+    ],
+    storage,
+  })
+  const a = await projector.projectExchange({ ...exchange(), path: 'sess-new-1' })
+  const b = await projector.projectExchange({ ...exchange(), path: 'sess-new-2' })
+  assert.equal(a.length, 1, 'first fresh session emits its row')
+  assert.equal(b.length, 1, 'second fresh session emits its row')
+  assert.equal(discoverCalls, 1, 'both fresh sessions share a single index build')
+  assert.equal(messageScanReads, 0, 'no fresh session pays the per-session committed-row scan')
+})
+
+test('seeding uses a targeted session read when storage supports it', async () => {
+  const targeted = []
+  let fullReads = 0
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 100_000 }]
+    },
+    async *readRows() {
+      fullReads++
+      yield { session_id: 'some-other-session', message_id: 'old' }
+    },
+    async *readRowsWhere(tablePath, columns, whereIn) {
+      targeted.push({ tablePath, columns, whereIn })
+    },
+  }))
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', {
+      project: () => ({
+        provider: 'native',
+        session_id: 'sess-targeted',
+        messages: [{ role: 'user', content: 'fresh', message_id: 'uuid-fresh' }],
+      }),
+    })],
+    storage,
+  })
+
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 1)
+  assert.equal(fullReads, 0, 'the global committed-session scan is bypassed')
+  assert.deepEqual(targeted, [{
+    tablePath: '/p',
+    columns: ['message_id', 'session_id'],
+    whereIn: { session_id: ['sess-targeted'] },
+  }])
+})
+
+function freshSessionIndexStorage() {
+  let discoverCalls = 0
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+    },
+    /** @param {string} tablePath @param {string[]=} columns */
+    async *readRows(tablePath, columns) {
+      // The only committed session id in this table is one no test below
+      // ever looks up, so every lookup is a genuine miss.
+      yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
+    },
+  }))
+  return { storage, getDiscoverCalls: () => discoverCalls }
+}
+
+/**
+ * @param {ReturnType<typeof freshSessionIndexStorage>['storage']} storage
+ * @param {() => number} now
+ * @param {ReturnType<typeof collectingLogger>} [log]
+ */
+function freshSessionProjector(storage, now, log) {
+  return createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: (input) => ({
+          provider: 'native',
+          session_id: String(input.path),
+          messages: [{ role: 'user', content: 'fresh', message_id: `uuid-${input.path}` }],
+        }),
+      }),
+    ],
+    storage,
+    now,
+    log,
+  })
+}
+
+test('committed-session index: a miss past the rebuild window triggers exactly one rebuild', async () => {
+  // Previously untested branch: SESSION_INDEX_REBUILD_MS is hard-coded, so
+  // exercising "stale, then rebuilt" requires an injectable clock.
+  let clockMs = 0
+  const now = () => clockMs
+  const { storage, getDiscoverCalls } = freshSessionIndexStorage()
+  const projector = freshSessionProjector(storage, now)
+
+  await projector.projectExchange({ ...exchange(), path: 'sess-a' })
+  assert.equal(getDiscoverCalls(), 1, 'first projection builds the index')
+
+  await projector.projectExchange({ ...exchange(), path: 'sess-a2' })
+  assert.equal(getDiscoverCalls(), 1, 'still inside the rebuild window: the stale-but-fresh index is trusted')
+
+  clockMs = SESSION_INDEX_REBUILD_MS + 1
+  await projector.projectExchange({ ...exchange(), path: 'sess-b' })
+  assert.equal(getDiscoverCalls(), 2, 'past the rebuild window: a miss triggers exactly one rebuild')
+})
+
+test('committed-session index: N concurrent fresh-session misses past the rebuild window share one rebuild', async () => {
+  // Finding: `current` was captured before an `await`, so every caller that
+  // suspended on the stale index re-tested the stale `atMs` after resuming
+  // and rebuilt again, even though another caller had already refreshed
+  // `built`. This must observe exactly one rebuild for N concurrent misses,
+  // not N. (Verified to fail against the pre-fix code: N=6 concurrent misses
+  // produced 7 discoverCachePartitions calls instead of 2.)
+  let clockMs = 0
+  const now = () => clockMs
+  const { storage, getDiscoverCalls } = freshSessionIndexStorage()
+  const projector = freshSessionProjector(storage, now)
+
+  // Warm the index once, inside the window.
+  await projector.projectExchange({ ...exchange(), path: 'sess-warm' })
+  assert.equal(getDiscoverCalls(), 1, 'warm-up projection builds the index once')
+
+  // Move past the rebuild window, then fire N concurrent lookups for N
+  // distinct fresh session ids (autonomous clients minting session ids).
+  clockMs = SESSION_INDEX_REBUILD_MS + 1
+  const N = 6
+  const results = await Promise.all(
+    Array.from({ length: N }, (_, i) => projector.projectExchange({ ...exchange(), path: `sess-fresh-${i}` }))
+  )
+  for (const rows of results) assert.equal(rows.length, 1, 'each concurrent fresh session still emits its own row')
+  assert.equal(
+    getDiscoverCalls(),
+    2,
+    `${N} concurrent misses past the rebuild window must share a single rebuild, not one each`
+  )
+})
+
+test('committed-session index: a scan that throws degrades the index instead of wedging it', async () => {
+  // Finding (#685): the index's stamp-and-self-clear handler runs on
+  // FULFILLMENT only, so a scan that ever threw was never normalized. The
+  // failed attempt stays published in `built` and never clears itself, so
+  // every later caller re-awaits the same rejection: one throwing scan
+  // wedges the index for the listener's life and loses EVERY subsequent
+  // exchange, rather than degrading the way the rest of this best-effort
+  // path does. (#689 later chained that handler onto the scan, which
+  // incidentally gave the rejection an awaiter and closed the original
+  // unhandled-rejection-kills-the-daemon shape; the assertion below keeps
+  // that closed, since nothing structural holds the chaining in place.)
+  //
+  // Driven here by a storage whose FIRST `discoverCachePartitions` (the
+  // index build) answers with a non-iterable, so the exception escapes
+  // `scanCommittedSessionIds` from outside its try/catch. Later calls are
+  // well-formed, so the per-session fallback scan is unaffected and the
+  // "err toward scanning" degradation is observable on its own.
+  /** @type {unknown[]} */
+  const unhandled = []
+  /** @param {unknown} reason */
+  const onUnhandled = (reason) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    let discoverCalls = 0
+    const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+      async discoverCachePartitions() {
+        discoverCalls++
+        // Contract says CachePartitionMeta[]; a malformed answer makes the
+        // `for (const part of partitions ?? [])` loop throw.
+        if (discoverCalls === 1) return /** @type {never} */ ({ malformed: true })
+        return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+      },
+      async *readRows() {
+        yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
+      },
+    }))
+    /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+    const logged = []
+    const projector = freshSessionProjector(storage, () => 0, collectingLogger(logged))
+
+    const rows = await projector.projectExchange({ ...exchange(), path: 'sess-throwing-index' })
+
+    // An index that cannot answer must not swallow the session: the
+    // per-session scan runs and the row is still emitted.
+    assert.equal(rows.length, 1, 'a failed index build errs toward scanning and still emits the row')
+    assert.ok(discoverCalls >= 2, 'the failed index build falls back to the per-session committed-row scan')
+
+    // The rejected attempt must not stay published: a second session on the
+    // same listener rebuilds (the scan is well-formed by now) instead of
+    // re-awaiting the rejection forever.
+    const callsAfterFirst = discoverCalls
+    const later = await projector.projectExchange({ ...exchange(), path: 'sess-after-throwing-index' })
+    assert.equal(later.length, 1, 'the next exchange survives a scan that rejected earlier')
+    assert.ok(discoverCalls > callsAfterFirst, 'the failed attempt clears itself, so the next miss rebuilds')
+
+    // Surviving the rejection must not make it invisible: the daemon now
+    // keeps running on a degraded index, so the log line is the only thing
+    // that says so. `error_kind` distinguishes this (a broken "resolve,
+    // never reject" contract, i.e. a defect) from `discover_failed`, the
+    // I/O condition that reaches the same message and may clear itself.
+    const scanWarns = logged.filter(
+      (entry) => entry.level === 'warn' && entry.message === 'aigw.session_index_scan_failed'
+    )
+    assert.equal(scanWarns.length, 1, 'a rejecting scan warns exactly once, not once per failure branch')
+    assert.equal(scanWarns[0].fields.error_kind, 'scan_rejected')
+    assert.match(String(scanWarns[0].fields.error), /not iterable/)
+
+    // Unhandled rejections are only detected once the microtask queue has
+    // drained, so give the loop a turn before asserting there were none.
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(
+      unhandled.map((reason) => (reason instanceof Error ? reason.message : String(reason))),
+      [],
+      'a throwing session-index scan must not produce an unhandled rejection'
+    )
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+})
+
+test('committed-session index: a scan slower than the rebuild window still serves cache hits', async () => {
+  // Finding: `atMs` was stamped when the scan STARTED. A `session_id` scan
+  // that itself outlives SESSION_INDEX_REBUILD_MS was therefore stale the
+  // moment it resolved, so the very next miss rebuilt again: back-to-back
+  // whole-table scans that never serve a single hit, on exactly the table
+  // size that makes the index worth having. The window has to age the
+  // ANSWER, so it runs from completion.
+  let clockMs = 0
+  const now = () => clockMs
+  let discoverCalls = 0
+  /** @type {() => void} */
+  let releaseScan = () => {}
+  const scanGate = new Promise((resolve) => {
+    releaseScan = () => resolve(undefined)
+  })
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      // The scan is in flight across the whole rebuild window.
+      await scanGate
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+    },
+    async *readRows() {
+      yield { session_id: 'sess-committed-elsewhere', message_id: 'uuid-committed' }
+    },
+  }))
+  const projector = freshSessionProjector(storage, now)
+
+  const first = projector.projectExchange({ ...exchange(), path: 'sess-a' })
+  // Let the build start, advance the clock past the window while its scan is
+  // still running, and only then let the scan finish.
+  await new Promise((resolve) => setImmediate(resolve))
+  clockMs = SESSION_INDEX_REBUILD_MS + 1
+  releaseScan()
+  assert.equal((await first).length, 1, 'the session that triggered the slow build still emits its row')
+  assert.equal(discoverCalls, 1, 'a scan slower than the window is not stale the moment it resolves')
+
+  // A later miss, one millisecond after the scan resolved: comfortably
+  // inside a window measured from completion.
+  clockMs += 1
+  const second = await projector.projectExchange({ ...exchange(), path: 'sess-b' })
+  assert.equal(second.length, 1, 'the next fresh session still emits its row')
+  assert.equal(discoverCalls, 1, 'the freshly-completed index serves a hit instead of rebuilding at once')
 })
 
 test('restart replay: concurrent first exchanges for one session seed once and emit no duplicates', async () => {
@@ -797,7 +1111,9 @@ test('restart replay: concurrent first exchanges for one session seed once and e
     projector.projectExchange(exchange()),
     projector.projectExchange(exchange()),
   ])
-  assert.equal(scanCalls, 1, 'concurrent first exchanges share a single committed-row scan')
+  // 2 = one shared session-index build + one shared per-session scan; the
+  // point is that concurrent first exchanges never each run their own.
+  assert.equal(scanCalls, 2, 'concurrent first exchanges share the index build and the committed-row scan')
   assert.equal(a.length + b.length, 0, 'both concurrent replays emit zero duplicate rows')
 })
 
@@ -863,6 +1179,177 @@ test('restart replay: a throwing storage degrades to not-seeded and never drops 
   const rows = await projector.projectExchange(exchange())
   assert.equal(rows.length, 1, 'a seeding failure must never throw and never drop a row')
 })
+
+test('committed-session index: a build that could not scan is not cached as "no committed rows"', async () => {
+  // A failed index build is a distinct outcome from a successful empty scan.
+  // When the two were conflated, the failure was cached as "this table has no
+  // committed sessions" for the whole SESSION_INDEX_REBUILD_MS window, so every
+  // session whose first exchange landed in that window skipped its seed scan
+  // and re-emitted its committed rows on a restart replay. The test above
+  // ('a throwing storage degrades to not-seeded') cannot see that: it only
+  // asserts rows are never dropped, which holds either way.
+  //
+  // Here `discoverCachePartitions` throws on call 1 (the index build) and
+  // succeeds afterwards, so both halves of the fallback are observable: the
+  // failing build must fall through to the per-session scan, and the NEXT
+  // session must rebuild the index rather than trust the failed one, which is
+  // what lets its already-committed row be seeded and deduped.
+  let discoverCalls = 0
+  const committed = [{ message_id: 'uuid-sess-committed', session_id: 'sess-committed' }]
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      if (discoverCalls === 1) throw new Error('boom')
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: committed.length }]
+    },
+    async *readRows() {
+      for (const row of committed) yield row
+    },
+  }))
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: (input) => ({
+          provider: 'native',
+          session_id: String(input.path),
+          messages: [{ role: 'user', content: 'one', message_id: `uuid-${input.path}` }],
+        }),
+      }),
+    ],
+    storage,
+  })
+
+  const first = await projector.projectExchange({ ...exchange(), path: 'sess-fresh' })
+  assert.equal(first.length, 1, 'a fresh session still emits its row when the index build fails')
+  assert.equal(
+    discoverCalls,
+    2,
+    'a failed index build must err toward the per-session scan (build + scan), not skip it'
+  )
+
+  // Same listener, same rebuild window, a session that DOES have a committed
+  // row. Trusting the failed build would skip its seed and re-emit the row.
+  const second = await projector.projectExchange({ ...exchange(), path: 'sess-committed' })
+  assert.equal(second.length, 0, 'the committed row is seeded and deduped, not re-emitted as a duplicate')
+  assert.equal(
+    discoverCalls,
+    4,
+    'the failed build is retried (3) and the session seeds its committed rows (4)'
+  )
+})
+
+test('seed failure: a storage that breaks its discover contract loses no rows and does not poison the session memo', async () => {
+  // Finding (#692), two halves of one silent failure:
+  //
+  //  - `scanCommittedMessageIds` guards only the `discoverCachePartitions`
+  //    CALL; the walk over the answer sits outside that try/catch, so a
+  //    storage resolving a truthy NON-iterable (a violation of its own
+  //    declared `CachePartitionMeta[]` return type) throws out of a
+  //    function whose whole point is to degrade rather than cost a row.
+  //  - `seedPromises` memoized that rejected promise and never removed it,
+  //    so `projectExchange` rejected, `source.js` caught it and dropped the
+  //    row, and EVERY later exchange for the session short-circuited onto
+  //    the poisoned memo and was dropped with no warn at all. Measured in
+  //    review: five exchanges, two warn lines, zero rows.
+  //
+  // So both properties are asserted per exchange: the row still lands, and
+  // the failure keeps saying so instead of going quiet after the first.
+  //
+  // The index build (discover call 1) is kept WELL-FORMED on purpose. A
+  // storage malformed on that call too rejects inside the committed-session
+  // index, which is issue #685 / PR #690's separate defect; keeping it
+  // well-formed isolates this one and keeps this test independent of that
+  // fix.
+  let discoverCalls = 0
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      discoverCalls++
+      if (discoverCalls === 1) {
+        return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 1 }]
+      }
+      return /** @type {never} */ ({ malformed: true })
+    },
+    async *readRows() {
+      // The index must place this session among the committed ones, or the
+      // per-session scan is skipped and the defect never fires.
+      yield { session_id: 'sess-broken-seed', message_id: 'uuid-committed' }
+    },
+  }))
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logged = []
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', { project: perExchangeMessage })],
+    storage,
+    log: collectingLogger(logged),
+  })
+
+  const first = await settledProjection(
+    projector.projectExchange({ ...exchange(), exchange_id: 'ex-1', path: 'sess-broken-seed' })
+  )
+  assert.equal(
+    first.error === undefined ? undefined : String(first.error),
+    undefined,
+    'exchange 1: a seed that could not run must not fail the projection'
+  )
+  assert.equal(first.rows?.length, 1, 'exchange 1: the row survives a seed that could not run')
+
+  const second = await settledProjection(
+    projector.projectExchange({ ...exchange(), exchange_id: 'ex-2', path: 'sess-broken-seed' })
+  )
+  assert.equal(
+    second.error === undefined ? undefined : String(second.error),
+    undefined,
+    'exchange 2: a memoized failure must not fail every later exchange for the session'
+  )
+  assert.equal(second.rows?.length, 1, 'exchange 2: the session is not permanently poisoned')
+
+  // 3 = one index build + one seed scan per exchange. Exchange 2 having
+  // re-run its scan is the direct evidence that no failed memo survived it.
+  assert.equal(discoverCalls, 3, 'a seed that broke is retried, not cached as this session verdict')
+
+  // Silence was the other half of the defect: a daemon dropping every row
+  // for a session while logging nothing is the failure operators could not
+  // see. Each failing exchange must carry its own signal.
+  const warns = logged.filter((e) => e.level === 'warn' && e.message === 'aigw.seed_seen_messages_failed')
+  assert.equal(warns.length, 2, 'each exchange whose seed failed emits its own operator signal')
+  for (const warn of warns) {
+    assert.equal(warn.fields.error_kind, 'seed_rejected')
+    assert.equal(warn.fields.session_id, 'sess-broken-seed')
+    assert.match(String(warn.fields.error), /not iterable/)
+  }
+})
+
+/**
+ * A projector whose message_id is unique per exchange. Reusing one id
+ * across exchanges would let the seen-set dedup (the very thing the seed
+ * feeds) suppress the second row legitimately, hiding a drop under a zero.
+ *
+ * @param {AiGatewayExchangeInput} input
+ * @returns {AiGatewayProjectedExchange}
+ */
+function perExchangeMessage(input) {
+  return {
+    provider: 'native',
+    session_id: String(input.path),
+    messages: [{ role: 'user', content: 'hi', message_id: `uuid-${input.exchange_id}` }],
+  }
+}
+
+/**
+ * Settle a projection without letting a rejection escape, so a test can
+ * assert on "it rejected" as evidence instead of dying on it.
+ *
+ * @param {Promise<unknown[]>} projecting
+ * @returns {Promise<{ rows: unknown[] | undefined, error: unknown }>}
+ */
+function settledProjection(projecting) {
+  return projecting.then(
+    (rows) => ({ rows, error: undefined }),
+    (/** @type {unknown} */ error) => ({ rows: undefined, error })
+  )
+}
 
 /**
  * Minimal `ExtendedQueryStorageService`-shaped stub exposing only the
@@ -984,5 +1471,382 @@ function collectingLogger(sink) {
     info: make('info'),
     warn: make('warn'),
     error: make('error'),
+  }
+}
+
+/**
+ * The live projector's dedup state is per-listener and outlives every
+ * exchange, and row expansion commits to it before the caller's
+ * `appendRows` has had a chance to fail. `journal` + rollback is how a
+ * caller keeps that state describing what landed. Issue #879.
+ */
+test('a journaled projection can be rolled back so the same exchange projects again', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('ok', { project: () => projection('ok') })],
+  })
+  /** @type {(() => void)[]} */
+  const journal = []
+  const first = await projector.projectExchange(exchange(), { journal })
+  assert.ok(first.length > 0)
+
+  // Stand-in for the append the caller could not complete.
+  rollbackAiGatewayStateJournal(journal)
+  assert.equal(journal.length, 0)
+
+  const retry = await projector.projectExchange(exchange())
+  assert.deepEqual(retry.map((r) => r.part_id), first.map((r) => r.part_id))
+  assert.deepEqual(retry.map((r) => r.previous_message_id), first.map((r) => r.previous_message_id))
+})
+
+test('without a rollback a re-projected exchange still dedups to nothing', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('ok', { project: () => projection('ok') })],
+  })
+  const first = await projector.projectExchange(exchange())
+  assert.ok(first.length > 0)
+  const again = await projector.projectExchange(exchange())
+  assert.equal(again.length, 0)
+})
+
+/**
+ * A journal is replayed by ONE exchange, but the state it rewinds belongs to
+ * the whole listener and the proxy runs its finalizers concurrently. So a
+ * rollback must not unwind the thread from under turns another exchange
+ * already chained and wrote: those turns stay in `chain.seen`, nothing
+ * re-chains them, and the tail would silently settle before them.
+ *
+ * The buried exchange still has to come back with the links it was projected
+ * with, though. Reading the CURRENT tail on the replay would emit the
+ * thread's opening turns claiming to follow turns that follow them, and the
+ * later exchange already links back to one of them, so the stored
+ * `previous_message_id` graph would contain a cycle: this column's contract
+ * is that the full ancestry is the transitive closure of the link (LLP
+ * 0026#consequences), so a consumer walking it would not terminate.
+ */
+test('a rollback does not rewind a thread past turns a later exchange chained', () => {
+  const state = createAiGatewayConversationState()
+  /** @param {string} id @param {string} role */
+  const message = (id, role) => ({ role, content: `c-${id}`, message_id: id, provider_uuid: id })
+  /** @param {string[]} ids */
+  const turns = (ids) => ({
+    provider: 'anthropic',
+    session_id: 's1',
+    conversation_id: 'c1',
+    client_name: 'claude',
+    conversation_source: 'claude_code',
+    messages: ids.map((id) => message(id, id.startsWith('u') ? 'user' : 'assistant')),
+  })
+
+  // Exchange A projects the first turn and is still awaiting its append.
+  /** @type {(() => void)[]} */
+  const journalA = []
+  const rowsA = aiGatewayRowsFromProjectedExchange(/** @type {any} */ (turns(['u1', 'a1'])), {
+    state,
+    journal: journalA,
+  })
+  assert.deepEqual(rowsA.map((r) => r.message_id), ['u1', 'a1'])
+
+  // Exchange B replays those, chains the second turn, and lands.
+  const rowsB = aiGatewayRowsFromProjectedExchange(/** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2'])), {
+    state,
+    journal: [],
+  })
+  assert.deepEqual(rowsB.map((r) => r.message_id), ['u2', 'a2'])
+  assert.deepEqual(rowsB[0].previous_message_id, ['a1'])
+
+  // Only now does A's append fail.
+  rollbackAiGatewayStateJournal(journalA)
+
+  const rowsC = aiGatewayRowsFromProjectedExchange(
+    /** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2', 'u3'])),
+    { state },
+  )
+  const u3 = rowsC.find((r) => r.message_id === 'u3')
+  assert.ok(u3, 'the new turn projects')
+  assert.deepEqual(u3.previous_message_id, ['a2'], 'the thread still runs through the turn B wrote')
+
+  // A's rows come back as A projected them, not hung off B's tail.
+  assert.deepEqual(
+    rowsC.map((r) => [r.message_id, r.previous_message_id]),
+    [['u1', []], ['a1', ['u1']], ['u3', ['a2']]],
+    'the replay rebuilds the rows the failed append never wrote',
+  )
+})
+
+test('a rollback of the newest exchange restores the thread tail exactly', () => {
+  const state = createAiGatewayConversationState()
+  /** @param {string[]} ids */
+  const turns = (ids) => ({
+    provider: 'anthropic',
+    session_id: 's2',
+    conversation_id: 'c2',
+    client_name: 'claude',
+    conversation_source: 'claude_code',
+    messages: ids.map((id) => ({
+      role: id.startsWith('u') ? 'user' : 'assistant',
+      content: `c-${id}`,
+      message_id: id,
+      provider_uuid: id,
+    })),
+  })
+
+  aiGatewayRowsFromProjectedExchange(/** @type {any} */ (turns(['u1', 'a1'])), { state })
+  /** @type {(() => void)[]} */
+  const journal = []
+  const second = aiGatewayRowsFromProjectedExchange(
+    /** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2'])),
+    { state, journal },
+  )
+  assert.deepEqual(second.map((r) => r.previous_message_id), [['a1'], ['u2']])
+
+  rollbackAiGatewayStateJournal(journal)
+
+  const retry = aiGatewayRowsFromProjectedExchange(
+    /** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2'])),
+    { state },
+  )
+  assert.deepEqual(retry.map((r) => r.message_id), ['u2', 'a2'])
+  assert.deepEqual(retry.map((r) => r.previous_message_id), [['a1'], ['u2']])
+})
+
+// @ref LLP 0469#exchange-scope [tests]: exchange snapshots never seed or retain listener history
+for (const targeted of [false, true]) {
+  test(`exchange-scoped snapshots skip storage and listener retention (targeted reads: ${targeted})`, async () => {
+    let discovers = 0
+    let reads = 0
+    const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+      async discoverCachePartitions() {
+        discovers++
+        return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/committed', rowCount: 1 }]
+      },
+      async *readRows() { reads++; yield { session_id: 'old-session', message_id: 'old-message' } },
+      ...(targeted ? { async *readRowsWhere() { reads++ } } : {}),
+    }))
+    const { projector, collections } = observeListenerCollections(() => createAiGatewayMessageProjector({
+      gatewayId: 'gw-test',
+      storage,
+      projectors: [registered('snapshot', { project: snapshotProjection })],
+    }))
+
+    // Alternate successful append lifetimes and append-failure rollback.
+    // The journal must not capture temporary state even while append is pending.
+    let journalEntries = 0
+    for (let i = 0; i < 1000; i++) {
+      const input = exchange({ exchange_id: `snapshot-${i}` })
+      /** @type {(() => void)[]} */
+      const journal = []
+      const rows = await projector.projectExchange(input, { journal })
+      assert.equal(rows.length, 3)
+      journalEntries += journal.length
+      if (i % 2) {
+        rollbackAiGatewayStateJournal(journal)
+      }
+    }
+    assert.ok(collections.length >= 5, 'observer covers conversation maps, seen set and seed promises')
+    assert.deepEqual({ discovers, reads, journalEntries, listenerSizes: collections.map((collection) => collection.size) },
+      { discovers: 0, reads: 0, journalEntries: 0, listenerSizes: collections.map(() => 0) },
+      'zero storage discovery/reads, undo closures and retained listener identity/seed entries')
+  })
+}
+
+test('an exchange snapshot retries with identical IDs and links after failed append', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test', projectors: [registered('snapshot', { project: snapshotProjection })],
+  })
+  /** @type {(() => void)[]} */
+  const journal = []
+  const first = await projector.projectExchange(exchange(), { journal })
+  assert.equal(journal.length, 0, 'temporary state needs no append rollback or retained undo closures')
+  rollbackAiGatewayStateJournal(journal)
+  assert.deepEqual(await projector.projectExchange(exchange()), first)
+})
+
+test('null thread uses temporary snapshot state and an expansion failure leaves no shared mutations', async () => {
+  let fail = true
+  const { projector, collections } = observeListenerCollections(() => createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('snapshot', {
+      project: (input) => ({
+        ...snapshotProjection(input),
+        conversation_id: /** @type {any} */ (null),
+        messages: [
+          { role: 'user', content: 'first', message_id: 'first' },
+          { role: 'assistant', get content() { if (fail) throw new Error('expansion failed'); return 'second' } },
+        ],
+      }),
+    })],
+  }))
+  /** @type {(() => void)[]} */
+  const journal = []
+  await assert.rejects(projector.projectExchange(exchange(), { journal }), /expansion failed/)
+  assert.equal(journal.length, 0)
+  assert.ok(collections.every((collection) => collection.size === 0), 'failure never enters shared state')
+  fail = false
+  const retry = await projector.projectExchange(exchange())
+  assert.equal(retry.length, 2)
+  assert.deepEqual(retry.map((row) => row.previous_message_id), [[], ['first']])
+  assert.ok(collections.every((collection) => collection.size === 0))
+})
+
+test('exchange snapshots preserve equal-text positions, explicit IDs and local links across distinct requests', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('snapshot', { project: snapshotProjection })],
+  })
+  const first = await projector.projectExchange(exchange({ exchange_id: 'snapshot-A' }))
+  const second = await projector.projectExchange(exchange({ exchange_id: 'snapshot-B' }))
+  for (const { id, rows } of [{ id: 'snapshot-A', rows: first }, { id: 'snapshot-B', rows: second }]) {
+    const ids = [0, 1, 2].map((index) => `${id}:${index}`)
+    assert.deepEqual(rows.map((row) => row.message_id), ids)
+    assert.deepEqual(rows.map((row) => row.part_id), ids.map((messageId) => `${messageId}#0`))
+    assert.deepEqual(rows.map((row) => row.message_index), [0, 1, 2])
+    assert.deepEqual(rows.map((row) => row.content_text), ['same text', 'same text', 'same text'])
+    assert.deepEqual(rows.map((row) => row.previous_message_id), [[], [ids[0]], [ids[1]]])
+    assert.deepEqual(rows.map((row) => row.request_id), [id, id, id])
+  }
+  assert.equal(new Set([...first, ...second].map((row) => row.part_id)).size, 6)
+})
+
+for (const scenario of [
+  { name: 'missing exchange ID', input: { exchange_id: undefined }, session: 'normal-session' },
+  { name: 'empty exchange ID', input: { exchange_id: '' }, session: 'normal-session' },
+  { name: 'unequal session ID', input: { exchange_id: 'ex-1' }, session: 'normal-session' },
+  { name: 'supplied thread', input: { exchange_id: 'ex-1' }, session: 'ex-1', thread: 'thread-1' },
+  { name: 'supplied empty thread', input: { exchange_id: 'ex-1' }, session: 'ex-1', thread: '' },
+]) {
+  test(`ordinary dispatcher retains seed/replay/rollback behavior: ${scenario.name}`, async () => {
+    let scans = 0
+    const storage = stubStorage([
+      { partition: {}, rows: [{ session_id: scenario.session, message_id: 'committed-id' }] },
+    ], () => scans++)
+    const { projector, collections } = observeListenerCollections(() => createAiGatewayMessageProjector({
+      gatewayId: 'gw-test',
+      storage,
+      projectors: [registered('normal', {
+        project: () => ({
+          provider: 'native',
+          session_id: scenario.session,
+          ...(scenario.thread !== undefined ? { conversation_id: scenario.thread } : {}),
+          messages: [
+            { role: 'user', content: 'committed', message_id: 'committed-id' },
+            { role: 'assistant', content: 'new fallback' },
+          ],
+        }),
+      })],
+    }))
+    const input = exchange(scenario.input)
+    /** @type {(() => void)[]} */
+    const journal = []
+    const first = await projector.projectExchange(input, { journal })
+    assert.equal(first.length, 1, 'committed explicit identity is seeded and suppressed')
+    assert.ok(journal.length > 0, 'ordinary fallback expansion remains journaled')
+    assert.ok(collections.every((collection) => collection.size > 0), 'observer sees real shared-state retention')
+    rollbackAiGatewayStateJournal(journal)
+    const retry = await projector.projectExchange(input)
+    assert.deepEqual(retry, first, 'ordinary fallback IDs and links survive failed-append retry')
+    assert.equal((await projector.projectExchange(input)).length, 0, 'ordinary same-session replay is deduped')
+    assert.equal(scans, 2, 'one index build and one memoized committed-session scan')
+  })
+}
+
+test('exchange snapshots do not borrow an ordinary session tail or seed memo with the same session ID', async () => {
+  let scans = 0
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    storage: stubStorage([], () => scans++),
+    projectors: [registered('mixed', {
+      project: (input) => ({
+        provider: 'native',
+        session_id: 'snapshot-shared',
+        messages: [{ role: 'user', content: String(input.path) }],
+      }),
+    })],
+  })
+  const ordinary = await projector.projectExchange(exchange({ exchange_id: 'normal-exchange', path: 'ordinary' }))
+  assert.equal(scans, 1)
+  const snapshot = await projector.projectExchange(exchange({ exchange_id: 'snapshot-shared', path: 'snapshot' }))
+  assert.deepEqual(snapshot[0].previous_message_id, [])
+  assert.equal(scans, 1, 'snapshot does not consult existing seed memo')
+  const next = await projector.projectExchange(exchange({ exchange_id: 'normal-next', path: 'next ordinary' }))
+  assert.deepEqual(next[0].previous_message_id, [ordinary[0].message_id], 'snapshot never changes the ordinary tail')
+})
+
+test('Claude, Codex and OpenClaw wire fallbacks keep ordinary shared dedup and seeding', async () => {
+  const anthropic = exchange({
+    exchange_id: 'raw-exchange-fallback', path: '/v1/messages', provider: 'anthropic',
+    request_headers: '{}',
+    request_body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: 'hello' }] }),
+    response_body: JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: 'ok' }] }),
+  })
+  const cases = [
+    { adapter: createClaudeExchangeProjector({ homeDir: '/nonexistent', stateFile: '/nonexistent/context.jsonl' }), input: anthropic },
+    { adapter: createCodexExchangeProjector(), input: exchange({
+      ...anthropic, path: '/v1/chat/completions', provider: 'openai',
+      response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+    }) },
+    { adapter: createOpenclawExchangeProjector(), input: exchange({
+      ...anthropic, request_headers: JSON.stringify({ 'x-hypaware-client': 'openclaw' }),
+    }) },
+  ]
+  for (const { adapter, input } of cases) {
+    let scans = 0
+    const projector = createAiGatewayMessageProjector({
+      gatewayId: 'gw-test', storage: stubStorage([], () => scans++),
+      projectors: [{ ...adapter, _seq: 0 }],
+    })
+    const rows = await projector.projectExchange(input)
+    assert.ok(rows.length >= 2, `${adapter.name}: actual fallback wire input projects request and response`)
+    assert.notEqual(rows[0].session_id, input.exchange_id, `${adapter.name}: does not copy raw exchange ID`)
+    assert.equal((await projector.projectExchange(input)).length, 0, `${adapter.name}: same-session replay still dedups`)
+    assert.equal(scans, 1, `${adapter.name}: ordinary seed discovery still runs`)
+  }
+})
+
+/** @param {AiGatewayExchangeInput} input @returns {AiGatewayProjectedExchange} */
+function snapshotProjection(input) {
+  return {
+    provider: 'native', session_id: input.exchange_id, request_id: input.exchange_id,
+    messages: [0, 1, 2].map((index) => ({
+      role: index === 2 ? 'assistant' : 'user', content: 'same text',
+      message_id: `${input.exchange_id}:${index}`,
+      previous_message_id: index === 0 ? [] : [`${input.exchange_id}:${index - 1}`],
+    })),
+  }
+}
+
+/**
+ * Observe only allocations during synchronous dispatcher construction, then
+ * restore constructors before projection/IO. These are the actual closed-over
+ * listener collections; per-exchange collections are allocated later. The
+ * ordinary-path test above calibrates the observer against retained state.
+ * No GC timing, heap thresholds or production inspection API is needed.
+ * @param {() => ReturnType<typeof createAiGatewayMessageProjector>} build
+ */
+function observeListenerCollections(build) {
+  const NativeMap = globalThis.Map
+  const NativeSet = globalThis.Set
+  /** @type {Array<Map<unknown, unknown> | Set<unknown>>} */
+  const collections = []
+  globalThis.Map = new Proxy(NativeMap, {
+    construct(target, args) {
+      const collection = Reflect.construct(target, args)
+      collections.push(collection)
+      return collection
+    },
+  })
+  globalThis.Set = new Proxy(NativeSet, {
+    construct(target, args) {
+      const collection = Reflect.construct(target, args)
+      collections.push(collection)
+      return collection
+    },
+  })
+  try {
+    return { projector: build(), collections }
+  } finally {
+    globalThis.Map = NativeMap
+    globalThis.Set = NativeSet
   }
 }

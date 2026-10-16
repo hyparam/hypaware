@@ -1,9 +1,9 @@
 // @ts-check
 
-import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
@@ -12,18 +12,37 @@ import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { createRolloutCwdResolver } from './rollout-cwd.js'
-import { attach, defaultConfigPath } from './settings.js'
+import { attach, detach, defaultConfigPath } from './settings.js'
 import { runCodexClassifyHook } from './classify_hook.js'
-import { errCode } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayRouteInput, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/codex'
 const CLIENT_NAME = 'codex'
 const UPSTREAM_NAME = 'openai'
 const CHATGPT_UPSTREAM_NAME = 'chatgpt'
+// The API-key destination for Codex traffic that arrived on the neutral
+// prefix. A name of its own, not a second copy of the `openai` preset: that
+// name is a last-write-wins slot two adapters register (LLP 0161), so a rung
+// written there is only as durable as the activation order.
+// @ref LLP 0313#decision [implements]: the credential rung and the rewrite live on an upstream codex owns outright
+const OPENAI_CODEX_UPSTREAM_NAME = 'openai-codex'
+// The one prefix attach writes, in both auth modes. It says nothing about how
+// the user logged in, so it cannot be wrong when they switch.
+// @ref LLP 0313#the-neutral-prefix [implements]
+const CODEX_ROUTE_PREFIX = '/backend-api/codex'
+const CODEX_PROVIDER_NAME = 'HypAware Codex Gateway'
+// OpenAI platform keys are the only credential the `/v1` upstream accepts and
+// the only one `chatgpt.com` never will, so the prefix is the whole test.
+// Compared against a lower-cased token: the question is "could these bytes be
+// a platform key", and a case-sensitive miss forwards a real one to
+// `chatgpt.com`.
+const API_KEY_PREFIX = 'sk-'
+// Gateway-local request metadata naming the real upstream a steering client
+// wants, stripped before the request leaves for the provider (LLP 0109).
+const UPSTREAM_HEADER = 'x-hypaware-upstream'
 
 /**
  * The plugin's `config_sections` validator, surfaced as a side-effect-free
@@ -43,9 +62,8 @@ export const configSection = { section: CODEX_CONFIG_SECTION, validate: validate
  *
  * Resolves the `hypaware.ai-gateway` capability, registers the
  * OpenAI-compatible upstream preset, wires Codex's config.toml
- * `attach()`, and contributes the `hypaware-query` and `hypaware-graph`
- * skills plus the AI usage report skill and the report-to-html renderer
- * for Codex installs.
+ * `attach()`, and contributes the `hypaware-query`, `hypaware-reference`,
+ * `hypaware-privacy`, and `hypaware-report` skills for Codex installs.
  *
  * `attach()` emits a `client.attach` span tagged with `hyp_plugin`,
  * `client_name`, `status`, and `restored=true|false`. The reversing
@@ -70,21 +88,59 @@ export async function activate(ctx) {
   /** @type {AiGatewayCapability} */
   const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 
+  // `path_prefix` stays for the sort rank the compiled table derives from it;
+  // `match()` reproduces that prefix exactly and adds the steering rung, so
+  // this registration is self-sufficient rather than relying on a sibling
+  // adapter having won the name-keyed preset slot (LLP 0016's presets are a
+  // last-write-wins `Map.set` by name).
+  // @ref LLP 0157#adapter-rework [implements]: the `x-hypaware-upstream` rung, so a steered turn selects this upstream per request
   gateway.registerUpstreamPreset({
     name: UPSTREAM_NAME,
     base_url: 'https://api.openai.com',
     path_prefix: '/v1',
     provider: 'openai',
+    match: matchOpenaiUpstream,
+  })
+  // Reachable only by the credential rung: nothing is attached to this name
+  // and no client sends this path with an `sk-` key by arrangement. It exists
+  // so an API-key login that arrived on the neutral prefix reaches the wire it
+  // is scoped for, at that wire's own path shape, without waiting for a
+  // reconcile pass or a client restart.
+  // @ref LLP 0313#decision [implements]: path and credential together select the upstream
+  gateway.registerUpstreamPreset({
+    name: OPENAI_CODEX_UPSTREAM_NAME,
+    base_url: 'https://api.openai.com',
+    path_prefix: CODEX_ROUTE_PREFIX,
+    provider: 'openai',
+    // Above every config entry, not merely above the `chatgpt` preset, and
+    // that is load-bearing rather than decorative: the `hyp init` picker
+    // writes a `chatgpt` upstream into operator config, config entries
+    // compile at priority 0 and sort ahead of presets on equal rank, so at
+    // the inherited rank this preset would lose the default install, which is
+    // the install the fix is for.
+    //
+    // The cost, stated plainly because this comment used to deny it: an
+    // operator who declares their own upstream on `/backend-api/codex` IS
+    // outranked for requests carrying an api-key-shaped credential. Nothing
+    // else is diverted (`match()` requires both the prefix and the
+    // credential), but that one case is a real exception to "operator config
+    // wins the routing question", taken deliberately because the alternative
+    // is forwarding the key to a host that must never see it.
+    priority: 10,
+    match: matchOpenaiCodexUpstream,
+    rewrite: { from: CODEX_ROUTE_PREFIX, to: '/v1' },
   })
   gateway.registerUpstreamPreset({
     name: CHATGPT_UPSTREAM_NAME,
     base_url: 'https://chatgpt.com',
-    path_prefix: '/backend-api/codex',
+    path_prefix: CODEX_ROUTE_PREFIX,
     provider: 'chatgpt',
+    match: matchChatgptUpstream,
   })
 
   const homeDir = ctx.env.HOME ?? os.homedir()
   const codexHome = resolveCodexHome(ctx)
+  const gatewayCapture = ctx.config?.capture_mode === 'gateway'
   // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
   // the capture-seam resolvers so a `--private` (machine-local `ignore`) dir
   // stops recording at capture, not just at the export seam. Without it the
@@ -117,10 +173,13 @@ export async function activate(ctx) {
   // outside the proxy) into `ai_gateway_messages` via `hyp backfill codex`.
   ctx.backfills.register(
     createCodexBackfillProvider({
+      ignoredSessions: new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log),
       homeDir,
       codexHome,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      config: ctx.config,
+      configPath: resolveConfigPath(ctx),
       localOnlyListPath: localOnlyList,
     })
   )
@@ -130,9 +189,65 @@ export async function activate(ctx) {
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
+    requiresEndpoint: gatewayCapture,
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
       const configPath = resolveConfigPath(ctx)
+
+      // @ref LLP 0429#default [implements]: capture reads rollouts; attach only releases the old managed inference route
+      if (!gatewayCapture) {
+        return withSpan(
+          'client.attach',
+          {
+            [Attr.PLUGIN]: PLUGIN_NAME,
+            [Attr.OPERATION]: 'client.attach',
+            client_name: CLIENT_NAME,
+            hyp_client: CLIENT_NAME,
+            dry_run: attachCtx.dryRun === true,
+          },
+          async (span) => {
+            const result = await detach({ configPath, dryRun: attachCtx.dryRun === true })
+            if ('warning' in result && result.warning) attachCtx.stderr?.write(result.warning + '\n')
+            span.setAttribute('status', 'ok')
+            span.setAttribute('restored', result.changed === true)
+            logger.info('client.attach.write', {
+              hyp_plugin: PLUGIN_NAME, hyp_client: CLIENT_NAME,
+              config_path: configPath, mode: 'transcript', changed: result.changed,
+            })
+            if (attachCtx.json) {
+              attachCtx.stdout.write(JSON.stringify({
+                status: 'ok', action: 'attach', client: CLIENT_NAME,
+                mode: 'transcript', settings_path: configPath,
+                dry_run: attachCtx.dryRun === true, changed: result.changed,
+              }) + '\n')
+              return
+            }
+            // Transcript attach still reads and edits config.toml, so say
+            // which file: a dry-run that names no path cannot be inspected,
+            // and the claude line above names its settings file the same way.
+            //
+            // But only promise the removal when there is something to remove.
+            // On a fresh install - the common case now that transcript is the
+            // default - there is no managed route, nothing is written, and the
+            // file need not even exist; announcing a removal there describes
+            // work that will not happen.
+            attachCtx.stdout.write(attachCtx.dryRun
+              ? `(dry-run) Would attach Codex via ${configPath}\n`
+              : `✓ Codex attached (${configPath})\n`)
+            if (result.changed && result.removed) {
+              attachCtx.stdout.write(attachCtx.dryRun
+                ? '  Would remove the managed gateway route.\n'
+                : '  Removed the managed gateway route.\n')
+            }
+            if (result.changed) attachCtx.stdout.write('  Preserve saved chats with a direct OpenAI compatibility provider.\n')
+            attachCtx.stdout.write(attachCtx.dryRun
+              ? '  Would capture Codex CLI and Desktop from their local rollout files.\n'
+              : '  Codex CLI and Desktop capture uses local rollout files; inference connects directly to your provider.\n')
+            attachCtx.stdout.write('  Full tool definitions are unavailable. Restart existing Codex clients after changing capture mode.\n')
+          },
+          { component: 'plugin.codex' }
+        )
+      }
 
       return withSpan(
         'client.attach',
@@ -148,9 +263,7 @@ export async function activate(ctx) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
             const port = safeEndpointPort(attachCtx.endpoint)
-            const route = port === undefined
-              ? undefined
-              : providerRouteForAuthMode(await readCodexAuthMode(resolveAuthPath(ctx)), port)
+            const route = port === undefined ? undefined : codexProviderRoute(port)
             writeAttachOutput(attachCtx, {
               status: 'ok',
               client: CLIENT_NAME,
@@ -164,8 +277,7 @@ export async function activate(ctx) {
           }
           const port = endpointPort(attachCtx.endpoint)
           try {
-            const authMode = await readCodexAuthMode(resolveAuthPath(ctx))
-            const route = providerRouteForAuthMode(authMode, port)
+            const route = codexProviderRoute(port)
             const result = await attach({
               port,
               version: ctx.plugin.version,
@@ -222,11 +334,7 @@ export async function activate(ctx) {
     'hypaware-query',
     'hypaware-reference',
     'hypaware-privacy',
-    'hypaware-graph',
-    'hypaware-ai-usage-report',
-    'hypaware-report-to-html',
-    'hypaware-publish-report',
-    'hypaware-apply-report-changes',
+    'hypaware-report',
   ]) {
     ctx.skills.register({
       name: skillName,
@@ -238,6 +346,171 @@ export async function activate(ctx) {
 }
 
 /**
+ * Route an inbound request to the `openai` upstream.
+ *
+ * Two rungs, in precedence order:
+ *
+ *  1. The `x-hypaware-upstream` request metadata, when it names this
+ *     preset's provider. A steering client can then reach this upstream on
+ *     a path that carries no `/v1` at all (the bare gateway origin plus
+ *     `/chat/completions`), which is otherwise unroutable: the gateway
+ *     answers 404 and the caller's turn fails, which capture may never
+ *     cause. No Codex or Claude traffic sends this header, so the rung is
+ *     inert for every route that exists today.
+ *  2. The `/v1` path anchor: byte-for-byte the same set of paths
+ *     `pathMatchesPrefix(path, '/v1')` accepts, because a preset that
+ *     declares `match()` never falls back to its `path_prefix`. Widening or
+ *     narrowing this re-routes live Codex traffic.
+ *
+ * @ref LLP 0157#adapter-rework [implements]: upstream routing is per request, selected by the `x-hypaware-upstream` metadata via the gateway's existing header match functions
+ * @ref LLP 0157#requirements [constrained-by]: R5 - the user's turn MUST NOT fail because of capture, so an unroutable steered turn is a defect
+ * @param {AiGatewayRouteInput} input
+ * @returns {boolean}
+ */
+function matchOpenaiUpstream(input) {
+  if (headerValue(input.headers, UPSTREAM_HEADER) === 'openai') return true
+  return input.path === '/v1' || input.path.startsWith('/v1/')
+}
+
+/**
+ * Route an API-key request that arrived on the neutral Codex prefix to the
+ * OpenAI platform wire.
+ *
+ * Attach writes one `base_url` in both auth modes, so the path no longer
+ * claims which credential the user holds; the request itself does. An
+ * `sk-` bearer is unambiguously an OpenAI platform key, and `chatgpt.com`
+ * will never accept one, so the only route that can succeed is
+ * `api.openai.com/v1/*` (the preset's `rewrite` supplies the path shape).
+ *
+ * Two rungs:
+ *
+ *  1. The neutral prefix plus an api-key-shaped credential selects this
+ *     upstream, and nothing overrides that. An `x-hypaware-upstream` steer
+ *     (LLP 0157) names a destination, and this rung is not a destination
+ *     preference but a refusal: no steer may put a platform key on
+ *     `chatgpt.com`. Letting the header decline this rung was a hole, because
+ *     the presets it deferred to are exactly the ones operator config
+ *     replaces (`hyp init` writes `openai` and `chatgpt`), so a steered key
+ *     fell through to the unguarded `chatgpt` entry and left for the wrong
+ *     host. Claiming it here costs a steered caller nothing it can want:
+ *     this upstream is `api.openai.com`, the only host an `sk-` key can
+ *     reach, at the `/v1` shape that host actually serves.
+ *  2. Anything else declines, so an unrecognized or absent credential falls
+ *     back to path routing, which is the behavior that exists today.
+ *
+ * @ref LLP 0313#decision [implements]: routing is per request, by path and credential
+ * @ref LLP 0313#sk-never-reaches-chatgpt [implements]: this preset, not the second-line guard, is what makes the invariant true on a default install
+ * @param {AiGatewayRouteInput} input
+ * @returns {boolean}
+ */
+function matchOpenaiCodexUpstream(input) {
+  if (!isCodexRoutePath(input.path)) return false
+  return carriesApiKeyCredential(input.headers)
+}
+
+/**
+ * Route the ChatGPT subscription wire, and refuse to carry an API key onto
+ * it.
+ *
+ * The prefix half reproduces `pathMatchesPrefix(path, CODEX_ROUTE_PREFIX)`
+ * exactly, because a preset that declares `match()` never falls back to its
+ * `path_prefix`. The refusal half is the invariant: an `sk-` key is never
+ * sent to `chatgpt.com`. It is second-line only. The `openai-codex` preset
+ * above outranks this one and claims that request first; this rung is what
+ * happens if it ever does not, and it fails the turn at the gateway with a
+ * 404 rather than handing the user's platform key to a host that has no
+ * business seeing it.
+ *
+ * Residual, and it is the ordinary case rather than an exotic one: the
+ * `hyp init` picker writes an upstream named `chatgpt` into operator config,
+ * config wins the routing question by name, and TOML can express no
+ * credential rung. So on a DEFAULT install this guard is not in the routing
+ * table at all, and the entry that replaced it routes on `path_prefix`
+ * alone. That is why the invariant may not rest here: every request
+ * `carriesApiKeyCredential` fails to recognise is one this guard would have
+ * refused and that config entry forwards to `chatgpt.com`. `openai-codex`
+ * is the mechanism that survives config, which is why its credential test is
+ * deliberately the broader one.
+ *
+ * @ref LLP 0313#sk-never-reaches-chatgpt [implements]: the guard is second-line, behind the openai-codex preset
+ * @param {AiGatewayRouteInput} input
+ * @returns {boolean}
+ */
+function matchChatgptUpstream(input) {
+  if (!isCodexRoutePath(input.path)) return false
+  return !carriesApiKeyCredential(input.headers)
+}
+
+/**
+ * Path-segment match on the neutral Codex prefix, the same set
+ * `pathMatchesPrefix(path, CODEX_ROUTE_PREFIX)` accepts.
+ *
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isCodexRoutePath(path) {
+  return path === CODEX_ROUTE_PREFIX || path.startsWith(CODEX_ROUTE_PREFIX + '/')
+}
+
+/**
+ * Could this request's `Authorization` header be carrying an OpenAI platform
+ * key?
+ *
+ * Deliberately broader than a strict `Bearer <token>` parse, because the two
+ * ways of being wrong are not symmetrical. A false positive sends a non-key
+ * credential to `api.openai.com`, which answers 401. A false negative sends
+ * a real platform key to `chatgpt.com`, which is the leak this whole change
+ * exists to prevent, and on a default install nothing downstream catches it
+ * (see `matchChatgptUpstream`). So a malformed scheme, a stray trailing
+ * token and an upper-cased prefix all still count as a key.
+ *
+ * Prefix inspection only, and the value never leaves this function: the
+ * gateway already reads and forwards `Authorization`, so testing its first
+ * few characters adds no exposure, but nothing here may reach a log line, a
+ * span attribute, or a stored row.
+ *
+ * @ref LLP 0313#credential-inspection [constrained-by]: the token is read, never recorded
+ * @param {Record<string, string[]> | undefined} headers
+ * @returns {boolean}
+ */
+function carriesApiKeyCredential(headers) {
+  const auth = headerValue(headers, 'authorization')
+  if (typeof auth !== 'string') return false
+  const value = auth.trim()
+  // A well-formed `Bearer <token>` yields the token; anything else is tested
+  // whole, so a header that forgot its scheme is still recognised. A real
+  // auth-scheme name (`Basic`, `Negotiate`, `Digest`) never begins `sk-`,
+  // so testing the whole value adds no false positive.
+  const bearer = /^bearer\s+/i.exec(value)
+  const token = bearer ? value.slice(bearer[0].length) : value
+  return token.toLowerCase().startsWith(API_KEY_PREFIX)
+}
+
+/**
+ * First non-empty value for a header name, case-insensitively. The route
+ * input's headers are already lowercased and array-valued, but the lookup
+ * accepts the raw `IncomingHttpHeaders` shape too so it stays usable from a
+ * caller that did not go through `buildRouteInput`.
+ *
+ * @param {Record<string, string | string[] | undefined> | undefined} headers
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+function headerValue(headers, name) {
+  if (!headers) return undefined
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted) continue
+    if (typeof value === 'string' && value.length > 0) return value
+    if (Array.isArray(value)) {
+      const found = value.find((entry) => typeof entry === 'string' && entry.length > 0)
+      if (typeof found === 'string') return found
+    }
+  }
+  return undefined
+}
+
+/**
  * @param {PluginActivationContext} ctx
  */
 function resolveConfigPath(ctx) {
@@ -246,32 +519,26 @@ function resolveConfigPath(ctx) {
 }
 
 /**
- * @param {string | undefined} authMode
+ * The one provider block attach writes, in both auth modes, permanently.
+ *
+ * Neither line names an upstream: the prefix keeps the shape the
+ * subscription route already uses (so that route is forwarded byte for byte,
+ * exactly as before) and the name is neutral, so nothing in the managed
+ * block claims where traffic goes. The gateway resolves that per request,
+ * from the credential.
+ *
+ * This is what makes a login switch a non-event. Nothing on disk encodes the
+ * auth mode, so nothing on disk can go stale when the mode changes, and
+ * there is no re-attach, reconcile pass, or `codex` restart in the loop.
+ *
+ * @ref LLP 0313#the-neutral-prefix [implements]: one base_url in both auth modes, so attach never reads auth.json
  * @param {number} port
  */
-// @ref LLP 0099#decision [implements]: only an affirmative chatgpt mode leaves the /v1 default
-export function providerRouteForAuthMode(authMode, port) {
-  if (authMode === 'chatgpt') {
-    return {
-      baseUrl: `http://127.0.0.1:${port}/backend-api/codex`,
-      providerName: 'HypAware ChatGPT Gateway',
-    }
-  }
+function codexProviderRoute(port) {
   return {
-    baseUrl: `http://127.0.0.1:${port}/v1`,
-    providerName: 'HypAware OpenAI Gateway',
+    baseUrl: `http://127.0.0.1:${port}${CODEX_ROUTE_PREFIX}`,
+    providerName: CODEX_PROVIDER_NAME,
   }
-}
-
-/**
- * @param {PluginActivationContext} ctx
- */
-function resolveAuthPath(ctx) {
-  const codexHome = ctx.env.CODEX_HOME
-  if (typeof codexHome === 'string' && codexHome.length > 0) {
-    return path.join(codexHome, 'auth.json')
-  }
-  return path.join(ctx.env.HOME ?? os.homedir(), '.codex', 'auth.json')
 }
 
 /**
@@ -287,35 +554,6 @@ function resolveCodexHome(ctx) {
     return codexHome
   }
   return path.join(ctx.env.HOME ?? os.homedir(), '.codex')
-}
-
-/**
- * Read the Codex auth mode from auth.json. Newer Codex versions omit the
- * `auth_mode` field, so when it is absent infer 'chatgpt' from the shape:
- * OAuth `tokens` present with no `OPENAI_API_KEY` means a ChatGPT
- * subscription login, which must route to `/backend-api/codex` (the
- * subscription token is not scoped for the OpenAI `/v1` API).
- *
- * @param {string} authPath
- * @returns {Promise<string | undefined>}
- */
-// @ref LLP 0099#decision [implements]: infer chatgpt from tokens-without-key; explicit auth_mode wins
-export async function readCodexAuthMode(authPath) {
-  try {
-    const parsed = JSON.parse(await fs.readFile(authPath, 'utf8'))
-    if (!parsed || typeof parsed !== 'object') return undefined
-    const mode = Reflect.get(parsed, 'auth_mode')
-    if (typeof mode === 'string') return mode
-    const tokens = Reflect.get(parsed, 'tokens')
-    const apiKey = Reflect.get(parsed, 'OPENAI_API_KEY')
-    if (tokens && typeof tokens === 'object' && typeof apiKey !== 'string') {
-      return 'chatgpt'
-    }
-    return undefined
-  } catch (err) {
-    if (errCode(err) === 'ENOENT') return undefined
-    return undefined
-  }
 }
 
 function skillsRootDir() {
@@ -381,10 +619,11 @@ function writeAttachOutput(attachCtx, fields) {
       dry_run: fields.dryRun,
       config_path: fields.configPath,
       changed: fields.changed,
+      mode: 'gateway',
     }
     if (fields.port !== undefined) {
       payload.port = fields.port
-      payload.base_url = fields.baseUrl ?? `http://127.0.0.1:${fields.port}/v1`
+      payload.base_url = fields.baseUrl ?? `http://127.0.0.1:${fields.port}${CODEX_ROUTE_PREFIX}`
     }
     if (fields.prevValue !== undefined) payload.prev_value = fields.prevValue
     attachCtx.stdout.write(JSON.stringify(payload) + '\n')
@@ -396,7 +635,7 @@ function writeAttachOutput(attachCtx, fields) {
     if (fields.baseUrl !== undefined) {
       attachCtx.stdout.write(`  Would set base_url = ${fields.baseUrl}\n`)
     } else {
-      attachCtx.stdout.write('  Would set base_url to the local gateway endpoint /v1\n')
+      attachCtx.stdout.write(`  Would set base_url to the local gateway endpoint ${CODEX_ROUTE_PREFIX}\n`)
     }
     return
   }
@@ -405,10 +644,9 @@ function writeAttachOutput(attachCtx, fields) {
   if (fields.baseUrl !== undefined) {
     attachCtx.stdout.write(`  base_url = ${fields.baseUrl}\n`)
   } else if (fields.port !== undefined) {
-    attachCtx.stdout.write(`  base_url = http://127.0.0.1:${fields.port}/v1\n`)
+    attachCtx.stdout.write(`  base_url = http://127.0.0.1:${fields.port}${CODEX_ROUTE_PREFIX}\n`)
   }
   if (fields.prevValue !== undefined) {
     attachCtx.stdout.write(`  (previous model_provider was ${fields.prevValue})\n`)
   }
 }
-

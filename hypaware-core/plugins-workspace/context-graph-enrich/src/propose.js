@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from 'hypaware/core/util'
+
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 
 import { columnsFor, enrichTablePath, PROSPECTS_DATASET, prospectId } from './datasets.js'
@@ -14,7 +16,10 @@ import { readState, updateState } from './state.js'
  */
 
 const EXTRACTOR = 'enrich.t1'
-const EXTRACTOR_VERSION = 1
+const EXTRACTOR_VERSION = 2
+const MAX_SESSION_PARTS = 10_000
+const MAX_TRANSCRIPT_CHARS = 2_000_000
+const MAX_CANDIDATES = 128
 
 /**
  * Run one T1 propose tick over **whole sessions**. The two regimes differ only
@@ -55,7 +60,7 @@ export async function runProposeTick(runtime, opts = {}) {
       // Track which sessions advanced so the watermark only moves over the
       // sessions actually processed (an early deadline break must not skip the
       // rest: they re-qualify next tick).
-      /** @type {Array<{ anchorKey: string, keys: string[], candidates: ReturnType<typeof parseProspects> }>} */
+      /** @type {Record<string, unknown>[]} */
       const perSession = []
       /** @type {Record<string, SessionMark>} */
       const newMarks = {}
@@ -63,6 +68,7 @@ export async function runProposeTick(runtime, opts = {}) {
       for (const sid of sessionIds) {
         if (opts.deadlineMs && Date.now() > opts.deadlineMs) break
         const partRows = await runSql(runtime, buildSessionPartsQuery(cfg, sid))
+        if (partRows.length > MAX_SESSION_PARTS) throw new Error('enrichment session exceeds 10000-part budget')
         const ordered = orderSessionParts(partRows, cfg)
         if (ordered.length === 0) continue
         const mark = sessionMark(ordered, cfg)
@@ -76,14 +82,15 @@ export async function runProposeTick(runtime, opts = {}) {
           if (prev && cmpMark(mark, prev) <= 0) continue
         }
 
-        const { text, keys } = buildTranscript(ordered, cfg)
+        const { text } = buildTranscript(ordered, cfg)
         if (text) {
           const result = await getCompletion(runtime).complete(
-            buildProposeRequest({ text, model: p.t1_model, maxTokens: t1MaxTokens(p), maxCandidates: p.max_candidates }),
+            buildProposeRequest({ text, model: p.t1_model, maxTokens: t1MaxTokens(p), maxCandidates: Math.min(p.max_candidates, MAX_CANDIDATES) }),
             { signal: opts.signal }
           )
-          const candidates = parseProspects(result).filter((c) => (c.confidence ?? 1) >= p.confidence_floor)
-          perSession.push({ anchorKey: sid, keys, candidates })
+          const candidates = parseProspects(result).slice(0, Math.min(p.max_candidates, MAX_CANDIDATES)).filter((c) => (c.confidence ?? 1) >= p.confidence_floor)
+          const rows = [...collectProspectRows([{ anchorKey: sid, rows: ordered, candidates }], cfg, new Date().toISOString()).values()]
+          perSession.push(...rows)
           extracted++
         }
         // Advance even for a settled session with no extractable text, so it
@@ -91,8 +98,7 @@ export async function runProposeTick(runtime, opts = {}) {
         newMarks[sid] = mark
       }
 
-      const createdAt = new Date().toISOString()
-      const candidateRows = [...collectProspectRows(perSession, cfg, createdAt).values()]
+      const candidateRows = perSession
       const newRows = await filterNewProspects(runtime, candidateRows)
       if (newRows.length > 0) {
         await runtime.storage.appendRows(enrichTablePath(runtime.storage, PROSPECTS_DATASET), [...columnsFor(PROSPECTS_DATASET)], newRows)
@@ -174,7 +180,7 @@ export async function selectSessions(runtime, { regime, nowMs, marks }) {
   }
   // Oldest-settled first, so the longest-waiting sessions are enriched soonest;
   // a stable tiebreak on the id keeps selection deterministic.
-  eligible.sort((a, b) => a.lastTs - b.lastTs || (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0))
+  eligible.sort((a, b) => a.lastTs - b.lastTs || compareStrings(a.sid, b.sid))
   const ids = eligible.map((e) => e.sid)
   return regime === 'ongoing' ? ids.slice(0, p.max_sessions_per_tick) : ids
 }
@@ -210,8 +216,8 @@ export function buildSessionAggregateQuery(cfg) {
 }
 
 /**
- * Read **all** filtered parts of one session. The full transcript, no row
- * budget and no truncation (that was the defect). The shared content filter
+ * Read one full session or refuse it when it exceeds the part budget. The
+ * extra row detects overflow; a partial transcript is never submitted. The shared content filter
  * keeps the proposer on signal, and the anchor value is `sqlQuote`'d (the only
  * interpolated value; column names are validated identifiers). Ordering is done
  * in JS ({@link orderSessionParts}) so the watermark and transcript are computed
@@ -224,7 +230,7 @@ export function buildSessionAggregateQuery(cfg) {
 export function buildSessionPartsQuery(cfg, sessionId) {
   const cols = [...new Set([cfg.anchor_key_column, cfg.timestamp_column, cfg.tiebreak_column, cfg.id_column, cfg.text_column])]
   const clauses = [`${cfg.anchor_key_column} = '${sqlQuote(sessionId)}'`, ...contentFilterClauses(cfg)]
-  return `SELECT ${cols.join(', ')} FROM ${cfg.source_dataset} WHERE ${clauses.join(' AND ')}`
+  return `SELECT ${cols.join(', ')} FROM ${cfg.source_dataset} WHERE ${clauses.join(' AND ')} LIMIT ${MAX_SESSION_PARTS + 1}`
 }
 
 /**
@@ -249,7 +255,7 @@ export function orderSessionParts(rows, cfg) {
     if (ta !== tb) return ta - tb
     const ia = strField(a[cfg.tiebreak_column])
     const ib = strField(b[cfg.tiebreak_column])
-    return ia < ib ? -1 : ia > ib ? 1 : 0
+    return compareStrings(ia, ib)
   })
 }
 
@@ -268,6 +274,7 @@ export function buildTranscript(orderedRows, cfg) {
   const keys = new Set()
   for (const r of orderedRows) {
     const t = textField(r[cfg.text_column])
+    if (text.length + t.length + 1 > MAX_TRANSCRIPT_CHARS) throw new Error('enrichment transcript exceeds 2000000-character budget')
     if (t) text += (text ? '\n' : '') + t
     const idVal = strField(r[cfg.id_column])
     if (idVal) keys.add(idVal)
@@ -305,7 +312,7 @@ function t1MaxTokens(p) {
  * {@link prospectId}. The same (extractor, version, anchor, type+label)
  * collapses to one row, so re-proposing the same content never duplicates.
  *
- * @param {Array<{ anchorKey: string, keys: string[], candidates: ReturnType<typeof parseProspects> }>} perSession
+ * @param {Array<{ anchorKey: string, rows: Record<string, unknown>[], candidates: ReturnType<typeof parseProspects> }>} perSession
  * @param {EnrichConfig} cfg
  * @param {string} createdAt
  * @returns {Map<string, Record<string, unknown>>}
@@ -313,8 +320,10 @@ function t1MaxTokens(p) {
 export function collectProspectRows(perSession, cfg, createdAt) {
   /** @type {Map<string, Record<string, unknown>>} */
   const out = new Map()
-  for (const { anchorKey, keys, candidates } of perSession) {
-    for (const c of candidates) {
+  for (const { anchorKey, rows, candidates } of perSession) {
+    for (const c of candidates.slice(0, Math.min(cfg.propose.max_candidates, MAX_CANDIDATES))) {
+      const sourceKeys = evidenceKeys(rows, c.evidence, cfg)
+      if (!sourceKeys) continue
       const id = prospectId({
         extractor: EXTRACTOR,
         extractorVersion: EXTRACTOR_VERSION,
@@ -332,7 +341,7 @@ export function collectProspectRows(perSession, cfg, createdAt) {
         anchor_type: cfg.anchor_type,
         anchor_key: anchorKey,
         source_dataset: cfg.source_dataset,
-        source_keys: { [cfg.id_column]: keys },
+        source_keys: sourceKeys,
         extractor: EXTRACTOR,
         extractor_version: EXTRACTOR_VERSION,
         created_at: createdAt,
@@ -487,4 +496,30 @@ function textField(v) {
   } catch {
     return String(v)
   }
+}
+
+/**
+ * Verify one exact quote against one unique part. Ambiguous, absent or
+ * oversized quotes cannot acquire a claim-specific source locator.
+ * @param {Record<string, unknown>[]} rows
+ * @param {unknown} quote
+ * @param {EnrichConfig} cfg
+ * @returns {Record<string, string[]> | null}
+ * @ref LLP 0428#claim-evidence [implements]: provenance names verified evidence, never every message in a session.
+ */
+export function evidenceKeys(rows, quote, cfg) {
+  if (typeof quote !== 'string' || !quote.trim() || quote.length > 2000) return null
+  /** @type {Record<string, string[]> | null} */
+  let found = null
+  for (const row of rows) {
+    const text = textField(row[cfg.text_column])
+    if (!text.includes(quote)) continue
+    const id = strField(row[cfg.id_column])
+    const part = strField(row[cfg.tiebreak_column])
+    if (!id || !part) continue
+    const keys = { [cfg.id_column]: [id], [cfg.tiebreak_column]: [part] }
+    if (found && JSON.stringify(found) !== JSON.stringify(keys)) return null
+    found = keys
+  }
+  return found
 }

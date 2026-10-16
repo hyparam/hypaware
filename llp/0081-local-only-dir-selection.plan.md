@@ -1,4 +1,4 @@
-# LLP 0081: local-only directory selection — implementation plan
+# LLP 0081: local-only directory selection (implementation plan)
 
 **Type:** plan
 **Status:** Active
@@ -13,7 +13,7 @@
 > independently-mergeable tasks: the machine-local store first, then the
 > resolver, then the export-seam enforcement (the core) and the attended
 > surfaces in parallel, closed by a hermetic smoke. No task touches the
-> capture path, the cache schema, or the gateway — enforcement is
+> capture path, the cache schema, or the gateway: enforcement is
 > export-read + resolver only (LLP 0070).
 
 ## Tasks
@@ -30,7 +30,7 @@
 ## Notes
 
 - The design (LLP 0080) is neutral-minted `Status: Active`; merging the change
-  set ships it — no status-flip task.
+  set ships it, no status-flip task.
 - T3 is the privacy-critical core and the only complexity-4 task: one seam,
   three consumer call sites, and the cursor invariant, which must land
   together because the `readRowsSince` yield type is load-bearing.

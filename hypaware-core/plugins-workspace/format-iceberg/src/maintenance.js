@@ -8,7 +8,7 @@ import {
 import { fileCatalogCommit } from 'icebird/src/write/commit.js'
 import { icebergStageRewrite } from 'icebird/src/write/rewrite.js'
 
-import { SNAPSHOT_RETENTION_DEFAULTS } from '../../../../src/core/cache/maintenance.js'
+import { SNAPSHOT_RETENTION_DEFAULTS } from '../../../../src/core/cache/maintenance_defaults.js'
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
 

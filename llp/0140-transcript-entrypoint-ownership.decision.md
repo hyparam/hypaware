@@ -2,10 +2,12 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0446 (remove backfill planning; use import dry runs)
 **Systems:** Plugins, Backfill, Config
 **Author:** Brendan / Claude
 **Date:** 2026-07-27
 **Related:** LLP 0049, LLP 0050, LLP 0103, LLP 0115, LLP 0130, LLP 0133, LLP 0139
+**Extended-by:** LLP 0358 (the ownership gate now runs on a scheduled Claude transcript sweep)
 
 > Claude Desktop writes its sessions into `~/.claude/projects`, the tree the
 > `@hypaware/claude` backfill scans. So Desktop history was imported

@@ -117,7 +117,7 @@ export async function run({ harness, expect }) {
 
     // Pre-write the Claude attach marker so the healthy-case probe
     // reports `attached=true`. Real installs reach this state by
-    // running `hyp attach --client claude`; the smoke stubs it out
+    // running `hyp client attach claude`; the smoke stubs it out
     // here so the assertions can focus on diagnostics rather than
     // adapter side effects.
     await writeJson(path.join(fakeHome, '.claude', 'settings.json'), {
@@ -127,7 +127,7 @@ export async function run({ harness, expect }) {
 
     const okStdout = makeBuf()
     const okStderr = makeBuf()
-    const okExit = await dispatch(['status'], {
+    const okExit = await dispatch(['status', '--verbose'], {
       stdout: okStdout,
       stderr: okStderr,
       kernel,
@@ -307,7 +307,7 @@ export async function run({ harness, expect }) {
 
     const badTextStdout = makeBuf()
     const badTextStderr = makeBuf()
-    const badTextExit = await dispatch(['status'], {
+    const badTextExit = await dispatch(['status', '--verbose'], {
       stdout: badTextStdout,
       stderr: badTextStderr,
       kernel,
@@ -329,7 +329,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'broken text: surfaces a repair command',
       badText,
-      (v) => v.includes('repair: hyp attach --client claude')
+      (v) => v.includes('repair: hyp client attach claude')
     )
 
     await obs.shutdown()

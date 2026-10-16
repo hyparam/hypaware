@@ -12,7 +12,7 @@ import { flattenOtlpMetrics } from './otlp/metrics.js'
 
 /**
  * @import { PluginActivationContext, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { OtlpRequest } from './types.js'
+ * @import { OtlpRequest } from '../../../../src/core/otlp/types.js'
  */
 
 const FLATTENERS = {

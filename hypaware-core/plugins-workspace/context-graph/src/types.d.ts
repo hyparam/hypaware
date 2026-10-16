@@ -5,7 +5,7 @@ export type GraphRow = Record<string, unknown>
 
 /**
  * A partition the dedup compaction refused to rewrite, with the reason:
- * `unreadable-cursor` (cursor.json missing/corrupt — never treat as a
+ * `unreadable-cursor` (cursor.json missing/corrupt, never treat as a
  * synthetic default when about to retire a generation), `unexpected-layout`
  * (not the source-table layout graph tables use), or `concurrent-write`
  * (the cursor changed between scan and swap; retiring the old generation
@@ -48,6 +48,8 @@ export interface ContractRule {
   /** Declarative filter; only valid with `columns`. */
   where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
+  /** Optional bounded fan-out; engine prefers this over toRow. */
+  toRows?(row: Record<string, unknown>): GraphRow[]
 }
 
 /**
@@ -97,7 +99,7 @@ export interface Contract {
   /** Projector id stamped into provenance (e.g. `ai-gateway.t0`). */
   projector: string
   /**
-   * Projector version, stamped into every row's provenance — a marker for
+   * Projector version, stamped into every row's provenance: a marker for
    * which generation of this source's projector minted the row, not a
    * re-projection trigger. Ids are content-addressed (LLP 0023
    * §content-addressed-ids), so a bump alone rewrites nothing: committed rows
@@ -133,6 +135,8 @@ export interface ContractRegistry {
  */
 export interface ContextGraphCapability {
   registerContract(contract: Contract): void
+  /** Project only contracts registered for this source dataset. */
+  project(sourceDataset: string): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
   kit: {
     nodeId(type: string, naturalKey: string): string
     edgeId(srcId: string, type: string, dstId: string): string
@@ -143,7 +147,7 @@ export interface ContextGraphCapability {
   }
 }
 
-/** A node as the traversal reads it — graph identity plus display fields. */
+/** A node as the traversal reads it: graph identity plus display fields. */
 export interface GraphNode {
   node_id: string
   node_type: string
@@ -151,8 +155,12 @@ export interface GraphNode {
   label: string | null
 }
 
-/** An edge as the traversal reads it — endpoints and relation type. */
+/** An edge as the traversal reads it: endpoints and relation type. */
 export interface GraphEdge {
+  edge_id?: string
+  props?: Record<string, unknown> | null
+  source_dataset?: string
+  source_keys?: Record<string, unknown> | null
   src_id: string
   dst_id: string
   edge_type: string
@@ -163,6 +171,10 @@ export type Direction = 'out' | 'in' | 'both'
 
 /** One reached node, tagged with how (and from where) the walk arrived. */
 export interface Neighbor {
+  edge_id?: string
+  props?: Record<string, unknown> | null
+  source_dataset?: string
+  source_keys?: Record<string, unknown> | null
   hop: number
   edge_type: string
   direction: 'out' | 'in'
@@ -177,7 +189,9 @@ export interface TraversalOk {
   neighbors: Neighbor[]
   reachable: number
   truncated: boolean
+  /** For queryNeighbors: visited node ids including the seed, not the corpus size. */
   totalNodes: number
+  /** For queryNeighbors: distinct edges examined, not the corpus size. */
   totalEdges: number
 }
 
@@ -186,6 +200,16 @@ export interface TraversalErr {
   ok: false
   error: string
   candidates?: GraphNode[]
+  /**
+   * True when the failure is "nothing has been projected yet" rather than
+   * "no such node". Without it the two are indistinguishable, and the graph
+   * is empty by default on an install that has never run `hyp graph
+   * project` (LLP 0213 #d3).
+   *
+   * Set on the shared operation result, not in CLI rendering, so an MCP
+   * caller gets the same distinction as the terminal does.
+   */
+  graphEmpty?: boolean
 }
 
 /** Parsed `graph neighbors` argv: one positional seed plus flags. */

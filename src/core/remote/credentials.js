@@ -1,10 +1,10 @@
 // @ts-check
 
-import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { withFileLock } from '../util/file_lock.js'
 import { refreshSession, sessionExpiredMessage } from './identity_client.js'
 
 /**
@@ -34,20 +34,6 @@ const CREDENTIALS_BASENAME = 'remote-credentials.json'
 
 /** Refresh an `oidc` access JWT once it is within this window of expiry. */
 const REFRESH_SKEW_MS = 60 * 1000
-
-/**
- * The one lock constant: a lock whose mtime is older than this is treated as
- * abandoned by a dead holder and broken (LLP 0065 D1). It is set comfortably
- * above the longest *legitimate* hold - the 30s-bounded token-endpoint refresh
- * ({@link refreshOidcSession}) plus a millisecond commit - so a live holder mid
- * refresh is never broken, and comfortably below user patience. There is no
- * separate wait timeout and no liveness probe: because a lock's mtime is fixed at
- * acquisition and the clock only advances, every waiter is guaranteed to either
- * acquire (the holder released) or break the lock (its age crossed this) within
- * one stale interval. {@link withCredentialsLock} keeps a `2x` overall deadline
- * only as a runaway-loop backstop.
- */
-const LOCK_STALE_MS = 60 * 1000
 
 /**
  * Single-entry parse cache for the credential file. The stdio proxy resolves a
@@ -97,10 +83,11 @@ const MCP_PATH = '/v1/mcp'
  * the single registered target URL, so no second URL is ever configured.
  *
  * @param {string} url the registered target URL (a base, or a full /v1/mcp URL)
+ * @param {string} [org] operator read selector, carried only on the MCP URL
  * @returns {string}
  * @ref LLP 0084#derive [implements]: MCP endpoint derives from the registered base; a path already ending /v1/mcp is honored verbatim
  */
-export function deriveMcpEndpoint(url) {
+export function deriveMcpEndpoint(url, org) {
   /** @type {URL} */
   let parsed
   try {
@@ -113,6 +100,16 @@ export function deriveMcpEndpoint(url) {
   // only normalizing a trailing slash. Otherwise treat the URL as a base and
   // append the MCP path after any existing path prefix.
   parsed.pathname = trimmedPath.endsWith(MCP_PATH) ? trimmedPath : `${trimmedPath}${MCP_PATH}`
+  // Rewrite the raw query string rather than calling `searchParams.set`: that
+  // setter re-serializes every existing parameter as form encoding, so a
+  // registered `%20` would come back as `+`, a `~` as `%7E`, and a valueless
+  // `?flag` would grow an `=`, all only when an operator passes --org. This way
+  // the target's own parameters reach the server exactly as registered.
+  if (org !== undefined) {
+    const kept = parsed.search.replace(/^\?/, '').split('&')
+      .filter((part) => part !== '' && part !== 'org' && !part.startsWith('org='))
+    parsed.search = `?${[...kept, `org=${encodeURIComponent(org)}`].join('&')}`
+  }
   return parsed.toString()
 }
 
@@ -180,13 +177,16 @@ export function remoteTokenEnvVar(target) {
  */
 export async function readCredentials(stateDir) {
   const parsed = await readRawCredentials(stateDir)
-  /** @type {Record<string, RemoteCredentialRecord>} */
-  const out = {}
+  // Object.fromEntries, not `out[target] = record`: a target named `__proto__`
+  // would run the inherited setter, dropping the record from the map and making
+  // it the prototype, from where it answers every other name's lookup.
+  /** @type {[string, RemoteCredentialRecord][]} */
+  const entries = []
   for (const [target, entry] of Object.entries(parsed)) {
     const record = normalizeRecord(entry)
-    if (record) out[target] = record
+    if (record) entries.push([target, record])
   }
-  return out
+  return Object.fromEntries(entries)
 }
 
 /**
@@ -297,10 +297,28 @@ function normalizeRecord(entry) {
  */
 export async function writeToken(stateDir, target, token) {
   await withCredentialsLock(stateDir, async () => {
-    const current = await readRawCredentials(stateDir, { mutable: true })
-    current[target] = { kind: 'static', token }
-    await writeCredentials(stateDir, current)
+    const current = await readRawCredentials(stateDir)
+    await writeCredentials(stateDir, putRecord(current, target, { kind: 'static', token }))
   })
+}
+
+/**
+ * The raw credential map with one target's record replaced, defined as an
+ * **own** key. Plain assignment cannot: `current['__proto__'] = record` runs
+ * Object.prototype's inherited setter, so the record becomes the map's
+ * prototype and JSON.stringify writes a store without it, which is how
+ * `hyp remote login --name=__proto__` reported a token it never stored. The
+ * appended pair wins over an earlier one of the same name, so this replaces or
+ * adds exactly as the assignment did, and returning a fresh map lets callers
+ * read the shared parse cache instead of cloning it to mutate in place.
+ *
+ * @param {Record<string, unknown>} current
+ * @param {string} target
+ * @param {Record<string, unknown>} record
+ * @returns {Record<string, unknown>}
+ */
+function putRecord(current, target, record) {
+  return Object.fromEntries([...Object.entries(current), [target, record]])
 }
 
 /**
@@ -340,19 +358,18 @@ export async function writeSession(stateDir, target, session) {
  * @ref LLP 0065#d1 [implements]: refresh commit is a compare-and-swap, so the double-hold window cannot resurrect or clobber a sibling write
  */
 async function commitSession(stateDir, target, session, ifRefreshToken) {
-  const current = await readRawCredentials(stateDir, { mutable: true })
+  const current = await readRawCredentials(stateDir)
   if (ifRefreshToken !== undefined) {
     const cur = /** @type {Record<string, any> | undefined} */ (current[target])
     if (!cur || typeof cur !== 'object' || cur.refreshToken !== ifRefreshToken) return false
   }
-  current[target] = {
+  await writeCredentials(stateDir, putRecord(current, target, {
     kind: 'oidc',
     refreshToken: session.refreshToken,
     accessJwt: session.accessJwt,
     expiresAt: session.expiresAt,
     org: session.org,
-  }
-  await writeCredentials(stateDir, current)
+  }))
   return true
 }
 
@@ -399,7 +416,10 @@ export async function resolveToken({ target, env, stateDir }) {
     return { ok: true, token: fromEnv, source: 'env' }
   }
   const creds = await readCredentials(stateDir)
-  const entry = creds[target]
+  // Own-key read: an inherited Object.prototype member is truthy, so a target
+  // named `constructor` walked past this presence check and died in bearerOf's
+  // `token.length` instead of reporting that it has no stored token.
+  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
   if (entry) {
     const token = bearerOf(entry)
     // A non-empty cached bearer is usable as-is; an oidc record is also present
@@ -443,7 +463,9 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
   // below sees the freshest refresh token a sibling may have just rotated in.
   if (forceRefresh) rawCache = null
   const creds = await readCredentials(stateDir)
-  const entry = creds[target]
+  // Own-key read, as in resolveToken: an inherited member is truthy, so the
+  // miss was signposted as an unrefreshable session, not a logged-out target.
+  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
   if (!entry) {
     return { ok: false, error: noTokenError(target, envName) }
   }
@@ -679,101 +701,17 @@ function noTokenError(target, envName) {
   return `no token for '${target}' - run 'hyp remote login ${target}' (or set ${envName})`
 }
 
-/** @param {number} ms @returns {Promise<void>} */
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 /**
- * Break a lock whose holder is past {@link LOCK_STALE_MS}, so a crashed holder can
- * never wedge the store for longer than one stale interval (LLP 0065 D1). The
- * break is a plain `fs.rm`: it does not grant the lock, it only clears a dead
- * file, so the contender that broke it must still win the `O_EXCL` create like
- * everyone else. That is what makes a four-line break safe where the old
- * rename-aside-and-restore steal was not - exclusivity is decided by the create,
- * never by the break.
- *
- * @param {string} lockPath
- * @returns {Promise<void>}
- */
-async function breakLockIfStale(lockPath) {
-  /** @type {Stats} */
-  let st
-  try {
-    st = await fs.stat(lockPath)
-  } catch {
-    return // vanished between the failed open and now: the loop retries the create
-  }
-  // A holder within its budget is alive (or recently so): wait it out. Only an
-  // age past the bounded-hold ceiling marks it dead and breakable.
-  if (Date.now() - st.mtimeMs > LOCK_STALE_MS) await fs.rm(lockPath, { force: true })
-}
-
-/**
- * Serialize the read-modify-write of the shared 0600 store across concurrent
- * `hyp` processes (a verb call beside a proxy, two MCP clients). Without it two
- * writers to *different* targets each read the whole map and rename; the later
- * rename clobbers the earlier writer's just-rotated one-time-use refresh token
- * for the other target, forcing a needless re-login. An `O_EXCL` lock file is the
- * cross-process mutex, held across the bounded token-endpoint refresh
- * ({@link refreshOidcSession}). The cache is dropped on entry so the locked body
- * reads the freshest on-disk map (an identical-size sibling rewrite the parse
- * cache would otherwise miss).
- *
- * Crash recovery is age-only (LLP 0065 D1): the lock is granted solely by the
- * `O_EXCL` create, a holder past {@link LOCK_STALE_MS} is broken with a plain
- * `fs.rm`, and release removes the file only if its per-acquisition nonce is still
- * ours, so a holder whose overran lock was broken and re-acquired never evicts the
- * successor. No liveness probe, no `{host, pid}` tag, no second timeout: the only
- * deadline is a `2x` runaway-loop backstop, because a fixed-mtime lock is
- * guaranteed to be acquired or broken within one stale interval.
- *
  * @template T
  * @param {string} stateDir
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
- * @ref LLP 0065#d1 [implements]: age-stale mutex - grant only by O_EXCL, break by rm, release by nonce
  */
 async function withCredentialsLock(stateDir, fn) {
-  await fs.mkdir(stateDir, { recursive: true })
-  const lockPath = `${remoteCredentialsPath(stateDir)}.lock`
-  const nonce = crypto.randomUUID()
-  const deadline = Date.now() + LOCK_STALE_MS * 2
-  for (;;) {
-    try {
-      const handle = await fs.open(lockPath, 'wx')
-      try {
-        await handle.writeFile(nonce)
-      } catch (err) {
-        // A create that could not record its nonce must not leave an empty lock
-        // that wedges contenders until the stale age; drop our own fresh file.
-        await fs.rm(lockPath, { force: true })
-        throw err
-      } finally {
-        await handle.close()
-      }
-      break
-    } catch (err) {
-      if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
-      await breakLockIfStale(lockPath)
-      if (Date.now() > deadline) {
-        throw new Error('timed out acquiring the remote credentials lock')
-      }
-      await delay(25)
-    }
-  }
-  try {
-    // Read the freshest on-disk map inside the lock; see the doc comment.
+  return withFileLock(`${remoteCredentialsPath(stateDir)}.lock`, async () => {
     rawCache = null
-    return await fn()
-  } finally {
-    // Remove only our own lock: if a hold ever overran the stale age and a
-    // contender broke and re-acquired it, the file now belongs to a successor.
-    try {
-      const owner = await fs.readFile(lockPath, 'utf8')
-      if (owner === nonce) await fs.rm(lockPath, { force: true })
-    } catch { /* already gone */ }
-  }
+    return fn()
+  })
 }
 
 /**

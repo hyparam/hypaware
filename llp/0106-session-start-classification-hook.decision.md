@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0044, LLP 0049, LLP 0100, LLP 0103, LLP 0105, LLP 0107
+**Extended-by:** [LLP 0200](./0200-folder-ask-is-a-preference.decision.md) (the ask is now opt-in: a machine-local preference decides whether it happens, and its default is `sync` - unclassified folders keep the implicit default and the hook stays quiet. Choosing `ask` is this document unchanged. The hook, its gating, its copy's three choices, and the store its answers land in are untouched; the copy gains one line naming the preference)
 
 > On an **enrolled** machine, opening a Claude/Codex session in a directory
 > with no recorded usage class triggers a client hook that asks the user to

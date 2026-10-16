@@ -27,6 +27,11 @@ export function reduce(state, key) {
     return cancelledOf(state)
   }
   if (key.name === 'escape') {
+    // Back is opt-in per prompt: only the wizard's step prompts set
+    // `allowBack`, so escape keeps meaning cancel everywhere else.
+    // Ctrl+C (above) cancels regardless.
+    // @ref LLP 0191#esc-back [implements]: escape settles as `backed` on an allowBack prompt; ctrl+c stays the cancel
+    if (state.allowBack) return /** @type {State} */ ({ ...state, status: 'backed' })
     return cancelledOf(state)
   }
   switch (state.kind) {
@@ -51,27 +56,23 @@ function cancelledOf(state) {
  */
 function reduceMultiselect(state, key) {
   const n = state.options.length
+  // The Submit row sits one past the last option (cursor === n): a visible
+  // way to finish for people who would not guess that enter confirms from
+  // anywhere. Enter keeps its confirm-from-anywhere meaning.
+  const rows = n + 1
   if (key.name === 'return') {
-    const selected = state.options.filter((o) => o.checked).length
-    const min = state.bounds?.min ?? 0
-    const max = state.bounds?.max
-    if (selected < min) {
-      return { ...state, error: `select at least ${min}` }
-    }
-    if (typeof max === 'number' && selected > max) {
-      return { ...state, error: `select at most ${max}` }
-    }
-    return { ...state, status: 'resolved', error: undefined }
+    return confirmMultiselect(state)
   }
-  if (n === 0) return state
   switch (key.name) {
     case 'up':
     case 'k':
-      return { ...state, cursor: (state.cursor - 1 + n) % n, error: undefined }
+      return { ...state, cursor: (state.cursor - 1 + rows) % rows, error: undefined }
     case 'down':
     case 'j':
-      return { ...state, cursor: (state.cursor + 1) % n, error: undefined }
+      return { ...state, cursor: (state.cursor + 1) % rows, error: undefined }
     case 'space': {
+      // Space on the Submit row activates it, like pressing a button.
+      if (state.cursor === n) return confirmMultiselect(state)
       const cur = state.options[state.cursor]
       // A disabled row (e.g. a fleet-locked source) is context-only: the
       // cursor can rest on it, but toggling is a no-op.
@@ -96,6 +97,27 @@ function reduceMultiselect(state, key) {
     }
   }
   return state
+}
+
+/**
+ * Settle a multiselect as resolved, or reject with a bounds error while
+ * staying active. Shared by enter (anywhere) and space/enter on the
+ * Submit row.
+ *
+ * @param {MultiselectState} state
+ * @returns {MultiselectState}
+ */
+function confirmMultiselect(state) {
+  const selected = state.options.filter((o) => o.checked).length
+  const min = state.bounds?.min ?? 0
+  const max = state.bounds?.max
+  if (selected < min) {
+    return { ...state, error: `select at least ${min}` }
+  }
+  if (typeof max === 'number' && selected > max) {
+    return { ...state, error: `select at most ${max}` }
+  }
+  return { ...state, status: 'resolved', error: undefined }
 }
 
 /**

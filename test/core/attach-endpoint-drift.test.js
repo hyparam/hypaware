@@ -13,7 +13,7 @@ import { createAttachHandler } from '../../src/core/config/action_attach.js'
 /**
  * Issue #277 Gap 2: the daemon's gateway rebinds to a fresh ephemeral port on
  * every restart, but the attach reconcile pass is level-triggered on marker
- * existence — a `done` attach marker short-circuits forever, so the client's
+ * existence, a `done` attach marker short-circuits forever, so the client's
  * ANTHROPIC_BASE_URL keeps pointing at the old port and capture silently stops.
  *
  * The fix makes the attach marker endpoint-aware: it records the endpoint it
@@ -67,7 +67,7 @@ function clientsWith({ attachCalls }) {
       ctx.stdout.write(
         JSON.stringify({
           status: 'attached', action: 'attach', client: 'claude', dry_run: false,
-          changed: true, settings_path: '/home/u/.claude/settings.json', port,
+          changed: true, settings_path: '/home/u/.claude/settings.json', port, mode: 'otel',
         }) + '\n'
       )
     },
@@ -161,6 +161,82 @@ test('a legacy done attach marker with no recorded endpoint re-attaches once (ba
   }
 })
 
+test('a proxy-mode marker at the current endpoint re-attaches into otel mode', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    const endpoint = 'http://127.0.0.1:55555'
+    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.writeFileSync(
+      markerPath(stateRoot),
+      JSON.stringify({
+        attach: {
+          claude: {
+            status: 'done',
+            request_key: 'claude',
+            at: '2026-08-17T00:00:00.000Z',
+            endpoint,
+            mode: 'proxy',
+          },
+        },
+      }, null, 2) + '\n'
+    )
+
+    /** @type {string[]} */
+    const attachCalls = []
+    const clients = clientsWith({ attachCalls })
+    const reconciler = createActionReconciler({ stateRoot, handlers: [createAttachHandler()], log: NOOP_LOG })
+
+    const first = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(first.results.map((x) => x.outcome), ['done'])
+    assert.deepEqual(attachCalls, [endpoint])
+    assert.equal(readMarkerFile(stateRoot).attach.claude.mode, 'otel')
+
+    const second = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(second.results.map((x) => x.outcome), ['skipped'])
+    assert.equal(attachCalls.length, 1, 'the otel marker settles after the migration')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('an otherwise-current Claude action marker without the current settings schema re-attaches once', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    const endpoint = 'http://127.0.0.1:55555'
+    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.writeFileSync(
+      markerPath(stateRoot),
+      JSON.stringify({
+        attach: {
+          claude: {
+            status: 'done',
+            request_key: 'claude',
+            at: '2026-08-31T00:00:00.000Z',
+            endpoint,
+            mode: 'otel',
+          },
+        },
+      }, null, 2) + '\n'
+    )
+
+    /** @type {string[]} */
+    const attachCalls = []
+    const clients = clientsWith({ attachCalls })
+    const reconciler = createActionReconciler({ stateRoot, handlers: [createAttachHandler()], log: NOOP_LOG })
+
+    const first = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(first.results.map((x) => x.outcome), ['done'])
+    assert.deepEqual(attachCalls, [endpoint], 'the pre-2.1.257 marker must reach the settings writer')
+    assert.equal(readMarkerFile(stateRoot).attach.claude.settings_schema, 4)
+
+    const second = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(second.results.map((x) => x.outcome), ['skipped'])
+    assert.equal(attachCalls.length, 1, 'the schema migration settles after one successful attach')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
 test('a changed asset set re-attaches at an unchanged endpoint (LLP 0107 currency)', async () => {
   const { tmp, stateRoot } = await makeFixture()
   try {
@@ -214,17 +290,19 @@ test('a changed asset set re-attaches at an unchanged endpoint (LLP 0107 currenc
     assert.equal(attachCalls.length, 2)
 
     // The org withdraws the plugin again. The set shrinks, so this re-attach
-    // copies only helper-a - but helper-b is still on disk, and the marker is
-    // the only thing naming it. A rewrite that reported just this pass's copies
-    // would strand it beyond the reach of every reversal.
+    // copies only helper-a, and takes helper-b off the machine: this attach's
+    // own record says it wrote that path, the plan no longer contains it, and
+    // its bytes are unchanged (LLP 0219 #prune-on-materialize). Before that it
+    // sat there until someone ran a detach.
     const r5 = await reconciler.reconcile(reconcileInput({ endpoint, clients, home, skills: [skillA] }))
     assert.deepEqual(r5.results.map((x) => x.outcome), ['done'])
     const dropped = path.join(home, 'skills', 'claude', 'helper-b')
-    assert.equal(fs.existsSync(dropped), true, 'the withdrawn skill is still on disk')
+    assert.equal(fs.existsSync(dropped), false, 'the withdrawn skill comes off the machine')
     assert.deepEqual(
       [...readMarkerFile(stateRoot).attach.claude.installed_assets].sort(),
       [path.join(home, 'skills', 'claude', 'helper-a'), dropped].sort(),
-      'the undo record still names it, so a later leave can remove it'
+      'the undo record still names it: the union is unchanged, and it is what a ' +
+        'prune that could not act (an edited copy, a locked path) would fall back on'
     )
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })

@@ -2,14 +2,17 @@
 
 /**
  * The wizard's closing "first look": the shared gateway overview
- * (`query/overview.js`, the same block `hyp query overview` prints),
- * placed at the end of an attended setup so the run ends on the user's own
- * rows rather than on a command they still have to type.
+ * (`query/overview.js`), placed at the end of an attended setup so the run
+ * ends on the user's own rows rather than on a command they still have to
+ * type.
  *
- * This module owns only the wizard's half of the contract: when the step
- * runs, and that it can never fail a finished install.
+ * Setup renders two of the block's four sections
+ * ({@link FIRST_LOOK_SECTIONS}); `hyp query overview` renders all four.
  *
- * @import { FirstLookResult } from '../../../../src/core/cli/wizard/types.js'
+ * This module owns only the wizard's half of the contract: which sections
+ * run, when the step runs, and that it can never fail a finished install.
+ *
+ * @import { FirstLookOutcome, FirstLookResult } from '../../../../src/core/cli/wizard/types.js'
  * @import { OverviewNotice, OverviewQueryRunner } from '../../../../src/core/query/types.js'
  */
 
@@ -40,11 +43,21 @@ export { overviewRunnerFromCtx as firstLookRunnerFromCtx } from '../../query/ove
  * cannot act on, attached to a block whose backfilled rows were
  * force-flushed anyway. `hyp query overview` prints both.
  *
+ * A failed refresh is NOT that line and is not dropped, even though it
+ * arrives on the same freshness channel. It says the spool could not enter
+ * the cache, so rows the user can see are recorded are absent from the table
+ * being drawn. Before LLP 0321 that failure threw and setup printed no block
+ * at all; serving the confirmed rows is the improvement, and printing them
+ * under "First look at what HypAware has recorded" with the one signal that
+ * they are incomplete suppressed would trade a visible failure for a silent
+ * one - the omission this block's own rules forbid.
+ *
  * The sink closes. An expired deadline abandons queries that keep running,
  * and one of them resolving late must not print a disclosure after the
  * privacy narration that setup documents as its last words.
  *
  * @ref LLP 0105 [implements]: withholding is disclosed on every surface, setup included
+ * @ref LLP 0321#consequences [implements]: a degraded result never claims to be current, setup included
  * @param {{ write(chunk: string): unknown }} stderr
  * @returns {((notice: OverviewNotice) => void) & { close(): void }}
  */
@@ -53,7 +66,7 @@ export function firstLookNoticeSink(stderr) {
   const sink = /** @type {((notice: OverviewNotice) => void) & { close(): void }} */ (
     /** @param {OverviewNotice} notice */
     (notice) => {
-      if (open && notice.kind === 'local-only') stderr.write(notice.line)
+      if (open && notice.kind !== 'freshness') stderr.write(notice.line)
     }
   )
   sink.close = () => { open = false }
@@ -62,6 +75,30 @@ export function firstLookNoticeSink(stderr) {
 
 /** The wizard's heading for the shared block: this is a setup milestone. */
 const FIRST_LOOK_TITLE = 'First look at what HypAware has recorded'
+
+/**
+ * The sections setup runs. Two of the four, and the seam LLP 0135 kept
+ * open for exactly this ("the seam for a shorter variant remains if setup
+ * output ever needs trimming").
+ *
+ * Both halves of the cost were real on a working cache. **Space:** all
+ * four run ~60 lines, which is a wall of tables to scroll past at the
+ * moment the user is finally being handed something to do. **Time:** the
+ * sections run sequentially, so four of them on a 91k-row cache took ~5s
+ * against a section budget that assumed ~2s, and setup regularly printed
+ * "Stopped here to keep setup moving - the repos and tools sections did
+ * not finish". A block that routinely announces its own truncation is
+ * worse than a shorter block that finishes.
+ *
+ * Models and daily are the pair that survives, because they are the two
+ * that answer "did it work": which models this machine talks to, and that
+ * traffic landed on real days. Repos and tools are the interesting half,
+ * and interesting is what `hyp query overview` is for - it still runs all
+ * four, with no deadline, because there the user asked.
+ *
+ * @ref LLP 0198#wizard-sections [implements]: setup runs the two sections that prove capture, not all four
+ */
+const FIRST_LOOK_SECTIONS = /** @type {const} */ (['models', 'daily'])
 
 /**
  * How long the closing look may take before setup gives up on it.
@@ -113,7 +150,18 @@ async function withDeadline(promise, ms) {
  * materialized) degrades to a skipped step, because setup itself already
  * succeeded by the time this runs.
  *
+ * Returns `wrote` alongside `shown`, and it is *measured*: the writable the
+ * body sees is a counter in front of the caller's, so every branch, present
+ * or future, reports whether it put text on the screen. The two questions
+ * are not the same one. `shown` is "did the block render", and a caller that
+ * needs "did this push what came before it out of view" cannot infer that
+ * from `shown`: the `slow` skip renders no block and still writes two lines
+ * saying so. The wizard's closing repeat asks the second question
+ * (LLP 0230 #when), and inferring it from `shown` is what broke across the
+ * no-dataset, error and slow branches in turn.
+ *
  * @ref LLP 0135#first-look [implements]: setup ends on the user's own rows, and never fails on them
+ * @ref LLP 0230#when [implements]: the caller needs "wrote something", so measure it here rather than let the caller guess
  *
  * @param {{
  *   runner?: OverviewQueryRunner | undefined,
@@ -123,8 +171,23 @@ async function withDeadline(promise, ms) {
  * }} args
  * @returns {Promise<FirstLookResult>}
  */
-export async function runWizardFirstLook({ runner, stdout, color = false, budgetMs = FIRST_LOOK_BUDGET_MS }) {
-  return withSpan(
+export async function runWizardFirstLook({ runner, stdout: target, color = false, budgetMs = FIRST_LOOK_BUDGET_MS }) {
+  /** @type {boolean} */
+  let wrote = false
+  // The only `stdout` in scope below, so a branch cannot write without being
+  // counted. Set before delegating rather than after: a `write` that throws
+  // part-way (EPIPE on a closed pipe) may have emitted, and the safe error
+  // is an extra reminder, not a lost one.
+  /** @type {{ write(chunk: string): unknown }} */
+  const stdout = {
+    /** @param {string} chunk */
+    write(chunk) {
+      wrote = true
+      return target.write(chunk)
+    },
+  }
+  /** @type {FirstLookOutcome} */
+  const outcome = await withSpan(
     'wizard.first_look',
     {
       [Attr.COMPONENT]: 'wizard',
@@ -139,8 +202,8 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
       }
 
       // Sections land in `partial` as they complete, so an expired deadline
-      // keeps finished work rather than discarding it: three sections done
-      // and a fourth in flight is a shorter block, not a blank one.
+      // keeps finished work rather than discarding it: one section done and
+      // the other in flight is a shorter block, not a blank one.
       const partial = emptyOverview()
       // The whole step is inside one try, not just the queries: rendering
       // and writing can fail too (an unforeseen row shape, or a stream that
@@ -156,11 +219,10 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
       // (`cli/stream_errors.js`), which is where it belongs: it is a
       // property of the process's streams, not of any one command.
       try {
-        // Every section, the same block `hyp query overview` prints. The
-        // run is longer for it (~60 lines against ~35), which the privacy
-        // narration survives because it is written after this and stays the
-        // last thing on screen (`@ref LLP 0135#privacy`).
-        const overview = await withDeadline(collectOverview(runner, { into: partial }), budgetMs)
+        const overview = await withDeadline(
+          collectOverview(runner, { into: partial, sections: FIRST_LOOK_SECTIONS }),
+          budgetMs
+        )
 
         const expired = overview === null
         const rows = overview ?? partial
@@ -180,39 +242,46 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
 
         span.setAttribute('provider_rows', rows.providerRows.length)
         span.setAttribute('day_rows', rows.dailyRows.length)
+        // Nothing recorded is said once, by setup's closing line; an empty
+        // block here would say it first. A withholding notice is still news.
+        // @ref LLP 0437#first-look [implements]: an empty first look prints nothing
+        const withheld = runner.sawWithholding?.() ?? false
+        if (!expired && !withheld && rows.providerRows.length === 0 && rows.dailyRows.length === 0) {
+          span.setAttribute('status', 'skipped')
+          span.setAttribute('skip_reason', 'empty')
+          return { shown: false, reason: /** @type {const} */ ('empty') }
+        }
         if (expired) {
           span.setAttribute('partial', true)
           span.setAttribute('budget_ms', budgetMs)
           span.setAttribute('missing_sections', missingSections(rows).join(','))
         }
-        // `footer: false` because the closing line below is this run's single
-        // pointer: setup should teach one command, not two dim lines naming
-        // the same one.
+        // `footer: false` because the block ends on its last section: the
+        // first look prints no pointer line at all, dim or otherwise.
         stdout.write(renderOverview({
           ...rows,
           title: FIRST_LOOK_TITLE,
           color,
           footer: false,
-          withheld: runner.sawWithholding?.() ?? false,
+          withheld,
         }))
         if (expired) {
           // Name the missing sections as *unfinished*, not as empty. "no
           // repos" and "the repos section did not finish" are different
           // claims, and only one of them is true - the same never-silent rule
-          // the block follows for the rows it omits.
+          // the block follows for the rows it omits. `collectOverview` stamped
+          // the requested set on `partial` before its first await, so an
+          // expired run still names only the two sections it asked for.
           const missing = missingSections(rows)
           const which = missing.length > 1
             ? `${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]} sections`
             : `${missing[0]} section`
           stdout.write(
             missing.length > 0
-              ? `\nStopped here to keep setup moving - the ${which} did not finish.\n`
+              ? `\nStopped here to keep setup moving: the ${which} did not finish.\n`
               : '\nStopped here to keep setup moving.\n'
           )
         }
-        // The block is re-runnable: name the command that reprints it, so the
-        // setup teaches one durable entry point instead of a one-off view.
-        stdout.write(`\nSee this again anytime: hyp query overview (--sql shows the queries)\n`)
         return {
           shown: true,
           providerRows: rows.providerRows.length,
@@ -230,4 +299,7 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
     },
     { component: 'wizard' }
   )
+  // One exit, so `wrote` is attached to whatever the body decided rather
+  // than restated per branch.
+  return { ...outcome, wrote }
 }

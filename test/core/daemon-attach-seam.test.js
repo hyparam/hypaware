@@ -9,7 +9,7 @@ import { resolveClientActionSeam } from '../../src/core/daemon/runtime.js'
  * #179 round-3 hardening (LLP 0045 §Part 1): the daemon's client-action seam
  * resolves the auto-attach `endpoint` from a *proven-bound* gateway only. When
  * `localEndpoint()` throws (the gateway never bound) the daemon must NOT fall
- * back to the configured-`listen` URL — recording a base URL for a port nothing
+ * back to the configured-`listen` URL: recording a base URL for a port nothing
  * bound would point clients at a dead endpoint. The manual `hyp attach`/`init`
  * paths keep that fallback (`core_commands.js`); this is the daemon path only.
  */
@@ -30,7 +30,7 @@ function makeFileLog() {
 /**
  * A minimal `BootKernelResult` double exposing just what the seam reads: the
  * ai-gateway capability (with a stubbed `localEndpoint`) and a config whose
- * configured `listen` *would* resolve — so the unbound case proves the daemon no
+ * configured `listen` *would* resolve, so the unbound case proves the daemon no
  * longer falls back to it.
  * @param {{ localEndpoint: () => string }} opts
  * @returns {any}
@@ -47,7 +47,7 @@ function makeBoot({ localEndpoint }) {
   }
   return {
     clientDescriptors: new Map(),
-    // Configured listen resolves to http://127.0.0.1:8787 — the *old* fallback
+    // Configured listen resolves to http://127.0.0.1:8787, the *old* fallback
     // target. The daemon path must ignore it when localEndpoint() throws.
     config: { version: 2, plugins: [{ name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787' } }] },
     runtime: {
@@ -80,7 +80,7 @@ test('seam does NOT fall back to the configured listen when localEndpoint() thro
     }),
     fileLog: /** @type {any} */ (fileLog),
   })
-  // The configured listen (127.0.0.1:8787) WOULD have resolved — the daemon path
+  // The configured listen (127.0.0.1:8787) WOULD have resolved, the daemon path
   // must still leave endpoint undefined so auto-attach stays inert this pass.
   assert.equal(seam.endpoint, undefined)
   // The gateway capability itself is still present (clients can be invoked once

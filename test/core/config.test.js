@@ -4,8 +4,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  configRecordsPickAnswer,
   createConfigRegistry,
   defaultConfigPath,
+  isForgedGrepOnlyConfig,
   parseConfigShape,
 } from '../../src/core/config/schema.js'
 import {
@@ -99,6 +101,9 @@ test('parseConfigShape preserves query.cache.maintenance.compact_batch_bytes', (
       cache: {
         maintenance: {
           compact_batch_bytes: 16 * 1024 * 1024,
+          // Lowering the batch bound below the default average would leave a
+          // converged partition permanently due, so the pair moves together.
+          compact_avg_file_bytes: 16 * 1024 * 1024,
           compact_file_count: 8,
         },
       },
@@ -121,6 +126,99 @@ test('parseConfigShape rejects a negative compact_batch_bytes', () => {
     result.ok === false &&
       result.errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_batch_bytes')),
     true
+  )
+})
+
+// @ref LLP 0312#avg-below-batch [tests]: an in-place merged file never
+// exceeds `compact_batch_bytes`, so an average-size threshold above that
+// bound is one a converged partition can never satisfy. Validation rejects
+// the pairing rather than letting a partition read as permanently due.
+test('parseConfigShape rejects compact_avg_file_bytes above compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          compact_avg_file_bytes: 64 * 1024 * 1024,
+          compact_batch_bytes: 32 * 1024 * 1024,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  const error = result.ok === false &&
+    result.errors.find((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes'))
+  assert.ok(error, 'the offending key is named')
+  assert.match(error.message, /compact_batch_bytes/)
+})
+
+test('parseConfigShape rejects compact_avg_file_bytes above the default compact_batch_bytes', () => {
+  // Only the average is set, so the pairing is with the default batch bound
+  // (32 MB). Comparing the two written values alone would let this through.
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: { cache: { maintenance: { compact_avg_file_bytes: 128 * 1024 * 1024 } } },
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(
+    result.ok === false &&
+      result.errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes')),
+    true
+  )
+})
+
+test('parseConfigShape accepts compact_avg_file_bytes equal to compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          compact_avg_file_bytes: 8 * 1024 * 1024,
+          compact_batch_bytes: 8 * 1024 * 1024,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, true)
+})
+
+// @ref LLP 0312#avg-below-batch [tests]: the rule compares EFFECTIVE values,
+// which means a key that failed its own check would otherwise be paired with
+// a default the user never wrote. Reporting that pairing names a bound absent
+// from their file and blames the key that is not broken.
+test('parseConfigShape does not blame compact_avg_file_bytes for an invalid compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          // Legal against the batch bound the user actually wants; the batch
+          // bound itself is what is malformed.
+          compact_avg_file_bytes: 64 * 1024 * 1024,
+          compact_batch_bytes: -1,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  const errors = result.ok === false ? result.errors : []
+  assert.equal(
+    errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_batch_bytes')),
+    true,
+    'the key that is actually malformed is reported'
+  )
+  assert.equal(
+    errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_avg_file_bytes')),
+    false,
+    'the cross-field rule stays silent rather than name a default bound the config never wrote'
   )
 })
 
@@ -217,6 +315,31 @@ test('diagnoseV1Config reports advisory product wiring gaps', async () => {
   )
 })
 
+// `hyp setup --source opencode` composes exactly one plugin, and OpenCode's
+// adapter registers with the kernel's own client registry rather than the
+// gateway's, so `hyp client attach opencode` succeeds with no gateway in the
+// config. Warning anyway made the documented OpenCode onboarding end on
+// `overall: degraded`, claiming attach would fail after it already had.
+test('diagnoseV1Config does not ask an endpoint-free client to add a gateway', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const ctx = { clientDescriptors: catalog.clientDescriptors, knownPlugins: catalog.pluginMetadata }
+
+  const opencodeOnly = diagnoseV1Config(
+    { version: 2, plugins: [{ name: '@hypaware/opencode' }] },
+    ctx
+  )
+  assert.deepEqual(opencodeOnly.map((diagnostic) => diagnostic.kind), [])
+
+  // The gateway-backed clients still get the warning: their adapters
+  // register through the gateway, so attach really does fail without it.
+  const claudeOnly = diagnoseV1Config(
+    { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    ctx
+  )
+  assert.deepEqual(claudeOnly.map((diagnostic) => diagnostic.kind), ['client_without_gateway'])
+})
+
 test('diagnoseV1Config falls back to first-party client descriptors', () => {
   const withoutGateway = diagnoseV1Config({
     version: 2,
@@ -224,16 +347,29 @@ test('diagnoseV1Config falls back to first-party client descriptors', () => {
   })
   assert.deepEqual(withoutGateway.map((diagnostic) => diagnostic.kind), ['client_without_gateway'])
 
-  const missingUpstream = diagnoseV1Config({
+  const claudeNeedsNoProxyUpstream = diagnoseV1Config({
     version: 2,
     plugins: [
       { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/claude' },
     ],
   })
-  assert.deepEqual(missingUpstream.map((diagnostic) => diagnostic.kind), [
-    'gateway_missing_anthropic_upstream',
-  ])
+  assert.deepEqual(claudeNeedsNoProxyUpstream.map((diagnostic) => diagnostic.kind), [])
+
+  // Codex needs no inference upstream either since capture left the
+  // inference path: the picker composes `upstreams: []` for a codex pick, so
+  // a warning here would fire on every default install. The fallback
+  // descriptor has to agree with the manifest, which dropped
+  // `required_upstreams` in the same change.
+  // @ref LLP 0429#default [tests]: onboarding composes no inference upstream for Codex
+  const codexNeedsNoUpstream = diagnoseV1Config({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+      { name: '@hypaware/codex' },
+    ],
+  })
+  assert.deepEqual(codexNeedsNoUpstream.map((diagnostic) => diagnostic.kind), [])
 })
 
 test('diagnoseV1Config emits descriptor-derived upstream diagnostic kinds', () => {
@@ -294,7 +430,7 @@ test('buildPluginCatalog extracts client descriptors from manifests', async () =
   assert.equal(claude?.agentDir, '.claude/agents')
   assert.equal(claude?.attachProbe?.format, 'json')
   assert.equal(claude?.attachProbe?.marker_key, '_hypaware')
-  assert.deepEqual(claude?.requiredUpstreams, ['anthropic'])
+  assert.equal(claude?.requiredUpstreams, undefined)
 
   assert.ok(catalog.clientDescriptors.has('codex'))
   const codex = catalog.clientDescriptors.get('codex')
@@ -302,7 +438,7 @@ test('buildPluginCatalog extracts client descriptors from manifests', async () =
   assert.equal(codex?.skillDir, '.codex/skills')
   assert.equal(codex?.agentDir, undefined)
   assert.equal(codex?.attachProbe?.format, 'toml')
-  assert.deepEqual(codex?.requiredUpstreams, ['openai', 'chatgpt'])
+  assert.equal(codex?.requiredUpstreams, undefined)
 })
 
 test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed by row name', () => {
@@ -351,7 +487,7 @@ test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed 
               summary: 'The Claude Mac app',
               detect: { app_bundle: '/Applications/Claude.app' },
               needs_setup: true,
-              configure_command: 'claude-desktop install',
+              configure_command: 'client claude-desktop install',
             },
           ],
         },
@@ -378,7 +514,7 @@ test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed 
   assert.equal(claudeDesktop?.summary, 'The Claude Mac app')
   assert.deepEqual(claudeDesktop?.detect, { app_bundle: '/Applications/Claude.app' })
   assert.equal(claudeDesktop?.needsSetup, true)
-  assert.equal(claudeDesktop?.configureCommand, 'claude-desktop install')
+  assert.equal(claudeDesktop?.configureCommand, 'client claude-desktop install')
 })
 
 test('buildPluginCatalog picker descriptors are first-manifest-wins on a name collision', () => {
@@ -648,4 +784,33 @@ test('diagnoseV1Config treats ChatGPT as a valid Codex upstream', async () => {
     diagnostics.some((diagnostic) => diagnostic.kind === 'gateway_missing_openai_upstream'),
     false
   )
+})
+
+// The forged-shape predicate is exported, so it must match exactly what its
+// JSDoc and LLP 0426 document even though every current caller pre-filters
+// on `version === 2`: the next caller inherits the predicate, not the
+// callers' filters.
+// @ref LLP 0426#forged-shape [tests]: the match requires version: 2; a version-less or v1 document is not the migration's write
+test('isForgedGrepOnlyConfig requires the version: 2 it documents', () => {
+  assert.equal(isForgedGrepOnlyConfig(/** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/grep' }] })), true)
+  assert.equal(isForgedGrepOnlyConfig(/** @type {any} */ ({ version: 1, plugins: [{ name: '@hypaware/grep' }] })), false)
+  assert.equal(isForgedGrepOnlyConfig(/** @type {any} */ ({ plugins: [{ name: '@hypaware/grep' }] })), false)
+})
+
+// One document, one classification: the status reader asks over
+// `parseConfigShape` output, the pick lane over a raw `JSON.parse` of the
+// same file, and the predicate must answer the same for both shapes.
+// @ref LLP 0426#consequences [tests]: entry keys the parser drops do not defeat the match and parser-kept decorations do, over the raw and parsed document alike
+test('configRecordsPickAnswer classifies the raw and parsed forms of a document identically', () => {
+  const twin = { version: 2, plugins: [{ name: '@hypaware/grep', note: 'mine' }] }
+  const parsedTwin = parseConfigShape(twin)
+  assert.equal(parsedTwin.ok, true)
+  assert.equal(configRecordsPickAnswer(/** @type {any} */ (twin)), false, 'raw near-twin')
+  assert.equal(parsedTwin.ok && configRecordsPickAnswer(parsedTwin.config), false, 'parsed near-twin')
+
+  const decorated = { version: 2, plugins: [{ name: '@hypaware/grep', enabled: false }] }
+  const parsedDecorated = parseConfigShape(decorated)
+  assert.equal(parsedDecorated.ok, true)
+  assert.equal(configRecordsPickAnswer(/** @type {any} */ (decorated)), true, 'raw decorated entry')
+  assert.equal(parsedDecorated.ok && configRecordsPickAnswer(parsedDecorated.config), true, 'parsed decorated entry')
 })

@@ -6,6 +6,8 @@
 // list of `repair` hints. Agents consume the JSON form; humans read the
 // rendered ✓/✗/⚠ lines.
 
+import type { VerbRegistration } from '../../../hypaware-plugin-kernel-types.d.ts'
+
 export type DiagnosticSeverity = 'error' | 'warn'
 
 /**
@@ -23,7 +25,9 @@ export type PluginDiagnosticKind =
   | 'activate_missing'
   | 'activate_threw'
   | 'contribution_not_registered'
+  | 'contribution_unreadable'
   | 'contribution_undeclared'
+  | 'command_help_drift'
   | 'capability_unresolved'
   | 'capability_unprovided'
 
@@ -48,16 +52,68 @@ export interface DoctorReport {
   warnCount: number
 }
 
+/**
+ * One registered command, as the help system sees it. `commands` (names only)
+ * answers "was it registered"; the help checks also need to know what it says
+ * and whether help shows it at all.
+ */
+export interface RegisteredCommand {
+  name: string
+  summary: string
+  /** Alternate spellings the registration claims; empty when it claims none. */
+  aliases: string[]
+  /** True when the registration sets `hidden`, keeping it out of every help listing. */
+  hidden: boolean
+}
+
+/**
+ * The snapshot buckets that are plain name lists, and so can be diffed against a
+ * `contributes.<category>` array. Names the keys rather than deriving them from
+ * `RegisteredSnapshot`, whose other fields carry richer shapes.
+ */
+export type NameListKey =
+  | 'sources'
+  | 'sinks'
+  | 'datasets'
+  | 'commands'
+  | 'skills'
+  | 'agents'
+  | 'init_presets'
+  | 'capabilities'
+
 /** Normalized snapshot of what a dry-run `activate()` actually registered. */
 export interface RegisteredSnapshot {
   sources: string[]
   sinks: string[]
   datasets: string[]
   commands: string[]
+  /** `commands`, with the fields the manifest also carries. Same order. */
+  commandDetails: RegisteredCommand[]
+  /** Group descriptions registered with `ctx.commands.registerGroup`. */
+  commandGroups: { name: string, summary?: string }[]
   skills: string[]
   agents: string[]
   init_presets: string[]
   capabilities: string[]
+}
+
+/**
+ * One registration the snapshot would not vouch for, and so left out of
+ * `RegisteredSnapshot`.
+ *
+ * The snapshot already said so, on the log and its stderr mirror. That is a
+ * different stream from the report, so a consumer reading stdout alone saw the
+ * declared-vs-registered diff taken against a snapshot with a hole in it, and
+ * nothing to say there was one (hyparam/hypaware#1569). The sentence is carried
+ * here as well as mirrored, so both surfaces say the same thing about it.
+ */
+export interface RefusedContribution {
+  /** What the snapshot calls it: `source`, `command`, `command alias`, ... */
+  kind: string
+  /** The name it claimed, or the empty string when it claimed nothing readable. */
+  name: string
+  /** Why it was left out, in the words the stderr mirror uses. */
+  message: string
 }
 
 export interface DryRunResult {
@@ -67,6 +123,10 @@ export interface DryRunResult {
   error?: { kind: 'entrypoint_import_failed' | 'activate_missing' | 'activate_threw'; message: string }
   /** Always present (empty when the dry run never reached activation). */
   registered: RegisteredSnapshot
+  /** What the snapshot refused. Always present, empty on the honest path. */
+  refused: RefusedContribution[]
+  /** The verbs the plugin registered, on a successful run asked for them (`withVerbs`). */
+  verbs?: VerbRegistration[]
 }
 
 export type ScaffoldKind = 'source' | 'sink' | 'dataset'

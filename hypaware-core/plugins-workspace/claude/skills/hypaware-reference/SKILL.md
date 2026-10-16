@@ -1,6 +1,7 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go". For querying recorded data use hypaware-query; for graph questions hypaware-graph; for team token analysis hypaware-ai-usage-report.
+description: Explain what HypAware does, what it captures, how data flows, configuration and paths, connecting to HypAware Cloud, and local-only versus opt-in behavior. Use for product orientation and conceptual questions. Querying activity, quick recommendations, and report management belong to hypaware-query; capture audits and recording controls belong to hypaware-privacy.
+user-invocable: false
 ---
 
 # HypAware Reference
@@ -11,18 +12,18 @@ to the **hypaware-query** skill, which owns that ground entirely.
 
 ## What HypAware is
 
-A modular logs and telemetry collector with a plugin-kernel architecture, part
-of HypStack, an open-source stack for AI observability. It captures the sources
-below into a local Iceberg-backed query cache that everything else reads from.
+A modular logs and telemetry collector with a plugin-kernel architecture. It
+captures the sources below into a local Iceberg-backed query cache that
+everything else reads from.
 What stays on the machine and what can leave is drawn under "What is opt-in".
 
 ## What it captures (sources)
 
-`hyp init` picks any subset of `claude`, `codex`, `raw-anthropic`, `raw-openai`,
+`hyp setup` picks any subset of `claude`, `codex`, `raw-anthropic`, `raw-openai`,
 and `otel`. For what is actually recording here, read it rather than infer it:
-`hyp status` marks each client configured/attached, and on a fleet-managed
-host also splits them into what the fleet forwards and what stays local, so a
-local addition is never invisible. `hyp policy list` enumerates folder
+`hyp status` marks each client configured/attached, and on a centrally managed
+host also splits them into what the org forwards and what stays local, so a
+local addition is never invisible. `hyp privacy list` enumerates folder
 markings.
 
 The rule neither command states: folder scoping works only for `claude` and
@@ -47,7 +48,7 @@ markings are a no-op for the raw proxies and OTEL.
 `HYP_HOME` defaults to `~/.hyp`; override by exporting it before invoking the
 CLI or daemon.
 
-- `<HYP_HOME>/hypaware-config.json` - active config, rewritten by `hyp init`
+- `<HYP_HOME>/hypaware-config.json` - active config, rewritten by `hyp setup`
 - `<HYP_HOME>/hypaware/cache/` - local query cache (Iceberg-backed)
 - `<HYP_HOME>/hypaware/sinks/<name>/outbox/` - failed export rows awaiting retry
 - `<HYP_HOME>/hypaware/dev-telemetry/` - daemon self-telemetry
@@ -63,10 +64,12 @@ rather than replacing it.
 A default install keeps everything on the machine. Two deliberate config
 choices change that:
 
-- **Enrolling with a central server** turns on the `@hypaware/central` sink,
-  which forwards cache partitions to it. `hyp remote login` (attended, and what
-  the install wizard wraps) and `hyp join <url> <token>` (unattended / MDM)
-  reach the same enrolled state.
+- **Enrolling with a sync server** (HypAware Cloud, unless
+  `query.default_remote` or the `<name>` given to `hyp remote login <name>`
+  points elsewhere, or the URL given to `hyp join`) turns on the
+  `@hypaware/central` sink, which forwards cache partitions to it. `hyp remote login` (attended, and what the install wizard
+  wraps) and `hyp join <url> <token>` (unattended / MDM) reach the same
+  enrolled state.
 - **Bundled plugins that are off by default**, several of which send content
   off-machine: the `s3` sink and the `completion-*` / `embedder-*` enrichment
   plugins. `hyp plugin list` shows what is active here.
@@ -76,17 +79,11 @@ curated HypAware registry.
 
 ## Hand-offs
 
-- Query or inspect recorded data - use the **hypaware-query** skill.
-- Team token usage, cost, and improvement analysis - use the
-  **hypaware-ai-usage-report** skill.
-- See what was captured here, and mark or purge it - use the
-  **hypaware-privacy** skill (also the review before an enrolled machine's
-  first sync).
-- Opt a folder out of recording - `hyp ignore <path>` writes a committable
-  `.hypignore`; `hyp policy set <path> ignore` marks it machine-local instead,
-  with no repo breadcrumb. To pause only this conversation, `/hypaware-ignore`.
-- "Is it working?" or diagnose a problem - `hyp status` (add `--json` for the
-  stable shape).
+- Query recorded activity, get a quick recommendation, or save, upload, list,
+  view, and act on reports or recommendations: **hypaware-query**.
+- Generate a full report: **hypaware-report**.
+- Audit captured content, change folder privacy, purge, or stop/resume recording
+  this conversation: **hypaware-privacy**.
 
 ## Guardrails
 

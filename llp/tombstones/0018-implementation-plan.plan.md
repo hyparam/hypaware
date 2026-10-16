@@ -8,7 +8,7 @@
 **Related:** LLP 0002
 
 > **Tombstoned.** This is the original phased build plan. V1.0.0 has shipped, so
-> it is executed history, not live guidance — kept for migration and archaeology
+> it is executed history, not live guidance: kept for migration and archaeology
 > only. Live V1 decisions are in [LLP 0002](../0002-v1-scope.decision.md); the
 > phase 10–13 path here was superseded by `finish-v1`
 > ([LLP 0019](./0019-finish-v1.plan.md)). Original body follows verbatim.
@@ -41,7 +41,7 @@ attached to every step.
    until both external assertions and internal telemetry agree.
 4. **The kernel observes itself first.** The plugin runtime, the
    capability registry, the sink driver, the cache, the command
-   dispatcher — all emit spans/logs/metrics on the same OTLP
+   dispatcher: all emit spans/logs/metrics on the same OTLP
    pipeline plugins use. This is the load-bearing invariant: if
    `@hypaware/otel` is even partially wired, the kernel's own
    telemetry tells us what the kernel just did.
@@ -133,7 +133,7 @@ runs a named smoke flow with a fresh `DEV_RUN_ID`. The harness:
 
 Every step below names the smoke flow it adds and the SQL it runs.
 
-## Phase 0 — Project Rename and Branch Reset
+## Phase 0: Project Rename and Branch Reset
 
 Concrete deliverable: the repo at `/Users/phil/workspace/collectivus`
 is renamed in-place to `hypaware`, but the npm package keeps
@@ -150,19 +150,19 @@ Steps:
    `.d.ts` types pulled from
    [`collectivus-plugin-kernel-types.d.ts`](collectivus-plugin-kernel-types.d.ts).
 3. **Add the observability module first** (`src/core/observability/`):
-   - `tracer.js` — wraps an OTel `NodeTracerProvider` with an OTLP
+   - `tracer.js`: wraps an OTel `NodeTracerProvider` with an OTLP
      HTTP exporter pointed at `OTEL_EXPORTER_OTLP_ENDPOINT`.
      Falls back to a `JsonlExporter` writing to
      `<state>/dev-telemetry/traces-<pid>.jsonl` when the env says
      dev mode and the endpoint is unreachable.
-   - `logger.js` — structured logger that emits OTel `LogRecord`s
+   - `logger.js`: structured logger that emits OTel `LogRecord`s
      and mirrors them to stderr in dev mode for live debugging.
-   - `meter.js` — Prometheus-style counters/histograms exported
+   - `meter.js`: Prometheus-style counters/histograms exported
      via the OTel metric exporter on the same endpoint.
-   - `attrs.js` — central place that builds the
+   - `attrs.js`: central place that builds the
      `hyp_component`/`hyp_plugin`/`status`/`error_kind` attribute
      bag; ensures snake_case and bounds high-cardinality values.
-   - `span_helpers.js` — `withSpan(name, attrs, fn)` and
+   - `span_helpers.js`: `withSpan(name, attrs, fn)` and
      `runRoot(name, attrs, fn)` so kernel and plugins do not
      reach into the tracer directly.
 4. **Wire env-driven enable.** `HYP_DEV_TELEMETRY=1` enables the
@@ -187,18 +187,18 @@ where serviceName = 'hypaware-dev'
   and name = 'kernel.boot'
 ```
 
-## Phase 1 — Manifest, Dependency Graph, Capability Registry
+## Phase 1: Manifest, Dependency Graph, Capability Registry
 
 Deliverables:
 
-- `src/core/manifest.js` — loader+validator for `PluginManifest`,
+- `src/core/manifest.js`: loader+validator for `PluginManifest`,
   manifests live as `hypaware.plugin.json` (renamed from the old
   `ctvs.plugin.json`) inside each plugin tree.
-- `src/core/dep_graph.js` — toposort over `requires.plugins` and
+- `src/core/dep_graph.js`: toposort over `requires.plugins` and
   `requires.capabilities`, errors on cycles and on missing
   capability providers, errors on duplicate capability providers
   per the resolved policy in `hypaware-design.md` §Resolved.
-- `src/core/registry/capabilities.js` — implements
+- `src/core/registry/capabilities.js`: implements
   `CapabilityRegistry` from the types file. Each `provide` /
   `require` emits a log: `cap.provide`, `cap.require_satisfied`,
   `cap.require_missing`. Counter `hyp_capabilities_provided` ticks
@@ -235,19 +235,19 @@ where JSON_VALUE(attributes, '$.dev_run_id') = '<run-id>'
   and JSON_VALUE(attributes, '$.hyp_capability') = 'hypaware.dummy'
 ```
 
-## Phase 2 — Activation Context, Path Service, State Dirs
+## Phase 2: Activation Context, Path Service, State Dirs
 
 Deliverables:
 
-- `src/core/runtime/paths.js` — builds `PluginPaths` per plugin
+- `src/core/runtime/paths.js`: builds `PluginPaths` per plugin
   (`rootDir`, `stateDir=<state>/plugins/<name>`,
   `cacheDir=<state>/cache/plugins/<name>`,
   `tempDir=<os tmp>/<name>-<run-id>`).
-- `src/core/runtime/activation.js` — assembles
+- `src/core/runtime/activation.js`: assembles
   `PluginActivationContext`. Wraps every registry call so it auto-
   populates `hyp_plugin` on emitted spans/logs (a plugin can't
   pretend to be a different one without going around the context).
-- `src/core/runtime/loader.js` — `import()` the plugin's
+- `src/core/runtime/loader.js`: `import()` the plugin's
   `entrypoint` after manifests are validated; awaits `activate()`
   inside a `plugin.activate` span.
 
@@ -279,14 +279,14 @@ where JSON_VALUE(attributes, '$.dev_run_id') = '<run-id>'
 order by startTimestamp
 ```
 
-## Phase 3 — Command Registry, CLI Bridge, Built-In Commands
+## Phase 3: Command Registry, CLI Bridge, Built-In Commands
 
 Deliverables:
 
-- `src/core/registry/commands.js` — `CommandRegistry` matching the
+- `src/core/registry/commands.js`: `CommandRegistry` matching the
   types file; sorts commands for help rendering; routes argv to
   the longest matching prefix (`gascity attach` beats `gascity`).
-- `src/core/cli/dispatch.js` — replaces `bin/cli.js`'s hard-coded
+- `src/core/cli/dispatch.js`: replaces `bin/cli.js`'s hard-coded
   `SUBCOMMANDS` set. The new dispatch boots the kernel, loads the
   manifests of installed plugins (in Phase 3 the "installed" set
   is just the in-repo workspace), and then dispatches argv against
@@ -321,7 +321,7 @@ Smoke `command_dispatch`:
   with `status=ok` and the matching `command_name`.
 - Asserts `command.run` span for `query schema logs` is followed
   by a `query.resolve_tables` child span with
-  `hyp_dataset=logs` — which proves the dataset registry was at
+  `hyp_dataset=logs`, which proves the dataset registry was at
   least consulted, even if no rows exist.
 
 SQL:
@@ -335,7 +335,7 @@ where JSON_VALUE(attributes, '$.dev_run_id') = '<run-id>'
 order by startTimestamp
 ```
 
-## Phase 4 — Intrinsic Cache and Query as a Core Service
+## Phase 4: Intrinsic Cache and Query as a Core Service
 
 The Iceberg-backed cache, the SQL surface, and the dataset
 registry stop being entangled with plugins.
@@ -352,7 +352,7 @@ Donor files (kept, repointed):
 New code:
 
 - `src/core/registry/datasets.js` implementing `QueryRegistry`.
-  Built-in core registers **zero** datasets — even `logs`, `traces`,
+  Built-in core registers **zero** datasets, even `logs`, `traces`,
   `metrics`, `ai_gateway_messages`, `gascity_messages` come from
   plugins.
 - `src/core/cache/storage.js` exposes `QueryStorageService`
@@ -393,7 +393,7 @@ where JSON_VALUE(attributes, '$.dev_run_id') = '<run-id>'
   and name = 'cache.append'
 ```
 
-## Phase 5 — Source Registry and Sink Driver (Core-Only)
+## Phase 5: Source Registry and Sink Driver (Core-Only)
 
 Deliverables:
 
@@ -407,7 +407,7 @@ Deliverables:
   registration time and emits `sink.register` logs with
   `sink_kind`, `writer`, `destination`, `supports` so a
   misconfigured pair is greppable. Counter `hyp_sinks_registered`.
-- `src/core/sinks/driver.js` — the kernel's cron loop. Reads
+- `src/core/sinks/driver.js`: the kernel's cron loop. Reads
   `sinks.*.config.schedule`, computes ready partitions out of the
   cache, calls `sink.exportBatch(...)`. Each tick is a
   `sink.export_batch` span with `hyp_sink_instance`,
@@ -415,7 +415,7 @@ Deliverables:
   go into a per-sink outbox under
   `<state>/sinks/<name>/outbox/` for retry; an
   `hyp_sink_export_failures_total` Sum ticks.
-- `src/core/sinks/encoder.js` — utility for blob sinks to drive
+- `src/core/sinks/encoder.js`: utility for blob sinks to drive
   their `SinkEncoder`. Each `encodePartition` call is a
   `sink.encode_partition` span tagged with `format`, `extension`,
   `row_count`, `bytes_written`.
@@ -426,7 +426,7 @@ Smoke `sink_export_driver`:
   `hypaware.blob-store` that writes to the smoke tmp dir.
 - Registers a fake encoder `@hypaware/test-encoder` providing
   `hypaware.encoder` (writes one CSV-ish line per row, plain
-  bytes; encoder choice doesn't matter — we're testing the
+  bytes; encoder choice doesn't matter: we're testing the
   driver).
 - Writes 50 dummy rows to the cache (via Phase 4 fixture
   plugin).
@@ -449,16 +449,16 @@ where JSON_VALUE(attributes, '$.dev_run_id') = '<run-id>'
   and name = 'sink.export_batch'
 ```
 
-## Phase 6 — Config v2, Validation, Migrator
+## Phase 6: Config v2, Validation, Migrator
 
 Deliverables:
 
-- `src/core/config/schema.js` — the v2 shape from
+- `src/core/config/schema.js`: the v2 shape from
   [`hypaware-design.md`](hypaware-design.md) §Config Model and the
   `HypAwareV2Config` interface, validated through
   `ConfigRegistry.registerSection` for per-plugin sections (each
   plugin owns its own validator).
-- `src/core/config/validate.js` — kernel-level cross-plugin
+- `src/core/config/validate.js`: kernel-level cross-plugin
   validation:
   - blob sink writer/destination compatibility
     (`hypaware.blob-store` + `hypaware.encoder`),
@@ -467,7 +467,7 @@ Deliverables:
   - dataset retention references known datasets,
   - duplicate capability providers must have an explicit
     `disambiguate` pin (per resolved policy).
-- `src/core/config/migrator.js` — best-effort v1→v2 conversion.
+- `src/core/config/migrator.js`: best-effort v1→v2 conversion.
   Reads the current `collectivus.json`:
   - `role` is dropped.
   - `proxy` + `claude` settings become a default
@@ -505,20 +505,20 @@ where JSON_VALUE(attributes, '$.dev_run_id') = '<run-id>'
   and severityText in ('WARN', 'ERROR')
 ```
 
-## Phase 7 — Plugin Install Path and Lock File
+## Phase 7: Plugin Install Path and Lock File
 
 Deliverables:
 
-- `src/core/plugin_install/resolver.js` — short-name resolution
+- `src/core/plugin_install/resolver.js`: short-name resolution
   (first-party, scoped third-party, unscoped third-party, git URL,
   local directory) per design §Plugin Install and Locking.
-- `src/core/plugin_install/fetch.js` — git tarball/clone, copy
+- `src/core/plugin_install/fetch.js`: git tarball/clone, copy
   artifact tree into `<state>/plugins/<name>/`. No `npm install`,
   no native build steps. For the in-repo cutover, `local-dir`
   source resolves to `hypaware-core/plugins-workspace/<name>/`.
-- `src/core/plugin_install/lock.js` — read/write
+- `src/core/plugin_install/lock.js`: read/write
   `<state>/plugin-lock.json` per `PluginLockFile`.
-- `src/core/plugin_install/update_check.js` — best-effort, shares
+- `src/core/plugin_install/update_check.js`: best-effort, shares
   policy with the existing npm update check, runs once per 24h,
   silent on failure. Updates the lock's
   `PluginUpdateState.checked_at`; surfaces `available=true` to
@@ -555,7 +555,7 @@ where JSON_VALUE(attributes, '$.dev_run_id') = '<run-id>'
   and name = 'plugin.install'
 ```
 
-## Phase 8 — First-Party Plugin Extraction (in-repo workspace)
+## Phase 8: First-Party Plugin Extraction (in-repo workspace)
 
 This is the heavy lift. Each subphase migrates one piece of
 current behavior into a plugin under
@@ -635,7 +635,7 @@ before they land in the cache).
   capability), schema for `ai_gateway_messages`.
 - Renames the dataset from `proxy_messages` →
   `ai_gateway_messages` per the "one source, one table" rule.
-  The migrator and the cache schema bump handle this — the
+  The migrator and the cache schema bump handle this: the
   query-cache schema version (`QUERY_CACHE_SCHEMA_VERSION`)
   bumps to 5 so any cache under the old name is treated stale
   and gets rebuilt from the JSONL stage on first refresh.
@@ -749,7 +749,7 @@ the server-side `control_plane.js` will be lifted out into
 `@hypaware/central` is a request sink. Its `Sink.exportBatch`
 forwards ready cache partitions to the central server via the
 existing `OutboxSink`/`IdentityClient`/`ConfigClient` machinery.
-No more `role: gateway` — the *behavior* previously gated by
+No more `role: gateway`, the *behavior* previously gated by
 `role: gateway` is just this plugin being configured.
 
 Smoke `central_forward_outbox`:
@@ -773,7 +773,7 @@ Donor files: `src/gascity/*`, `src/cli/gascity.js`,
 `activate(ctx)`:
 - Registers source `gascity` with `configSection: "gascity"`.
 - Registers dataset `gascity_messages` with the existing
-  Parquet-direct discover/refresh path (no JSONL stage —
+  Parquet-direct discover/refresh path (no JSONL stage:
   gascity writes Parquet directly under the cache).
 - Registers commands `gascity attach`, `gascity detach`,
   `gascity list`.
@@ -798,7 +798,7 @@ Smoke `gascity_attach_writes_partition`:
   `hyp_plugin=@hypaware/gascity` and a follow-up `source.reload`
   span when the second `attach` ran.
 
-## Phase 9 — Walkthrough, Init Presets, Status, Skills
+## Phase 9: Walkthrough, Init Presets, Status, Skills
 
 Deliverables:
 
@@ -833,7 +833,7 @@ Instrumentation:
 Smoke `walkthrough_to_first_query`:
 
 - Drives `hyp init claude-and-otel-local` (a preset we ship
-  exactly for this smoke — picks ai-gateway + otel + local-fs +
+  exactly for this smoke: picks ai-gateway + otel + local-fs +
   parquet + claude).
 - Asserts the v2 config was written and matches a golden.
 - Asserts `hyp status` exits 0, prints the four plugins, prints
@@ -843,7 +843,7 @@ Smoke `walkthrough_to_first_query`:
 - Asserts both rows are visible in `logs` and `ai_gateway_messages`
   under the same `dev_run_id`.
 
-## Phase 10 — Split `@hypaware/server` Into Its Own Package
+## Phase 10: Split `@hypaware/server` Into Its Own Package
 
 `src/server/control_plane.js`, `src/server/*` (server-side bits)
 and `src/server/identity.js` move into a new repository
@@ -865,7 +865,7 @@ Smoke `server_round_trip`:
 - Asserts the server's storage saw the row, with `dev_run_id`
   preserved through the central forward.
 
-## Phase 11 — Extract First-Party Plugins to Standalone Repos
+## Phase 11: Extract First-Party Plugins to Standalone Repos
 
 Each `plugins-workspace/<name>` becomes
 `github:hyperparam/hypaware-<name>`. The plugin's CI commits its
@@ -888,7 +888,7 @@ Smoke `kernel_release_full_install`:
 - Re-runs the `walkthrough_to_first_query` smoke against the
   install. Same passes.
 
-## Phase 12 — Ship `@hypaware/gascity` as the First External Plugin
+## Phase 12: Ship `@hypaware/gascity` as the First External Plugin
 
 Move `plugins-workspace/gascity` to
 `github:hyperparam/hypaware-gascity` and install it via
@@ -903,7 +903,7 @@ Smoke `external_plugin_gascity_install`:
 - Run `gascity_attach_writes_partition` smoke against this
   install. Same assertions.
 
-## Phase 13 — Delete Donor Wiring
+## Phase 13: Delete Donor Wiring
 
 Everything inside `src/cli.js`, `src/server.js`,
 `src/collector.js`, `src/proxy.js`, etc. that the plugins already
@@ -919,8 +919,8 @@ except the meta commands listed in Phase 3.
 
 The kernel CI keeps two test suites:
 
-- `npm test` — unit tests against `src/core/*`, no plugins.
-- `npm run smoke:all` — runs every smoke flow from Phases 0–12 in
+- `npm test`: unit tests against `src/core/*`, no plugins.
+- `npm run smoke:all`, runs every smoke flow from Phases 0–12 in
   order against a tmp `HYP_HOME`, fails on the first regression.
 
 ## Continuous Smoke Harness Layout
@@ -989,7 +989,7 @@ For each phase to be considered done:
    `HYP_DEV_TELEMETRY=1 npm run smoke -- <flow>`.
 2. The flow runs in CI on the cutover branch.
 3. The flow can be re-run against an existing user's
-   `~/.hyp` (read-only) without writing data — i.e. nothing
+   `~/.hyp` (read-only) without writing data: i.e. nothing
    in the flow assumes a freshly created install except where
    it explicitly creates the tmp `HYP_HOME`. This proves the
    flow is debuggable in real installs, not just synthetic
@@ -1008,8 +1008,8 @@ V1 complete (per design appendix) when:
 - `@hypaware/central` forwards successfully to an existing
   collectivus central server (or to the new `@hypaware/server`
   after Phase 10).
-- Removing any one first-party plugin disables only its surface
-  — verified by a "remove + run smokes" loop that asserts
+- Removing any one first-party plugin disables only its surface:
+  verified by a "remove + run smokes" loop that asserts
   every other phase's smoke still passes.
 
 ## Risks and Mitigations
@@ -1017,7 +1017,7 @@ V1 complete (per design appendix) when:
 - **Iceberg cache schema drift.** The `ai_gateway_messages` rename
   forces a `QUERY_CACHE_SCHEMA_VERSION` bump. Mitigation: the
   refresh layer already treats stale-version partitions as
-  unreadable and rebuilds from JSONL — verified by extending the
+  unreadable and rebuilds from JSONL, verified by extending the
   existing `query/refresh.test.js` rather than writing new
   fixtures.
 - **Sink driver vs. existing daily uploader.** The current
@@ -1025,7 +1025,7 @@ V1 complete (per design appendix) when:
   code for `@hypaware/central` and `@hypaware/local-fs`. Both
   plugins share `src/core/sinks/driver.js`'s cron; the existing
   `src/upload/scheduler.js` is moved into core there. Risk:
-  losing the existing `signals` filter — mitigated by a smoke
+  losing the existing `signals` filter, mitigated by a smoke
   assertion that asserts each configured sink only sees the
   partitions its `datasets` filter allows (this also tests the
   per-source export routing extension point the design left

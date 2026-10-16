@@ -25,11 +25,15 @@ import { loadManifests } from '../manifest.js'
  */
 export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/ai-gateway',
+  '@hypaware/grep',
   '@hypaware/otel',
   '@hypaware/claude',
   '@hypaware/codex',
   '@hypaware/hermes',
   '@hypaware/openclaw',
+  '@hypaware/opencode',
+  '@hypaware/cursor',
+  '@hypaware/pi',
   '@hypaware/local-fs',
   '@hypaware/s3',
   '@hypaware/format-parquet',
@@ -61,14 +65,19 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * capabilities (which no default-activated plugin provides) and spends on
  * model calls, so it too activates only via explicit config.
  *
- * The Claude Desktop pair follows it too: `@hypaware/claude-account`
- * holds a real credential (an org API key or a subscription token
- * store), so enabling it is a deliberate fleet-policy decision, and
- * `@hypaware/claude-desktop` requires the credential capability that
- * only that opt-in provides.
+ * `@hypaware/claude-account` remains excluded because it holds a real
+ * credential. `@hypaware/claude-desktop` remains explicit because naming it
+ * is the consent gate that lets the scheduled Claude reader import Desktop's
+ * local transcript trees (LLP 0358); selecting its picker row names it.
+ *
+ * The GitHub source is bundled so its session-evidence contract evolves with
+ * `ai_gateway_messages`, but activation remains explicit because it performs
+ * credentialed outbound API capture. Once activated, its own inventory and
+ * cadence defaults apply.
  *
  * @type {ReadonlySet<PluginName>}
  * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
+ * @ref LLP 0358#onboarding [constrained-by]: Desktop is selectable but its transcript ownership plugin activates only when the user selects it
  */
 export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/central',
@@ -80,6 +89,9 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/context-graph-enrich',
   '@hypaware/claude-account',
   '@hypaware/claude-desktop',
+  '@hypaware/github',
+  // @ref LLP 0469#seams [implements]: native Ollama capture requires explicit plugins[] opt-in
+  '@hypaware/ollama',
 ]))
 
 /**
@@ -107,8 +119,10 @@ export function defaultBundledWorkspaceDir() {
  *                  manifests feed the plugin catalog so datasets,
  *                  client descriptors, and capability metadata remain
  *                  visible to config validation and the walkthrough.
- *  - `unknownDirs` - directories that hold a parseable manifest under
- *                    a name the kernel doesn't recognise as bundled.
+ *  - `unknown` - manifests that parsed under a name the kernel doesn't
+ *                recognize as bundled. The whole manifest, not just the
+ *                directory: the name it declares is the only thing that can
+ *                answer a caller asking after that name (issue #1843).
  *
  * Missing workspace directories return an empty result rather than
  * throwing so `npx hypaware --help` works from any directory.
@@ -133,7 +147,7 @@ export async function discoverBundledPlugins(opts = {}) {
       .map((d) => path.join(workspaceDir, d.name))
   } catch (err) {
     if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
-      return { loaded: [], failed: [], excluded: [], unknownDirs: [] }
+      return { loaded: [], failed: [], excluded: [], unknown: [] }
     }
     throw err
   }
@@ -144,8 +158,8 @@ export async function discoverBundledPlugins(opts = {}) {
   const loaded = []
   /** @type {LoadedManifest[]} */
   const excluded = []
-  /** @type {string[]} */
-  const unknownDirs = []
+  /** @type {LoadedManifest[]} */
+  const unknown = []
   for (const entry of all.loaded) {
     const name = /** @type {PluginName} */ (entry.manifest.name)
     if (allowlist.has(name)) {
@@ -153,9 +167,9 @@ export async function discoverBundledPlugins(opts = {}) {
     } else if (excludeSet.has(name)) {
       excluded.push(entry)
     } else {
-      unknownDirs.push(entry.rootDir)
+      unknown.push(entry)
     }
   }
 
-  return { loaded, failed: all.failed, excluded, unknownDirs }
+  return { loaded, failed: all.failed, excluded, unknown }
 }

@@ -1,0 +1,3 @@
+# LF everywhere, including Windows clones: the win32 test-suite work depends
+# on fixture bytes not varying with the clone's core.autocrlf setting.
+* text=auto eol=lf

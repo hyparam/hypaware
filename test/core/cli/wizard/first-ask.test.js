@@ -1,0 +1,560 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+import {
+  SUGGESTED_PROMPTS,
+  launchClient,
+  resolveLaunchers,
+  resolveOnPath,
+  runWizardFirstAsk,
+  writeSuggestedPrompts,
+} from '../../../../src/core/cli/wizard/first_ask.js'
+import { PromptCancelledError } from '../../../../src/core/cli/tui/index.js'
+
+// The explicit first ask (LLP 0198): which clients it will offer,
+// that a pick becomes a real spawn carrying the question, and that launch
+// failures degrade to the printed list.
+// @ref LLP 0198#first-ask [tests]:
+
+function makeBuf() {
+  let value = ''
+  return {
+    /** @param {string} chunk */
+    write(chunk) { value += String(chunk); return true },
+    text() { return value },
+  }
+}
+
+/** A descriptor map with `claude` launchable and `claude-desktop` not. */
+function descriptors() {
+  return new Map(/** @type {any} */ ([
+    ['claude', {
+      plugin: '@hypaware/claude',
+      name: 'claude',
+      skillDir: '.claude/skills',
+      launch: { bin: 'claude', args: ['{prompt}'], label: 'Claude Code' },
+    }],
+    ['codex', {
+      plugin: '@hypaware/codex',
+      name: 'codex',
+      skillDir: '.codex/skills',
+      launch: { bin: 'codex', args: ['{prompt}'], label: 'Codex' },
+    }],
+    ['claude-desktop', {
+      plugin: '@hypaware/claude-desktop',
+      name: 'claude-desktop',
+      skillDir: '.claude/skills',
+    }],
+  ]))
+}
+
+/** Records what would have been spawned and exits 0 without running it. */
+function recordingSpawn() {
+  /** @type {{ cmd: string, args: string[], opts: any }[]} */
+  const calls = []
+  /** @type {any} */
+  const fn = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts })
+    const child = new EventEmitter()
+    queueMicrotask(() => child.emit('close', 0))
+    return child
+  }
+  return { fn, calls }
+}
+
+/** The list is editable content; tests anchor on its shape, never on an id. */
+const FIRST = SUGGESTED_PROMPTS[0]
+
+/** A gather that succeeds into a fixed folder (the launch needs one). */
+const fakeEvidence = async () => ({ dir: '/hyp/ask', from: '2026-08-08', files: ['ASK.md'] })
+
+/** @param {string|number} value */
+function selectReturning(value) {
+  /** @type {any[]} */
+  const seen = []
+  /** @type {any} */
+  const fn = async (spec) => { seen.push(spec); return value }
+  return { fn, seen }
+}
+
+test('resolveOnPath: finds an executable on PATH, ignores a non-executable match', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-'))
+  const exe = path.join(dir, 'fakeclient')
+  await fsp.writeFile(exe, '#!/bin/sh\n', { mode: 0o755 })
+  const plain = path.join(dir, 'notexec')
+  await fsp.writeFile(plain, 'x', { mode: 0o644 })
+
+  assert.equal(await resolveOnPath('fakeclient', { PATH: dir }, 'darwin'), exe)
+  assert.equal(await resolveOnPath('notexec', { PATH: dir }, 'darwin'), undefined)
+  assert.equal(await resolveOnPath('absent', { PATH: dir }, 'darwin'), undefined)
+  // An empty PATH is not an error, just nothing found.
+  assert.equal(await resolveOnPath('fakeclient', {}, 'darwin'), undefined)
+})
+
+test('resolveOnPath: a mode-0755 directory named claude on PATH is not an installed CLI', async () => {
+  // @ref LLP 0198#path-probe [tests]: the probe looks for a launch binary, and
+  // the execute bit on a directory means traversable, not runnable
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-dir-'))
+  await fsp.mkdir(path.join(dir, 'claude'), { mode: 0o755 })
+
+  assert.equal(await resolveOnPath('claude', { PATH: dir }, 'darwin'), undefined)
+  // The launchable set, which is what decides which refusal `hyp ask` prints.
+  const launchers = await resolveLaunchers({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    env: { PATH: dir },
+    platform: 'darwin',
+  })
+  assert.deepEqual(launchers, [])
+
+  // Everything else a PATH entry can hold, against one real binary that must
+  // keep resolving: an install is normally a symlink to one.
+  const real = path.join(dir, 'real-claude')
+  await fsp.writeFile(real, '#!/bin/sh\n', { mode: 0o755 })
+  await fsp.symlink(real, path.join(dir, 'linked'))
+  await fsp.symlink(path.join(dir, 'claude'), path.join(dir, 'to-dir'))
+  await fsp.symlink(path.join(dir, 'gone'), path.join(dir, 'dangling'))
+
+  assert.equal(await resolveOnPath('linked', { PATH: dir }, 'darwin'), path.join(dir, 'linked'))
+  assert.equal(await resolveOnPath('to-dir', { PATH: dir }, 'darwin'), undefined)
+  assert.equal(await resolveOnPath('dangling', { PATH: dir }, 'darwin'), undefined)
+
+  // The `PATHEXT` loop walks past a rejected candidate, so a directory named
+  // `claude.EXE` does not shadow the real `claude.CMD` beside it.
+  const win = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-firstask-win-'))
+  await fsp.mkdir(path.join(win, 'claude.EXE'), { mode: 0o755 })
+  const cmd = path.join(win, 'claude.CMD')
+  await fsp.writeFile(cmd, 'rem\n', { mode: 0o755 })
+  const winEnv = { PATH: win, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
+  assert.equal(await resolveOnPath('claude', winEnv, 'win32'), cmd)
+})
+
+test('resolveLaunchers: picked and resolvable only; a launch-less client is never offered', async () => {
+  // @ref LLP 0198#path-probe [tests]: detection is not launchability
+  const launchers = await resolveLaunchers({
+    clients: ['claude', 'codex', 'claude-desktop'],
+    descriptors: descriptors(),
+    env: {},
+    // codex is picked but absent from PATH; claude-desktop has no launch spec
+    resolve: async (bin) => (bin === 'claude' ? '/usr/local/bin/claude' : undefined),
+  })
+  assert.deepEqual(launchers.map((l) => l.client), ['claude'])
+  assert.equal(launchers[0].binPath, '/usr/local/bin/claude')
+  assert.equal(launchers[0].label, 'Claude Code')
+})
+
+test('resolveLaunchers: an unpicked client is not offered even when it resolves', async () => {
+  const launchers = await resolveLaunchers({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    env: {},
+    resolve: async () => '/usr/local/bin/anything',
+  })
+  assert.deepEqual(launchers.map((l) => l.client), ['claude'])
+})
+
+test('runWizardFirstAsk: a pick spawns the client with the question as argv', async () => {
+  // @ref LLP 0198#real-launch [tests]: the launch is real, inherits the terminal, and carries the prompt
+  const stdout = makeBuf()
+  const spawner = recordingSpawn()
+  const chooser = selectReturning(FIRST.id)
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: chooser.fn,
+    prepareEvidence: fakeEvidence,
+  })
+
+  assert.deepEqual(result, { launched: true, client: 'claude', promptId: FIRST.id, exitCode: 0 })
+  assert.equal(spawner.calls.length, 1)
+  assert.equal(spawner.calls[0].cmd, '/usr/local/bin/claude')
+  const expected = FIRST.prompt
+  assert.deepEqual(spawner.calls[0].args, [expected])
+  // The child must own the terminal, or it draws over the ask menu's frame.
+  assert.equal(spawner.calls[0].opts.stdio, 'inherit')
+  // The client starts inside the evidence folder, never the caller's directory.
+  assert.equal(spawner.calls[0].opts.cwd, '/hyp/ask')
+  // Announced before the handoff: a client that takes a moment to draw
+  // must not read as a hang.
+  assert.match(stdout.text(), /Starting Claude Code/)
+  // A launch replaces the list; it is not also printed.
+  assert.doesNotMatch(stdout.text(), /Worth asking your AI client/)
+})
+
+test('launchClient: an explicit cwd is honoured, so the low-level seam stays parameterised', () => {
+  // The wizard-level option is gone (the launch directory is the one the
+  // user ran `hyp ask` from), but the helper itself still takes a cwd:
+  // it is the seam a caller with a directory to name would use.
+  // @ref LLP 0198#real-launch [tests]: the spawn carries the prompt and whatever directory it is given
+  const spawner = recordingSpawn()
+  launchClient({
+    launcher: { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/usr/local/bin/claude', args: ['{prompt}'] },
+    prompt: FIRST.prompt,
+    cwd: '/w/acme',
+    env: {},
+    spawnFn: spawner.fn,
+  })
+  assert.equal(spawner.calls.length, 1)
+  assert.equal(spawner.calls[0].opts.cwd, '/w/acme')
+  assert.deepEqual(spawner.calls[0].args, [FIRST.prompt])
+})
+
+test('launchClient: a prompt is substituted literally, not read as a replacement pattern', () => {
+  // `hyp report fix` builds its prompt from a fetched page's title, so the
+  // prompt is no longer always a constant this file wrote.
+  // @ref LLP 0198#real-launch [tests]: what the spawn carries is the prompt itself
+  const spawner = recordingSpawn()
+  const prompt = 'Batch $& the $` retries $$ now'
+  launchClient({
+    launcher: { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/usr/local/bin/claude', args: ['run', '--prompt', '{prompt}'] },
+    prompt,
+    env: {},
+    spawnFn: spawner.fn,
+  })
+  assert.deepEqual(spawner.calls[0].args, ['run', '--prompt', prompt])
+})
+
+test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is filled', async () => {
+  const spawner = recordingSpawn()
+  const result = await runWizardFirstAsk({
+    clients: ['x'],
+    descriptors: new Map(/** @type {any} */ ([['x', {
+      plugin: '@hypaware/x', name: 'x', skillDir: '.x',
+      launch: { bin: 'x', args: ['run', '--prompt', '{prompt}'], label: 'X' },
+    }]])),
+    stdout: makeBuf(),
+    env: {},
+    interactive: true,
+    resolve: async () => '/bin/x',
+    spawnFn: spawner.fn,
+    select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
+  })
+  assert.equal(result.launched, true)
+  assert.deepEqual(spawner.calls[0].args.slice(0, 2), ['run', '--prompt'])
+  assert.equal(spawner.calls[0].args[2], FIRST.prompt)
+})
+
+// @ref LLP 0198#path-probe [tests]: nothing recorded and resolvable is one refusal, and the caller words it
+test('runWizardFirstAsk: no launchable client launches nothing and prints nothing, whatever the cache holds', async () => {
+  for (const hasRows of [true, false, undefined]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const spawner = recordingSpawn()
+    const result = await runWizardFirstAsk({
+      clients: ['claude-desktop'],
+      descriptors: descriptors(),
+      stdout,
+      stderr,
+      env: {},
+      interactive: true,
+      ...(hasRows === undefined ? {} : { hasRows }),
+      resolve: async () => undefined,
+      spawnFn: spawner.fn,
+      select: selectReturning(FIRST.id).fn,
+    })
+    // An empty cache does not win: "come back once you have history" would
+    // send the reader to this same refusal.
+    assert.deepEqual(result, { launched: false, reason: 'no-launcher' })
+    assert.equal(spawner.calls.length, 0)
+    // The caller owns the message, so the question it cannot ask is not printed.
+    assert.equal(stdout.text(), '')
+    assert.equal(stderr.text(), '')
+  }
+})
+
+test('the no-launch footer names the condition for a launch, never a prompt to paste', () => {
+  const stdout = makeBuf()
+  writeSuggestedPrompts({ stdout, footer: 'no-launch' })
+  const text = stdout.text()
+  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
+  // The prompt names the evidence folder, which a reader with no launch
+  // does not have, so it is never offered as something to paste.
+  for (const p of SUGGESTED_PROMPTS) assert.ok(!text.includes(p.prompt), `prompt ${p.id} offered for pasting`)
+  // That condition is `askableClients`' predicate: attached, or configured with
+  // no attach marker to write, which is recorded but not attached.
+  assert.match(text, /Once a recorded client can be started here \(see `hyp status`\), run `hyp ask` again/)
+  assert.doesNotMatch(text, /attached client/)
+})
+
+test('an empty cache frames the question as something to come back to', () => {
+  // @ref LLP 0198#empty-cache [tests]: no rows reframes the list, and the reason is stated
+  const stdout = makeBuf()
+  writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
+  assert.match(stdout.text(), /Nothing recorded yet/)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(stdout.text().includes(p.label), `missing question ${p.id}`)
+  assert.match(stdout.text(), /Run `hyp ask` then, to start your client on it/)
+})
+
+test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as more output', async () => {
+  // @ref LLP 0198#frame [tests]: the explicit ask is drawn as its own screen
+  const stdout = makeBuf()
+  const chooser = selectReturning(FIRST.id)
+  await runWizardFirstAsk({
+    clients: ['claude', 'codex'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/anything',
+    spawnFn: recordingSpawn().fn,
+    select: chooser.fn,
+  })
+  // One question, so the only screen is which client answers it.
+  assert.equal(chooser.seen.length, 1)
+  for (const spec of chooser.seen) assert.equal(spec.box, true)
+})
+
+test('runWizardFirstAsk: an empty cache suppresses the launch and says why', async () => {
+  // @ref LLP 0198#empty-cache [tests]: no rows means no launch, whatever is on PATH
+  const stdout = makeBuf()
+  const spawner = recordingSpawn()
+  const chooser = selectReturning(FIRST.id)
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: true,
+    hasRows: false,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: chooser.fn,
+  })
+  assert.deepEqual(result, { launched: false, reason: 'no-rows' })
+  assert.equal(spawner.calls.length, 0)
+  assert.equal(chooser.seen.length, 0, 'a menu whose every row answers from an empty cache is not shown')
+  const text = stdout.text()
+  assert.match(text, /Nothing recorded yet/)
+  // The reason capture looks empty, which is not obvious: HypAware is not
+  // retroactive beyond what backfill imported.
+  assert.match(text, /captures from your next session onward/)
+  // The questions still print, as something to come back to.
+  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
+  assert.match(text, /Run `hyp ask` then/)
+})
+
+test('runWizardFirstAsk: an unknown row count never withholds the offer', async () => {
+  // @ref LLP 0198#empty-cache [tests]: only a definite no suppresses
+  const spawner = recordingSpawn()
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout: makeBuf(),
+    env: {},
+    interactive: true,
+    // hasRows omitted: the caller could not tell
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
+  })
+  assert.equal(result.launched, true)
+  assert.equal(spawner.calls.length, 1)
+})
+
+test('runWizardFirstAsk: cancelling the client pick declines, and keeps the list', async () => {
+  // @ref LLP 0398#one-question [tests]: with no question menu, the client pick is the one place to say not now
+  for (const chooser of [
+    /** @type {any} */ (async () => { throw new PromptCancelledError() }),
+  ]) {
+    const stdout = makeBuf()
+    const spawner = recordingSpawn()
+    const result = await runWizardFirstAsk({
+      clients: ['claude', 'codex'],
+      descriptors: descriptors(),
+      stdout,
+      env: {},
+      interactive: true,
+      resolve: async (bin) => `/usr/local/bin/${bin}`,
+      spawnFn: spawner.fn,
+      select: chooser,
+    })
+    assert.deepEqual(result, { launched: false, reason: 'declined' })
+    assert.equal(spawner.calls.length, 0)
+    assert.match(stdout.text(), /hyp ask/)
+  }
+})
+
+test('runWizardFirstAsk: a non-interactive run prints the list and never prompts', async () => {
+  const stdout = makeBuf()
+  const chooser = selectReturning(FIRST.id)
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: false,
+    resolve: async () => '/usr/local/bin/claude',
+    select: chooser.fn,
+  })
+  assert.deepEqual(result, { launched: false, reason: 'not-interactive' })
+  assert.equal(chooser.seen.length, 0)
+  assert.match(stdout.text(), /Worth asking your AI client/)
+})
+
+test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', async () => {
+  // @ref LLP 0198#real-launch [tests]: launch failures degrade to the list
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  /** @type {any} */
+  const failing = () => {
+    const child = new EventEmitter()
+    queueMicrotask(() => child.emit('error', new Error('ENOENT')))
+    return child
+  }
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    stderr,
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: failing,
+    select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
+  })
+  assert.deepEqual(result, { launched: false, reason: 'spawn-failed' })
+  assert.match(stderr.text(), /Could not start claude: ENOENT/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
+})
+
+test('runWizardFirstAsk: an unforeseen error is contained', async () => {
+  // Two clients, so the client pick (the one remaining prompt) is reached and throws.
+  const stdout = makeBuf()
+  const result = await runWizardFirstAsk({
+    clients: ['claude', 'codex'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: true,
+    resolve: async (bin) => `/usr/local/bin/${bin}`,
+    select: /** @type {any} */ (async () => { throw new TypeError('boom') }),
+  })
+  assert.deepEqual(result, { launched: false, reason: 'error' })
+  assert.match(stdout.text(), /Worth asking your AI client/)
+})
+
+test('runWizardFirstAsk: two launchable clients ask which one answers', async () => {
+  const spawner = recordingSpawn()
+  /** @type {any[]} */
+  const specs = []
+  /** @type {any} */
+  const chooser = async (spec) => {
+    specs.push(spec)
+    return 'codex'
+  }
+  const result = await runWizardFirstAsk({
+    clients: ['claude', 'codex'],
+    descriptors: descriptors(),
+    stdout: makeBuf(),
+    env: {},
+    interactive: true,
+    resolve: async (bin) => `/usr/local/bin/${bin}`,
+    spawnFn: spawner.fn,
+    select: chooser,
+    prepareEvidence: fakeEvidence,
+  })
+  assert.deepEqual(result, { launched: true, client: 'codex', promptId: FIRST.id, exitCode: 0 })
+  assert.equal(specs.length, 1)
+  assert.match(specs[0].title, /Which client/)
+  assert.equal(spawner.calls[0].cmd, '/usr/local/bin/codex')
+})
+
+test('the suggested prompt is one routable question that names no machinery', async () => {
+  // @ref LLP 0198#split [tests]: core owns the questions, and they name no machinery
+  // One question (LLP 0398 #one-question): the earlier rows became the
+  // routes it chooses between, so a second row here would be a regression.
+  assert.equal(SUGGESTED_PROMPTS.length, 1)
+  assert.equal(new Set(SUGGESTED_PROMPTS.map((p) => p.id)).size, SUGGESTED_PROMPTS.length, 'ids must be unique')
+  for (const p of SUGGESTED_PROMPTS) {
+    assert.ok(p.id && p.label && p.prompt, 'every question needs an id, a label, and a prompt')
+    assert.ok(p.prompt.length > 20, `${p.id} prompt is too terse to route`)
+    // A skill *name* is machinery the user should never have to learn; the
+    // word "skill" as a subject ("worth making into a skill") is theirs.
+    assert.doesNotMatch(p.prompt, /hypaware-[a-z]|\bdataset\b|\bSQL\b/i,
+      `${p.id} names machinery the user should not need`)
+  }
+})
+
+test('every suggested label fits a narrow terminal without wrapping', async () => {
+  // The label is the printed question. A wrapped one reads as two
+  // questions. 72 columns leaves room for the two-space indent inside an
+  // 80-column terminal.
+  const tooLong = SUGGESTED_PROMPTS.filter((p) => p.label.length > 72)
+  assert.deepEqual(tooLong.map((p) => `${p.id} (${p.label.length} cols)`), [])
+})
+
+test('runWizardFirstAsk: the recommendation row gathers first and starts the client in the run directory', async () => {
+  // @ref LLP 0398#run-directory [tests]: the client starts inside the evidence, on the folder-relative prompt
+  const stdout = makeBuf()
+  const spawner = recordingSpawn()
+  const chooser = selectReturning('recommend')
+  let gathered = 0
+  /** @type {string | undefined} */
+  let askedFor
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: chooser.fn,
+    prepareEvidence: async (client) => {
+      gathered += 1
+      askedFor = client
+      return { dir: '/hyp/ask/20260907T050000Z', from: '2026-08-08', files: ['ASK.md'] }
+    },
+  })
+  assert.equal(gathered, 1)
+  // The gather writes the instructions, and they name a skill tree. Which
+  // tree depends on who is about to read them, so the chosen client has to
+  // reach it: Codex and OpenCode do not load ~/.claude/skills.
+  assert.equal(askedFor, 'claude', 'the client the wizard chose is the one the gather is told about')
+  assert.deepEqual(result, { launched: true, client: 'claude', promptId: 'recommend', exitCode: 0 })
+  assert.equal(spawner.calls[0].opts.cwd, '/hyp/ask/20260907T050000Z')
+  assert.match(spawner.calls[0].args[0], /Read ASK\.md first/)
+  assert.match(stdout.text(), /Starting Claude Code in \/hyp\/ask\/20260907T050000Z/)
+})
+
+test('runWizardFirstAsk: a failed or absent gather refuses to launch', async () => {
+  // @ref LLP 0398#run-directory [tests]: no evidence, no launch; the cold answer is the failure this ask removes
+  for (const prepareEvidence of [
+    async () => { throw new Error('cache locked') },
+    async () => undefined,
+    undefined,
+  ]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const spawner = recordingSpawn()
+    const result = await runWizardFirstAsk({
+      clients: ['claude'],
+      descriptors: descriptors(),
+      stdout,
+      stderr,
+      env: {},
+      interactive: true,
+      resolve: async () => '/usr/local/bin/claude',
+      spawnFn: spawner.fn,
+      select: selectReturning(FIRST.id).fn,
+      ...(prepareEvidence ? { prepareEvidence } : {}),
+    })
+    assert.deepEqual(result, { launched: false, reason: 'no-evidence' })
+    assert.equal(spawner.calls.length, 0)
+    assert.match(stderr.text(), /Nothing was started/)
+  }
+})

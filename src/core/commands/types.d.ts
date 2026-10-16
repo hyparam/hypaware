@@ -1,4 +1,11 @@
 import type { UsageClass } from '../usage-policy/types.d.ts'
+import type {
+  BackfillMaterializerRegistry,
+  BackfillRegistry,
+  HypAwareV2Config,
+  QueryRegistry,
+  QueryStorageService,
+} from '../../../hypaware-plugin-kernel-types.js'
 
 // How the shared machine-local marking writers (`runMarkMachineLocal`,
 // `runUnmarkMachineLocal`, `runIgnoreCheck`) render internal values for a
@@ -26,6 +33,28 @@ export interface PolicyHumanVocabulary {
   implicitSuffix?(): string
 }
 
+// A structural subset of `CommandRunContext`: exactly the fields
+// `runBackfillProvider`, `runProvider`, `resolveOwnersForRun`, and the
+// materialize/write/flush helpers they call
+// (`src/core/commands/backfill.js`) read off `ctx`. Every existing
+// `CommandRunContext` already satisfies it, so `hyp backfill`'s CLI path
+// and the onboarding finale's call keep typechecking unchanged; the
+// daemon sweep driver (LLP 0173 T9) can build one directly out of
+// `boot.runtime` fields without assembling a full, mostly-unused
+// `CommandRunContext`. `query` was missing from this list until LLP 0173
+// T12's smoke (the first caller to drive a real, non-mocked write through
+// the sweep driver) found `writeRows`/`flushDataset` crash on
+// `ctx.query.getDataset` when a sweep-built `ctx` reached them.
+// @ref LLP 0172#lane-b-sweep [implements]: the narrowed context type `runBackfillProvider`, `runProvider`, `resolveOwnersForRun`, and the materialize/write/flush helpers declare, so the daemon sweep driver can build one without a full `CommandRunContext`
+export interface BackfillRunnerContext {
+  env: NodeJS.ProcessEnv
+  config: HypAwareV2Config
+  storage: QueryStorageService
+  query: QueryRegistry
+  backfills: BackfillRegistry
+  backfillMaterializers: BackfillMaterializerRegistry
+}
+
 export interface BackfillProviderResult {
   provider: string
   plugin: string
@@ -36,14 +65,6 @@ export interface BackfillProviderResult {
   sessions_seen: number
   status: 'ok' | 'failed'
   error?: string
-}
-
-// A distinct working directory the user has captured Claude/Codex exchanges
-// in, read from the local cache (LLP 0069 #enumerate). `repoRoot` is `null`
-// for Codex directories (no repo-root stamping) or plain non-repo cwds.
-export interface CapturedDirectory {
-  cwd: string
-  repoRoot: string | null
-  rows: number
-  lastSeen: string | null
+  /** Which step produced `error`, for the run's `provider_finish` span. */
+  error_kind?: string
 }

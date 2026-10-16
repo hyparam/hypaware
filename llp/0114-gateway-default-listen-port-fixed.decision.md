@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-20
 **Related:** LLP 0044, LLP 0045, LLP 0086
+**Extended-by:** LLP 0235, the interception CA is minted in-process, name-constrained, and removed on detach (#interception-accepted is revisited by name: in proxy mode a squatter on the port receives all client egress rather than only attached-client traffic, and the conclusion still holds because the 0600 CA key needs the same-user access that section already conceded reads the client's tokens directly; mutual authentication is still not added)
 
 > The AI gateway's `DEFAULT_LISTEN` was `127.0.0.1:0`: the OS picks a fresh
 > ephemeral port on every daemon restart. LLP 0086 made that livable by

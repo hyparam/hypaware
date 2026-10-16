@@ -1,0 +1,462 @@
+// @ts-check
+
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import process from 'node:process'
+import test from 'node:test'
+
+import { DurableBinRequiredError, GlobalInstallError } from '../../src/core/cli/global_install.js'
+import { runPickerFinale } from '../../src/core/cli/walkthrough.js'
+import { SystemdUnitError } from '../../src/core/daemon/linux.js'
+import { LaunchAgentError } from '../../src/core/daemon/macos.js'
+import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
+
+/**
+ * The local pathway's daemon-install failure (#1383). `installDaemon` throws
+ * `DaemonInstallError` on a platform with no service manager and the finale
+ * let it out, so a local-only `hyp setup` on win32 exited 1 with the config
+ * already committed and attach, client assets and backfill never run. The
+ * team pathway's `skipDaemonInstall` does not cover it: only a join sets it.
+ *
+ * Driven through `runPickerFinale` with `process.platform` stubbed, so
+ * the real `installDaemon` rather than the injectable seam is what throws.
+ */
+
+/** @returns {{ write(chunk: string): boolean, text(): string }} */
+function makeBuf() {
+  let value = ''
+  return {
+    write(chunk) {
+      value += String(chunk)
+      return true
+    },
+    text() {
+      return value
+    },
+  }
+}
+
+/**
+ * Run `fn` with `process.platform` reporting `platform`.
+ *
+ * @template T
+ * @param {NodeJS.Platform} platform
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withPlatform(platform, fn) {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true })
+  try {
+    return await fn()
+  } finally {
+    if (original) Object.defineProperty(process, 'platform', original)
+  }
+}
+
+test('a local-pathway setup on a platform with no service manager finishes attach and backfill', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-win32-'))
+  const env = { HOME: home, HYP_HOME: path.join(home, '.hyp') }
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  /** @type {string[]} */
+  const attached = []
+  /** @type {string[]} */
+  const backfilled = []
+
+  const result = await withPlatform('win32', () => runPickerFinale({
+    capabilities: /** @type {any} */ ({
+      has: (/** @type {string} */ id) => id === 'hypaware.ai-gateway',
+      require: () => ({
+        getClient: (/** @type {string} */ name) =>
+          name === 'claude'
+            ? { attach: async () => { attached.push(name) } }
+            : undefined,
+        localEndpoint: () => 'http://127.0.0.1:4317',
+      }),
+    }),
+    stdout,
+    stderr,
+    env,
+    clientsPicked: ['claude'],
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    configPath: path.join(env.HYP_HOME, 'hypaware-config.json'),
+    retentionDays: 14,
+    interactive: false,
+    backfill: {
+      available: ['claude'],
+      /** @param {{ provider: string, dryRun: boolean, retentionDays: number, until: string }} args */
+      async run(args) {
+        backfilled.push(args.provider)
+        return { provider: args.provider, dryRun: args.dryRun, ok: true, scanned: 1, rowsWritten: 1, skipped: 0 }
+      },
+    },
+    // The local pathway: no join, so nothing sets `skipDaemonInstall` and the
+    // finale reaches the real installer.
+    finale: {},
+  }))
+
+  assert.notEqual(result.cancelled, true, 'the finale finishes rather than throwing out to the CLI')
+  assert.equal(result.daemonInstall.failed, true, 'the install step is recorded as failed, not as a clean skip')
+  assert.match(stderr.text(), /win32 has no background service to install/)
+  assert.doesNotMatch(stderr.text(), /hyp daemon install/, 'a platform with no service manager is not told to run the installer')
+  assert.deepEqual(attached, ['claude'], 'client attach still runs; it needs no service manager')
+  assert.deepEqual(backfilled, ['claude'], 'backfill still runs; it is a local file import')
+  assert.deepEqual(result.attach, [{ client: 'claude', dryRun: false, ok: true }])
+
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+test('daemonIncompleteNote without a context clause names the missing service and nothing else', () => {
+  assert.equal(
+    daemonIncompleteNote('win32'),
+    'note: win32 has no background service to install - nothing is captured on this machine\n'
+  )
+  assert.equal(
+    daemonIncompleteNote('darwin'),
+    "note: the daemon install did not finish - run 'hyp daemon install'\n"
+  )
+})
+
+// The other half of the same defect, and the one every real user is exposed
+// to: `installDaemon` reaches darwin/linux and the service manager itself
+// fails. LLP 0317 D1 makes the platform installers raise their `ServiceOpError`
+// subclass when no pid appears, which is not a `DaemonInstallError`, so a catch
+// on that class alone would leave the run dying after the config commit exactly
+// as #1383 describes. The team pathway has never died here: `runDaemonInstall`
+// turns every install failure into exit 1 and the login lane reads that as
+// `daemon_incomplete` (#978).
+
+/**
+ * @param {string} home
+ * @param {string[]} events
+ * @param {{ write(chunk: string): boolean, text(): string }} stderr
+ */
+function finaleArgs(home, events, stderr) {
+  return {
+    finale: { dryRun: false, skipDaemonRestart: true },
+    retentionDays: 30,
+    interactive: false,
+    clientsPicked: ['claude'],
+    capabilities: /** @type {any} */ ({
+      has: (/** @type {string} */ id) => id === 'hypaware.ai-gateway',
+      require: () => ({
+        getClient: (/** @type {string} */ name) =>
+          name === 'claude' ? { attach: async () => { events.push('attach') } } : undefined,
+        localEndpoint: () => 'http://127.0.0.1:4317',
+      }),
+    }),
+    config: /** @type {any} */ ({
+      version: 2,
+      plugins: [{ name: '@hypaware/ai-gateway', config: { upstreams: [], proxy_mode: true } }],
+    }),
+    configPath: path.join(home, '.hyp', 'hypaware-config.json'),
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+    stdout: makeBuf(),
+    stderr,
+    waitForCaFn: async () => {
+      events.push('ca-wait')
+      return { ready: true }
+    },
+  }
+}
+
+test('a launchd/systemd install failure on a supported platform finishes the finale too', async () => {
+  for (const Err of [LaunchAgentError, SystemdUnitError]) {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-svcop-'))
+    /** @type {string[]} */
+    const events = []
+    const stderr = makeBuf()
+    const summary = await runPickerFinale(/** @type {any} */ ({
+      ...finaleArgs(home, events, stderr),
+      installDaemonFn: async () => { throw new Err('launchctl bootstrap exited 5') },
+    }))
+    assert.equal(summary.daemonInstall.failed, true, `${Err.name} is recorded as a failed install`)
+    assert.match(stderr.text(), /^daemon install failed: launchctl bootstrap exited 5\n/, 'the service manager\'s own diagnosis reaches the user, not just the span')
+    assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+    assert.deepEqual(events, ['attach'], 'no CA can appear without a daemon, so the wait is skipped and attach still runs')
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('an error that is not an install failure still escapes the finale', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-bug-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  await assert.rejects(
+    () => runPickerFinale(/** @type {any} */ ({
+      ...finaleArgs(home, events, stderr),
+      installDaemonFn: async () => { throw new TypeError('a bug in this lane') },
+    })),
+    /a bug in this lane/,
+    'the catch is install failures only; anything else is a bug and propagates'
+  )
+  assert.deepEqual(events, [], 'nothing after the install step ran')
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The last two ways `installDaemon` could still kill the finale after the
+// config commit (#1386). Neither is a service-manager failure, so neither is a
+// `ServiceOpError`, and both are ordinary environment failures rather than
+// bugs: `npx hypaware setup` cannot reach the registry, or the plist/unit
+// directory cannot be written.
+
+test('a failed npx durable-bin upgrade finishes the finale too', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-npx-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    installDaemonFn: async () => {
+      throw new GlobalInstallError(
+        "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
+      )
+    },
+  }))
+  assert.equal(summary.daemonInstall.failed, true, 'the global install failure is a failed daemon install')
+  assert.match(
+    stderr.text(),
+    /^daemon install failed: npx detected, but npm install -g hypaware@1\.0\.0 failed: EACCES\./,
+    'the npm diagnosis is actionable, so it reaches the user rather than only the span'
+  )
+  assert.match(stderr.text(), /Run 'npm install -g hypaware@1\.0\.0' manually/, 'the repair the user can actually run is the one printed')
+  assert.doesNotMatch(
+    stderr.text(),
+    /hyp daemon install/,
+    'the global install npm refused is what would have put hyp on PATH, so the note must not name a hyp command (#1395)'
+  )
+  assert.deepEqual(events, ['attach'], 'attach still runs; it needs no daemon')
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The other half of #1395: a GlobalInstallError is not by itself proof that no
+// hyp exists. npm install -g can land and the prefix lookup after it fail, and
+// that run does have a hyp on PATH, so the note is right there and still prints.
+test('a global install that landed before the prefix lookup failed still gets the note', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-prefix-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    installDaemonFn: async () => {
+      throw new GlobalInstallError('npm config get prefix failed: ENOENT', { globalBinInstalled: true })
+    },
+  }))
+  assert.equal(summary.daemonInstall.failed, true, 'a failed prefix lookup is still a failed daemon install')
+  assert.match(stderr.text(), /^daemon install failed: npm config get prefix failed: ENOENT\n/)
+  assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// Skipped as root, who is refused by no mode bits: the mkdir would succeed and
+// the run would fail further along on something this test does not describe.
+test('an unwritable unit directory finishes the finale too', { skip: process.getuid?.() === 0 }, async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-eacces-'))
+  const systemdDir = path.join(home, '.config', 'systemd')
+  await fs.mkdir(systemdDir, { recursive: true })
+  // Only the unit directory's parent is sealed: the rest of the finale keeps
+  // writing under HOME, and this failure must not stand in for those.
+  await fs.chmod(systemdDir, 0o500)
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  try {
+    // The real installer, not the seam: the throw has to come from the
+    // filesystem write inside `installSystemdUnit` itself.
+    const summary = await withPlatform('linux', () => runPickerFinale(/** @type {any} */ (
+      finaleArgs(home, events, stderr)
+    )))
+    assert.equal(summary.daemonInstall.failed, true, 'an EACCES on the unit directory is a failed install')
+    assert.match(stderr.text(), /^daemon install failed: failed to create .*systemd\/user: EACCES/, 'the system error names the path and the reason')
+    assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+    assert.deepEqual(events, ['attach'], 'attach still runs; it needs no daemon')
+  } finally {
+    // Restored whatever happened: a failed assertion would otherwise leave a
+    // 0500 directory that `fs.rm` cannot empty.
+    await fs.chmod(systemdDir, 0o700)
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The restart ran after an install the same finale had recorded as failed, so
+// a run with `skipDaemonRestart: false` printed a `daemon restart failed:` line
+// directly under the note saying the install did not finish: two lines for one
+// fault, the second contradicting the first (#1393).
+
+test('a failed install withholds the daemon restart instead of contradicting its own note', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-restart-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    // The gate under test: the restart is asked for, and only the failed
+    // install withholds it.
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => { throw new LaunchAgentError('launchctl bootstrap exited 5') },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true)
+  assert.equal(
+    stderr.text(),
+    `daemon install failed: launchctl bootstrap exited 5\n${daemonIncompleteNote(process.platform)}`,
+    'the failed-install finale says the install failed and what to do, and nothing else'
+  )
+  assert.deepEqual(
+    summary.daemonRestart,
+    { skipped: true, dryRun: false, ok: false },
+    'the restart is recorded as skipped, not as a run that failed'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// Same contradiction, one stream over: a dry run whose plan could not be
+// rendered printed the note and then went on to say it would restart the
+// daemon, and recorded the restart as a clean one (#1393).
+
+test('a dry run whose install plan failed does not go on to claim it would restart', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-dryrun-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const stdout = makeBuf()
+  const summary = await withPlatform('win32', () => runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    stdout,
+    finale: { dryRun: true, skipDaemonRestart: false },
+  })))
+
+  assert.equal(summary.daemonInstall.failed, true)
+  assert.doesNotMatch(stdout.text(), /Would restart the daemon/)
+  assert.deepEqual(
+    summary.daemonRestart,
+    { skipped: true, dryRun: true, ok: false },
+    'the restart is recorded as skipped, not as a dry run that would have worked'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The gate above was too broad for one of the three failure classes (#1400).
+// `GlobalInstallError` comes from the npx durable-bin upgrade, which runs
+// *before* either platform installer, so it says nothing about whether a
+// service exists. On a machine that already had one running, withholding the
+// restart left that daemon serving the config this run had just replaced, and
+// only an explicit reload would have picked the new one up. The predicate that
+// separates the classes is a runtime probe, not the error: restart what has a
+// live pid.
+
+test('a durable-bin failure over a running daemon still restarts it onto the config just written', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-npx-live-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  /** @type {Record<string, unknown>[]} */
+  const restarts = []
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => {
+      throw new GlobalInstallError(
+        "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
+      )
+    },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 4242, platform: process.platform }),
+      restartServiceDaemon: async (/** @type {Record<string, unknown>} */ options) => { restarts.push(options) },
+    },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true, 'the durable-bin upgrade still counts as a failed install')
+  assert.equal(restarts.length, 1, 'the daemon that is observably running is restarted so it reads the new config')
+  assert.equal(restarts[0]?.homeDir, home, 'the restart addresses the same home the finale installed against')
+  assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: false, ok: true })
+  assert.doesNotMatch(stderr.text(), /daemon restart failed:/)
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The other side of the same predicate, and why it is a pid rather than
+// `loaded`: LLP 0317 D1's failure mode is a service the manager registered and
+// never spawned. The install raises for it, and there is no process serving the
+// old config, so there is nothing to restart and nothing to report.
+
+test('a service install that left the job loaded with no pid still attempts no restart', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-nopid-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  let restarted = false
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => { throw new LaunchAgentError('no pid after kickstart') },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, platform: process.platform }),
+      restartServiceDaemon: async () => { restarted = true },
+    },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true)
+  assert.equal(restarted, false, 'a registered job with no process behind it is serving no config')
+  assert.deepEqual(
+    summary.daemonRestart,
+    { skipped: true, dryRun: false, ok: false },
+    'the restart is recorded as skipped, not as a run that failed'
+  )
+  assert.equal(
+    stderr.text(),
+    `daemon install failed: no pid after kickstart\n${daemonIncompleteNote(process.platform)}`,
+    'still one fault, one diagnosis: no contradicting restart-failed line'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The combination neither test above covers (#1408): the install reached the
+// service manager *and* left a daemon running. A reinstall that raises partway
+// through has not necessarily stopped the process it was replacing, so the pid
+// is there and the restart runs. Which error class threw is not what the gate
+// reads.
+
+test('a service install that raised over a still-live daemon restarts it anyway', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-live-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  let restarted = false
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => { throw new LaunchAgentError('launchctl bootstrap exited 5') },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 5150, platform: process.platform }),
+      restartServiceDaemon: async () => { restarted = true },
+    },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true, 'the service-manager failure is still a failed install')
+  assert.equal(restarted, true, 'the daemon the failed reinstall left running is restarted, not written off')
+  assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: false, ok: true })
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+
+test('a refused temporary CLI stops the finale before attach and threads force to the installer', async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-durable-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const events = []
+  await assert.rejects(runPickerFinale({
+    ...finaleArgs(home, events, makeBuf()),
+    force: true,
+    interactive: false,
+    installDaemonFn: async (options) => {
+      assert.equal(options.force, true)
+      assert.equal(options.durableBin?.interactive, false)
+      throw new DurableBinRequiredError('A durable CLI is required')
+    },
+  }), DurableBinRequiredError)
+  assert.deepEqual(events, [], 'attach and backfill must not run after refusal')
+})

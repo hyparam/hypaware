@@ -444,18 +444,18 @@ async function flushIfSupported(storage, tablePath, reason) {
  * Goes through the shared export-read seam (`storage.readRowsSince`)
  * rather than the raw `storage.readRows` full scan, so a row whose `cwd`
  * resolves to `local-only` is withheld from the committed snapshot exactly
- * like every other sink honors it — the Iceberg table-format was the last
+ * like every other sink honors it: the Iceberg table-format was the last
  * export path still reading off the unfiltered seam
  * (@ref LLP 0070#why-export [implements]). Iceberg commits are
  * snapshot/marker-based (`state.js` load/writeMarker), not cursor-based, so
  * there is nothing here to resume from: every call is a from-scratch full
- * scan (`since` omitted, which `readRowsSince` treats as watermark `0` —
- * strictly below every real seq — combined with `includeLegacy: true` so
+ * scan (`since` omitted, which `readRowsSince` treats as watermark `0`;
+ * strictly below every real seq; combined with `includeLegacy: true` so
  * the pre-upgrade null-seq backlog is also carried), and the `after`
  * continuation `readRowsSince` yields is discarded (@ref LLP 0070#incremental
- * [constrained-by] — the drop-but-advance cursor contract exists for
+ * [constrained-by], the drop-but-advance cursor contract exists for
  * watermark-based sinks; this snapshot-based path has no watermark to
- * advance). Drop-only entries — rows a `local-only` cwd withheld — are
+ * advance). Drop-only entries, rows a `local-only` cwd withheld, are
  * skipped rather than yielded.
  *
  * @param {QueryStorageService} storage

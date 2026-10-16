@@ -6,6 +6,8 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0006, LLP 0012, LLP 0015
+**Extended-by:** LLP 0234, decryption follows the routing table and recording follows the path anchor (proxy mode qualifies the pure-passthrough claim: the gateway now holds a name-constrained local CA per LLP 0235, but still adds no credential of its own and stays byte-transparent to the upstream)
+**Extended-by:** LLP 0468 (direct Ollama text API capture and exchange-scoped projection lifetime, designed in LLP 0469; provider projection stays adapter-owned)
 
 > The load-bearing capability for client adapters. Decomposed from
 > `hypaware-design.md` (AI Gateway as a Plugin).
@@ -30,8 +32,8 @@ and use it to register upstream presets, attach/detach client settings, install
 client-side skills, and enrich rows in `ai_gateway_messages` from local
 transcripts (Claude only).
 
-The gateway exposes typed hooks — `registerUpstreamPreset`, `registerClient`,
-`registerMessageEnricher` — so a new adapter never modifies gateway code.
+The gateway exposes typed hooks, `registerUpstreamPreset`, `registerClient`,
+`registerMessageEnricher`, so a new adapter never modifies gateway code.
 
 ## Naming rule
 
@@ -43,7 +45,7 @@ ownership unambiguous: the producing plugin evolves its own shape without
 cross-plugin coordination, and adapter enrichers/skills compile against a
 stable, single-owner table.
 
-A different source for similar data — say a `@hypaware/litellm` plugin —
+A different source for similar data, say a `@hypaware/litellm` plugin,
 registers its **own** table (`litellm_messages`). It may adopt the same column
 shape as a stylistic convergence, but that is not a shared contract enforced by
 core. Users who run both and want a unified view define a SQL view over the

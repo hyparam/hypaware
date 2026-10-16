@@ -1,0 +1,456 @@
+// Shared interfaces for the @hypaware/github plugin.
+//
+// Two kinds of types live here, kept apart deliberately:
+//
+//   1. Kernel types - re-exported from the host runtime's published
+//      `hypaware-plugin-kernel-types.d.ts`. This file is the single place that
+//      reaches the root kernel contract, so the rest of `src/` imports kernel
+//      shapes from `./types.js`. The root-anchored path resolves from this
+//      bundled source and from the generated declaration tree.
+//
+//   2. Capability + plugin-local types - declared here directly. Like
+//      `@hypaware/ai-gateway-graph`, this plugin RE-DECLARES the
+//      `hypaware.context-graph` capability shape rather than importing the
+//      provider's internals: a contract author consumes only the kit's public
+//      surface, so the id recipe + provenance columns stay owned by the graph
+//      plugin (LLP 0023 §contract-contribution).
+
+import type {
+  AsyncDataSource,
+  CachePartitionMeta,
+  ColumnSpec,
+  CommandRunContext,
+  DatasetDataSourceContext,
+  DatasetDiscoveryContext,
+  DatasetRefreshResult,
+  DatasetRegistration,
+  HypError,
+  JsonObject,
+  PluginActivationContext,
+  PluginLogger,
+  QueryPartition,
+  QueryStorageService,
+  ScannableDataSource,
+  SinkContinuation,
+  SourceStatus,
+  StartedSource,
+  ValidationError,
+  ValidationResult,
+} from '../../../../hypaware-plugin-kernel-types.js'
+
+export type {
+  AsyncDataSource,
+  CachePartitionMeta,
+  ColumnSpec,
+  CommandRunContext,
+  DatasetDataSourceContext,
+  DatasetDiscoveryContext,
+  DatasetRefreshResult,
+  DatasetRegistration,
+  HypError,
+  JsonObject,
+  PluginActivationContext,
+  PluginLogger,
+  QueryPartition,
+  QueryStorageService,
+  ScannableDataSource,
+  SinkContinuation,
+  SourceStatus,
+  StartedSource,
+  ValidationError,
+  ValidationResult,
+}
+
+// ---------------------------------------------------------------------------
+// Storage: the extended cache surface the kernel hands plugins. `AsyncDataSource`
+// is the kernel's own re-export of the `squirreling` type (so a dataset's
+// `createDataSource` return matches `DatasetRegistration`); only the
+// `dataSourceForTable` extension is added here.
+// ---------------------------------------------------------------------------
+
+/** `QueryStorageService` plus the `dataSourceForTable` extension used by datasets. */
+export type ExtendedQueryStorageService = QueryStorageService & {
+  dataSourceForTable(tablePath: string): Promise<ScannableDataSource | null>
+}
+
+// ---------------------------------------------------------------------------
+// `hypaware.context-graph` capability shape (re-declared, not imported).
+// ---------------------------------------------------------------------------
+
+export type GraphRow = Record<string, unknown>
+
+export interface RulePredicate {
+  eq?: Record<string, string>
+  in?: Record<string, string[]>
+  likePrefix?: Record<string, string>
+}
+
+/** One T0 contract rule in the declarative or raw-SQL capability form. */
+export interface ContractRule {
+  kind: 'node' | 'edge'
+  type: string
+  sql?: string
+  columns?: string[]
+  where?: RulePredicate
+  toRow(row: Record<string, unknown>): GraphRow | null
+}
+
+/** Per-node spec a `toRow` hands `buildNode` (identity + optional display + provenance keys). */
+export interface NodeSpec {
+  type: string
+  key: string
+  label?: string | null
+  props?: Record<string, unknown>
+  firstSeen: unknown
+  sourceKeys: Record<string, unknown>
+}
+
+/** Per-edge spec a `toRow` hands `buildEdge` (endpoints + relation type + provenance keys). */
+export interface EdgeSpec {
+  type: string
+  srcType: string
+  srcKey: string
+  dstType: string
+  dstKey: string
+  firstSeen: unknown
+  sourceKeys: Record<string, unknown>
+}
+
+/** The row builders the kit hands a contract author (id recipe + provenance live in the graph plugin). */
+export interface GraphRowBuilders {
+  buildNode(spec: NodeSpec): GraphRow
+  buildEdge(spec: EdgeSpec): GraphRow
+}
+
+/** The shared authoring kit exposed on the `hypaware.context-graph` capability. */
+export interface GraphKit {
+  nodeId(type: string, naturalKey: string): string
+  edgeId(srcId: string, type: string, dstId: string): string
+  makeRowBuilders(meta: {
+    sourceDataset: string
+    projector: string
+    projectorVersion: number
+  }): GraphRowBuilders
+}
+
+/** The `hypaware.context-graph` capability value, as this plugin consumes it. */
+export interface ContextGraphCapabilityLike {
+  registerContract(contract: unknown): void
+  project(sourceDataset: string): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
+  kit: GraphKit
+}
+
+/** The contract object `registerContract` accepts. */
+export interface GraphContract {
+  name: string
+  plugin: string
+  sourceDataset: string
+  projector: string
+  projectorVersion: number
+  rules: ContractRule[]
+}
+
+// ---------------------------------------------------------------------------
+// Plugin-local config.
+// ---------------------------------------------------------------------------
+
+export interface GithubConfig {
+  ignore: string[]
+  poll_interval: string
+  inventory: 'session_repos' | 'all_visible'
+  token_env: string
+}
+
+export interface GithubConfigError {
+  pointer: string
+  message: string
+  errorKind: 'github_config_invalid'
+}
+
+export type GithubConfigResult =
+  | { ok: true; config: GithubConfig }
+  | { ok: false; errors: GithubConfigError[] }
+
+export interface ObservedReposIndex {
+  list(): Promise<string[]>
+  /**
+   * The inventory the last successful `list()` derived, served from persisted
+   * state without deriving again. A `list()` that throws leaves it intact, so
+   * a tick whose inventory read failed can still tell which repositories its
+   * durable cursors are about.
+   */
+  lastKnown(): string[]
+  /**
+   * True when the last `list()` left a withholding revalidation pass
+   * incomplete (LLP 0367): `list()` served only the repositories re-confirmed
+   * so far, and bounded local work remains for the next tick.
+   */
+  revalidationPending(): boolean
+}
+
+export interface GithubRuntime {
+  ctx: PluginActivationContext
+  config: GithubConfig
+  log: PluginLogger
+  stateDir: string
+  storage: ExtendedQueryStorageService
+  env: NodeJS.ProcessEnv
+  observedRepos: ObservedReposIndex
+  graph: ContextGraphCapabilityLike
+  /** Undefined on activation: catch up existing rows once, then skip idle ticks. */
+  projectionNeeded?: boolean
+  /** Test seam; production defaults to the real fetch client. */
+  clientFactory?: () => GithubClient
+  /** Test seam; production uses the fixed whole-tick request limit. */
+  captureRequestLimit?: number
+}
+
+export interface GithubOAuthOptions {
+  fetchImpl?: typeof fetch
+  signal?: AbortSignal
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+}
+
+export interface GithubOAuthTokens {
+  access_token: string
+  expires_at?: number
+  refresh_token?: string
+  refresh_expires_at?: number
+}
+
+export interface GithubAuthRecord {
+  generation: string
+  status: 'pending' | 'logged_out' | 'active'
+  account?: { login: string; id: number }
+  access_token?: string
+  expires_at?: number
+  refresh_token?: string
+  refresh_expires_at?: number
+}
+
+export interface LocalObservedRepoState {
+  schema_version: 1
+  repos: string[]
+  partitions: Record<string, SinkContinuation>
+  partition_versions: Record<string, string>
+  /** The export-policy fingerprint `repos` was last derived under (LLP 0367). */
+  policy_fingerprint?: string
+  /** When the last full derivation completed (ISO); drives the age backstop. */
+  revalidated_at?: string
+  /** Present only while a re-derivation pass is incomplete. */
+  revalidation?: ObservedRepoRevalidationState
+}
+
+/**
+ * Durable progress of one withholding-revalidation pass (LLP 0367
+ * #bounded-revalidation): everything a later tick or a restarted daemon needs
+ * to resume mid-partition. Bounded by the distinct repository inventory plus
+ * per-partition cursor state, never by transcript-row count.
+ */
+export interface ObservedRepoRevalidationState {
+  /** The policy fingerprint this pass validates against. */
+  fingerprint: string
+  /** Repositories re-confirmed so far; what `list()` serves while incomplete. */
+  repos: string[]
+  /** Per-partition pass continuations (resume point within each partition). */
+  partitions: Record<string, SinkContinuation>
+  /** Partitions the pass has read to exhaustion. */
+  done: string[]
+  /** `epoch:rowCount` observed before each completed partition was read. */
+  versions: Record<string, string>
+}
+
+// ---------------------------------------------------------------------------
+// Per-repo capture cursor (sidecar state - see LLP 0360 §cursoring).
+// ---------------------------------------------------------------------------
+
+/**
+ * One repo's poll cursor: `since` high-water marks for the time-windowed
+ * endpoints (issues/commits/comments) and an ETag map for the listing
+ * endpoints that lack `since`. Shared by backfill + poll so a backfilled repo's
+ * poller resumes past history rather than re-fetching it.
+ */
+export interface RepoCursor {
+  /** Explicit one-time import authorization, removed on completion or exclusion. */
+  one_time_import?: true
+  since?: { issues?: string; commits?: string; comments?: string; pulls?: string }
+  /**
+   * Event ids sitting exactly ON the matching `since` watermark. GitHub's
+   * `since` is inclusive, so those items come back every tick; carrying their
+   * identity is what stops them being appended twice without pushing the
+   * watermark past an item stamped in the same second (issue #1284).
+   */
+  boundary?: { issues?: string[]; commits?: string[]; comments?: string[] }
+  etag?: Record<string, string>
+  /**
+   * Numbers known to be pull requests, from either listing: what discriminates
+   * a PR conversation comment from an issue comment.
+   */
+  pull_numbers?: number[]
+  /**
+   * Pull numbers already captured at exactly `since.pulls`, which is a
+   * different question from `pull_numbers` (the issues listing returns PRs the
+   * pulls pass has not captured yet). Only the boundary second is kept, since
+   * that is the only one the equal-timestamp tie guard consults. Absent while
+   * no pulls phase has observed that second (a sidecar written before this
+   * field existed, or one whose phases have all ended on a 304), and the guard
+   * then falls back to `pull_numbers`; never written empty, since an empty
+   * answer would retire that fallback.
+   */
+  pulls_high_numbers?: number[]
+  work?: GithubRepoWork
+}
+
+export interface CursorState {
+  schema_version: number
+  repos: Record<string, RepoCursor>
+  next_repo?: string
+  /**
+   * The last capture verdict any process reached over the whole inventory:
+   * true when that tick ended with bounded work remaining, false when it did
+   * not. Absent on a sidecar written before the field existed, which reads as
+   * "no verdict recorded" rather than as false (LLP 0438#durable-verdict).
+   */
+  pending?: boolean
+}
+
+export interface GithubPullTask {
+  number: number
+  created_at?: string
+  phase: 'files' | 'reviews' | 'commits'
+  page?: string | null
+}
+
+export interface GithubCommitTask {
+  sha: string
+  created_at?: string
+  page?: string | null
+}
+
+export interface GithubRepoWork {
+  mode: 'backfill' | 'poll'
+  phase: 'issues' | 'pulls' | 'commits' | 'comments'
+  page?: string | null
+  baseline_pulls?: string
+  // Per-phase high-water staging. A phase accumulates here and publishes into
+  // `RepoCursor.since` only at its boundary, so a dropped `work` re-fetches
+  // rather than skipping the un-fetched pages (LLP 0360#cursoring).
+  issues_high?: string
+  pulls_high?: string
+  /**
+   * Staged `RepoCursor.pulls_high_numbers` for the in-flight `pulls_high`.
+   * Absent only on a phase resumed from a work descriptor written before this
+   * field existed, which stages nothing rather than the partial answer its
+   * remaining pages would give.
+   */
+  pulls_high_numbers?: number[]
+  /**
+   * Pull numbers this phase has already emitted a `pull_request` row for, so a
+   * re-listing produced by the `updated` sort reshuffling under pagination
+   * emits nothing a second time. Staged because the request budget splits the
+   * phase across ticks. Absent on a phase resumed from a work descriptor
+   * written before this field existed, which guards only its remaining pages.
+   */
+  pulls_emitted?: number[]
+  commits_high?: string
+  comments_high?: string
+  /**
+   * Event ids the in-flight gate phase has already appended a row for, so a
+   * re-listing produced by the listing reshuffling under pagination emits
+   * nothing a second time. One of issues/commits/comments is live at a time, so
+   * the three share the field and every phase transition clears it. Staged
+   * because the request budget splits a phase across ticks, and capped like the
+   * boundary sets, so overflow degrades to the duplicate, not to a lost row.
+   */
+  gate_emitted?: string[]
+  // The boundary identities staged alongside each `*_high`, published into
+  // `RepoCursor.boundary` at the same phase boundary.
+  issues_high_ids?: string[]
+  commits_high_ids?: string[]
+  comments_high_ids?: string[]
+  pulls_etag?: string
+  pull_tasks?: GithubPullTask[]
+  commit_tasks?: GithubCommitTask[]
+}
+
+// ---------------------------------------------------------------------------
+// GitHub API client surface (capture.js depends on this, not on `fetch`, so
+// tests inject a fake).
+// ---------------------------------------------------------------------------
+
+/** A normalized GitHub actor (the `user`/`author` object subset we keep). */
+export interface GithubActor {
+  login: string
+  type?: string
+}
+
+/**
+ * The capture tick's request allowance (LLP 0361#budget). The caller spends one
+ * unit before each page call; the client spends one more for every redirect hop
+ * and rejects with `github_budget_exhausted` when none is left.
+ */
+export interface GithubRequestBudget {
+  take(): boolean
+}
+
+export interface GithubClient {
+  /** Enumerate every repository visible to the authenticated local identity. */
+  listViewerRepos(): Promise<string[]>
+  listIssuesPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubIssue>>
+  listPullRequestsPage(owner: string, repo: string, etag: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubPull>>
+  listPullRequestFilesPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<string>>
+  listPullRequestReviewsPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubReview>>
+  listPullRequestCommitsPage(owner: string, repo: string, number: number, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubCommit>>
+  listCommitsPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubCommit>>
+  listCommitFilesPage(owner: string, repo: string, sha: string, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<string>>
+  listIssueCommentsPage(owner: string, repo: string, since: string | undefined, page?: string, budget?: GithubRequestBudget): Promise<GithubPage<GithubComment>>
+}
+
+export interface GithubPage<T> {
+  items: T[]
+  next: string | null
+  etag?: string | null
+  notModified?: boolean
+}
+
+export interface GithubIssue {
+  number: number
+  state?: string
+  created_at?: string
+  updated_at?: string
+  user?: GithubActor | null
+  pull_request?: unknown
+}
+
+export interface GithubPull {
+  number: number
+  state?: string
+  merged_at?: string | null
+  draft?: boolean
+  created_at?: string
+  updated_at?: string
+  user?: GithubActor | null
+}
+
+export interface GithubReview {
+  id: number
+  state?: string
+  submitted_at?: string
+  user?: GithubActor | null
+}
+
+export interface GithubCommit {
+  sha: string
+  author?: GithubActor | null
+  commit?: { author?: { date?: string } | null; committer?: { date?: string } | null } | null
+}
+
+export interface GithubComment {
+  id: number
+  created_at?: string
+  updated_at?: string
+  user?: GithubActor | null
+  /** `.../issues/{number}` - the subject the comment is attached to. */
+  issue_url?: string
+}

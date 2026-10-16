@@ -13,13 +13,14 @@ import {
   runWizardFork,
 } from '../../../../src/core/cli/wizard/fork.js'
 
-// The wizard fork phase (LLP 0129 #fork) and the amended returning gate
-// (LLP 0129 #returning-gate). Both prompts drive the legacy readline
-// fallback here (HYP_NO_TUI=1 / non-TTY stdout), matching the pattern
+// The wizard fork phase (LLP 0129 #fork) and the returning gate
+// (LLP 0129 #returning-gate, amended by LLP 0182 to one Reconfigure for
+// every machine). Both prompts drive the legacy readline fallback here
+// (HYP_NO_TUI=1 / non-TTY stdout), matching the pattern
 // `test/core/init-configured-entry.test.js` already uses for the
 // pre-amendment gate.
 // @ref LLP 0129#fork [tests]:
-// @ref LLP 0129#returning-gate [tests]:
+// @ref LLP 0182#one-reconfigure [tests]:
 
 function makeBuf() {
   let value = ''
@@ -45,13 +46,14 @@ function ctxWithStdin(input) {
 }
 
 /**
- * @param {{ configExists?: boolean, configValid?: boolean, hasCentral?: boolean }} over
+ * @param {{ configExists?: boolean, configValid?: boolean, configRecordsAnswer?: boolean, hasCentral?: boolean }} over
  */
 function fixtureReport(over = {}) {
-  const { configExists = true, configValid = true, hasCentral = false } = over
+  const { configExists = true, configValid = true, configRecordsAnswer = true, hasCentral = false } = over
   return /** @type {any} */ ({
     configExists,
     configValid,
+    configRecordsAnswer,
     layered: hasCentral
       ? { hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }
       : null,
@@ -60,18 +62,28 @@ function fixtureReport(over = {}) {
 
 // --- runWizardFork / buildForkOptions ---
 
-test('buildForkOptions: team, local, quit, in that order', () => {
+// Two rows and no quit row; sync leads and is the bare-enter default.
+// @ref LLP 0410#two-rows [tests]:
+test('buildForkOptions: team then local, no quit row', () => {
   const values = buildForkOptions().map((o) => o.value)
-  assert.deepEqual(values, ['team', 'local', 'quit'])
+  assert.deepEqual(values, ['team', 'local'])
 })
 
-test('runWizardFork: a bare enter takes the default (quit)', async () => {
+test('runWizardFork: a bare enter takes the default (sync)', async () => {
   const { opts, stdout } = ctxWithStdin('\n')
   const choice = await runWizardFork(opts)
-  assert.equal(choice, 'quit')
-  assert.match(stdout.text(), /1\) Join a team/)
-  assert.match(stdout.text(), /2\) Local install and configuration/)
-  assert.match(stdout.text(), /3\) Quit/)
+  assert.equal(choice, 'team')
+  // The intro line precedes the menu (LLP 0211 #explain-first).
+  assert.match(stdout.text(), /HypAware records the sessions, logs, and telemetry/)
+  assert.match(stdout.text(), /1\) Sync to the cloud/)
+  assert.match(stdout.text(), /2\) Local only/)
+  assert.doesNotMatch(stdout.text(), /Quit/)
+  assert.match(stdout.text(), /Choose \[1-2, default 1\]: /)
+  // Row summaries carry the guidance and the sign-in disclosure
+  // (LLP 0211 #collect-labels), in the legacy renderer too.
+  assert.match(stdout.text(), /follows you across machines and harnesses/)
+  assert.match(stdout.text(), /You will be asked to sign in\./)
+  assert.match(stdout.text(), /Everything stays on this machine\./)
 })
 
 test('runWizardFork: choosing 1 forks to the team pathway', async () => {
@@ -100,14 +112,12 @@ test('legacyForkPrompt: matches runWizardFork on the same input (direct call, no
 
 // --- buildReturningGateOptions ---
 
-test('buildReturningGateOptions: a managed machine gets scoped-reconfigure, never bare Reconfigure', () => {
-  const values = buildReturningGateOptions(true).map((o) => o.value)
-  assert.deepEqual(values, ['scoped-reconfigure', 'status', 'quit'])
-})
-
-test('buildReturningGateOptions: a solo machine keeps full Reconfigure', () => {
-  const values = buildReturningGateOptions(false).map((o) => o.value)
+// One menu for both machine kinds (LLP 0182): the builder takes no
+// `managed` argument at all, so there is no branch left to drift.
+test('buildReturningGateOptions: one Reconfigure, the same three rows for every machine', () => {
+  const values = buildReturningGateOptions().map((o) => o.value)
   assert.deepEqual(values, ['reconfigure', 'status', 'quit'])
+  assert.equal(buildReturningGateOptions.length, 0)
 })
 
 // --- evaluateReturningGate ---
@@ -127,14 +137,83 @@ test('evaluateReturningGate: an invalid config is also first-run', async () => {
   assert.equal(gate.action, 'first-run')
 })
 
-test('evaluateReturningGate: managed machine, choosing the scoped entry presets a scoped re-entry (no fork)', async () => {
+// A central layer that stops merging cleanly (a server-side config change,
+// client/server schema drift) must not relabel the machine as unmanaged:
+// the caller reads `managed` to decide whether to lock the org's rows, and
+// an editable org row composes into the local layer.
+// @ref LLP 0129#join-before-picker [tests]:
+test('evaluateReturningGate: a managed machine with an invalid config is still managed on the first-run path', async () => {
+  const { opts } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configValid: false, hasCentral: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, true)
+})
+
+// Defensive coverage of the guard's *other* branch, not a state the
+// collector emits: `collectHypAwareStatus` sets `configExists` from a
+// non-null effective config, and `mergeConfigLayers` always returns one
+// once a central layer loaded, so on a real machine `hasCentral` implies
+// `configExists`. Pinned so a future rewrite of the `||` cannot make
+// `managed` depend on `configExists` again.
+test('evaluateReturningGate: a managed machine with no config at all is still managed', async () => {
+  const { opts } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configExists: false, hasCentral: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, true)
+})
+
+// The residual LLP 0277 §consequences left open. `hyp remote add` before the
+// first `hyp init` (the documented team onboarding order) writes a config
+// holding only `query.remotes`: it exists, it validates, and it records no
+// answer to the pick question. Fronting onboarding with the "already set up"
+// summary over a machine that collects nothing is the misreading LLP 0277
+// took out of the pick lane; the gate now keys on the same discriminator.
+// @ref LLP 0281#returning-gate [tests]:
+test('evaluateReturningGate: a valid config that records no pick answer is the first-run path', async () => {
+  const { opts, stdout } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configRecordsAnswer: false })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, false)
+  // No summary screen: the gate never rendered.
+  assert.doesNotMatch(stdout.text(), /already configured/)
+  assert.doesNotMatch(stdout.text(), /Reconfigure/)
+})
+
+// `managed` is read before the early return on this branch too, for the same
+// reason the invalid-config branch pins it: the caller locks the org's rows
+// off it, and an editable org row composes into the local layer.
+// @ref LLP 0281#returning-gate [tests]:
+test('evaluateReturningGate: an answer-less config on a managed machine is first-run and still managed', async () => {
+  const { opts } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configRecordsAnswer: false, hasCentral: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, true)
+})
+
+// The boundary the discriminator draws: a recorded answer still fronts the
+// gate, so the fix cannot be read as "the returning gate is gone".
+// @ref LLP 0281#returning-gate [tests]:
+test('evaluateReturningGate: a config that records a pick answer still fronts the returning gate', async () => {
+  const { opts, stdout } = ctxWithStdin('1\n')
+  opts.collectStatus = async () => fixtureReport({ configRecordsAnswer: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'reconfigure')
+  assert.match(stdout.text(), /1\) Reconfigure/)
+})
+
+test('evaluateReturningGate: managed machine, Reconfigure is the same row it is on a solo machine', async () => {
   const { opts, stdout } = ctxWithStdin('1\n')
   opts.collectStatus = async () => fixtureReport({ hasCentral: true })
   const gate = await evaluateReturningGate(opts)
-  assert.equal(gate.action, 'scoped-reconfigure')
+  assert.equal(gate.action, 'reconfigure')
+  // Still reported: the orchestrator locks the org's picker rows off it.
   assert.equal(gate.managed, true)
-  assert.match(stdout.text(), /1\) Adjust what this machine collects/)
-  assert.doesNotMatch(stdout.text(), /1\) Reconfigure/)
+  assert.match(stdout.text(), /1\) Reconfigure/)
+  assert.doesNotMatch(stdout.text(), /Adjust/)
 })
 
 test('evaluateReturningGate: managed machine, a bare enter still quits (never reconfigures by accident)', async () => {
@@ -172,7 +251,7 @@ test('evaluateReturningGate: either machine kind can still choose status', async
 
 test('legacyReturningGatePrompt: default title is the plain "what would you like to do" prompt', async () => {
   const { opts, stdout } = ctxWithStdin('\n')
-  const choice = await legacyReturningGatePrompt(opts, buildReturningGateOptions(false))
+  const choice = await legacyReturningGatePrompt(opts, buildReturningGateOptions())
   assert.equal(choice, 'quit')
   assert.match(stdout.text(), /What would you like to do\?/)
 })

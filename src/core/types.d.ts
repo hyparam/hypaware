@@ -1,7 +1,9 @@
 import type {
   PickerDetectProbe,
+  PluginActivityProbeManifest,
   PluginAttachProbeManifest,
   PluginContributionManifest,
+  PluginClientLaunchManifest,
   PluginManifest,
   PluginName,
   PluginPickerCompose,
@@ -32,6 +34,28 @@ export interface ClientDescriptor {
    * that live in another client's transcript tree.
    */
   transcriptEntrypoints?: string[]
+  /**
+   * How to start this client on a question, from
+   * `contributes.client.launch`. Read by the wizard's first ask and
+   * `hyp ask`; absent for a client that cannot be started on a prompt
+   * (LLP 0198#split).
+   */
+  launch?: PluginClientLaunchManifest
+  /**
+   * Where this client's own activity leaves a file trail, from
+   * `contributes.client.activity_probe`. Read by the `hyp status`
+   * capture-health probe (LLP 0257#status-and-health); absent for a
+   * client whose activity leaves no scannable trail.
+   */
+  activityProbe?: PluginActivityProbeManifest
+  /**
+   * `false` when the manifest declares `contributes.client.backfill_provider:
+   * false`: this client registers no backfill provider, another plugin's
+   * provider imports its history. Absent otherwise. Read by the `hyp status`
+   * client-actions derivation so a provider-less client is `n/a`, never a
+   * `pending` that cannot resolve (LLP 0379).
+   */
+  backfillProvider?: false
 }
 
 /**
@@ -47,6 +71,18 @@ export interface PickerDescriptor {
   label: string
   summary?: string
   detect?: PickerDetectProbe
+  /**
+   * True when the row is kept out of the interactive picker menu but
+   * remains a picker source everywhere else (`--source`, read-back,
+   * opt-out identity, dataset ownership). See
+   * `PluginPickerContribution.hidden`.
+   */
+  hidden?: boolean
+  /**
+   * The `process.platform` values this row is offered on. Absent means
+   * every platform. See `PluginPickerContribution.platforms`.
+   */
+  platforms?: string[]
   needsSetup?: boolean
   configureCommand?: string
   /**
@@ -62,6 +98,16 @@ export interface PluginCatalog {
   knownDatasets: Set<string>
   clientDescriptors: Map<string, ClientDescriptor>
   pickerDescriptors: Map<string, PickerDescriptor>
+  /**
+   * Plugins that ride other plugins into a composed config, keyed by the
+   * rider and valued by the names it waits for (`compose_with`). Read by
+   * `composePickerConfig` after the picked rows are folded.
+   *
+   * Optional so a hand-built catalog (tests, narrow call sites that only
+   * want descriptors) stays valid; absent means "no riders", which
+   * composes exactly what the picks name.
+   */
+  composeWith?: Map<PluginName, PluginName[]>
 }
 
 // --- dep_graph ---

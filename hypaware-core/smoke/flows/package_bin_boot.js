@@ -16,7 +16,7 @@ import {
  * finish-v1.md §Phase 1:
  *
  * - `node ./bin/hypaware.js --help` exits 0 (no-arg help via flag).
- * - `node ./bin/hypaware.js smoke core_boot_noop` still passes (the
+ * - `node ./bin/hypaware.js dev smoke core_boot_noop` still passes (the
  *   internal developer path is preserved through the dispatcher).
  * - `npm pack --dry-run --json` ships the bundled assets the package
  *   needs at install time: `bin/hypaware.js`, `src/core/**`, plugin
@@ -62,24 +62,50 @@ export async function run({ harness, expect }) {
         helpResult.status,
         (v) => v === 0
       )
+      // The banner's marketing sentence is copy, not a contract this flow
+      // owns; it changes with onboarding copy decisions (e.g. LLP 0211) and
+      // no LLP pins it. Assert the usage line and a known command name
+      // instead: those are what "the packaged binary boots and --help
+      // works" actually means, and they survive a copy edit.
       expect.that(
-        'hypaware --help prints the usage header',
+        'hypaware --help prints the usage line',
         helpResult.stdout,
-        (v) => typeof v === 'string' && v.includes('hyp - HypAware kernel CLI')
+        (v) => typeof v === 'string' && v.includes('usage: hyp <command> [args...]')
+      )
+      // Journey commands render as rows; direct operations render in one
+      // compact Additional commands list. Assert both shapes so either half
+      // disappearing fails the packaged-binary gate.
+      const helpRows = String(helpResult.stdout ?? '')
+        .split('\n')
+        .flatMap((line) => {
+          const m = /^ {2}(\S+) {2,}\S/.exec(line)
+          return m ? [m[1]] : []
+        })
+      const additional = String(helpResult.stdout ?? '')
+        .split('Additional commands:\n')[1]
+        ?.split('\n')[0]
+        ?.trim()
+        .split(',')
+        .map((name) => name.trim()) ?? []
+      expect.that(
+        `hypaware --help lists journey rows and compact operations (rows=${helpRows.join(',') || '<none>'}; additional=${additional.join(',') || '<none>'})`,
+        { helpRows, additional },
+        (v) => v.helpRows.includes('status') && v.helpRows.includes('setup') &&
+          v.additional.includes('daemon') && v.additional.includes('dev')
       )
 
       const smokeResult = spawnSync(
         process.execPath,
-        [binPath, 'smoke', 'core_boot_noop'],
+        [binPath, 'dev', 'smoke', 'core_boot_noop'],
         { cwd: repoRoot, encoding: 'utf8', env: { ...process.env } }
       )
       expect.that(
-        `hypaware smoke core_boot_noop exits 0 (got status=${smokeResult.status}, stderr=${truncate(smokeResult.stderr)})`,
+        `hypaware dev smoke core_boot_noop exits 0 (got status=${smokeResult.status}, stderr=${truncate(smokeResult.stderr)})`,
         smokeResult.status,
         (v) => v === 0
       )
       expect.that(
-        'hypaware smoke core_boot_noop reports ok',
+        'hypaware dev smoke core_boot_noop reports ok',
         smokeResult.stdout,
         (v) => typeof v === 'string' && v.includes('smoke core_boot_noop: ok')
       )

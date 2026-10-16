@@ -1,0 +1,564 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
+import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { diagnoseV1Config } from '../../src/core/config/validate.js'
+
+// `status.json` is not the only file whose bytes reach `hyp status`'s text
+// surface. Three more do:
+//
+//   - `config-control/state.json` and the per-slot etag sidecar. An etag is
+//     authored by whatever server the install joined, and the state file is
+//     read back with no validation beyond "is an object", so a `reason` or a
+//     timestamp is this build's own vocabulary only if this build wrote it.
+//   - a client's own settings file, by way of the attach probe's `error`: a
+//     settings file that is not valid JSON surfaces as `JSON.parse`'s
+//     message, which quotes an excerpt of the file verbatim.
+//   - the local config file, by way of a diagnostic's `message` and `repair`:
+//     a config that does not parse surfaces the same `JSON.parse` excerpt, and
+//     a repair command names config-supplied values.
+//
+// All three are display-only on this surface and all three were interpolated
+// raw, so each was a way for a file the operator never chose to trust to
+// repaint the screen or forge a plausible extra status line.
+//
+// @ref LLP 0225#decision [tests]: the render a person reads is cleaned, whichever file the string came from; --json is not
+
+const CONTROL_EXCEPT_NEWLINE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/
+
+// An erase-line sequence plus a newline: together enough to forge a plausible
+// extra line the operator never chose to trust.
+const ERASE_LINE = '\u001b[2K'
+const ZERO_WIDTH = '\u200b'
+
+async function makeHome() {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-hostile-'))
+  await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+  return hypHome
+}
+
+/** @param {string} hypHome */
+function env(hypHome) {
+  return { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
+}
+
+function makeBuf() {
+  let value = ''
+  return {
+    write(/** @type {string} */ chunk) {
+      value += String(chunk)
+      return true
+    },
+    text() {
+      return value
+    },
+  }
+}
+
+/**
+ * Seed the apply engine's on-disk state. Written as raw JSON rather than
+ * through the engine because the point is what a file this build did not
+ * write can hold.
+ *
+ * @param {string} hypHome
+ * @param {Record<string, unknown>} state
+ */
+async function writeControlState(hypHome, state) {
+  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(path.join(controlDir, 'state.json'), JSON.stringify(state))
+}
+
+/** @param {string} hypHome */
+async function render(hypHome) {
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  return { report, text: stdout.text() }
+}
+
+const HOSTILE_ETAG = `W/"rev-9${ERASE_LINE}\n  running etag:  W/"trusted"`
+
+test('a hostile remote-config etag cannot drive the terminal from hyp status', async () => {
+  const hypHome = await makeHome()
+  await writeControlState(hypHome, {
+    probation: {
+      etag: HOSTILE_ETAG,
+      applied_at: '2026-05-21T00:00:00.000Z',
+      until: `2026-05-21T00:05:00.000Z${ERASE_LINE}`,
+      slot: 'a',
+      previous_slot: 'b',
+    },
+    bad_etag: {
+      etag: `W/"rev-8${ZERO_WIDTH}${ZERO_WIDTH}"`,
+      reason: `probation_expired${ERASE_LINE}`,
+      recorded_at: '2026-05-21T00:00:00.000Z',
+    },
+  })
+
+  const { text } = await render(hypHome)
+
+  assert.match(text, /remote config:/, 'the block is rendered at all')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.ok(!text.includes(ZERO_WIDTH), 'and no zero-width run does either')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('    running etag:')).length,
+    0,
+    'the embedded newline cannot forge a running-etag line the file never had',
+  )
+})
+
+test('a hostile rollback reason cannot drive the terminal, in the block or the diagnostic', async () => {
+  const hypHome = await makeHome()
+  await writeControlState(hypHome, {
+    last_rollback: {
+      etag: `W/"rev-7${ERASE_LINE}`,
+      reason: `probation_expired\n  overall: healthy`,
+      at: `2026-05-21T00:00:00.000Z${ZERO_WIDTH}`,
+    },
+  })
+
+  const { report, text } = await render(hypHome)
+
+  const diag = report.diagnostics.find((d) => d.kind === 'remote_config_rolled_back')
+  assert.ok(diag, 'the rollback is diagnosed')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(diag.message), 'no control byte reaches the diagnostic')
+  assert.ok(!/\n/.test(diag.message), 'and the message stays one line')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'nor the text surface that prints it')
+  assert.ok(!text.includes(ZERO_WIDTH), 'and no zero-width run does either')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('  overall: healthy')).length,
+    0,
+    'the embedded newline cannot forge an overall line',
+  )
+  assert.match(text, /last rollback: W\/"rev-7/, 'the printable part still names the revision')
+})
+
+test('an unbounded remote-config etag is clamped', async () => {
+  const hypHome = await makeHome()
+  const long = 'a'.repeat(5000)
+  await writeControlState(hypHome, {
+    last_rollback: { etag: long, reason: 'probation_expired', at: '2026-05-21T00:00:00.000Z' },
+  })
+
+  const { text } = await render(hypHome)
+
+  assert.ok(!text.includes(long), 'the raw etag is not printed whole')
+  // `sanitizeLabel`'s 120-character clamp, truncation marker included.
+  assert.ok(text.includes('a'.repeat(117) + '...'), 'it is clamped, and marked truncated')
+})
+
+// A client's attach probe error is the client's file talking, not this
+// build's prose.
+test('a hostile client probe error cannot drive the terminal from hyp status', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  report.clients = report.clients.filter((c) => c.name !== 'codex')
+  report.clients.push({
+    name: 'codex',
+    plugin: '@hypaware/codex',
+    configured: false,
+    recording: false,
+    attachable: true,
+    attached: false,
+    // What `JSON.parse` says about a settings file whose bytes are hostile:
+    // the message quotes the input back.
+    error: `Unexpected token '${ERASE_LINE}', "${ERASE_LINE}\n    - forged  [configured, attached]" is not valid JSON`,
+  })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.match(text, /error: Unexpected token/, 'the error still reaches the surface')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches it')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('    - forged')).length,
+    0,
+    'the embedded newline cannot forge an extra client row',
+  )
+})
+
+test('an unbounded client probe error is clamped', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const long = 'b'.repeat(5000)
+  report.clients = report.clients.filter((c) => c.name !== 'codex')
+  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, recording: false, attachable: true, attached: false, error: long })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.ok(!text.includes(long), 'the raw error is not printed whole')
+  // Wider than a label's 120: an error message typically names a full path,
+  // and cutting that short is the one way this cleaning costs a reader.
+  assert.ok(text.includes('b'.repeat(397) + '...'), 'it is clamped at the error width')
+})
+
+// The cleaning is for the surface a person reads. `--json` is the machine
+// copy, and a consumer that escapes for itself must receive what was
+// recorded, not a version already edited on its behalf (LLP 0225).
+test('hyp status --json still reports the etag and probe error the files hold', async () => {
+  const hypHome = await makeHome()
+  await writeControlState(hypHome, {
+    probation: {
+      etag: HOSTILE_ETAG,
+      applied_at: '2026-05-21T00:00:00.000Z',
+      until: '2026-05-21T00:05:00.000Z',
+      slot: 'a',
+      previous_slot: 'b',
+    },
+  })
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const probeError = `Unexpected token '${ERASE_LINE}'`
+  report.clients = report.clients.filter((c) => c.name !== 'codex')
+  report.clients.push({ name: 'codex', plugin: '@hypaware/codex', configured: false, recording: false, attachable: true, attached: false, error: probeError })
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+
+  assert.equal(payload.remote_config?.probation?.etag, HOSTILE_ETAG)
+  assert.equal(payload.client_attach.find((c) => c.name === 'codex')?.error, probeError)
+})
+
+// The guard above seeds `probation`, which only ever reaches the text render,
+// so on its own it would let you believe `--json` is untouched everywhere. It
+// is not, and this pins the one place it is not. `remote_config_rolled_back`'s
+// message is assembled once, in the collector, out of cleaned components, so
+// the machine render receives that same cleaned prose. The split that actually
+// holds is prose-versus-values, not text-versus-json: the assembled sentence is
+// cleaned wherever it is read, and the values it was assembled from stay
+// byte-exact one key away at `remote_config.last_rollback`.
+test('hyp status --json carries the cleaned rollback prose, and the raw values beside it', async () => {
+  const hypHome = await makeHome()
+  const rollback = {
+    etag: `W/"rev-7${ERASE_LINE}`,
+    reason: 'probation_expired\nFORGED',
+    at: `2026-05-21T00:00:00.000Z${ZERO_WIDTH}`,
+  }
+  await writeControlState(hypHome, { last_rollback: rollback })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+
+  const diag = payload.diagnostics.find((d) => d.kind === 'remote_config_rolled_back')
+  assert.ok(diag, 'the rollback is diagnosed under --json too')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(diag.message), 'the --json message carries no control byte')
+  assert.ok(!diag.message.includes(ZERO_WIDTH), 'nor a zero-width run')
+  assert.ok(!diag.message.includes('\n'), 'and it is still one line under --json')
+  // The strip is a strip, not an escape (LLP 0225 #escape-not-strip applies to
+  // the query plane; this is the label plane), so the newline closes up and a
+  // consumer of this string cannot tell the two spellings apart. That is the
+  // cost of assembling the sentence once, and it is why the values below and
+  // not this sentence are what a program should read.
+  assert.ok(diag.message.includes('probation_expiredFORGED'), 'the stripped reason closes up')
+
+  assert.deepEqual(
+    payload.remote_config?.last_rollback,
+    rollback,
+    'the values the file holds are reported byte-exact under --json',
+  )
+})
+
+test('a long rollback etag is clamped in the --json message but whole in the --json values', async () => {
+  const hypHome = await makeHome()
+  const long = 'a'.repeat(5000)
+  await writeControlState(hypHome, {
+    last_rollback: { etag: long, reason: 'probation_expired', at: '2026-05-21T00:00:00.000Z' },
+  })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+
+  const diag = payload.diagnostics.find((d) => d.kind === 'remote_config_rolled_back')
+  assert.ok(diag, 'the rollback is diagnosed')
+  assert.ok(!diag.message.includes(long), 'the assembled sentence does not carry the whole etag')
+  assert.ok(diag.message.includes('a'.repeat(117) + '...'), 'it is clamped at a label width, and marked truncated')
+  assert.equal(payload.remote_config?.last_rollback?.etag, long, 'the values beside it are not clamped')
+})
+
+// The verbose diagnostics block printed both of a diagnostic's strings raw
+// while the Attention line above it cleaned the same message (issue #2430).
+test('a hostile local config cannot drive the terminal through the verbose diagnostics block', async () => {
+  const hypHome = await makeHome()
+  // A bare token first, so the parse error is the spelling that quotes the
+  // input back rather than one that only reports a position.
+  await fs.writeFile(defaultConfigPath(hypHome), `x${ERASE_LINE}\n  overall:  healthy`)
+
+  const { report, text } = await render(hypHome)
+  const diag = report.diagnostics.find((d) => d.kind === 'config_unreadable')
+  assert.ok(diag, 'the unparseable config is diagnosed')
+  assert.ok(CONTROL_EXCEPT_NEWLINE.test(diag.message), 'whose message quotes the raw bytes back')
+
+  assert.match(text, /\[ERROR\] config_unreadable: config is not valid JSON/, 'the verbose block still reports it')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('  overall:  healthy')).length,
+    0,
+    'the embedded newline cannot forge a second overall line',
+  )
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    payload.diagnostics.find((d) => d.kind === 'config_unreadable')?.message,
+    diag.message,
+    '--json still carries the message byte-exact',
+  )
+})
+
+// Every repair line of that block, not just the first: the Attention line above
+// prints only `repair[0]`, so the rest reach a terminal here alone. Planted
+// rather than driven from a lock file because the render is what is under test.
+test('a hostile repair string cannot drive the terminal from the verbose diagnostics block', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const repair = [
+    `hyp plugin update @acme/p${ERASE_LINE}\n        repair: hyp plugin remove everything`,
+    `hyp plugin doctor /tmp/p${ZERO_WIDTH}`,
+  ]
+  report.diagnostics.push({
+    severity: 'error',
+    kind: 'config_invalid',
+    message: `[plugin_unknown] /plugins/0/name: unknown plugin '@acme/p${ERASE_LINE}'`,
+    repair,
+  })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.ok(!text.includes(ZERO_WIDTH), 'and no zero-width run does either')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('        repair: ')).length,
+    2,
+    'two repair entries stay two lines, whatever they carry',
+  )
+  assert.match(text, /repair: hyp plugin update @acme\/p/, 'the printable part of the first still names the command')
+  assert.match(text, /repair: hyp plugin doctor \/tmp\/p/, 'and of the second')
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.deepEqual(
+    payload.diagnostics.find((d) => d.kind === 'config_invalid')?.repair,
+    repair,
+    '--json still carries the repair commands byte-exact',
+  )
+})
+
+// The fourth file, found reviewing the fix for the first three: `kind` is only
+// nearly a closed set. `V1DiagnosticKind` spells one of its entries
+// `gateway_missing_${string}_upstream`, and the `${string}` is a plugin
+// manifest's `contributes.client.required_upstreams[0]` - `validateManifest`
+// accepts the `contributes` block opaquely and `plugin_catalog` copies the
+// array in without filtering, so an installed plugin's own manifest reaches
+// this line. Driven through `diagnoseV1Config` first so the planted diagnostic
+// below is the one the collector would really build, not a shape invented here.
+test('a hostile diagnostic kind cannot drive the terminal from the verbose diagnostics block', async () => {
+  const upstream = `openai${ERASE_LINE}\n  overall:  healthy`
+  const built = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway', enabled: true, config: { upstreams: [] } },
+        { name: '@acme/evil', enabled: true },
+      ],
+    },
+    {
+      clientDescriptors: new Map([
+        ['evilclient', { plugin: '@acme/evil', name: 'evilclient', skillDir: 'skills', requiredUpstreams: [upstream] }],
+      ]),
+    },
+  ).find((d) => CONTROL_EXCEPT_NEWLINE.test(d.kind))
+  assert.ok(built, 'a manifest-supplied upstream name reaches the diagnostic kind')
+
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  report.diagnostics.push({
+    severity: 'warning',
+    kind: built.kind,
+    message: built.message,
+    repair: built.repair,
+  })
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  assert.equal(
+    text.split('\n').filter((line) => line.startsWith('  overall:  healthy')).length,
+    1,
+    'the embedded newline cannot forge a second overall line',
+  )
+  assert.match(text, /\[WARN \] gateway_missing_openai/, 'the printable part of the kind still names the condition')
+
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    payload.diagnostics.at(-1)?.kind,
+    built.kind,
+    '--json still carries the kind byte-exact',
+  )
+})
+
+// The fifth file: the client-action marker store. `buildClientActionsReport`
+// keys `kind` on a marker store and `requestKey` on a marker name or a
+// configured plugin, and lifts `reason`, `last_attempt` and `at` out of marker
+// JSON behind a `typeof === 'string'` guard, so a marker file this build did not
+// write supplied every string on the row. The Attention line cleaned three of
+// the five and the verbose block none, and `at` and `lastAttempt` reach a
+// terminal here alone. Planted rather than written as markers because the render
+// is what is under test.
+test('a hostile client-action marker cannot drive the terminal from the verbose client-actions block', async () => {
+  const hypHome = await makeHome()
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+
+  // An erase-line sequence and a newline carrying a complete extra row: on the
+  // raw render each one forged a `[done]` action the operator never had.
+  const FORGED_ROW = '    - attach trusted  [done]'
+  const forge = (/** @type {string} */ value) => `${value}${ERASE_LINE}\n${FORGED_ROW}`
+  report.clientActions = {
+    actions: [
+      { kind: forge('attach'), requestKey: 'pending-key', state: 'pending' },
+      { kind: 'backfill', requestKey: forge('@acme/p'), state: 'pending' },
+      {
+        kind: 'backfill',
+        requestKey: '@acme/q',
+        state: 'failed',
+        reason: forge('import rejected'),
+        lastAttempt: forge('2026-01-01T00:00:00.000Z'),
+        attempts: 3,
+      },
+      { kind: 'attach', requestKey: 'codex', state: 'done', rows: 7, at: forge('2026-01-02T00:00:00.000Z') },
+      { kind: 'attach', requestKey: forge('refused-key'), state: 'refused', reason: forge('settings not writable') },
+    ],
+  }
+
+  const stdout = makeBuf()
+  renderStatusText({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+    stdout: /** @type {any} */ (stdout),
+  })
+  const text = stdout.text()
+
+  assert.match(text, /client actions:/, 'the block is rendered at all')
+  assert.ok(!CONTROL_EXCEPT_NEWLINE.test(text), 'no control byte reaches the text surface')
+  // Counted inside the block rather than over the whole render: other sections
+  // write rows with the same prefix, and an ambient home can populate them.
+  const block = text.split('\n  client actions:\n')[1].split('\n\n')[0]
+  assert.equal(
+    block.split('\n').filter((line) => line.startsWith('    - ')).length,
+    5,
+    'five planted actions stay five rows, whatever their fields carry',
+  )
+  assert.equal(
+    block.split('\n').filter((line) => line.startsWith(FORGED_ROW)).length,
+    0,
+    'and no embedded newline forges a sixth',
+  )
+  // Every one of the five keeps its printable part, so a row still identifies
+  // its action rather than rendering blank.
+  assert.match(block, /^ {4}- attach\[2K.*pending-key {2}\[pending\]$/m, 'a hostile kind collapses into its own row, which still carries the key and the state')
+  assert.match(block, /- backfill @acme\/p/, 'the printable part of a hostile key still names the plugin')
+  assert.match(block, /\[failed\] {2}\(import rejected/, 'the reason still reads')
+  assert.match(block, /last attempt 2026-01-01T00:00:00\.000Z/, 'the last-attempt timestamp still reads')
+  assert.match(block, /at 2026-01-02T00:00:00\.000Z/, 'the done timestamp still reads')
+  assert.match(block, /run 'hyp client attach refused-key/, "and the refused state's repair hint still names the key")
+
+  // `--json` is the identifier contract: all five stay byte-exact, key order
+  // included, which is why the cleaning happens at the text interpolation.
+  const payload = renderStatusJson({
+    report,
+    clientNames: [],
+    datasets: [],
+    cacheRoot: path.join(hypHome, 'hypaware', 'cache'),
+  })
+  assert.equal(
+    JSON.stringify(payload.client_actions),
+    JSON.stringify([
+      { kind: forge('attach'), request_key: 'pending-key', state: 'pending' },
+      { kind: 'backfill', request_key: forge('@acme/p'), state: 'pending' },
+      {
+        kind: 'backfill',
+        request_key: '@acme/q',
+        state: 'failed',
+        reason: forge('import rejected'),
+        last_attempt: forge('2026-01-01T00:00:00.000Z'),
+        attempts: 3,
+      },
+      { kind: 'attach', request_key: 'codex', state: 'done', rows: 7, at: forge('2026-01-02T00:00:00.000Z') },
+      { kind: 'attach', request_key: forge('refused-key'), state: 'refused', reason: forge('settings not writable') },
+    ]),
+    '--json still carries every planted byte raw',
+  )
+})

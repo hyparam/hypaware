@@ -1,0 +1,116 @@
+// @ts-check
+
+/**
+ * The OTLP environment keys that OUTRANK the general endpoint an `otel` attach
+ * writes, and the one rule for deciding whether one is in force.
+ *
+ * In the OTLP environment-variable contract a per-signal key beats the generic
+ * one, so `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` decides where log records go no
+ * matter what `OTEL_EXPORTER_OTLP_ENDPOINT` says. Attach manages exactly the
+ * nine keys of LLP 0258 #env-keys and none of these, which leaves one shape
+ * that has to be said out loud rather than discovered.
+ *
+ * This lives in core, not in the `claude` plugin that writes the endpoint,
+ * because two callers apply the same precedence rule from two directions:
+ * `hyp client attach claude` at write time, and `hyp status` on every run. A second
+ * copy of the list is a copy that drifts.
+ *
+ * @ref LLP 0271#the-key-list [implements]
+ */
+
+/**
+ * The keys, in report order.
+ *
+ * Endpoint, protocol and headers for the two signals attach actually turns on,
+ * plus the general headers key. The headers keys are here from the other side
+ * of the same hazard: they carry a collector's credential, and it would now
+ * ride requests aimed at a loopback listener that never asked for it.
+ *
+ * Traces are deliberately absent - attach enables the logs and metrics
+ * exporters and nothing else, so a traces endpoint redirects nothing HypAware
+ * captures, and a warning list with a false alarm in it is how the true ones
+ * get ignored.
+ *
+ * @type {readonly string[]}
+ */
+export const OTLP_PER_SIGNAL_OVERRIDE_KEYS = Object.freeze([
+  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
+  'OTEL_EXPORTER_OTLP_METRICS_PROTOCOL',
+  'OTEL_EXPORTER_OTLP_LOGS_HEADERS',
+  'OTEL_EXPORTER_OTLP_METRICS_HEADERS',
+  'OTEL_EXPORTER_OTLP_HEADERS',
+])
+
+/**
+ * Whether a value read off one of those keys is in force.
+ *
+ * The empty string counts as set, and that is the whole point rather than a
+ * completeness flourish: an exported-but-empty per-signal endpoint still
+ * outranks the general one, so it blackholes instead of redirecting, which is
+ * the variant with no receiving collector and therefore no other trace of the
+ * failure anywhere. A truthiness test is exactly what misses it. `undefined`
+ * and a JSON `null` off a settings file still read as absent.
+ *
+ * @ref LLP 0271#empty-counts-as-set [implements]
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function otlpOverrideIsSet(value) {
+  return value !== undefined && value !== null
+}
+
+/**
+ * The subset of {@link OTLP_PER_SIGNAL_OVERRIDE_KEYS} standing in `env`.
+ *
+ * @param {Record<string, unknown> | undefined} env
+ * @returns {string[]}
+ */
+export function perSignalOtlpOverrides(env) {
+  if (!env) return []
+  return OTLP_PER_SIGNAL_OVERRIDE_KEYS.filter(
+    (key) => Object.hasOwn(env, key) && otlpOverrideIsSet(env[key])
+  )
+}
+
+/**
+ * Whether a key from {@link OTLP_PER_SIGNAL_OVERRIDE_KEYS} is a headers key.
+ *
+ * The list holds two different hazards and they must not be reported with one
+ * sentence. An endpoint or protocol key outranks what attach wrote and the
+ * export stops arriving; a headers key routes nothing at all, and its harm is
+ * the opposite direction - a collector credential riding requests aimed at a
+ * loopback listener. Telling a user with an unrelated `OTEL_EXPORTER_OTLP_HEADERS`
+ * that none of their telemetry is captured is the false alarm this list is
+ * otherwise careful to avoid.
+ *
+ * @ref LLP 0271#the-key-list [implements]: the headers keys are on the list from the other side of the same hazard
+ * @param {string} key
+ * @returns {boolean}
+ */
+export function isOtlpHeadersOverride(key) {
+  return key.endsWith('_HEADERS')
+}
+
+/**
+ * The signal a key from {@link OTLP_PER_SIGNAL_OVERRIDE_KEYS} governs, or
+ * `undefined` for the general key that governs both.
+ *
+ * Naming the signal is what keeps the warning true. Attach turns on the logs
+ * and the metrics exporter, and the two carry different things: the log
+ * records hold the prompt, response and tool text, the metrics hold the token
+ * and cost counters. A user exporting only `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+ * to their own collector - an ordinary setup - loses the counters and keeps
+ * every prompt, so a line telling them nothing at all is captured is the same
+ * standing false alarm the headers split exists to avoid, one list entry over.
+ *
+ * @ref LLP 0271#the-key-list [implements]: the list covers exactly the two signals attach turns on, and a warning names the one it is about
+ * @param {string} key
+ * @returns {'logs' | 'metrics' | undefined}
+ */
+export function otlpOverrideSignal(key) {
+  if (key.includes('_LOGS_')) return 'logs'
+  if (key.includes('_METRICS_')) return 'metrics'
+  return undefined
+}

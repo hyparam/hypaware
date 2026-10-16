@@ -46,8 +46,8 @@ function sanitizeSegment(value, field) {
 /**
  * Derive the **stable logical** watermark key for a partition.
  *
- * The key is the partition's logical identity — its directory relative to
- * `<cacheRoot>/datasets/` — NOT the physical `tableDir` inside it. This is the
+ * The key is the partition's logical identity, its directory relative to
+ * `<cacheRoot>/datasets/`, NOT the physical `tableDir` inside it. This is the
  * hinge of design constraint (B): retention rewrites the table on the same
  * lineage and compaction swaps in a brand-new `table-<seq>/` directory, but the
  * logical partition directory (`datasets/<dataset>/source=<source>/`) is stable
@@ -110,7 +110,7 @@ function validateContinuation(continuation) {
 /**
  * Parse a persisted record, returning `null` for anything that is missing,
  * unparseable, or structurally wrong. A `null` read means "no durable
- * watermark", so the sink re-exports from the start of the partition — the safe
+ * watermark", so the sink re-exports from the start of the partition: the safe
  * direction (at-least-once + downstream dedup), never a silent skip. This mirrors
  * the null-seq migration default and `ingest-seq.js`'s tolerant `readNextSeq`.
  *

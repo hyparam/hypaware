@@ -1,13 +1,17 @@
 // @ts-check
 
-import { Attr, withSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
+import { sanitizeLabel } from '../util/json_util.js'
+import { groupThousands } from '../util/format_number.js'
 
 /**
- * @import { CommandRunContext, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, DatasetRegistration, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CacheStatusPartition, CacheStatusReport } from '../../../src/core/cache/types.js'
  * @import { OverviewRows } from '../../../src/core/query/types.js'
  */
 
@@ -21,11 +25,9 @@ import { useColor } from '../cli/stdio.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const dataset = argv[0]
-  if (!dataset) {
-    ctx.stderr.write('usage: hyp query schema <dataset>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const dataset = String(parsed.params.dataset)
   return withSpan(
     'query.resolve_tables',
     {
@@ -49,35 +51,181 @@ export async function runQuerySchema(argv, ctx) {
 }
 
 /**
- * @param {string[]} _argv
+ * Report this machine's local cache. There is no remote form: the server
+ * owns its own registration state and never exposes it through this
+ * command, so `--remote` is refused rather than ignored.
+ *
+ * The refusal matters more here than it does for `--refresh`. A rejected
+ * refresh is obvious (nothing happened), but a silently-ignored `--remote`
+ * on `status` prints a plausible, server-shaped inventory of the *wrong*
+ * host, with nothing on stderr and a zero exit. Callers asking "what does
+ * the server have" have been observed to read the local answer as the
+ * server's and carry on.
+ *
+ * @ref LLP 0273#decision [implements]: status rejects --remote before any cache work, so no local inventory reaches stdout
+ * @ref LLP 0273#asymmetry: the silent ignore is self-consistent here, unlike a dropped --refresh, so nothing later contradicts it
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runQueryStatus(_argv, ctx) {
+export async function runQueryStatus(argv, ctx) {
+  if (argv.some((arg) => arg === '--remote' || arg.startsWith('--remote='))) {
+    ctx.stderr.write(
+      "hyp cache status: --remote is not supported - status reports this machine's local cache (the server owns its own)\n"
+    )
+    ctx.stderr.write(
+      "  to see what a remote host holds, probe it: hyp query sql 'select 1 from <dataset> limit 1' --remote <target>\n"
+    )
+    return 2
+  }
+  // Everything else goes through the shared codec, for the same reason the
+  // spelled-out `--remote` is refused above: `status` takes no arguments, so
+  // anything else here is a near miss (`--remot prod`, `-r prod`,
+  // `--format json`, a bare `prod`) that a silent ignore would answer with
+  // the same well-formed local inventory the refusal exists to withhold.
+  // @ref LLP 0273#asymmetry [implements]: a wrong-host answer is self-consistent, so a mistyped flag has to fail loudly too
+  const parsed = parseCoreCommandArgv('cache status', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
-  ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
-  ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
-  ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
-  for (const dataset of datasets) {
-    ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
+  ctx.stdout.write(renderCacheStatus({ report, datasets }))
+  return 0
+}
+
+/**
+ * Human byte size, in the decimal units `hyp status` reports storage in.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1e3) return `${Math.max(0, Math.round(bytes) || 0)} B`
+  if (bytes < 999_500) return `${Math.round(bytes / 1e3)} KB`
+  if (bytes < 999_500_000) return `${(bytes / 1e6).toFixed(1)} MB`
+  return `${(bytes / 1e9).toFixed(1)} GB`
+}
+
+/**
+ * A partition's row label. The dataset is the row above it, so a
+ * source-only key prints as the bare source.
+ *
+ * @param {CacheStatusPartition} p
+ * @returns {string}
+ */
+function partitionLabel(p) {
+  const entries = Object.entries(p.partition)
+  if (entries.length === 0) return '(all)'
+  if (entries.length === 1 && entries[0][0] === 'source') return entries[0][1]
+  return entries.map(([k, v]) => `${k}=${v}`).join('/')
+}
+
+/**
+ * The retention cutoff most source-table partitions share, hoisted into the
+ * header only when it beats "no cutoff" as the most common answer among them.
+ * A cutoff held by a minority stays on its own row instead of reading as
+ * cache-wide.
+ *
+ * @param {CacheStatusPartition[]} partitions
+ * @returns {string | undefined}
+ */
+function commonRetentionCutoff(partitions) {
+  /** @type {Map<string, number>} */
+  const counts = new Map()
+  /** @type {string} */
+  let best = ''
+  for (const p of partitions) {
+    if (p.layout !== 'source-table') continue
+    const key = p.lastRetentionCutoffDate ?? ''
+    const n = (counts.get(key) ?? 0) + 1
+    counts.set(key, n)
+    if (n > (counts.get(best) ?? 0)) best = key
   }
-  if (report.partitions.length > 0) {
-    ctx.stdout.write(`partitions: ${report.partitions.length}\n`)
-    for (const p of report.partitions) {
-      const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
-      const label = `${p.dataset}/${partKey || 'all'}`
-      if (p.layout === 'source-table') {
-        const extras = []
-        if (p.deleteFileCount) extras.push(`deletes=${p.deleteFileCount}`)
-        if (p.lastRetentionCutoffDate) extras.push(`retention_cutoff=${p.lastRetentionCutoffDate}`)
-        ctx.stdout.write(`  ${label}  source-table  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B${extras.length ? '  ' + extras.join('  ') : ''}\n`)
-      } else {
-        ctx.stdout.write(`  ${label}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
-      }
+  return best || undefined
+}
+
+const CACHE_STATUS_COLUMNS = ['ROWS', 'FILES', 'SNAPSHOTS', 'DELETES', 'METADATA']
+
+/**
+ * Render `hyp cache status` as one table: a row per dataset, with its
+ * partitions indented beneath it unless the only one is a placeholder
+ * (`source=unknown`, or no partition key). Dataset names stay at column 0,
+ * which is where callers reading the dataset list look for them. Only what
+ * varies is printed per row: the source-table layout is the unlabelled
+ * default, and the shared retention cutoff sits in the header.
+ *
+ * @param {{ report: CacheStatusReport, datasets: DatasetRegistration[] }} args
+ * @returns {string}
+ */
+export function renderCacheStatus({ report, datasets }) {
+  const cutoff = commonRetentionCutoff(report.partitions)
+  // `dataset.name` is a live plugin property, not a stored field, and it is
+  // this table's join key: read it once per registration rather than once per
+  // map, or two disagreeing reads can mark a registered dataset `(not registered)`.
+  /** @type {Map<string, CacheStatusPartition[]>} */
+  const byDataset = new Map()
+  /** @type {Map<string, string>} */
+  const plugins = new Map()
+  for (const d of datasets) {
+    const name = d.name
+    const plugin = d.plugin
+    byDataset.set(name, [])
+    plugins.set(name, plugin)
+  }
+  for (const p of report.partitions) {
+    const parts = byDataset.get(p.dataset)
+    if (parts) parts.push(p)
+    else byDataset.set(p.dataset, [p])
+  }
+
+  /** @param {CacheStatusPartition} p */
+  const cells = (p) => [
+    groupThousands(p.rowCount),
+    groupThousands(p.dataFileCount),
+    groupThousands(p.snapshotCount),
+    p.deleteFileCount ? groupThousands(p.deleteFileCount) : '-',
+    formatBytes(p.metadataBytes),
+  ]
+  /** @param {CacheStatusPartition} p */
+  const note = (p) => {
+    if (p.layout !== 'source-table') return `${p.layout === 'epoch' ? 'legacy ' : ''}epoch ${p.epoch}`
+    if (p.lastRetentionCutoffDate === cutoff) return ''
+    return p.lastRetentionCutoffDate ? `cutoff ${p.lastRetentionCutoffDate}` : 'no cutoff'
+  }
+
+  /** @type {Array<{ label: string, cells?: string[], note: string }>} */
+  const rows = []
+  for (const [name, parts] of byDataset) {
+    const owner = plugins.get(name) ?? '(not registered)'
+    const label = parts.length === 1 ? partitionLabel(parts[0]) : ''
+    if (parts.length === 0) {
+      rows.push({ label: name, cells: CACHE_STATUS_COLUMNS.map(() => '-'), note: owner })
+    } else if (label === '(all)' || label === 'unknown') {
+      rows.push({ label: name, cells: cells(parts[0]), note: [owner, note(parts[0])].filter(Boolean).join('  ') })
+    } else {
+      rows.push({ label: name, note: owner })
+      for (const p of parts) rows.push({ label: `  ${partitionLabel(p)}`, cells: cells(p), note: note(p) })
     }
   }
-  return 0
+
+  let out = `cache      ${report.cacheRoot}\n`
+  out += `pending    ${formatBytes(report.pendingSpoolBytes)}\n`
+  if (cutoff) out += `retention  cutoff ${cutoff}\n`
+  if (rows.length === 0) return out + 'datasets   none registered\n'
+
+  const labelWidth = rows.reduce((w, r) => Math.max(w, r.label.length), 'DATASET'.length)
+  const widths = CACHE_STATUS_COLUMNS.map((h, i) => rows.reduce((w, r) => Math.max(w, r.cells?.[i].length ?? 0), h.length))
+  /**
+   * @param {string} label
+   * @param {string[] | undefined} values
+   * @param {string} trailing
+   */
+  const line = (label, values, trailing) => {
+    const padded = [label.padEnd(labelWidth), ...widths.map((w, i) => (values?.[i] ?? '').padStart(w))].join('  ')
+    return `${padded}   ${trailing}`.trimEnd() + '\n'
+  }
+  out += '\n' + line('DATASET', CACHE_STATUS_COLUMNS, '')
+  for (const r of rows) out += line(r.label, r.cells, r.note)
+  return out
 }
 
 const QUERY_OVERVIEW_USAGE =
@@ -175,7 +323,7 @@ export async function runQueryOverview(argv, ctx) {
     // "no AI client is set up yet".
     ctx.stderr.write(
       'hyp query overview: nothing has been recorded yet - no AI client is connected.\n' +
-      '  Run `hyp init` to start capturing Claude or Codex sessions.\n'
+      '  Run `hyp setup` to start capturing Claude or Codex sessions.\n'
     )
     return 1
   }
@@ -238,7 +386,9 @@ export async function runQueryOverview(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runQueryRefresh(argv, ctx) {
-  const target = argv[0]
+  const parsed = parseCoreCommandArgv('cache refresh', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const target = /** @type {string | undefined} */ (parsed.params.dataset)
   const datasets = ctx.query.listDatasets()
   const filtered = target ? datasets.filter((d) => d.name === target) : datasets
   if (target && filtered.length === 0) {
@@ -246,31 +396,129 @@ export async function runQueryRefresh(argv, ctx) {
     return 1
   }
   let total = 0
-  for (const dataset of filtered) {
-    if (typeof dataset.refreshPartition !== 'function') continue
-    const partitions = await dataset.discoverPartitions({
-      config: ctx.config,
-      scope: { limit: 1_000_000 },
-      cacheDir: ctx.storage.cacheRoot,
+  /** @type {{ label: string, message: string }[]} */
+  const failures = []
+  /**
+   * Both interpolations reach a TTY and neither is this build's own text:
+   * the reason is whatever the cache rejected with, so both ride the label
+   * policy (LLP 0225), the reason clamped where the `hyp status` line clamps
+   * its quote.
+   * @param {string} label
+   * @param {unknown} err
+   */
+  const recordFailure = (label, err) => {
+    failures.push({
+      label: sanitizeLabel(label) ?? 'unknown',
+      message: sanitizeLabel(err instanceof Error ? err.message : String(err), 200) ?? 'unknown error',
     })
-    for (const partition of partitions) {
-      const result = await dataset.refreshPartition(partition, {
-        cacheDir: ctx.storage.cacheRoot,
-        force: true,
-        log: {
-          debug() {},
-          info() {},
-          warn() {},
-          error() {},
+  }
+  // A throw records the failure and the loop moves on. This command is the
+  // retry half of the `cache_flush_failing` repair pair (LLP 0330), and
+  // aborting at the first still-failing table left every table behind it
+  // untried on every run - including tables whose own cause was already
+  // fixed and whose stamp only a completed attempt clears (LLP
+  // 0322#clearing). LLP 0321's strict outcome stands below: any failure
+  // still exits non-zero with each original error reported.
+  // @ref LLP 0333#every-table-before-failure [implements]: attempt every table, accumulate every error, still fail
+  for (const dataset of filtered) {
+    // Hoisted only so the `typeof` narrowing survives into the closure below.
+    // Every call of it goes back through `.call(dataset, ...)`: the plugin
+    // contract declares `refreshPartition` as a *method*
+    // (`hypaware-plugin-kernel-types.d.ts`), the scaffold this repo hands
+    // plugin authors writes it as method shorthand, and a bare hoisted call
+    // is a strict-mode call with `this === undefined`. Same reason
+    // `src/core/query/sql.js` reaches for `scan.call(source, ...)` rather
+    // than calling its hoisted local directly.
+    const refreshPartition = dataset.refreshPartition
+    if (typeof refreshPartition !== 'function') continue
+    /** @type {QueryPartition[]} */
+    let partitions
+    try {
+      // The two plugin calls this loop guards get a span each, for the same
+      // reason the forced flush between them has one: the guard turns a throw
+      // into an accumulated failure, so without a span of its own a
+      // plugin-thrown error reaches the trace nowhere at all, while a
+      // `flushTable` throw lands on `cache.flush` with the exception on it.
+      // Every in-repo `refreshPartition` returns `skipped`, and every in-repo
+      // `discoverPartitions` builds paths over `discoverCachePartitions`,
+      // which swallows its own fs errors - so the throwing caller is a
+      // third-party plugin, which is exactly the one whose failure nobody can
+      // read out of this repo's source.
+      // @ref LLP 0021#span-helpers [implements]: the sanctioned wrapper, so a guarded plugin call still reaches the trace
+      partitions = await withSpan(
+        'dataset.discover_partitions',
+        {
+          [Attr.COMPONENT]: 'query',
+          [Attr.OPERATION]: 'dataset.discover_partitions',
+          [Attr.DATASET]: dataset.name,
+          status: 'ok',
         },
-        storage: ctx.storage,
-      })
-      const storage = /** @type {typeof ctx.storage & { flushTable?: (tablePath: string, opts?: { force?: boolean, reason?: string }) => Promise<unknown> }} */ (ctx.storage)
-      if (partition.tablePath && typeof storage.flushTable === 'function') {
-        await storage.flushTable(partition.tablePath, { force: true, reason: 'query_refresh' })
-      }
-      if (result.status === 'written') total += result.rows
+        () => dataset.discoverPartitions({
+          config: ctx.config,
+          scope: { limit: 1_000_000 },
+          cacheDir: ctx.storage.cacheRoot,
+        }),
+        { component: 'query' }
+      )
+    } catch (err) {
+      recordFailure(dataset.name, err)
+      continue
     }
+    for (const partition of partitions) {
+      try {
+        const result = await withSpan(
+          'dataset.refresh_partition',
+          {
+            [Attr.COMPONENT]: 'query',
+            [Attr.OPERATION]: 'dataset.refresh_partition',
+            [Attr.DATASET]: dataset.name,
+            status: 'ok',
+          },
+          () => refreshPartition.call(dataset, partition, {
+            cacheDir: ctx.storage.cacheRoot,
+            force: true,
+            log: {
+              debug() {},
+              info() {},
+              warn() {},
+              error() {},
+            },
+            storage: ctx.storage,
+          }),
+          { component: 'query' }
+        )
+        const storage = /** @type {typeof ctx.storage & { flushTable?: (tablePath: string, opts?: { force?: boolean, reason?: string }) => Promise<unknown> }} */ (ctx.storage)
+        if (partition.tablePath && typeof storage.flushTable === 'function') {
+          await storage.flushTable(partition.tablePath, { force: true, reason: 'query_refresh' })
+        }
+        if (result.status === 'written') total += result.rows
+      } catch (err) {
+        const partKey = Object.entries(partition.partition ?? {}).map(([k, v]) => `${k}=${v}`).join('/')
+        recordFailure(`${dataset.name}/${partKey || 'all'}`, err)
+      }
+    }
+  }
+  for (const failure of failures) {
+    ctx.stderr.write(`hyp query refresh: ${failure.label}: ${failure.message}\n`)
+  }
+  if (failures.length > 0) {
+    // The failures were caught here rather than rethrown, so the dispatcher's
+    // generic catch - the thing that tags `command.run` with `error_kind` -
+    // never runs, and the root span of a failed refresh carries only a
+    // nonzero `exit_code`. LLP 0021 owes a handled failure its `error_kind`
+    // too; `hyp privacy` already carries its own kind for the same reason
+    // (issue #413). An attribute, not a `recordException`: every cause is
+    // already an exception event on its own child span in this trace, and
+    // restating one of N at the root would name a single cause as if it were
+    // the failure. Purely additive - stdout, stderr and the exit code are
+    // unchanged.
+    // @ref LLP 0021#the-attribute-contract [implements]: a handled failure still owes its span an `error_kind`
+    const span = getActiveSpan()
+    span?.setAttribute(Attr.ERROR_KIND, 'refresh_failed')
+    span?.setAttribute('refresh_failure_count', failures.length)
+    span?.setAttribute('refresh_first_failure', `${failures[0].label}: ${failures[0].message}`)
+    ctx.stdout.write(`refreshed ${filtered.length} dataset(s), wrote ${total} row(s), ${failures.length} refresh failure(s)\n`)
+    return 1
   }
   ctx.stdout.write(`refreshed ${filtered.length} dataset(s), wrote ${total} row(s)\n`)
   return 0
@@ -310,6 +558,9 @@ export async function runQueryMaintain(argv, ctx) {
     // committed fallback rows too, so a manual sweep also closes the race.
     storage: ctx.storage,
     getSettleHook: (dataset) => ctx.query.getDataset(dataset)?.resettleBatch,
+    // @ref LLP 0311#migration: the manual path runs the same one-time
+    // re-partition the daemon tick would.
+    getDeclaration: (dataset) => ctx.query.getDataset(dataset)?.cachePartitioning,
   })
   if (report.dryRun) {
     ctx.stdout.write('[dry-run]\n')
@@ -320,12 +571,59 @@ export async function runQueryMaintain(argv, ctx) {
     const actions = []
     if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
     if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    if (p.repartitioned) actions.push('re-partitioned to the declared layout')
+    // @ref LLP 0311#migration: a deferred migration leaves the partition on
+    // its recorded layout, so the run must not read as "nothing to migrate".
+    if (p.repartitionDeferred) actions.push('re-partition deferred (target layout not derivable)')
+    // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
+    // rewrite; without this line the run reads as "nothing due".
+    if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)
+    // @ref LLP 0217#record-effectiveness: without this the run reports
+    // "0 partitions compacted" for a partition it is deliberately leaving
+    // fragmented, and the reason is only recoverable by reading cursors.
+    // The skip line quotes the count the recorded rewrite ran over, not the
+    // live count: the sentence is about that rewrite, and the two diverge
+    // whenever the partition shrank without becoming due again.
+    if (p.compactionIneffective) {
+      actions.push(p.compacted
+        ? 'no file-count reduction'
+        : `compaction skipped: the last rewrite of ${p.compactionIneffectiveFiles} files reduced nothing`)
+    }
+    // @ref LLP 0218#report-the-spent-attempt: the other stated reason a
+    // partition is left alone. The retry a writer change granted was spent by
+    // a rewrite that failed, which is why nothing has been attempted since;
+    // saying so names the manual way out instead of leaving the partition
+    // looking converged.
+    if (p.compactionAttemptFailed) {
+      actions.push(`compaction skipped: the retry failed under this writer at ${p.compactionAttemptFailedAt}, --force to retry`)
+    }
+    // @ref LLP 0220#tick-reports-degraded: this tick's own failure, as
+    // opposed to the line above, which reports one an earlier tick already
+    // recorded on the cursor. The walk continued past this partition, so
+    // without the line the run reads as a clean one that happened to do
+    // less work.
+    if (p.failed) {
+      actions.push(`FAILED: ${p.errorMessage} (${p.errorKind}); the walk continued`)
+    }
     if (actions.length > 0) {
       ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
     }
   }
-  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted (${report.elapsedMs}ms)\n`)
-  return 0
+  const rebaselineNote = report.totalRebaselined > 0 ? `, ${report.totalRebaselined} rebaselined` : ''
+  const failedNote = report.totalFailed > 0 ? `, ${report.totalFailed} partitions failed` : ''
+  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted${rebaselineNote}${failedNote} (${report.elapsedMs}ms)\n`)
+  // Before this PR the exception propagated to bin/hypaware.js, which wrote
+  // `hyp: <message>` to stderr - so a caller that only captures stderr (a
+  // cron or systemd wrapper, `>/dev/null`) still needs a line there on a
+  // degraded tick, not just the stdout summary above.
+  if (report.totalFailed > 0) {
+    ctx.stderr.write(`hyp query maintain: ${report.totalFailed} partition(s) failed; the walk continued\n`)
+  }
+  // A partition that threw used to abort the walk and exit non-zero. The
+  // walk survives it now, but the tick did not do what it was asked, so the
+  // exit status still says so: a script that gated on this must not start
+  // reading a degraded run as a clean one.
+  return report.totalFailed > 0 ? 1 : 0
 }
 
 const QUERY_MAINTAIN_USAGE = 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]'
@@ -348,7 +646,7 @@ const QUERY_MAINTAIN_SCHEMA = {
  * @returns {{ error: string } | { dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }}
  */
 function parseQueryMaintainArgv(argv) {
-  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA)
+  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: QUERY_MAINTAIN_USAGE }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ dataset?: string, 'dry-run': boolean, force: boolean, 'compact-only': boolean, 'expire-only': boolean }} */ (parsed.params)

@@ -1,12 +1,10 @@
 // @ts-check
 
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-
 import { runGraphCompact, runGraphProject } from './command.js'
 import { graphNeighborsVerb } from './verb.js'
 import { makeRowBuilders, nodeId, edgeId } from './contract-kit.js'
 import { createContractRegistry } from './contract-registry.js'
+import { projectGraph } from './project.js'
 import {
   EDGE_DATASET,
   graphDatasetRegistration,
@@ -17,38 +15,40 @@ import { setGraphRuntime } from './runtime.js'
 
 /**
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { ContextGraphCapability } from './types.js'
  */
 
 /** The capability version source plugins / connectors require to contribute a contract. */
-const CAPABILITY_VERSION = '1.0.0'
+const CAPABILITY_VERSION = '1.1.0'
 
 /**
  * Activate `@hypaware/context-graph`.
  *
  * Registers:
- *  - capability `hypaware.context-graph@1.0.0` - source plugins (or a
+ *  - capability `hypaware.context-graph@1.1.0` - source plugins (or a
  *    connector like `@hypaware/ai-gateway-graph`) call `registerContract` to
  *    contribute a projection contract, and build its rows with the shared
  *    `kit` (id recipe + provenance). The engine runs every registered contract.
  *  - dataset `node` and dataset `edge` - derived graph tables, fronted by
- *    the kernel-managed Iceberg cache (populated by the projection command,
- *    not by a live source)
+ *    the kernel-managed Iceberg cache (populated by the projection command
+ *    or a source's explicit projection request)
  *  - command `graph project` - runs the T0 deterministic projection over
  *    every registered source contract
  *  - command `graph compact` - merges duplicate node/edge rows and
  *    rewrites affected partitions into sorted tables
- *  - command `graph neighbors` - walks the activity graph from a seed node out
- *    to N hops, reading the published node/edge datasets ([LLP 0064])
- *  - skill `hypaware-graph` - teaches AI clients (Claude, Codex) how to project
- *    and query the graph; installed by `hyp skills install` when this plugin is
- *    active
+ *  - command `query graph neighbors` (alias `graph neighbors`) - walks the
+ *    activity graph from a seed node out to N hops, reading the published
+ *    node/edge datasets ([LLP 0064])
+ *  - groups `graph` and `query graph` - the namespace's own help, so both
+ *    `hyp graph --help` and `hyp query graph --help` state the projection
+ *    model instead of listing subcommands bare ([LLP 0214])
  *
- * Registration only; the projection runs on demand via the command (no
- * snapshot/commit hook exists, and eventual freshness is acceptable).
+ * Projection runs via the command or a source's capability call. The graph
+ * plugin itself registers no background source or timer.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0023#on-demand-projection [implements]: command-only projection keeps the plugin out of the daemon loop
+ * @ref LLP 0392#capability [implements]: sources request their own projection through the graph capability
  */
 export async function activate(ctx) {
   // The contract registry source plugins contribute into, exposed via the
@@ -60,6 +60,15 @@ export async function activate(ctx) {
   /** @type {ContextGraphCapability} */
   const capability = {
     registerContract: (contract) => registry.register(contract),
+    async project(sourceDataset) {
+      const contracts = registry.list().filter((c) => c.sourceDataset === sourceDataset)
+      if (contracts.length === 0) throw new Error(`graph project: no contract registered for source '${sourceDataset}'`)
+      return projectGraph({
+        query: ctx.query,
+        storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+        contracts,
+      })
+    },
     kit: { nodeId, edgeId, makeRowBuilders },
   }
   ctx.provideCapability('hypaware.context-graph', CAPABILITY_VERSION, capability)
@@ -67,19 +76,76 @@ export async function activate(ctx) {
   ctx.query.registerDataset(graphDatasetRegistration(NODE_DATASET))
   ctx.query.registerDataset(graphDatasetRegistration(EDGE_DATASET))
 
+  // The group's own voice. Neither prefix has a bare command, so without this
+  // their `--help` is a subcommand table with no prose, and the projection
+  // model has nowhere to be stated.
+  //
+  // Both prefixes are registered because LLP 0248 splits the namespace in two:
+  // `graph project|compact` stay direct operations under `graph`, while the
+  // journey moved to `query graph neighbors`. Registering only one of them
+  // leaves the other rendering a bare table, which is the exact regression
+  // LLP 0214 exists to prevent.
+  // @ref LLP 0214#d2 [implements]: a plugin namespace describes itself instead of rendering a bare table
+  // @ref LLP 0248#tree [constrained-by]: `graph` keeps project/compact while the neighbors journey lives under `query graph`
+  const groupSummary = 'Build and walk the activity graph projected from recorded sessions'
+  const groupHelp = [
+    'The graph is a derived projection of the recorded AI sessions: the same',
+    'data `hyp query` reads as rows, read instead as relationships. Sessions',
+    'connect to the apps, models, tools, files, skills, programs, repos, and',
+    'commits they touched.',
+    '',
+    'GitHub capture projects its data automatically. Run `hyp graph project`',
+    'to build all sources, including newly recorded sessions, before querying.',
+    'Projection is idempotent, so re-running it is safe.',
+    '',
+    'Two ways to read it, and they answer different questions:',
+    '  hyp query sql "... from node/edge ..."   counts, rankings, group-by',
+    '  hyp query graph neighbors <node>         what connects to X, N hops',
+    '',
+    '`node` and `edge` are ordinary query datasets, so everything in',
+    "`hyp query --help` applies to them, including --format and --output.",
+  ].join('\n')
+  for (const name of ['graph', 'query graph']) {
+    ctx.commands.registerGroup({ name, plugin: PLUGIN_NAME, summary: groupSummary, help: groupHelp })
+  }
+
   ctx.commands.register({
     name: 'graph project',
     plugin: PLUGIN_NAME,
+    category: 'additional',
+    audience: 'operator',
     summary: 'Project every registered source contract into the node/edge activity graph',
-    usage: 'hyp graph project [--source <dataset>] [--dry-run]',
+    usage: 'hyp graph project [--source <dataset>] [--refresh] [--dry-run]',
+    help: [
+      'Reads every registered source contract and writes the node/edge tables.',
+      'Idempotent: running it twice over unchanged recordings changes nothing,',
+      'Existing identities keep their properties unless --refresh is supplied.',
+      '',
+      'Prints `N node(s), M edge(s) - wrote ...` on success. An empty graph',
+      'after a successful run means there are no recordings to project yet,',
+      'not that the projection failed.',
+      '',
+      '  --source <dataset>  project only this source dataset',
+      '  --refresh           replace matching projector rows with current evidence',
+      '  --dry-run           report what would be written, write nothing',
+    ].join('\n'),
     run: runGraphProject,
   })
 
   ctx.commands.register({
     name: 'graph compact',
     plugin: PLUGIN_NAME,
+    category: 'additional',
+    audience: 'operator',
     summary: 'Merge duplicate graph rows and rewrite affected partitions sorted',
     usage: 'hyp graph compact [--dry-run]',
+    help: [
+      'Maintenance, not a projection step. Merges duplicate node/edge rows left',
+      'by repeated projections and rewrites the affected partitions sorted.',
+      'Querying does not require it; a large graph reads faster after it.',
+      '',
+      '  --dry-run  report what would be merged, write nothing',
+    ].join('\n'),
     run: runGraphCompact,
   })
 
@@ -88,13 +154,11 @@ export async function activate(ctx) {
   // lights up wherever this plugin is active, with no core change.
   ctx.verbs.register(graphNeighborsVerb)
 
-  // Teaches AI clients how to project and query the graph. Registered only
-  // when this plugin is active, so `hyp skills install` copies it into
-  // ~/.claude/skills and ~/.codex/skills only for installs that have the graph.
-  ctx.skills.register({
-    name: 'hypaware-graph',
-    plugin: PLUGIN_NAME,
-    clients: ['claude', 'codex'],
-    sourceDir: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'hypaware-graph'),
-  })
+  // No skill. `hypaware-graph` was retired into `hypaware-query` (LLP 0213
+  // #d2): the graph is composed wherever the gateway is, and `hypaware-query`
+  // ships only from the two adapters that require the gateway, so the merged
+  // skill can never reach an install without the graph. What was mechanics
+  // here now lives in this plugin's own `--help` (LLP 0214), which appears and
+  // disappears with the commands it documents.
+  // @ref LLP 0213#skill-implies-graph [constrained-by]: the merged skill's reach is bounded by the gateway, so a separate skill buys nothing
 }

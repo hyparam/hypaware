@@ -43,7 +43,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *   - `hyp sync --yes` exits 0 and the report mentions the
  *     instance as `exported`.
  *   - Daemon self-telemetry includes `source.start` (otlp),
- *     `sink.tick`, `sink.export_batch` (status=ok for `good`, !=ok
+ *     `daemon.bookkeeping`, `sink.export_batch` (status=ok for `good`, !=ok
  *     for `broken`), and `daemon.shutdown`.
  *
  * @param {{ harness: any, expect: any }} args
@@ -167,12 +167,12 @@ export async function run({ harness, expect }) {
   expect.that(
     'stdout: hyp sync reported the good instance as exported',
     forceOut,
-    (v) => typeof v === 'string' && /good: exported/.test(v),
+    (v) => typeof v === 'string' && /^✓ Exported to .*\/sink-good$/m.test(v),
   )
   expect.that(
     'stdout: hyp sync reported the broken instance as partial (failed mkdir)',
     forceOut,
-    (v) => typeof v === 'string' && /broken: (partial|failed)/.test(v),
+    (v) => typeof v === 'string' && /^(Partly exported to .*\/sink-broken|Could not send to .*\/sink-broken)/m.test(v),
   )
 
   // ----- Inspect the Parquet artifact written by `good` -----
@@ -263,7 +263,7 @@ export async function run({ harness, expect }) {
   )
 
   // Give the daemon's tick loop room to fire at least once so the
-  // `sink.tick` self-telemetry span lands in JSONL before we stop.
+  // `daemon.bookkeeping` self-telemetry span lands in JSONL before we stop.
   await sleep(120)
 
   await handle.stop()
@@ -283,8 +283,8 @@ export async function run({ harness, expect }) {
   )
 
   expect.that(
-    'traces: sink.tick span emitted (force from CLI)',
-    traces.filter((/** @type {any} */ t) => t.name === 'sink.tick'),
+    'traces: daemon bookkeeping span emitted independently of exports',
+    traces.filter((/** @type {any} */ t) => t.name === 'daemon.bookkeeping'),
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
 

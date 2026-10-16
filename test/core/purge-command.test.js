@@ -13,6 +13,7 @@ import { resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { readRowsFromTable, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { runPurge } from '../../src/core/commands/purge.js'
 import { scopeGovernance, scopeGoverns } from '../../src/core/usage-policy/matcher.js'
+import { claudeBodySpoolDir } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/spool.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -217,7 +218,7 @@ test('purge preserves surviving rows\' part_id (dedupe identity) and does not re
     assert.deepEqual(rows.map((r) => r.part_id).sort(), ['m3#0', 'm4#0'])
 
     // Watermark integrity: the streaming scan (what the export seam reads)
-    // yields exactly the survivors, and a second scan is stable — the deletes
+    // yields exactly the survivors, and a second scan is stable, the deletes
     // are durable, no purged row resurrects.
     /** @param {AsyncIterable<Record<string, unknown>>} it */
     const collect = async (it) => { const out = []; for await (const r of it) out.push(r.part_id); return out.sort() }
@@ -354,6 +355,90 @@ test('runPurge --all --yes deletes everything and reports counts', async () => {
   }
 })
 
+// The spool holds raw request and response bodies that have not been projected
+// yet. Leaving them behind would let the next received batch write rows the
+// user just deleted, so every purge empties it - a targeted purge included,
+// because a spooled body carries no cwd for a target to match against.
+// @ref LLP 0253#purge-and-detach-sweep [tests]: `hyp purge` removes the spool
+//   directory's contents
+test('runPurge empties the capture spool and reports what it removed', async () => {
+  const cacheRoot = await makeTmpDir('cli-spool')
+  const hypHome = await makeTmpDir('cli-spool-home')
+  try {
+    await seed(cacheRoot)
+    const spoolDir = claudeBodySpoolDir(hypHome)
+    await fs.mkdir(spoolDir, { recursive: true })
+    await fs.writeFile(path.join(spoolDir, 'req-1.json'), '{"messages":["a raw prompt"]}')
+    await fs.writeFile(path.join(spoolDir, 'resp-1.json'), '{"content":["a raw reply"]}')
+
+    const { ctx, stdout } = makeCtx({ cacheRoot, hypHome })
+    const code = await runPurge(['--all', '--yes', '--json'], ctx)
+    assert.equal(code, 0)
+    assert.equal(JSON.parse(stdout.text).spoolFilesRemoved, 2)
+    assert.deepEqual(await fs.readdir(spoolDir), [], 'the directory survives, its contents do not')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('runPurge sweeps the spool for a targeted purge too, and says nothing when it is empty', async () => {
+  const cacheRoot = await makeTmpDir('cli-spool-target')
+  const hypHome = await makeTmpDir('cli-spool-target-home')
+  try {
+    await seed(cacheRoot)
+    const spoolDir = claudeBodySpoolDir(hypHome)
+    await fs.mkdir(spoolDir, { recursive: true })
+    await fs.writeFile(path.join(spoolDir, 'req-1.json'), '{"messages":["a raw prompt"]}')
+
+    const { ctx, stdout } = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([REPO_B, '--yes'], ctx), 0)
+    assert.match(stdout.text, /emptied the capture spool: 1 raw body file deleted/)
+    assert.deepEqual(await fs.readdir(spoolDir), [])
+
+    // A second purge finds nothing and stays quiet about it.
+    const second = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([REPO_B, '--yes'], second.ctx), 0)
+    assert.doesNotMatch(second.stdout.text, /capture spool/)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A spool sweep failure alone (no cache-layer `localError`) still exits 1
+// (`swept.failed > 0`), so the JSON receipt must not claim the local side
+// `completed` while that holds - it would contradict the nonzero exit code.
+// @ref LLP 0253#purge-and-detach-sweep [tests]: an unremoved spool file is
+//   reported as an incomplete local purge, not a silently swallowed sweep
+test('runPurge reports local status incomplete when the capture spool sweep fails, even without a local purge error', async () => {
+  const cacheRoot = await makeTmpDir('cli-spool-fail')
+  const hypHome = await makeTmpDir('cli-spool-fail-home')
+  const spoolDir = claudeBodySpoolDir(hypHome)
+  try {
+    await seed(cacheRoot)
+    await fs.mkdir(spoolDir, { recursive: true })
+    await fs.writeFile(path.join(spoolDir, 'req-1.json'), '{"messages":["a raw prompt"]}')
+    // No write permission on the spool directory: the file cannot be
+    // unlinked, so the sweep counts it as failed rather than removed.
+    await fs.chmod(spoolDir, 0o500)
+
+    const { ctx, stdout, stderr } = makeCtx({ cacheRoot, hypHome })
+    const code = await runPurge(['--session', 's1', '--yes', '--json'], ctx)
+    assert.equal(code, 1)
+    const parsed = JSON.parse(stdout.text)
+    assert.equal(parsed.rowsDeleted, 2, 'the cache purge itself still succeeded and is still reported')
+    assert.equal(parsed.local.status, 'incomplete')
+    assert.equal(parsed.local.containment, 'incomplete')
+    assert.match(parsed.local.error, /1 capture spool file\(s\) could not be removed/)
+    assert.match(stderr.text, /could not be removed/)
+  } finally {
+    await fs.chmod(spoolDir, 0o700).catch(() => {})
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 test('runPurge subtree warns about resurrection when the dir still resolves full', async () => {
   const cacheRoot = await makeTmpDir('cli-warn')
   const hypHome = await makeTmpDir('cli-warn-home')
@@ -365,7 +450,7 @@ test('runPurge subtree warns about resurrection when the dir still resolves full
     assert.equal(code, 0)
     assert.match(stderr.text, /still record and will be re-imported/)
     assert.match(stderr.text, /home\/u\/repoA/)
-    assert.match(stderr.text, /hyp policy set <path> ignore/)
+    assert.match(stderr.text, /hyp privacy set <path> ignore/)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })
@@ -397,7 +482,7 @@ test('runPurge --ignored is durable: an ignored dir does not warn', async () => 
   }
 })
 
-test('runPurge --json emits machine-readable counts and resurrectable dirs', async () => {
+test('runPurge --json reports a session fence instead of a resurrection warning', async () => {
   const cacheRoot = await makeTmpDir('cli-json')
   const hypHome = await makeTmpDir('cli-json-home')
   try {
@@ -408,7 +493,7 @@ test('runPurge --json emits machine-readable counts and resurrectable dirs', asy
     const parsed = JSON.parse(stdout.text)
     assert.equal(parsed.rowsDeleted, 2)
     assert.equal(parsed.partitionsAffected, 1)
-    assert.deepEqual(parsed.resurrectable.sort(), [REPO_A, REPO_A_SUB].sort())
+    assert.deepEqual(parsed.resurrectable, [])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })
@@ -710,13 +795,17 @@ test('scopeGovernance stays unwidened for callers that do not opt in', () => {
 })
 
 // The near-miss note has to be true of *this* run, not only of the run the
-// report was designed around. `aliased` has two causes and only one of them is
-// the filesystem adjudicating; the other is an `ENOENT`, which is the ordinary
-// case when the user purges a project directory they already deleted. Both
-// tests below use spellings that exist on no host, so neither depends on
-// whether the test volume folds.
+// report was designed around. `aliased` has three causes and only the first is
+// the filesystem adjudicating: two live directories with two inodes, a spelling
+// no longer on disk (the ordinary case, when the user purges a project
+// directory they already deleted), and a `stat` that could not be taken at all,
+// because `sameDirectoryOnDisk` answers `false` for every errno rather than for
+// `ENOENT` alone. The tests below use spellings that exist on no host, or exist
+// but cannot be read, so none of them asks the volume for a folding verdict. The
+// last one is the single fixture in this file that has to *build* both
+// spellings, so it alone needs them to be two entries, and skips where they are
+// not.
 // @ref LLP 0104#spellings [tests]: the retention note claims only what the run established
-
 test('the near-miss note does not claim a verdict an ENOENT never gave', async () => {
   const cacheRoot = await makeTmpDir('cli-alias-gone')
   const hypHome = await makeTmpDir('cli-alias-gone-home')
@@ -764,5 +853,100 @@ test('the near-miss note agrees in number with the rows it is counting', async (
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })
     await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+// The third cause, and the one the note used to misdescribe (#497 finding 1).
+// `sameDirectoryOnDisk` answers `false` for *any* `stat` error, so an alias that
+// is present on disk but unreadable retains exactly like one that is absent, and
+// the run has no way to tell them apart. That collapse is correct and stays: the
+// alternative is widening a deletion onto an unproven pair. What it constrains
+// is the sentence, which used to offer "genuinely different, or no longer on
+// disk" as an exhaustive pair when neither holds here.
+//
+// The fixture uses a self-referential symlink for `ELOOP` rather than a
+// chmod-ed ancestor for `EACCES`: it needs no injection, needs the real
+// predicate rather than a stubbed one, and unlike a permission bit it still
+// fails the `stat` when the suite runs as root.
+//
+// Unlike every other fixture here it creates *both* spellings, which is the one
+// thing a normalization-insensitive volume will not allow: on APFS or HFS+ the
+// NFD spelling already names the NFC directory just made, so the `symlink` below
+// would land `EEXIST` instead of building the loop. That host cannot host this
+// cause at all (a folded volume proves the alias and deletes), so it skips
+// rather than erroring, and the `ENOENT` case above still covers the retention.
+test('the near-miss note does not say "no longer on disk" of an alias that is on disk but unreadable', async (t) => {
+  const cacheRoot = await makeTmpDir('cli-alias-eloop')
+  const hypHome = await makeTmpDir('cli-alias-eloop-home')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-eloop-'))
+  try {
+    const root = await fs.realpath(projects)
+    await fs.mkdir(path.join(root, NFC))
+    const folds = await fs.lstat(path.join(root, NFD)).then(() => true, () => false)
+    if (folds) {
+      t.skip('this volume folds the two spellings into one entry, so the alias cannot be made unreadable here')
+      return
+    }
+    // Present (`lstat` finds it), unreadable (`stat` gives `ELOOP`), and so
+    // neither "genuinely different" nor "no longer on disk".
+    await fs.symlink(path.join(root, NFD), path.join(root, NFD))
+    assert.ok(await fs.lstat(path.join(root, NFD)), 'the alias spelling is on disk')
+    await assert.rejects(fs.stat(path.join(root, NFD)), { code: 'ELOOP' })
+
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+    ])
+    const { ctx, stdout, stderr } = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([path.join(root, NFC), '--yes'], ctx), 0)
+
+    // Retention is the safe direction and must not move: an unprovable alias is
+    // never deleted, whatever stopped the `stat`.
+    assert.match(stdout.text, /purged 0 rows /)
+    assert.deepEqual((await remainingRows(cacheRoot)).map((r) => r.part_id), ['m1#0'])
+
+    assert.match(stderr.text, /1 cached row under a similarly spelled directory was left in place/)
+    assert.match(
+      stderr.text,
+      /\(genuinely different, no longer on disk, or could not be checked\)/,
+      'the enumeration has to admit the cause this run actually hit'
+    )
+    assert.doesNotMatch(
+      stderr.text,
+      /\(genuinely different, or no longer on disk\)/,
+      'the alias is on disk and nothing adjudicated it different, so neither of the old two holds'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+// The other half of #497 finding 1, and the reason it is a message defect and
+// not a data-loss one: pin that a swallowed error resolves to `aliased` and
+// never to `governs`, for every errno anyone has proposed. A future attempt to
+// "improve" the swallow by treating some errno as reachable would delete rows
+// under a directory no filesystem ever identified with the target, and would
+// fail here rather than in someone's cache.
+// @ref LLP 0104#spellings [tests]: an unprovable alias is retained whatever the errno, so the fix to the wording cannot move a deletion
+test('no stat errno makes an unprovable alias deletable', () => {
+  for (const code of ['ENOENT', 'EACCES', 'EPERM', 'ELOOP', 'ENOTDIR', 'EIO']) {
+    let calls = 0
+    const statSync = () => {
+      calls++
+      const err = new Error(code)
+      Object.assign(err, { code })
+      throw err
+    }
+    assert.equal(
+      scopeGovernance(`/vol/${NFD}/sub`, `/vol/${NFC}`, { proveAliases: true, statSync }),
+      'aliased',
+      `${code} must retain and report, never widen the deletion`
+    )
+    // Without this the test could not fail: neither spelling exists on any
+    // host, so a build that stopped threading `statSync` down to
+    // `sameDirectoryOnDisk` would reach the same `aliased` through a real
+    // `ENOENT`, and the errno under test would never have been raised at all.
+    assert.ok(calls > 0, `the injected ${code} has to be the errno the predicate actually saw`)
   }
 })

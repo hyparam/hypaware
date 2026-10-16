@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/grep",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22",
+  "entrypoint": "./src/index.js",
+  "description": "Search recorded messages by scanning the local cache directly, without indexes or background work.",
+  "permissions": [
+    "read_state",
+    "write_state"
+  ],
+  "compose_with": [
+    "@hypaware/ai-gateway"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "name": "query grep",
+        "category": "explore-share",
+        "audience": "everyday",
+        "summary": "Grep stored ai_gateway_messages: case-insensitive substring or regex, served from direct scans of the local cache. Covers only these columns: content_text, tool_name, session_id, conversation_id, agent_id, model, cwd, git_branch, git_remote. Every other column, including system prompts (system_text), tool definitions (tools), attributes, and raw frames, is NOT searched, so zero hits is not evidence the text is absent from those columns - read them with query_sql instead"
+      }
+    ]
+  }
+}

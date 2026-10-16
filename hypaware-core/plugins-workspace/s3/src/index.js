@@ -313,7 +313,7 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage, watermark
             throw tagError(err, 'encoder_failed')
           }
           // Embed [sinceSeq, lastSeq] so a crash-retry re-PUTs the same object
-          // key (idempotent overwrite) — the blob sink's server-ledger stand-in.
+          // key (idempotent overwrite): the blob sink's server-ledger stand-in.
           const filename = withSeqRangeFilename(blob.filename, reader.sinceSeq, reader.lastAfter.seq)
           const objectKey = renderObjectKey({
             prefix: config.prefix,

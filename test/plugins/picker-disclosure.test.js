@@ -1,0 +1,146 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { loadManifests } from '../../src/core/manifest.js'
+import { RESTART_COMMAND } from '../../hypaware-core/plugins-workspace/openclaw/src/attach.js'
+
+// Picking a row changes the machine, and the picker summary is the one
+// disclosure of that the wizard makes (PR #629 review, finding 2). This
+// copy was shortened once and the disclosures silently vanished with it -
+// nothing asserted them. Each assertion here names the side effect a
+// summary must keep admitting to, not its exact wording, so the copy can
+// be re-tuned without losing the admission.
+
+const WORKSPACE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../hypaware-core/plugins-workspace'
+)
+
+/**
+ * @param {string} plugin workspace directory name
+ * @param {string} row picker row name
+ * @returns {Promise<string>}
+ */
+async function pickerSummary(plugin, row) {
+  const { loaded, failed } = await loadManifests([path.join(WORKSPACE, plugin)])
+  assert.equal(failed.length, 0, failed.map((f) => f.message).join('; '))
+  const picker = /** @type {any} */ (loaded[0].manifest).contributes?.picker ?? []
+  const match = picker.find((/** @type {any} */ r) => r.name === row)
+  assert.ok(match, `picker row '${row}' exists in ${plugin}`)
+  return match.summary ?? ''
+}
+
+test('claude picker summary discloses the attach and the skill install', async () => {
+  const summary = await pickerSummary('claude', 'claude')
+  assert.match(summary, /edits Claude Code's settings/i)
+  assert.match(summary, /skills/i)
+})
+
+// Claude capture is now its own OTEL listener. The gateway plugin remains in
+// composition because the adapter uses its projected-exchange writer, but no
+// Claude traffic is routed through it and no Anthropic upstream is composed.
+// @ref LLP 0262#capture [tests]: the picker teaches the recorder that actually receives Claude content
+test('claude picker summary discloses that a local port is opened', async () => {
+  const summary = await pickerSummary('claude', 'claude')
+  assert.match(summary, /opens a local port/i)
+  assert.doesNotMatch(summary, /gateway|proxy/i)
+})
+
+test('codex picker discloses file capture, migration, and missing full definitions', async () => {
+  const summary = await pickerSummary('codex', 'codex')
+  assert.match(summary, /local session files/i)
+  assert.match(summary, /Removes an old managed gateway route/i)
+  assert.match(summary, /Full tool definitions are unavailable/i)
+  assert.match(summary, /local port/i)
+  assert.match(summary, /skills/i)
+})
+
+// Attach writes a managed JavaScript file under OpenCode's config home
+// (`opencode/src/attach.js`), and this row is the only place that says so.
+test('opencode picker summary discloses the plugin file it adds', async () => {
+  const summary = await pickerSummary('opencode', 'opencode')
+  assert.match(summary, /adds a plugin file/i)
+})
+
+// `cursor/src/native.js` records tool results in full (file bodies and shell
+// output, LLP 0399 #file-content), so the row must claim that, not filenames.
+test('cursor picker summary discloses that file contents and command output are recorded', async () => {
+  const summary = await pickerSummary('cursor', 'cursor')
+  assert.match(summary, /file contents/i)
+  assert.match(summary, /command output/i)
+})
+
+test('otel picker summary discloses that a local port is opened', async () => {
+  const summary = await pickerSummary('otel', 'otel')
+  assert.match(summary, /opens a local port/i)
+})
+
+test('openclaw picker summary discloses the gateway-config rewrite', async () => {
+  const summary = await pickerSummary('openclaw', 'openclaw')
+  assert.match(summary, /edits OpenClaw's gateway config/i)
+})
+
+// A running OpenClaw gateway keeps routing at the old baseUrl until it is
+// restarted, so attach's write is inert without it (`openclaw/src/attach.js`
+// RESTART_COMMAND / RESTART_INSTRUCTION, LLP 0167#verify-results item 4).
+// attach.js prints that only after the rewrite has happened; the picker row
+// is the one place the user can read it before choosing. Asserted against
+// the imported `RESTART_COMMAND`, not a copy of the literal, so a rename in
+// attach.js fails this test instead of leaving the manifest pointing at a
+// command that no longer exists.
+test('openclaw picker summary names the manual gateway restart attach requires', async () => {
+  const summary = await pickerSummary('openclaw', 'openclaw')
+  assert.ok(
+    summary.toLowerCase().includes(RESTART_COMMAND.toLowerCase()),
+    `expected summary to contain '${RESTART_COMMAND}', got: ${summary}`
+  )
+})
+
+// `requires_gateway` composes `@hypaware/ai-gateway`, whose source binds an
+// HTTP listener on 127.0.0.1 (default `127.0.0.1:18521`, `ai-gateway/src/
+// config.js` DEFAULT_LISTEN, bound by `proxy.js` startProxy). That is the
+// same class of side effect the otel row already names, and these two rows
+// carry no adapter to disclose it anywhere else.
+//
+// Since LLP 0202 both rows are `hidden`, and the picker menu was the only
+// consumer of `summary`, so this copy currently reaches nobody: these two
+// are composed by `hyp init --source <id>`, which never prompts. The
+// assertions stay because hiding is a display filter, not a deletion - the
+// rows are still picker sources, and un-hiding one must not be the moment
+// its listener disclosure is discovered missing.
+for (const row of ['raw-anthropic', 'raw-openai']) {
+  test(`${row} picker summary discloses that a local gateway listener is started`, async () => {
+    const summary = await pickerSummary('ai-gateway', row)
+    assert.match(summary, /starts a local gateway listener/i)
+  })
+}
+
+// @ref LLP 0358#onboarding [tests]: selecting transcript capture must not
+// imply the optional credential/plist experiment runs behind the checkbox.
+test('claude-desktop picker summary states that capture makes no Desktop changes', async () => {
+  const summary = await pickerSummary('claude-desktop', 'claude-desktop')
+  assert.match(summary, /makes no changes to Claude Desktop/i)
+  assert.match(summary, /needs no sign-in or admin approval/i)
+})
+
+// @ref LLP 0358#claude-code-consequences [tests]: a Desktop-only pick also
+// captures Claude Code, and the row must admit it before selection (PR #1231
+// B1, resolved by disclosure: keep the composition, state it plainly).
+test('claude-desktop picker summary discloses the Claude Code capture, history import, and attach', async () => {
+  const summary = await pickerSummary('claude-desktop', 'claude-desktop')
+  assert.match(summary, /records Claude Code/i)
+  assert.match(summary, /Claude Code history/i)
+  assert.match(summary, /may edit its settings/i)
+})
+
+// The shared ai-gateway plugin supplies the backfill materializer and also
+// binds its listener, so the transcript-only row still discloses that local
+// side effect even though no Desktop traffic is redirected through it.
+test('claude-desktop picker summary discloses that a local port is opened', async () => {
+  const summary = await pickerSummary('claude-desktop', 'claude-desktop')
+  assert.match(summary, /opens a local port/i)
+})

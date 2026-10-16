@@ -1,6 +1,6 @@
 // @ts-check
 
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -31,7 +31,7 @@ export async function runSinkMaintain(argv, ctx) {
       'dry-run': { type: 'boolean', default: false },
     },
     positional: ['instance'],
-  })
+  }, STRICT_SHORT_FLAGS)
   if ('help' in parsed) {
     ctx.stdout.write('usage: hyp sink maintain [instance] [--compact] [--dry-run]\n')
     return 0

@@ -1,21 +1,50 @@
-import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
 import type {
   AiGatewayClientRegistration,
+  AiGatewayCaptureReason,
   AiGatewayExchangeProjector,
   AiGatewayRouteInput,
   AiGatewaySettlementEnricher,
+  AiGatewayUpstreamPathRewrite,
   AiGatewayUpstreamPreset,
+  AiGatewayUpstreamAliasRoute,
   PluginActivationContext,
 } from '../../../../hypaware-plugin-kernel-types.d.ts'
-import type { Exchange } from './recorder.js'
+import type { Exchange, createNullExchange } from './recorder.js'
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
 
+export interface CaptureOutcomeEntry {
+  route: string
+  observed: number
+  persisted: number
+  failed: number
+  reasons: Partial<Record<AiGatewayCaptureReason, number>>
+  reason?: AiGatewayCaptureReason
+  last_outcome?: string
+  last_observed?: string
+  last_persisted?: string
+  last_failed?: string
+  persisted_id?: string
+  failed_id?: string
+  reported_at: number
+  reported_reason?: AiGatewayCaptureReason
+}
+
 export interface ExchangeInit {
+  recordingGeneration?: string
+  captureLimit?: number
   upstream: string
   provider: string | undefined
   method: string | undefined
   path: string | undefined
   requestHeaders: Record<string, string | string[] | undefined>
+  /**
+   * The path the gateway actually forwarded on, present only when a
+   * routing rewrite moved it off the inbound path. The row's `path`
+   * stays the door the request arrived at, because that is what decides
+   * the body shape a projector reads (LLP 0313).
+   */
+  upstreamPath?: string
 }
 
 export interface ResponseStart {
@@ -25,6 +54,24 @@ export interface ResponseStart {
 
 export interface RecorderOptions {
   redactHeaders?: readonly string[]
+}
+
+/** Private process boundary. Captures travel in memory, never on disk here. */
+export interface GatewayProcessTransport {
+  role: 'gateway' | 'processing'
+  configure?(redactHeaders: readonly string[]): void
+  observeCapture?(callback: (route: string, reason: AiGatewayCaptureReason, id?: string) => void): void
+  recorder?: {
+    startExchange(init: ExchangeInit): Exchange
+    drain(timeoutMs?: number): Promise<void>
+  }
+  finish?(exchange: Exchange, ignoredSessions: Set<string>): void
+  generation?: string
+  refreshRecording?(recording: boolean, generation: string, signal: AbortSignal): Promise<unknown>
+  settleVerification?(generation: string, signal: AbortSignal): Promise<unknown>
+  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>, refresh?: (recording: boolean, signal: AbortSignal, generation: string) => Promise<unknown>, settleVerification?: (generation: string, signal: AbortSignal) => Promise<unknown>): () => Promise<void>
+  endpoint?: { host: string; port: number }
+  snapshot?(): Record<string, number | boolean>
 }
 
 export interface FinishedRow {
@@ -70,7 +117,7 @@ export interface SseEvent {
 
 /**
  * Runtime shape shared by TOML-config upstreams and adapter-registered
- * `AiGatewayUpstreamPreset`s — both flow through this one structural type.
+ * `AiGatewayUpstreamPreset`s, both flow through this one structural type.
  */
 export interface UpstreamConfig {
   name: string
@@ -79,6 +126,17 @@ export interface UpstreamConfig {
   provider?: string
   priority?: number
   match?: (input: AiGatewayRouteInput) => boolean
+  /** Declarative outbound path-prefix swap, carried from the preset (LLP 0313). */
+  rewrite?: AiGatewayUpstreamPathRewrite
+  /**
+   * Paths the registering adapter claims, carried from its preset when
+   * operator config overrode the entry by name. Proxy mode's record anchor
+   * (LLP 0234); never a routing input.
+   */
+  record_prefix?: string
+  /** Runtime-only alias metadata; never compiled from persisted config. */
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface AiGatewayConfig {
@@ -93,6 +151,13 @@ export interface AiGatewayConfig {
   upstreams: UpstreamConfig[]
   /** Extra headers to redact in stored rows. */
   redactHeaders: string[]
+  /**
+   * Serve `CONNECT` tunnels and TLS-terminate the hosts the routing table
+   * names. Off unless explicitly enabled (LLP 0231).
+   */
+  proxyMode: boolean
+  /** Corporate proxy to chain outbound connections through, when configured. */
+  upstreamProxy?: UpstreamProxy
 }
 
 export interface CompiledUpstream {
@@ -100,9 +165,20 @@ export interface CompiledUpstream {
   provider?: string
   baseUrl: URL
   prefix: string | undefined
+  /**
+   * The paths the registering adapter claims, used as proxy mode's record
+   * anchor. Distinct from `prefix`, which is the operator's routing question:
+   * `path_prefix = "/"` means "route everything here", never "record
+   * everything here" (LLP 0234).
+   */
+  recordPrefix?: string
   priority: number
   seq: number
   match: ((input: AiGatewayRouteInput) => boolean) | undefined
+  /** Validated outbound path-prefix swap, applied when the request is forwarded (LLP 0313). */
+  rewrite?: AiGatewayUpstreamPathRewrite
+  aliasOf?: string
+  captureMatch?: AiGatewayUpstreamAliasRoute['captureMatch']
 }
 
 export interface ProxyOptions {
@@ -110,27 +186,62 @@ export interface ProxyOptions {
   upstreams: UpstreamConfig[]
   onExchangeFinished(exchange: Exchange): void | Promise<void>
   startExchange(init: {
+    recordingGeneration?: string
+    captureLimit?: number
     upstream: string
     provider: string | undefined
     method: string | undefined
     path: string | undefined
     requestHeaders: IncomingHttpHeaders
-  }): Exchange
+    upstreamPath?: string
+  }): Exchange | ReturnType<typeof createNullExchange>
   /**
    * Handle a request under the reserved `/_hypaware/` control prefix. The
    * proxy short-circuits control requests BEFORE upstream matching (they
    * are never proxied and start no exchange) and delegates the full
-   * request lifecycle — body read and response — to this callback. Absent,
+   * request lifecycle, body read and response, to this callback. Absent,
    * the proxy 404s the control request locally.
    * @ref LLP 0066#control-path: the control prefix is reserved and answered
    * locally, so an opt-out can never be forwarded upstream as a real request.
    */
   onControlRequest?(req: IncomingMessage, res: ServerResponse, url: URL): void
+  /**
+   * Turns proxy mode on. Present only when the operator enabled it and a
+   * machine-local CA is available; absent, the listener serves reverse-proxy
+   * traffic only and a CONNECT is refused.
+   *
+   * @ref LLP 0233#one-listener-two-front-doors
+   */
+  interception?: {
+    secureContextFor(host: string): import('node:tls').SecureContext
+  }
+  /**
+   * Serve CONNECT as blind tunnels only, with no interception. Set when a
+   * client may still have `HTTPS_PROXY` pointed here but TLS termination is
+   * unavailable, so its egress keeps working unrecorded rather than failing
+   * entirely (LLP 0233).
+   */
+  tunnelOnly?: boolean
+  /** Corporate proxy to chain both tunnels and the intercepted leg through. */
+  upstreamProxy?: UpstreamProxy
+  /** Agent that routes the intercepted upstream leg through {@link upstreamProxy}. */
+  chainedAgent?: import('node:https').Agent
+  log?: {
+    warn?(message: string, fields?: Record<string, unknown>): void
+    info?(message: string, fields?: Record<string, unknown>): void
+  }
 }
 
 export interface StartedProxy {
+  recordingDetails?(): Record<string, unknown>
   host: string
   port: number
+  /**
+   * The listener itself: a test seam for injecting sockets whose peer
+   * address a loopback connect cannot produce. Production callers use only
+   * `host`, `port`, and `stop`.
+   */
+  server: Server
   stopped: Promise<void>
   stop(): Promise<void>
 }
@@ -139,14 +250,36 @@ export interface StartedProxy {
 export type RegisteredProjector = AiGatewayExchangeProjector & { _seq: number }
 
 /**
+ * Per-thread `previous_message_id` bookkeeping inside an ai-gateway
+ * conversation state: which message ids this thread has already chained,
+ * the current tail new messages link to, and the links owed to messages a
+ * rolled-back exchange left buried under a later one (issue #879).
+ */
+export interface ThreadChain {
+  seen: Set<string>
+  last: string | undefined
+  /**
+   * message id -> the `previous_message_id` array the message was FIRST
+   * projected with. Written only when a rollback cannot restore the tail
+   * (another exchange has chained past it), read by the re-projection that
+   * rebuilds the row the failed append never wrote. Entries are kept rather
+   * than consumed so a second failed attempt still replays the same link;
+   * they are bounded by `seen`, which is already per-message.
+   */
+  replayLinks: Map<string, string[]>
+}
+
+/**
  * Mutable state owned by the ai-gateway plugin instance. Both the
  * `AiGatewayCapability` facade (what adapter plugins see) and the running
- * source read from this object — the API mutates it via `register*` calls,
+ * source read from this object: the API mutates it via `register*` calls,
  * the source consumes it when compiling the upstream table and dispatching
  * projectors over a finalized exchange.
  */
 export interface GatewayState {
   presets: Map<string, AiGatewayUpstreamPreset>
+  aliases: Map<string, { canonicalName: string, route: AiGatewayUpstreamAliasRoute }>
+  aliasRoutes: { name: string, canonical: string, path_prefix: string, base_url: string }[]
   clients: Map<string, AiGatewayClientRegistration>
   projectors: RegisteredProjector[]
   enrichers: Map<string, AiGatewaySettlementEnricher>
@@ -154,11 +287,10 @@ export interface GatewayState {
   /**
    * In-memory set of opaque session-id tokens the local control route has
    * been asked to ignore. Lives on `GatewayState` (created once per plugin
-   * activation, NOT per listener) so a config `reload()` — which tears down
-   * and relaunches the listener — does not silently re-enable recording
-   * mid-session. No file, no cache column: dies with the daemon process.
-   * @ref LLP 0066#ephemeral [implements]: the set is deliberately process-local,
-   * which is the half of the caveat `EPHEMERAL_NOTE` has to keep telling users.
+   * activation, NOT per listener) so a config `reload()`, which tears down
+   * and relaunches the listener, does not silently re-enable recording
+   * mid-session. The persistent markers are loaded during activation.
+   * @ref LLP 0403#storage [implements]: activation loads saved exclusions.
    */
   ignoredSessions: Set<string>
 }
@@ -186,7 +318,7 @@ export type SessionIdResolution =
   | {
       ok: true
       sessionId: string
-      source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout'
+      source: 'argument' | 'claude_env' | 'pi_env' | 'codex_rollout' | 'codex_env_rollout'
       evidence?: string
       threadId?: string
     }
@@ -204,6 +336,40 @@ export type SessionEndpointResolution =
   | { ok: false; error: string }
 
 /**
+ * One recorder's outcome for a `hyp session ignore` / `unignore` write. The
+ * verb addresses every recorder hosting the control route (the gateway plus
+ * whatever a live daemon snapshot advertises, LLP 0256 #cli-posts-to-both)
+ * and reports each outcome; `ignored` / `total` are present exactly when
+ * `ok` is true, `error` exactly when it is not.
+ */
+export interface SessionMutationOutcome {
+  recorder: string
+  endpoint: string
+  endpointSource: 'daemon_status' | 'config_listen'
+  ok: boolean
+  ignored?: boolean
+  total?: number
+  error?: string
+}
+
+/**
+ * One recorder's answer for `hyp session status`. Every live recorder that
+ * advertises the shared control route is queried before the command claims
+ * the session is protected. A failed read remains `unknown`; it never turns
+ * into `not_ignored`.
+ */
+export interface SessionStatusOutcome {
+  recorder: string
+  endpoint: string
+  endpoint_source: 'daemon_status' | 'config_listen'
+  endpoint_authenticated: false
+  status: 'ignored' | 'not_ignored' | 'unknown'
+  ignored: boolean | null
+  total: number | null
+  reason: string | null
+}
+
+/**
  * What `hyp session status` reports, in `--json` field order. It carries the
  * PROVENANCE of both inputs alongside the answer (`session_id_source` /
  * `session_id_evidence`, `endpoint_source`) because an `ignored: true` rests on
@@ -211,13 +377,27 @@ export type SessionEndpointResolution =
  * gateway" - and only some of the ways of establishing them are authoritative.
  * Hiding which one was used is how a confident answer about the wrong session
  * reads as a confident answer about yours.
+ *
+ * **The `--json` envelope is this record plus two fields the writer adds and
+ * this interface deliberately does not carry**, because they are constants
+ * rather than results: `folder_policy` (the other governor's verb) and
+ * `endpoint_authenticated`, which is always `false`. The second is `false` **by
+ * contract, not by outcome** - no answer this verb can obtain is authenticated,
+ * on `unknown` reports included - so a peer-identity check, if one is ever
+ * adopted, needs a NEW field rather than flipping this one: a consumer that
+ * learned "false means nobody checked" must not have to relearn "false now
+ * means the check ran and failed". Anything that adds a report shape here owes
+ * it the same constant.
+ *
  * @ref LLP 0066#readable [implements]: R10 and R12 shape this record - `ignored`
  * is nullable so an unconfirmable read cannot render as `false`.
+ * @ref LLP 0166#stated-not-proved [constrained-by]: the `--json` envelope states
+ * the responder was never authenticated, on every shape.
  */
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'
   session_id: string | null
-  session_id_source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout' | null
+  session_id_source: 'argument' | 'claude_env' | 'pi_env' | 'codex_rollout' | 'codex_env_rollout' | null
   session_id_evidence: string | null
   /**
    * The Codex thread the invocation is in, when one was resolved. Distinct from
@@ -231,6 +411,7 @@ export interface SessionStatusReport {
   endpoint: string | null
   endpoint_source: 'daemon_status' | 'config_listen' | null
   reason: string | null
+  recorders: SessionStatusOutcome[]
 }
 
 export interface AiGatewayRuntime {
@@ -238,4 +419,39 @@ export interface AiGatewayRuntime {
   state: GatewayState
   sources: ExtendedSourceRegistry
   started: boolean
+}
+
+/**
+ * A corporate proxy to chain outbound connections through. Present only when
+ * the operator configured `upstream_proxy`, and applied to both blind tunnels
+ * and the intercepted upstream leg so proxy mode never silently cuts egress a
+ * customer already depended on.
+ */
+export interface UpstreamProxy {
+  host: string
+  port: number
+  /** Pre-encoded `Proxy-Authorization` header value, when the proxy needs one. */
+  authorization?: string
+}
+
+/** Wiring for {@link attachConnectFrontDoor}. */
+export interface ConnectFrontDoorOptions {
+  /** The HTTP server terminated tunnels are handed back to. */
+  server: import('node:http').Server
+  /**
+   * Whether to decrypt this tunnel. False means blind-pipe, which is the
+   * default disposition for every host no upstream names.
+   */
+  shouldIntercept(host: string, port: number): boolean
+  /** Leaf certificate for an intercepted host; throws for a host the CA cannot vouch for. */
+  secureContextFor(host: string): import('node:tls').SecureContext
+  upstreamProxy?: UpstreamProxy
+  log?: { warn?(message: string, fields?: Record<string, unknown>): void }
+}
+
+export interface ConnectFrontDoor {
+  /** Sockets this handler currently owns; used by tests and shutdown. */
+  openCount(): number
+  /** Detach the handler and destroy every socket it owns. */
+  close(): void
 }

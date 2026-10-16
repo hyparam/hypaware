@@ -2,6 +2,8 @@
 
 import readline from 'node:readline/promises'
 
+import { queuedLineAsker } from '../cli/line_asker.js'
+
 /**
  * @import { PluginLockEntry, PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ConfirmDecision, StagedArtifact } from '../../../src/core/plugin_install/types.js'
@@ -136,6 +138,16 @@ export async function decideConfirmation({ yes, tty, ask }) {
  * counts as rejection. Closes the readline interface once an answer
  * comes back so the dispatcher doesn't leak file descriptors.
  *
+ * "Anything else" includes a stdin that ends without a line.
+ * `rl.question` leaves its promise permanently unsettled at EOF, so a
+ * terminal that dropped mid-install hung on the confirm rather than
+ * declining it. The asker's EOF `null` is coalesced into the empty line,
+ * which the printed `[y/N]` already reads as a no: the unanswerable
+ * question takes the default it advertised, and `decideConfirmation`
+ * turns that into the same `rejected` a typed `n` gives.
+ *
+ * @ref LLP 0190#eof-everywhere [implements]: a spent stdin lands on the prompt's stated default rather than waiting on an answer that can never come
+ *
  * @param {{
  *   stdin: NodeJS.ReadableStream,
  *   stdout: NodeJS.WritableStream,
@@ -146,9 +158,10 @@ export async function decideConfirmation({ yes, tty, ask }) {
 export function buildTtyPrompt({ stdin, stdout, promptText }) {
   return async function ask() {
     const rl = readline.createInterface({ input: stdin, output: stdout, terminal: false })
+    const askLine = queuedLineAsker(rl, stdin, stdout)
     try {
-      const answer = await rl.question(promptText ?? 'Proceed? [y/N] ')
-      const trimmed = answer.trim().toLowerCase()
+      const answer = await askLine(promptText ?? 'Proceed? [y/N] ')
+      const trimmed = (answer ?? '').trim().toLowerCase()
       return trimmed === 'y' || trimmed === 'yes'
     } finally {
       rl.close()

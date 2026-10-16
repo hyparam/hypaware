@@ -8,7 +8,8 @@ import { whereToParquetFilter } from './parquet-pushdown.js'
 
 /**
  * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
- * @import { AsyncDataSource, ScanOptions, ScanResults, SqlPrimitive } from 'squirreling/src/types.js'
+ * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ScanOptions, ScanResults, SqlPrimitive } from 'squirreling'
  */
 
 /**
@@ -35,13 +36,15 @@ import { whereToParquetFilter } from './parquet-pushdown.js'
  *
  * @param {AsyncBuffer} file
  * @param {FileMetaData} metadata
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 export function parquetDataSource(file, metadata) {
   const schema = parquetSchema(metadata)
+  const columns = schema.children.map((c) => c.element.name)
+  const physicalColumns = new Set(columns)
   return {
     numRows: Number(metadata.num_rows),
-    columns: schema.children.map((c) => c.element.name),
+    columns,
     /**
      * @param {ScanOptions} hints
      * @returns {ScanResults}
@@ -53,11 +56,22 @@ export function parquetDataSource(file, metadata) {
       // With a WHERE present the engine owns LIMIT/OFFSET so it applies
       // them to the *filtered* result rather than to raw row positions.
       const appliedLimitOffset = !hints.where
-      // When a filter is pushed down it may reference columns outside the
-      // engine's projection; read all columns so hyparquet can evaluate
-      // it, and let the engine project. Without a filter, honor the
-      // requested projection.
-      const readColumns = filter ? undefined : hints.columns
+      // Honor the requested projection whether or not a filter is pushed
+      // down. A filter may reference columns outside the projection, but
+      // hyparquet unions its own `columnsNeededForFilter` into the read
+      // plan and deletes the extras from the returned rows, so passing the
+      // narrow projection is safe. Reading all columns instead would decode
+      // every payload column on any filtered scan. Because the emitted row
+      // set is now exactly `columns`, a caller that wraps this scan and
+      // reports its own `appliedWhere: false` (letting the engine re-apply
+      // the predicate over rows this scan already returned, as `unionSources`
+      // does) must include the predicate's columns in `columns`, or the
+      // engine has nothing to re-filter on.
+      // hyparquet >= 1.29 rejects a projected name absent from the physical
+      // schema. Keep the scan physical here; the union pads requested columns
+      // the partition lacks after this source yields its rows.
+      // @ref LLP 0241#alignment [constrained-by]: drifted columns are padded above the physical parquet read
+      const readColumns = hints.columns?.filter((column) => physicalColumns.has(column))
 
       return {
         appliedWhere,

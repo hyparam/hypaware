@@ -1,4 +1,4 @@
-# LLP 0068: session opt-out — implementation plan
+# LLP 0068: session opt-out (implementation plan)
 
 **Type:** plan
 **Status:** Active
@@ -15,7 +15,7 @@
 
 Task shape:
 
-- **T1 — gateway control surface** (all `@hypaware/ai-gateway` + kernel types).
+- **T1: gateway control surface** (all `@hypaware/ai-gateway` + kernel types).
   The `/_hypaware/` local control-path short-circuit in `proxy.js` (before
   `matchUpstream`, no exchange started), the new `control.js` route module
   (`POST`/`DELETE /_hypaware/ignore/session`, idempotent, `{session_id,
@@ -29,7 +29,7 @@ Task shape:
   nothing consumes the set yet. Rated 4: the control-path concept is new
   gateway architecture (routing-order correctness against catch-all upstreams,
   recorder bypass, set lifetime vs reload), not a mechanical wire-up.
-- **T2 — adapter drops** (all `@hypaware/claude` + `@hypaware/codex`). The
+- **T2: adapter drops** (all `@hypaware/claude` + `@hypaware/codex`). The
   session-keyed `USAGE_POLICY_DROP` in `claude/src/projector.js` (right after
   `resolveClaudeSessionId`) and `codex/src/exchange-projector.js` (hoist
   `conversationId`/`sessionId` resolution above `messagesForTransport`, test
@@ -39,7 +39,7 @@ Task shape:
   Rated 3: the seam, sentinel, and dispatcher handling all exist
   (`.hypignore` precedent); the only judgment is the R5 key-equivalence
   reasoning and the Codex hoist, both settled by the design.
-- **T3 — R8 matrix + smoke** (tests only). The R7 independence matrix
+- **T3: R8 matrix + smoke** (tests only). The R7 independence matrix
   (`.hypignore` x session set), R3 restart-drops-state / reload-keeps-set
   tests, and the hermetic smoke
   `hypaware-core/smoke/flows/session_optout_capture_drop.js` (ignore → drop

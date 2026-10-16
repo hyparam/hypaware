@@ -2,6 +2,8 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import v8 from 'node:v8'
+import vm from 'node:vm'
 
 import { asyncRow } from 'squirreling'
 import { executeQuerySql, QueryExecutionBudgetError, resolveHeapBudgetBytes } from '../../src/core/query/sql.js'
@@ -50,11 +52,15 @@ function memorySource(rows, opts = {}) {
   return source
 }
 
-/** @param {AsyncDataSource} source */
-function registryFor(source) {
+/**
+ * @param {AsyncDataSource} source
+ * @param {{ localOnlyContentColumns?: string[] }} [extras]
+ */
+function registryFor(source, extras = {}) {
   const dataset = {
     discoverPartitions: async () => [],
     createDataSource: async () => source,
+    ...extras,
   }
   return /** @type {any} */ ({ getDataset: () => dataset, listDatasets: () => [] })
 }
@@ -66,7 +72,17 @@ const storage = /** @type {any} */ ({
 
 test('a query whose heap growth exceeds the execution budget refuses with the typed error', async () => {
   // More rows than the inline check stride, so the guard samples mid-scan.
-  const rows = Array.from({ length: 6000 }, (_, i) => ({ a: `value-${i}` }))
+  // The confirm-with-gc step (LLP 0097#confirm-with-gc) means a crossing
+  // only refuses once it survives a forced full GC, so the retained rows
+  // here have to be large enough to swamp the ambient baseline noise from
+  // that same forced GC (observed on Node 24: tens of KB to a few MB of
+  // heapUsed drift between baseline and check, unrelated to this query, and
+  // large enough on some runs to hide a small genuine retention entirely).
+  // Short values (`value-0`..`value-5999`) retain only a few hundred KB and
+  // were lost in that noise often enough to flake; padding each value keeps
+  // the genuine retained growth an order of magnitude above the noise floor
+  // so the crossing is confirmed regardless of GC timing.
+  const rows = Array.from({ length: 20000 }, (_, i) => ({ a: `value-${i}-${'x'.repeat(1000)}` }))
   await assert.rejects(
     executeQuerySql({
       query: 'SELECT a FROM t ORDER BY a',
@@ -95,6 +111,156 @@ test('a query whose heap growth exceeds the execution budget refuses with the ty
       return true
     }
   )
+})
+
+/**
+ * A source that mints each padded value as the scan reaches it, so the bytes a
+ * blocking ORDER BY retains are growth measured inside the query rather than an
+ * array allocated before the baseline was taken. ~20MB retained against the 1MB
+ * budgets below.
+ *
+ * @returns {AsyncDataSource}
+ */
+function growingSource() {
+  const numRows = 20000
+  return {
+    columns: ['a'],
+    numRows,
+    scan(options) {
+      const rowColumns = options?.columns ?? ['a']
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (let i = 0; i < numRows; i++) yield asyncRow({ a: `value-${i}-${'x'.repeat(1000)}` }, rowColumns)
+        },
+      }
+    },
+  }
+}
+
+/** @type {(() => void) | null | undefined} */
+let forcedGc
+
+/**
+ * Collect a sibling test's garbage before a refusal test measures growth.
+ * executeQuerySql baselines on live `heapUsed` and its confirming full GC
+ * (LLP 0097#confirm-with-gc) subtracts collected garbage from this query's
+ * growth, so garbage left in the baseline hides a genuine retention: the
+ * environment half below refused when run alone and not after its sibling.
+ * Resolved the way the guard resolves its own handle; a runtime that refuses
+ * one leaves the baseline as it was.
+ *
+ * @returns {void}
+ */
+function collectSiblingGarbage() {
+  if (forcedGc === undefined) {
+    const exposed = Reflect.get(globalThis, 'gc')
+    if (typeof exposed === 'function') {
+      forcedGc = /** @type {() => void} */ (exposed)
+    } else {
+      try {
+        v8.setFlagsFromString('--expose-gc')
+        const candidate = vm.runInNewContext('gc')
+        forcedGc = typeof candidate === 'function' ? /** @type {() => void} */ (candidate) : null
+      } catch {
+        forcedGc = null
+      } finally {
+        // The reset has to run on the throwing path too, or --expose-gc stays
+        // set for the rest of the runner process.
+        v8.setFlagsFromString('--no-expose-gc')
+      }
+    }
+  }
+  if (forcedGc) forcedGc()
+}
+
+/**
+ * @param {string} mb
+ * @param {() => Promise<void>} body
+ * @returns {Promise<void>}
+ */
+async function withHeapMbEnv(mb, body) {
+  const prev = process.env.HYP_QUERY_MAX_HEAP_MB
+  process.env.HYP_QUERY_MAX_HEAP_MB = mb
+  try {
+    await body()
+  } finally {
+    if (prev === undefined) delete process.env.HYP_QUERY_MAX_HEAP_MB
+    else process.env.HYP_QUERY_MAX_HEAP_MB = prev
+  }
+}
+
+/**
+ * The advice the refusal may only offer where it works. Matched as a concept
+ * rather than a sentence: pointing a reader at the override means naming it,
+ * and telling them to make the budget bigger means one of these verbs, so a
+ * reworded or longer sentence still trips both halves of the pair below.
+ */
+const OVERRIDE_NAME = /HYP_[A-Z0-9_]+/i
+const RAISE_ADVICE = /rais|increas|bigger|higher|larger|lift|expand|needs more/i
+
+/**
+ * Both halves refuse at the same 1MB budget over the same source, so the only
+ * difference is where that budget came from. The pair is mirrored on purpose:
+ * dropping the advice everywhere fails the second test, and reintroducing it on
+ * the caller-budgeted path fails the first.
+ */
+test('a caller-budgeted refusal does not advise the operator override it cannot reach', async () => {
+  // 4096MB asked for by the environment, 1MB passed as an option. The option
+  // wins ahead of the environment (resolveHeapBudgetBytes returns it before
+  // reading process.env), which is what makes advice to change the
+  // environment value advice that cannot work on this path.
+  await withHeapMbEnv('4096', async () => {
+    collectSiblingGarbage()
+    await assert.rejects(
+      executeQuerySql({
+        query: 'SELECT a FROM t ORDER BY a',
+        registry: registryFor(growingSource()),
+        storage,
+        maxHeapBytes: 1024 * 1024,
+      }),
+      (err) => {
+        assert.ok(err instanceof QueryExecutionBudgetError, 'the typed refusal, not a generic error')
+        assert.equal(err.limitBytes, 1024 * 1024, 'the explicit option refused, not the 4096MB environment value')
+        assert.doesNotMatch(err.message, OVERRIDE_NAME, 'names no environment knob')
+        assert.doesNotMatch(err.message, RAISE_ADVICE, 'offers no raise-the-budget advice')
+        // Not vacuous: an empty message, or a different error class reaching
+        // the same assertions, fails here.
+        assert.match(err.message, /execution memory budget \(\d+MB used of 1MB\)/)
+        assert.match(err.message, /WHERE|LIMIT|aggregate/, 'still carries actionable guidance')
+        assert.match(
+          err.message,
+          /\[site=[a-z_]+ raw=\d+MB gc=(confirmed|unavailable) baseline=\d+MB\]$/,
+          'still carries the trip-site diagnosis'
+        )
+        return true
+      }
+    )
+  })
+})
+
+test('an environment-budgeted refusal keeps advising HYP_QUERY_MAX_HEAP_MB, the lever that works there', async () => {
+  await withHeapMbEnv('1', async () => {
+    collectSiblingGarbage()
+    await assert.rejects(
+      executeQuerySql({
+        // No maxHeapBytes: the environment override is what bounds this run,
+        // so raising it is something the reader can actually act on.
+        query: 'SELECT a FROM t ORDER BY a',
+        registry: registryFor(growingSource()),
+        storage,
+      }),
+      (err) => {
+        assert.ok(err instanceof QueryExecutionBudgetError, 'the typed refusal, not a generic error')
+        assert.equal(err.limitBytes, 1024 * 1024, 'the environment override is the budget that refused')
+        assert.match(err.message, /HYP_QUERY_MAX_HEAP_MB/, 'names the override this path does read')
+        assert.match(err.message, RAISE_ADVICE, 'and says to make it bigger')
+        assert.match(err.message, /WHERE|LIMIT|aggregate/, 'alongside the narrowing guidance')
+        return true
+      }
+    )
+  })
 })
 
 test('resolveHeapBudgetBytes resolves the effective ceiling and never disables on a blank env', () => {
@@ -165,6 +331,199 @@ test('the streaming-aggregate scanColumn fast path stays lit through the budget 
   })
   assert.equal(result.rows[0].n, 7)
   assert.deepEqual(scanColumnCalls, ['a'], 'the engine consumed the column stream, not buffered rows')
+})
+
+test('the budget decoration preserves the scan receiver', async () => {
+  const source = memorySource([{ a: 1 }])
+  const scan = /** @type {NonNullable<AsyncDataSource['scan']>} */ (source.scan)
+  source.scan = function scanWithReceiver(options) {
+    assert.equal(this, source)
+    return scan.call(source, options)
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT a FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.deepEqual(result.rows, [{ a: 1 }])
+})
+
+// @ref LLP 0294#transparent-wrappers [tests]: the heap decoration samples native batches without forcing the source back through scan()
+test('the prepared native-batch path stays lit through the budget decoration', async () => {
+  let preparedCalls = 0
+  const schema = {
+    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false }],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['a'],
+    numRows: 4,
+    schema,
+    scan() {
+      throw new Error('legacy row scan should not run')
+    },
+    prepareScan(request) {
+      preparedCalls++
+      assert.deepEqual(request.columns.map((demand) => demand.field), [7])
+      return {
+        schema,
+        residual: {},
+        properties: { exactRows: 4, maxRows: 4 },
+        async *batches() {
+          yield {
+            selection: { type: 'all', length: 4 },
+            columns: [{ type: 'typed', values: new Float64Array([4, 3, 2, 1]), length: 4 }],
+          }
+        },
+      }
+    },
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT MIN(a) AS n FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.equal(result.rows[0].n, 1)
+  assert.equal(preparedCalls, 1)
+})
+
+test('a prepared-only source keeps its scanColumn fast path through the budget decoration', async () => {
+  const schema = {
+    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'string' }), nullable: false }],
+  }
+  /** @type {string[]} */
+  const scanColumnCalls = []
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['a'],
+    schema,
+    prepareScan() {
+      throw new Error('prepared scan should not replace the column fast path')
+    },
+    scanColumn({ column }) {
+      scanColumnCalls.push(column)
+      return {
+        appliedWhere: true,
+        appliedLimitOffset: true,
+        async *chunks() {
+          yield ['x', 'y', 'x']
+        },
+      }
+    },
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT COUNT(DISTINCT a) AS n FROM t',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.equal(result.rows[0].n, 2)
+  assert.deepEqual(scanColumnCalls, ['a'])
+})
+
+test('the native budget guard samples a lazy column immediately after materialization', async () => {
+  const rowCount = 200_000
+  const schema = {
+    fields: [{ id: 7, name: 'a', dataType: /** @type {const} */ ({ type: 'string' }), nullable: false }],
+  }
+  let readCalls = 0
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['a'],
+    schema,
+    prepareScan() {
+      return {
+        schema,
+        residual: {},
+        properties: { exactRows: rowCount, maxRows: rowCount },
+        async *batches() {
+          yield {
+            selection: { type: 'all', length: rowCount },
+            columns: [{
+              async read() {
+                readCalls++
+                return {
+                  type: 'values',
+                  values: Array.from({ length: rowCount }, (_, i) => `retained-${i}-${'x'.repeat(100)}`),
+                  length: rowCount,
+                }
+              },
+            }],
+          }
+        },
+      }
+    },
+  }
+  await assert.rejects(
+    executeQuerySql({
+      query: 'SELECT MIN(a) AS n FROM t',
+      registry: registryFor(source),
+      storage,
+      maxHeapBytes: 8 * 1024 * 1024,
+    }),
+    (err) => {
+      assert.ok(err instanceof QueryExecutionBudgetError)
+      assert.equal(err.diagnostics?.site, 'native_batch')
+      return true
+    }
+  )
+  assert.equal(readCalls, 1)
+})
+
+test('a governable prepared-only source refuses restricted visibility without a row scan', async () => {
+  const schema = {
+    fields: [{ id: 7, name: 'content', dataType: /** @type {const} */ ({ type: 'string' }), nullable: true }],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns: ['content'],
+    schema,
+    prepareScan() {
+      throw new Error('privacy refusal must happen before the prepared scan')
+    },
+  }
+  await assert.rejects(
+    executeQuerySql({
+      query: 'SELECT content FROM t',
+      registry: registryFor(source, { localOnlyContentColumns: ['content'] }),
+      storage,
+    }),
+    {
+      message: 'Dataset "t" must provide columns and scan() to enforce local-only visibility',
+    }
+  )
+})
+
+// Squirreling plans a prepared source from its `schema` and never reads the
+// `columns` such a source may also advertise, so the local-only gate has to
+// read the schema too. A gate that trusted `columns` would see no content
+// column here and hand the caller the prepared scan unfiltered.
+// @ref LLP 0105 [tests]: the visibility gate is decided on the column list the engine actually plans from
+test('the local-only gate reads a prepared source schema, not its narrower columns list', async () => {
+  const schema = {
+    fields: [
+      { id: 1, name: 'id', dataType: /** @type {const} */ ({ type: 'number' }), nullable: false },
+      { id: 2, name: 'content', dataType: /** @type {const} */ ({ type: 'string' }), nullable: true },
+    ],
+  }
+  /** @type {AsyncDataSource} */
+  const source = {
+    // Deliberately narrower than `schema`: the engine ignores this list.
+    columns: ['id'],
+    schema,
+    prepareScan() {
+      throw new Error('privacy refusal must happen before the prepared scan')
+    },
+  }
+  await assert.rejects(
+    executeQuerySql({
+      query: 'SELECT content FROM t',
+      registry: registryFor(source, { localOnlyContentColumns: ['content'] }),
+      storage,
+    }),
+    {
+      message: 'Dataset "t" must provide columns and scan() to enforce local-only visibility',
+    }
+  )
 })
 
 test('transient scan garbage does not trip the budget; only retained growth refuses', async () => {

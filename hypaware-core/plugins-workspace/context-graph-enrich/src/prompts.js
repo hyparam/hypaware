@@ -31,7 +31,7 @@ const EMIT_PROSPECTS_TOOL = {
             confidence: { type: 'number', description: '0..1 - your confidence this is a real, useful item.' },
             evidence: { type: 'string', description: 'A short quote from the text supporting it.' },
           },
-          required: ['type', 'label'],
+          required: ['type', 'label', 'evidence'],
         },
       },
     },
@@ -122,7 +122,7 @@ export function buildProposeRequest({ text, model, maxTokens, maxCandidates }) {
  * thinking knob, so the tool is forced for reliable structured output.
  * `parseDecisions` treats a missing call as "no decisions" either way.
  *
- * @param {{ prospects: Array<{ type: string, label: string, summary?: string, confidence?: number, recall?: string }>, neighborhood: string, source: string, model: string, maxTokens: number, provider: string }} args
+ * @param {{ prospects: Array<{ type: string, label: string, summary?: string, evidence?: string, confidence?: number, recall?: string }>, neighborhood: string, source: string, model: string, maxTokens: number, provider: string }} args
  * @returns {CompletionRequest}
  */
 export function buildCurateBatchRequest({ prospects, neighborhood, source, model, maxTokens, provider }) {
@@ -130,6 +130,7 @@ export function buildCurateBatchRequest({ prospects, neighborhood, source, model
     .map((p, i) =>
       `[${i + 1}] type: ${p.type} | label: ${p.label} | confidence: ${p.confidence ?? ''}\n` +
       `    summary: ${p.summary ?? ''}\n` +
+      `    proposed evidence quote (verify against source): ${p.evidence ?? '(absent)'}\n` +
       `    similar existing items: ${p.recall || '(none)'}`
     )
     .join('\n\n')

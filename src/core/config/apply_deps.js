@@ -7,6 +7,7 @@ import { discoverConfigSectionValidators } from './discover_section_validators.j
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { detectShadowedPlugins } from '../runtime/boot.js'
 import { installPlugin, loadLock } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
 
@@ -70,7 +71,19 @@ export function buildConfigApplyDeps(opts) {
     // validation. Discover the section validators for any introduced plugin
     // from disk (side-effect-free, never runs `activate()`) and route each
     // plugin to the right source: live for active, discovered for introduced.
-    const allManifests = [...bundled.loaded, ...bundled.excluded, ...installed.loaded]
+    // An installed manifest whose name a bundled plugin owns is code boot
+    // never activates, so discovery must not import its entrypoint either:
+    // the import runs the stale module body inside the live daemon, and its
+    // duplicate registration then fails into a spurious
+    // `config.section_discovery_failed` warning on every apply. Reachable
+    // only since the shadow stopped rejecting boot.
+    // @ref LLP 0380#bundled-copy-wins [implements]: the shadowed copy is not imported, here as in selection
+    const shadowed = new Set(detectShadowedPlugins({ discovered: bundled, installed }))
+    const allManifests = [
+      ...bundled.loaded,
+      ...bundled.excluded,
+      ...installed.loaded.filter((m) => !shadowed.has(/** @type {PluginName} */ (m.manifest.name))),
+    ]
     const sectionRegistry = await buildSectionRegistry({
       document: shape.config,
       live: configRegistry,

@@ -44,7 +44,7 @@ test('write / read round-trips and sets 0600', () => {
   writeStoredCredential(filePath, record)
   assert.deepEqual(readStoredCredential(filePath), record)
   const mode = fs.statSync(filePath).mode & 0o777
-  assert.equal(mode, 0o600)
+  if (process.platform !== 'win32') assert.equal(mode, 0o600)
 })
 
 test('read throws on corrupt JSON and on an unrecognized shape', () => {

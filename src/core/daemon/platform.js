@@ -25,7 +25,11 @@ export const SYSTEMD_UNIT_BASE = 'hypaware'
  * @returns {string}
  */
 export function defaultLogDir(homeDir) {
-  return path.join(homeDir ?? os.homedir(), '.hyp', 'hypaware', 'logs')
+  // path.posix here and below: these paths name locations on a darwin/linux
+  // host and land inside plist/unit content, so they must keep POSIX form
+  // even when rendered elsewhere (`--dry-run` on win32). Identical to
+  // path.join on the platforms the service actually installs on.
+  return path.posix.join(homeDir ?? os.homedir(), '.hyp', 'hypaware', 'logs')
 }
 
 /**
@@ -36,7 +40,7 @@ export function defaultLogDir(homeDir) {
  * @returns {string}
  */
 export function defaultConfigPath(homeDir) {
-  return path.join(homeDir ?? os.homedir(), '.hyp', 'hypaware-config.json')
+  return path.posix.join(homeDir ?? os.homedir(), '.hyp', 'hypaware-config.json')
 }
 
 /**
@@ -46,7 +50,7 @@ export function defaultConfigPath(homeDir) {
  * @returns {string}
  */
 export function defaultPlistDir(homeDir) {
-  return path.join(homeDir ?? os.homedir(), 'Library', 'LaunchAgents')
+  return path.posix.join(homeDir ?? os.homedir(), 'Library', 'LaunchAgents')
 }
 
 /**
@@ -56,7 +60,7 @@ export function defaultPlistDir(homeDir) {
  * @returns {string}
  */
 export function defaultUnitDir(homeDir) {
-  return path.join(homeDir ?? os.homedir(), '.config', 'systemd', 'user')
+  return path.posix.join(homeDir ?? os.homedir(), '.config', 'systemd', 'user')
 }
 
 /**
@@ -105,4 +109,31 @@ export function daemonKindLabel(platform = process.platform) {
  */
 export function platformIsSupported(platform = process.platform) {
   return platform === 'darwin' || platform === 'linux'
+}
+
+/**
+ * The note a run prints when the daemon install did not finish. Two callers
+ * reach it: the enrolling login lane, whose sign-in and enrollment are a fact
+ * by that point, and the picker finale, whose config is already committed.
+ * Either way the only missing piece is the background service, so `context`
+ * names what did land and the note reports a missing service, never a failed
+ * sign-in and never a failed setup.
+ *
+ * The remediation prints only where it can work. `hyp daemon install` is the
+ * fix on a platform with a service manager; on one without, no run of it
+ * would finish, so the note says the machine captures nothing instead of
+ * naming a command that cannot help (#978).
+ *
+ * Here rather than beside either caller: it branches on `platformIsSupported`,
+ * and this is the leaf both lanes reach without closing an import cycle.
+ *
+ * @param {NodeJS.Platform} platform
+ * @param {string} [context] what did land, e.g. `'enrolled'`; omitted when the note stands alone
+ * @returns {string}
+ */
+export function daemonIncompleteNote(platform, context) {
+  const lead = context ? `${context}, but ` : ''
+  return platformIsSupported(platform)
+    ? `note: ${lead}the daemon install did not finish - run 'hyp daemon install'\n`
+    : `note: ${lead}${platform} has no background service to install - nothing is captured on this machine\n`
 }

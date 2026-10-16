@@ -5,7 +5,7 @@
  */
 
 // `ignore` shipped in V1 (LLP 0049); `local-only` was reserved (LLP 0051)
-// and is now implemented (LLP 0070/0080) — a committable `.hypignore`
+// and is now implemented (LLP 0070/0080): a committable `.hypignore`
 // declaring `local-only` resolves to that class instead of clamping to
 // `ignore`. The set still grows additively; any other/future token still
 // hits the fail-safe below.

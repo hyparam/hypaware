@@ -35,7 +35,7 @@ const COLUMNS = [
 /**
  * Hermetic smoke closing the local-only-dir-selection change set (LLP
  * 0080/0081, task T9): seeds cache rows from two `cwd`s, marks one
- * `local-only` via the durable CLI (`hyp ignore --local-only`), then drives
+ * `local-only` via the durable CLI (`hyp privacy set <path> local-only`), then drives
  * the REAL central forward sink through the REAL sink driver end to end.
  *
  * @ref LLP 0070#enforce [tests]: the export-seam filter drops a `local-only`
@@ -202,17 +202,17 @@ export async function run({ harness, expect }) {
     await step('mark_local_only', async () => {
       const stdout = makeBuf()
       const stderr = makeBuf()
-      const code = await dispatch(['ignore', '--local-only', excludedCwd], {
+      const code = await dispatch(['privacy', 'set', excludedCwd, 'local-only'], {
         stdout,
         stderr,
         kernel,
         registry,
         env: process.env,
       })
-      expect.that('cli: hyp ignore --local-only exited 0', code, (v) => v === 0)
-      expect.that('cli: hyp ignore --local-only had no stderr', stderr.text(), (v) => v.length === 0)
+      expect.that('cli: hyp privacy set <path> local-only exited 0', code, (v) => v === 0)
+      expect.that('cli: hyp privacy set <path> local-only had no stderr', stderr.text(), (v) => v.length === 0)
       expect.that(
-        'cli: hyp ignore --local-only confirms the marked directory',
+        'cli: hyp privacy set <path> local-only confirms the marked directory',
         stdout.text(),
         (v) => v.includes('marked') && v.includes(excludedCwd) && v.includes('as local-only')
       )

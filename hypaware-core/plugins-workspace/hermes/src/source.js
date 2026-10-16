@@ -9,14 +9,8 @@
  * @ref LLP 0122#source [implements]: start probes `state_db` (missing ->
  *   idle, present -> open + load watermark + start the poll timer),
  *   `status()`/`reload()`/`stop()`.
- * @ref LLP 0122#watermark [implements]: the per-tick change-detection and
- *   whole-session re-projection loop, leaning on the shared
- *   `ai_gateway.projected_exchange` materializer's pre-write `part_id`
- *   dedupe (`aiGatewayBackfillMaterializer`, ai-gateway `dataset.js`) to
- *   turn a whole-session re-projection into "append only the new tail".
- *   The watermark itself persists in the plugin's kernel-managed state
- *   dir (`watermark.js`), the same sidecar-file pattern
- *   `context-graph-enrich`/`vector-search` use for their own cursors.
+ * @ref LLP 0449#reconciliation [implements]: reconcile whole visible sessions,
+ *   including rewinds and in-place edits, through the shared cache writer.
  * @ref LLP 0118#requirements [implements]: spec R9, no `~/.hermes/state.db`
  *   -> idle mode, `status()` reports it, no error noise, and the same poll
  *   timer re-probes each tick so an install that appears later is picked up
@@ -53,6 +47,17 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000
 
 /** The cache partition segment hermes's poll writes land under, distinct from `hyp backfill`'s `backfill` segment. */
 export const HERMES_PARTITION_SEGMENT = 'hermes'
+
+/**
+ * How many reconciled sessions a poll tick accumulates before flushing the
+ * watermark sidecar. Each flush rewrites the whole map, so it costs
+ * O(tracked sessions) whatever it carries: 0.63ms at 1000 sessions, 2.6ms at
+ * 5000. Flushing per session would make the passes that touch every session
+ * (a first tick, a lost sidecar, the LLP 0449 fingerprint upgrade) quadratic,
+ * 13s of blocking writes at 5000; batching holds that to 0.21s and still
+ * bounds a crash to re-scanning under 64 already-converged sessions.
+ */
+export const WATERMARK_FLUSH_SESSIONS = 64
 
 /**
  * Mutable poll-tick state for one `startHermesSource` lifetime. Exported
@@ -225,8 +230,7 @@ export function createHermesPollRunner(ctx) {
     homeDir,
     stateDir: ctx.paths.stateDir,
     resolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyList }),
-    // Seed only: `runHermesPollTick` re-mints this per tick so the shared
-    // materializer re-scans committed rows every tick (LLP 0122#watermark).
+    // Diagnostic identity, refreshed once per poll.
     devRunId: randomUUID(),
     db: null,
     watermark: {},
@@ -242,31 +246,20 @@ export function createHermesPollRunner(ctx) {
  * Run one poll tick against `runner`, mutating it in place: probe/open when
  * idle, list changed sessions against the persisted watermark, re-project
  * each changed session whole and write through the shared
- * `ai_gateway.projected_exchange` materializer, then persist the advanced
- * watermark. Never throws: a `state_db` read/open error degrades
- * `runner.lastError` + logs, matching LLP 0122#sqlite's "degrade status
+ * `ai_gateway.projected_exchange` materializer, persisting the advanced
+ * watermark every {@link WATERMARK_FLUSH_SESSIONS} sessions and again when
+ * the loop leaves, by either exit. Never throws: a `state_db` read/open
+ * error degrades `runner.lastError` + logs, matching LLP 0122#sqlite's "degrade status
  * rather than error the daemon" and spec R9's "idle cleanly, no error
  * noise" for the specific missing-file case.
  *
- * @ref LLP 0122#watermark [implements]
+ * @ref LLP 0449#detection [implements]
  * @ref LLP 0118#requirements [implements]: spec R9
  * @param {HermesPollRunner} runner
  * @param {PluginActivationContext} ctx
  * @returns {Promise<void>}
  */
 export async function runHermesPollTick(runner, ctx) {
-  // @ref LLP 0122#watermark [implements]: refresh the dedupe scan every tick.
-  // The shared `ai_gateway.projected_exchange` materializer memoizes its
-  // committed-`part_id` seen-set per `devRunId` and never refreshes it while
-  // the id is stable. A daemon runner that reused one id for its whole
-  // lifetime therefore never re-observed rows committed between ticks (by an
-  // earlier tick, a `hyp backfill`, or - before the activation fix - a
-  // concurrent CLI poll), so whole-session re-projection re-appended the
-  // already-written prefix instead of dropping it (issue #348). Minting a
-  // fresh id per tick forces a fresh committed scan, so an already-written
-  // prefix is dropped on every re-projection (spec R2). The id is minted once
-  // per tick (not per session), so sessions within a tick still share one scan
-  // and dedupe against each other.
   runner.devRunId = randomUUID()
   try {
     await withSpan(
@@ -297,37 +290,104 @@ export async function runHermesPollTick(runner, ctx) {
         let rowsAppended = 0
         if (changed.length > 0) {
           const sessionsById = new Map(sessions.map((s) => [s.id, s]))
-          for (const change of changed) {
-            const session = sessionsById.get(change.session_id)
-            if (!session) continue
-            const messages = await db.listMessagesForSession(change.session_id)
-            // @ref LLP 0122#watermark [implements]: the whole session is
-            // re-projected every time, never a partial batch, so identity
-            // (message_index / previous_message_id chains / part ids)
-            // never depends on when the session was first observed.
-            const item = await projectHermesSession({
-              session,
-              messages,
-              sourcePath: runner.stateDbPath,
-              clientName: HERMES_CLIENT_NAME,
-              homeDir: runner.homeDir,
-              resolver: runner.resolver,
-              log: ctx.log,
-            })
-            if (item) {
-              rowsAppended += await writeProjectedItem(runner, ctx, item)
-            }
-            // Watermark advances whether or not the item produced rows
-            // (usage-policy drop, or nothing new to write): the session
-            // was still examined through to its current state, and not
-            // advancing would re-examine (and, for a drop, re-log) it
-            // every tick forever.
-            runner.watermark[String(change.session_id)] = {
-              max_message_id: change.max_message_id,
-              ended_at: change.ended_at,
-            }
+          // @ref LLP 0449#detection [constrained-by]: a fingerprint is persisted
+          // only after its session reconciled, so a flush inside the loop can
+          // never make a restart skip work that did not finish.
+          let pendingMarks = 0
+          let sessionsPersisted = 0
+          // Non-null only while one session's reconcile is in flight, so the
+          // catch below can tell a reconcile that broke from a flush that did.
+          /** @type {string | number | null} */
+          let reconcilingSessionId = null
+          const flushMarks = () => {
+            if (pendingMarks === 0) return
+            writeHermesWatermark(runner.stateDir, runner.watermark)
+            sessionsPersisted += pendingMarks
+            pendingMarks = 0
           }
-          writeHermesWatermark(runner.stateDir, runner.watermark)
+          try {
+            for (const change of changed) {
+              const session = sessionsById.get(change.session_id)
+              if (!session) continue
+              reconcilingSessionId = change.session_id
+              const messages = await db.listMessagesForSession(change.session_id)
+              // @ref LLP 0449#reconciliation [implements]: replace shifted parts
+              // and removed suffixes from a complete visible transcript.
+              const item = await projectHermesSession({
+                session,
+                messages,
+                sourcePath: runner.stateDbPath,
+                clientName: HERMES_CLIENT_NAME,
+                homeDir: runner.homeDir,
+                resolver: runner.resolver,
+                log: ctx.log,
+              })
+              if (item) {
+                rowsAppended += await writeProjectedItem(runner, ctx, item)
+              }
+              // Watermark advances whether or not the item produced rows
+              // (usage-policy drop, or nothing new to write): the session
+              // was still examined through to its current state, and not
+              // advancing would re-examine (and, for a drop, re-log) it
+              // every tick forever.
+              runner.watermark[String(change.session_id)] = {
+                max_message_id: change.max_message_id,
+                ended_at: change.ended_at,
+                fingerprint: change.fingerprint,
+              }
+              reconcilingSessionId = null
+              if (++pendingMarks >= WATERMARK_FLUSH_SESSIONS) flushMarks()
+            }
+          } catch (err) {
+            // The sessions before this one reconciled fully; dropping their
+            // fingerprints would make the next start repeat all of them. The
+            // flush is best-effort: a sidecar write that fails here must not
+            // replace the error that got us here, which is the one worth
+            // reporting. `sessions_persisted` then counts only what landed.
+            try {
+              flushMarks()
+            } catch (flushErr) {
+              // The marks stay in memory, so this tick's work is not
+              // repeated in-process, but nothing re-triggers a flush for
+              // them: `pendingMarks` is a per-tick local and
+              // `listChangedSessions` reads the in-memory map, so these
+              // sessions are not "changed" again. They reach disk only if
+              // some other session changes later, since a flush rewrites the
+              // whole map; a restart before then re-scans them, which is the
+              // benign pre-fix behaviour. Record the failure with the tick's
+              // progress: when a reconcile is the tick's error nothing else
+              // reports an unwritable sidecar, and `sessions_persisted` short
+              // of `sessions_examined` otherwise reads exactly like a healthy
+              // trailing batch. When the in-loop flush is the tick's error,
+              // this record is the one that names the write as the step that
+              // broke.
+              ctx.log.warn('hermes.watermark_flush_failed', {
+                component: 'hermes',
+                operation: 'hermes.poll',
+                error_kind: errorKind(flushErr),
+                error: flushErr instanceof Error ? flushErr.message : String(flushErr),
+                sessions_persisted: sessionsPersisted,
+                sessions_examined: changed.length,
+              })
+            }
+            // The in-loop flush throws from inside this `try` as well, with
+            // every reconcile committed. Naming a session then points an
+            // operator at work that succeeded, so this fires only when a
+            // reconcile is what broke.
+            if (reconcilingSessionId !== null) {
+              ctx.log.warn('hermes.session_reconcile_failed', {
+                component: 'hermes',
+                operation: 'hermes.poll',
+                status: 'partial',
+                error_kind: errorKind(err),
+                session_id: String(reconcilingSessionId),
+                sessions_persisted: sessionsPersisted,
+                sessions_examined: changed.length,
+              })
+            }
+            throw err
+          }
+          flushMarks()
         }
 
         runner.rowsWritten += rowsAppended
@@ -400,11 +460,10 @@ async function tryOpen(runner, ctx) {
 /**
  * Materialize one projected-exchange `BackfillItem` through the shared
  * `ai_gateway.projected_exchange` materializer (`@hypaware/ai-gateway`,
- * required by hermes's manifest) and append the resulting rows.
+ * required by hermes's manifest) and reconcile the resulting snapshot.
  *
- * @ref LLP 0122#watermark [implements]: relies on the materializer's
- *   pre-write `part_id` dedupe to turn a whole-session re-projection into
- *   "append only the new tail".
+ * @ref LLP 0449#reconciliation [implements]: authoritative snapshots retain
+ *   equal parts, replace changed parts and remove withdrawn parts.
  * @param {HermesPollRunner} runner
  * @param {PluginActivationContext} ctx
  * @param {BackfillItem} item
@@ -426,7 +485,7 @@ async function writeProjectedItem(runner, ctx, item) {
     storage: ctx.storage,
     devRunId: runner.devRunId,
   })
-  if (!Array.isArray(rows) || rows.length === 0) return 0
+  if (!Array.isArray(rows) || (rows.length === 0 && !item.reconcile)) return 0
 
   const dataset = ctx.query.getDataset?.(AI_GATEWAY_MESSAGES_DATASET)
   if (!dataset) {
@@ -438,6 +497,10 @@ async function writeProjectedItem(runner, ctx, item) {
     return 0
   }
   const schemaColumns = dataset.schema?.columns ?? []
+  if (item.reconcile) {
+    if (!ctx.storage.reconcileRows) throw new Error('Hermes capture requires local snapshot reconciliation support')
+    return ctx.storage.reconcileRows(AI_GATEWAY_MESSAGES_DATASET, schemaColumns, rows, item.reconcile)
+  }
   await ctx.storage.appendRowsToPartition(
     AI_GATEWAY_MESSAGES_DATASET,
     [HERMES_PARTITION_SEGMENT],

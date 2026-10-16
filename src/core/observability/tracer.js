@@ -2,14 +2,12 @@
 
 import { JsonlSpanExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
-import { OtlpSpanExporter } from './otlp_exporters.js'
+import { OtlpSpanExporter, OTLP_EXPORT_TIMEOUT_MS } from './otlp_exporters.js'
 import { trace, TracerProvider } from './runtime.js'
 
 /**
  * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
-
-const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
  * Install a NodeTracerProvider with the exporter strategy described in
@@ -30,7 +28,6 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  * @ref LLP 0021#exporter-selection [implements]: three-state JSONL / OTLP / no-op exporter choice
  */
 export function installTracerProvider({ env, resource }) {
-  /** @type {object[]} */
   const exporters = []
 
   if (env.devTelemetry) {

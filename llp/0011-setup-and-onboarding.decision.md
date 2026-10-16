@@ -6,6 +6,9 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0010, LLP 0012
+**Extended-by:** LLP 0404 (durable CLI setup and explicit temporary-install override)
+**Extended-by:** LLP 0411 (separate GitHub collection and browser-login offer)
+**Extended-by:** LLP 0462 (agent setup guide on the non-terminal entry)
 
 > The first-run experience. Decomposed from `hypaware-design.md`
 > (Setup and Onboarding).
@@ -23,6 +26,14 @@
 > **Amended by [LLP 0137](./0137-onboarding-retention-defaults.decision.md)**:
 > the "Cache retention (days)" question is removed; the pathway sets the
 > default instead (90-day team / 120-day local).
+
+> **Amended by [LLP 0213](./0213-graph-plugin-always-active.decision.md#derived-data-plugins)**:
+> composition is not limited to source / client / sink picks. A **derived-data**
+> plugin (the context graph) consumes what another plugin captured, contributes
+> no pick of its own, and rides the pick whose data it derives from, declared in
+> its manifest rather than hardcoded in the composer. What widens is which
+> plugins the composed set may contain; [#no-architectural-names](#no-architectural-names)
+> is unchanged, and is why such a plugin is not given a picker row of its own.
 
 ## Interactive walkthrough
 
@@ -42,8 +53,8 @@ the retention window comes from the pathway chosen at the fork
 ([LLP 0137](./0137-onboarding-retention-defaults.decision.md#pathway-defaults)).
 
 The walkthrough is the canonical first-run experience. It composes
-**plugin-contributed picks** — each source/client plugin registers what it
-collects; each sink plugin registers what it exports to — and writes a config
+**plugin-contributed picks**, each source/client plugin registers what it
+collects; each sink plugin registers what it exports to, and writes a config
 the daemon can load.
 
 ## Returning to a configured install
@@ -88,13 +99,13 @@ repair of a broken file.
 The user describes **what** they want to collect and **where** it should go;
 HypAware picks the plugin set. There are no names like "standalone" or
 "gateway." The written config enumerates the chosen plugins explicitly
-([LLP 0010](./0010-config-model.spec.md#explicit-plugin-set)) — never an implicit
+([LLP 0010](./0010-config-model.spec.md#explicit-plugin-set)), never an implicit
 "defaults" mode.
 
 ## Autodetect vs default
 
 - **Autodetect** pre-checks a *client source* (`claude`, `codex`) when its tool
-  is found on the system. It sets only the initial checkbox state — never forces
+  is found on the system. It sets only the initial checkbox state, never forces
   a source on, never hides one. Raw proxy sources and OTEL are never
   autodetected (no installed tool to find). See [LLP 0012](./0012-sources.spec.md#source-kinds).
 - **Default** is a fixed starting selection not derived from system state:
@@ -119,7 +130,7 @@ config file + install the daemon", not a separate path. See
 
 The interactive walkthrough seeds a source's local history with a one-shot
 backfill in its finale; `join` reaches the same parity without a finale via
-**backfill on join** — once the joined config is confirmed, the daemon imports
+**backfill on join**, once the joined config is confirmed, the daemon imports
 each backfill-capable source's pre-join history once, driven by the source
 plugin's own `config.backfill`. See [LLP 0037](./0037-backfill-on-join.decision.md),
 an instance of the central-config-driven client-action seam in

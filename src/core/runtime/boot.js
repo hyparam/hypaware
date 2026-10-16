@@ -7,7 +7,8 @@ import {
   getLogger,
   runRoot,
 } from '../observability/index.js'
-import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { defaultConfigPath } from '../config/schema.js'
+import { loadClientConfigLayers } from '../config/grep_migration.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { collectConfigErrors } from '../config/validate.js'
@@ -16,7 +17,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
 import { createKernelRuntime } from './activation.js'
-import { buildSourceWithholdResolver } from './source_withhold.js'
+import { buildSourceWithholdResolver, ensureClientSyncMigration } from './source_withhold.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import {
   V1_BUNDLED_PLUGIN_ALLOWLIST,
@@ -27,7 +28,7 @@ import { discoverInstalledPlugins } from './installed.js'
 
 /**
  * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
- * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { LoadedManifest, UnsatisfiedRequirement } from '../../../src/core/types.js'
  * @import { ActivationResult } from '../../../src/core/runtime/types.js'
  * @import { BootKernelOptions, BootKernelResult, BootProfile } from '../../../src/core/runtime/types.js'
  * @import { ConfigLayerDrop, LoadConfigResult, PluginMetadata } from '../../../src/core/config/types.js'
@@ -95,39 +96,37 @@ export async function bootKernel(opts = {}) {
         span.setAttribute('installed_failed', installed.failed.length)
       }
 
-      // An installed plugin must not shadow a bundled first-party
-      // plugin by name. The override policy is intentionally deferred
-      // (see hy-gh-2 design): reject boot with a clear, telemetry-tagged
-      // error so the operator removes the installed copy before booting.
-      // The same detection feeds the shared `selectBootPlugins` so help
-      // knows to advertise no commands when boot would reject.
+      // An installed plugin never runs in a bundled first-party plugin's
+      // name: the bundled copy is activated and the installed one sits
+      // idle in the lock. Boot used to reject here instead, and the reject
+      // was the hazard: dispatch boots before every command, `hyp plugin
+      // remove` included, so the operator could not run the repair the error
+      // named, and under launchd/systemd `KeepAlive` the daemon respawned
+      // into the same throw every few seconds, appending to a log that never
+      // rotates. One warning per name per boot; `hyp status` carries the
+      // repair and `hyp plugin list` marks the shadowed entry.
+      // @ref LLP 0380#bundled-copy-wins [implements]: the bundled copy activates, the installed shadow is logged and skipped, boot never rejects
       const shadowing = detectShadowedPlugins({ discovered, installed })
       if (shadowing.length > 0) {
         span.setAttribute('installed_shadow_collisions', shadowing.length)
-        span.setAttribute('error_kind', 'installed_shadows_bundled')
         const log = getLogger('kernel')
         for (const name of shadowing) {
-          log.error('plugin.shadow_collision', {
+          log.warn('plugin.shadow_collision', {
             [Attr.PLUGIN]: name,
-            [Attr.ERROR_KIND]: 'installed_shadows_bundled',
+            [Attr.COMPONENT]: 'kernel',
+            status: 'skipped',
             hyp_reason: 'installed_plugin_name_collides_with_bundled',
+            hyp_repair: `hyp plugin remove ${name}`,
           })
         }
-        const message =
-          `installed plugin(s) shadow bundled first-party plugin(s): ${shadowing.sort().join(', ')}. ` +
-          `Remove the installed copy with 'hyp plugin remove <name>' before booting.`
-        const shadowErr = /** @type {Error & { hypErrorKind?: string }} */ (new Error(message))
-        shadowErr.hypErrorKind = 'installed_shadows_bundled'
-        throw shadowErr
       }
 
       // Two-layer config resolution (LLP 0031): the effective config is
       // the merge of a server-owned **central** layer (authoritative,
       // locked) and the user-owned **local** layer (`hypaware-config.json`,
-      // additive-only). Both are read-only here. Only the daemon's apply
-      // engine ever writes the central layer. A host that never joined has
-      // no central layer, so `effective = local` (this whole block is a
-      // no-op for it) and behaviour is byte-for-byte what it was before.
+      // additive-only). Only the daemon's apply engine writes the central
+      // layer; the client may migrate its local grep entry. A host that never
+      // joined has no central layer, so `effective = local` after migration.
       // The catalog is built from the very manifests this boot discovered
       // so the merge validates local additions against the same plugin set
       // it will activate.
@@ -138,6 +137,7 @@ export async function bootKernel(opts = {}) {
         configPath,
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
+        migrateGrep: bootProfile === 'config',
       })
       const centralConfig = merged.centralConfig
       const centralConfigPath = merged.centralConfigPath
@@ -173,30 +173,86 @@ export async function bootKernel(opts = {}) {
       // The kernel runtime (and its storage service) is built here, after
       // the catalog and layered config are known, rather than at the top of
       // this function: `sourceWithholdResolver` needs both to classify each
-      // picker source's provenance (LLP 0132 #source-scoped-withholding),
-      // and nothing before this point reads `runtime`.
-      // @ref LLP 0132#source-scoped-withholding [implements]: boot builds the resolver once, from the very catalog + merged config this boot just resolved
+      // picker source's provenance (LLP 0188), and nothing before this
+      // point reads `runtime`. The migration runs first: both the daemon
+      // and the CLI boot through here, so the first invocation after the
+      // default-sync upgrade materializes the pre-0188 withheld set before
+      // any export can read the store.
+      // @ref LLP 0188#migration [implements]: boot materializes the pre-0188 derived withheld set before building the resolver
+      // @ref LLP 0188#opt-out [implements]: boot builds the resolver from the very catalog + merged config this boot just resolved, over the live opt-out store
+      await ensureClientSyncMigration({ catalog, layered: merged, stateDir: stateRoot })
       const commandRegistry = opts.commandRegistry ?? createCommandRegistry()
       const runtime = createKernelRuntime({
         commandRegistry,
         cacheRoot,
+        ...(opts.storage ? { storage: opts.storage } : {}),
         ...(opts.configControl ? { configControl: opts.configControl } : {}),
-        sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged }),
+        sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged, stateDir: stateRoot }),
       })
 
       // Full plugin pool + selection (shared with help so `hyp --help`
       // advertises exactly the command set this boot would activate and
       // dispatch): V1 allowlist + excluded-from-default set + installed
-      // plugins, with an installed plugin replacing a same-named excluded
-      // bundled skeleton. Excluded plugins are in the pool so they activate
-      // when named in config or an init preset, the allowlist only governs
-      // default activation, not discoverability.
-      const { installedNames, selected, selectedManifests } = selectBootPlugins({
+      // plugins (an installed copy of a bundled name, excluded or not, is
+      // dropped from the pool: the warning above named it). Excluded plugins
+      // are in the pool so they activate when named in config or an init
+      // preset, the allowlist only governs default activation, not
+      // discoverability.
+      const { installedNames, pool, selected, selectedManifests } = selectBootPlugins({
         discovered,
         installed,
         config,
         bootProfile,
       })
+
+      // Plugins this boot found a manifest for but whose profile did not
+      // select: the profile never gave them a chance to activate. `skipped`
+      // below cannot answer that question for callers, since it only walks
+      // `discovered.loaded` and so omits the V1-excluded bundled plugins
+      // (`@hypaware/central`, …) that `all-bundled`/`all-available` drop even
+      // when the config names them. Dispatch reads this to tell a profile
+      // artifact apart from a config defect when a sink fails to materialize.
+      const withheldByProfile = pool
+        .map((m) => /** @type {PluginName} */ (m.manifest.name))
+        .filter((name) => !selected.has(name))
+
+      // The plugins the user asked for. The profile term of `unavailablePlugins`
+      // below is intersected with this set, and the intersection is what keeps
+      // the field usable: every `config`-profile boot withholds the whole
+      // non-config pool, so an unintersected profile term would report a hole on
+      // every ordinary boot and stand the client-asset prune down forever.
+      // Intersected, `config` yields nothing (a plugin the user genuinely
+      // removed from the config still prunes) and `all-available` yields exactly
+      // the config-enabled names that profile dropped.
+      const configEnabled = new Set(
+        (config?.plugins ?? [])
+          .filter((entry) => entry.enabled !== false)
+          .map((entry) => /** @type {PluginName} */ (entry.name))
+      )
+      const wantedButWithheld = withheldByProfile.filter((name) => configEnabled.has(name))
+
+      // A manifest that would not load contributes nothing and has no plugin
+      // name to be known by, so it is named by the directory it failed in. Both
+      // pools count: an installed plugin whose manifest is unreadable leaves the
+      // same hole a bundled one does.
+      //
+      // Kept whole here, for the reason `unsatisfiedRequirements` is kept
+      // beside `unavailablePlugins`: the flat list is all the client-asset
+      // prune needs, but a caller that has to *say* why a directory
+      // contributed nothing needs the rejection reason too, and `loadManifest`
+      // already recorded it (issue #1576). The flat term is derived from this
+      // one so the two cannot disagree.
+      const unloadableManifests = [...discovered.failed, ...installed.failed]
+      // The flat term carries one thing the reasoned list above cannot: a lock
+      // entry with no usable `install_dir`, which discovery could not even
+      // attempt a manifest for, so it has no `rootDir` to be a `FailedManifest`
+      // by and is named by its lock key instead. It leaves the same hole in
+      // this boot's plan as a manifest that would not load, and the prune
+      // stands down on the hole rather than on how the hole was made; omitting
+      // it would read that plugin's client assets as retired and delete them
+      // out of the user's home on the first boot after the lock was hand-edited
+      // (issue #1958).
+      const unloadable = [...unloadableManifests.map((f) => f.rootDir), ...installed.malformed]
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
@@ -245,6 +301,10 @@ export async function bootKernel(opts = {}) {
           mode,
           runId,
           skipped,
+          withheldByProfile,
+          unsatisfiedRequirements: /** @type {UnsatisfiedRequirement[]} */ ([]),
+          unloadableManifests,
+          unavailablePlugins: [...new Set([...unloadable, ...wantedButWithheld])],
           clientDescriptors: catalog.clientDescriptors,
         }
       }
@@ -269,12 +329,25 @@ export async function bootKernel(opts = {}) {
           config: configByName.get(/** @type {PluginName} */ (/** @type {LoadedManifest} */ (entry).manifest.name)) ?? /** @type {JsonObject} */ ({}),
         }))
 
+      // The env this boot resolved, not `process.env`: plugins read `ctx.env`
+      // at activation time to place state, so a caller booting with an injected
+      // env (tests, smokes, the daemon) only gets its HYP_HOME honored if the
+      // env reaches activation from here. `HYP_HOME` is forced to the home this
+      // boot resolved, not forwarded, the way every other site threading an env
+      // alongside a resolved home already does (`daemon/runtime.js`,
+      // `daemon/gateway.js`, `cli/integration.js`): `stateRoot`/`cacheRoot` are
+      // rooted under it, so a plugin re-deriving a home from the raw env would
+      // place its state where the kernel is not looking.
+      // @ref LLP 0300#home-resolution [constrained-by]: a plugin re-derives the
+      //   home via `readObservabilityEnv`, the shape 0300 declined because it
+      //   ignores `env.HOME`, so setting `HYP_HOME` is the only way to steer it
       const result = await activatePlugins({
         plugins: activationEntries,
         stateRoot,
         runId,
         runtime,
         tmpRoot: opts.tmpRoot,
+        env: { ...env, HYP_HOME: hypHome },
       })
 
       const activePlugins = result.results
@@ -296,6 +369,27 @@ export async function bootKernel(opts = {}) {
         mode,
         runId,
         skipped,
+        withheldByProfile,
+        // Which door `unavailablePlugins` below took, and why, for the caller
+        // that has to *say* why a plugin is missing rather than only that it
+        // is: the flat list underneath keeps names alone (issue #1580).
+        unsatisfiedRequirements: resolution.unsatisfied,
+        unloadableManifests,
+        // The one list of "this boot did not get its whole plugin set", for
+        // callers that must not read a missing contribution as a withdrawn one.
+        // Four doors, and only the first ever reaches an activation record: a
+        // plugin whose `activate()` threw, one the dep graph eliminated for an
+        // unsatisfied `requires`, one whose manifest would not load, and one the
+        // boot profile withheld although the config enabled it.
+        // @ref LLP 0219#incomplete-activation-prunes-nothing [implements]: every
+        //   way a boot comes up short of its plugin set lands in one list, so
+        //   the delete path stands down on all of them and not just on throws
+        unavailablePlugins: [...new Set([
+          ...failed.map((r) => /** @type {string} */ (r.plugin.name)),
+          ...resolution.unsatisfied.map((u) => /** @type {string} */ (u.plugin)),
+          ...unloadable,
+          ...wantedButWithheld,
+        ])],
         clientDescriptors: catalog.clientDescriptors,
       }
     },
@@ -307,28 +401,39 @@ export async function bootKernel(opts = {}) {
  * Resolve the effective two-layer config from disk (LLP 0031): load the
  * user-owned **local** layer (`configPath`) and the server-owned
  * **central** layer (active slot / join seed under `stateRoot`), then
- * merge + prune via {@link resolveLayeredConfig}. Both layers are read
- * read-only. Only the daemon's apply engine ever writes the central
+ * merge + prune via {@link resolveLayeredConfig}. Client boot can opt into
+ * the local grep migration. Only the daemon's apply engine writes the central
  * layer. The single place `bootKernel` and the SIGHUP reload agree on
  * what "effective" means, so a reload can never silently drop the central
  * layer.
  *
- * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string> }} args
+ * `centralConfig` is `null` for **two different** states: no central layer on
+ * disk, and a central layer that is there but does not load. Boot itself is
+ * right to collapse them (either way there is nothing to merge), but a caller
+ * deciding a *permission* on "is this machine enrolled" is not: it must be
+ * able to tell "not enrolled" from "cannot tell". `centralLoaded` is returned
+ * raw alongside for exactly that. `localLoaded` includes the compatibility
+ * entry when migration cannot persist to a read-only local file.
+ *
+ * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string>, migrateGrep?: boolean }} args
  * @returns {Promise<{
  *   centralConfig: HypAwareV2Config | null,
  *   localConfig: HypAwareV2Config | null,
  *   centralConfigPath: string | null,
  *   localLoaded: LoadConfigResult | null,
+ *   centralLoaded: LoadConfigResult | null,
  *   effective: HypAwareV2Config | null,
  *   drops: ConfigLayerDrop[],
  *   centralQueryIgnored: boolean,
  * }>}
  */
-export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, knownPlugins, knownDatasets }) {
-  const localLoaded = configPath ? await loadConfigFile(configPath) : null
-  const localConfig = localLoaded?.ok ? localLoaded.config : null
+export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, knownPlugins, knownDatasets, migrateGrep = false }) {
   const centralConfigPath = resolveCentralLayerPath({ stateRoot })
-  const centralLoaded = centralConfigPath ? await loadConfigFile(centralConfigPath) : null
+  const { local: localLoaded, central: centralLoaded } = await loadClientConfigLayers({
+    configPath, centralConfigPath,
+    migrateGrep: migrateGrep && knownPlugins?.has('@hypaware/grep') === true,
+  })
+  const localConfig = localLoaded?.ok ? localLoaded.config : null
   const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
 
   const merged = resolveLayeredConfig({
@@ -355,6 +460,7 @@ export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, know
     localConfig,
     centralConfigPath,
     localLoaded,
+    centralLoaded,
     effective: (centralConfig || localConfig) ? merged.effective : null,
     drops: merged.drops,
     centralQueryIgnored: merged.centralQueryIgnored,
@@ -368,9 +474,9 @@ export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, know
  * catalog drives the validation pass, so it must reflect the same
  * bundled + installed plugin set the kernel runs.
  *
- * @param {{ stateRoot: string, configPath: string | null, workspaceDir?: string }} args
+ * @param {{ stateRoot: string, configPath: string | null, workspaceDir?: string, migrateGrep?: boolean }} args
  */
-export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, workspaceDir }) {
+export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, workspaceDir, migrateGrep = true }) {
   const discovered = await discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {})
   const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
   const catalog = buildPluginCatalog([...discovered.loaded, ...discovered.excluded], installed.loaded)
@@ -379,6 +485,7 @@ export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, wor
     configPath,
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
+    migrateGrep,
   })
 }
 
@@ -403,14 +510,31 @@ export function resolveConfigPath({ explicit, env, hypHome }) {
 /**
  * Detect installed plugins that shadow a bundled first-party plugin by
  * name. Pure (manifests only: no I/O, telemetry, or throw). Shared
- * between `bootKernel`'s hard reject guard and `selectBootPlugins` so the
- * shadow rule has a single definition.
+ * between `bootKernel`'s warning, `selectBootPlugins`' pool (which drops
+ * the shadows so the bundled copy is what activates), and the `hyp status`
+ * diagnostic, so the shadow rule has a single definition.
  *
- * @param {{ discovered: { loaded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }} args
+ * Both bundled buckets count. The V1-excluded set once held only developer
+ * skeletons (`@hypaware/central`, `@hypaware/gascity`) that an installed
+ * copy was allowed to replace; it now holds complete first-party plugins
+ * whose only difference from the allowlist is that activation is an explicit
+ * config choice (`@hypaware/github`, `@hypaware/claude-desktop`). An
+ * installed copy of one of those activated silently in place of the bundled
+ * code, with `hyp plugin list` still saying "(bundled)", so a pre-bundling
+ * install kept running stale code across every release that shipped a fix
+ * to the bundled copy.
+ *
+ * `excluded` is required, not optional: an allowlist-only comparison is
+ * exactly the bug this fixes, and a caller that omitted the bucket would
+ * reintroduce it silently. `discoverBundledPlugins` always returns both.
+ *
+ * @param {{ discovered: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }} args
  * @returns {PluginName[]}
  */
 export function detectShadowedPlugins({ discovered, installed }) {
-  const bundledNames = new Set(discovered.loaded.map((m) => m.manifest.name))
+  const bundledNames = new Set(
+    [...discovered.loaded, ...discovered.excluded].map((m) => m.manifest.name)
+  )
   /** @type {PluginName[]} */
   const shadowing = []
   for (const m of installed.loaded) {
@@ -435,11 +559,12 @@ export function detectShadowedPlugins({ discovered, installed }) {
  * encodes the two selection rules help must not skip:
  *
  *  - `shadowing`: installed plugins whose name collides with a bundled
- *    first-party plugin. Boot rejects on these; help advertises no plugin
- *    commands rather than phantoms that will never dispatch.
- *  - excluded-bundled-vs-installed: an installed plugin replaces a
- *    same-named excluded bundled skeleton in the pool, so its commands
- *    (not the skeleton's) are what dispatch sees.
+ *    first-party plugin, allowlisted or V1-excluded alike. They are dropped
+ *    from the pool and from `installedNames`, so the bundled manifest is
+ *    the one selected and its commands are the ones help advertises. (An
+ *    installed copy used to replace a same-named excluded bundled skeleton
+ *    in the pool; see `detectShadowedPlugins` for why that carve-out is
+ *    gone.) The list is returned so surfaces can name the idle copy.
  *
  * @param {{
  *   discovered: { loaded: LoadedManifest[], excluded: LoadedManifest[] },
@@ -457,13 +582,19 @@ export function detectShadowedPlugins({ discovered, installed }) {
  */
 export function selectBootPlugins({ discovered, installed, config, bootProfile = 'config' }) {
   const shadowing = detectShadowedPlugins({ discovered, installed })
+  const shadowed = new Set(shadowing)
+  // A shadowed installed copy is invisible to selection: it leaves the pool,
+  // so no name appears twice, and it leaves `installedNames`, so the
+  // `all-bundled` / `all-available` profiles keep treating the bundled
+  // plugin as bundled instead of dropping it as "installed".
+  // @ref LLP 0380#bundled-copy-wins [implements]: selection never sees the installed shadow
+  const installedUnshadowed = installed.loaded.filter(
+    (m) => !shadowed.has(/** @type {PluginName} */ (m.manifest.name))
+  )
   const installedNames = new Set(
-    installed.loaded.map((m) => /** @type {PluginName} */ (m.manifest.name))
+    installedUnshadowed.map((m) => /** @type {PluginName} */ (m.manifest.name))
   )
-  const excludedAvailable = discovered.excluded.filter(
-    (m) => !installedNames.has(/** @type {PluginName} */ (m.manifest.name))
-  )
-  const pool = [...discovered.loaded, ...excludedAvailable, ...installed.loaded]
+  const pool = [...discovered.loaded, ...discovered.excluded, ...installedUnshadowed]
   const selected = computeSelectedPlugins({
     bootProfile,
     config,
@@ -501,7 +632,8 @@ export function selectBootPlugins({ discovered, installed, config, bootProfile =
  *   config (`enabled !== false`). Excluded and installed plugins are
  *   honoured when they appear in the config: typing the name is the
  *   explicit opt-in. The installed plugin is never preferred over a
- *   bundled one (shadow collisions are rejected before this point).
+ *   bundled one: `selectBootPlugins` dropped the shadow from this pool
+ *   before it got here (LLP 0380).
  *
  * Plugins in the config that aren't bundled (or aren't installed)
  * are skipped silently here. The cross-plugin validator surfaces
@@ -558,6 +690,32 @@ function computeSelectedPlugins({ bootProfile, config, discovered, installedName
     if (entry.enabled === false) continue
     const name = /** @type {PluginName} */ (entry.name)
     if (available.has(name)) out.add(name)
+  }
+  if (bootProfile === 'gateway') {
+    // Adapter routing registrations stay in the forwarding process. No source
+    // other than ai-gateway is started there, and its storage rejects access.
+    // @ref LLP 0038#implemented-boundary [implements]: activate gateway contributors without background sources or sinks
+    const selected = new Set(discovered.filter(({ manifest }) => out.has(manifest.name) && (
+      manifest.name === '@hypaware/ai-gateway' ||
+      manifest.requires?.capabilities?.['hypaware.ai-gateway'] !== undefined
+    )).map(({ manifest }) => manifest.name))
+    // Include configured dependencies of routing contributors. The ordinary
+    // dependency resolver still diagnoses a missing/unconfigured dependency.
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const { manifest } of discovered) {
+        if (!selected.has(manifest.name)) continue
+        for (const { manifest: candidate } of discovered) {
+          if (!out.has(candidate.name) || selected.has(candidate.name)) continue
+          if (manifest.requires?.plugins?.[candidate.name] !== undefined || Object.keys(manifest.requires?.capabilities ?? {}).some(cap => candidate.provides?.capabilities?.[cap] !== undefined)) {
+            selected.add(candidate.name)
+            changed = true
+          }
+        }
+      }
+    }
+    return selected
   }
   return out
 }
