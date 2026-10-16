@@ -386,6 +386,20 @@ test('dispatch routes hyp init <installed-preset> even when preset args include 
     assert.equal(exitCode, 0)
     assert.equal(stdout.text(), 'preset:target,--yes\n')
     assert.equal(stderr.text(), '')
+
+    // Only the bundled presets refuse setup choices they cannot honor
+    // (#2468); a third-party preset still receives them to read itself.
+    const optStdout = bufferWriter()
+    const optStderr = bufferWriter()
+    const optExit = await dispatch(['setup', 'fixture', '--retention-days', '45', '--from-file=mine.json', '--client', 'codex', '--yes'], {
+      env: { ...process.env, HYP_HOME: hypHome },
+      stdout: optStdout,
+      stderr: optStderr,
+      cwd: hypHome,
+      workspaceDir: path.join(hypHome, 'no-bundled'),
+    })
+    assert.equal(optExit, 0, optStderr.text())
+    assert.equal(optStdout.text(), 'preset:--retention-days,45,--from-file=mine.json,--client,codex,--yes\n')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

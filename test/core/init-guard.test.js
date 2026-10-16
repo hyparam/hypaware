@@ -453,8 +453,9 @@ test('setup --yes --bogus still refuses with exit 2 on stderr', async () => {
 // Regression (#2468): the #2437 gate allowlisted every flag `hyp setup`
 // declares, so a setup choice the preset never reads was accepted and dropped
 // with exit 0. `--from-file` installed the preset's plugins in place of the
-// operator's file. These refuse before the preset runs, so a refusal leaves
-// the config, its backups, and the operator's file untouched.
+// operator's file. The bundled presets refuse these before any write or
+// backup, so a refusal leaves the config, its backups, and the operator's file
+// untouched. A third-party preset still receives them, since it may honor them.
 
 /**
  * The config and its backups in a home, ignoring the state directories boot
@@ -483,7 +484,7 @@ for (const extra of UNHONORED) {
     const { hypHome, stdout, stderr, opts } = await makeHome()
     const code = await dispatch(['setup', 'claude-and-otel-local', ...extra], opts)
     assert.equal(code, 2, stdout.text())
-    assert.match(stderr.text(), /not supported with a preset|unexpected argument/)
+    assert.match(stderr.text(), /not supported with preset 'claude-and-otel-local'|unexpected argument '(stray|false)'/)
     assert.doesNotMatch(stdout.text(), /Wrote /)
     assert.deepEqual(await configFiles(hypHome), [])
   })
@@ -498,7 +499,7 @@ test('setup claude-and-otel-local --from-file over an existing config leaves it 
 
   const code = await dispatch(['setup', 'claude-and-otel-local', '--from-file', fromFile, '--force'], opts)
   assert.equal(code, 2)
-  assert.match(stderr.text(), /--from-file is not supported with a preset; run hyp setup --from-file <path> without a preset name/)
+  assert.match(stderr.text(), /--from-file is not supported with preset 'claude-and-otel-local'; run hyp setup --from-file <path> without a preset name/)
   assert.equal(await fs.readFile(configPath, 'utf8'), before)
   assert.deepEqual(await configFiles(hypHome), ['hypaware-config.json'])
   assert.equal(await fs.readFile(fromFile, 'utf8'), JSON.stringify(INCOMING) + '\n')
@@ -512,7 +513,7 @@ test('setup claude-and-otel-local --retention-days 90 --force leaves an existing
 
   const code = await dispatch(['setup', 'claude-and-otel-local', '--retention-days', '90', '--force'], opts)
   assert.equal(code, 2)
-  assert.match(stderr.text(), /--retention-days is not supported with a preset/)
+  assert.match(stderr.text(), /--retention-days is not supported with preset 'claude-and-otel-local'/)
   assert.equal(await fs.readFile(configPath, 'utf8'), before)
   assert.deepEqual(await configFiles(hypHome), ['hypaware-config.json'])
 })
@@ -542,13 +543,18 @@ for (const flag of ['--force', '--dry-run', '--dry-run=false']) {
   })
 }
 
-test('gascity preset refuses a positional argument it never reads', async () => {
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  const code = await gascityInitPreset(['mycity'], /** @type {any} */ ({ stdout, stderr }))
-  assert.equal(code, 2)
-  assert.match(stderr.text(), /unexpected argument 'mycity' after preset 'gascity'/)
-  assert.equal(stdout.text(), '')
+test('gascity preset refuses a positional or a setup choice it never reads', async () => {
+  for (const [argv, message] of [
+    [['mycity'], /unexpected argument 'mycity' after preset 'gascity'/],
+    [['--retention-days=90'], /--retention-days is not supported with preset 'gascity'/],
+  ]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await gascityInitPreset(/** @type {string[]} */ (argv), /** @type {any} */ ({ stdout, stderr }))
+    assert.equal(code, 2)
+    assert.match(stderr.text(), /** @type {RegExp} */ (message))
+    assert.equal(stdout.text(), '')
+  }
 })
 
 test('gascity preset with no flags, or --yes, still prints its config', async () => {

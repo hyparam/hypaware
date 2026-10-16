@@ -14,6 +14,7 @@ import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
 import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
 import { booleanFlagValue } from '../../../../src/core/cli/verb_codec.js'
+import { presetUnhonoredArgError } from '../../../../src/core/cli/command_args.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -664,11 +665,10 @@ function booleanFlag(argv, name) {
  * @param {CommandRunContext} ctx
  */
 async function runClaudeAndOtelLocalPreset(argv, ctx) {
-  // This preset reads no positional argument, so one would be dropped while
-  // the config write reports success (#2468).
-  const extra = argv.find((t) => !t.startsWith('-'))
-  if (extra !== undefined) {
-    ctx.stderr.write(`hyp setup: unexpected argument '${extra}' after preset 'claude-and-otel-local'\n`)
+  // Ahead of the backup below, so a refused run leaves nothing behind.
+  const unhonored = presetUnhonoredArgError(argv, 'claude-and-otel-local')
+  if (unhonored !== null) {
+    ctx.stderr.write(`${unhonored}\n`)
     return 2
   }
   const dryRunFlag = booleanFlag(argv, 'dry-run')

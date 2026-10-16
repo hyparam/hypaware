@@ -1,5 +1,7 @@
 // @ts-check
 
+import { presetUnhonoredArgError } from '../../../../src/core/cli/command_args.js'
+
 /**
  * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
@@ -11,7 +13,8 @@
  * so callers can pipe it into a fresh config; it does not write to
  * disk itself. Since nothing is written, `--force` and `--dry-run` would
  * claim work this preset never does, so they refuse rather than pass
- * silently, and so does a positional argument it never reads (#2468).
+ * silently, and so do the setup choices and positionals it never reads
+ * (#2468).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -23,9 +26,9 @@ export async function gascityInitPreset(argv, ctx) {
     ctx.stderr.write(`hyp setup: ${writerFlag.split('=')[0]} is not supported with preset 'gascity'; it only prints a config and writes nothing\n`)
     return 2
   }
-  const extra = argv.find((t) => !t.startsWith('-'))
-  if (extra !== undefined) {
-    ctx.stderr.write(`hyp setup: unexpected argument '${extra}' after preset 'gascity'\n`)
+  const unhonored = presetUnhonoredArgError(argv, 'gascity')
+  if (unhonored !== null) {
+    ctx.stderr.write(`${unhonored}\n`)
     return 2
   }
   const preset = {

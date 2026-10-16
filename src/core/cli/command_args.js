@@ -418,3 +418,29 @@ export function parseCoreCommandArgv(name, argv, ctx) {
   }
   return { ok: true, params: parsed.params }
 }
+
+/**
+ * The refusal a bundled `hyp setup <preset>` owes for argv it cannot honor:
+ * a setup choice its fixed plugin list never reads (`--client`, `--source`,
+ * `--export`, `--retention-days`, `--bin`), `--from-file`, or a positional.
+ * Each would otherwise be dropped while the preset reports a successful
+ * write (#2468). The preset calls this before any write or backup. It is not
+ * applied in `runInit`, because a third-party preset may honor these and
+ * reads its own argv.
+ *
+ * @param {string[]} argv the argv after the preset name
+ * @param {string} preset
+ * @returns {string | null} the stderr line, or null when nothing is refused
+ */
+export function presetUnhonoredArgError(argv, preset) {
+  for (const token of argv) {
+    if (/^--from-file(=|$)/.test(token)) {
+      return `hyp setup: --from-file is not supported with preset '${preset}'; run hyp setup --from-file <path> without a preset name`
+    }
+    if (/^--(client|source|export|retention-days|bin)(=|$)/.test(token)) {
+      return `hyp setup: ${token.split('=')[0]} is not supported with preset '${preset}'; run hyp setup --yes without a preset name to set it`
+    }
+    if (!token.startsWith('-')) return `hyp setup: unexpected argument '${token}' after preset '${preset}'`
+  }
+  return null
+}
