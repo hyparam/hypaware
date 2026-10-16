@@ -92,6 +92,6 @@ export interface GraphKit {
 /** The `hypaware.context-graph` capability value, as this connector consumes it. */
 export interface ContextGraphCapability {
   registerContract(contract: unknown): void
-  project(sourceDataset: string): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
+  project(sourceDataset: string, options?: { signal?: AbortSignal }): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
   kit: GraphKit
 }

@@ -63,11 +63,11 @@ export function resolveProjectionMaxHeapBytes() {
  * structurally converge for free. Idempotent: a second run with no new source
  * data writes zero rows.
  *
- * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean, refresh?: boolean, __executeSql?: (args: ExecuteSqlOptions) => Promise<ExecuteSqlResult> }} args
+ * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean, refresh?: boolean, signal?: AbortSignal, __executeSql?: (args: ExecuteSqlOptions) => Promise<ExecuteSqlResult> }} args
  * @returns {Promise<{ nodes: number, edges: number, nodesWritten: number, edgesWritten: number }>}
  * @ref LLP 0023#contract-contribution [implements]: the engine runs every registered contract; adding a source is contributing one
  */
-export async function projectGraph({ query, storage, contracts, config, dryRun = false, refresh = false, __executeSql = executeQuerySql }) {
+export async function projectGraph({ query, storage, contracts, config, dryRun = false, refresh = false, signal, __executeSql = executeQuerySql }) {
   // A dedicated finite budget for every projection scan: the shared scan below
   // fully materializes the source table, so it needs more than the 1 GiB
   // user-query default without stripping the guard (never 0). Resolved once and
@@ -88,8 +88,10 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
    * @returns {Promise<ExecuteSqlResult>}
    */
   __executeSql = async (args) => {
+    // The caller's signal reaches every scan site, so an aborted projection stops reading
+    signal?.throwIfAborted()
     try {
-      return await rawExecuteSql(args)
+      return await rawExecuteSql(signal ? { ...args, signal } : args)
     } catch (err) {
       if (err instanceof Error && err.name === 'QueryExecutionBudgetError') {
         err.message +=
@@ -146,6 +148,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       const yieldDue = (index) => (index & 255) === 0 && performance.now() - sliceStart >= RULE_LOOP_SLICE_MS
       const yieldNow = async () => {
         await yieldToEventLoop()
+        signal?.throwIfAborted()
         sliceStart = performance.now()
       }
 
@@ -247,12 +250,15 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         // Settle pending rows through the normal dedup reads before maintenance.
         await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
         await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
+        signal?.throwIfAborted()
         await refreshGraphRows(storage, NODE_DATASET, nodeRows)
         await refreshGraphRows(storage, EDGE_DATASET, edgeRows)
       }
 
       const freshNodes = await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
       const freshEdges = await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
+      // Last abort point: once the appends start, they settle together
+      signal?.throwIfAborted()
 
       if (freshNodes.length > 0) {
         await storage.appendRows(graphTablePath(storage, NODE_DATASET), [...NODE_COLUMNS], freshNodes)

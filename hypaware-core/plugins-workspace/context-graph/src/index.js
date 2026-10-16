@@ -60,13 +60,14 @@ export async function activate(ctx) {
   /** @type {ContextGraphCapability} */
   const capability = {
     registerContract: (contract) => registry.register(contract),
-    async project(sourceDataset) {
+    async project(sourceDataset, options) {
       const contracts = registry.list().filter((c) => c.sourceDataset === sourceDataset)
       if (contracts.length === 0) throw new Error(`graph project: no contract registered for source '${sourceDataset}'`)
       return projectGraph({
         query: ctx.query,
         storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
         contracts,
+        signal: options?.signal,
       })
     },
     kit: { nodeId, edgeId, makeRowBuilders },

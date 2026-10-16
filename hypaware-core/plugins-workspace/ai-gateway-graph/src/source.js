@@ -12,6 +12,8 @@ import { SOURCE_DATASET } from './graph_contract.js'
 
 export const PROJECTION_INTERVAL_MS = 5 * 60_000
 export const FIRST_PROJECTION_DELAY_MS = 1_000
+// Backstop under the 5 s `hyp daemon stop` waits for the process, with room for the other sources
+export const STOP_GRACE_MS = 2_000
 
 /**
  * @param {PluginActivationContext} ctx
@@ -32,6 +34,7 @@ export async function startGraphSource(ctx, graph) {
   /** @type {string | null} */
   let lastSuccessAt = null
   let stopped = false
+  const cancel = new AbortController()
   let projectionDue = true
   let rowsWritten = 0
 
@@ -58,7 +61,7 @@ export async function startGraphSource(ctx, graph) {
 
       projectionDue = true
       ctx.log.info('graph.projection_started', { source_dataset: SOURCE_DATASET })
-      const result = await graph.project(SOURCE_DATASET)
+      const result = await graph.project(SOURCE_DATASET, { signal: cancel.signal })
       // Keep the pre-scan fingerprint: capture during a projection must stay
       // due. Flushing a pending spool can cause one extra idempotent pass.
       projectedFingerprint = fingerprint
@@ -73,6 +76,10 @@ export async function startGraphSource(ctx, graph) {
         duration_ms: Date.now() - started,
       })
     } catch (err) {
+      if (cancel.signal.aborted) {
+        ctx.log.info('graph.projection_cancelled', { source_dataset: SOURCE_DATASET, duration_ms: Date.now() - started })
+        return
+      }
       lastError = err instanceof Error ? err.message : String(err)
       ctx.log.error('graph.projection_failed', {
         source_dataset: SOURCE_DATASET,
@@ -108,7 +115,20 @@ export async function startGraphSource(ctx, graph) {
     async stop() {
       stopped = true
       clearTimeout(timer)
-      await inFlight
+      if (!inFlight) return
+      // Abort stops the projection's reads and starts no write; appends already
+      // under way settle. The grace bounds stop if work ignores the signal.
+      cancel.abort()
+      /** @type {ReturnType<typeof setTimeout> | undefined} */
+      let grace
+      const outcome = await Promise.race([
+        inFlight.then(() => 'done'),
+        new Promise(resolve => { grace = setTimeout(() => resolve('timeout'), STOP_GRACE_MS) }),
+      ])
+      clearTimeout(grace)
+      if (outcome === 'timeout') {
+        ctx.log.warn('graph.projection_abandoned', { source_dataset: SOURCE_DATASET, grace_ms: STOP_GRACE_MS })
+      }
     },
   }
 }

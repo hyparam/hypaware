@@ -34,8 +34,13 @@ signal; explicit projection and daemon restart still perform a full catch-up.
 
 Only successful projection clears due work. Failures log the dataset and error,
 appear in source status, and retry on the ordinary cadence, even when no new
-capture arrives. Timer callbacks do not overlap. Stop clears the timer and
-awaits in-flight work before returning. No reload-specific settings exist.
+capture arrives. Timer callbacks do not overlap. Stop clears the timer, aborts
+in-flight work and awaits it for at most two seconds before returning. The abort
+reaches every projection query, and no graph write starts after it; appends
+already under way settle. Cancelled work is logged, not reported as an error,
+and the next start catches up because projection is idempotent. Work that
+ignores the abort is abandoned at the bound with a warning log, so a stalled
+scan cannot hold daemon stop. No reload-specific settings exist.
 Structured start/completion/failure logs complement the engine's existing
 `graph.project` spans and write counts.
 
