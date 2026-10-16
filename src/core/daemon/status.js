@@ -49,7 +49,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -1931,6 +1931,30 @@ export async function collectHypAwareStatus(opts = {}) {
       // listing would in any case be a read that changes nothing
       // (LLP 0139#repair-must-be-runnable, as generalised by LLP 0195).
       repair: [activationLogGrep, 'hyp daemon restart'],
+    })
+  }
+
+  // ----- configured sinks the running daemon could not materialize (issue #2547) -----
+  // The daemon degrades its boot on these, but a sink with no handle has no
+  // row in the snapshot, so the warning it persisted is the only record.
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  const sinkMaterializePrefix = `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: `
+  const sinkMaterializeFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.warnings)
+    ? daemonStatusFile.warnings.filter((w) => typeof w === 'string' && w.startsWith(sinkMaterializePrefix))
+    : []
+  for (const warning of sinkMaterializeFailures) {
+    // The writer bounds each part; this bound is for a file it did not write.
+    const detail = sanitizeLabel(warning.slice(sinkMaterializePrefix.length), 512)
+    diagnostics.push({
+      severity: 'error',
+      kind: 'sink_materialize_failed',
+      message: `${detail ?? 'a configured sink did not materialize'} - nothing is exported to it`,
+      // A restart alone reproduces the same error; it only helps once the
+      // cause is fixed, because sinks are materialized at boot.
+      repair: [
+        `grep -s sink_materialize_failed ${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')} ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`,
+        'hyp daemon restart  # after fixing the cause; sinks are materialized at boot',
+      ],
     })
   }
 

@@ -27,8 +27,9 @@ import { createSinkDriver } from '../sinks/driver.js'
 import { diagnosticEntries, readDiagnosticRecord } from '../sinks/diagnostic_history.js'
 import { sinkInstanceName } from '../registry/sinks.js'
 import { materializeSinks } from '../sinks/materialize.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
-import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, MAX_ACTIVATION_MESSAGE_CHARS, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
 import {
   clearControlRequests,
   watchControlRequests,
@@ -673,11 +674,19 @@ export async function runDaemon(opts = {}) {
   if (sinkResult.errors.length > 0) {
     for (const e of sinkResult.errors) {
       fileLog.error('daemon.sink_materialize_failed', {
+        [Attr.COMPONENT]: 'daemon',
         instance: e.instance,
         error_kind: e.errorKind,
         message: e.message,
       })
     }
+    // A configured sink that never materialized exports nothing, so the boot
+    // is degraded exactly as it is for a source that failed to start (issue
+    // #2547). Reload does not re-materialize sinks, so this holds until a boot
+    // whose materialize succeeds.
+    status.state = 'degraded'
+    status.warnings = sinkResult.errors.map((e) =>
+      `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: sink '${sanitizeLabel(e.instance) ?? 'unknown'}' (${sanitizeLabel(e.errorKind) ?? 'materialize_failed'}): ${sanitizeLabel(e.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`)
   }
 
   // ----- Sink driver -----
@@ -760,7 +769,8 @@ export async function runDaemon(opts = {}) {
   // status.json: a degraded boot (any source failed to start) must not log
   // `daemon.healthy`. Monitoring keyed off that event would read a false
   // positive, and a health event never lists a source that failed to
-  // start; it reports only the sources that actually came up.
+  // start; it reports only the sources that actually came up. A sink that
+  // failed to materialize degrades the boot the same way.
   // @ref LLP 0017#the-primary-daemon [implements]: the boot health event reports the same state as `hyp daemon status`
   const startedSourceNames = sourceSnapshots
     .filter((s) => s.state !== 'failed')
@@ -778,6 +788,7 @@ export async function runDaemon(opts = {}) {
       failed_sources: sourceSnapshots
         .filter((s) => s.state === 'failed')
         .map((s) => s.name),
+      failed_sinks: sinkResult.errors.map((e) => ({ instance: e.instance, error_kind: e.errorKind })),
       sinks: status.sinks.map((s) => s.instance),
     })
   }

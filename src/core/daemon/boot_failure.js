@@ -45,6 +45,14 @@ export const MAX_ACTIVATION_MESSAGE_CHARS = 200
 export const BOOT_FAILED_WARNING_PREFIX = 'boot_failed'
 
 /**
+ * The label a processing daemon stamps on the warning it persists for each
+ * configured sink instance that did not materialize at boot (issue #2547).
+ * `hyp status` reads it back off a live snapshot to name the sink and its
+ * error, since nothing else in the snapshot records a sink that has no handle.
+ */
+export const SINK_MATERIALIZE_FAILED_WARNING_PREFIX = 'sink_materialize_failed'
+
+/**
  * The `errorKind` a snapshot entry carries when the plugin's `activate()` was
  * never called, because the dependency resolver eliminated it for an
  * unsatisfied `requires` (issue #1580).
