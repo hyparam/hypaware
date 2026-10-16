@@ -74,8 +74,8 @@ tool arguments and results are projected from the allowlisted source shapes;
 system context, reasoning blocks and metadata never become raw frames.
 Content-addressed references are hash-checked. Repeated archive references are
 visited once. Missing blobs, oversized data and unknown required shapes are
-observable failures, not empty successful conversations. Subagent graphs,
-standalone shell turns, external user-text blobs and older formats are outside
+observable failures, not empty successful conversations. Local subagent graphs
+are traversed as described below. Standalone shell turns, external user-text blobs and older formats are outside
 this implementation; orphan blobs are never scanned to invent history.
 
 ## Recovery and usage {#recovery}
@@ -113,6 +113,34 @@ Manual runs bypass them, and restarts begin cold. Live recovery has a separate
 64-entry root cache with the same no-drop rule. A shared active-session set
 prevents live writes overlapping backfill consumption of that session. A busy
 live trigger retries; a busy backfill session waits until another pass.
+
+## Local subagent graphs {#subagents}
+
+Cursor 3.19.19's ConversationStateStructure contains inline SubagentPersistedState
+map entries in field 16 and content-addressed references to that type in field
+31. Follow only explicitly local states (environment=1) with a conversation
+state; cloud/first-class cloud or machine references and unspecified environments are not
+proof of local workspace ownership. Never follow transcript path strings.
+When both forms name a child, require identical state bytes and project it
+once. Conflicting copies or duplicate keys within either map are refused.
+
+Reuse the same message projection for each child, excluding thinking/system
+context as for the root. Keep session_id and cwd owned by the root so existing
+session opt-outs and file/workspace admission apply to every child. Derive a
+stable conversation_id from the root session and native ancestor IDs, scope
+message identities to it, and set the existing agent_id, is_sidechain and
+parent_thread_id fields. Root identities are unchanged. Where the native run
+map unambiguously connects a child and parent tool call, retain that call as
+cursor.spawned_by_tool_use_id, the same provenance concept used by Claude.
+Multiple parent calls for a resumed child leave that link unknown.
+
+One worker and one shared 4,096-read/32-MiB budget cover the whole tree, with
+at most 64 child states and depth 16. Limits and missing referenced blobs
+refuse the snapshot observably; neither receives a fresh budget per child.
+Pending children retain the existing incomplete-checkpoint refusal behavior.
+Traversal follows saved references only, with no blob scan or persistent map.
+Synthetic SQLite, replay, privacy and nesting fixtures verify this contract;
+real-client nested/background/resume behavior remains a compatibility limit.
 
 ## Live token usage {#live-usage}
 

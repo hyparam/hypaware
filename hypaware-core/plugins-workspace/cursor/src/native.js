@@ -7,6 +7,7 @@ import { opendir, readFile, stat, realpath } from 'node:fs/promises'
 import { isPlainObject } from '../../../../src/core/util/json_util.js'
 
 /** @import { DatabaseSync } from 'node:sqlite' */
+/** @import { AiGatewayProjectedExchange } from '../../../../hypaware-plugin-kernel-types.js' */
 /** @import { CursorSession, CursorSnapshot, CursorReadOptions, CursorMessage } from '../../../../hypaware-core/plugins-workspace/cursor/src/types.js' */
 
 const MAX_RECORD = 1024 * 1024
@@ -319,119 +320,171 @@ export function readCursorSession(session, previousRoot) {
     }
     const fingerprint = createHash('sha256').update(rootData).digest('hex')
     if (fingerprint === previousRoot) return { root: fingerprint, exchanges: [], unchanged: true }
-    const root = cursorFields(rootData)
-    if (root.has(4)) throw new CursorReadError('native_in_progress')
-    if (!root.has(8)) throw new CursorReadError('native_no_turns')
-    // JSON results complement typed steps; never deserialize the system/user
-    // context or reasoning variants into projected messages.
-    const toolResults = new Map()
-    const toolInputs = new Map()
-    const assistantTexts = new Map()
-    const refs = [...(root.get(1) ?? [])]
-    for (const archive of [...(root.get(11) ?? []), ...(root.get(13) ?? [])]) {
-      const fields = cursorFields(blob(archive))
-      refs.push(...(fields.get(1) ?? []))
-    }
-    if (refs.length > MAX_BLOBS) throw new CursorReadError('native_graph_limit')
-    const seenRefs = new Set()
-    for (const pointer of refs) {
-      const key = Buffer.isBuffer(pointer) ? pointer.toString('hex') : pointer
-      if (seenRefs.has(key)) continue
-      seenRefs.add(key)
-      const data = blob(pointer)
-      const message = JSON.parse(data.toString('utf8'))
-      if (!Array.isArray(message.content)) continue
-      if (message.role === 'assistant') {
-        for (const block of message.content) {
-          if (block?.type === 'text' && typeof block.text === 'string') assistantTexts.set(block.text, (assistantTexts.get(block.text) ?? 0) + 1)
-        }
-        for (const block of message.content) {
-          if (block?.type === 'tool-call' && typeof block.toolCallId === 'string' && isPlainObject(block.args)) toolInputs.set(block.toolCallId, block.args)
-        }
-      }
-      if (message.role !== 'tool') continue
-      for (const block of message.content) {
-        if (block?.type !== 'tool-result' || typeof block.toolCallId !== 'string' || typeof block.toolName !== 'string') continue
-        if (toolResults.has(block.toolCallId)) throw new CursorReadError('native_tool_id_collision')
-        if (block.result === undefined) throw new CursorReadError('native_tool_result_missing')
-        toolResults.set(block.toolCallId, { name: block.toolName, result: block.result })
-      }
-    }
+    /** @type {AiGatewayProjectedExchange[]} */
     const exchanges = []
-    for (const pointer of root.get(8) ?? []) {
-      const turn = cursorFields(blob(pointer))
-      if (!turn.has(1)) throw new CursorReadError('native_turn_shape')
-      const agent = cursorFields(bytes(turn, 1))
-      const user = cursorFields(blob(bytes(agent, 1)))
-      const userId = string(user, 2)
-      const generation = string(agent, 3)
-      const routedModel = string(agent, 7).trim()
-      const model = routedModel.length <= 256 && !/[\x00-\x1f\x7f]/.test(routedModel) ? routedModel || undefined : undefined
-      if (!userId || userId.length > 256 || !generation || generation.length > 256) throw new CursorReadError('native_identity_missing')
-      /** @type {CursorMessage[]} */
-      const messages = []
-      const id = (...parts) => 'cursor:' + JSON.stringify([session.id, userId, ...parts])
-      const attrs = { cursor: { generation_id: generation, identity_source: 'native_turn_step' } }
-      // Simulated prompts are not human speech. Refuse untested external text
-      // blobs rather than silently replacing a real prompt with empty text.
-      if (user.has(18) || user.has(19)) throw new CursorReadError('native_external_user_text')
-      // Typed field 5 suppresses the prompt. Its meaning is inferred from the
-      // inspected stores, not documented, so only the exact varint 1 is read
-      // that way: any other value keeps the prompt. A prompt missing from a
-      // real client is the signal to recheck this.
-      if (user.get(5)?.[0] !== 1) messages.push({ role: 'user', message_id: id('user'), provider_uuid: userId,
-        content: string(user, 1), message_created_at: time(user, 25), request_id: generation, attributes: attrs })
-      let index = 0
-      for (const stepRef of agent.get(2) ?? []) {
-        const ordinal = index++
-        const step = cursorFields(blob(stepRef))
-        if (step.has(3)) continue
-        if (step.has(1)) {
-          const assistant = cursorFields(bytes(step, 1))
-          const text = string(assistant, 1)
-          // Cursor omits the final end timestamp even after CLI exit. Require
-          // corroborating model-context text for that case; a streaming typed
-          // step alone must not claim the durable identity of finished text.
-          if (!editor && !time(assistant, 3) && text) {
-            const remaining = assistantTexts.get(text) ?? 0
-            if (!remaining) throw new CursorReadError('native_in_progress')
-            assistantTexts.set(text, remaining - 1)
+    let agents = 0
+    /**
+     * @param {Map<number, Array<Buffer | number>>} root
+     * @param {string[]} ancestry
+     * @param {string} [parentThreadId]
+     * @param {string} [spawnedBy]
+     * @ref LLP 0399#subagents: child traversal shares the root's read/byte budget.
+     */
+    const visit = (root, ancestry, parentThreadId, spawnedBy) => {
+      if (ancestry.length > 16 || ++agents > 65) throw new CursorReadError('native_subagent_limit')
+      const threadId = ancestry.length ? 'cursor:' + JSON.stringify([session.id, 'subagent', ...ancestry]) : session.id
+      if (root.has(4)) throw new CursorReadError('native_in_progress')
+      if (!ancestry.length && !root.has(8)) throw new CursorReadError('native_no_turns')
+      // JSON results complement typed steps; never deserialize the system/user
+      // context or reasoning variants into projected messages.
+      const toolResults = new Map()
+      const toolInputs = new Map()
+      const assistantTexts = new Map()
+      const refs = [...(root.get(1) ?? [])]
+      for (const archive of [...(root.get(11) ?? []), ...(root.get(13) ?? [])]) {
+        const fields = cursorFields(blob(archive))
+        refs.push(...(fields.get(1) ?? []))
+      }
+      if (refs.length > MAX_BLOBS) throw new CursorReadError('native_graph_limit')
+      const seenRefs = new Set()
+      for (const pointer of refs) {
+        const key = Buffer.isBuffer(pointer) ? pointer.toString('hex') : pointer
+        if (seenRefs.has(key)) continue
+        seenRefs.add(key)
+        const data = blob(pointer)
+        const message = JSON.parse(data.toString('utf8'))
+        if (!Array.isArray(message.content)) continue
+        if (message.role === 'assistant') {
+          for (const block of message.content) {
+            if (block?.type === 'text' && typeof block.text === 'string') assistantTexts.set(block.text, (assistantTexts.get(block.text) ?? 0) + 1)
           }
-          if (text) messages.push({ role: 'assistant', message_id: id('assistant', generation, ordinal), content: text,
-            message_created_at: time(assistant, 2), request_id: generation, attributes: attrs })
-        } else if (step.has(2)) {
-          const tool = cursorFields(bytes(step, 2))
-          const callId = string(tool, 57)
-          if (!callId || callId.length > 256) throw new CursorReadError('native_identity_missing')
-          const result = toolResults.get(callId)
-          if (!result) throw new CursorReadError('native_tool_result_missing')
-          const variants = [...tool.keys()].filter((n) => ![54, 57, 59, 60].includes(n))
-          if (variants.length !== 1) throw new CursorReadError('native_tool_shape')
-          const body = cursorFields(bytes(tool, variants[0]))
-          const outcome = cursorFields(bytes(body, 2))
-          const isError = toolError(variants[0], outcome)
-          // Keep the shipped result identity so replay fills only missing call
-          // rows. The call uses the same native ID, never a hook helper ID.
-          messages.push({ role: 'assistant', message_id: id('tool_call', callId), request_id: generation,
-            message_created_at: time(tool, 59), attributes: attrs,
-            content: [{ type: 'tool_use', name: result.name, id: callId,
-              ...(toolInputs.has(callId) ? { input: toolInputs.get(callId) } : {}) }] })
-          messages.push({ role: 'tool', message_id: id('tool', callId), request_id: generation,
-            message_created_at: time(tool, 59), attributes: attrs,
-            content: [{ type: 'tool_result', name: result.name, tool_use_id: callId,
-              ...(toolInputs.has(callId) ? { input: toolInputs.get(callId) } : {}),
-              content: typeof result.result === 'string' ? result.result : JSON.stringify(result.result), is_error: isError }] })
-        } else throw new CursorReadError('native_step_shape')
+          for (const block of message.content) {
+            if (block?.type === 'tool-call' && typeof block.toolCallId === 'string' && isPlainObject(block.args)) toolInputs.set(block.toolCallId, block.args)
+          }
+        }
+        if (message.role !== 'tool') continue
+        for (const block of message.content) {
+          if (block?.type !== 'tool-result' || typeof block.toolCallId !== 'string' || typeof block.toolName !== 'string') continue
+          if (toolResults.has(block.toolCallId)) throw new CursorReadError('native_tool_id_collision')
+          if (block.result === undefined) throw new CursorReadError('native_tool_result_missing')
+          toolResults.set(block.toolCallId, { name: block.toolName, result: block.result })
+        }
       }
-      for (const message of messages) {
-        message.previous_message_id = []
-        // Only the saved turn's routed label describes the response. Current
-        // client settings and encrypted model strings are not model evidence.
-        if (message.role === 'assistant' && model) message.model = model
+      for (const pointer of root.get(8) ?? []) {
+        const turn = cursorFields(blob(pointer))
+        if (!turn.has(1)) throw new CursorReadError('native_turn_shape')
+        const agent = cursorFields(bytes(turn, 1))
+        const user = cursorFields(blob(bytes(agent, 1)))
+        const userId = string(user, 2)
+        const generation = string(agent, 3)
+        const routedModel = string(agent, 7).trim()
+        const model = routedModel.length <= 256 && !/[\x00-\x1f\x7f]/.test(routedModel) ? routedModel || undefined : undefined
+        if (!userId || userId.length > 256 || !generation || generation.length > 256) throw new CursorReadError('native_identity_missing')
+        /** @type {CursorMessage[]} */
+        const messages = []
+        const id = (...parts) => 'cursor:' + JSON.stringify([threadId, userId, ...parts])
+        const attrs = { cursor: { generation_id: generation, identity_source: 'native_turn_step' } }
+        // Simulated prompts are not human speech. Refuse untested external text
+        // blobs rather than silently replacing a real prompt with empty text.
+        if (user.has(18) || user.has(19)) throw new CursorReadError('native_external_user_text')
+        // Typed field 5 suppresses the prompt. Its meaning is inferred from the
+        // inspected stores, not documented, so only the exact varint 1 is read
+        // that way: any other value keeps the prompt. A prompt missing from a
+        // real client is the signal to recheck this.
+        if (user.get(5)?.[0] !== 1) messages.push({ role: 'user', message_id: id('user'), provider_uuid: userId,
+          content: string(user, 1), message_created_at: time(user, 25), request_id: generation, attributes: attrs })
+        let index = 0
+        for (const stepRef of agent.get(2) ?? []) {
+          const ordinal = index++
+          const step = cursorFields(blob(stepRef))
+          if (step.has(3)) continue
+          if (step.has(1)) {
+            const assistant = cursorFields(bytes(step, 1))
+            const text = string(assistant, 1)
+            // Cursor omits the final end timestamp even after CLI exit. Require
+            // corroborating model-context text for that case; a streaming typed
+            // step alone must not claim the durable identity of finished text.
+            if (!editor && !time(assistant, 3) && text) {
+              const remaining = assistantTexts.get(text) ?? 0
+              if (!remaining) throw new CursorReadError('native_in_progress')
+              assistantTexts.set(text, remaining - 1)
+            }
+            if (text) messages.push({ role: 'assistant', message_id: id('assistant', generation, ordinal), content: text,
+              message_created_at: time(assistant, 2), request_id: generation, attributes: attrs })
+          } else if (step.has(2)) {
+            const tool = cursorFields(bytes(step, 2))
+            const callId = string(tool, 57)
+            if (!callId || callId.length > 256) throw new CursorReadError('native_identity_missing')
+            const result = toolResults.get(callId)
+            if (!result) throw new CursorReadError('native_tool_result_missing')
+            const variants = [...tool.keys()].filter((n) => ![54, 57, 59, 60].includes(n))
+            if (variants.length !== 1) throw new CursorReadError('native_tool_shape')
+            const body = cursorFields(bytes(tool, variants[0]))
+            const outcome = cursorFields(bytes(body, 2))
+            const isError = toolError(variants[0], outcome)
+            // Keep the shipped result identity so replay fills only missing call
+            // rows. The call uses the same native ID, never a hook helper ID.
+            messages.push({ role: 'assistant', message_id: id('tool_call', callId), request_id: generation,
+              message_created_at: time(tool, 59), attributes: attrs,
+              content: [{ type: 'tool_use', name: result.name, id: callId,
+                ...(toolInputs.has(callId) ? { input: toolInputs.get(callId) } : {}) }] })
+            messages.push({ role: 'tool', message_id: id('tool', callId), request_id: generation,
+              message_created_at: time(tool, 59), attributes: attrs,
+              content: [{ type: 'tool_result', name: result.name, tool_use_id: callId,
+                ...(toolInputs.has(callId) ? { input: toolInputs.get(callId) } : {}),
+                content: typeof result.result === 'string' ? result.result : JSON.stringify(result.result), is_error: isError }] })
+          } else throw new CursorReadError('native_step_shape')
+        }
+        for (const message of messages) {
+          message.previous_message_id = []
+          // Only the saved turn's routed label describes the response. Current
+          // client settings and encrypted model strings are not model evidence.
+          if (message.role === 'assistant' && model) message.model = model
+        }
+        exchanges.push({ provider: 'unknown', client_name: 'cursor', session_id: session.id, conversation_id: threadId,
+          ...(ancestry.length ? { agent_id: ancestry.at(-1), is_sidechain: true, parent_thread_id: parentThreadId,
+            ...(spawnedBy ? { attributes: { cursor: { spawned_by_tool_use_id: spawnedBy } } } : {}) } : {}),
+          conversation_source: 'cursor-native', entrypoint: session.frontend, cwd: session.cwd, messages })
       }
-      exchanges.push({ provider: 'unknown', client_name: 'cursor', session_id: session.id, conversation_id: session.id,
-        conversation_source: 'cursor-native', entrypoint: session.frontend, cwd: session.cwd, messages })
+
+      // Maps use protobuf entry { key: 1, value: 2 }. If both forms exist,
+      // require identical state instead of guessing which snapshot is newer.
+      const children = new Map()
+      for (const key of [16, 31]) {
+        const seen = new Set()
+        for (const value of root.get(key) ?? []) {
+          if (!Buffer.isBuffer(value)) throw new CursorReadError('native_wire_shape')
+          const entry = cursorFields(value)
+          const childId = string(entry, 1)
+          if (!childId || childId.length > 256 || seen.has(childId)) throw new CursorReadError('native_subagent_identity')
+          seen.add(childId)
+          children.set(childId, { value: bytes(entry, 2), reference: key === 31, inline: key === 31 ? children.get(childId)?.value : undefined })
+          if (children.size > 64) throw new CursorReadError('native_subagent_limit')
+        }
+      }
+      // A resumed child can have several parent calls. Do not invent a single
+      // spawning call if the saved run map is ambiguous.
+      const parents = new Map()
+      for (const value of root.get(30) ?? []) {
+        if (!Buffer.isBuffer(value)) throw new CursorReadError('native_wire_shape')
+        const entry = cursorFields(value)
+        const run = cursorFields(bytes(entry, 2))
+        const childId = string(run, 2)
+        const callId = string(run, 1)
+        if (!children.has(childId) || !callId || callId.length > 256 || callId !== string(entry, 1)) continue
+        parents.set(childId, parents.has(childId) && parents.get(childId) !== callId ? undefined : callId)
+      }
+      for (const [childId, child] of children) {
+        const data = child.reference ? blob(child.value) : child.value
+        if (child.inline && !child.inline.equals(data)) throw new CursorReadError('native_subagent_identity')
+        const state = cursorFields(data)
+        // Cloud references do not prove local workspace ownership. Do not
+        // follow transcript paths or read unrelated stores to fill them in.
+        if (state.get(6)?.[0] !== 1 || state.has(7) || state.has(8) || state.has(10)) continue
+        if (state.has(1)) visit(cursorFields(bytes(state, 1)), [...ancestry, childId], threadId, parents.get(childId))
+      }
     }
+    visit(cursorFields(rootData), [])
     return { root: fingerprint, exchanges }
   } catch (err) { throw safeError(err) } finally { closeDb(db) }
 }
