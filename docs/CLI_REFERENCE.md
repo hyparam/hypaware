@@ -1155,7 +1155,7 @@ capture:
 | `@hypaware/pi` | Five minutes | Yes |
 | `@hypaware/claude` (also Claude Desktop) | Five minutes | Yes |
 | `@hypaware/cursor` | Five minutes | Yes |
-| `@hypaware/openclaw` | Five minutes | No |
+| `@hypaware/openclaw` | Five minutes | Yes |
 
 `hyp client detach <client>` stops every client's scheduled recovery, whatever
 `on_join` says; `hyp client attach <client>` resumes it.
@@ -1174,9 +1174,10 @@ Without an explicit window, recovery uses `query.cache.retention.default_days`,
 or 90 days if that setting is absent. A retention value of `0` means no age
 limit. See [retention configuration](CONFIGURATION.md#set-local-retention).
 
-`sweep_cron` changes the recovery cadence. OpenClaw schedules recovery even when
-`backfill.on_join` is false; bound it with `window_days`, or run
-`hyp client detach openclaw` to stop its capture.
+`sweep_cron` changes the recovery cadence and has no "never" value. For the
+adapters marked Yes above, `backfill.on_join: false` stops automatic history
+import only: live capture continues, and an explicit `hyp backfill <provider>`
+still imports on demand. Detach only when you want to stop capture as well.
 
 ## Collect GitHub activity
 
