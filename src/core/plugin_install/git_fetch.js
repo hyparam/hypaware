@@ -120,8 +120,8 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
         ok: false,
         errorKind: 'manifest_name_unsafe',
         message:
-          `plugin install: refused, manifest name '${manifest.name}' does not resolve to a ` +
-          `directory inside the plugin install root; nothing was installed and nothing was removed`,
+          `plugin install: refused, manifest name '${manifest.name}' is not an install name ` +
+          `(one name or @scope/name, inside the plugin install root); nothing was installed and nothing was removed`,
       }
     }
 
