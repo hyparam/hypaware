@@ -20,8 +20,8 @@ LLP 0505's guard is lexical. A valid `@scope/name` whose `@scope` directory is a
 pre-existing symlink passes it, and then the local lane's recursive remove, the
 git lane's parent mkdir and backup rename, and `hyp plugin remove`'s recursive
 delete all follow the link out of `<state>/plugins` (issue #2118). The link need
-not be planted by hand: a local-dir artifact may carry symlinks, and both lanes
-keep them.
+not be planted by hand: a local-dir artifact may carry symlinks, and that lane
+keeps them (the git lane rejects them).
 
 ## Filesystem parent {#filesystem-parent}
 
@@ -56,6 +56,11 @@ refuses, or when LLP 0505's rule withholds the delete, nothing is deleted and th
 result says so: the CLI prints `removed <name>` and then one stderr line,
 `hyp plugin remove: deleted nothing on disk: <reason>`. Before this, a withheld
 delete reported plain success.
+
+When the delete runs, it targets the derived destination the check inspected,
+not the `install_dir` text the row records. A recorded `<root>/jump/../victim`
+equals `<root>/victim` lexically and passes LLP 0505's rule, but the OS walks
+`jump` first, so a linked `jump` would steer the delete outside the root.
 
 ## Boundaries
 
