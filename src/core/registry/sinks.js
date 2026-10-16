@@ -380,13 +380,10 @@ export function createSinkRegistry() {
    * kernel's materializer took out of the config row: the value every other
    * label on the instance comes from, and on the kernel's own path the name
    * `materializeRequest`/`materializeBlob` filtered the listing on to reach
-   * this contribution. That agreement holds only as far as the record does:
-   * `ownerName` reads a live, unfrozen property, so a plugin that rewrites its
-   * own `name` after activation moves every label on the instance, and this
-   * resolution moves with them only when the rewritten owner still holds a
-   * registration of this contribution (issue #2130). Otherwise the identity
-   * fallback in the next paragraph applies, and the tags are another
-   * registrant's validated set, a residual of #2130 this fix leaves unchanged.
+   * this contribution. That agreement holds as far as the record does, and
+   * `createActivationContext` freezes the record and locks `ctx.plugin`, so
+   * on the kernel's path the owner match below always hits and the identity
+   * fallback never hands one registrant another's validated set (issue #2130).
    *
    * An identity match under another owner is still preferred over reading the
    * contribution, because a host driving this registry itself records no owner
@@ -736,11 +733,11 @@ function contributionKey(plugin, name) {
  * row (`src/core/sinks/materialize.js`). The loader builds that record from
  * the manifest it validated (`src/core/runtime/loader.js`), so it is the
  * kernel's own rather than a property of the contribution the instance came
- * from. It is not out of a plugin's reach: `ctx.plugin` is that very object,
- * unfrozen, so an activated plugin can still rewrite the name the kernel
- * resolves it under (issue #2130). Reading it once, here, is what keeps one
- * instantiation's labels, span, counter and owner record from disagreeing
- * whatever it answers.
+ * from. `ctx.plugin` is that very object, but `createActivationContext`
+ * freezes it and locks the member, so an activated plugin cannot rewrite the
+ * name the kernel resolves it under (issue #2130). Reading it once, here,
+ * still keeps one instantiation's labels, span, counter and owner record
+ * from disagreeing for a direct caller that hands in a record of its own.
  *
  * A record without a usable `name` answers `''` rather than falling back to
  * the contribution's claim, which `InstantiateArgs` makes unreachable for a

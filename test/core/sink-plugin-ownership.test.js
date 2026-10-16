@@ -566,3 +566,111 @@ test('a contribution naming a neighbour never reaches that neighbour\'s activati
   assert.equal(errors[0].errorKind, 'sink_contribution_missing')
   assert.equal(received, null, 'the impostor\'s create() ran under the neighbour\'s activation context')
 })
+
+// The owner half again, from the other side (issue #2130): `materializeRequest`
+// passes `ctx.plugin` to `instantiate`, so the record a plugin was handed at
+// activation is what every owner read, label and `supports` match comes from.
+// A plugin that could rename that record, or swap the member, would move its
+// own sink onto a neighbour.
+
+const C = '@fixture/unregistered'
+
+/**
+ * Every route by which plugin code could change the identity the materializer
+ * later reads, each tried against a fresh name. ES modules run strict, so a
+ * refused write throws rather than passing silently.
+ *
+ * @param {any} ctx
+ * @param {string} to
+ */
+function attemptRenames(ctx, to) {
+  const record = ctx.plugin
+  assert.throws(() => { record.name = to }, TypeError, `ctx.plugin.name was reassigned to ${to}`)
+  assert.throws(
+    () => Object.defineProperty(record, 'name', { configurable: true, get() { return to } }),
+    TypeError,
+    `an accessor was installed on ctx.plugin.name answering ${to}`
+  )
+  assert.throws(() => { ctx.plugin = { ...record, name: to } }, TypeError, `ctx.plugin was replaced with a record naming ${to}`)
+  assert.throws(
+    () => Object.defineProperty(ctx, 'plugin', { value: { ...record, name: to } }),
+    TypeError,
+    `ctx.plugin was redefined as a record naming ${to}`
+  )
+  assert.throws(() => { delete ctx.plugin }, TypeError, 'ctx.plugin was deleted')
+  assert.equal(ctx.plugin, record, 'ctx.plugin is no longer the record activation handed over')
+  assert.equal(ctx.plugin.name, A, `ctx.plugin.name answers ${ctx.plugin.name} after the attempts`)
+}
+
+test('a plugin cannot rename the identity its sinks are materialized under', async () => {
+  const owner = fixtureSink('central', A)
+  /** @type {any} */
+  let staged
+  /** @type {ExtendedSinkHandle[]} */
+  let handles = []
+  /** @type {any[]} */
+  let errors = []
+  const seen = await telemetryFrom(async () => {
+    staged = stage()
+    staged.ctxA.sinks.register(owner.contribution)
+    for (const to of [B, C]) attemptRenames(staged.ctxA, to)
+    const result = await materializeSinks(
+      staged.runtime,
+      /** @type {any} */ ({ sinks: { 'org-export': { plugin: A, config: { schedule: '* * * * *', token: 'SECRET-TOKEN' } } } }),
+      { stateRoot: '/nowhere', runId: 'r' }
+    )
+    handles = result.handles
+    errors = result.errors
+  })
+
+  assert.deepEqual(errors, [])
+  assert.equal(handles.length, 1)
+  assert.equal(handles[0].plugin, A, 'handle.plugin moved off the configured owner')
+  assert.deepEqual(handles[0].supports, ['queryable'])
+  assert.equal(/** @type {ExtendedSinkRegistry} */ (staged.runtime.sinks).ownerOf('org-export'), A, 'ownerOf moved off the configured owner')
+  assert.equal(staged.ctxA.sinks.get('org-export'), handles[0], 'the owner lost its own live handle')
+  const narrowed = /** @type {any} */ (staged.ctxB.sinks.get('org-export'))
+  assert.notEqual(narrowed, handles[0], 'the neighbour got the live handle')
+  assert.equal(narrowed.config, undefined, 'the neighbour read the instance config')
+
+  for (const body of ['sink.resolved', 'sink.register']) {
+    const record = seen.records.find((r) => r.body === body)
+    assert.ok(record, `no ${body} record`)
+    assert.equal(record.attributes.hyp_plugin, A, `${body} named another plugin`)
+  }
+  const counted = seen.measurements.filter((m) => m.name === 'hyp_sinks_registered')
+  assert.equal(counted.length, 1)
+  assert.equal(counted[0].attributes.hyp_plugin, A, 'hyp_sinks_registered ticked under another plugin')
+})
+
+test('a shared contribution resolves the configured registrant\'s supports, not another registrant\'s', async () => {
+  // One contribution object, two registrations with separately validated tag
+  // sets: B's first, so an identity-only fallback would land on it.
+  const staged = stage()
+  const shared = fixtureSink('shared', B).contribution
+  staged.ctxB.sinks.register(shared)
+  shared.plugin = A
+  shared.supports = []
+  staged.ctxA.sinks.register(shared)
+  for (const to of [B, C]) attemptRenames(staged.ctxA, to)
+
+  const { handles, errors } = await materializeSinks(
+    staged.runtime,
+    /** @type {any} */ ({ sinks: { 'org-export': { plugin: A, config: { schedule: '* * * * *' } } } }),
+    { stateRoot: '/nowhere', runId: 'r' }
+  )
+  assert.deepEqual(errors, [])
+  assert.equal(handles.length, 1)
+  assert.equal(handles[0].plugin, A)
+  assert.equal(/** @type {ExtendedSinkRegistry} */ (staged.runtime.sinks).ownerOf('org-export'), A)
+  assert.deepEqual(handles[0].supports, [], 'the instance carries the other registrant\'s validated supports')
+})
+
+test('a plugin still reads its own identity, and the freeze stops at the record', () => {
+  const { ctxA } = stage()
+  assert.equal(ctxA.plugin.name, A)
+  assert.equal(ctxA.plugin.version, '1.0.0')
+  assert.equal(ctxA.plugin.rootDir, '/nowhere')
+  assert.equal(Object.isFrozen(ctxA.plugin), true)
+  assert.equal(Object.isFrozen(ctxA.plugin.manifest), false, 'the manifest was frozen as a side effect')
+})
