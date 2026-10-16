@@ -327,6 +327,34 @@ for (const rel of SKILLS) {
   })
 }
 
+// Issue #1688: a bystander opt-out undo that runs unconditionally revokes a
+// deliberate one. A repeat add answers `ignored: true` the same as a first one
+// (the control route is a Set add), so the receipt cannot say whether this
+// call made the membership, and the opt-out is durable, so a wrong undo
+// resumes recording until the user notices. Every copy, the host-neutral tree
+// included, must gate the undo on the user and must not order it outright.
+const BYSTANDER_UNDO_COPIES = [
+  'hypaware-core/plugins-workspace/claude/skills/hypaware-privacy/SKILL.md',
+  'hypaware-core/plugins-workspace/codex/skills/hypaware-privacy/SKILL.md',
+  'hypaware-core/skills/hypaware-privacy/SKILL.md',
+]
+
+for (const rel of BYSTANDER_UNDO_COPIES) {
+  test(`${rel} undoes a bystander opt-out only once the user rules out their own`, () => {
+    const text = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', rel), 'utf8')
+    const start = text.indexOf('## Step 1')
+    const step1 = text.slice(start, text.indexOf('## Step 2', start))
+    assert.doesNotMatch(step1, /undo it before you stop/, 'the undo must not be an unconditional order')
+    assert.match(
+      step1,
+      /`hyp session unignore "<the session_id it reported>"` only if the user confirms they did not opt that session out themselves/,
+      'the undo must wait for the user to rule out a deliberate opt-out'
+    )
+    assert.match(step1, /cannot say whether the write added that session or found it already opted out/,
+      'and say why the receipt alone cannot decide it')
+  })
+}
+
 /* ------------------------------------------------------------------ */
 /* 3. Both privacy skills lead with the CLI verb, not the shell POST   */
 /* ------------------------------------------------------------------ */

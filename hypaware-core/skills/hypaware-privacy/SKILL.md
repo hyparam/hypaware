@@ -53,7 +53,7 @@ The verb resolves this client's session id, if the client states one, addresses 
 Read the receipt rather than only the exit code, and report what it says:
 
 - `"status"` is `ok` only when every recorder it *addressed* took the write; `partial` means at least one did not. Neither says a recorder it never addressed is covered.
-- `"session_id"` and `"session_id_source"` say which session it opted out and how it found the id. If the source names another client, or the user does not recognize the session, it opted out a bystander while this one keeps being recorded. That write already happened, so undo it before you stop - `hyp session unignore "<the session_id it reported>"`.
+- `"session_id"` and `"session_id_source"` say which session it opted out and how it found the id. If the source names another client, or the user does not recognize the session, it opted out a bystander while this one keeps being recorded. That write already happened. Undo it with `hyp session unignore "<the session_id it reported>"` only if the user confirms they did not opt that session out themselves: the receipt cannot say whether the write added that session or found it already opted out, and an undo removes a deliberate opt-out just the same. Otherwise leave it, and tell the user the bystander session stays suppressed until explicitly unignored.
 - `"recorders"` lists each recorder it addressed and that recorder's answer. Report any entry that is not `ok`.
 
 **If the verb refuses** because it cannot resolve an id, or because more than one client states one for this shell, do not guess. If the user or this client can state the id, pass it explicitly and check that `"session_id"` equals it byte for byte:
