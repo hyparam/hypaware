@@ -64,7 +64,7 @@ const APPEND_OPEN_RETRY_LIMIT = 8
  * @returns {CacheSpool}
  */
 export function createCacheSpool(args) {
-  /** @type {Map<string, { writeLock: Promise<unknown>, flushLock: Promise<unknown> }>} */
+  /** @type {Map<string, { writeLock: Promise<unknown>, flushLock: Promise<unknown>, ownMarkers: Set<string> }>} */
   const states = new Map()
   /** @type {Set<string>} */
   const knownTables = new Set()
@@ -76,7 +76,11 @@ export function createCacheSpool(args) {
     knownTables.add(tablePath)
     let state = states.get(tablePath)
     if (!state) {
-      state = { writeLock: Promise.resolve(), flushLock: Promise.resolve() }
+      // `ownMarkers` names the append markers this instance has on disk for
+      // the table. Its appends and rotations share the write lock above, so
+      // none of them can span one of its rotations; a marker from any other
+      // instance can, even one in this process.
+      state = { writeLock: Promise.resolve(), flushLock: Promise.resolve(), ownMarkers: new Set() }
       states.set(tablePath, state)
     }
     return state
@@ -125,12 +129,12 @@ export function createCacheSpool(args) {
     // marker before that rotation, so it is listed here or already finished
     // writing, and a finished write is in the bytes read below.
     // @ref LLP 0514#hold-the-file [implements]: a rotated file a live foreign append still holds is drained but not unlinked
-    const appends = foreignAppendMarkers(dir)
+    const appends = foreignAppendMarkers(dir, stateFor(tablePath).ownMarkers)
     for (const filePath of files) {
       let fileMalformed = 0
       let held = false
       for (;;) {
-        const before = appends.length > 0 ? await fs.stat(filePath, { bigint: true }) : null
+        const before = appends && appends.length > 0 ? await fs.stat(filePath, { bigint: true }) : null
         const progress = await readProgress(filePath)
         const startOffset = progress?.byteOffset ?? 0
         const batchId = `flush-${Date.now()}-${process.pid}`
@@ -146,6 +150,12 @@ export function createCacheSpool(args) {
           await writeProgress(filePath, batch.resumeOffset)
         }
 
+        // The markers could not be listed, so no writer can be ruled out:
+        // the rows are committed, and a later pass unlinks the file.
+        if (!appends) {
+          held = true
+          break
+        }
         if (!before) break
         // Still open in a live writer: keep the file and its progress, and a
         // later pass resumes from there once the writer lets go.
@@ -246,7 +256,8 @@ export function createCacheSpool(args) {
       const result = await withWriteLock(tablePath, async () => {
         const dir = spoolDir(tablePath)
         await fs.mkdir(dir, { recursive: true })
-        const { handle, marker } = await openActiveFile(dir)
+        const { ownMarkers } = stateFor(tablePath)
+        const { handle, marker } = await openActiveFile(dir, ownMarkers)
         // An append either lands in the spool or it does not, and the
         // outcome says which. Callers read a rejection as "nothing landed"
         // and re-derive what to write from the spool - `dedupeStoredPartIds`
@@ -287,6 +298,7 @@ export function createCacheSpool(args) {
           // stays the one that propagates.
           await handle.close().catch(() => undefined)
           await fs.rm(marker, { force: true }).catch(() => undefined)
+          ownMarkers.delete(marker)
         }
         return { bytesWritten, pendingBytes: pendingBytesSync(tablePath) }
       })
@@ -632,7 +644,9 @@ async function withDrainClaim(tablePath, fn) {
 
 /**
  * Open `active.jsonl` for append and publish the append's marker, naming the
- * inode it opened, before anything is written.
+ * inode it opened, before anything is written. The inode is in the marker's
+ * name, `.append-<pid>-<ino>-<uuid>`, not its content, so no drain can see a
+ * marker that does not yet say which file it holds.
  *
  * The marker has to be visible before a rotation can move the file, or a
  * drain in another process could list the spool, find no writer, and unlink
@@ -643,29 +657,34 @@ async function withDrainClaim(tablePath, fn) {
  *
  * @ref LLP 0514#marker [implements]: the marker exists before the append can write, and names the file it will write into
  * @param {string} dir
+ * @param {Set<string>} own the calling instance's markers; the new one is added before it exists on disk
  * @returns {Promise<{ handle: FileHandle, marker: string }>}
  */
-async function openActiveFile(dir) {
+async function openActiveFile(dir, own) {
   const active = path.join(dir, ACTIVE_FILE)
   for (let attempt = 0; ; attempt++) {
     // Opened `a+` rather than `a`: writes still append, and the read
     // side is what lets a failed append verify the tail is its own
     // bytes before truncating them (see `discardTail`).
     const handle = await fs.open(active, 'a+')
-    const marker = path.join(dir, `${APPEND_MARKER_PREFIX}${process.pid}-${randomUUID()}`)
+    let marker = ''
     let current = false
     try {
       const { ino } = await handle.stat({ bigint: true })
-      await fs.writeFile(marker, String(ino), { flag: 'wx', mode: 0o600 })
+      marker = path.join(dir, `${APPEND_MARKER_PREFIX}${process.pid}-${ino}-${randomUUID()}`)
+      own.add(marker)
+      await fs.writeFile(marker, '', { flag: 'wx', mode: 0o600 })
       current = await fs.stat(active, { bigint: true }).then((stat) => stat.ino === ino, () => false)
     } catch (err) {
       await handle.close().catch(() => undefined)
-      await fs.rm(marker, { force: true }).catch(() => undefined)
+      if (marker) await fs.rm(marker, { force: true }).catch(() => undefined)
+      own.delete(marker)
       throw err
     }
     if (current) return { handle, marker }
     await handle.close().catch(() => undefined)
     await fs.rm(marker, { force: true }).catch(() => undefined)
+    own.delete(marker)
     if (attempt >= APPEND_OPEN_RETRY_LIMIT) {
       throw new Error(`spool active file kept rotating under an append (${dir})`)
     }
@@ -673,29 +692,32 @@ async function openActiveFile(dir) {
 }
 
 /**
- * The append markers in `dir` that belong to another live process. This
- * process's own appends never span its own rotation, which runs under the
- * same write lock. A marker whose process is gone is removed here: a killed
- * append writes nothing more, so it holds no file.
+ * The append markers in `dir` that belong to a live writer other than the
+ * calling instance, whose own appends never span its own rotation (they run
+ * under the same write lock). Another instance in this process has its own
+ * lock, so only `own` is skipped, never this pid. A marker whose process is
+ * gone is removed here: a killed append writes nothing more, so it holds no
+ * file. Null when the spool cannot be listed, which rules no writer out.
  *
  * @ref LLP 0514#dead-writers [implements]: a dead pid's marker is cleared on sight, so a killed writer cannot hold a file forever
  * @param {string} dir
- * @returns {string[]}
+ * @param {Set<string>} own
+ * @returns {string[] | null}
  */
-function foreignAppendMarkers(dir) {
+function foreignAppendMarkers(dir, own) {
   /** @type {string[]} */
   let names
   try {
     names = fsSync.readdirSync(dir)
   } catch {
-    return []
+    return null
   }
   /** @type {string[]} */
   const live = []
   for (const name of names) {
     if (!name.startsWith(APPEND_MARKER_PREFIX)) continue
     const pid = Number(name.slice(APPEND_MARKER_PREFIX.length).split('-')[0])
-    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue
+    if (!Number.isSafeInteger(pid) || pid <= 0 || own.has(path.join(dir, name))) continue
     if (!processAlive(pid)) {
       try { fsSync.unlinkSync(path.join(dir, name)) } catch { /* already gone */ }
       continue
@@ -707,25 +729,21 @@ function foreignAppendMarkers(dir) {
 
 /**
  * Whether one of the listed markers is a live append holding the file with
- * inode `ino`. An unreadable or empty marker counts as holding it: it may be
- * one whose inode is still being written, and keeping a file costs a resumed
- * read later, where unlinking it early costs the rows.
+ * inode `ino`, read from the marker's name. A marker gone since the listing
+ * belongs to an append that has finished, so its bytes are on disk. A name
+ * this code did not write names no file and holds nothing.
  *
  * @param {string} dir
  * @param {string[]} names
  * @param {bigint} ino
  */
 function appendWritingInto(dir, names, ino) {
+  const wanted = String(ino)
   for (const name of names) {
-    let recorded
-    try {
-      recorded = fsSync.readFileSync(path.join(dir, name), 'utf8')
-    } catch (err) {
-      if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') continue
-      return true
-    }
-    if (recorded !== '' && recorded !== String(ino)) continue
-    if (processAlive(Number(name.slice(APPEND_MARKER_PREFIX.length).split('-')[0]))) return true
+    const [pid, recorded] = name.slice(APPEND_MARKER_PREFIX.length).split('-')
+    if (recorded !== wanted) continue
+    if (!fsSync.existsSync(path.join(dir, name))) continue
+    if (processAlive(Number(pid))) return true
   }
   return false
 }

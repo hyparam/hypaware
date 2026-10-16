@@ -50,24 +50,33 @@ function runChild(script, args) {
  * A child process whose append to `active.jsonl` stops just before it writes:
  * it signals `paused` in `signals` and waits for `go`. With `torn`, it first
  * writes half the line, signals `torn` instead, and never finishes, so the
- * parent can kill it mid-append.
+ * parent can kill it mid-append. With `atMarker`, it stops earlier, with its
+ * marker created empty and the write that would fill it still to come.
  *
  * @param {string} cacheRoot
  * @param {string} signals
- * @param {{ id: number, torn?: boolean }} opts
+ * @param {{ id: number, torn?: boolean, atMarker?: boolean }} opts
  */
-function spawnStalledAppend(cacheRoot, signals, { id, torn = false }) {
+function spawnStalledAppend(cacheRoot, signals, { id, torn = false, atMarker = false }) {
   const script = `
     import fs from 'node:fs/promises'
     import fsSync from 'node:fs'
     import path from 'node:path'
     import { createQueryStorageService } from ${JSON.stringify(storageUrl)}
-    const [cacheRoot, signals, id, torn] = process.argv.slice(1)
+    const [cacheRoot, signals, id, torn, atMarker] = process.argv.slice(1)
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+    const writeMarker = fs.writeFile
+    fs.writeFile = async (file, data, opts) => {
+      if (atMarker !== '1' || !String(file).includes('/.append-')) return writeMarker(file, data, opts)
+      await writeMarker(file, '', opts)
+      fsSync.writeFileSync(path.join(signals, 'paused'), '')
+      while (!fsSync.existsSync(path.join(signals, 'go'))) await sleep(5)
+      return writeMarker(file, data)
+    }
     const open = fs.open
     fs.open = async (file, flags) => {
       const handle = await open(file, flags)
-      if (!String(file).endsWith('active.jsonl')) return handle
+      if (atMarker === '1' || !String(file).endsWith('active.jsonl')) return handle
       const writeFile = handle.writeFile.bind(handle)
       handle.writeFile = async (data, encoding) => {
         if (torn === '1') {
@@ -86,7 +95,7 @@ function spawnStalledAppend(cacheRoot, signals, { id, torn = false }) {
     const svc = createQueryStorageService({ cacheRoot })
     await svc.appendRows(svc.cacheTablePath('demo', ['all']), ${JSON.stringify(COLS)}, [{ id: Number(id), msg: 'stalled' }])
   `
-  const proc = spawn(process.execPath, ['--input-type=module', '-e', script, cacheRoot, signals, String(id), torn ? '1' : '0'], { stdio: ['ignore', 'ignore', 'inherit'] })
+  const proc = spawn(process.execPath, ['--input-type=module', '-e', script, cacheRoot, signals, String(id), torn ? '1' : '0', atMarker ? '1' : '0'], { stdio: ['ignore', 'ignore', 'inherit'] })
   /** @type {Promise<{ code: number | null, signal: NodeJS.Signals | null }>} */
   const exited = new Promise((resolve, reject) => {
     proc.on('error', reject)
@@ -306,6 +315,7 @@ test('an append in another process that spans a rotation is committed exactly on
     await svc.appendRows(tablePath, COLS, [{ id: 3, msg: 'while stalled' }])
     await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
     assert.deepEqual((await committedIds(svc)).sort(), [1, 3])
+    assert.equal((await spoolNames(dir, 'flush-')).filter((name) => name.endsWith('.jsonl')).length, 1, 'only the stalled writer\'s file is held')
 
     await fs.writeFile(path.join(cacheRoot, 'go'), '')
     assert.deepEqual(await exited, { code: 0, signal: null })
@@ -355,6 +365,141 @@ test('a writer killed mid-append holds its file only until the next drain', asyn
     assert.deepEqual(await committedIds(svc), [1, 3])
   } finally {
     // A failed assertion would otherwise leave the stalled writer running.
+    child?.kill('SIGKILL')
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// A drain that cannot list the markers cannot rule out a writer, so it
+// commits what it read and keeps every rotated file for a later pass.
+test('a drain that cannot list the append markers keeps the rotated file it read', async () => {
+  const cacheRoot = await makeTmpDir()
+  /** @type {ChildProcess | undefined} */
+  let child
+  const readdirSync = fsSync.readdirSync
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const tablePath = svc.cacheTablePath('demo', ['all'])
+    const dir = path.join(tablePath, '_hypaware_spool')
+    await svc.appendRows(tablePath, COLS, [{ id: 1, msg: 'before' }])
+
+    const { proc, exited } = spawnStalledAppend(cacheRoot, cacheRoot, { id: 2 })
+    child = proc
+    await waitFor(path.join(cacheRoot, 'paused'))
+
+    // Only the marker listing is a bare `readdirSync(dir)`; the spool's file
+    // listings pass `withFileTypes`.
+    let failed = 0
+    fsSync.readdirSync = /** @type {typeof readdirSync} */ ((/** @type {fsSync.PathLike} */ p, /** @type {unknown[]} */ ...rest) => {
+      if (String(p) === dir && rest.length === 0 && failed++ === 0) {
+        throw Object.assign(new Error('injected EIO'), { code: 'EIO' })
+      }
+      return /** @type {Function} */ (readdirSync)(p, ...rest)
+    })
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    fsSync.readdirSync = readdirSync
+    assert.equal(failed, 1, 'the marker listing failed once')
+    assert.deepEqual(await committedIds(svc), [1])
+    assert.equal((await spoolNames(dir, 'flush-')).filter((name) => name.endsWith('.jsonl')).length, 1, 'the file is kept')
+
+    await fs.writeFile(path.join(cacheRoot, 'go'), '')
+    assert.deepEqual(await exited, { code: 0, signal: null })
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    assert.deepEqual((await committedIds(svc)).sort(), [1, 2], 'the acknowledged row is committed, and nothing twice')
+    assert.deepEqual(await spoolNames(dir, 'flush-'), [])
+  } finally {
+    fsSync.readdirSync = readdirSync
+    child?.kill('SIGKILL')
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// Each storage service has its own write lock, so two in one process can
+// span each other's rotation the same way two processes can.
+test('an append in another storage service in the same process that spans a rotation is committed', async () => {
+  const cacheRoot = await makeTmpDir()
+  const open = fs.open
+  /** @type {() => void} */
+  let release = () => undefined
+  /** @type {Promise<unknown> | undefined} */
+  let pending
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const writer = createQueryStorageService({ cacheRoot })
+    const tablePath = svc.cacheTablePath('demo', ['all'])
+    const dir = path.join(tablePath, '_hypaware_spool')
+    await svc.appendRows(tablePath, COLS, [{ id: 1, msg: 'before' }])
+
+    /** @type {Promise<void>} */
+    const gate = new Promise((resolve) => { release = resolve })
+    /** @type {() => void} */
+    let entered = () => undefined
+    /** @type {Promise<void>} */
+    const paused = new Promise((resolve) => { entered = resolve })
+    fs.open = /** @type {typeof open} */ (async (/** @type {string} */ file, /** @type {string} */ flags) => {
+      const handle = await open(file, flags)
+      if (!String(file).endsWith('active.jsonl')) return handle
+      const writeFile = handle.writeFile.bind(handle)
+      handle.writeFile = /** @type {typeof writeFile} */ (async (/** @type {string} */ data, /** @type {BufferEncoding} */ encoding) => {
+        entered()
+        await gate
+        return writeFile(data, encoding)
+      })
+      return handle
+    })
+    pending = writer.appendRows(tablePath, COLS, [{ id: 2, msg: 'stalled' }])
+    await paused
+    fs.open = open
+
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    assert.deepEqual(await committedIds(svc), [1])
+    assert.equal((await spoolNames(dir, 'flush-')).filter((name) => name.endsWith('.jsonl')).length, 1, 'the file the append holds is kept')
+
+    release()
+    await pending
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    assert.deepEqual((await committedIds(svc)).sort(), [1, 2], 'the acknowledged row is committed, and nothing twice')
+    assert.deepEqual(await spoolNames(dir, 'flush-'), [])
+    assert.deepEqual(await spoolNames(dir, '.append-'), [])
+  } finally {
+    fs.open = open
+    release()
+    await pending?.catch(() => undefined)
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// A writer stalled the moment its marker exists holds the one file its
+// marker names: the marker says which file before any drain can see it, so
+// later rotations are unlinked as they drain instead of piling up.
+test('a writer stalled at its marker holds one rotated file however many flushes follow', async () => {
+  const cacheRoot = await makeTmpDir()
+  /** @type {ChildProcess | undefined} */
+  let child
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const tablePath = svc.cacheTablePath('demo', ['all'])
+    const dir = path.join(tablePath, '_hypaware_spool')
+    await svc.appendRows(tablePath, COLS, [{ id: 1, msg: 'before' }])
+
+    const { proc, exited } = spawnStalledAppend(cacheRoot, cacheRoot, { id: 2, atMarker: true })
+    child = proc
+    await waitFor(path.join(cacheRoot, 'paused'))
+
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    for (const id of [3, 4, 5]) {
+      await svc.appendRows(tablePath, COLS, [{ id, msg: 'while stalled' }])
+      await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+      assert.equal((await spoolNames(dir, 'flush-')).filter((name) => name.endsWith('.jsonl')).length, 1, `one file held after id ${id}`)
+    }
+
+    await fs.writeFile(path.join(cacheRoot, 'go'), '')
+    assert.deepEqual(await exited, { code: 0, signal: null })
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    assert.deepEqual((await committedIds(svc)).sort(), [1, 2, 3, 4, 5], 'every row once')
+    assert.deepEqual(await spoolNames(dir, 'flush-'), [])
+    assert.deepEqual(await spoolNames(dir, '.append-'), [])
+  } finally {
     child?.kill('SIGKILL')
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

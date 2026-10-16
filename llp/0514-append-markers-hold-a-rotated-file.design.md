@@ -27,10 +27,14 @@ wait.
 
 ## The marker {#marker}
 
-- Before it writes, an append creates `<spool>/.append-<pid>-<uuid>` (exclusive
-  create, mode 0600) holding the inode number of the `active.jsonl` handle it
-  opened. It removes the marker after it closes the handle, whatever the
-  outcome.
+- Before it writes, an append creates an empty
+  `<spool>/.append-<pid>-<ino>-<uuid>` (exclusive create, mode 0600), where
+  `<ino>` is the inode number of the `active.jsonl` handle it opened. The
+  inode is in the name, not the content, so a marker is never visible before
+  it says which file it holds: a writer stalled between creating a marker and
+  filling it would otherwise leave one that names no file, and that would
+  have to hold every file. It removes the marker after it closes the handle,
+  whatever the outcome.
 - After creating the marker, the append checks that `active.jsonl` still names
   that inode. A match means any rename of the file comes after the marker
   exists. A mismatch (or a missing file) means a rotation got in first: the
@@ -46,8 +50,13 @@ wait.
   still write into one of the rotated files published its marker before that
   rotation, so it is listed, or it has already finished and its bytes are in
   what the drain reads.
-- The drain's own process is excluded: its appends and its rotations share the
-  in-process write lock, so they never span each other.
+- The drain's own storage instance is excluded: its appends and its
+  rotations share that instance's write lock, so they never span each other.
+  The instance keeps the names of the markers it has on disk and skips only
+  those. Another instance in the same process has its own lock and can span
+  the rotation like another process, so the pid alone excludes nothing.
+- If the spool cannot be listed, no writer can be ruled out: every rotated
+  file is read and committed, and none is unlinked in that pass.
 - A drain reads and commits every rotated file as before. Before unlinking
   one, it asks whether a listed marker names that file's inode and belongs to
   a live process. If so, the file and its progress record are kept, and a
@@ -56,8 +65,9 @@ wait.
 - If no listed writer holds it but the file grew while it was read, the drain
   reads again from the progress offset before unlinking, so a write that
   finished between the read and the check is committed, not unlinked.
-- An empty or unreadable marker counts as holding: keeping a file costs a
-  resumed read later, while unlinking it early costs the rows.
+- A marker that has gone since the listing belongs to an append that
+  finished, so its bytes are on disk and it holds nothing. A marker name this
+  design did not write names no inode and holds nothing.
 - A stuck writer holds only the one file it opened. Later appends open the new
   `active.jsonl`, later rotations and drains go through, and the held file
   waits in the spool and counts as pending.
@@ -78,9 +88,12 @@ wait.
 ## Cost {#cost}
 
 - Per append: one small exclusive file create, one path `stat`, one handle
-  `stat`, and one unlink. No retained memory.
-- Per drain pass: one `readdir` of the spool. Only when another live process
-  has an append in flight: two `stat`s and one marker read per rotated file.
+  `stat`, and one unlink. The instance holds each in-flight marker's name in
+  a set until the unlink, so it is bounded by the appends in flight.
+- Per drain pass: one `readdir` of the spool. Only when another live writer
+  has an append in flight: two `stat`s per rotated file, plus one existence
+  check per marker naming that file's inode. A stuck writer holds one file,
+  so later passes re-check only that one.
   No timers, no waiting, nothing per row.
 
 ## Mixed versions {#mixed-versions}
