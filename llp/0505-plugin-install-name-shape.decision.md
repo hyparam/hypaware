@@ -54,12 +54,17 @@ instead of being refused at its next install.
 ## Removal
 
 `hyp plugin remove` still clears any lock row, because `hyp status` prints it as
-the repair for a bad row. It deletes a directory only when the directory is
-strictly beneath the plugins root and its path relative to the root is itself
-an install name. A row keyed by, or recording an `install_dir` of, a bare
-`@scope` is cleared without deleting the scope directory. A plugin installed
-under the older rule at a deeper path keeps its directory on disk after its row
-is removed; leaving files is the safe failure here.
+the repair for a bad row. It deletes a directory only when the row's key is
+itself an install name and the directory the row records (or derives, when it
+records none) is exactly the one that key derives. Both install lanes record
+the derived directory, so any other row was hand-edited, and judging the
+directory alone would let it point at a plugin it does not own: a key of
+`a/../b` or `trail/` resolves to another plugin's valid destination, a recorded
+`install_dir` can name another plugin, and a bare `@scope` names every plugin
+under that scope. Such a row is cleared and nothing is deleted. A plugin
+installed under the older rule with a name that is no longer an install name
+keeps its directory on disk after its row is removed; leaving files is the safe
+failure here.
 
 ## Out of scope
 

@@ -796,15 +796,55 @@ test('isInstallName: one segment or @scope/name, each literal and in normal form
   assert.equal(isInstallName(/** @type {any} */ (undefined)), false)
 })
 
-test('isRemovableInstallDir: only an install-name path strictly beneath the plugins root', () => {
+test('removePlugin: a hand-edited row that resolves to another plugin deletes nothing', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-remove-foreign-dir-'))
+  try {
+    const stateDir = path.join(tmpRoot, 'hypaware')
+    const root = path.join(stateDir, 'plugins')
+    // Each case: a lock key and the install_dir its row records (undefined
+    // reaches the fallback join). Every one resolves to a valid destination
+    // owned by a different plugin, so judging the directory alone deletes it.
+    const cases = [
+      { key: 'a/../b', installDir: undefined, victim: 'b' },
+      { key: 'a/../b', installDir: path.join(root, 'b'), victim: 'b' },
+      { key: 'trail/', installDir: undefined, victim: 'trail' },
+      { key: '@scope', installDir: path.join(root, 'b'), victim: 'b' },
+      { key: 'valid', installDir: path.join(root, 'b'), victim: 'b' },
+    ]
+    for (const { key, installDir, victim } of cases) {
+      const victimDir = path.join(root, victim)
+      await fs.mkdir(victimDir, { recursive: true })
+      await fs.writeFile(path.join(victimDir, 'hypaware.plugin.json'), '{}')
+      // The victim's own row sits beside the hand-edited one and must survive.
+      const owner = { name: victim, install_dir: victimDir }
+      await writeLock(stateDir, {
+        schema_version: 1,
+        plugins: /** @type {any} */ ({ [victim]: owner, [key]: { name: key, install_dir: installDir } }),
+      })
+      const result = await removePlugin({ name: key, stateDir })
+      const label = `key=${JSON.stringify(key)} install_dir=${installDir}`
+      assert.equal(result.ok, true, label)
+      assert.equal((await fs.stat(path.join(victimDir, 'hypaware.plugin.json'))).isFile(), true, label)
+      assert.deepEqual((await loadLock(stateDir)).plugins, { [victim]: owner }, label)
+    }
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
+test('isRemovableInstallDir: only an install-name key at its own derived directory', () => {
   const stateDir = path.join(os.tmpdir(), 'hyp-removable-probe')
   const root = path.join(stateDir, 'plugins')
-  assert.equal(isRemovableInstallDir(stateDir, path.join(root, 'plain')), true)
-  assert.equal(isRemovableInstallDir(stateDir, path.join(root, '@scope', 'name')), true)
-  assert.equal(isRemovableInstallDir(stateDir, path.join(root, '@scope')), false)
-  assert.equal(isRemovableInstallDir(stateDir, root), false)
-  assert.equal(isRemovableInstallDir(stateDir, path.join(root, 'a', 'b', 'c')), false)
-  assert.equal(isRemovableInstallDir(stateDir, path.join(stateDir, 'victim')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'plain', path.join(root, 'plain')), true)
+  assert.equal(isRemovableInstallDir(stateDir, '@scope/name', path.join(root, '@scope', 'name')), true)
+  assert.equal(isRemovableInstallDir(stateDir, '@scope', path.join(root, '@scope')), false)
+  assert.equal(isRemovableInstallDir(stateDir, '.', root), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'a/b/c', path.join(root, 'a', 'b', 'c')), false)
+  assert.equal(isRemovableInstallDir(stateDir, '../victim', path.join(stateDir, 'victim')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'a/../b', path.join(root, 'b')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'trail/', path.join(root, 'trail')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'plain', path.join(root, 'other')), false)
+  assert.equal(isRemovableInstallDir(stateDir, 'plain', path.join(stateDir, 'plain')), false)
 })
 
 /**

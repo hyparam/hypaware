@@ -393,9 +393,11 @@ export async function removePlugin({ name, stateDir }) {
       // makes the fallback join resolve two levels above it. `hyp status`
       // prints this very command as the repair for such a row, so still clear
       // the row, and delete only a directory strictly beneath the root
-      // (issue #1967) that is itself an install destination: a row for a bare
-      // `@scope` points at every plugin under that scope (issue #2123).
-      if (isRemovableInstallDir(stateDir, installDir)) {
+      // (issue #1967) that is this row's own install destination: a key or
+      // recorded directory for a bare `@scope`, a normalizing key, or another
+      // plugin's directory points at plugins this row does not own (issue
+      // #2123).
+      if (isRemovableInstallDir(stateDir, name, installDir)) {
         await fs.rm(installDir, { recursive: true, force: true })
       }
       const nextLock = removeLockEntry(lock, name)

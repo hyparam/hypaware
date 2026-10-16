@@ -90,22 +90,26 @@ export function installDirIsContained(stateDir, name) {
 }
 
 /**
- * True when `installDir` is a directory `hyp plugin remove` may delete:
- * strictly beneath the plugin install root, at a path that is itself an
- * install name. A lock row is hand-editable, and one keyed (or pointing
- * at) a bare `@scope` names the directory of every plugin under that
- * scope, so such a row is cleared without deleting anything.
+ * True when `hyp plugin remove` may delete `installDir` for the lock row
+ * keyed `name`: the key is itself an install name whose derived
+ * directory is strictly beneath the plugin install root
+ * ({@link installDirIsContained}), and `installDir` is that directory.
+ * Both install lanes record exactly the derived directory, so a row
+ * that fails this was hand-edited. Checking the directory alone is not
+ * enough: a key of `a/../b` or `trail/`, or a recorded `install_dir`
+ * naming another plugin, resolves to a valid destination that belongs
+ * to a different plugin, and a bare `@scope` names the directory of
+ * every plugin under that scope.
  *
  * @param {string} stateDir
- * @param {string} installDir
+ * @param {string} name lock key
+ * @param {string} installDir directory the row records, or the derived one
  * @ref LLP 0505#removal [implements]: the row is still cleared; only the delete
  *   is withheld
  */
-export function isRemovableInstallDir(stateDir, installDir) {
-  const root = path.join(stateDir, PLUGIN_INSTALL_SUBDIR)
-  if (path.resolve(installDir) === path.resolve(root) || !isWithinDir(installDir, root)) return false
-  const rel = path.relative(path.resolve(root), path.resolve(installDir))
-  return isInstallName(rel.split(path.sep).join('/'))
+export function isRemovableInstallDir(stateDir, name, installDir) {
+  return installDirIsContained(stateDir, name) &&
+    path.resolve(installDir) === path.resolve(pluginInstallDir(stateDir, name))
 }
 
 /** @param {string} stateDir */
