@@ -476,3 +476,79 @@ function runNode(entry) {
     child.on('close', (code) => resolve({ code, stderr }))
   })
 }
+
+test('local subagent references and inline states retain scoped identity, nesting and privacy', async () => {
+  const f = await fixture()
+  try {
+    const childState = wire([1, f.state], [6, 1])
+    const nested = wire(...cursorFields(f.state).entries().flatMap(([key, values]) => values.map((value) => [key, value])),
+      [16, wire([1, 'nested'], [2, childState])])
+    const inline = wire([1, nested], [6, 1])
+    const run = wire([1, 'native-call-3'], [2, 'child'])
+    f.writeRoot(Buffer.concat([f.state,
+      wire([16, wire([1, 'child'], [2, inline])],
+        [31, wire([1, 'other'], [2, f.put(childState)])],
+        [30, wire([1, 'native-call-3'], [2, run])])]))
+    const snap = readCursorSession(f.session)
+    assert.equal(snap.exchanges.length, 4)
+    const root = snap.exchanges[0]
+    assert.equal(root.agent_id, undefined)
+    assert.equal(root.messages[0].message_id, 'cursor:' + JSON.stringify([f.session.id, 'native-user', 'user']))
+    const children = snap.exchanges.filter((e) => e.is_sidechain)
+    assert.equal(children.length, 3)
+    const child = children.find((e) => e.agent_id === 'child')
+    const grandchild = children.find((e) => e.agent_id === 'nested')
+    assert.ok(child && grandchild)
+    assert.equal(child.parent_thread_id, f.session.id)
+    assert.equal(grandchild.parent_thread_id, child.conversation_id)
+    assert.equal(/** @type {any} */ (child.attributes?.cursor)?.spawned_by_tool_use_id, 'native-call-3')
+    const rows = snap.exchanges.flatMap((e) => aiGatewayRowsFromProjectedExchange(e))
+    assert.equal(rows.length, 52)
+    assert.equal(new Set(rows.map((r) => r.part_id)).size, 52)
+    assert.equal(rows.filter((r) => r.is_sidechain).length, 39)
+    assert.ok(rows.filter((r) => r.agent_id === 'child').every((r) => /** @type {any} */ (r.attributes).cursor.spawned_by_tool_use_id === 'native-call-3'))
+    assert.ok(rows.every((r) => r.session_id === f.session.id && r.cwd === f.cwd))
+    assert.equal(JSON.stringify(rows).includes('PRIVATE'), false)
+    assert.deepEqual(readCursorSession(f.session), snap)
+    await fs.rm(path.join(f.cwd, 'notes.txt'))
+    for (const exchange of snap.exchanges) {
+      const filtered = await cursorAdmission({}).filter(exchange)
+      assert.equal(filtered?.messages.length, 11, 'child Read calls and results follow the same file admission')
+    }
+    const admission = cursorAdmission({ ignoredSessions: new Set([f.session.id]) })
+    for (const exchange of snap.exchanges) assert.equal(await admission.filter(exchange), undefined)
+    await fs.writeFile(path.join(f.cwd, '.hypignore'), 'ignore\n')
+    for (const exchange of snap.exchanges) assert.equal(await cursorAdmission({}).filter(exchange), undefined)
+  } finally { await f.cleanup() }
+})
+
+test('subagent recovery refuses ambiguous, missing, deep and oversized trees, and excludes cloud states', async () => {
+  const f = await fixture()
+  try {
+    const child = wire([1, f.state], [6, 1])
+    const reference = f.put(child)
+    f.writeRoot(Buffer.concat([f.state, wire([16, wire([1, 'child'], [2, child])], [31, wire([1, 'child'], [2, reference])])]))
+    assert.equal(readCursorSession(f.session).exchanges.length, 2, 'identical referenced and inline copies are projected once')
+    f.writeRoot(Buffer.concat([f.state, wire([16, wire([1, 'child'], [2, wire([6, 1])])], [31, wire([1, 'child'], [2, reference])])]))
+    assert.throws(() => readCursorSession(f.session), /native_subagent_identity/)
+    f.writeRoot(Buffer.concat([f.state, wire([16, wire([1, 'cloud'], [2, wire([1, f.state], [6, 2])])])]))
+    assert.equal(readCursorSession(f.session).exchanges.length, 1)
+    f.writeRoot(Buffer.concat([f.state, wire([31, wire([1, 'missing'], [2, Buffer.alloc(32)])])]))
+    assert.throws(() => readCursorSession(f.session), /native_blob_missing_or_large/)
+    f.writeRoot(Buffer.concat([f.state, wire([16, wire([1, ''], [2, child])])]))
+    assert.throws(() => readCursorSession(f.session), /native_subagent_identity/)
+    f.writeRoot(Buffer.concat([f.state, wire(...Array.from({ length: 65 }, (_, i) => [16, wire([1, 'child-' + i], [2, child])]))]))
+    assert.throws(() => readCursorSession(f.session), /native_subagent_limit/)
+    const extra = Array.from({ length: 2100 }, (_, i) => f.put(Buffer.from(JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: 'probe-' + i }] }))))
+    const expanded = Buffer.concat([f.state, wire(...extra.map((ref) => [1, ref]))])
+    f.writeRoot(Buffer.concat([expanded, wire([31, wire([1, 'child'], [2, f.put(wire([1, expanded], [6, 1]))])])]))
+    assert.throws(() => readCursorSession(f.session), /native_graph_limit/, 'root and child share one blob-read budget')
+    const branch = Buffer.concat([f.state, wire(...Array.from({ length: 33 }, (_, i) => [16, wire([1, 'child-' + i], [2, child])]))])
+    f.writeRoot(Buffer.concat([f.state, wire(...['a', 'b'].map((id) => [16, wire([1, id], [2, wire([1, branch], [6, 1])])]))]))
+    assert.throws(() => readCursorSession(f.session), /native_subagent_limit/, 'agent limit is shared across branches')
+    let nested = f.state
+    for (let i = 0; i < 17; i++) nested = Buffer.concat([f.state, wire([31, wire([1, 'child'], [2, f.put(wire([1, nested], [6, 1]))])])])
+    f.writeRoot(nested)
+    assert.throws(() => readCursorSession(f.session), /native_subagent_limit/)
+  } finally { await f.cleanup() }
+})
