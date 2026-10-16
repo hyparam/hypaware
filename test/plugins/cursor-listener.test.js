@@ -134,7 +134,7 @@ test('policy/session ignore precede persistence; missing fields and disabled rec
     assert.equal(f.rows.length, 0)
     const status = await f.source.status?.()
     assert.equal(status?.details?.history_recovery, 'native_store')
-    assert.equal(status?.details?.usage_supported, false)
+    assert.equal(status?.details?.usage_supported, true)
     assert.equal(status?.details?.policy_drops, 1)
     assert.equal(status?.details?.session_drops, 1)
     assert.equal(status?.details?.missing_cwd, 1)
@@ -465,4 +465,36 @@ test('back-to-back recovery passes share one decode thread, released once the so
     await hook()
     await waitFor(() => spawns() === 2)
   } finally { clearInterval(keepAlive); native.close(); await f.cleanup() }
+})
+
+test('live usage survives native-first capture, callback duplicates, restart and failed storage', async () => {
+  const f = await fixture({ recoveryDelayMs: 60000 })
+  try {
+    const body = envelope(f.root, { hook_event_name: 'stop', input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 10 })
+    const append = f.storage.appendRows
+    f.storage.appendRows = async () => { throw new Error('PRIVATE') }
+    assert.equal((await f.post(body)).status, 500)
+    f.storage.appendRows = append
+    // A native row already exists. Usage has its own identity and no text.
+    f.rows.push({ message_id: 'native-assistant', part_id: 'native-assistant#0', client_name: 'cursor' })
+    for (const hook_event_name of ['afterAgentResponse', 'stop', 'stop']) {
+      await f.post({ ...body, delivery_id: randomUUID(), event: { ...body.event, hook_event_name } })
+    }
+    assert.equal(f.rows.length, 2)
+    assert.deepEqual(f.rows[1].attributes.usage, { input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 10, total_tokens: 160 })
+    assert.equal(f.rows[1].content_text ?? '', '')
+    assert.equal(f.rows[1].hook_event, 'stop')
+    await f.restart()
+    assert.equal((await f.post({ ...body, delivery_id: randomUUID() })).status, 200)
+    assert.equal(f.rows.length, 2)
+    assert.ok(f.events.includes('cursor.hook.recorded'))
+    f.ignoredSessions.add('conversation')
+    assert.equal((await f.post({ ...body, event: { ...body.event, generation_id: 'ignored' } })).status, 202)
+    assert.equal(f.rows.length, 2)
+    f.ignoredSessions.clear()
+    await fs.writeFile(path.join(f.root, '.hypignore'), 'ignore\n')
+    await f.restart()
+    assert.equal((await f.post({ ...body, event: { ...body.event, generation_id: 'private' } })).status, 202)
+    assert.equal(f.rows.length, 2)
+  } finally { await f.cleanup() }
 })

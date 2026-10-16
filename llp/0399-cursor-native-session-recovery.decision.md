@@ -25,8 +25,8 @@ This is a version-specific integration, not a supported Cursor export API.
 
 ## Identity and finality {#identity}
 
-Native records own conversation rows. Hooks schedule recovery; only the
-additional `beforeReadFile` observation also writes a hook row. No prompt,
+Native records own conversation content. Hooks schedule recovery; additional
+`beforeReadFile` and terminal usage observations write separate hook rows. No prompt,
 response or generic tool hook fallback can race the native lane into duplicate
 rows. This deliberately trades immediate hook text for recoverable native
 identity, including Shell calls whose hook helper IDs differ from native IDs.
@@ -98,9 +98,8 @@ retention/window semantics filter dated messages, while unknown timestamps
 remain unknown and use the storage owner's normal receipt-time fallback.
 The adapter does not infer billed usage from context occupancy or hook counts.
 The inspected native `ConversationTokenDetails` carries used/max context tokens,
-not response billing. Live usage hooks cannot simply enrich already stored
-assistant rows: shared part-ID dedupe keeps the first write. Reliable token
-capture still needs verified accounting and a replay-safe carrier.
+not response billing. Live usage is captured separately as described below; native recovery never
+fabricates counters when that terminal observation was missed.
 Provider remains unknown; editor/CLI entrypoint comes from the native store.
 A bounded saved routed-model display label is attributed to assistant rows of
 that turn. It is not inferred from the current selected model or encrypted
@@ -114,6 +113,30 @@ Manual runs bypass them, and restarts begin cold. Live recovery has a separate
 64-entry root cache with the same no-drop rule. A shared active-session set
 prevents live writes overlapping backfill consumption of that session. A busy
 live trigger retries; a busy backfill session waits until another pass.
+
+## Live token usage {#live-usage}
+
+Cursor 3.19.19 copies agent.v1 TurnEndedUpdate counters into turnTokenUsage,
+clears them at generation start, and emits them on stop and afterAgentResponse.
+The SDK documents additive input, output, cache-read and cache-write counters
+and per-turn usage events (https://cursor.com/docs/sdk/typescript#token-usage).
+Only stop is an accounting source here. Require all four counters to be
+nonnegative safe integers and their sum to be safe; omission means unknown,
+not zero. These are runtime token counts, not a billed-cost claim.
+
+A system hook observation with an empty text block carries attributes.usage,
+keyed by (session, 'usage', generation). It contains no hook response text or
+raw payload. It uses the existing row schema and shared stored/spooled dedupe.
+Duplicate delivery, repeated stop callbacks and daemon restart converge to one
+row. First valid accounting wins; afterAgentResponse remains a recovery trigger.
+This is a Cursor-specific exception to LLP 0035's assistant-last-row carrier:
+late counters cannot enrich an already deduplicated native assistant row.
+Native backfill never emits usage, so the two paths cannot double count it.
+Selected hook model settings are not attributed as the billed model.
+
+The existing hook admission, serialized writes, failure retry and writer
+rotation apply. No pending usage map, transcript dependency or raw spool is
+added. Offline history and clients that omit counters remain unsupported.
 
 ## File contents and tool outcomes {#file-content}
 
