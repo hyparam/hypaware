@@ -221,7 +221,9 @@ export async function readCentralSinkOrigins({ stateDir, configPath }) {
  * forwarding" and "is it enrolled" from separate reads can get answers that
  * describe different moments. The effective config is resolved by the same
  * {@link resolveLayeredConfigFromDisk} the daemon's boot and SIGHUP reload
- * call, so what this names is what the sink forwards from.
+ * call, so both answers describe the config on disk at this read. A running
+ * daemon forwards from whatever it last loaded; an edit it has not reloaded
+ * yet is named here before the sink ships to it.
  *
  * Not a permission gate: counting a local sink as connected would reject a
  * login with `hyp leave` advice that cannot clear it, so enrollment decisions

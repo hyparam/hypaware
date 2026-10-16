@@ -34,9 +34,10 @@ its sessions left the machine.
   directly instead of through enrollment.
 - **One snapshot**: the forwarding answer, the destinations the copy names,
   and the `enrolled` field all come from a single resolution of the layered
-  config, by the same resolver the daemon's boot and reload use, so the
-  prompt cannot describe a different moment, or a different config, than
-  the one the sink forwards from.
+  config on disk, by the same resolver the daemon's boot and reload use, so
+  the three cannot disagree with each other. This does not synchronize with
+  a running daemon: an edit it has not reloaded yet is named by the hook
+  before the sink forwards to it. No new daemon requirement follows.
 - **Enrollment keeps its meaning**: `enrolled` stays the central layer
   alone. Login exclusivity, `readCentralEnrollment`, and `hyp leave`'s
   ownership rules are unchanged; a local sink is never relabelled as a
