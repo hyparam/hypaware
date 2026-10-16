@@ -7,6 +7,7 @@
 **Date:** 2026-10-16
 **Extends:** [LLP 0417#cache-mutation-guard](./0417-session-purge-across-storage.spec.md#cache-mutation-guard) (a new key for the same guard), [LLP 0492#contention](./0492-ingest-seq-reserved-at-commit.design.md#contention) (a bounded wait, with exhaustion leaving rows in the spool)
 **Related:** LLP 0321, LLP 0347, [issue 2580](https://github.com/hyparam/hypaware/issues/2580)
+**Extended-by:** [LLP 0514](./0514-append-markers-hold-a-rotated-file.design.md) (an append in flight holds the rotated file it writes into, closing #scope)
 
 @ref LLP 0417#cache-mutation-guard [extends]: the same directory guard, keyed on the spool instead of a partition
 @ref LLP 0492#contention [extends]: a busy claim is retried for a bounded time, then the flush fails and rows wait
