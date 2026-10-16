@@ -79,12 +79,10 @@ set privacy controls before connecting; see [headless setup](#ci-and-headless-de
 
 ## Verify the setup
 
-<!-- agent: Run hyp status and tell me whether recording is active, what is shared with my team versus kept local, and whether a first-sync deadline is pending. This is a local operation with no MCP path. -->
+<!-- agent: Run hyp status and tell me whether recording is active, what is shared with my team versus kept local, and whether a first-sync deadline is pending. -->
 ```sh
 hyp status
 ```
-
-This is a local operation with no MCP path.
 
 This reports whether recording is active, what is shared with your team
 versus kept on your machine, and any pending first-sync deadline. To disconnect
@@ -99,8 +97,6 @@ sending eligible recordings now:
 hyp sync --dry-run
 hyp sync
 ```
-
-These are local operations with no MCP path.
 
 `hyp sync` asks for confirmation. Local-only and ignored data remain excluded.
 An all-destination confirmed sync can release the first-sync review hold early.
@@ -130,8 +126,6 @@ hyp remote list
 hyp remote login <target> --no-forward
 ```
 
-These are local operations with no MCP path.
-
 `--no-forward` grants query access without enrolling this machine for sync.
 Use `hyp remote add` to configure
 another target; see the [remote reference](CLI_REFERENCE.md#manage-remote-query-targets)
@@ -143,8 +137,6 @@ for its URL and credential options. For remote searches and SQL, see
 ```sh
 hyp leave
 ```
-
-This is a local operation with no MCP path.
 
 This stops Cloud sync and configuration pull, reverses organization-managed
 client attaches, and removes the sync credential. Local configuration,
@@ -184,8 +176,6 @@ On your own machine, where you are signed in (`hyp remote login`):
 hyp remote mint
 ```
 
-This is a local operation with no MCP path.
-
 This prints the token **once**; store it in your CI secret store immediately
 (the examples below call it `HYP_CI_TOKEN`). Only the token goes to standard
 output, so `hyp remote mint > ci.token` captures exactly the secret. Options:
@@ -222,8 +212,6 @@ hyp status
 # teardown: flush what the schedule has not exported yet
 hyp sync --yes
 ```
-
-These are local operations with no MCP path.
 
 The organization configuration must enable the integration your job uses. Join
 writes enrollment settings; the daemon then fetches configuration and starts
@@ -278,8 +266,6 @@ install as a real service where one is available:
 ```sh
 printf '%s' "$HYP_CI_TOKEN" | hyp join https://api.hypaware.ai
 ```
-
-This is a local operation with no MCP path.
 
 Without `--no-daemon`, join installs and starts the daemon under launchd or
 systemd. Both are per-user services, not system ones: on Linux it is a systemd

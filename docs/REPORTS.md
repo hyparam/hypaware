@@ -21,12 +21,10 @@ locally or publish it to HypAware Cloud to share with your organization.
 `hypaware-report` skill installed, which means Claude Code or Codex, to analyze
 your local recordings. Tell it which period to cover and what to investigate:
 
-<!-- agent: Use the hypaware-report skill to cover last week and focus on repeated debugging work. Generating a report is a local operation with no MCP path. -->
+<!-- agent: Use the hypaware-report skill to cover last week and focus on repeated debugging work. -->
 ```sh
 hyp report generate "Cover last week and focus on repeated debugging work"
 ```
-
-Generating a report is a local operation with no MCP path.
 
 Without additional instructions, it reviews the previous calendar month.
 
@@ -45,12 +43,10 @@ remains a separate action, using `hyp report publish <name> ...`.
 <!-- @ref LLP 0461 [explains]: the report skill offers a single-recommendation path that hyp report recommend publishes -->
 To get one recommendation instead of a full report, ask for it:
 
-<!-- agent: Use the hypaware-report skill to give me one recommendation about repeated test failures. Generating a recommendation is a local operation with no MCP path. -->
+<!-- agent: Use the hypaware-report skill to give me one recommendation about repeated test failures. -->
 ```sh
 hyp report generate "Give me one recommendation about repeated test failures"
 ```
-
-Generating a recommendation is a local operation with no MCP path.
 
 Unless you name a period, the skill uses the 14 days ending yesterday. It writes one
 `recommendation-<slug>.md` page in the current directory and does not save a
@@ -69,13 +65,11 @@ To share the generated report with your organization, replace `REPORT_NAME`
 with the saved name printed by `hyp report save` (a path to a folder works
 too) and `PERIOD` with the reporting period, such as `2026-W36`:
 
-<!-- agent: Use HypAware to publish the report folder REPORT_NAME to our organization as a usage review for PERIOD, then list the last ten usage reviews. Publishing and listing reports are local operations with no MCP path. -->
+<!-- agent: Use HypAware to publish the report folder REPORT_NAME to our organization as a usage review for PERIOD, then list the last ten usage reviews. -->
 ```sh
 hyp report publish REPORT_NAME --kind usage-review --period PERIOD --remote team
 hyp report list --kind usage-review --limit 10 --remote team
 ```
-
-Publishing and listing reports are local operations with no MCP path.
 
 Publishing uploads the report bundle and requires a write-capable credential. Review
 the report for private content first. See the [report command reference](CLI_REFERENCE.md#generate-and-manage-reports)
@@ -98,7 +92,6 @@ the id from `hyp report list`; it starts your agent on the change.
 hyp report fix hyprec-0123456789abcdef
 ```
 
-Over MCP, on your team's server at `/v1/mcp`, the `fix_recommendation` prompt
-does the same: the agent reads the recommendation with `get_recommendation` and
-marks it applied with `set_recommendation_status`, the tool for
-`hyp report mark`.
+Over MCP, the `fix_recommendation` prompt does the same: the agent reads the
+recommendation with `get_recommendation` and marks it applied with
+`set_recommendation_status`, the tool for `hyp report mark`.

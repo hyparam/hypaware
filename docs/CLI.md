@@ -51,7 +51,7 @@ HypAware backs up the existing configuration before replacement.
 
 ## Check the installation
 
-<!-- agent: Run hyp status and tell me whether HypAware is installed and recording correctly, and what to fix if not. This is a local operation with no MCP path. -->
+<!-- agent: Run hyp status and tell me whether HypAware is installed and recording correctly, and what to fix if not. -->
 ```sh
 hyp status
 ```

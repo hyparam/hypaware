@@ -2,7 +2,7 @@
 
 Check the installation's status and version:
 
-<!-- agent: Run hyp status and hyp version and tell me what needs attention and the exact commands to fix it. These are local operations with no MCP path. -->
+<!-- agent: Run hyp status and hyp version and tell me what needs attention and the exact commands to fix it. -->
 ```sh
 hyp status
 hyp version
@@ -28,22 +28,18 @@ hypaware 1.41.0
   platform: darwin arm64
 ```
 
-These are local operations with no MCP path.
-
 `hyp status` reports the background service, clients, storage, and problems,
 with guidance to help resolve them. Use `hyp status --verbose` for more detail
 or `hyp status --json` for scripts.
 
 ## No new recordings
 
-<!-- agent: HypAware is not recording new sessions. Run hyp client status, hyp daemon status, and hyp cache status, work through the checklist on the troubleshooting page, and tell me what is wrong. These are local operations with no MCP path. -->
+<!-- agent: HypAware is not recording new sessions. Run hyp client status, hyp daemon status, and hyp cache status, work through the checklist on the troubleshooting page, and tell me what is wrong. -->
 ```sh
 hyp client status
 hyp daemon status
 hyp cache status
 ```
-
-These are local operations with no MCP path. So are the checks below.
 
 1. Check that the intended source is configured. Add it through `hyp setup`
    if needed.
@@ -80,8 +76,6 @@ hyp ollama setup
 hyp client status ollama
 hyp status --verbose
 ```
-
-These are local operations with no MCP path.
 
 Check the **Direct upstream**, service/model inventory and **Capture root (live)**
 separately. An executable on PATH does not prove a service or model is ready.
@@ -147,20 +141,16 @@ by dates, hit count, searchable columns, privacy, or local retention.
 - Use `--output ./results.json` with `--format json` for complete query output;
   this does not lift your query's own `LIMIT`.
 
-These are local operations with no MCP path.
-
 See [querying](QUERYING.md) for searches, session drill-downs, and bounded SQL.
 
 ## An export or team sync is missing
 
-<!-- agent: Run hyp status, hyp sync --dry-run, and hyp remote list, and tell me why my recordings are not reaching HypAware Cloud. These are local operations with no MCP path. -->
+<!-- agent: Run hyp status, hyp sync --dry-run, and hyp remote list, and tell me why my recordings are not reaching HypAware Cloud. -->
 ```sh
 hyp status
 hyp sync --dry-run
 hyp remote list
 ```
-
-These are local operations with no MCP path.
 
 Check that a sink exists, its destination is correct, and the rows are eligible
 to leave. An attended first-sync review hold, local-only folder or client
@@ -200,15 +190,13 @@ See [team setup](TEAM_SETUP.md) and [privacy controls](PRIVACY.md).
 
 ## A command is missing or rejects an option
 
-<!-- agent: A hyp command or flag from the docs is missing on this machine. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. These are local operations with no MCP path. -->
+<!-- agent: A hyp command or flag from the docs is missing on this machine. Run hyp version and hyp plugin list and tell me whether it is an inactive plugin or an old version. -->
 ```sh
 hyp version
 hyp --help
 hyp plugin list
 hyp query --help
 ```
-
-These are local operations with no MCP path.
 
 Plugin-owned commands appear only while the owning plugin is active. Entering
 a known inactive command prints a repair instruction. If a flag in these docs
@@ -222,8 +210,6 @@ hyp update
 hyp status
 ```
 
-These are local operations with no MCP path.
-
 `hyp update` checks for a newer release and restarts an installed daemon after
 updating. If installation succeeded but restart failed, run
 `hyp daemon restart`. A foreground daemon needs to be relaunched by its owner
@@ -234,13 +220,11 @@ For a missing global binary or broken service definition, follow
 
 ## Disk usage or maintenance problems
 
-<!-- agent: Use HypAware to show cache size and what a maintenance pass would remove, without applying it. These are local operations with no MCP path. -->
+<!-- agent: Use HypAware to show cache size and what a maintenance pass would remove, without applying it. -->
 ```sh
 hyp cache status
 hyp cache maintain ai_gateway_messages --dry-run
 ```
-
-These are local operations with no MCP path.
 
 Check [retention and storage paths](CONFIGURATION.md) to distinguish the query
 cache, exported files, retry state, and logs. Cache retention does not reclaim
@@ -270,8 +254,6 @@ For a command you run yourself, set it in the same shell:
 HYP_GRAPH_PROJECTION_MAX_HEAP_MB=6144 hyp graph project
 ```
 
-This is a local operation with no MCP path.
-
 The installed daemon does not read your shell. It runs scheduled work, such as
 the projection after a GitHub poll, in a child of the service process, and that
 child inherits the service environment. `hyp daemon install` writes no
@@ -292,8 +274,6 @@ On Linux (systemd user service):
 systemctl --user set-environment HYP_GRAPH_PROJECTION_MAX_HEAP_MB=6144
 hyp daemon restart
 ```
-
-On either system, these are local operations with no MCP path.
 
 Either setting applies only to processes started afterwards, which is what the
 restart is for, and both are forgotten at logout or reboot. To keep a value,

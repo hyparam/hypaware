@@ -1,10 +1,10 @@
 // @ts-check
 
 // Each `<!-- agent: ... -->` marker in docs/ is a prompt the site shows above a
-// command. An agent connected over MCP has no `hyp`, so every prompt must also
-// say which MCP tool does the same read or act, or that there is none. Tool
-// names come from docs/MCP_REFERENCE.md, which is generated from the real
-// registrations, so a renamed tool fails here instead of leaving a dead name.
+// command. Where an MCP tool does the same read or act, the prompt names it;
+// where none does, the docs say nothing about MCP. Tool names come from
+// docs/MCP_REFERENCE.md, which is generated from the real registrations, so a
+// renamed tool fails here instead of leaving a dead name.
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url'
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DOCS_DIR = path.join(REPO_ROOT, 'docs')
 const MARKER = /<!-- agent: ([\s\S]*?) -->/g
+// The verb prefixes the local and recommendation tools share.
+const TOOL_NAME = /\b(?:get|list|set|query|grep|graph)_[a-z_]+\b/g
 
 /** Tool names from MCP_REFERENCE.md: every `### name` heading before `## Prompts`. */
 function referenceTools() {
@@ -34,19 +36,27 @@ async function docsPages() {
   return pages
 }
 
-// @ref LLP 0494#docs-paths [tests]: every agent prompt names its MCP tool or says there is no MCP path
-test('every agent marker names an MCP tool or says there is no MCP path', async () => {
+// @ref LLP 0494#docs-paths [tests]: a tool an agent prompt names is a real MCP tool
+test('every MCP tool an agent marker names is in MCP_REFERENCE.md', async () => {
   const tools = referenceTools()
   assert.ok(tools.includes('query_sql') && tools.includes('set_recommendation_status'), `MCP_REFERENCE.md tools: ${tools.join(', ')}`)
   let count = 0
   for (const { page, text } of await docsPages()) {
     for (const [, prompt] of text.matchAll(MARKER)) {
       count++
-      const named = tools.some((tool) => new RegExp(`\\b${tool}\\b`).test(prompt))
-      assert.ok(named || /no MCP path/.test(prompt), `docs/${page} marker names no MCP path: ${prompt}`)
+      for (const [name] of prompt.matchAll(TOOL_NAME)) {
+        assert.ok(tools.includes(name), `docs/${page} marker names ${name}, which MCP_REFERENCE.md does not list`)
+      }
     }
   }
   assert.ok(count > 0, 'no agent markers found in docs/')
+})
+
+// @ref LLP 0494#docs-paths [tests]: the docs name an MCP path where one exists and never say there is none
+test('no docs page says an operation has no MCP path', async () => {
+  for (const { page, text } of await docsPages()) {
+    assert.ok(!/no MCP path/i.test(text), `docs/${page} says an operation has no MCP path`)
+  }
 })
 
 // @ref LLP 0494#docs-paths [tests]: hyp report list gets its own prompt in Reports

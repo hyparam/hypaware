@@ -16,8 +16,6 @@ hyp client status
 hyp client status codex
 ```
 
-These are local operations with no MCP path.
-
 On an existing installation, choose **Reconfigure** to add a client. Team-managed
 choices are locked; local additions remain yours to configure.
 
@@ -49,8 +47,6 @@ hyp client status codex
 hyp status
 ```
 
-These are local operations with no MCP path.
-
 Attach is safe to repeat and preserves unrelated client settings. Start a new
 client process so it reads the updated configuration, complete a short turn,
 then check `hyp query overview` or search for a distinctive phrase with
@@ -70,8 +66,6 @@ hyp backfill codex --since 2026-09-01T00:00:00Z --dry-run
 hyp backfill codex --since 2026-09-01T00:00:00Z
 hyp cache status
 ```
-
-These are local operations with no MCP path.
 
 Both `codex` and `--since` are optional. Omit the provider to import from all
 enabled providers; use `--since` to choose a start date. Without it, the import
@@ -100,8 +94,6 @@ hyp detach codex --dry-run
 hyp detach codex
 ```
 
-These are local operations with no MCP path.
-
 Detach stops recording this client: no new sessions from it reach the cache,
 including the scheduled transcript imports, and the running daemon picks this
 up without a restart. Detach also reverses the client's managed settings where supported. For Ollama,
@@ -129,8 +121,6 @@ hyp github login
 hyp github status
 ```
 
-These are local operations with no MCP path.
-
 GitHub's `repo` authorization scope includes write access, although HypAware only
 reads. Review the repositories selected in the plugin configuration. Use
 `hyp github backfill owner/repo` to import existing activity or `hyp github sync`
@@ -145,8 +135,6 @@ clients so your agent can look up recorded sessions. To reinstall the skills:
 ```sh
 hyp client skills install
 ```
-
-This is a local operation with no MCP path.
 
 This installs skills for all eligible clients. For launching an agent on a
 question, see [queries](QUERYING.md#explore-recordings-with-your-agent).
@@ -166,8 +154,6 @@ hyp ollama setup
 hyp client status ollama
 ```
 
-These are local operations with no MCP path.
-
 To add Ollama on an existing installation while preserving its export choice,
 run `hyp setup --source ollama` without `--export`. An explicit `--export` changes
 that choice. Other clients are preserved; check `hyp status` to see your sinks. Recorded local inference can leave the machine through configured sinks.
@@ -182,8 +168,6 @@ The direct service defaults to `http://127.0.0.1:11434`. To use a custom service
 hyp ollama setup --upstream http://127.0.0.1:21434
 hyp ollama setup
 ```
-
-These are local operations with no MCP path.
 
 This preserves the other upstreams and recording choice. If an endpoint was
 saved but its restart or live route is unconfirmed, run `hyp daemon restart`, then
@@ -242,8 +226,6 @@ hyp client status ollama
 hyp status
 ```
 
-These are local operations with no MCP path.
-
 The explicit check discloses and sends the fixed prompt
 `Reply with OK. This is a HypAware capture check.` and records its response.
 Configured sinks may export both. A **persisted** result names the `request_id`
@@ -293,8 +275,6 @@ hyp client detach ollama
 hyp client status ollama
 ```
 
-These are local operations with no MCP path.
-
 Wait for successful live confirmation. The same running CLI session or SDK object
 can keep using the unchanged capture host: inference continues, new Ollama requests
 are unrecorded, and saved history remains. Other attached clients keep recording.
@@ -308,8 +288,6 @@ To resume explicitly:
 hyp client attach ollama
 hyp ollama setup
 ```
-
-These are local operations with no MCP path.
 
 Successful attach starts a new recording generation. Only new requests can be
 captured; an older response finishing after detach or reattach is not resumed
