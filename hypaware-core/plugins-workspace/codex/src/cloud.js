@@ -2,6 +2,7 @@
 import { acquireCloudAuth, readCloudAuth, CloudError } from './cloud-auth.js'
 import { openCloudClient, readCloudThread, listCloudThreads } from './cloud-client.js'
 import { readCloudConnection, DEFAULT_CLOUD_ORIGINS } from './cloud-state.js'
+import { compareStrings } from 'hypaware/core/util'
 import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 import { AI_GATEWAY_MESSAGES_DATASET, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 
@@ -118,7 +119,7 @@ export function createCodexCloudProvider(opts, deps = {}) {
           for (const id of attempted.keys()) if (!present.has(id)) attempted.delete(id)
           // @ref LLP 0511#discovery: attempt order is fairness, never a successful-write checkpoint.
           candidates.sort((a, b) => (attempted.get(a.id) ?? 0) - (attempted.get(b.id) ?? 0)
-            || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
+            || b.updatedAt - a.updatedAt || compareStrings(a.id, b.id))
           selected = candidates.slice(0, 20).map(t => t.id)
           ctx.log.info('codex.cloud.discovered', { ...fields, status: 'ok', discovered: listed.length,
             eligible: candidates.length, selected: selected.length, deferred: Math.max(0, candidates.length - selected.length) })
