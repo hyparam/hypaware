@@ -50,9 +50,10 @@ import { Attr, getLogger } from '../observability/index.js'
  * A partition whose mutation guard another process holds is recorded in
  * `partitionsSkipped` and the run continues; the caller owes the operator that
  * list and a failure, because those partitions may still hold matching rows.
- * A later non-busy failure still aborts the run, and carries out with it both
- * the skips recorded so far ({@link purgeSkipsFrom}) and the cleanup jobs
- * admitted so far ({@link purgeCleanupFrom}).
+ * A later non-busy failure still aborts the run, and carries out with it the
+ * skips recorded so far ({@link purgeSkipsFrom}), the cleanup jobs admitted so
+ * far ({@link purgeCleanupFrom}), and the purged directories and near-misses
+ * observed so far ({@link purgeObservationsFrom}).
  *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
  * @param {{ cacheRoot: string, target: PurgeTarget, onCleanupQueued?: (id: string) => Promise<void>, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
@@ -65,9 +66,15 @@ import { Attr, getLogger } from '../observability/index.js'
 export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
   /** @type {Set<string>} */
   const purgedCwds = new Set()
+  // The predicate accepts a row before its batch commits, so what it records
+  // reaches `purgedCwds` only once the delete call that visited it returned.
+  // A call that throws may have committed some batches and not others; its
+  // directories are dropped rather than reported as purged.
+  /** @type {Set<string>} */
+  const visitedCwds = new Set()
   /** @type {{ rows: number, cwds: Set<string> }} */
   const retainedAliases = { rows: 0, cwds: new Set() }
-  const { predicate, columns } = buildPredicate(target, purgedCwds, retainedAliases, deps)
+  const { predicate, columns } = buildPredicate(target, visitedCwds, retainedAliases, deps)
 
   const partitions = await discoverCachePartitions(cacheRoot)
   let rowsDeleted = 0
@@ -116,6 +123,8 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
           continue
         }
         const result = await deleteMatchingRows(current, predicate, { columns, beforeDelete })
+        for (const cwd of visitedCwds) purgedCwds.add(cwd)
+        visitedCwds.clear()
         if (result.rowsDeleted === 0) continue
         rowsDeleted += result.rowsDeleted
         affected = true
@@ -132,14 +141,19 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
       // with its tables (LLP 0333 #every-table-before-failure). Any other
       // failure still aborts the run.
       if (!isPartitionMutationBusy(error)) {
-        // The skip list and the cleanup ids are returned on completion alone,
-        // so this throw is about to discard their only copy. Carry both out on
-        // the error: those partitions may still hold matching rows, and the
-        // cleanup jobs admitted before the abort are durable and still run.
+        // The skip list, the cleanup ids and the observations are returned on
+        // completion alone, so this throw is about to discard their only copy.
+        // Carry them out on the error: those partitions may still hold
+        // matching rows, the cleanup jobs admitted before the abort are
+        // durable and still run, and a directory whose rows were deleted
+        // still owes the resurrection warning (LLP 0104 §resurrection).
         if (error instanceof Error) {
-          const carried = /** @type {{ partitionsSkipped?: { partition: string, error: string }[], cacheCleanup?: string[] }} */ (error)
+          const carried = /** @type {{ partitionsSkipped?: { partition: string, error: string }[], cacheCleanup?: string[], purgedCwds?: string[], retainedAliasRows?: number, retainedAliasCwds?: string[] }} */ (error)
           carried.partitionsSkipped = partitionsSkipped
           carried.cacheCleanup = [...cacheCleanup]
+          carried.purgedCwds = [...purgedCwds]
+          carried.retainedAliasRows = retainedAliases.rows
+          carried.retainedAliasCwds = [...retainedAliases.cwds]
         }
         throw error
       }
@@ -190,6 +204,25 @@ export function purgeSkipsFrom(error) {
 export function purgeCleanupFrom(error) {
   const cleanup = /** @type {{ cacheCleanup?: unknown } | null | undefined} */ (error)?.cacheCleanup
   return Array.isArray(cleanup) ? cleanup : []
+}
+
+/**
+ * What a {@link purgeCache} run had already established when a non-busy
+ * failure aborted it: the directories whose rows a returned delete call
+ * removed, and the near-miss rows it left in place. Empty for any other thrown
+ * value. Partial by construction, since partitions after the abort were never
+ * read.
+ *
+ * @param {unknown} error
+ * @returns {{ purgedCwds: string[], retainedAliasRows: number, retainedAliasCwds: string[] }}
+ */
+export function purgeObservationsFrom(error) {
+  const carried = /** @type {{ purgedCwds?: unknown, retainedAliasRows?: unknown, retainedAliasCwds?: unknown } | null | undefined} */ (error)
+  return {
+    purgedCwds: Array.isArray(carried?.purgedCwds) ? carried.purgedCwds : [],
+    retainedAliasRows: typeof carried?.retainedAliasRows === 'number' ? carried.retainedAliasRows : 0,
+    retainedAliasCwds: Array.isArray(carried?.retainedAliasCwds) ? carried.retainedAliasCwds : [],
+  }
 }
 
 /**
