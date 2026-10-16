@@ -111,6 +111,16 @@ export interface UnloadableManifestSnapshot {
   message: string
 }
 
+/**
+ * One `daemon.sink_materialize_failed` record read back from the daemon log
+ * for a repair hint (issue #2547). Either field is null when the record did
+ * not carry it as a string.
+ */
+export interface SinkMaterializeFailure {
+  instance: string | null
+  errorKind: string | null
+}
+
 export interface SinkSnapshot {
   instance: string
   plugin: string
