@@ -91,6 +91,14 @@ export function mergeConfigLayers(central, local) {
   if (central.auto_update !== undefined) effective.auto_update = central.auto_update
   else if (local?.auto_update !== undefined) effective.auto_update = local.auto_update
 
+  // @ref LLP 0503#config [implements]: local custom patterns can strengthen central redaction but cannot remove its rules
+  if (central.redaction !== undefined || local?.redaction !== undefined) {
+    effective.redaction = { custom_patterns: [
+      ...(central.redaction?.custom_patterns ?? []),
+      ...(local?.redaction?.custom_patterns ?? []),
+    ] }
+  }
+
   return { effective, drops, centralQueryIgnored }
 }
 

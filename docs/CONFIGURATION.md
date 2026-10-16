@@ -46,6 +46,38 @@ For direct edits to the active file, validate afterward and restart the daemon
 to load the change. Set a custom `HYP_HOME` consistently for the CLI and daemon;
 changing it in one shell does not move existing recordings or a running service.
 
+## Redact exported content
+
+Exports automatically mask recognized credentials and sensitive file-tool
+contents before cloud forwarding or file export. The local cache retains the
+original recording. See [privacy and redaction](PRIVACY.md#automatic-export-redaction)
+for coverage and limits.
+
+Add your own patterns at the top level of `hypaware-config.json`:
+
+```json
+{
+  "redaction": {
+    "custom_patterns": [
+      { "pattern": "internal-token-[A-Za-z0-9]+" },
+      { "pattern": "customer-[0-9]{8}", "flags": "i" }
+    ]
+  }
+}
+```
+
+Merge this fragment into your existing configuration. Patterns use JavaScript
+regex syntax without `/` delimiters. Matching replaces every occurrence with
+`[REDACTED]`; optional flags are `g`, `i`, `m`, `s`, and `u`. JSON requires
+backslashes to be doubled, for example `"\\d{8}"`. Each layer accepts up to
+32 patterns, each up to 2048 characters. Invalid expressions fail validation.
+Local patterns add to organization patterns and built-in masking.
+
+Run `hyp config validate`, then `hyp daemon restart` to apply changes.
+Pattern matching has a one-second worker deadline per row. A timeout or row
+budget failure stops that export with an error; it never sends raw content as
+a fallback. Earlier exports are not changed by adding a pattern.
+
 ## Set local retention
 
 First-time guided setup uses 120 days for local collection and 90 days for team

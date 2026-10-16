@@ -7,6 +7,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
+import { parseRedactionConfig } from '../sinks/redaction.js'
 
 /**
  * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../hypaware-plugin-kernel-types.js'
@@ -351,6 +352,8 @@ export function parseConfigShape(value) {
     }
   }
 
+  const redaction = parseRedactionConfig(root.redaction, errors)
+
   for (const key of Object.keys(root)) {
     if (!RECOGNIZED_TOP_KEYS.has(key)) {
       errors.push({ pointer: `/${key}`, message: `unrecognized top-level key '${key}'` })
@@ -366,10 +369,11 @@ export function parseConfigShape(value) {
   if (query) config.query = query
   if (disambiguate) config.disambiguate = disambiguate
   if (autoUpdate !== undefined) config.auto_update = autoUpdate
+  if (redaction !== undefined) config.redaction = redaction
   return { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update', 'redaction'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`

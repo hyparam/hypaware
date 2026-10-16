@@ -185,6 +185,7 @@ export async function bootKernel(opts = {}) {
       const runtime = createKernelRuntime({
         commandRegistry,
         cacheRoot,
+        redaction: config?.redaction,
         ...(opts.storage ? { storage: opts.storage } : {}),
         ...(opts.configControl ? { configControl: opts.configControl } : {}),
         sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged, stateDir: stateRoot }),
