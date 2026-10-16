@@ -327,7 +327,9 @@ export function renderStatusSummary({ report, stdout }) {
   const unit = bytes >= 1e9 ? 'GB' : bytes >= 1e6 ? 'MB' : bytes >= 1e3 ? 'KB' : 'B'
   const divisor = unit === 'GB' ? 1e9 : unit === 'MB' ? 1e6 : unit === 'KB' ? 1e3 : 1
   stdout.write(`  Storage    ${unit === 'GB' ? (bytes / divisor).toFixed(1) : Math.round(bytes / divisor)} ${unit} · ${report.retention.days}-day retention\n`)
-  stdout.write(`  Sharing    ${report.layered?.hasCentral ? 'Organization sync configured' : 'No organization sync'}\n`)
+  const sharingUnknown = centralSharingUnknown(report)
+  stdout.write(`  Sharing    ${report.layered?.hasCentral ? 'Organization sync configured'
+    : sharingUnknown ? 'Unknown (organization config could not be read)' : 'No organization sync'}\n`)
   renderSharingNotices(report, stdout)
   if (report.selfUpdate?.line) stdout.write(`  ${printable(report.selfUpdate.line, MAX_ERROR_CHARS)}\n`)
   for (const s of report.sources) {
@@ -357,9 +359,10 @@ export function renderStatusSummary({ report, stdout }) {
       // row, and it records whenever it is listed.
       : !client || client.configured ? 'Recording'
       : 'Not recording'
-    // A missing policy on an enrolled host is unknown, never permission to sync.
+    // A missing policy on an enrolled host is unknown, never permission to sync,
+    // and so is any policy on a host whose central layer cannot be read.
     const sharing = localOnly.has(name) ? 'Local only' : syncing.has(name) ? 'Sync'
-      : report.layered?.hasCentral ? 'Unknown' : 'Local only'
+      : report.layered?.hasCentral || sharingUnknown ? 'Unknown' : 'Local only'
     stdout.write(`  ${printable(name, 22).padEnd(22)}  ${state.padEnd(31)}  ${sharing}\n`)
   }
   if (syncing.size > 0) stdout.write('\n  Sync = organization sharing policy, not delivery confirmation.\n')
@@ -1039,6 +1042,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(
       `    syncing: ${list(report.clientSync.syncing)} - local-only: ${list(report.clientSync.localOnly)}\n`
     )
+  } else if (centralSharingUnknown(report)) {
+    stdout.write('    syncing: unknown - local-only: unknown (organization config could not be read)\n')
   }
 
   // Which client surfaces have actually produced rows, and when (LLP 0164).
@@ -1431,6 +1436,22 @@ export function formatEntrypointAge(lastSeen, nowMs = Date.now()) {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   return `${days}d ago`
+}
+
+/**
+ * Whether the report cannot establish this host's sharing at all: the
+ * collector found a central layer it could not read, which leaves
+ * `layered` and `clientSync` null exactly as on a host that never joined.
+ * Read off the collector's own `config_central_unreadable` diagnostic, so
+ * the text views and `--json` rest on the same evidence and nothing here
+ * probes the disk again.
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {boolean}
+ */
+// @ref LLP 0455#compact-view [implements]: an unreadable central layer is Unknown sharing, never No organization sync or Local only
+function centralSharingUnknown(report) {
+  return report.diagnostics.some((d) => d.kind === 'config_central_unreadable')
 }
 
 /**
