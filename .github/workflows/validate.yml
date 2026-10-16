@@ -1,0 +1,65 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CLAUDE_CODE_VERSION: 2.1.301
+  SKILLS_VERSION: 1.7.2
+  AJV_CLI_VERSION: 5.0.0
+  AJV_FORMATS_VERSION: 3.0.1
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # 1. Claude Code: the marketplace and plugin.json, then .mcp.json
+      # through the manifest, then a hermetic install into this job's HOME.
+      - name: Claude Code
+        run: |
+          claude() { npx -y "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "$@"; }
+          claude plugin validate . --strict
+          claude plugin validate .claude-plugin/plugin.json --strict
+          claude plugin marketplace add "$PWD"
+          claude plugin install hypaware@hypaware
+
+      # 2. Cursor: kebab-case names, declared variables, https URLs.
+      - name: Cursor
+        run: node scripts/check.js cursor
+
+      # 3. Skills: frontmatter caps, links inside each skill, and the set
+      # the skills CLI sees.
+      - name: Skills
+        run: |
+          node scripts/check.js skills
+          npx -y "skills@${SKILLS_VERSION}" add . --list | tee "$RUNNER_TEMP/skills-list.txt"
+          node scripts/check.js skills-list < "$RUNNER_TEMP/skills-list.txt"
+
+      # 4. Drift: skills/ is byte-identical to the pinned release, and every
+      # version field is the pin.
+      - name: Drift
+        run: node scripts/check.js drift
+
+      # 5. Registry entry: the pinned schema, then the rules it does not state.
+      - name: Registry entry
+        run: |
+          schema_url="$(node -p "require('./registry/server.json')['\$schema']")"
+          curl -fsSL "$schema_url" -o "$RUNNER_TEMP/server.schema.json"
+          npx -y -p "ajv-cli@${AJV_CLI_VERSION}" -p "ajv-formats@${AJV_FORMATS_VERSION}" -- \
+            ajv validate -s "$RUNNER_TEMP/server.schema.json" -d registry/server.json \
+            -c ajv-formats --spec=draft7 --strict=false
+          node scripts/check.js registry
+
+      # 6. Directory hygiene.
+      - name: Directory hygiene
+        run: node scripts/check.js hygiene

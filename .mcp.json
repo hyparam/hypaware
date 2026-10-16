@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hypaware": {
+      "type": "http",
+      "url": "https://api.hypaware.ai/v1/mcp",
+      "headers": { "Authorization": "Bearer ${HYPAWARE_AGENT_TOKEN}" }
+    }
+  }
+}

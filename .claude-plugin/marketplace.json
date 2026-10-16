@@ -1,0 +1,8 @@
+{
+  "name": "hypaware",
+  "owner": { "name": "Hyperparam" },
+  "metadata": { "description": "The HypAware MCP and its skills." },
+  "plugins": [
+    { "name": "hypaware", "source": "./", "description": "The HypAware MCP and its skills." }
+  ]
+}

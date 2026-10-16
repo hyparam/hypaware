@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.hypaware/hypaware",
+  "title": "HypAware",
+  "description": "Query your team's AI coding history and act on HypAware recommendations from any MCP client.",
+  "version": "1.43.0",
+  "websiteUrl": "https://hypaware.ai",
+  "repository": {
+    "url": "https://github.com/hyparam/hypaware-plugin",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.hypaware.ai/v1/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <agent token>. Mint one with `hyp remote mint --scope query`.",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "hypaware",
+      "version": "1.43.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ]
+    }
+  ]
+}

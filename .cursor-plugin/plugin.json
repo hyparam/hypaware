@@ -1,0 +1,23 @@
+{
+  "name": "hypaware",
+  "version": "1.43.0",
+  "description": "Query your team's AI coding history and act on HypAware recommendations from Cursor.",
+  "author": {
+    "name": "Hyperparam"
+  },
+  "homepage": "https://hypaware.ai",
+  "repository": "https://github.com/hyparam/hypaware-plugin",
+  "license": "MIT",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "HYPAWARE_AGENT_TOKEN": {
+        "type": "string",
+        "description": "Agent token from `hyp remote mint --scope query`."
+      }
+    },
+    "required": [
+      "HYPAWARE_AGENT_TOKEN"
+    ]
+  }
+}

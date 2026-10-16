@@ -1,0 +1,12 @@
+{
+  "name": "hypaware",
+  "version": "1.43.0",
+  "description": "Query your team's AI coding history and act on HypAware recommendations from Claude Code.",
+  "author": {
+    "name": "Hyperparam",
+    "url": "https://hypaware.ai"
+  },
+  "homepage": "https://hypaware.ai",
+  "repository": "https://github.com/hyparam/hypaware-plugin",
+  "license": "MIT"
+}
