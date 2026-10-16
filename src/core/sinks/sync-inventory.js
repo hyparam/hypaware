@@ -32,7 +32,7 @@ export function validInventoryBucket(value) {
     (day === 'undated' || inventoryDay(day) === day)
 }
 
-// @ref LLP 0498#meaning [implements]: sorted distinct identities make replay order irrelevant and same-count replacements detectable.
+// @ref LLP 0501#meaning [implements]: sorted distinct identities make replay order irrelevant and same-count replacements detectable.
 /** @param {Iterable<string>} values */
 export function summarizeInventoryKeys(values) {
   const unique = new Set()
