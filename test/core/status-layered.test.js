@@ -9,8 +9,10 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { renderStatusJson, renderStatusSummary, renderStatusText } from '../../src/core/commands/status.js'
 import { compareStrings } from '../../src/core/util/compare_strings.js'
+
+/** @import { HypAwareStatusReport } from '../../src/core/daemon/types.js' */
 
 // `hyp status` on a centrally-managed host must restore inspectability of
 // the merged config: per-entry provenance + the dropped-local section.
@@ -371,4 +373,100 @@ test('config_missing does not claim "neither a central layer" when the central l
 
   const unreadable = report.diagnostics.find((d) => d.kind === 'config_central_unreadable')
   assert.ok(unreadable, 'the central layer is reported unreadable too')
+})
+
+// Every unreadable state collapses to the same report shape as a never-joined
+// host (`layered` and `clientSync` null), so the text views must read the
+// collector's diagnostic rather than infer a solo host (issue #2431).
+
+/** @type {Array<[string, (controlDir: string) => Promise<void>]>} */
+const UNREADABLE_CENTRAL_STATES = [
+  ['an unparseable seed', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'seed.json'), '{ not json at all\n')
+  }],
+  ['an active pointer naming a gone slot', async (controlDir) => {
+    await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+  }],
+  ['an active pointer that is a regular file', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify({ version: 2 }) + '\n')
+    await fs.writeFile(path.join(controlDir, 'active'), 'config.a.json')
+  }],
+  ['a control directory that cannot be listed', async (controlDir) => {
+    await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify({ version: 2 }))
+    await fs.chmod(controlDir, 0o000)
+  }],
+]
+
+/** @param {HypAwareStatusReport} report */
+function renderBothViews(report) {
+  // The collector probes no clients here, so give the compact table one
+  // configured client to label.
+  const withClient = /** @type {HypAwareStatusReport} */ ({
+    ...report,
+    clients: [{ name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false }],
+  })
+  const compact = makeBuf()
+  renderStatusSummary({ report: withClient, stdout: compact })
+  const verbose = makeBuf()
+  renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: verbose })
+  return { compact: compact.text(), verbose: verbose.text() }
+}
+
+for (const [label, arrange] of UNREADABLE_CENTRAL_STATES) {
+  test(`${label} renders Unknown sharing in the compact and verbose views`, async () => {
+    const hypHome = await makeHome()
+    const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+    await fs.mkdir(controlDir, { recursive: true })
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/ai-gateway' }],
+    }) + '\n')
+    await arrange(controlDir)
+
+    try {
+      const report = await collectHypAwareStatus({ env: env(hypHome) })
+      assert.ok(report.diagnostics.some((d) => d.kind === 'config_central_unreadable'))
+      // No new persistent field: JSON keeps its null shape and the diagnostic
+      // carries the evidence.
+      const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: '/tmp/cache' })
+      assert.equal(json.config_layers, null)
+      assert.equal(report.overall, 'healthy')
+
+      const { compact, verbose } = renderBothViews(report)
+      assert.match(compact, /Sharing\s+Unknown \(organization config could not be read\)/)
+      assert.match(compact, /codex\s+Recording\s+Unknown/)
+      assert.doesNotMatch(compact, /No organization sync|Local only/)
+      assert.match(verbose, /syncing: unknown - local-only: unknown \(organization config could not be read\)/)
+      assert.match(verbose, /\(none visible - organization config could not be read\)/)
+      assert.doesNotMatch(verbose, /keeping captured data local only/)
+      // The diagnostic says what the report cannot see, not that a running
+      // daemon stopped forwarding.
+      assert.doesNotMatch(compact + verbose, /stopped forwarding|no longer forward/)
+    } finally {
+      await fs.chmod(controlDir, 0o700)
+    }
+  })
+}
+
+test('an absent central layer still renders a solo host as no organization sync', async () => {
+  const hypHome = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }],
+  }) + '\n')
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const { compact, verbose } = renderBothViews(report)
+  assert.match(compact, /Sharing\s+No organization sync/)
+  assert.match(compact, /codex\s+Recording\s+Local only/)
+  assert.match(verbose, /\(none - keeping captured data local only\)/)
+  assert.doesNotMatch(compact + verbose, /Unknown|unknown|could not be read/)
+})
+
+test('a readable central layer renders organization sync, not unknown', async () => {
+  const hypHome = await makeHome()
+  await joinedHomeForRender(hypHome)
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  const { compact } = renderBothViews(report)
+  assert.match(compact, /Sharing\s+Organization sync configured/)
+  assert.doesNotMatch(compact, /could not be read/)
 })

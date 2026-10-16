@@ -58,6 +58,21 @@ test('missing enrolled policy stays unknown, while a solo client is local only',
   assert.match(render(report({ clients })), /codex\s+Recording\s+Local only/)
 })
 
+// An unreadable central layer leaves `layered` and `clientSync` null exactly
+// as on a host that never joined, so only the collector's own diagnostic tells
+// the two apart (issue #2431).
+test('an unreadable central layer reads Unknown sharing, never solo-host local only', () => {
+  const clients = [{ name: 'codex', plugin: '@hypaware/codex', configured: true, recording: true, attached: false, attachable: false }]
+  const diagnostics = /** @type {HypAwareStatusReport['diagnostics']} */ ([{ severity: 'warning', kind: 'config_central_unreadable', message: 'central config layer /x is unreadable (boom)', repair: [] }])
+  const text = render(report({ clients, diagnostics }))
+  assert.match(text, /Sharing\s+Unknown \(organization config could not be read\)/)
+  assert.match(text, /codex\s+Recording\s+Unknown/)
+  assert.doesNotMatch(text, /No organization sync|Local only/)
+  const solo = render(report({ clients }))
+  assert.match(solo, /Sharing\s+No organization sync/)
+  assert.match(solo, /codex\s+Recording\s+Local only/)
+})
+
 test('warning gaps show both ages and one primary repair without asserting lost sessions', () => {
   const now = Date.now()
   const text = render(report({

@@ -1275,15 +1275,12 @@ export async function collectHypAwareStatus(opts = {}) {
   // `config_unreadable` / `config_local_unreadable` own the run.
   const localConfigUnreadable = !localLoaded.ok && localLoaded.errorKind !== 'config_missing'
 
-  // Same fact, central layer: a central file the host could not parse is not
-  // the operator removing anything either, so it must not be read as intent
-  // any more than a local parse failure is.
-  const centralLayerParseFailed = !!centralLoaded && !centralLoaded.ok && centralLoaded.errorKind !== 'config_missing'
-
   // Whether the central layer can be read at all, widest definition: every
   // load failure counts, `config_missing` included, and a null `centralLoaded`
   // is re-checked against the control directory instead of read as an
-  // absence. See `centralLayerUnreadable`'s own doc for why.
+  // absence. See `centralLayerUnreadable`'s own doc for why. Like a local
+  // parse failure, none of these is the operator removing anything, so the
+  // export-withhold gate below reads every one of them as uncertainty (#2432).
   const centralUnreadable = centralLayerUnreadable({ stateDir: stateRoot, centralLoaded })
 
   // Validate the *effective* (merged + pruned) config: that is what runs.
@@ -1388,7 +1385,7 @@ export async function collectHypAwareStatus(opts = {}) {
     diagnostics.push({
       severity: 'warning',
       kind: 'config_central_unreadable',
-      message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - the team config it carries is not applied`,
+      message: `central config layer ${centralUnreadable.configPath} is unreadable (${centralUnreadable.message}) - its team config is not in this report, and a running daemon may still be on the config it last applied`,
       repair: [
         'hyp join <url> <token>',
         'hyp leave, then hyp remote login',
@@ -2033,7 +2030,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // Cleared by the status-file fallback below, the one branch whose rows no
   // config entry and no live handle backs - but only when an empty
   // configured sink set is the operator's own removal. An unreadable local
-  // or central config (`localConfigUnreadable`, `centralLayerParseFailed`) and
+  // or central config (`localConfigUnreadable`, `centralUnreadable`) and
   // a `sinks` entry the central layer merge dropped (`merged.drops`, reason
   // `invalid_merge`) also leave `config.sinks` empty without the operator
   // having removed anything, so none of these is read as intent here; reading
@@ -2097,7 +2094,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // since an unreadable layer leaves no record of which instances it named.
     const recovered = (Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
       .filter((s) => !!s && typeof s === 'object')
-    sinksAreConfigured = localConfigUnreadable || centralLayerParseFailed
+    sinksAreConfigured = localConfigUnreadable || !!centralUnreadable
       || recovered.some((s) => sinkKeysDroppedByMerge.has(s.instance))
     sinks.push(...recovered)
   }
