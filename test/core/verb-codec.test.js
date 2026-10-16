@@ -115,6 +115,31 @@ test('codec: integer minimum, enum, unknown flag, extra positional', () => {
   assert.match(/** @type {any} */ (argvToParams(NEIGHBORS_SCHEMA, ['a', 'b'])).error, /unexpected argument 'b'/)
 })
 
+test('codec: maximum bounds integers and numbers, endpoints included, and names the range', () => {
+  /** @type {VerbInputSchema} */
+  const schema = {
+    type: 'object',
+    properties: {
+      days: { type: 'integer', minimum: 1, maximum: 3650 },
+      cap: { type: 'integer', maximum: 10 },
+      ratio: { type: 'number', minimum: 0, maximum: 1 },
+      share: { type: 'number', maximum: 0.5 },
+    },
+  }
+  for (const days of ['1', '3650']) assert.equal(okParams(argvToParams(schema, ['--days', days])).params.days, Number(days))
+  for (const days of ['0', '3651', '1e30']) {
+    assert.match(/** @type {any} */ (argvToParams(schema, ['--days', days])).error, new RegExp(`--days expects an integer from 1 to 3650 \\(got ${days}\\)`))
+  }
+  assert.match(/** @type {any} */ (argvToParams(schema, ['--cap', '11'])).error, /--cap expects an integer <= 10 \(got 11\)/)
+  assert.equal(okParams(argvToParams(schema, ['--ratio', '1'])).params.ratio, 1)
+  assert.match(/** @type {any} */ (argvToParams(schema, ['--ratio', '1.5'])).error, /--ratio expects a number from 0 to 1 \(got 1\.5\)/)
+  assert.match(/** @type {any} */ (argvToParams(schema, ['--share', '0.6'])).error, /--share expects a number <= 0\.5 \(got 0\.6\)/)
+  // The MCP half reads the same bound, and the advertised schema keeps it.
+  assert.match(/** @type {any} */ (validateToolArguments(schema, { days: 1e30 })).error, /days expects an integer from 1 to 3650/)
+  assert.deepEqual(validateToolArguments(schema, { days: 3650 }), { ok: true, params: { days: 3650 } })
+  assert.equal(toJsonSchema(schema).properties.days.maximum, 3650)
+})
+
 test('codec: required missing is reported', () => {
   assert.match(/** @type {any} */ (argvToParams(NEIGHBORS_SCHEMA, [])).error, /missing required node/)
   assert.match(/** @type {any} */ (argvToParams(SQL_SCHEMA, [])).error, /missing required sql/)

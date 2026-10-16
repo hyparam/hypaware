@@ -404,6 +404,14 @@ function resolveFlag(props, flag) {
 
 /**
  * @param {VerbInputProperty} prop
+ * @param {number} n
+ */
+function withinBounds(prop, n) {
+  return (prop.minimum === undefined || n >= prop.minimum) && (prop.maximum === undefined || n <= prop.maximum)
+}
+
+/**
+ * @param {VerbInputProperty} prop
  * @param {string} value
  * @param {string} label
  * @returns {{ ok: true, value: unknown } | { ok: false, error: string }}
@@ -412,10 +420,14 @@ function coerceValue(prop, value, label) {
   switch (prop.type) {
     case 'integer': {
       const n = Number(value)
-      const noun = prop.minimum === 1
-        ? 'a positive integer'
-        : prop.minimum !== undefined ? `an integer >= ${prop.minimum}` : 'an integer'
-      if (!Number.isInteger(n) || (prop.minimum !== undefined && n < prop.minimum)) {
+      // `Number.isInteger` accepts exponent notation, so `1e30` is an integer
+      // here; a declared `maximum` is what bounds it (issue #972).
+      const noun = prop.maximum !== undefined
+        ? prop.minimum !== undefined ? `an integer from ${prop.minimum} to ${prop.maximum}` : `an integer <= ${prop.maximum}`
+        : prop.minimum === 1
+          ? 'a positive integer'
+          : prop.minimum !== undefined ? `an integer >= ${prop.minimum}` : 'an integer'
+      if (!Number.isInteger(n) || !withinBounds(prop, n)) {
         return { ok: false, error: `${label} expects ${noun} (got ${value})` }
       }
       return { ok: true, value: n }
@@ -423,8 +435,11 @@ function coerceValue(prop, value, label) {
     case 'number': {
       const n = Number(value)
       if (!Number.isFinite(n)) return { ok: false, error: `${label} expects a number (got ${value})` }
-      if (prop.minimum !== undefined && n < prop.minimum) {
-        return { ok: false, error: `${label} expects a number >= ${prop.minimum} (got ${value})` }
+      if (!withinBounds(prop, n)) {
+        const noun = prop.maximum === undefined
+          ? `a number >= ${prop.minimum}`
+          : prop.minimum === undefined ? `a number <= ${prop.maximum}` : `a number from ${prop.minimum} to ${prop.maximum}`
+        return { ok: false, error: `${label} expects ${noun} (got ${value})` }
       }
       return { ok: true, value: n }
     }

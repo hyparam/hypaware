@@ -363,3 +363,34 @@ test('the gate is by class and scope, not by tool name', async () => {
   const list = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
   assert.deepEqual(list.result.tools.map((/** @type {any} */ t) => t.name), ['other_write'])
 })
+
+test('list_recommendations above its 100-row maximum is refused before the tool runs, naming the range', async () => {
+  const c = /** @type {any} */ (REMOTE_TOOL_CONTRACTS.find((x) => x.tool === 'list_recommendations'))
+  const verbs = createVerbRegistry()
+  verbs.register({
+    name: `contract ${c.tool}`,
+    tool: c.tool,
+    title: c.title,
+    summary: c.summary,
+    inputSchema: c.inputSchema,
+    authClass: c.authClass,
+    scope: c.scope,
+    operation: async () => ({}),
+    render: () => ({ stdout: '' }),
+  })
+  /** @type {any[]} */ const ran = []
+  const s = createMcpServer({
+    verbs,
+    query: /** @type {any} */ (fakeQuery),
+    runTool: (/** @type {any} */ v, /** @type {any} */ p) => { ran.push(p); return Promise.resolve(v.operation(p)) },
+    transport: 'http',
+    allowOperator: false,
+  })
+  const over = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_recommendations', arguments: { limit: 101 } } }))
+  assert.equal(over.error.code, -32602)
+  assert.match(over.error.message, /limit expects an integer from 1 to 100/)
+  assert.equal(ran.length, 0)
+  const top = /** @type {any} */ (await s.handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_recommendations', arguments: { limit: 100 } } }))
+  assert.equal(top.result.isError, false)
+  assert.equal(ran[0].limit, 100)
+})
