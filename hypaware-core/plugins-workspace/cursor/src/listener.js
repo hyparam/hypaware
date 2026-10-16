@@ -117,7 +117,11 @@ export function createStartCursorSource(deps = {}) {
               let rowsWritten = 0
               for (const exchange of snapshot.exchanges) {
                 if (stopped) { complete = false; break }
-                const permitted = await admission.filter(exchange)
+                // A hook reports the running client's version, not the version
+                // that produced older turns recovered alongside this one.
+                const attributed = item.clientVersion && item.generation && exchange.messages.every((message) => message.request_id === item.generation)
+                  ? { ...exchange, client_version: item.clientVersion } : exchange
+                const permitted = await admission.filter(attributed)
                 if (!permitted || permitted.messages.length !== exchange.messages.length) complete = false
                 if (!permitted?.messages.length) continue
                 const result = await nativeWriter.record(permitted)
@@ -154,11 +158,15 @@ export function createStartCursorSource(deps = {}) {
       }, deps.recoveryDelayMs ?? 1000)
       recoveryTimer.unref()
     }
-    const scheduleRecovery = (id, cwd) => {
+    const scheduleRecovery = (id, cwd, event) => {
       if (stopped) return
       const key = JSON.stringify([id, cwd])
       if (!pending.has(key) && pending.size >= 64) { recoveryCounts.recovery_queue_drops++; return }
-      pending.set(key, { id, cwd, attempt: 0 })
+      const generation = typeof event.generation_id === 'string' && event.generation_id.length <= 256 ? event.generation_id : undefined
+      const previous = pending.get(key)
+      const clientVersion = typeof event.cursor_version === 'string' && /^[\w.+-]{1,128}$/.test(event.cursor_version)
+        ? event.cursor_version : generation && generation === previous?.generation ? previous.clientVersion : undefined
+      pending.set(key, { id, cwd, generation, clientVersion, attempt: 0 })
       armRecovery()
     }
     const control = createControlHandler({ ignoredSessions, log: ctx.log, logEvent: 'cursor.control.ignore_session', logFields: { [Attr.PLUGIN]: '@hypaware/cursor' } })
@@ -276,7 +284,7 @@ export function createStartCursorSource(deps = {}) {
           }
           // @ref LLP 0399#identity: the native store owns conversation rows.
           // Hook-only response/tool IDs cannot safely join native Shell IDs.
-          scheduleRecovery(session, cwd)
+          scheduleRecovery(session, cwd, event)
           if (hook !== 'beforeReadFile') {
             counts.lifecycle_events++
             skip('native_recovery_scheduled')

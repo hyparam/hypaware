@@ -289,13 +289,13 @@ test('native recovery retries failed writes, survives restart, and serializes wi
       await append(...args)
     }
     await f.post(body)
-    await waitFor(() => f.rows.length === 8)
+    await waitFor(() => f.rows.length === 13)
     assert.equal((await f.source.status?.())?.details?.native_failures, 1)
     assert.equal((await f.source.status?.())?.lastError, undefined)
     await f.restart()
     await f.post(body)
     await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
-    assert.equal(f.rows.length, 8)
+    assert.equal(f.rows.length, 13)
     const provider = createCursorBackfillProvider({ ...f.readOptions, activeRecoveries })
     const ctx = /** @type {any} */ ({ dryRun: false, env: {}, log: { info() {}, warn() {} } })
     const iterator = provider.run(ctx)[Symbol.asyncIterator]()
@@ -308,8 +308,25 @@ test('native recovery retries failed writes, survives restart, and serializes wi
     await iterator.return?.()
     assert.equal(activeRecoveries.size, 0)
     await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
-    assert.equal(f.rows.length, 8)
+    assert.equal(f.rows.length, 13)
   } finally { native.close(); await f.cleanup() }
+})
+
+test('live native recovery attributes the hook version only to its matching generation', async () => {
+  for (const generation of ['native-generation', 'different-generation', undefined]) {
+    const f = await fixture({ recoveryDelayMs: 30 })
+    const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+    try {
+      await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'postToolUse',
+        generation_id: generation, cursor_version: '2026.09.08-6caf4ff' }))
+      // Coalescing a callback without the version must retain the first one's
+      // metadata for the same generation, without retaining the raw payload.
+      await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'stop', generation_id: generation }))
+      await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
+      assert.equal(f.rows.length, 13)
+      for (const row of f.rows) assert.equal(row.client_version, generation === 'native-generation' ? '2026.09.08-6caf4ff' : undefined)
+    } finally { native.close(); await f.cleanup() }
+  }
 })
 
 test('pending recovery is bounded, cancelled on stop, and rechecks session ignore', async () => {
@@ -375,7 +392,7 @@ test('a hook callback is answered within its timeout while a maximal-size graph 
     // slower machine moves both numbers together.
     assert.ok(gap < window / 3, `recovery blocked the event loop for ${gap.toFixed(0)}ms of a ${window.toFixed(0)}ms pass`)
     await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
-    assert.equal(f.rows.filter((row) => row.role !== 'system').length, 8)
+    assert.equal(f.rows.filter((row) => row.role !== 'system').length, 13)
   } finally { open(); native.close(); await f.cleanup() }
 })
 

@@ -177,21 +177,29 @@ function editorMetadata(db, id, dbPath) {
 export function safeError(err) { return err instanceof CursorReadError ? err : new CursorReadError('native_read_failed') }
 
 /** Narrow protobuf wire reader. Only chosen field bytes are decoded by callers.
- * @param {Uint8Array} input @returns {Map<number, Array<Buffer | number>>}
+ * @param {Uint8Array} input
+ * @param {number} [signedField] A verified int32 field; other varints stay unsigned.
+ * @returns {Map<number, Array<Buffer | number>>}
  * @ref LLP 0399#native-format: bounded descriptor-specific traversal; no thought decoding
  */
-export function cursorFields(input) {
+export function cursorFields(input, signedField) {
   const data = Buffer.isBuffer(input) ? input : Buffer.from(input)
   if (data.length > MAX_RECORD) throw new CursorReadError('native_record_limit')
   let offset = 0
   const fields = new Map()
-  const integer = () => {
+  const integer = (signed = false) => {
     let value = 0n
     for (let shift = 0n; shift < 70n; shift += 7n) {
       if (offset >= data.length) throw new CursorReadError('native_truncated')
       const byte = data[offset++]
       value |= BigInt(byte & 127) << shift
       if (byte < 128) {
+        if (signed) {
+          const int32 = BigInt.asIntN(32, value)
+          // Protobuf int32 negatives may arrive sign-extended to ten bytes.
+          if (value !== BigInt.asUintN(64, int32) && value !== BigInt.asUintN(32, int32)) throw new CursorReadError('native_integer_limit')
+          return Number(int32)
+        }
         if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new CursorReadError('native_integer_limit')
         return Number(value)
       }
@@ -206,7 +214,7 @@ export function cursorFields(input) {
     const kind = tag % 8
     if (!number) throw new CursorReadError('native_wire_shape')
     let value
-    if (kind === 0) value = integer()
+    if (kind === 0) value = integer(number === signedField)
     else {
       const size = kind === 2 ? integer() : kind === 1 ? 8 : kind === 5 ? 4 : -1
       if (size < 0 || size > data.length - offset) throw new CursorReadError('native_wire_shape')
@@ -233,6 +241,30 @@ function string(fields, key) { return bytes(fields, key).toString('utf8') }
 function time(fields, key) {
   const value = fields.get(key)?.[0]
   return typeof value === 'number' && value > 0 && value < 8640000000000000 ? new Date(value).toISOString() : undefined
+}
+
+/**
+ * Cursor 3.19.19's ShellResult has a result union plus independent fields
+ * 101-104 (sandbox policy, background flag, terminals folder and pid).
+ * Counting those fields as union alternatives loses otherwise explicit errors.
+ * Unknown fields still refuse a classification, and background success is not
+ * evidence of a completed process. Never classify arbitrary output text.
+ * @param {number} variant
+ * @param {Map<number, Array<Buffer | number>>} outcome
+ * @returns {boolean | null}
+ * @ref LLP 0399#file-content: classify only verified native outcomes
+ */
+function toolError(variant, outcome) {
+  const terminal = [...outcome.keys()].filter((key) => variant !== 1 || ![101, 102, 103, 104].includes(key))
+  if (![1, 4, 5, 8, 44].includes(variant) || terminal.length !== 1 || outcome.get(terminal[0])?.length !== 1) return null
+  const result = terminal[0]
+  if (variant !== 1) return result === 1 ? false : [2, 3, 4].includes(result) ? true : null
+  if ([2, 3, 4, 5, 7].includes(result)) return true
+  if (result !== 1 || outcome.get(102)?.[0] === 1) return null
+  const success = cursorFields(bytes(outcome, 1), 3)
+  const exitCode = success.get(3)?.[0] ?? 0
+  if (typeof exitCode !== 'number') return null
+  return exitCode !== 0 || string(success, 4) !== ''
 }
 
 /** @param {CursorSession} session @param {string} [previousRoot] @returns {CursorSnapshot} */
@@ -362,13 +394,13 @@ export function readCursorSession(session, previousRoot) {
           if (variants.length !== 1) throw new CursorReadError('native_tool_shape')
           const body = cursorFields(bytes(tool, variants[0]))
           const outcome = cursorFields(bytes(body, 2))
-          const terminal = [...outcome.keys()]
-          // Outcome 1 is success in the tested tool contracts. Restrict the
-          // interpretation to verified variants; unknown tools stay unknown.
-          const known = [1, 4, 5, 8, 44].includes(variants[0])
-          const isError = known && terminal.length === 1
-            ? terminal[0] === 1 ? false : [2, 3, 4].includes(terminal[0]) ? true : null
-            : null
+          const isError = toolError(variants[0], outcome)
+          // Keep the shipped result identity so replay fills only missing call
+          // rows. The call uses the same native ID, never a hook helper ID.
+          messages.push({ role: 'assistant', message_id: id('tool_call', callId), request_id: generation,
+            message_created_at: time(tool, 59), attributes: attrs,
+            content: [{ type: 'tool_use', name: result.name, id: callId,
+              ...(toolInputs.has(callId) ? { input: toolInputs.get(callId) } : {}) }] })
           messages.push({ role: 'tool', message_id: id('tool', callId), request_id: generation,
             message_created_at: time(tool, 59), attributes: attrs,
             content: [{ type: 'tool_result', name: result.name, tool_use_id: callId,

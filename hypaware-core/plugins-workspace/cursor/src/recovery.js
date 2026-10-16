@@ -22,6 +22,7 @@ export function cursorAdmission(opts) {
       const cwd = exchange.cwd
       const rank = CLASS_RANK[resolver.resolve(cwd).class]
       const messages = []
+      const refusedCalls = new Set()
       for (const message of exchange.messages) {
         let allowed = true
         if (message.role === 'tool' && Array.isArray(message.content)) {
@@ -45,9 +46,17 @@ export function cursorAdmission(opts) {
           }
         }
         if (allowed) messages.push(message)
+        else if (Array.isArray(message.content)) {
+          for (const block of message.content) {
+            if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') refusedCalls.add(block.tool_use_id)
+          }
+        }
       }
       if (opts.ignoredSessions?.has(exchange.session_id ?? '') || resolver.resolve(cwd).class === 'ignore') return undefined
-      return { ...exchange, messages }
+      // A newly emitted call must not reintroduce arguments from a Read whose
+      // result failed the existing file policy. Do not resolve the paths twice.
+      return { ...exchange, messages: refusedCalls.size ? messages.filter((message) =>
+        !Array.isArray(message.content) || !message.content.some((block) => block.type === 'tool_use' && refusedCalls.has(block.id))) : messages }
     },
   }
 }

@@ -83,7 +83,7 @@ export async function run({ harness, expect }) {
     let callbacks = 0
     for (const [mode, version] of [['editor', '3.19.19'], ['cli', '2026.09.08-6caf4ff']]) {
       await step(`${mode}_fixture`, async () => {
-        const base = { conversation_id: stores.find((s) => s.session.frontend === mode).session.id, generation_id: 'turn', cursor_version: version, workspace_roots: [cwd], transcript_path: null }
+        const base = { conversation_id: stores.find((s) => s.session.frontend === mode).session.id, generation_id: 'native-generation', cursor_version: version, workspace_roots: [cwd], transcript_path: null }
         const events = [
           { hook_event_name: 'beforeSubmitPrompt', prompt: 'Read notes' },
           { hook_event_name: 'beforeReadFile', file_path: path.join(cwd, 'notes.txt'), content: 'Observed file contents' },
@@ -125,15 +125,19 @@ export async function run({ harness, expect }) {
       expect.that('Ignored directory dropped', result, (v) => v.status === 202 && v.body.reason === 'usage_policy')
       const out = buffer()
       const err = buffer()
-      const code = await dispatch(['query', 'sql', 'select client_name, entrypoint, content_text, tool_name from ai_gateway_messages', '--refresh', 'always', '--format', 'json'], { kernel, registry, env: process.env, stdout: out, stderr: err })
+      const code = await dispatch(['query', 'sql', 'select client_name, client_version, session_id, entrypoint, part_type, content_text, tool_name, tool_call_id, tool_result_for, tool_args, is_error from ai_gateway_messages', '--refresh', 'always', '--format', 'json'], { kernel, registry, env: process.env, stdout: out, stderr: err })
       expect.that('Query succeeds', code, (v) => v === 0)
       const rows = JSON.parse(out.text())
-      expect.that('Both modes retain repeated text, tools and file observations', rows, (v) => v.length === 18 && v.filter((r) => r.content_text === 'Same text').length === 4 && v.filter((r) => r.tool_name === 'Read').length === 2 && v.filter((r) => r.content_text === 'Observed file contents').length === 2)
-      expect.that('Native store identifies editor and CLI', rows, (v) => v.every((r) => r.client_name === 'cursor') && v.filter((r) => r.entrypoint === 'editor').length === 8 && v.filter((r) => r.entrypoint === 'cli').length === 8)
+      expect.that('Both modes retain repeated text, tools and file observations', rows, (v) => v.length === 28 && v.filter((r) => r.content_text === 'Same text').length === 4 && v.filter((r) => r.tool_name === 'Read').length === 4 && v.filter((r) => r.content_text === 'Observed file contents').length === 2)
+      expect.that('Native store identifies editor and CLI', rows, (v) => v.every((r) => r.client_name === 'cursor') && v.filter((r) => r.entrypoint === 'editor').length === 13 && v.filter((r) => r.entrypoint === 'cli').length === 13)
+      const calls = rows.filter((row) => row.part_type === 'tool_call')
+      expect.that('Tool calls retain arguments and join each native result', calls, (v) => v.length === 10 && v.every((call) => call.tool_args && rows.some((row) => row.part_type === 'tool_result' && row.session_id === call.session_id && row.tool_result_for === call.tool_call_id)))
+      expect.that('Shell failures are queryable', rows.filter((row) => row.part_type === 'tool_result' && row.tool_name === 'Shell'), (v) => v.length === 4 && v.every((row) => row.is_error === true))
+      expect.that('Hook version belongs to the recovered generation', rows, (v) => v.filter((row) => row.entrypoint === 'editor').every((row) => row.client_version === '3.19.19') && v.filter((row) => row.entrypoint === 'cli').every((row) => row.client_version === '2026.09.08-6caf4ff'))
     })
     await step('health_and_detach', async () => {
       const status = await kernel.sources.started('cursor')?.status?.()
-      expect.that('Status names measured and unsupported coverage', status?.details, (v) => v.callbacks === callbacks && v.rows_written === 18 && v.policy_drops === 1 && v.history_recovery === 'native_store' && v.usage_supported === false)
+      expect.that('Status names measured and unsupported coverage', status?.details, (v) => v.callbacks === callbacks && v.rows_written === 28 && v.policy_drops === 1 && v.history_recovery === 'native_store' && v.usage_supported === false)
       await kernel.sources.stop('cursor')
       started = false
       const descriptor = buildPluginCatalog(loaded).clientDescriptors.get('cursor')
@@ -147,7 +151,7 @@ export async function run({ harness, expect }) {
     expect.that('Every callback has receive telemetry', traces.filter((t) => t.name === 'cursor.hook.receive'), (v) => v.length === callbacks)
     expect.that('Privacy decision is visible in telemetry', traces, (v) => v.some((t) => t.attributes?.reason === 'usage_policy'))
     const logs = await expect.logs()
-    expect.that('Native recovery emits evidence for both frontends', logs.filter((l) => l.body === 'cursor.recovery.recorded'), (v) => v.length === 2 && v.every((l) => Number(l.attributes?.rows_written) === 8))
+    expect.that('Native recovery emits evidence for both frontends', logs.filter((l) => l.body === 'cursor.recovery.recorded'), (v) => v.length === 2 && v.every((l) => Number(l.attributes?.rows_written) === 13))
     expect.that('Storage path emitted row evidence', logs, (v) => v.some((l) => l.body === 'cursor.hook.recorded' && Number(l.attributes?.rows_written) === 1))
   } finally {
     if (started) await kernel.sources.stop('cursor')
