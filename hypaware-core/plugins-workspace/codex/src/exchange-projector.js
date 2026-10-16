@@ -219,6 +219,22 @@ export function createCodexExchangeProjector(opts = {}) {
 
       /** @type {JsonObject} */
       const codexAttributes = codexContext?.attributes ? { ...codexContext.attributes } : {}
+      const repo = codexRepoEnrichment(codexContext?.workspaces, cwd, resolver)
+      if (repo?.status === 'enriched') {
+        codexAttributes.workspace = repo.workspace
+        setIfString(codexAttributes, 'git_origin_url', repo.git_remote)
+        setIfString(codexAttributes, 'git_commit', repo.head_sha)
+        if (repo.has_changes !== undefined) codexAttributes.has_changes = repo.has_changes
+      } else if (repo) {
+        // No path, hashed or raw: the reason is the whole diagnosis.
+        ctx?.log?.info?.('plugin.codex.workspace_enrichment_withheld', {
+          component: 'codex',
+          operation: 'workspace_enrichment',
+          status: 'withheld',
+          reason: repo.reason,
+          exchange_id: input.exchange_id,
+        })
+      }
       // The projector never supplies message_id today, so every row
       // takes the gateway's fallback identity. Stamp the codex-side
       // signal for symmetry with the @hypaware/claude adapter.
@@ -237,10 +253,11 @@ export function createCodexExchangeProjector(opts = {}) {
         cwd: recordedContext.cwd,
         git_branch: recordedContext.git_branch,
         // @ref LLP 0032#capture: repo identity for the graph bridge (Repo/Commit).
-        // repo_root is intentionally omitted for Codex (left null). See
-        // resolveCodexContext. @ref LLP 0032#codex-repo-root
-        git_remote: codexContext?.git_remote,
-        head_sha: codexContext?.head_sha,
+        // Only git_remote/head_sha are first-class: they need no repo root, and
+        // repo_root stays null because Codex exposes no verified git toplevel
+        // and the workspace may be a repo subdir. @ref LLP 0032#codex-repo-root
+        git_remote: repo?.status === 'enriched' ? repo.git_remote : undefined,
+        head_sha: repo?.status === 'enriched' ? repo.head_sha : undefined,
         client_name: recordedContext.client_name,
         client_version: recordedContext.client_version,
         entrypoint: recordedContext.entrypoint,
@@ -806,11 +823,9 @@ function resolveCodexContext(input, provider, path, reqBody) {
   const userAgent = readHeader(input.request_headers, 'user-agent')
   const client = codexClientFromUserAgent(userAgent)
   const inBandCwd = firstString(readRecordedCwd(reqBody), readStringKey(metadata, 'cwd'))
-  const workspace = selectCodexWorkspace(metadata, inBandCwd)
-  const workspaceInfo = workspace?.info
-  const remoteUrls = isPlainObject(workspaceInfo?.associated_remote_urls)
-    ? workspaceInfo.associated_remote_urls
-    : undefined
+  const workspaces = readKey(metadata, 'workspaces')
+  const workspaceMap = isPlainObject(workspaces) ? workspaces : undefined
+  const workspace = selectCodexWorkspace(workspaceMap, inBandCwd)
   const thread_id = firstString(
     readStringKey(clientMetadata, 'thread_id'),
     readStringKey(metadata, 'thread_id'),
@@ -877,15 +892,6 @@ function resolveCodexContext(input, provider, path, reqBody) {
   // verify that, so when they do not, say so on the row.
   // @ref LLP 0151#lineage-conflict [implements]: the tie-break leaves evidence.
   const lineage_conflict = lineageConflict(clientMetadata, metadata)
-  // Strip any credential userinfo at ingress, before it reaches the first-class
-  // `git_remote` field or the `attributes.codex.git_origin_url` mirror.
-  // @ref LLP 0032#remote-redaction
-  const git_origin_url = redactRemoteUserinfo(readStringKey(remoteUrls, 'origin'))
-  const git_commit = readStringKey(workspaceInfo, 'latest_git_commit_hash')
-  const has_changes = typeof workspaceInfo?.has_changes === 'boolean'
-    ? workspaceInfo.has_changes
-    : undefined
-
   /** @type {JsonObject} */
   const attributes = {}
   setIfString(attributes, 'thread_id', thread_id)
@@ -899,10 +905,6 @@ function resolveCodexContext(input, provider, path, reqBody) {
   setIfString(attributes, 'lineage_source', lineage_source)
   setIfString(attributes, 'lineage_conflict', lineage_conflict)
   if (turn_started_at_unix_ms !== undefined) attributes.turn_started_at_unix_ms = turn_started_at_unix_ms
-  setIfString(attributes, 'workspace', workspace?.path)
-  setIfString(attributes, 'git_origin_url', git_origin_url)
-  setIfString(attributes, 'git_commit', git_commit)
-  if (has_changes !== undefined) attributes.has_changes = has_changes
 
   return {
     thread_id,
@@ -915,9 +917,9 @@ function resolveCodexContext(input, provider, path, reqBody) {
     // workspace key for the ONE resolved cwd (gate + stamp). `selectCodexWorkspace`
     // substitutes the first `workspaces` key when none matches, which is a guess
     // about a directory the session may never have run in, so it must not decide
-    // a `.hypignore` verdict. The key still enriches (`attributes.codex.workspace`,
-    // git_*) and still supplies the cwd on the subscription route as a last
-    // resort, below: see `workspace_cwd`.
+    // a `.hypignore` verdict. The key still supplies the cwd on the subscription
+    // route as a last resort, below: see `workspace_cwd`. It no longer enriches
+    // on its own say: see `codexRepoEnrichment`.
     cwd: inBandCwd,
     // The key as a LAST-RESORT cwd, carried apart from the in-band one so the
     // call site can rank it BELOW the rollout (#480). Set only when the request
@@ -927,26 +929,20 @@ function resolveCodexContext(input, provider, path, reqBody) {
     // still not stand in for it).
     // @ref LLP 0083#workspace-key-ranks-last [implements]: in-band, then
     // rollout, then the key
-    workspace_cwd: inBandCwd ? undefined : workspace?.path,
+    workspace_cwd: inBandCwd ? undefined : workspace,
     // Set only when the substitution was refused, so the caller can log it
     // rather than let a discarded guess vanish. Refused is narrower than
     // "different bytes": see `workspaceCoversCwd`.
     // @ref LLP 0160#decision [implements]: an ancestor key was never a guess.
-    refused_workspace_cwd: workspace && inBandCwd && !workspaceCoversCwd(workspace.path, inBandCwd)
-      ? workspace.path
+    refused_workspace_cwd: workspace && inBandCwd && !workspaceCoversCwd(workspace, inBandCwd)
+      ? workspace
       : undefined,
     client_version: client.version,
     entrypoint: originator,
     sandbox,
-    // @ref LLP 0032#capture: repo identity for the graph bridge, already in the
-    // turn metadata (also kept in attributes.codex.* for provenance). Only
-    // git_remote/head_sha are first-class: they feed Repo/Commit convergence and
-    // need no repo root. repo_root is deliberately NOT derived from the workspace
-    // path. Codex exposes no verified git toplevel, and the workspace may be a
-    // repo *subdir*, which would mis-relativize (or collide) File keys. Codex
-    // File nodes therefore keep absolute keys in V1. @ref LLP 0032#codex-repo-root
-    git_remote: git_origin_url,
-    head_sha: git_commit,
+    // The raw map, so repository enrichment can be chosen against the cwd the
+    // call site resolves rather than the in-band one (`codexRepoEnrichment`).
+    workspaces: workspaceMap,
     attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
   }
 }
@@ -1140,20 +1136,62 @@ function codexClientFromUserAgent(userAgent) {
 }
 
 /**
- * @param {Record<string, unknown> | undefined} metadata
+ * The `workspaces` key standing in for the in-band `cwd`: the nearest one
+ * covering it, else the first. Feeds only the last-resort cwd and the refusal
+ * signal; enrichment is chosen separately, against the resolved cwd.
+ *
+ * @param {Record<string, unknown> | undefined} workspaces
  * @param {string | undefined} cwd
- * @returns {{ path: string, info?: Record<string, unknown> } | undefined}
+ * @returns {string | undefined}
  */
-function selectCodexWorkspace(metadata, cwd) {
-  const workspaces = readKey(metadata, 'workspaces')
-  if (!isPlainObject(workspaces)) return undefined
+function selectCodexWorkspace(workspaces, cwd) {
+  if (!workspaces) return undefined
   const workspacePaths = Object.keys(workspaces).filter((key) => key.length > 0)
-  const workspacePath = nearestCoveringWorkspace(workspacePaths, cwd) ?? workspacePaths[0]
-  if (!workspacePath) return undefined
-  const info = readKey(workspaces, workspacePath)
+  return nearestCoveringWorkspace(workspacePaths, cwd) ?? workspacePaths[0]
+}
+
+/**
+ * The repository identity a row may carry from the `workspaces` map: the
+ * nearest key covering the RESOLVED `cwd` (in-band, rollout, or the key itself
+ * as last resort), and only when the shared matcher does not classify that key
+ * `ignore`. Otherwise nothing, and the row keeps its conversation, lineage and
+ * other Codex attributes without the four mirrors and `git_remote`/`head_sha`.
+ *
+ * Covering, because a key the session never ran in is a guess and its remote is
+ * capture evidence under `inventory = "session_repos"` (#1189). Not `ignore`,
+ * because nearest-governs is not monotone down the chain: a covering ancestor
+ * declared `ignore` can admit a turn through a nested loosening, and its
+ * identity must still not ride on that row. The second test is one more
+ * `resolve` on the resolver's own TTL cache, keyed on an ancestor of a cwd the
+ * gate just resolved, and runs only for a row already admitted.
+ *
+ * @ref LLP 0506#decision [implements]: enrichment needs a covering, non-ignored key
+ * @ref LLP 0032#remote-redaction [implements]: userinfo stripped at ingress
+ * @param {Record<string, unknown> | undefined} workspaces
+ * @param {string | undefined} cwd
+ * @param {UsagePolicyResolver} resolver
+ * @returns {{ status: 'enriched', workspace: string, git_remote?: string, head_sha?: string, has_changes?: boolean }
+ *   | { status: 'withheld', reason: 'not_covering' | 'workspace_ignored' }
+ *   | undefined}
+ */
+function codexRepoEnrichment(workspaces, cwd, resolver) {
+  if (!workspaces) return undefined
+  const workspacePaths = Object.keys(workspaces).filter((key) => key.length > 0)
+  if (workspacePaths.length === 0) return undefined
+  const workspace = nearestCoveringWorkspace(workspacePaths, cwd)
+  if (!workspace) return { status: 'withheld', reason: 'not_covering' }
+  if (resolver.resolve(workspace).class === 'ignore') return { status: 'withheld', reason: 'workspace_ignored' }
+  const info = readKey(workspaces, workspace)
+  const workspaceInfo = isPlainObject(info) ? info : undefined
+  const remoteUrls = isPlainObject(workspaceInfo?.associated_remote_urls)
+    ? workspaceInfo.associated_remote_urls
+    : undefined
   return {
-    path: workspacePath,
-    info: isPlainObject(info) ? info : undefined,
+    status: 'enriched',
+    workspace,
+    git_remote: redactRemoteUserinfo(readStringKey(remoteUrls, 'origin')),
+    head_sha: readStringKey(workspaceInfo, 'latest_git_commit_hash'),
+    has_changes: typeof workspaceInfo?.has_changes === 'boolean' ? workspaceInfo.has_changes : undefined,
   }
 }
 
@@ -1416,12 +1454,11 @@ function resolveRequestId(input) {
  * So this compares paths, not directories, in both directions: a symlinked
  * spelling of one tree reads as a refusal, and a lexical descendant that is
  * really a symlink out of the key's tree reads as covered. The gate itself
- * still resolves over every spelling, so no verdict turns on this. Selection
- * now does, which is new since #1189 and is the reason this paragraph no longer
- * says "reporting-only": where the `cwd` and a key spell one tree differently,
- * nothing covers, selection falls back to the first key, and the #1189 leak
- * survives at that spelling. Knowingly retained, for the hot-path reason above
- * (LLP 0160#decision retains it here; #479 is closed only at the gate).
+ * still resolves over every spelling, so no verdict turns on this. Enrichment
+ * does: where the `cwd` and a key spell one tree differently, nothing covers
+ * and the row goes unenriched (LLP 0506#decision), the safe side of the miss.
+ * Knowingly retained, for the hot-path reason above (LLP 0160#decision retains
+ * it here; #479 is closed only at the gate).
  *
  * @ref LLP 0069#requirements [implements]: R8, the one shared equal-or-descendant
  * test, never a second copy of the path rule
@@ -1451,41 +1488,12 @@ function workspaceCoversCwd(workspacePath, cwd) {
  * was sitting in the same map (#1189). Running the one equal-or-descendant rule
  * on both sides removes every case where a covering key existed and lost.
  *
- * It does not remove every ignored-tree remote, and the residue is worth
- * stating rather than reading "whole class" for it. Besides the substitution
- * LLP 0083 priced, where no key covers the `cwd` at all (the `@ref` below), two
- * further cases survive, and neither is created here.
- *
- * The larger one is the whole **subscription route**. The `cwd` passed in is the
- * in-band one, which that route never states, so the guard below returns
- * `undefined` and the first key is selected even when a covering key is sitting
- * in the map: the row is admitted on the *rollout* `cwd` and still carries the
- * first key's remote, and, because `refused_workspace_cwd` is also computed from
- * the in-band value, with no warn either. This fix therefore covers the in-band
- * half of #1189 only. Reaching the other half means running the predicate
- * against the rollout `cwd`, which LLP 0350#evidence names as the open half of
- * every option and LLP 0083#workspace-key-ranks-last leaves silent on purpose,
- * so it is not a selection defect to fix here.
- *
- * The smaller one: a covering key is an ancestor of the `cwd`, and
- * nearest-governs is not monotone down that chain (`LLP 0160#decision`), so an
- * ancestor that itself resolves `ignore` under a nested loosening still enriches
- * the admitted row, and, because it does cover, does so with no
- * `refused_workspace_cwd`. This one is NOT merely de-randomised, and calling it
- * that understates it: where the ignored ancestor already sorted first,
- * `master` produced the identical row, but where a NON-covering key sorted
- * first `master` enriched from that key and warned, so in those orderings the
- * row is new here and the warn is gone with it. Verified both ways (`ignore`
- * at `/work/outer`, `local-only` at `/work/outer/proj`, cwd
- * `/work/outer/proj/sub`): with `/work/clean` listed first, `master` stamps
- * `acme/clean` and warns, this stamps `acme/SECRET` and does not. Accepted
- * rather than overlooked: withholding it is LLP 0350 (C), which costs a second
- * usage-policy resolution per exchange that LLP 0049 R6 does not budget for,
- * and the remote it now names is at least the tree the session ran in.
- *
- * Both are the enrichment question LLP 0350 (B)/(C) is open on, so both are
- * deliberately left unpinned by a test: pinning them would be the accepted-test
- * problem LLP 0350#consequences already warns (B) about.
+ * Two residues this left (the subscription route, where the in-band `cwd` is
+ * absent, and a covering ancestor that is itself `ignore` under a nested
+ * loosening) are closed downstream, not here: enrichment is now chosen by
+ * `codexRepoEnrichment` against the RESOLVED `cwd` and withheld from an ignored
+ * key (LLP 0506#decision). What this selection still decides is only the
+ * last-resort `cwd` and `refused_workspace_cwd`, both from the in-band value.
  *
  * Longest-wins rather than first-covering, because `workspaces` may declare
  * nested trees: for a `cwd` of `/work/proj/sub` with both `/work` and
@@ -1522,8 +1530,9 @@ function workspaceCoversCwd(workspacePath, cwd) {
  * @ref LLP 0350#options: option (F). This changes WHICH key the last-ranked
  * source picks, not the RANK of the sources, which is what
  * LLP 0083#workspace-key-ranks-last settled and which is untouched here: the
- * key still loses the cwd to in-band and to the rollout, still enriches, and is
- * still substituted when no key covers the cwd at all.
+ * key still loses the cwd to in-band and to the rollout, and is still
+ * substituted as the cwd when the request states none. Whether it enriches is
+ * LLP 0506's rule, applied in `codexRepoEnrichment` with this same helper.
  *
  * @param {readonly string[]} workspacePaths
  * @param {string | undefined} cwd

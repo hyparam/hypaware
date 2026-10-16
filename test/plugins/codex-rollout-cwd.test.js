@@ -210,7 +210,10 @@ test('a workspaces key does not preempt the rollout session_meta.cwd (#480)', ()
   assert.equal(lookups, 1, 'a declared workspaces map must not skip the rollout lookup')
 })
 
-test('the rollout cwd is stamped on the row while the workspace key still enriches it (#480)', () => {
+test('the rollout cwd is stamped on the row, and a key not covering it no longer enriches (#480, #1189)', () => {
+  // Reversed on purpose from #480's "the key still enriches": a key the
+  // rollout cwd does not sit under is a guess, and under LLP 0506 a guess
+  // supplies no repository identity.
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
     rolloutCwd: fakeRolloutCwd({ [SUBSCRIPTION_THREAD_ID]: '/work/clean/real' }),
@@ -233,11 +236,77 @@ test('the rollout cwd is stamped on the row while the workspace key still enrich
     response_body: JSON.stringify({ output_text: 'done' }),
   }), context()))
   assert.ok(projection && projection !== USAGE_POLICY_DROP)
-  // Demoting the key costs it the cwd, not its enrichment role (LLP 0032#capture).
   assert.equal(projection.cwd, '/work/clean/real', 'the row records where the session actually ran')
+  assert.equal(projection.conversation_id, SUBSCRIPTION_THREAD_ID)
+  assert.equal(projection.attributes.codex.workspace, undefined)
+  assert.equal(projection.git_remote, undefined)
+  assert.equal(projection.head_sha, undefined)
+})
+
+// @ref LLP 0506#decision [tests]: selection runs against the RESOLVED cwd, so
+// the subscription route (rollout cwd) picks the covering key too. This is the
+// LLP 0350#evidence subscription reproduction.
+test('subscription route: the key covering the ROLLOUT cwd enriches, not the first-listed ignored one (#1189)', () => {
+  let lookups = 0
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: {
+      /** @param {string} threadId */
+      resolve(threadId) { lookups += 1; return threadId === SUBSCRIPTION_THREAD_ID ? '/work/clean/sub' : undefined },
+    },
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: SUBSCRIPTION_THREAD_ID,
+        workspaces: {
+          '/work/ignored/secret-proj': {
+            associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+            latest_git_commit_hash: 'deadbeef',
+          },
+          '/work/clean': {
+            associated_remote_urls: { origin: 'https://github.com/acme/clean.git' },
+            latest_git_commit_hash: 'feedface',
+          },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP)
+  assert.equal(lookups, 1, 'the rollout is read once, as before')
+  assert.equal(projection.cwd, '/work/clean/sub')
+  assert.equal(projection.git_remote, 'https://github.com/acme/clean.git')
+  assert.equal(projection.head_sha, 'feedface')
+  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.ok(!JSON.stringify(projection).includes('SECRET'))
+})
+
+test('with no rollout, a clean workspace key that IS the cwd still enriches (last resort, #1189)', () => {
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: fakeRolloutCwd({}),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: SUBSCRIPTION_THREAD_ID,
+        workspaces: {
+          '/work/clean/proj': { associated_remote_urls: { origin: 'git@github.com:acme/clean.git' } },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  assert.equal(projection.cwd, '/work/clean/proj')
   assert.equal(projection.attributes.codex.workspace, '/work/clean/proj')
   assert.equal(projection.git_remote, 'git@github.com:acme/clean.git')
-  assert.equal(projection.head_sha, 'deadbeef')
 })
 
 test('the workspace key still gates when there is no rollout to outrank it (#480)', () => {
