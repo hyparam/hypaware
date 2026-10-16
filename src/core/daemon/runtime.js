@@ -1998,7 +1998,7 @@ export async function requestDaemonStop({
 }) {
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
-    if (entry) clearPidFile(stateRoot)
+    if (entry) clearStalePidFile(stateRoot)
     // A gateway that is already gone is what a hard kill leaves behind, so
     // this is the arm of #2288 that actually accumulates: the child it
     // supervised went with it and its pid file below `processing/` is
@@ -2014,7 +2014,7 @@ export async function requestDaemonStop({
     } catch (err) {
       const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
       if (code === 'ESRCH') {
-        clearPidFile(stateRoot)
+        clearStalePidFile(stateRoot)
         clearStalePidFile(processingStateRoot(stateRoot))
         return 'not_running'
       }
@@ -2024,7 +2024,7 @@ export async function requestDaemonStop({
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (!processIsAlive(entry.pid)) {
-      clearPidFile(stateRoot)
+      clearStalePidFile(stateRoot)
       // The supervised processing child dies with the gateway that spawned it
       // and leaves its own pid file below `processing/` behind whenever it got
       // no shutdown to run (#2288). Reconciled rather than deleted: that pid
