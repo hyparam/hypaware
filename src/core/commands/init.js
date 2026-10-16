@@ -76,7 +76,8 @@ export function buildPickerBackfillRunner(ctx, skipOptional = false) {
  * presets land on stderr with the list of available names. What follows
  * the preset name is gated before the preset runs: a help flag renders
  * help, and a flag `hyp setup` does not advertise is a usage error, so
- * neither reaches the preset's config write.
+ * neither reaches the preset's config write. Any other setup option and
+ * any positional is the preset's own to read or refuse.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -118,7 +119,7 @@ export async function runInit(argv, ctx) {
     // choices would be dropped while setup reports success.
     const pickerOnly = presetArgv.find((t) => /^--(github|no-backfill)(=|$)/.test(t))
     if (pickerOnly !== undefined) {
-      ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with --source instead\n`)
+      ctx.stderr.write(`hyp setup: ${pickerOnly.split('=')[0]} is not supported with a preset; name choices with hyp setup --yes --source instead\n`)
       return 2
     }
     return preset.run(presetArgv, ctx)
