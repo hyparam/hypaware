@@ -5,7 +5,7 @@
 **Systems:** Sources, Cache, Plugins
 **Author:** Phil / Codex
 **Date:** 2026-09-29
-**Related:** LLP 0118, LLP 0119, LLP 0120, LLP 0122, LLP 0104
+**Related:** LLP 0118, LLP 0119, LLP 0120, LLP 0122, LLP 0104, LLP 0417
 
 ## Intent
 
@@ -54,6 +54,41 @@ across tables is retryable, not globally atomic: a failure can temporarily
 leave legacy copies, but retry converges and the poll watermark stays behind.
 Reconciliation never changes another client's or session's rows. Usage-policy
 and explicit session-purge exclusions still govern every incoming row.
+
+## Read-to-commit guard {#read-commit-guard}
+
+The partition guards serialize commits, not the reads they commit. Polling and
+explicit backfill run in separate processes, so a backfill could read a session,
+lose the CPU while Hermes rewinds it and the poll reconciles the rewound view,
+then commit its older snapshot over that newer one (issue #2277). Each writer
+therefore claims one cross-process guard per reconcile scope before its
+authoritative read and holds it through the reconcile commit.
+
+The guard reuses the cache mutation guard of LLP 0417#cache-mutation-guard,
+keyed on the cache root, the dataset and the scope's exact `where`
+(`client_name` and `session_id` for Hermes). It is a transient
+`.session-<hash>.mutation-lock` directory beside the dataset's partitions,
+removed on release; partition discovery finds no table in it, and no spool or
+cache file format changes. Distinct sessions never contend.
+
+Under the guard the writer reads the session and its visible messages in one
+SQLite read transaction, fingerprints exactly that view, and projects and
+commits it. The poll watermark advances to the committed view's mark only, so a
+later change is still seen as a change. Every path releases the guard, and a dry
+run takes none.
+
+Contention is bounded and visible. A poll that finds a session's guard held
+defers that session, logs it, and leaves its watermark so the next tick retries.
+A backfill waits a bounded time per session, then imports the rest, reports the
+session as busy in its scan summary and fails the run with
+`cache_partition_mutation_busy`, so a rerun is asked for rather than a partial
+import reported as complete.
+
+The scope guard is always taken before the partition guards inside the
+reconcile, and no holder of a partition guard takes a scope guard, so the order
+cannot cycle. Two simultaneous commits into the same partition still contend on
+the partition guard exactly as before; that is the existing fail-fast retry, not
+a new serialization.
 
 ## Boundaries
 
