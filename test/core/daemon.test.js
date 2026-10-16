@@ -621,6 +621,78 @@ test('runDaemon reload re-merges the central layer (does not re-read local alone
   }
 })
 
+test('a configured sink that fails to materialize degrades the boot, and a reload keeps it degraded (#2547)', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-sink-degraded-'))
+  let handle
+  try {
+    const installDir = await stageReloadPlugin(hypHome)
+    await writeLock(path.join(hypHome, 'hypaware'), {
+      schema_version: 1,
+      plugins: {
+        '@third-party/reload-fixture': {
+          name: '@third-party/reload-fixture',
+          version: '0.1.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-05-22T00:00:00.000Z',
+        },
+      },
+    })
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    // The fixture registers a source and no sink, so this instance cannot materialize.
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@third-party/reload-fixture', config: { value: 'before' } }],
+      sinks: { broken: { plugin: '@third-party/reload-fixture' } },
+    }))
+
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'sink-degraded-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+
+    const snap = handle.snapshot()
+    assert.equal(snap.state, 'degraded')
+    assert.deepEqual(snap.sources.map((s) => s.state), ['started'])
+    assert.equal(snap.warnings?.length, 1)
+    assert.match(snap.warnings[0], /^sink_materialize_failed: sink 'broken' \(sink_contribution_missing\): /)
+
+    // Reload does not materialize sinks, so it is no evidence the sink came up.
+    await handle.reload()
+    assert.equal(handle.snapshot().state, 'degraded')
+    const onDisk = readStatusFile(path.join(hypHome, 'hypaware'))
+    assert.equal(onDisk?.state, 'degraded')
+
+    await handle.stop()
+    await handle.done
+    handle = undefined
+
+    const raw = await fs.readFile(path.join(hypHome, 'hypaware', 'logs', 'daemon.log'), 'utf8')
+    const events = raw.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(events.some((e) => e.event === 'daemon.healthy'), false)
+    const failed = events.find((e) => e.event === 'daemon.sink_materialize_failed')
+    assert.equal(failed?.hyp_component, 'daemon')
+    assert.equal(failed?.instance, 'broken')
+    assert.equal(failed?.error_kind, 'sink_contribution_missing')
+    const degraded = events.find((e) => e.event === 'daemon.degraded')
+    assert.deepEqual(degraded?.failed_sinks, [{ instance: 'broken', error_kind: 'sink_contribution_missing' }])
+    assert.deepEqual(degraded?.failed_sources, [])
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 test('runDaemon health event derives from aggregate state and excludes failed sources (#138)', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-degraded-health-'))
   let handle
