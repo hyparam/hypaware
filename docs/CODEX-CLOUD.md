@@ -45,10 +45,30 @@ recording. Both use the existing file-backed Codex ChatGPT login. If that login
 is unavailable or unsupported, setup reports the incomplete step and continues;
 sign in through Codex and rerun setup to select the desired hosted rows.
 
-Reconfigure shows the saved choices. Clearing a hosted row stops future
+Reconfigure shows the choices saved by the hosted plugin. Clearing a hosted row stops future
 collection for that category. Keeping a row preserves existing thread IDs,
 history bounds and a narrower web-only or mobile-only CLI grant. Cancel and Back
 do not save changes. Unattended setup does not authenticate or grant hosted access.
+
+## Upgrading an earlier install
+
+Earlier builds ran hosted collection inside the `@hypaware/codex` plugin and
+kept its grant at `~/.hyp/hypaware/plugins/@hypaware/codex/cloud-connection.json`
+(under `$HYP_HOME` when set). The collector now lives in `@hypaware/codex-cloud`,
+which reads only its own grant, so after upgrading hosted collection stops until
+you choose it again. Rerun setup and select **Codex Cloud (experimental)**,
+**ChatGPT Work (experimental)** or both:
+
+```sh
+hyp setup
+```
+
+The old grant is left in place. It is not read, migrated or deleted, and you can
+remove that file once the new selection is saved. A narrow scope saved at the old
+location (specific chats, only Work web or only Work mobile, or a `--from-now`
+bound) is not migrated either: rerunning setup re-selects hosted collection with
+a new account-wide grant. To narrow it again, run `hyp codex-cloud connect` with
+the options you want after setup.
 
 ## Connect and import
 
