@@ -72,7 +72,7 @@ import {
  * @import { HypAwareV2Config, PluginConfigInstance, SourceContribution, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, OllamaCaptureStatus, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, OllamaCaptureStatus, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkMaterializeFailure, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
@@ -1939,6 +1939,8 @@ export async function collectHypAwareStatus(opts = {}) {
   // row in the snapshot, so the warning it persisted is the only record.
   // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
   const sinkMaterializePrefix = `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: `
+  // Also the first repair of the probation and recent-errors hints below.
+  const sinkMaterializeLogGrep = `grep -s sink_materialize_failed ${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')} ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`
   const sinkMaterializeFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.warnings)
     ? daemonStatusFile.warnings.filter((w) => typeof w === 'string' && w.startsWith(sinkMaterializePrefix))
     : []
@@ -1952,7 +1954,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // A restart alone reproduces the same error; it only helps once the
       // cause is fixed, because sinks are materialized at boot.
       repair: [
-        `grep -s sink_materialize_failed ${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')} ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`,
+        sinkMaterializeLogGrep,
         'hyp daemon restart  # after fixing the cause; sinks are materialized at boot',
       ],
     })
@@ -2740,6 +2742,10 @@ export async function collectHypAwareStatus(opts = {}) {
   try {
     remoteConfig = readConfigControlStatus({ stateRoot })
   } catch { /* best-effort probe */ }
+  // Kept so the recent-errors pass below, which reads the daemon log once,
+  // can name the sink that stopped this host confirming the revision.
+  /** @type {StatusDiagnostic | null} */
+  let rollbackDiagnostic = null
   if (remoteConfig?.lastRollback) {
     // The three values in this message are display-only, and none of them is
     // this build's own: the etag is whatever the joined server served, and
@@ -2762,12 +2768,13 @@ export async function collectHypAwareStatus(opts = {}) {
     // every diagnostic kind, not just this one.
     // @ref LLP 0225#decision [implements]: assembled prose is cleaned where it is assembled; the machine copy of the same values, `remote_config.last_rollback`, stays byte-exact
     const rolledBack = remoteConfig.lastRollback
-    diagnostics.push({
+    rollbackDiagnostic = {
       severity: 'warning',
       kind: 'remote_config_rolled_back',
       message: `remote config ${sanitizeLabel(rolledBack.etag) ?? ''} rolled back at ${sanitizeLabel(rolledBack.at) ?? ''} (${sanitizeLabel(rolledBack.reason) ?? ''})`,
       repair: ['fix the central config revision; the gateway re-applies when the served etag changes'],
-    })
+    }
+    diagnostics.push(rollbackDiagnostic)
   }
 
   // ----- client-action reconciler state (LLP 0036 / 0041) -----
@@ -2852,21 +2859,43 @@ export async function collectHypAwareStatus(opts = {}) {
   // whose `sinks` key the central merge dropped, leaves the gate armed over
   // the status-file fallback's recovered rows.
   // @ref LLP 0453#warning-rule [implements]: a destination outside the configured set does not warn, however the removal was spelled
+  const lastRollback = remoteConfig?.lastRollback
   const recentErrors = await countRecentErrors(
     stateRoot,
     sinksAreConfigured ? sinks : [],
     daemonStatusFile?.sinks,
+    lastRollback?.reason === 'probation_expired' && typeof lastRollback.at === 'string' ? Date.parse(lastRollback.at) : NaN,
   )
   const recentErrorCount = recentErrors.total
   diagnostics.push(...recentErrors.sinkDiagnostics)
+  // A probation that expired while a sink could not materialize says this
+  // host could not confirm the revision, not that the revision is bad, so the
+  // hint names the sink instead of blaming the config (issue #2547).
+  if (rollbackDiagnostic && recentErrors.probationSinkFailures.length > 0) {
+    const named = recentErrors.probationSinkFailures
+      .map((f) => `sink '${sanitizeLabel(f.instance) ?? 'unknown'}' (${sanitizeLabel(f.errorKind) ?? 'materialize_failed'})`)
+      .join(', ')
+    rollbackDiagnostic.message += `: this host could not confirm it because ${named} did not materialize`
+    rollbackDiagnostic.repair = [
+      sinkMaterializeLogGrep,
+      'fix the sink error the log shows; the revision itself may be fine',
+    ]
+  }
   if (recentErrors.warningCount > 0) {
+    // A restart reproduces a sink materialize failure, so it is offered only
+    // for the other errors, and never first when a sink failed.
+    const onlySinkFailures = recentErrors.sinkMaterialize === recentErrors.warningCount
     diagnostics.push({
       severity: 'warning',
       kind: 'recent_errors',
       // Export attempts have their own recovery-aware diagnostic. The history
       // count still includes them, but cannot make them actionable again.
       message: `${recentErrors.warningCount} error${recentErrors.warningCount === 1 ? '' : 's'} needing attention in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
-      repair: ['hyp daemon restart'],
+      repair: recentErrors.sinkMaterialize === 0
+        ? ['hyp daemon restart']
+        : onlySinkFailures
+          ? [sinkMaterializeLogGrep, 'fix the sink error the log shows']
+          : [sinkMaterializeLogGrep, 'hyp daemon restart  # for the other errors; a restart alone does not fix a sink materialize failure'],
     })
   }
 
@@ -4285,10 +4314,11 @@ const DEV_TELEMETRY_TAIL_BYTES = 1024 * 1024
  * @param {string} stateRoot
  * @param {SinkSnapshot[]} configuredSinks
  * @param {unknown} snapshotSinks
+ * @param {number} rollbackAtMs when a config probation expired, NaN otherwise
  * @param {number} [nowMs]
- * @returns {Promise<{ total: number, warningCount: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[] }>}
+ * @returns {Promise<{ total: number, warningCount: number, sinkMaterialize: number, breakdown: string[], sinkDiagnostics: StatusDiagnostic[], probationSinkFailures: SinkMaterializeFailure[] }>}
  */
-async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, nowMs = Date.now()) {
+async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, rollbackAtMs, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
   // Config-derived sink rows omit runtime stamps, so the last success comes
   // from the already-loaded daemon snapshot, read after the daemon has exited
@@ -4308,22 +4338,38 @@ async function countRecentErrors(stateRoot, configuredSinks, snapshotSinks, nowM
     }
   }
   const [gatewayLog, processingLog, sinkOutbox, devTelemetry] = await Promise.all([
-    countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
-    countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs),
+    countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs, rollbackAtMs),
+    countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs, rollbackAtMs),
     countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs, nowMs, lastSuccess),
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
-  const daemonLog = gatewayLog + processingLog
+  const daemonLog = gatewayLog.count + processingLog.count
+  const daemonLogSinkMaterialize = gatewayLog.sinkMaterialize + processingLog.sinkMaterialize
   /** @type {string[]} */
   const breakdown = []
-  if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)
-  if (devTelemetry.warningCount > 0) breakdown.push(`${devTelemetry.warningCount} in dev telemetry`)
+  if (daemonLog > 0) {
+    breakdown.push(`${daemonLog} in the daemon log${sinkMaterializeOfThem(daemonLogSinkMaterialize)}`)
+  }
+  if (devTelemetry.warningCount > 0) {
+    breakdown.push(`${devTelemetry.warningCount} in dev telemetry${sinkMaterializeOfThem(devTelemetry.sinkMaterialize)}`)
+  }
   return {
     total: daemonLog + sinkOutbox.total + devTelemetry.total,
     warningCount: daemonLog + devTelemetry.warningCount,
+    sinkMaterialize: daemonLogSinkMaterialize + devTelemetry.sinkMaterialize,
     breakdown,
     sinkDiagnostics: sinkOutbox.diagnostics,
+    // The kernel daemon is the processing child, so its log speaks first; a
+    // pre-split install keeps everything in the primary log.
+    probationSinkFailures: processingLog.probationSinkFailures.length > 0
+      ? processingLog.probationSinkFailures
+      : gatewayLog.probationSinkFailures,
   }
+}
+
+/** @param {number} n */
+function sinkMaterializeOfThem(n) {
+  return n > 0 ? `, ${n} of them sink materialize failure${n === 1 ? '' : 's'}` : ''
 }
 
 /**
@@ -4390,16 +4436,44 @@ async function readFileTail(filePath, maxBytes) {
 }
 
 /**
+ * How many sink materialize failures one boot's worth of the daemon log keeps
+ * for the probation hint. A boot logs one per configured sink that failed, so
+ * this only bounds a hostile or corrupt file.
+ */
+const PROBATION_SINK_FAILURES_MAX = 8
+
+/**
  * Count `level: "error"` records in the tail of the daemon log. This is the
  * production-side record: `openDaemonLog` runs on every boot, in every mode,
  * with no environment variable to enable it.
  *
+ * The same pass also answers the two questions the repair hints need (issue
+ * #2547), so the tail is read once. `sinkMaterialize` is how many of the
+ * counted errors are `daemon.sink_materialize_failed`, which a restart alone
+ * does not fix. `probationSinkFailures` is the sinks that failed to
+ * materialize in the boot that was running when a config probation expired
+ * at `rollbackAtMs`. A boot begins at `daemon.starting`. When that boot had
+ * not yet materialized its sinks by then (no materialize failure and no
+ * `daemon.healthy` or `daemon.degraded`), the expiry was found at boot, so
+ * the boot before it is the one that could not confirm the revision. A boot
+ * that did materialize with no failure explains nothing, whatever an earlier
+ * boot logged.
+ *
  * @param {string} logPath
  * @param {number} sinceMs
- * @returns {Promise<number>}
+ * @param {number} rollbackAtMs NaN when no probation expiry is in question
+ * @returns {Promise<{ count: number, sinkMaterialize: number, probationSinkFailures: SinkMaterializeFailure[] }>}
  */
-async function countDaemonLogErrors(logPath, sinceMs) {
+async function countDaemonLogErrors(logPath, sinceMs, rollbackAtMs) {
   let count = 0
+  let sinkMaterialize = 0
+  /** @type {SinkMaterializeFailure[]} */
+  let previousBoot = []
+  /** @type {SinkMaterializeFailure[]} */
+  let currentBoot = []
+  // True once the current boot has materialized its sinks, which it reports
+  // with a failure or with its `daemon.healthy` / `daemon.degraded` outcome.
+  let currentBootMaterialized = false
   for (const line of (await readFileTail(logPath, DAEMON_LOG_TAIL_BYTES)).split('\n')) {
     if (!line) continue
     /** @type {any} */
@@ -4410,11 +4484,33 @@ async function countDaemonLogErrors(logPath, sinceMs) {
       continue
     }
     if (!parsed || typeof parsed !== 'object') continue
+    const isSinkFailure = parsed.event === 'daemon.sink_materialize_failed'
+    if (Number.isFinite(rollbackAtMs)) {
+      const at = typeof parsed.ts === 'string' ? Date.parse(parsed.ts) : NaN
+      if (Number.isFinite(at) && at <= rollbackAtMs) {
+        if (parsed.event === 'daemon.starting') {
+          previousBoot = currentBoot
+          currentBoot = []
+          currentBootMaterialized = false
+        } else if (parsed.event === 'daemon.healthy' || parsed.event === 'daemon.degraded') {
+          currentBootMaterialized = true
+        } else if (isSinkFailure) {
+          currentBootMaterialized = true
+          if (currentBoot.length < PROBATION_SINK_FAILURES_MAX) {
+            currentBoot.push({
+              instance: typeof parsed.instance === 'string' ? parsed.instance : null,
+              errorKind: typeof parsed.error_kind === 'string' ? parsed.error_kind : null,
+            })
+          }
+        }
+      }
+    }
     if (parsed.level !== 'error') continue
     if (!recordedWithinWindow(parsed.ts, sinceMs)) continue
     count += 1
+    if (isSinkFailure) sinkMaterialize += 1
   }
-  return count
+  return { count, sinkMaterialize, probationSinkFailures: currentBootMaterialized ? currentBoot : previousBoot }
 }
 
 /**
@@ -4507,10 +4603,10 @@ async function countSinkOutboxBatches(sinksDir, sinceMs, nowMs, lastSuccess) {
  *
  * @param {string} telemetryDir
  * @param {number} sinceMs
- * @returns {Promise<{ total: number, warningCount: number }>}
+ * @returns {Promise<{ total: number, warningCount: number, sinkMaterialize: number }>}
  */
 async function countDevTelemetryErrors(telemetryDir, sinceMs) {
-  const result = { total: 0, warningCount: 0 }
+  const result = { total: 0, warningCount: 0, sinkMaterialize: 0 }
   /** @type {string[]} */
   let entries
   try {
@@ -4530,6 +4626,9 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
         if (!recordedWithinWindow(/** @type {any} */ (parsed).timestamp, sinceMs)) continue
         result.total += 1
         if (parsed.body !== 'sink.export_batch.failed') result.warningCount += 1
+        // The OTel half of `daemon.sink_materialize_failed`, so the repair
+        // hint treats it the same way (issue #2547).
+        if (parsed.body === 'sink.materialize_failed') result.sinkMaterialize += 1
       } catch {
         // skip malformed lines silently
       }
