@@ -752,6 +752,9 @@ export async function runPluginRemove(argv, ctx) {
     return 1
   }
   ctx.stdout.write(`removed ${name}\n`)
+  if (result.cleanupSkipped !== undefined) {
+    ctx.stderr.write(`hyp plugin remove: deleted nothing on disk: ${result.cleanupSkipped}\n`)
+  }
   return 0
 }
 

@@ -1,8 +1,11 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { isWithinDir } from '../runtime/contribution_names.js'
+
+/** @import { Stats } from 'node:fs' */
 
 /**
  * Layout helpers for the plugin install root. Everything lives under
@@ -110,6 +113,71 @@ export function installDirIsContained(stateDir, name) {
 export function isRemovableInstallDir(stateDir, name, installDir) {
   return installDirIsContained(stateDir, name) &&
     path.resolve(installDir) === path.resolve(pluginInstallDir(stateDir, name))
+}
+
+/**
+ * Check on disk that the install destination for `name` sits where its
+ * lexical path says, before anything creates, replaces or deletes it.
+ * `name` must already be an install name ({@link isInstallName}).
+ *
+ * The plugin install root is resolved as configured, so a `HYP_HOME`
+ * (or the root itself) under a symlink keeps working. Below the root,
+ * a scope directory must be a real directory: a `@scope` that is a
+ * symlink would steer a recursive delete, mkdir or rename outside the
+ * root, or onto another scope's plugins. The destination itself may be
+ * anything, including a link: both lanes and removal unlink a final
+ * link rather than follow it. A component that cannot be inspected
+ * (permissions, a loop) refuses. A missing component is fine, since
+ * nothing below it exists to be followed.
+ *
+ * This is bounded work along one path (at most three stat calls), not a
+ * sandbox: a hostile writer racing the check can still swap a component
+ * between it and the mutation.
+ *
+ * @param {string} stateDir
+ * @param {string} name install name
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ * @ref LLP 0508#filesystem-parent [implements]: resolve the configured root,
+ *   refuse a linked or uninspectable component below it
+ */
+export async function checkInstallDestination(stateDir, name) {
+  const root = path.join(stateDir, PLUGIN_INSTALL_SUBDIR)
+  const dir = pluginInstallDir(stateDir, name)
+  const below = name.includes('/') ? [path.dirname(dir), dir] : [dir]
+  try {
+    const rootStat = await fs.stat(root)
+    if (!rootStat.isDirectory()) return { ok: false, reason: `${root} is not a directory` }
+  } catch (err) {
+    const code = errorCode(err)
+    if (code !== 'ENOENT') return { ok: false, reason: `cannot inspect ${root} (${code})` }
+    // A dangling link at the root reports ENOENT through stat too.
+    try {
+      await fs.lstat(root)
+      return { ok: false, reason: `${root} is a symbolic link to nothing` }
+    } catch (lerr) {
+      const lcode = errorCode(lerr)
+      return lcode === 'ENOENT' ? { ok: true } : { ok: false, reason: `cannot inspect ${root} (${lcode})` }
+    }
+  }
+  for (const [i, component] of below.entries()) {
+    /** @type {Stats} */
+    let st
+    try {
+      st = await fs.lstat(component)
+    } catch (err) {
+      const code = errorCode(err)
+      return code === 'ENOENT' ? { ok: true } : { ok: false, reason: `cannot inspect ${component} (${code})` }
+    }
+    if (i === below.length - 1) return { ok: true }
+    if (st.isSymbolicLink()) return { ok: false, reason: `${component} is a symbolic link` }
+    if (!st.isDirectory()) return { ok: false, reason: `${component} is not a directory` }
+  }
+  return { ok: true }
+}
+
+/** @param {unknown} err */
+function errorCode(err) {
+  return /** @type {NodeJS.ErrnoException} */ (err)?.code ?? 'unknown'
 }
 
 /** @param {string} stateDir */

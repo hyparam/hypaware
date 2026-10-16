@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-10-16
 **Related:** LLP 0005, LLP 0007
+**Extended-by:** LLP 0508 (#filesystem-parent: the destination is also checked on disk, so a linked `@scope` refuses; #removal: a withheld delete is reported)
 
 > Extends [LLP 0007](./0007-plugin-install-and-locking.decision.md#install-root-and-lock-file)
 > with the shape a manifest name must have before `hyp plugin install` or
