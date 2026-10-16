@@ -28,7 +28,7 @@ import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFil
 import { partitionSpecForDeclaration, partitionSpecMigrationDue, sortColumnsForDeclaration } from '../iceberg/partition-spec.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
 import { sidecarPathFor } from '../search/searchable_columns.js'
-import { isPlainObject } from '../util/json_util.js'
+import { errCode, isPlainObject } from '../util/json_util.js'
 
 /**
  * @import {
@@ -81,6 +81,14 @@ export const MAX_FAILURES_BEFORE_BUDGET_BREAK = 4
  * on the next maintenance tick that finds it stale.
  */
 const ORPHAN_GRACE_MS = 60 * 60 * 1000
+
+/**
+ * How many generation names one compaction tries before giving up. Each
+ * miss is a dir an earlier interrupted swap left behind, and the orphan
+ * sweep reclaims those, so hitting this cap means something keeps
+ * recreating them.
+ */
+const GENERATION_RESERVE_ATTEMPTS = 8
 
 /**
  * Which compaction writer produced the outcome a cursor records.
@@ -377,9 +385,9 @@ function errorKindOf(err) {
  * @typedef {object} GenerationLayout
  * @property {'source-table' | 'epoch'} kind
  * @property {string} liveDir  name of the generation dir the cursor points at
- * @property {() => string} nextDirName  fresh name for the replacement generation
+ * @property {(attempt: number) => string} nextDirName  candidate name for the replacement generation; a later attempt names a different dir
  * @property {boolean} commitEmpty  commit a rewrite that found no columns (source-table) or abort it (legacy)
- * @property {number} [newEpoch]  epoch the legacy layout advances to, reported after compaction
+ * @property {(nextDir: string) => number | undefined} [epochOf]  epoch the legacy layout advances to when it publishes `nextDir`, reported after compaction
  * @property {(nextDir: string, rowCount: number, outcome: { dataFilesBefore: number, dataFilesAfter: number }) => PartitionCursor} cursorAfter  cursor to write once the generation swap commits
  */
 
@@ -396,7 +404,7 @@ function generationLayout(cursor) {
       // Iceberg metadata stores absolute `file://` URLs, so a rewrite
       // cannot rename directories after writing: pick a fresh name and
       // point the cursor at it.
-      nextDirName: () => `table-${Date.now()}`,
+      nextDirName: (attempt) => attempt === 0 ? `table-${Date.now()}` : `table-${Date.now()}-${attempt}`,
       commitEmpty: true,
       cursorAfter: (nextDir, rowCount, outcome) => ({
         epoch: cursor.epoch,
@@ -415,15 +423,18 @@ function generationLayout(cursor) {
       }),
     }
   }
-  const newEpoch = cursor.epoch + 1
+  // A purge rewrite reuses this cursor shape for a `table-*` generation;
+  // only an `epoch=` dir names the epoch it advances to.
+  /** @param {string} nextDir */
+  const epochOf = (nextDir) => nextDir.startsWith('epoch=') ? Number(nextDir.slice('epoch='.length)) : cursor.epoch + 1
   return {
     kind: 'epoch',
     liveDir: `epoch=${cursor.epoch}`,
-    nextDirName: () => `epoch=${newEpoch}`,
+    nextDirName: (attempt) => `epoch=${cursor.epoch + 1 + attempt}`,
     commitEmpty: false,
-    newEpoch,
-    cursorAfter: (_nextDir, rowCount, outcome) => ({
-      epoch: newEpoch,
+    epochOf,
+    cursorAfter: (nextDir, rowCount, outcome) => ({
+      epoch: epochOf(nextDir),
       rowCount,
       compaction: {
         previousEpoch: cursor.epoch,
@@ -1287,8 +1298,7 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   // generation, or the swap would silently drop it.
   const sortColumns = tableInfo?.sortColumns
 
-  const newDirName = layout.nextDirName()
-  const newDir = path.join(partitionDir, newDirName)
+  const { newDirName, newDir } = await reserveGenerationDir(partitionDir, layout)
 
   const seen = new Set()
   /** @type {ColumnSpec[] | null} */
@@ -1420,7 +1430,12 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   }
 
   if (!columns) {
-    if (!layout.commitEmpty) return null
+    if (!layout.commitEmpty) {
+      // Nothing was written, so the reservation is still the empty dir
+      // this attempt made; a non-recursive rmdir cannot take anything else.
+      await fsPromises.rmdir(newDir)
+      return null
+    }
     // An empty generation holds no rows at all, so no fallbacks either.
     await writeCursor(partitionDir, {
       ...layout.cursorAfter(newDirName, 0, { dataFilesBefore, dataFilesAfter: 0 }),
@@ -1459,12 +1474,39 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
 
   return {
-    newEpoch: layout.newEpoch,
+    newEpoch: layout.epochOf?.(newDirName),
     rowCount: totalRows,
     dataFilesBefore,
     dataFiles: newDataFiles,
     bytesWritten: streamed?.bytesWritten ?? 0,
   }
+}
+
+/**
+ * Claim a generation dir no earlier attempt wrote into. A swap that died
+ * after writing its output but before publishing the cursor leaves that
+ * output under the very name the retry would pick, and the lazy sink
+ * opens an existing table for append, so the retry used to publish the
+ * abandoned rows plus its own. A non-recursive mkdir fails on any
+ * pre-existing candidate, so the abandoned dir is skipped, never reused,
+ * and left for the orphan sweep.
+ *
+ * @param {string} partitionDir
+ * @param {GenerationLayout} layout
+ * @returns {Promise<{ newDirName: string, newDir: string }>}
+ */
+async function reserveGenerationDir(partitionDir, layout) {
+  for (let attempt = 0; attempt < GENERATION_RESERVE_ATTEMPTS; attempt++) {
+    const newDirName = layout.nextDirName(attempt)
+    const newDir = path.join(partitionDir, newDirName)
+    try {
+      await fsPromises.mkdir(newDir)
+      return { newDirName, newDir }
+    } catch (err) {
+      if (errCode(err) !== 'EEXIST') throw err
+    }
+  }
+  throw new Error(`no free compaction generation under ${partitionDir} after ${GENERATION_RESERVE_ATTEMPTS} attempts`)
 }
 
 /** @param {TableMetadata} metadata */
