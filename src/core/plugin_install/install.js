@@ -1,7 +1,6 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
 import {
   Attr,
@@ -10,7 +9,6 @@ import {
   SpanStatusCode,
   withSpan,
 } from '../observability/index.js'
-import { isWithinDir } from '../runtime/contribution_names.js'
 
 import { fetchPlugin } from './fetch.js'
 import { provenanceFromUrl, redactRawSource } from './git_source.js'
@@ -23,7 +21,7 @@ import {
   upsertEntry,
   writeLock,
 } from './lock.js'
-import { pluginInstallDir } from './paths.js'
+import { isRemovableInstallDir, pluginInstallDir } from './paths.js'
 import { resolveSource } from './resolver.js'
 import { checkForPluginUpdate } from './update_check.js'
 
@@ -395,9 +393,11 @@ export async function removePlugin({ name, stateDir }) {
       // makes the fallback join resolve two levels above it. `hyp status`
       // prints this very command as the repair for such a row, so still clear
       // the row, and delete only a directory strictly beneath the root
-      // (issue #1967).
-      const pluginsRoot = pluginInstallDir(stateDir, '')
-      if (isWithinDir(installDir, pluginsRoot) && path.resolve(installDir) !== path.resolve(pluginsRoot)) {
+      // (issue #1967) that is this row's own install destination: a key or
+      // recorded directory for a bare `@scope`, a normalizing key, or another
+      // plugin's directory points at plugins this row does not own (issue
+      // #2123).
+      if (isRemovableInstallDir(stateDir, name, installDir)) {
         await fs.rm(installDir, { recursive: true, force: true })
       }
       const nextLock = removeLockEntry(lock, name)

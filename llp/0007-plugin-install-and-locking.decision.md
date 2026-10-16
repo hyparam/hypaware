@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0008
+**Extended-by:** LLP 0505 (#install-name-shape: an install destination is one name or `@scope/name` in normal form, checked before any replacement; `hyp plugin remove` deletes only such a directory)
 
 > How plugins are named, resolved, fetched, and pinned. Decomposed from
 > `hypaware-design.md` (Plugin Install and Locking).

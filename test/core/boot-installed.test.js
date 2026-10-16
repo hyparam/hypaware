@@ -913,7 +913,9 @@ test('hyp plugin remove still deletes exactly the directory a contained entry na
     assert.equal(await dirExists(installDir), false)
     assert.equal(await dirExists(other.installDir), true)
 
-    // A key that normalizes back inside the root is still a contained delete.
+    // A key that normalizes back inside the root is not an install name, and
+    // the directory it lands on belongs to the plugin named `nested`: the row
+    // is cleared and the directory kept (issue #2123, LLP 0505#removal).
     const nestedDir = path.join(stateDir, 'plugins', 'nested')
     await fs.mkdir(nestedDir, { recursive: true })
     const lockPath = path.join(stateDir, 'plugin-lock.json')
@@ -925,7 +927,9 @@ test('hyp plugin remove still deletes exactly the directory a contained entry na
       stateDir,
     })
     assert.equal(normalized.ok, true)
-    assert.equal(await dirExists(nestedDir), false)
+    assert.equal(await dirExists(nestedDir), true)
+    const cleared = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    assert.equal(Object.hasOwn(cleared.plugins, 'elsewhere/../nested'), false)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

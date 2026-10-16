@@ -28,16 +28,53 @@ export function pluginInstallDir(stateDir, name) {
 }
 
 /**
- * True when `name` derives an install directory strictly beneath the
- * plugin install root.
+ * True when `name` has the shape of an install destination: one
+ * unscoped segment, or exactly `@scope/name`.
+ *
+ * Containment alone is not enough. A bare `@scope` stays inside the
+ * root but names the directory every `@scope/*` plugin lives in, so
+ * installing it deletes them all. Each segment must also be literal
+ * and in normal form: no `\` (a separator on Windows), no NUL, and no
+ * trailing space or dot, which Windows strips and so aliases `. ` to
+ * the root and `a.` to `a`. That rule also refuses `.` and `..`.
+ *
+ * @param {string} name
+ * @ref LLP 0505#install-name-shape [implements]: install-time only; boot-time
+ *   manifest validation keeps accepting what it accepted
+ */
+export function isInstallName(name) {
+  if (typeof name !== 'string') return false
+  const segments = name.split('/')
+  if (segments.length === 1) {
+    return !segments[0].startsWith('@') && isLiteralSegment(segments[0])
+  }
+  if (segments.length !== 2) return false
+  const [scope, base] = segments
+  return scope.startsWith('@') &&
+    isLiteralSegment(scope.slice(1)) &&
+    !base.startsWith('@') &&
+    isLiteralSegment(base)
+}
+
+/** @param {string} segment */
+function isLiteralSegment(segment) {
+  return segment.length > 0 &&
+    !segment.includes('\\') &&
+    !segment.includes('\0') &&
+    !segment.endsWith('.') &&
+    !segment.endsWith(' ')
+}
+
+/**
+ * True when `name` is an install name ({@link isInstallName}) and
+ * derives an install directory strictly beneath the plugin install
+ * root.
  *
  * `name` is third-party manifest text that both fetchers interpolate
  * into `pluginInstallDir` and then destroy whatever sits at: a name of
  * `../../victim` deletes a directory two levels above the plugins
- * root. Equality with the root is refused as well as escape: a name of
- * `.` resolves to the root itself and would take every installed
- * plugin with it. A name that normalizes back inside (`a/../b`) passes,
- * because it installs where every later lookup of that name also goes.
+ * root, and a name of `.` resolves to the root itself and would take
+ * every installed plugin with it.
  *
  * @param {string} stateDir
  * @param {string} name plugin name from the manifest
@@ -46,9 +83,33 @@ export function pluginInstallDir(stateDir, name) {
  *   must stay inside, not the state dir it sits in
  */
 export function installDirIsContained(stateDir, name) {
+  if (!isInstallName(name)) return false
   const root = path.join(stateDir, PLUGIN_INSTALL_SUBDIR)
   const dir = pluginInstallDir(stateDir, name)
   return path.resolve(dir) !== path.resolve(root) && isWithinDir(dir, root)
+}
+
+/**
+ * True when `hyp plugin remove` may delete `installDir` for the lock row
+ * keyed `name`: the key is itself an install name whose derived
+ * directory is strictly beneath the plugin install root
+ * ({@link installDirIsContained}), and `installDir` is that directory.
+ * Both install lanes record exactly the derived directory, so a row
+ * that fails this was hand-edited. Checking the directory alone is not
+ * enough: a key of `a/../b` or `trail/`, or a recorded `install_dir`
+ * naming another plugin, resolves to a valid destination that belongs
+ * to a different plugin, and a bare `@scope` names the directory of
+ * every plugin under that scope.
+ *
+ * @param {string} stateDir
+ * @param {string} name lock key
+ * @param {string} installDir directory the row records, or the derived one
+ * @ref LLP 0505#removal [implements]: the row is still cleared; only the delete
+ *   is withheld
+ */
+export function isRemovableInstallDir(stateDir, name, installDir) {
+  return installDirIsContained(stateDir, name) &&
+    path.resolve(installDir) === path.resolve(pluginInstallDir(stateDir, name))
 }
 
 /** @param {string} stateDir */
