@@ -223,9 +223,18 @@ export function tryReadCursorSync(partitionDir) {
       const kind = parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`
       throw new TypeError(`cursor.json holds ${kind}, not a cursor object`)
     }
+    // The same synthesized zero, one field down: `epoch: "2"` read as epoch
+    // 0, and maintenance reclaimed the live `epoch=2/` as an orphan (issue
+    // #2522). Every writer since the first has written a numeric epoch, so a
+    // missing one is no historical shape either.
+    // @ref LLP 0323#whole-cursor [implements]: a non-numeric epoch refuses the whole cursor instead of defaulting to zero.
+    if (typeof parsed.epoch !== 'number') {
+      const kind = parsed.epoch === undefined ? 'no epoch' : `an epoch of type ${parsed.epoch === null ? 'null' : typeof parsed.epoch}`
+      throw new TypeError(`cursor.json holds ${kind}, not a numeric epoch`)
+    }
     /** @type {PartitionCursor} */
     const cursor = {
-      epoch: typeof parsed.epoch === 'number' ? parsed.epoch : 0,
+      epoch: parsed.epoch,
       rowCount: typeof parsed.rowCount === 'number' ? parsed.rowCount : 0,
       compaction: parsed.compaction ?? null,
     }

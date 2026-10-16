@@ -253,6 +253,18 @@ export async function maintainCache(opts) {
       (maintained > 0 || totalFailed >= MAX_FAILURES_BEFORE_BUDGET_BREAK)
     ) break
 
+    // A cursor.json that is present but does not read names no live
+    // generation, and the epoch-0 default is a guess: on a legacy epoch
+    // partition compaction rewrote `epoch=0` into its successor, published
+    // that as live, and the orphan sweep then reclaimed the real generation
+    // (issue #2522). Decided from one read and one `existsSync`, as the
+    // append gate is; the read has already said why, so the partition is
+    // skipped until its cursor reads again.
+    // @ref LLP 0323#one-gate [constrained-by]: compaction acts on the strict reader's answer, not on readCursorSync's default.
+    const readCursor = tryReadCursorSync(part.path)
+    if (!readCursor && fs.existsSync(path.join(part.path, 'cursor.json'))) continue
+    const cursor = readCursor ?? { epoch: 0, rowCount: 0, compaction: null }
+
     // Built out here rather than inside the span callback so the catch
     // below still has it: a partition that threw part-way keeps whatever
     // the run had already established about it (its live file count, any
@@ -281,7 +293,6 @@ export async function maintainCache(opts) {
           status: 'ok',
         },
         async (span) => {
-          const cursor = readCursorSync(part.path)
           const settle = resolveSettleContext(opts, part.dataset)
 
           const done = await maintainGeneration(
@@ -640,7 +651,11 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // Flushes may have appended after the due check and metadata load.
             // Re-derive the live generation only after acquiring the same lock
             // the append path holds through its cursor update.
-            const lockedCursor = readCursorSync(r.path)
+            // Strict here too: a cursor that stopped reading since the walk's
+            // gate names no generation to rewrite (issue #2522).
+            const lockedRead = tryReadCursorSync(r.path)
+            if (!lockedRead && fs.existsSync(path.join(r.path, 'cursor.json'))) return null
+            const lockedCursor = lockedRead ?? { epoch: 0, rowCount: 0, compaction: null }
             const lockedLayout = generationLayout(lockedCursor)
             const lockedLiveDir = path.join(r.path, lockedLayout.liveDir)
             // @ref LLP 0310#in-place-by-default [implements]: routine dueness
