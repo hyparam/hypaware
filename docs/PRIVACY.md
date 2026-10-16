@@ -281,7 +281,7 @@ your confirmation. A review cannot guarantee it will find every secret, and it
 does not automatically redact all recorded content. You can run it at any time,
 even without Cloud enrollment.
 
-<!-- agent: Run the hypaware-privacy skill: review what this machine has recorded, sample it, and propose which folders to mark local-only or ignore before anything syncs. Do not delete anything without asking me. -->
+<!-- agent: Run the hypaware-privacy skill: review what this machine has recorded, sample it, and propose which folders to mark local-only or ignore before anything syncs. Do not delete anything without asking me. This is a local operation with no MCP path. -->
 ```sh
 hyp privacy show
 hyp privacy list
@@ -315,7 +315,7 @@ already-enrolled machine starts reporting on its next CLI run or daemon start
 after an upgrade, without a new prompt. Standalone installations default to off.
 Check the effective state and destination:
 
-<!-- agent: Use HypAware to tell me whether product telemetry is on, where it goes, and show me the next batch it would send. -->
+<!-- agent: Use HypAware to tell me whether product telemetry is on, where it goes, and show me the next batch it would send. This is a local operation with no MCP path. -->
 ```sh
 hyp telemetry status
 ```

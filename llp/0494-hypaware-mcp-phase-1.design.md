@@ -597,12 +597,12 @@ evidence detach removes on. Other clients keep replace-on-install.
 
 ### Agent prompts and the MCP path (HYP-136, HYP-137) {#docs-paths}
 
-- **Agent prompts.** Each `<!-- agent: ... -->` marker in `docs/` (23 today:
-  CLI 1, Querying 9, Reports 4, Privacy 2, Troubleshooting 5, Team setup 2)
-  is extended so that it works when the agent has no `hyp`. The prompt says
-  "Use HypAware" (as most already do), and the sentence after it names the
-  MCP tool for the same read or act. One new marker gives `hyp report list`
-  a prompt in Reports.
+- **Agent prompts.** Each `<!-- agent: ... -->` marker in `docs/` (22
+  before T9: CLI 1, Querying 9, Reports 4, Privacy 2, Troubleshooting 5,
+  Team setup 1) is extended so that it works when the agent has no `hyp`.
+  The prompt says "Use HypAware" (as most already do), and the sentence
+  after it names the MCP tool for the same read or act. One new marker
+  gives `hyp report list` a prompt in Reports.
 - **Every read or act instruction.** In Querying, Reports, Team setup,
   Clients and Troubleshooting, each CLI instruction gains one line naming
   its MCP path. `hyp report mark` gains `set_recommendation_status`. Where
