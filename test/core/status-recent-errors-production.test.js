@@ -9,6 +9,7 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
+import { renderStatusSummary } from '../../src/core/commands/status.js'
 
 /** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
 
@@ -813,6 +814,13 @@ for (const [label, arrange] of UNREADABLE_CENTRAL_WITHOUT_PARSE) {
     const warnings = report.diagnostics.filter((d) => d.kind === 'sink_export_failing')
     assert.equal(warnings.length, 1, 'an unreadable central layer must not suppress a live export failure')
     assert.match(warnings[0].message, /^central: 1 retained failed export record with no later success recorded/)
+    // The export warning sits beside the unreadable-layer reason, never in
+    // place of it, and sharing reads off that same signal.
+    let compact = ''
+    renderStatusSummary({ report, stdout: { write(chunk) { compact += chunk } } })
+    assert.match(compact, /Sharing\s+Unknown \(organization config could not be read\)/)
+    assert.match(compact, /central config layer .* is unreadable/)
+    assert.match(compact, /central: 1 retained failed export record/)
   })
 }
 
