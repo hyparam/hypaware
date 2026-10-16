@@ -423,6 +423,28 @@ async function resolveClientPolicyContext(ctx) {
 }
 
 /**
+ * Name the config layers that exist but cannot be read, for a receipt that
+ * must qualify where rows go, or null when every layer read cleanly. A missing
+ * local file is an absence, not a failure, and a resolution that threw left
+ * nothing verified. Only paths reach the copy: a parse error can quote the
+ * file, so its message never does.
+ *
+ * @param {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | null} layered
+ * @param {string} stateDir
+ * @returns {string | null}
+ */
+function unreadableConfigLayers(layered, stateDir) {
+  if (!layered) return "this machine's config"
+  /** @type {string[]} */
+  const parts = []
+  const central = centralLayerUnreadable({ stateDir, centralLoaded: layered.centralLoaded })
+  if (central) parts.push(`this machine's central config layer (${central.configPath})`)
+  const local = layered.localLoaded
+  if (local && !local.ok && local.errorKind !== 'config_missing') parts.push(`the local config (${local.configPath})`)
+  return parts.length > 0 ? parts.join(' and ') : null
+}
+
+/**
  * `hyp policy client [<name>] [sync|local-only] [--json]`
  *
  * The per-client sibling of the directory verbs (LLP 0188): on an enrolled
@@ -503,15 +525,22 @@ export async function runPolicyClient(argv, ctx) {
     return 0
   }
 
-  // Where this machine's rows actually go, from the central layer this command
-  // already resolved: a self-hosted enrollment is a supported lane, so no line
+  // Where this machine's rows actually go, from the effective config this
+  // command already resolved: a hand-authored `@hypaware/central` sink in the
+  // local layer forwards too (issue #2249), while the lock above stays on the
+  // central layer. A self-hosted enrollment is a supported lane, so no line
   // below may call the destination "the cloud".
   // @ref LLP 0134#custom-url-deferred [constrained-by]: the receipt names the server this machine forwards to, hosted or not
-  const destination = syncDestinationName(centralSinkOrigins(layered?.centralConfig))
+  const origins = centralSinkOrigins(layered?.effective)
+  const destination = syncDestinationName(origins)
+  // A layer nobody can read may forward somewhere this receipt cannot name, so
+  // no line below states an unqualified destination while one is unread.
+  const unreadable = unreadableConfigLayers(layered, stateDir)
 
   if (parsed.token === 'local-only') {
     if (provenance === 'central') {
       ctx.stderr.write(`error: '${name}' is set by your team and always syncs to ${destination}\n`)
+      if (unreadable) ctx.stderr.write(`  ${unreadable} cannot be read, so other destinations cannot be ruled out\n`)
       return 1
     }
     const next = [...(entries ?? []), { source: name, class: /** @type {'local-only'} */ ('local-only') }]
@@ -523,15 +552,17 @@ export async function runPolicyClient(argv, ctx) {
     }
     ctx.stdout.write(`${name}: local-only${optedOut.has(name) ? ' (unchanged)' : ''}\n`)
     ctx.stdout.write(`  future ${name} rows stay on this machine; rows already exported are not recalled\n`)
-    if (layered && !layered.centralConfig) {
-      // A layer yielding no config is either verifiably absent or merely
-      // unreadable, and only the first is "not connected": an enrollment
-      // nobody can read is not evidence that there is none (issue #2223).
-      // The opt-out above is already written in both cases.
-      const unreadable = centralLayerUnreadable({ stateDir, centralLoaded: layered.centralLoaded })
-      ctx.stdout.write(unreadable
-        ? `  this machine's central config layer (${unreadable.configPath}) cannot be read, so whether it syncs to a HypAware server cannot be verified; the opt-out is recorded either way\n`
-        : '  this machine is not connected to a HypAware server; the opt-out takes effect if it connects\n')
+    // A layer yielding no config is either verifiably absent or merely
+    // unreadable, and only the first is "not connected": an enrollment nobody
+    // can read is not evidence that there is none (issue #2223), and a local
+    // sink forwards with no enrollment at all (issue #2249). The opt-out above
+    // is already written in every case.
+    if (unreadable) {
+      ctx.stdout.write(origins.length > 0
+        ? `  ${unreadable} cannot be read, so this machine's destinations beyond ${destination} cannot be verified; the opt-out is recorded either way\n`
+        : `  ${unreadable} cannot be read, so whether it syncs to a HypAware server cannot be verified; the opt-out is recorded either way\n`)
+    } else if (origins.length === 0) {
+      ctx.stdout.write('  this machine is not connected to a HypAware server; the opt-out takes effect if it connects\n')
     }
     return 0
   }
@@ -550,7 +581,15 @@ export async function runPolicyClient(argv, ctx) {
   ctx.stdout.write(`${name}: sync\n`)
   // @ref LLP 0188#no-retroactive-ship [implements]: changing standing policy remains future-only
   // @ref LLP 0345#command [implements]: the policy transition points at the separate attended history replay
-  ctx.stdout.write(`  future ${name} rows sync to ${destination}\n`)
+  if (!unreadable) {
+    ctx.stdout.write(`  future ${name} rows sync to ${destination}\n`)
+  } else {
+    // The removal is recorded, but where the rows go is not provable: name a
+    // readable destination only as a known one (issue #2235).
+    ctx.stdout.write(origins.length > 0
+      ? `  future ${name} rows are eligible to sync, including to ${destination}; ${unreadable} cannot be read, so the complete list of destinations cannot be verified\n`
+      : `  future ${name} rows are eligible to sync, but ${unreadable} cannot be read, so where they go cannot be verified\n`)
+  }
   ctx.stdout.write(`  to upload retained history too: hyp sync --history ${name}\n`)
   return 0
 }
