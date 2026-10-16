@@ -5,7 +5,41 @@ nested agent structure through the existing HypAware OTEL collector and local
 SQL cache. A small sender-side disk spool recovered every completed span after
 collector failure and producer exit. Lost acknowledgements caused duplicates.
 
-## Measured run
+## Current-model follow-up
+
+Run ID: `langgraph-poc-1792182534856`. Live `gpt-6.1-sol` and `gpt-6-luna`
+both passed using the Responses API and low reasoning effort. These models
+were listed by the configured account and by the
+[current OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model).
+The defaults now use this pair instead of GPT-4.1.
+
+| Scenario | Stored rows | Unique spans | Model calls | Tool executions |
+| --- | ---: | ---: | ---: | ---: |
+| Live GPT-6.1 Sol + GPT-6 Luna, collector online | 24 | 24 | 4 | 2 |
+| Same live models, collector offline, failed tool and replay | 26 | 26 | 4 | 3 |
+| Lost acknowledgement and retry, protocol fixtures | 48 | 24 | 4 | 2 |
+
+Each live scenario reported 362 input tokens and 52 output tokens. All eight
+live calls completed. The visible answer was `42` in both scenarios. The
+collector was killed before the offline run; the producer finished and exited,
+and a fresh process delivered all 26 saved records after collector restart.
+
+In plain language, we can record what the agents said, which model each used,
+what tools they called, what the tools returned, and which agent worked under
+which parent. We can save completed records while the collector is unavailable
+and send them later. We still need to prevent recording the same event twice,
+connect this data to normal HypAware session reports, and add project/file
+context. The tested app must enable our recorder; LangGraph does not provide a
+universal session file that HypAware can discover after the fact.
+
+The newer API returns content blocks, so the prototype now extracts visible
+text and excludes reasoning items from recorded content. This arithmetic task
+reported zero reasoning tokens, so the run does not establish coverage of
+substantial reasoning or newer built-in tools such as computer use. Anthropic
+coverage is still fixture-only. The earlier accounting and duplication findings
+remain applicable. No production collector or schema code was changed.
+
+## Original GPT-4.1 baseline
 
 Run ID: `langgraph-poc-1792174393333`. Real model counts can vary because tool
 selection is model-driven.
@@ -70,13 +104,14 @@ OTLP protobuf support would not address these semantic and recovery gaps.
 
 ## Validation
 
-- `node scripts/langgraph-poc/run.mjs --live`: passed through the real daemon,
-  collector, cache, and CLI SQL path.
-- `node scripts/langgraph-poc/run.mjs`: passed again after adding explicit
-  single-root, ancestor-branch, and tool-call-ID assertions.
-- `npm test`: 8,111 passed, 4 skipped, 1 failure in the existing
-  `sandbox-shim-supervisor.test.js` process-replacement timing assertion.
-- The entire supervisor test file passed separately: 6 passed, 1 skipped.
-  No supervisor code was changed. The full suite was not rerun.
+- Current `node scripts/langgraph-poc/run.mjs --live`: passed with GPT-6.1 Sol
+  and GPT-6 Luna through the real daemon, collector, cache, and CLI SQL path,
+  including offline live calls, ancestry, and tool-call-ID assertions.
+- Current `npm test`: 8,112 passed, 4 skipped, zero failures.
+- The initial GPT-4.1 run had one existing supervisor timing-test failure;
+  that file passed separately and the current full suite also passed.
 - Syntax checks passed for all three prototype modules. CPU/memory limits and
   prototype-only synchronous disk writes are documented in the README.
+- CPU/memory review of the model update found no new unbounded work or retained
+  state. Content filtering is linear in the bounded response; spool limits are
+  unchanged. Per-call generation is capped at 1,024 tokens.

@@ -13,7 +13,10 @@ const ns = () => String(BigInt(Date.now()) * 1_000_000n)
 export function message(value) {
   return {
     role: value.getType?.() ?? value.type,
-    content: value.content,
+    // Responses can carry non-text reasoning items. Only record visible text.
+    content: Array.isArray(value.content)
+      ? value.content.filter(block => block.type === 'text' || block.type === 'output_text')
+      : value.content,
     tool_calls: value.tool_calls,
     tool_call_id: value.tool_call_id,
     usage: value.usage_metadata,

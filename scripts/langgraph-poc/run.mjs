@@ -107,10 +107,10 @@ if (process.argv[2] === 'collector') {
     assert.equal(online.delivery.pending, 0)
     await stop(true)
     // The agent completes and exits while delivery fails. Replay is a NEW process.
-    const offline = await agent('fixture', 'outage')
+    const offline = await agent(process.argv.includes('--live') ? 'live' : 'fixture', 'outage')
     assert.equal(offline.delivery.sent, 0)
     assert.equal(offline.delivery.pending, offline.completedSpans)
-    assert.equal(offline.toolAttempts, 3, 'one failed and two successful tool executions')
+    assert.ok(offline.toolAttempts >= 3, 'one failed and at least two successful tool executions')
     await start()
     const recovered = await agent('flush', 'recovery')
     assert.equal(recovered.sent, offline.completedSpans)

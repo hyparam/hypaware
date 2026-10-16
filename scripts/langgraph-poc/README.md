@@ -27,8 +27,10 @@ For two real models, set `OPENAI_API_KEY` in the environment and run:
 node scripts/langgraph-poc/run.mjs --live
 ```
 
-This adds bounded calls to `gpt-4.1-mini` and `gpt-4.1-nano`. It uses the
-OpenAI adapter's configured endpoint, if any. No LangSmith export is enabled.
+This uses `gpt-6.1-sol` and `gpt-6-luna` for both the live nested-agent run and
+the collector-outage run. Both use the Responses API, low reasoning effort,
+and a 1,024-token output limit per call, including reasoning tokens. The
+OpenAI adapter's configured endpoint is used, if any. No LangSmith export is enabled.
 All prompts are synthetic arithmetic tasks. Do not repurpose the callback to
 record private workloads: it deliberately retains the synthetic message body.
 
@@ -46,7 +48,8 @@ record private workloads: it deliberately retains the synthetic message body.
    completed spans to disk, fails one delivery attempt, and exits.
 5. Restart the collector on the same port. Start a fresh exporter process to
    replay the disk queue, then replay again to verify the queue is empty.
-6. With `--live`, run the same nested workflow using both real OpenAI models.
+6. With `--live`, run the same nested workflow using both real OpenAI models
+   again with the collector online. The outage step also uses these models.
 7. Put a loopback proxy in front of the collector. Forward a batch, wait for the
    collector's successful response, and drop the connection before forwarding
    its acknowledgement. Retry the retained batch against the collector.
@@ -75,6 +78,8 @@ The experiment supplies the thread ID and service identity. Graph and model
 metadata come from framework callbacks. No HypAware dataset columns or
 production configuration keys were added. Rows remain in `traces`; existing
 session reports and the activity graph are not wired to this source.
+Visible text is retained from Responses content blocks; reasoning items are
+excluded from the recorded content. Token counts can include reasoning tokens.
 
 The spool is our prototype feature, not a built-in LangGraph local transcript.
 Delivery happens at run completion and during explicit replay, with at most
@@ -99,6 +104,7 @@ enumeration and final SQL verification read the bounded experiment into memory.
 - [LangGraph JavaScript quickstart](https://docs.langchain.com/oss/javascript/langgraph/quickstart)
 - [LangChain message representation](https://docs.langchain.com/oss/python/langchain/messages)
 - [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
+- [Current OpenAI models and Responses tool-use requirements](https://developers.openai.com/api/docs/guides/latest-model)
 
 Callback argument order was checked against the installed JavaScript manager
 implementation. The callback and manager methods have different signatures;

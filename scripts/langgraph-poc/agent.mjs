@@ -51,10 +51,10 @@ if (mode === 'flush') {
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
       origin = `http://127.0.0.1:${server.address().port}`
     }
-    const models = live ? [
-      new ChatOpenAI({ model: 'gpt-4.1-mini', maxTokens: 128, maxRetries: 0, timeout: 20000 }),
-      new ChatOpenAI({ model: 'gpt-4.1-nano', maxTokens: 128, maxRetries: 0, timeout: 20000 }),
-    ] : [
+    const models = live ? ['gpt-6.1-sol', 'gpt-6-luna'].map(model => new ChatOpenAI({
+      model, useResponsesApi: true, reasoning: { effort: 'low' },
+      maxTokens: 1024, maxRetries: 0, timeout: 45000,
+    })) : [
       new ChatOpenAI({ model: 'fixture-openai', apiKey: 'fixture', maxRetries: 0,
         configuration: { baseURL: `${origin}/v1` } }),
       new ChatAnthropic({ model: 'fixture-anthropic', apiKey: 'fixture', maxRetries: 0,
@@ -83,7 +83,7 @@ if (mode === 'flush') {
     const graph = new StateGraph(MessagesAnnotation)
       .addNode('researcher', child(models[0], 'researcher-agent'))
       .addNode('reviewer', async (state, config) => reviewer.invoke({ messages: [new HumanMessage(
-        `Another agent answered ${state.messages.at(-1).content}. Independently use the add tool for 19 + 23, then answer with only the number.`
+        `Another agent answered ${state.messages.at(-1).text}. Independently use the add tool for 19 + 23, then answer with only the number.`
       )] }, config))
       .addEdge(START, 'researcher').addEdge('researcher', 'reviewer').addEdge('reviewer', END)
       .compile({ name: 'supervisor' })
@@ -91,9 +91,9 @@ if (mode === 'flush') {
     const result = await graph.invoke({ messages: [new HumanMessage(
       'Use the add tool to calculate 19 + 23, then answer with only the number. If a previous agent has already called it, verify that result and answer only the number.'
     )] }, { callbacks: [capture], configurable: { thread_id: capture.threadId }, recursionLimit: 12 })
-    assert.equal(String(result.messages.at(-1).content).trim(), '42')
+    assert.equal(result.messages.at(-1).text.trim(), '42')
     assert.equal(capture.active.size, 0, 'every callback start has an end')
-    const expected = { scenario, mode, final: result.messages.at(-1).content,
+    const expected = { scenario, mode, final: result.messages.at(-1).text,
       outputs, toolAttempts: attempts, completedSpans: capture.completed }
     fs.writeFileSync(path.join(path.dirname(directory), `${scenario}-expected.json`), JSON.stringify(expected, null, 2))
     console.log(JSON.stringify({ ...expected, outputs: undefined, delivery: await flush(directory, endpoint) }))
