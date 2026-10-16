@@ -2270,6 +2270,45 @@ test('a Codex user-agent alone does not let a flat client_metadata pair dictate 
   assert.deepEqual(projection.messages[0].content, [{ type: 'text', text: 'go' }])
 })
 
+// @ref LLP 0165#flat-pair-corroboration [tests]: the attack the split closes,
+// end to end. A real Codex turn seats its pair as the LLP 0030 partition key. A
+// local process that copies the user-agent and replays that pair, whole or
+// mangled, never lands on the same `session_id` or `conversation_id`.
+test('a forged or malformed flat pair cannot land a row in another session\'s partition', () => {
+  const projector = createCodexExchangeProjector()
+  /**
+   * @param {string} path
+   * @param {Record<string, string>} headers
+   * @param {unknown} map
+   */
+  const project = (path, headers, map) => /** @type {any} */ (projector.project(exchange({
+    path,
+    request_headers: JSON.stringify(headers),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go', client_metadata: map }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  const pair = { session_id: 'session-victim', thread_id: 'thread-victim' }
+
+  const victim = project('/backend-api/codex/responses', {}, pair)
+  assert.equal(victim.session_id, 'session-victim')
+  assert.equal(victim.conversation_id, 'thread-victim')
+
+  const ua = { 'user-agent': 'codex_cli_rs/0.55.0' }
+  const forgeries = [
+    { name: 'copied user-agent, whole pair', path: '/v1/responses', headers: ua, map: pair },
+    { name: 'copied user-agent, thread only', path: '/v1/responses', headers: ua, map: { thread_id: pair.thread_id } },
+    { name: 'copied user-agent, session only', path: '/v1/responses', headers: ua, map: { session_id: pair.session_id } },
+    { name: 'namespaced, thread only', path: '/backend-api/codex/responses', headers: {}, map: { thread_id: pair.thread_id } },
+    { name: 'namespaced, session only', path: '/backend-api/codex/responses', headers: {}, map: { session_id: pair.session_id } },
+    { name: 'namespaced, non-string thread', path: '/backend-api/codex/responses', headers: {}, map: { session_id: pair.session_id, thread_id: [pair.thread_id] } },
+  ]
+  for (const f of forgeries) {
+    const row = project(f.path, f.headers, f.map)
+    assert.notEqual(row.session_id, victim.session_id, f.name)
+    assert.notEqual(row.conversation_id, victim.conversation_id, f.name)
+  }
+})
+
 // @ref LLP 0165#flat-pair-corroboration [tests]: dropping the user-agent branch
 // from the strict predicate must not cost a Codex build that still writes an
 // `x-codex-*` entry into its map. That key names the client on its own, so a
