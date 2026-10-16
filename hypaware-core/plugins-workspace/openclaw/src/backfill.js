@@ -8,6 +8,7 @@ import {
   projectedExchangeItem,
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
+import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import {
   defaultOpenclawAgentsDir,
@@ -174,7 +175,11 @@ export function createOpenclawBackfillProvider(opts) {
     // @ref LLP 0172#lane-b-sweep [implements]: opt-in Lane B scheduling
     // metadata, tunable via `backfill.sweep_cron` (R7), defaulting to
     // every 5 minutes when the config key is absent.
-    sweep: { cron: resolveSweepCron(config) },
+    // @ref LLP 0041#consent-gating [constrained-by]: `backfill.on_join: false` is
+    // the operator's suppression of automatic history import, and the sweep is
+    // automatic history import, so the opt-out contributes no `sweep` field,
+    // as the Claude adapter does (LLP 0358#scheduled-sweep).
+    ...(sweepEnabled(config) ? { sweep: { cron: resolveSweepCron(config) } } : {}),
     async *run(ctx) {
       try { yield* runOpenclawBackfill({ ctx, agentsDir, clientName, resolver, config }) }
       catch (error) {
@@ -782,6 +787,19 @@ function resolveQuiesceMs(config) {
   const backfill = isPlainObject(config) && isPlainObject(config.backfill) ? config.backfill : undefined
   const quiesceMs = backfill?.quiesce_ms
   return typeof quiesceMs === 'number' ? quiesceMs : DEFAULT_QUIESCE_MS
+}
+
+/**
+ * Whether this plugin entry wants the daemon to rerun its import on a
+ * schedule. Reads `on_join` through the kernel's single reader of the
+ * `backfill` policy block, so the scheduled lane and the join-time reconciler
+ * agree on what an opt-out means.
+ *
+ * @param {JsonObject | undefined} config
+ * @returns {boolean}
+ */
+function sweepEnabled(config) {
+  return readBackfillPolicy({ name: DEFAULT_PLUGIN_NAME, config }).onJoin !== false
 }
 
 /**

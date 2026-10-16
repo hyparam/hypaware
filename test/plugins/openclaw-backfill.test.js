@@ -1296,6 +1296,33 @@ test('sweep.cron falls back to the every-5-minutes default when config is absent
   }
 })
 
+// @ref LLP 0041#consent-gating [tests]: `backfill.on_join: false` withholds the
+// scheduled sweep, which is automatic history import (issue #1339)
+test('backfill.on_join false contributes no sweep, so the daemon never ticks Lane B', async () => {
+  const env = await stageEnv()
+  try {
+    assert.equal(
+      createOpenclawBackfillProvider({ homeDir: env.homeDir, config: { backfill: { on_join: false } } }).sweep,
+      undefined
+    )
+    // A configured cadence does not override the opt-out.
+    assert.equal(
+      createOpenclawBackfillProvider({
+        homeDir: env.homeDir,
+        config: { backfill: { on_join: false, sweep_cron: '*/10 * * * *' } },
+      }).sweep,
+      undefined
+    )
+    // An explicit on_join true keeps the schedule.
+    assert.deepEqual(
+      createOpenclawBackfillProvider({ homeDir: env.homeDir, config: { backfill: { on_join: true } } }).sweep,
+      { cron: '*/5 * * * *' }
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // ---------------------------------------------------------------------------
 // LLP 0172#45-the-quiesce-window / LLP 0170#decision: the quiesce window
 // ---------------------------------------------------------------------------
