@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { bootKernel } from '../runtime/boot.js'
 import { cacheTablePath } from '../cache/paths.js'
-import { claimPartitionMutation, isPartitionMutationBusy } from '../cache/partition.js'
+import { claimPartitionMutation, isPartitionMutationBusy } from '../util/mutation_guard.js'
 import { installObservability } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { clearPidFile, isDaemonProcess, pidFilePath, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'

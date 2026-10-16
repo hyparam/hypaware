@@ -51,21 +51,28 @@ so two starts that both found a stale file could both pass it.
   guard held and refuses (`daemon start already in progress`) or finds the
   first start's pid file naming a live `daemon run` process and refuses
   (`daemon already running`). Two starts cannot both pass.
+- Clearing a stale pid file (`hyp daemon stop`, the supervised stop and the
+  uninstall) is a compare-and-delete under the same guard: it re-reads the
+  file and unlinks it only if the pid it names is gone. A clear that read a
+  dead pid and unlinked without the guard could remove the file a start had
+  just written for a live daemon, and the next start would then pass as well.
+  A clear that finds the guard held leaves the file to the start holding it.
 - The guard is held only for those few file operations, never for the
   daemon's lifetime. A start killed inside it leaves a dead owner, which the
   next start reclaims; a malformed guard fails closed as LLP 0417 describes.
+- The guard lives in `src/core/util/mutation_guard.js`, so the pid module
+  can take it without loading the cache.
 
 ## Scope {#scope}
 
-- `hyp daemon stop`'s stale-file cleanup and the gateway's own pid-file
-  removal at shutdown do not take the guard. Each removes a file whose holder
-  is gone, so a race with a start costs at most a missing pid file for a
-  running daemon until its next restart, not a second daemon.
+- The gateway's own pid-file removal at shutdown takes no guard. It runs
+  while that daemon is still alive, and a start meanwhile reads its live
+  `daemon run` pid and refuses.
 - The processor child's pid write is unchanged.
 
 ## Cost {#cost}
 
-- Per start: one guard directory create and remove, one owner file, one pid
+- Per start, and per stale clear: one guard directory create and remove, one owner file, one pid
   file read and write. Only when the pid file names a live process other than
   this one: one `/proc/<pid>/cmdline` read on Linux, or one `ps` exec
   (5 second bound) elsewhere. Nothing at runtime, nothing per row.

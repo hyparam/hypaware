@@ -2,7 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url'
 
 import { claimDaemonStart } from '../../src/core/daemon/gateway.js'
 import {
+  clearStalePidFile,
   isDaemonProcess,
   pidFilePath,
   processIsAlive,
@@ -36,6 +37,11 @@ function liveChild(t, args) {
   if (!child.pid) throw new Error('child did not start')
   t.after(() => child.kill('SIGKILL'))
   return /** @type {number} */ (child.pid)
+}
+
+function spawnSyncPid() {
+  const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' })
+  return Number(child.stdout)
 }
 
 /** @param {number} pid */
@@ -97,6 +103,22 @@ test('a start in progress elsewhere refuses rather than racing it', (t) => {
     () => claimDaemonStart(stateRoot, path.join(stateRoot, 'processing'), entry(process.pid)),
     /daemon start already in progress/
   )
+  assert.equal(readPidFile(stateRoot), null)
+})
+
+test('a stale clear leaves the pid file to a start that holds the guard', (t) => {
+  const stateRoot = makeStateRoot(t)
+  const dead = spawnSyncPid()
+  writePidFile(stateRoot, entry(dead))
+  const holder = liveChild(t, [])
+  const pidFile = pidFilePath(stateRoot)
+  const lock = path.join(path.dirname(pidFile), `.${path.basename(pidFile)}.mutation-lock`)
+  fs.mkdirSync(lock)
+  fs.writeFileSync(path.join(lock, `${holder}-00000000-0000-4000-8000-000000000000`), '')
+  clearStalePidFile(stateRoot)
+  assert.equal(readPidFile(stateRoot)?.pid, dead)
+  fs.rmSync(lock, { recursive: true })
+  clearStalePidFile(stateRoot)
   assert.equal(readPidFile(stateRoot), null)
 })
 

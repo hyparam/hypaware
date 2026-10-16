@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
+import { claimPartitionMutation } from '../util/mutation_guard.js'
 
 /**
  * @import { PidFileEntry } from '../../../src/core/daemon/types.js'
@@ -186,11 +187,21 @@ export function isDaemonProcess(pid) {
  * this cannot parse or unlink is `hyp daemon status`'s to report rather than a
  * reason to call a completed stop a failure.
  *
+ * The read and the unlink hold the guard a daemon start writes the file
+ * under, so a start that replaces a dead pid between them is never undone. A
+ * held guard means a start is writing the file now: it is left to that start.
+ *
+ * @ref LLP 0515#claim [implements]: a stale clear is a compare-and-delete under the start's guard
  * @param {string} stateRoot
  */
 export function clearStalePidFile(stateRoot) {
   try {
-    const entry = readPidFile(stateRoot)
-    if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
-  } catch { /* an unreadable or unremovable pid file outlives this stop */ }
+    const release = claimPartitionMutation(pidFilePath(stateRoot))
+    try {
+      const entry = readPidFile(stateRoot)
+      if (entry && !processIsAlive(entry.pid)) clearPidFile(stateRoot)
+    } finally {
+      release()
+    }
+  } catch { /* a held guard, or an unreadable or unremovable pid file, outlives this stop */ }
 }
