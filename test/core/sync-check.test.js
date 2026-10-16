@@ -7,6 +7,7 @@ import path from 'node:path'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createUsagePolicyResolver } from '../../src/core/usage-policy/matcher.js'
 import { inventoryDay, inventoryKey, inventoryBucket, summarizeInventoryKeys } from '../../src/core/sinks/sync-inventory.js'
 import { compareSyncInventory } from '../../src/core/commands/sync-check.js'
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
@@ -182,6 +183,76 @@ test('CLI checks real retained history through privacy filters without uploading
     await fs.writeFile(path.join(part.path, 'cursor.json'), '{')
     output = ''
     assert.equal(await runSync(argv, ctx), 2, 'an unreadable cursor cannot mean empty history')
+  } finally {
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+    await fs.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('a .hypignore written between repair attempts refuses the retry; unchanged policy still retries', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'sync-check-retry-'))
+  const project = path.join(tmp, 'project')
+  await fs.mkdir(project)
+  let clock = 1_000_000
+  const storage = createQueryStorageService({ cacheRoot: path.join(tmp, 'cache'), usagePolicyResolver: createUsagePolicyResolver({ now: () => clock }) })
+  const tablePath = storage.cacheTablePath('ai_gateway_messages', ['all'])
+  const columns = /** @type {ColumnSpec[]} */ ([{ name: 'part_id', type: 'STRING' }, { name: 'date', type: 'STRING' }, { name: 'cwd', type: 'STRING' }, { name: 'session_id', type: 'STRING' }])
+  await storage.appendRows(tablePath, columns, [{ part_id: 'late', date: '2020-01-01', cwd: project, session_id: 's' }])
+  await storage.flushTable(tablePath, { force: true })
+  // The server holds nothing, so every local row is a repair candidate.
+  const server = createServer(async (req, res) => {
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    const body = JSON.parse(Buffer.concat(chunks).toString())
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ version: 1, dataset: 'ai_gateway_messages', org: 'test-org', revision: 'a'.repeat(64), next: null,
+      summaries: body.buckets.map(b => ({ bucket: b, ...summarizeInventoryKeys([]) })), keys: body.bucket ? [] : undefined }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const url = `http://127.0.0.1:${/** @type {AddressInfo} */ (server.address()).port}`
+  let output = ''
+  const sent = []
+  let attempts = 0
+  let betweenAttempts = async () => {}
+  const ctx = /** @type {any} */ ({ env: { HYP_HOME: tmp, HYP_REMOTE_TOKEN_TEST: 'test-read-token' },
+    config: { version: 2, query: { remotes: { test: { url } } } }, storage,
+    stdout: { write: s => { output += s } }, stderr: { write: s => { output += s } },
+    query: { getDataset: () => ({ discoverPartitions: async () => (await storage.discoverCachePartitions()).map(part => ({ dataset: part.dataset, tablePath: part.path })) }) },
+    sinks: { listHandles: () => [{ instanceName: 'central', config: { url }, export() { throw new Error('must not upload') },
+      // Mirrors the sink contract: validate before every attempt, here a
+      // first attempt that fails (503) and one retry.
+      sink: { async restoreMissingRows(request) {
+        await request.validate()
+        attempts++
+        await betweenAttempts()
+        await request.validate()
+        attempts++
+        sent.push(...request.rows)
+        return { syncRestore: 1, status: 'accepted', restored: request.rows.length, present: 0, purged: 0 }
+      } } }] },
+  })
+  const repair = ['central', '--missing', '--dataset', 'ai_gateway_messages', '--json', '--yes']
+  try {
+    assert.equal(await runSync(repair, ctx), 0, output)
+    assert.deepEqual(sent.map(row => row.part_id), ['late'], 'unchanged policy permits the retry')
+    assert.equal(attempts, 2)
+    sent.length = 0
+    attempts = 0
+    output = ''
+    betweenAttempts = async () => {
+      await fs.writeFile(path.join(project, '.hypignore'), '')
+      clock += 6_000
+    }
+    assert.equal(await runSync(repair, ctx), 2, output)
+    assert.equal(attempts, 1, 'the retry is refused before it sends')
+    assert.equal(sent.length, 0)
+    assert.match(JSON.parse(output).error, /1 selected rows are no longer export-eligible/)
+    output = ''
+    assert.equal(await runSync(repair, ctx), 0, output)
+    assert.equal(JSON.parse(output).status, 'matched', 'a rerun no longer selects the ignored row')
+    assert.equal(sent.length, 0)
   } finally {
     server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))

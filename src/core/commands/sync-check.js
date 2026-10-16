@@ -197,6 +197,7 @@ export async function runSyncCheck(options, ctx) {
       }
     } catch { /* An absent or damaged optimization never proves coverage. */ }
     let org = /** @type {string | undefined} */ (undefined)
+    const selectedRows = /** @type {Map<string, Record<string, unknown>[]>} */ (new Map())
     const result = await compareSyncInventory(local, async body => {
       const response = await attachWithRefresh({ resolved,
         refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
@@ -237,6 +238,14 @@ export async function runSyncCheck(options, ctx) {
       purges.refresh()
       if (before !== after || policy !== storage.exportPolicyFingerprint?.() ||
         purges.size !== purgeCount || afterTables.some(table => storage.hasPendingSync(table))) throw new Error('local data or export policy changed during the check')
+      // @ref LLP 0501#missing [implements]: the policy fingerprint leaves out
+      // `.hypignore`, so before every transport attempt each selected row is
+      // asked again through the export seam's own verdict. The batch is
+      // refused, not trimmed: a retry must resend the same body under the
+      // same batch identity.
+      let withheld = 0
+      for (const [table, tableRows] of selectedRows) withheld += storage.exportWithheld(table, tableRows)
+      if (withheld) throw new Error(`${withheld} selected rows are no longer export-eligible; repair refused, rerun to repair the rest`)
     }
     await validate()
     await fs.mkdir(path.dirname(proofFile), { recursive: true, mode: 0o700 })
@@ -276,6 +285,9 @@ export async function runSyncCheck(options, ctx) {
           if (bytes > 4 * 1024 * 1024) throw new Error('repair exceeds 4 MiB; narrow --from/--to')
           rows.push(entry.row)
           selected.add(key)
+          const tableRows = selectedRows.get(table) ?? []
+          tableRows.push(entry.row)
+          selectedRows.set(table, tableRows)
         }
       }
       await validate()
