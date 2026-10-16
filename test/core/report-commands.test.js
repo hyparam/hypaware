@@ -437,7 +437,7 @@ test('list forwards a dash-leading filter value instead of dropping it', async (
   assert.equal(calls[0].url.searchParams.get('limit'), '-5')
 })
 
-// @ref LLP 0461#status-is-visible [tests]: every listed recommendation carries its state, `open` when the record has no status
+// @ref LLP 0516#listing-status [tests]: missing status does not imply open
 test('list prints each report\'s recommendations, by id, state and page, under its line', async (t) => {
   stubServer(t, () => ({
     status: 200,
@@ -447,7 +447,7 @@ test('list prints each report\'s recommendations, by id, state and page, under i
         recommendations: [
           // A server that reads the page's opening at publish (server LLP 0416), marked applied.
           { id: 'hyprec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.', status: { state: 'applied', by: 'email:a@b.c', at: '2026-07-21T10:00:00.000Z', via: 'cli' } },
-          // A report that predates that, or a page with no heading: id and page alone; never marked, so open.
+          // A report that predates that, or a page with no heading: id and page alone.
           { id: 'hyprec-fedcba9876543210', page: 'recommendation-tenant-check' },
         ],
       },
@@ -462,10 +462,29 @@ test('list prints each report\'s recommendations, by id, state and page, under i
     '  2026-07-20T10:00:00.000Z\tusage-review/2026-W29\trpt-b\t1200 bytes\tWeekly',
     '      hyprec-0123456789abcdef\t[applied]\trecommendation-batch-the-retries\tBatch the retries',
     '          Every retry is its own call. One queue fixes it.',
-    '      hyprec-fedcba9876543210\t[open]\trecommendation-tenant-check',
+    '      hyprec-fedcba9876543210\trecommendation-tenant-check',
     '  2026-07-13T10:00:00.000Z\tusage-review/2026-W28\trpt-a\t900 bytes',
   ])
 })
+
+// @ref LLP 0516#listing-status [tests]: both listings display only explicit server states
+for (const flat of [false, true]) {
+  test(`list ${flat ? 'flat' : 'grouped'} omits unknown states and preserves explicit states`, async (t) => {
+    const states = [undefined, null, {}, { state: '' }, { state: 42 }, { state: 'open' }, { state: 'dismissed' }, { state: 'future_state' }]
+    const recommendations = states.map((status, i) => ({ id: `hyprec-${String(i).padStart(16, '0')}`, page: `recommendation-${i}`, status }))
+    stubServer(t, () => ({ status: 200, json: flat
+      ? { recommendations }
+      : { reports: [{ id: 'rpt-a', recommendations }] } }))
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportList(flat ? ['--recommendations'] : [], ctx), 0)
+    const lines = out.join('').split('\n').filter((line) => line.includes('hyprec-'))
+    assert.equal(lines.length, states.length)
+    for (const line of lines.slice(0, 5)) assert.doesNotMatch(line, /\[/)
+    assert.match(lines[5], /\t\[open\]\t/)
+    assert.match(lines[6], /\t\[dismissed\]\t/)
+    assert.match(lines[7], /\t\[future_state\]\t/)
+  })
+}
 
 /* ---------- list --recommendations / --status ---------- */
 
@@ -498,7 +517,7 @@ test('list --recommendations lists recommendations flat from the _recommendation
   assert.deepEqual(out.join('').split('\n').filter(Boolean), [
     '  hyprec-0123456789abcdef\t[in_progress]\t2026-07-20T10:00:00.000Z\tusage-review/2026-W29/rpt-b\tBatch the retries',
     '      Every retry is its own call. One queue fixes it.',
-    '  hyprec-fedcba9876543210\t[open]\t2026-10-03T09:00:00.000Z\tstandalone\tNo python3 on the runner',
+    '  hyprec-fedcba9876543210\t2026-10-03T09:00:00.000Z\tstandalone\tNo python3 on the runner',
   ])
 })
 
@@ -2228,7 +2247,7 @@ test('a flat row the server sent without its report join reads as unknown, not u
   stubServer(t, () => ({ status: 200, json: { recommendations: [{ id: REC, title: 'Orphan' }] } }))
   const { ctx, out } = ctxWith()
   assert.equal(await runReportList(['--recommendations'], ctx), 0)
-  assert.equal(out.join(''), `  ${REC}\t[open]\t\t?/?/?\tOrphan\n`)
+  assert.equal(out.join(''), `  ${REC}\t\t?/?/?\tOrphan\n`)
   assert.doesNotMatch(out.join(''), /undefined/)
 })
 

@@ -512,9 +512,12 @@ An empty remote list
 succeeds. Each report's recommendations follow its line, one per line, as the
 minted id, its state in brackets, the `recommendation-<slug>` page the id
 names, and the page's title, with its thesis on the line below. The state is
-`open`, `in_progress`, `applied`, or `dismissed` as last recorded with
-`hyp report mark`; a recommendation nobody has marked is `open`, which is also
-what a remote that records no status lists. The page is the artifact path
+the one the remote supplies, such as `open`, `in_progress`, `applied`, or
+`dismissed` as last recorded with `hyp report mark`. The label appears only
+when the remote supplies a nonempty state, and an explicit `open` shows
+`[open]`. A missing, empty, or malformed status, as from a remote that records
+none, shows no label: a missing status does not say the recommendation is
+open. The page is the artifact path
 `hyp report get` takes. A remote that does not read the page's opening at
 publish, or a report published before it did, lists the id and page alone.
 `--json` prints the records whole, `recommendations` included.
@@ -523,12 +526,13 @@ publish, or a report published before it did, lists the id and page alone.
   2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review
       hyprec-0123456789abcdef	[applied]	recommendation-batch-the-retries	Batch the retries
           Every retry is its own call, 506 times a month. One queue fixes it.
-      hyprec-fedcba9876543210	[open]	recommendation-tenant-check
+      hyprec-fedcba9876543210	recommendation-tenant-check
 ```
 
 `--recommendations` lists the recommendations themselves, flat across
 reports and newest report first, from the remote's recommendation index: id,
-state, the parent report's publish time, the parent report as
+state in brackets (under the same rule, so a row without a supplied state has
+no label), the parent report's publish time, the parent report as
 `kind/period/id` (or `standalone` for one published with `hyp report
 recommend`), and the title, with the thesis below. `--status <state,...>`
 filters by state and implies `--recommendations`; an unknown state is refused

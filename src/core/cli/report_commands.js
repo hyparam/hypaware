@@ -575,7 +575,7 @@ export async function runReportRecommend(argv, ctx) {
  * the recommendations themselves, flat across reports, from the server's
  * `_recommendations` route.
  *
- * @ref LLP 0461#status-is-visible [implements]: every listing line that names a recommendation names its state
+ * @ref LLP 0516#listing-status [implements]: listing status labels come only from the server
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -685,7 +685,7 @@ export async function runReportList(argv, ctx) {
         ? 'standalone'
         : `${esc(r?.kind ?? '?')}/${esc(r?.period ?? '?')}/${esc(r?.id ?? '?')}`
       const titleCell = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
-      ctx.stdout.write(`  ${esc(c.id)}\t[${esc(recommendationState(c))}]\t${esc(r?.publishedAt ?? '')}\t${where}${titleCell}\n`)
+      ctx.stdout.write(`  ${esc(c.id)}${recommendationState(c)}\t${esc(r?.publishedAt ?? '')}\t${where}${titleCell}\n`)
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`      ${esc(c.summary)}\n`)
     }
     return 0
@@ -712,14 +712,13 @@ export async function runReportList(argv, ctx) {
     // the page's opening at publish adds its title and thesis (server LLP
     // 0416); an older server, or a report that predates that, lists the id
     // and page alone. A record with no recommendation pages carries no
-    // field, so a report with none prints nothing extra. The state marker
-    // reads `open` off a record with no status, which is also what an
-    // older server, which joins none, lists.
+    // field, so a report with none prints nothing extra. A missing status
+    // does not establish a state, so it gets no state marker.
     const recommendations = Array.isArray(r.recommendations) ? r.recommendations : []
     for (const c of recommendations) {
       if (typeof c?.id !== 'string' || typeof c?.page !== 'string') continue
       const titleCell = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
-      ctx.stdout.write(`      ${esc(c.id)}\t[${esc(recommendationState(c))}]\t${esc(c.page)}${titleCell}\n`)
+      ctx.stdout.write(`      ${esc(c.id)}${recommendationState(c)}\t${esc(c.page)}${titleCell}\n`)
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${esc(c.summary)}\n`)
     }
   }
@@ -728,15 +727,15 @@ export async function runReportList(argv, ctx) {
 }
 
 /**
- * The state a listed recommendation is in. A record that was never marked
- * carries no `status` field, and the contract reads that as `open`.
+ * The optional state cell for a listed recommendation. Missing status is
+ * unknown, not evidence that the recommendation is open.
  *
  * @param {any} c a recommendation row as the server lists it
  * @returns {string}
  */
 function recommendationState(c) {
   const state = c?.status?.state
-  return typeof state === 'string' && state ? state : 'open'
+  return typeof state === 'string' && state ? `\t[${esc(state)}]` : ''
 }
 
 /**

@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0516 (listing labels require an explicit server state)
 **Systems:** CLI, Reports
 **Author:** Brendan / Claude
 **Date:** 2026-10-03
