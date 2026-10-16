@@ -6,7 +6,7 @@ import { atomicWriteJson } from '../../../../src/core/util/index.js'
 import { acquireCloudAuth, CloudError } from './cloud-auth.js'
 
 /** @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js' */
-/** @import { CloudConnection, CloudOriginator } from '../../../../hypaware-core/plugins-workspace/codex/src/types.js' */
+/** @import { CloudConnection, CloudOriginator } from '../../../../hypaware-core/plugins-workspace/codex-cloud/src/types.js' */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** @type {CloudOriginator[]} */
@@ -109,4 +109,34 @@ export function registerCloudCommands(ctx, codexHome, deps = {}) {
       return 0
     },
   })
+}
+
+// @ref LLP 0511#onboarding: a confirmed picker answer narrows first and preserves prior scope and history bounds.
+/**
+ * @param {{stateDir: string, codexHome: string, env: NodeJS.ProcessEnv, sources: string[]}} opts
+ * @param {{acquire?: typeof acquireCloudAuth}} [deps]
+ */
+export async function configureCloudSelection(opts, deps = {}) {
+  const current = await readCloudConnection(opts.stateDir)
+  const previous = current?.origins ?? (current ? DEFAULT_CLOUD_ORIGINS : [])
+  /** @type {CloudOriginator[]} */
+  const desired = []
+  if (opts.sources.includes('codex-cloud')) desired.push('codex_cloud')
+  if (opts.sources.includes('chatgpt-work')) {
+    const work = previous.filter(origin => origin !== 'codex_cloud')
+    // An existing CLI grant to just web or mobile remains narrow on reconfigure.
+    desired.push(...(work.length ? work : /** @type {CloudOriginator[]} */ (['codex_work_web', 'codex_work_mobile'])))
+  }
+  if (desired.length === previous.length && desired.every(origin => previous.includes(origin))) return
+  const retained = previous.filter(origin => desired.includes(origin))
+  if (current && retained.length !== previous.length) {
+    if (retained.length) await atomicWriteJson(cloudConnectionPath(opts.stateDir), { ...current, origins: retained }, { mode: 0o600, dirMode: 0o700 })
+    else await fs.rm(cloudConnectionPath(opts.stateDir), { force: true })
+  }
+  if (desired.every(origin => previous.includes(origin))) return
+  const auth = await (deps.acquire ?? acquireCloudAuth)({ codexHome: opts.codexHome, env: opts.env,
+    ...(current ? { accountHash: current.accountHash } : {}) })
+  const connection = current ? { ...current, origins: desired }
+    : { version: 2, scope: 'account', accountHash: auth.accountHash, origins: desired }
+  await atomicWriteJson(cloudConnectionPath(opts.stateDir), connection, { mode: 0o600, dirMode: 0o700 })
 }

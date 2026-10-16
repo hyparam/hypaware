@@ -2050,3 +2050,32 @@ for (const scenario of ['cancel', 'back', 'config-failure', 'policy-failure', 'c
     if (scenario === 'back') assert.equal(passes, 2)
   })
 }
+
+test('hosted onboarding commits only after config save and skips cancelled or dry runs', async () => {
+  for (const mode of ['commit', 'cancel', 'dry-run']) {
+    const home = await tmpHome()
+    const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+    const catalog = emptyCatalog()
+    for (const id of ['codex-cloud', 'chatgpt-work']) {
+      catalog.pickerDescriptors.set(id, { plugin: '@hypaware/codex-cloud', id, label: id })
+    }
+    let calls = 0
+    const { opts } = wizardOpts(home, {
+      catalog,
+      detect: async () => new Set(),
+      finale: mode === 'dry-run' ? { dryRun: true } : {},
+      pick: async () => mode === 'cancel' ? { exitCode: 130, cancelled: true } : pickResult({
+        configPending: true, configPath, sourcesPicked: ['chatgpt-work'], clientsPicked: [],
+        config: { version: 2, plugins: [{ name: '@hypaware/codex-cloud' }] },
+      }),
+      configureCloud: async options => {
+        calls++
+        const saved = JSON.parse(await fs.readFile(configPath, 'utf8'))
+        assert.equal(saved.plugins[0].name, '@hypaware/codex-cloud')
+        assert.deepEqual(options.sources, ['chatgpt-work'])
+      },
+    })
+    await runInitWizard(opts)
+    assert.equal(calls, mode === 'commit' ? 1 : 0)
+  }
+})

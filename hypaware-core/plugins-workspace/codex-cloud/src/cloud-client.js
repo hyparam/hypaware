@@ -2,7 +2,7 @@
 import { CloudError } from './cloud-auth.js'
 import { DEFAULT_CLOUD_ORIGINS, validateCloudOrigins } from './cloud-state.js'
 
-/** @import { CloudOriginator } from '../../../../hypaware-core/plugins-workspace/codex/src/types.js' */
+/** @import { CloudOriginator } from '../../../../hypaware-core/plugins-workspace/codex-cloud/src/types.js' */
 
 export const CLOUD_ENDPOINT = 'wss://codex-cloud-backend.chatgpt.com/'
 

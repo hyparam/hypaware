@@ -136,7 +136,7 @@ test('an enrolled machine that never picked keeps no pick answer and seeds init 
   const checked = state.question.options
     .filter((/** @type {any} */ o) => o.checked)
     .map((/** @type {any} */ o) => o.value)
-  assert.deepEqual(checked.sort(), ['claude', 'codex'], 'detection seeds the first run')
+  assert.deepEqual(checked.sort(), ['claude', 'codex', 'codex-cloud'], 'detection seeds the first run')
   assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'codex'])
 })
 
@@ -181,7 +181,7 @@ test('a machine holding the forged grep-only config records no pick answer and s
   const checked = state.question.options
     .filter((/** @type {any} */ o) => o.checked)
     .map((/** @type {any} */ o) => o.value)
-  assert.deepEqual(checked.sort(), ['claude', 'codex'], 'detection seeds the picker, not the forged config')
+  assert.deepEqual(checked.sort(), ['claude', 'codex', 'codex-cloud'], 'detection seeds the picker, not the forged config')
   assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'codex'])
 })
 

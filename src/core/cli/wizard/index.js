@@ -53,6 +53,7 @@ import { commitWizardSyncScope, runWizardSyncScope } from './sync_scope.js'
 import { commitWizardFolderAsk, runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
+import { configureWizardCloud, HOSTED_CODEX_PICKS } from './codex_cloud.js'
 import { guardWizardOutput } from './output_guard.js'
 import { wizardStepProgress } from './steps.js'
 import { offerWizardGithub, connectWizardGithub } from './github.js'
@@ -871,6 +872,11 @@ async function runGuardedInitWizard(opts, guard) {
     ...(opts.printCommands ? { printCommands: true } : {}),
     ...(opts.picks ? { picks: opts.picks } : {}),
   })
+
+  if (interactive && !dryRun && HOSTED_CODEX_PICKS.every(id => catalog.pickerDescriptors.has(id))) {
+    if (!(await guard.checkpoint())) return await cancelDeadOutput()
+    await (opts.configureCloud ?? configureWizardCloud)({ env: opts.env, sources: picked.sourcesPicked, stdout: opts.stdout, stderr: opts.stderr })
+  }
 
   /** @type {FinaleSummary | undefined} */
   let finaleSummary
