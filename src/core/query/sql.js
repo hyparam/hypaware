@@ -502,6 +502,7 @@ export async function executeQuerySql(args) {
 
           if (refresh === 'always' && typeof dataset.refreshPartition === 'function') {
             for (const partition of partitions) {
+              args.signal?.throwIfAborted()
               await dataset.refreshPartition(partition, {
                 cacheDir: storage.cacheRoot,
                 force: true,
@@ -516,6 +517,7 @@ export async function executeQuerySql(args) {
             storage,
             refresh,
             messages: freshnessMessages,
+            signal: args.signal,
           })
           if (settled.degraded) refreshDegraded = true
 
@@ -728,7 +730,9 @@ export async function executeQuerySql(args) {
  *   storage: ExtendedQueryStorageService,
  *   refresh: RefreshMode,
  *   messages: string[],
- * }} args
+ *   signal?: AbortSignal,
+ * }} args once `signal` is aborted no further flush starts; one already
+ *   under way settles
  * @returns {Promise<{ degraded: boolean }>} whether any stream served
  *   unrefreshed data because its flush failed or is cooling down
  */
@@ -740,6 +744,8 @@ export async function settlePendingCacheForQuery(args) {
     try {
       const info = await args.storage.pendingInfo(partition.tablePath)
       if (!info.pending) continue
+      // Checked after the awaited read, so a caller aborted meanwhile starts no flush
+      args.signal?.throwIfAborted()
       if (args.refresh === 'always') {
         // This gate never consults the stamp under `always`: freshness is the
         // caller's stated requirement, so it gets the attempt and the original
@@ -771,6 +777,8 @@ export async function settlePendingCacheForQuery(args) {
         `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
       )
     } catch (err) {
+      // An abort is the caller's, never an automatic refresh failure to degrade past
+      args.signal?.throwIfAborted()
       if (args.refresh !== 'auto') throw err
       // A storage service that never had the spool methods is a wiring bug,
       // not the blocked spool-to-cache write the auto degrade is for. Told

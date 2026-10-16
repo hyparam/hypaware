@@ -258,64 +258,118 @@ test('stop returns at the grace when a projection ignores the signal, and the ne
   assert.ok(f.logs.some(l => l.event === 'graph.projection_cancelled' && l.attrs.reason === 'abandoned_at_stop_grace'))
 })
 
-// The round 2 reviewer probe (write-after-stop.mjs): real source registry,
-// contract, engine, SQL and on-disk cache, with the first graph append held
-// past the stop grace. Once it settles, no further graph write may start.
-test('a projection abandoned during its first append starts no further write once that append settles', async () => {
+/**
+ * Await `promise` under a referenced timer. The source's startup timer is
+ * unref'd, so a test waiting only on work behind it can see the event loop
+ * drain first (node:test then cancels the case, as on Node 22).
+ *
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {string} label
+ * @returns {Promise<T>}
+ */
+async function bounded(promise, label) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), 10_000) }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * The reviewer probes' layout: real source registry, contract, engine, SQL
+ * and on-disk cache, one captured message, and a gate a test holds one step
+ * of the projection on. `start` returns once the held step is entered.
+ */
+async function realSourceProbe() {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-late-write-'))
   const query = createQueryRegistry()
   for (const d of [aiGatewayDatasetRegistration(), graphDatasetRegistration('node'), graphDatasetRegistration('edge')]) query.registerDataset(d)
   const row = { session_id: 'sess-1', conversation_id: null, cwd: '/repo', git_branch: 'main', client_name: 'claude-code', user_id: 'u1', model: 'sonnet', tool_name: null, tool_args: null, part_type: 'text', role: 'user', content_text: 'synthetic', message_created_at: new Date().toISOString(), attributes: '{}' }
   const columns = Object.keys(row).map(name => ({ name, type: 'STRING', nullable: name !== 'session_id' }))
-  /** @type {Array<{ event: string, dataset?: string, stopped?: boolean, aborted?: boolean, attrs?: any }>} */
-  const events = []
+  await appendRowsToSourceTable(cacheRoot, DATASET_NAME, ['source=claude'], /** @type {any} */ (columns), [row])
+  const storage = createQueryStorageService({ cacheRoot })
+  const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
+  const registry = createSourceRegistry()
   /** @type {() => void} */
   let release = () => {}
   /** @type {() => void} */
   let entered = () => {}
   const gate = new Promise(resolve => { release = () => resolve(undefined) })
   const entry = new Promise(resolve => { entered = () => resolve(undefined) })
-  /** @type {Promise<unknown> | undefined} */
-  let projection
-  /** @type {AbortSignal | undefined} */
-  let signal
-  let stopped = false
-  const registry = createSourceRegistry()
+  const probe = {
+    query,
+    storage,
+    contract,
+    gate,
+    entered,
+    release,
+    /** @type {Array<{ event: string, dataset?: string, stopped?: boolean, aborted?: boolean, attrs?: any }>} */
+    events: [],
+    stopped: false,
+    /** @type {AbortSignal | undefined} */
+    signal: undefined,
+    /** @type {Promise<unknown> | undefined} */
+    projection: undefined,
+    async start() {
+      /** @param {string} event @param {any} attrs */
+      const log = (event, attrs) => { probe.events.push({ event, attrs }) }
+      const ctx = /** @type {any} */ ({ query, storage, log: { info: log, warn: log, error: log } })
+      const graph = /** @type {any} */ ({
+        project: (/** @type {string} */ _dataset, /** @type {any} */ opts) => {
+          probe.signal = opts.signal
+          probe.projection = projectGraph({ query, storage, contracts: [contract], signal: opts.signal })
+          return probe.projection
+        },
+      })
+      registry.register(/** @type {any} */ ({ name: 'ai-gateway-graph', plugin: '@hypaware/ai-gateway-graph', summary: 'probe', start: () => startGraphSource(ctx, graph) }))
+      await registry.start('ai-gateway-graph', ctx)
+      await bounded(entry, 'the held projection step')
+    },
+    async stop() {
+      await registry.stop('ai-gateway-graph')
+      probe.stopped = true
+    },
+    async close() {
+      release()
+      await probe.projection?.catch(() => {})
+      await registry.stop('ai-gateway-graph')
+      await fs.rm(cacheRoot, { recursive: true, force: true })
+    },
+  }
+  return probe
+}
+
+// The round 2 reviewer probe (write-after-stop.mjs): the first graph append
+// is held past the stop grace. Once it settles, no further graph write may start.
+test('a projection abandoned during its first append starts no further write once that append settles', async () => {
+  const probe = await realSourceProbe()
+  const { query, storage, events } = probe
   try {
-    await appendRowsToSourceTable(cacheRoot, DATASET_NAME, ['source=claude'], /** @type {any} */ (columns), [row])
-    const storage = createQueryStorageService({ cacheRoot })
     const append = storage.appendRows.bind(storage)
     storage.appendRows = async (table, cols, rows) => {
       const dataset = cols.some(c => c.name === 'node_id') ? 'node' : 'edge'
-      events.push({ event: 'append-start', dataset, stopped, aborted: signal?.aborted })
+      events.push({ event: 'append-start', dataset, stopped: probe.stopped, aborted: probe.signal?.aborted })
       if (dataset === 'node') {
-        entered()
-        await gate
+        probe.entered()
+        await probe.gate
       }
       await append(table, cols, rows)
-      events.push({ event: 'append-done', dataset, stopped })
+      events.push({ event: 'append-done', dataset, stopped: probe.stopped })
     }
-    /** @param {string} event @param {any} attrs */
-    const log = (event, attrs) => { events.push({ event, attrs }) }
-    const ctx = /** @type {any} */ ({ query, storage, log: { info: log, warn: log, error: log } })
-    const graph = /** @type {any} */ ({
-      project: (/** @type {string} */ _dataset, /** @type {any} */ opts) => {
-        signal = opts.signal
-        projection = projectGraph({ query, storage, contracts: [createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })], signal })
-        return projection
-      },
-    })
-    registry.register(/** @type {any} */ ({ name: 'ai-gateway-graph', plugin: '@hypaware/ai-gateway-graph', summary: 'probe', start: () => startGraphSource(ctx, graph) }))
-    await registry.start('ai-gateway-graph', ctx)
-    await entry
+    await probe.start()
 
-    await registry.stop('ai-gateway-graph')
-    stopped = true
-    assert.equal(signal?.aborted, true)
+    await probe.stop()
+    assert.equal(probe.signal?.aborted, true)
     assert.ok(events.some(e => e.event === 'graph.projection_abandoned'), 'stop returned at the grace')
 
-    release()
-    await assert.rejects(/** @type {Promise<unknown>} */ (projection), { name: 'AbortError' })
+    probe.release()
+    await assert.rejects(/** @type {Promise<unknown>} */ (probe.projection), { name: 'AbortError' })
     await setImmediate()
     assert.deepEqual(events.filter(e => e.event === 'append-start').map(e => e.dataset), ['node'], 'only the append under way at stop ran')
     assert.deepEqual(events.filter(e => e.event === 'append-start' && e.stopped), [], 'no write starts after stop')
@@ -327,9 +381,46 @@ test('a projection abandoned during its first append starts no further write onc
     const edges = await executeQuerySql({ query: 'SELECT COUNT(*) AS n FROM edge', registry: query, storage, refresh: 'always', includeLocalOnly: true })
     assert.equal(Number(edges.rows[0].n), 0, 'no edge was written')
   } finally {
-    release()
-    await projection?.catch(() => {})
-    await registry.stop('ai-gateway-graph')
-    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await probe.close()
+  }
+})
+
+// The round 3 reviewer probe (query-refresh-after-stop.mjs): an earlier run
+// left graph rows pending in the spool, and the dedup read's node discovery is
+// held past the stop grace. Its refresh must not flush them once released.
+test('a projection query released after stop does not flush pending graph rows', async () => {
+  const probe = await realSourceProbe()
+  const { query, storage, events } = probe
+  try {
+    await projectGraph({ query, storage, contracts: [probe.contract] })
+    assert.equal((await storage.discoverCachePartitions({ datasets: ['node'] })).length, 0, 'the earlier run left node rows pending only')
+
+    const node = /** @type {any} */ (query.getDataset('node'))
+    const discover = node.discoverPartitions
+    node.discoverPartitions = async (/** @type {any[]} */ ...args) => {
+      const parts = await discover(...args)
+      probe.entered()
+      await probe.gate
+      return parts
+    }
+    const flush = storage.flushTable.bind(storage)
+    storage.flushTable = async (table, opts) => {
+      events.push({ event: 'flush-start', stopped: probe.stopped, aborted: probe.signal?.aborted })
+      return flush(table, opts)
+    }
+    await probe.start()
+
+    await probe.stop()
+    assert.ok(events.some(e => e.event === 'graph.projection_abandoned'), 'stop returned at the grace')
+
+    probe.release()
+    await assert.rejects(/** @type {Promise<unknown>} */ (probe.projection), { name: 'AbortError' })
+    await setImmediate()
+    assert.deepEqual(events.filter(e => e.event === 'flush-start'), [], 'no flush starts after stop')
+    assert.ok(!events.some(e => e.event === 'graph.projection_completed'), 'an abandoned run is not reported as completed')
+    assert.ok(events.some(e => e.event === 'graph.projection_cancelled' && e.attrs.reason === 'abandoned_at_stop_grace'))
+    assert.equal((await storage.discoverCachePartitions({ datasets: ['node'] })).length, 0, 'the pending node rows stay pending')
+  } finally {
+    await probe.close()
   }
 })

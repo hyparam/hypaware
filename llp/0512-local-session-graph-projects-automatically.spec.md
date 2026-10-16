@@ -37,7 +37,8 @@ appear in source status, and retry on the ordinary cadence, even when no new
 capture arrives. Timer callbacks do not overlap. Stop clears the timer, aborts
 in-flight work and awaits it for at most two seconds before returning. The abort
 reaches every projection query, and the signal is checked before each graph
-write, so no write starts after it; only a write already under way settles. If
+write (including the pending-spool flush a projection query's refresh starts),
+so no write starts after it; only a write already under way settles. If
 that write outlasts the bound, stop returns with a warning log and the write may
 settle afterwards, but nothing after it starts. A run that ends under stop is
 logged as cancelled, never as completed or as an error, and the next start
