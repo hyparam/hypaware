@@ -65,7 +65,8 @@ async function makeTable(t, formatVersion) {
   assert.equal(metadata['format-version'], formatVersion)
   const files = (await listLiveDataFiles(tablePath)).map((f) => f.filePath)
   assert.equal(files.length, 3)
-  return { tablePath, tableUrl, resolver, lister, files }
+  // `files` stays outside `table`, so spreading `table` never passes a selection.
+  return { table: { tablePath, tableUrl, resolver, lister }, files }
 }
 
 /** @param {string} tablePath */
@@ -82,15 +83,22 @@ async function snapshotCount(tablePath) {
 
 for (const formatVersion of /** @type {const} */ ([3, 2])) {
   test(`v${formatVersion}: omitted selection keeps the whole-table scan`, async (t) => {
-    const table = await makeTable(t, formatVersion)
-    const result = await deleteMatchingRowsAtUrl({ ...table, predicate: isTarget, columns: ['session_id'] })
+    const { table, files } = await makeTable(t, formatVersion)
+    /** @type {string[]} */
+    const opened = []
+    /** @type {Resolver} */
+    const spy = { ...table.resolver, reader: (p) => { opened.push(p); return table.resolver.reader(p) } }
+    const args = { ...table, resolver: spy, predicate: isTarget, columns: ['session_id'] }
+    assert.ok(!('files' in args), 'the omitted case must not pass a selection')
+    const result = await deleteMatchingRowsAtUrl(args)
     assert.deepEqual(result, { rowsDeleted: 3, filesAffected: 3, batchCount: 1 })
+    for (const file of files) assert.ok(opened.includes(file), 'every live data file is scanned')
     assert.deepEqual(await messages(table.tablePath), ['other-a', 'other-b', 'other-c'])
   })
 
   test(`v${formatVersion}: a subset deletes matches only in the selected files and never opens the others`, async (t) => {
-    const table = await makeTable(t, formatVersion)
-    const [first, second, third] = table.files
+    const { table, files } = await makeTable(t, formatVersion)
+    const [first, second, third] = files
     /** @type {string[]} */
     const opened = []
     /** @type {Resolver} */
@@ -106,7 +114,7 @@ for (const formatVersion of /** @type {const} */ ([3, 2])) {
 
     // The survivors of the selected files and the untouched file's rows remain.
     const live = await listLiveDataFiles(table.tablePath)
-    assert.deepEqual(live.map((f) => f.filePath).sort(), [...table.files].sort())
+    assert.deepEqual(live.map((f) => f.filePath).sort(), [...files].sort())
     const deleted = new Map(live.map((f) => [f.filePath, [...(f.deletedPositions ?? [])]]))
     assert.deepEqual(deleted.get(first), [0n])
     assert.deepEqual(deleted.get(second), [])
@@ -114,7 +122,7 @@ for (const formatVersion of /** @type {const} */ ([3, 2])) {
   })
 
   test(`v${formatVersion}: an empty selection deletes nothing and commits nothing`, async (t) => {
-    const table = await makeTable(t, formatVersion)
+    const { table } = await makeTable(t, formatVersion)
     const before = await snapshotCount(table.tablePath)
     const result = await deleteMatchingRowsAtUrl({ ...table, predicate: () => true, columns: [], files: [] })
     assert.deepEqual(result, { rowsDeleted: 0, filesAffected: 0, batchCount: 0 })
@@ -123,9 +131,9 @@ for (const formatVersion of /** @type {const} */ ([3, 2])) {
   })
 
   test(`v${formatVersion}: a path not live in the current snapshot fails the whole selection before any commit`, async (t) => {
-    const table = await makeTable(t, formatVersion)
+    const { table, files } = await makeTable(t, formatVersion)
     const before = await snapshotCount(table.tablePath)
-    const [first, second] = table.files
+    const [first, second] = files
     for (const bad of [`${first}.missing`, 'file:///elsewhere/data.parquet', path.basename(first)]) {
       await assert.rejects(
         deleteMatchingRowsAtUrl({ ...table, predicate: isTarget, columns: ['session_id'], files: [first, second, bad] }),
@@ -137,8 +145,8 @@ for (const formatVersion of /** @type {const} */ ([3, 2])) {
   })
 
   test(`v${formatVersion}: rows already deleted in a selected file are not counted again`, async (t) => {
-    const table = await makeTable(t, formatVersion)
-    const [first] = table.files
+    const { table, files } = await makeTable(t, formatVersion)
+    const [first] = files
     const once = await deleteMatchingRowsAtUrl({ ...table, predicate: isTarget, columns: ['session_id'], files: [first] })
     assert.equal(once.rowsDeleted, 1)
     const again = await deleteMatchingRowsAtUrl({ ...table, predicate: isTarget, columns: ['session_id'], files: [first] })
@@ -170,8 +178,8 @@ test('a nonempty selection against a table with no snapshot is rejected', async 
 })
 
 test('an unreadable selected file fails the purge rather than reporting zero rows', async (t) => {
-  const table = await makeTable(t, 3)
-  const [first] = table.files
+  const { table, files } = await makeTable(t, 3)
+  const [first] = files
   await fs.writeFile(urlToPath(first), 'not parquet')
   await assert.rejects(deleteMatchingRowsAtUrl({ ...table, predicate: isTarget, columns: ['session_id'], files: [first] }))
 })
