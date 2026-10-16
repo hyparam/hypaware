@@ -136,6 +136,17 @@ test('mint --scope query sends ttl_seconds and label only when given', async () 
   ])
 })
 
+test('mint --scope query leaves its ceiling to the server, even past the enrollment 3650', async () => {
+  // The agent ceiling is per deployment with no upper bound, so the enrollment
+  // branch's 3650-day check must not refuse a value that server accepts.
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  await seedSession(hypHome)
+  const { impl, calls } = fetchStub([{ status: 201, body: MINTED }])
+  assert.equal(await runRemoteMint(['prod', '--scope', 'query', '--expires-days', '4000'], ctx, { fetchImpl: impl }), 0)
+  assert.deepEqual(JSON.parse(calls[0].init.body), { ttl_seconds: 4000 * 86400 })
+})
+
 test('a bare mint still sends the enrollment default of 365 days', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({ hypHome })

@@ -421,7 +421,7 @@ function coerceValue(prop, value, label) {
     case 'integer': {
       const n = Number(value)
       // `Number.isInteger` accepts exponent notation, so `1e30` is an integer
-      // here: only `maximum` keeps it from reaching the wire (issue #972).
+      // here; a declared `maximum` is what bounds it (issue #972).
       const noun = prop.maximum !== undefined
         ? prop.minimum !== undefined ? `an integer from ${prop.minimum} to ${prop.maximum}` : `an integer <= ${prop.maximum}`
         : prop.minimum === 1

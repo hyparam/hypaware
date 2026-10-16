@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { parseCoreCommandArgv } from './command_args.js'
+import { coreUsage, parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -1053,6 +1053,15 @@ function explainLoginError(callbackError, err) {
 const ENROLLMENT_EXPIRES_DAYS = 365
 
 /**
+ * The enrollment mint's server ceiling, in days. Checked in the enrollment
+ * branch rather than the shared schema: the agent mint's ceiling is a
+ * per-deployment setting with no upper bound, so a schema maximum would refuse
+ * values that server accepts (LLP 0494#cli-mint). It also keeps an exponent
+ * like `1e30`, which passes `Number.isInteger`, off the wire (issue #972).
+ */
+const ENROLLMENT_MAX_EXPIRES_DAYS = 3650
+
+/**
  * `hyp remote mint [name] [--scope query] [--label <label>] [--expires-days <n>]`:
  * mint a long-lived CI enrollment token against the target server and print it
  * once. With `--scope query` it mints a personal agent token instead
@@ -1082,9 +1091,14 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   if (gate.params.scope === 'query') {
     return runAgentMint({ name, label, expiresDays: /** @type {number | undefined} */ (gate.params['expires-days']) }, ctx, deps)
   }
-  // Bounded by the schema (LLP 0293), so no second check here. The default is
-  // this branch's own: the agent mint sends none and takes the server's.
+  // The schema (LLP 0293) owns the minimum; the ceiling is this branch's, like
+  // the default: the agent mint sends neither and takes the server's.
   const expiresDays = /** @type {number | undefined} */ (gate.params['expires-days']) ?? ENROLLMENT_EXPIRES_DAYS
+  if (expiresDays > ENROLLMENT_MAX_EXPIRES_DAYS) {
+    ctx.stderr.write(`hyp remote mint: --expires-days expects an integer from 1 to ${ENROLLMENT_MAX_EXPIRES_DAYS} (got ${expiresDays})\n`)
+    ctx.stderr.write(`usage: ${coreUsage('remote mint')}\n`)
+    return 2
+  }
   const remotes = await readConfiguredRemotes(ctx)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
