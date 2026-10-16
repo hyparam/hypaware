@@ -300,16 +300,18 @@ export function createCodexExchangeProjector(opts = {}) {
  * is answered by the body map, which carries both ids ungated. A refusal keyed
  * only on those blob fields therefore cannot fire for a real Codex turn, but the
  * reason is the map, not the blob. The lineage that
- * would survive a turn stating no thread id is the lineage Codex sends as a
- * DIRECT header, gated on nothing else: `x-codex-parent-thread-id` and
- * `x-openai-subagent` (see `subagent_signal` in `resolveCodexContext`). Those are
- * what make this refusal reachable at all, so both are consulted here.
+ * would survive a turn stating no thread id is the lineage Codex states outside
+ * the blob, gated on nothing else: `x-codex-parent-thread-id` and
+ * `x-openai-subagent`, each written both into the body map and as a direct header
+ * (see `subagent_signal` in `resolveCodexContext`). Those are what make this
+ * refusal reachable at all, so both are consulted here, on both carriers.
  *
  * A turn stating a container, no thread id, and no lineage of any kind is then
  * taken as the root thread it claims to be. That is a bounded residual: it can
  * only mis-resolve for a client that both withholds its thread id and withholds
  * every lineage signal on a subagent turn, and Codex withholds neither together.
- * The mirror residual is the refusal itself: `subagent_signal` is value-blind, so
+ * The mirror residual is the refusal itself: `subagent_signal` is value-blind
+ * (the label set is open, so no allowlist could be complete), so
  * `review`, `compact` and `memory_consolidation` (same-workspace sub-threads,
  * where the root's cwd is the correct answer) refuse a container the root would
  * have resolved, and LLP 0049 then fails OPEN and records the turn. Both residuals
@@ -776,6 +778,7 @@ function firstPlainObject(...values) {
 const X_CODEX_TURN_METADATA = 'x-codex-turn-metadata'
 const X_CODEX_WINDOW_ID = 'x-codex-window-id'
 const X_CODEX_PARENT_THREAD_ID = 'x-codex-parent-thread-id'
+const X_OPENAI_SUBAGENT = 'x-openai-subagent'
 
 /**
  * @param {AiGatewayExchangeInput} input
@@ -831,24 +834,29 @@ function resolveCodexContext(input, provider, path, reqBody) {
     readHeader(input.request_headers, X_CODEX_PARENT_THREAD_ID),
   )
   // Any evidence at all that this turn is a subagent's, in the names Codex's own
-  // source defines rather than only the ones read above. `codex-rs`
-  // `CodexResponsesMetadata::compatibility_headers` emits
-  // `x-codex-parent-thread-id` and `x-openai-subagent` (`review`, `compact`,
-  // `collab_spawn`, `memory_consolidation`) as DIRECT headers, gated only on
+  // source defines rather than only the ones read above. `codex-rs` states
+  // `x-codex-parent-thread-id` and `x-openai-subagent` in the body's flat
+  // `client_metadata` map AND as DIRECT compatibility headers, gated only on
   // their own value and NOT on the turn-metadata blob, so they are the one
   // lineage signal that survives a turn stating no `thread_id`. That makes them
-  // the only usable guard on the container fallback below: every field read
-  // above travels inside `x-codex-turn-metadata`, which also carries `thread_id`,
-  // so a refusal keyed on those alone can never fire before the thread-id path
-  // has already returned. Deliberately NOT mirrored into `attributes` or the
-  // `parent_thread_id` column: widening what a row records is a separate change
-  // with its own migration story, and this value only has to gate a fallback.
+  // the only usable guard on the container fallback below: the blob fields read
+  // above travel beside the blob's own `thread_id`, so a refusal keyed on those
+  // alone can never fire before the thread-id path has already returned. The
+  // body map comes first, as for every other lineage key, and only once
+  // `readCodexClientMetadata` has accepted it as Codex's; the header is the
+  // fallback for a hop that dropped the map. The `x-openai-subagent` value set
+  // is open (`SubAgentSource::Other(label)` passes any label through), so any
+  // non-empty string counts and no label is matched. Deliberately NOT mirrored
+  // into `attributes` or the `parent_thread_id` column: widening what a row
+  // records is a separate change with its own migration story, and this value
+  // only has to gate a fallback.
   // @ref LLP 0083#container-fallback-gap [implements]: the container fallback is
-  // refused on lineage Codex states as a header, not only in the metadata blob
+  // refused on lineage Codex states outside the metadata blob
+  // @ref LLP 0504#body-carried-subagent [implements]: the body map is a carrier too
   const subagent_signal = firstString(
     parent_thread_id,
-    readHeader(input.request_headers, 'x-codex-parent-thread-id'),
-    readHeader(input.request_headers, 'x-openai-subagent'),
+    readStringKey(clientMetadata, X_OPENAI_SUBAGENT),
+    readHeader(input.request_headers, X_OPENAI_SUBAGENT),
   )
   const originator = firstString(
     readHeader(input.request_headers, 'originator'),

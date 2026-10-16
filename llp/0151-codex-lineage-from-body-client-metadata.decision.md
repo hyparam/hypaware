@@ -6,7 +6,7 @@
 **Author:** Claude
 **Date:** 2026-07-29
 **Related:** LLP 0030, LLP 0049, LLP 0050, LLP 0066, LLP 0083, LLP 0141
-**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed)
+**Extended-by:** LLP 0430 (manual acceptance procedures are retired; references to them are removed); LLP 0504 (the subagent label is read from the body map for the cwd fallback guard, and its value set is open)
 
 > The Codex live projector derived a turn's thread, session and parent thread
 > from request headers, three of whose names Codex has never emitted, while the
@@ -147,6 +147,12 @@ read.** The audit of every header this file reads:
 `compact`, `memory_consolidation`, `collab_spawn`), which is a separate
 decision from where lineage is read. `forked_from_thread_id`, likewise present
 in the blob and unread, would need a column.
+
+> **Extended-by: [LLP 0504](./0504-codex-subagent-label-rides-the-body-map.decision.md#open-label-set).**
+> The four values are the ones Codex mints, not the whole set:
+> `SubAgentSource::Other(label)` passes any label through. The label is still
+> unread for `is_sidechain`, but LLP 0083's cwd fallback guard now reads it from
+> the body map first, then the header.
 
 <a id="lineage-source"></a>**The surface that stated the identity is recorded**
 as `attributes.codex.lineage_source` (`body_client_metadata` |

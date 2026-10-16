@@ -142,6 +142,10 @@ has the symmetric fallback.
   `x-codex-parent-thread-id`, and `x-openai-subagent` (`review`, `compact`,
   `collab_spawn`, `memory_consolidation`). Both are therefore consulted, which is
   what makes the refusal reachable at all.
+  (**Extended-by: [LLP 0504](./0504-codex-subagent-label-rides-the-body-map.decision.md#body-carried-subagent)** -
+  both names are also written into the body's flat `client_metadata` map, which
+  is read first, and the `x-openai-subagent` value set is open beyond the four
+  named here, so the guard stays value-blind.)
 
   **Narrowed by LLP 0151, not retired by it.** When this bullet was first written
   the adapter did not read the request body, and the note here recorded the body's
