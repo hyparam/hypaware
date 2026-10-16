@@ -23,9 +23,9 @@
   },
   "neutral-claude": {
     "hypaware-privacy": {
-      "neutralOnly": 20,
+      "neutralOnly": 18,
       "claudeOnly": 72,
-      "hash": "ee67f067e7337417"
+      "hash": "6577f0b50915c4f1"
     },
     "hypaware-query": {
       "neutralOnly": 13,
@@ -45,9 +45,9 @@
   },
   "neutral-codex": {
     "hypaware-privacy": {
-      "neutralOnly": 20,
+      "neutralOnly": 18,
       "codexOnly": 150,
-      "hash": "a8c423feac17a6b6"
+      "hash": "62476c134ec5aec9"
     },
     "hypaware-query": {
       "neutralOnly": 13,
