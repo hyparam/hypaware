@@ -9,6 +9,8 @@ import { Attr, getLogger, withSpan } from '../../../../src/core/observability/in
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { createCodexBackfillProvider } from './backfill.js'
+import { createCodexCloudProvider } from './cloud.js'
+import { registerCloudCommands } from './cloud-state.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { createRolloutCwdResolver } from './rollout-cwd.js'
@@ -140,6 +142,11 @@ export async function activate(ctx) {
 
   const homeDir = ctx.env.HOME ?? os.homedir()
   const codexHome = resolveCodexHome(ctx)
+  registerCloudCommands(ctx, codexHome)
+  ctx.backfills.register(createCodexCloudProvider({
+    codexHome, stateDir: ctx.paths.stateDir, env: ctx.env,
+    ignoredSessions: new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log),
+  }))
   const gatewayCapture = ctx.config?.capture_mode === 'gateway'
   // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
   // the capture-seam resolvers so a `--private` (machine-local `ignore`) dir

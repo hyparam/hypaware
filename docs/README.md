@@ -30,6 +30,7 @@ specific command.
 | --- | --- | --- |
 | [Setup](CLI.md) | Installation, updates, background service, and uninstall | `setup`, `status`, `update`, `version`, `daemon` |
 | [Clients and history](CLIENTS.md) | Supported clients, capture, history imports, GitHub activity, and skills | `client`, `attach`, `detach`, `backfill`, `github` |
+| [Experimental Codex Cloud](CODEX-CLOUD.md) | Hosted Codex and optional Work web/mobile chats through the local CLI login | `codex-cloud`, `backfill codex-cloud` |
 | [Queries](QUERYING.md) | Explore recordings with your agent, search, SQL, graph and vector tools, and MCP | `ask`, `query`, `graph`, `vector`, `enrichment`, `mcp` |
 | [Reports](REPORTS.md) | Generate, review, and publish reports | `report` |
 | [Cloud and teams](TEAM_SETUP.md) | Enrollment, sync, remote access, CI, and headless deployment | `remote`, `join`, `leave`, `sync` |

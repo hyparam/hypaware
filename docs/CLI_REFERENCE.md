@@ -39,6 +39,7 @@ This reference identifies each plugin-owned family:
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
+- `codex-cloud ...`: `@hypaware/codex` (experimental).
 - `client claude-account ...`: `@hypaware/claude-account`.
 - `client claude-desktop ...`: `@hypaware/claude-desktop`.
 - `graph ...` and `query graph neighbors`: `@hypaware/context-graph`.
@@ -1095,6 +1096,32 @@ desktop directories.
 ```sh
 hyp client claude-desktop install-helper
 ```
+
+## Experimental Codex Cloud collection
+
+Provided by `@hypaware/codex`; requires the installed Codex CLI and an existing
+file-backed ChatGPT login. The desktop app is optional. The default origin is `codex_cloud`. `--origins` independently selects any
+combination of `codex_cloud`, `codex_work_web`, and `codex_work_mobile`.
+Delegated Work and unknown origins are excluded.
+
+```sh
+hyp codex-cloud connect --all [--from-now] [--origins <origin,...>]
+hyp codex-cloud connect <thread-id> [thread-id...] [--origins <origin,...>]
+hyp codex-cloud status
+hyp backfill codex-cloud --dry-run --json
+hyp backfill codex-cloud --json
+hyp codex-cloud disconnect
+```
+
+`connect` replaces the local account-bound grant. `--all` enables discovery;
+explicit selection permits 1-20 unique IDs. `--from-now` excludes older activity.
+Otherwise the existing history window applies. Connection does not import
+immediately; an active daemon sweeps every five minutes. Imported records follow
+existing export settings. `status` prints the grant scope without credentials.
+`disconnect` stops future imports without deleting previous records.
+
+The hosted interface is experimental and may change. Keyring and API-key logins
+are unsupported. See [requirements, limits and troubleshooting](CODEX-CLOUD.md).
 
 ## Import past client history
 
