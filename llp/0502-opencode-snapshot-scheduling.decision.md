@@ -28,6 +28,5 @@ SDK reads and upload share a five-second abort signal. Disposal clears queued
 work and cancels active I/O; timers do not keep OpenCode alive. Neither failure
 nor timeout retries without another event or an explicit history import.
 
-This adopts the coalescing and serialized-work approach observed in AgentLogs,
-with a shorter cadence for HypAware's live local capture. No runtime dependency
-or scheduler configuration is added.
+The cadence keeps HypAware's local capture responsive while bounding repeated
+work. No runtime dependency or scheduler configuration is added.
