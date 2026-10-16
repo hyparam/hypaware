@@ -10,6 +10,9 @@ import { cursorNativeFixture, growToMaximalGraph, wire } from '../../hypaware-co
 import { cursorFields, cursorStorePaths, findCursorSession, listCursorSessions, readCursorSession } from '../../hypaware-core/plugins-workspace/cursor/src/native.js'
 import { createCursorBackfillProvider, cursorAdmission } from '../../hypaware-core/plugins-workspace/cursor/src/recovery.js'
 import { createCursorDecoder } from '../../hypaware-core/plugins-workspace/cursor/src/native_decoder.js'
+import { activate } from '../../hypaware-core/plugins-workspace/cursor/src/index.js'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
 import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /** @param {'cli' | 'editor'} [frontend] */
@@ -190,6 +193,73 @@ test('sweep fingerprints advance only after successful non-dry recovery and manu
 test('Cursor CLI config paths honor its config variables independently of editor storage', () => {
   assert.equal(cursorStorePaths({ env: { HOME: '/home/user', CURSOR_CONFIG_DIR: '/custom' }, platform: 'linux' }).cliRoot, '/custom/chats')
   assert.equal(cursorStorePaths({ env: { HOME: '/home/user', XDG_CONFIG_HOME: '/config' }, platform: 'linux' }).cliRoot, '/config/cursor/chats')
+})
+
+// @ref LLP 0403#storage [tests]: cursor joins the shared persistent store
+test('activate() persists session ignores to the shared store, honors saved ones in the sweep, and refuses when the store is unreadable', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-ignores-'))
+  try {
+    const cwd = path.join(root, 'workspace')
+    await fs.mkdir(cwd)
+    await fs.writeFile(path.join(cwd, 'notes.txt'), 'The probe value is MARIGOLD-42.\n')
+    const env = { HOME: path.join(root, 'home'), HYP_HOME: path.join(root, 'hyp'), CURSOR_CONFIG_DIR: path.join(root, 'cursor'), XDG_CONFIG_HOME: path.join(root, 'xdg') }
+    const f = await cursorNativeFixture(path.join(env.CURSOR_CONFIG_DIR, 'chats'), cwd, 'cli')
+    f.close()
+    const stateDir = readObservabilityEnv(env).stateDir
+    const silent = { info() {}, warn() {}, error() {}, debug() {} }
+    const activateCursor = async () => {
+      /** @type {any} */ let provider
+      /** @type {any} */ let source
+      await activate(/** @type {any} */ ({
+        env, config: {}, log: silent, configRegistry: { registerSection() {} },
+        query: { getDataset: () => true }, backfillMaterializers: { get: () => true },
+        backfills: { register(p) { provider = p } }, sources: { register(s) { source = s } },
+        commands: { get: () => true }, skills: { register() {} }, clients: { registerClient() {} },
+      }))
+      return { provider, source }
+    }
+    const sweep = async (provider) => {
+      const items = []
+      for await (const item of provider.run(/** @type {any} */ ({ env, log: silent }))) if ('value' in item) items.push(item.value)
+      return items
+    }
+    const control = (endpoint, method, id) => fetch(`${endpoint}/_hypaware/ignore/session${method === 'GET' ? `?session_id=${id}` : ''}`,
+      method === 'GET' ? {} : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session_id: id }) })
+
+    // A confirmed ignore on the cursor route is saved where every recorder reads it.
+    const first = await activateCursor()
+    assert.equal((await sweep(first.provider)).length, 1)
+    const started = await first.source.start(/** @type {any} */ ({ config: { listen_port: 0 }, storage: {}, log: silent }))
+    const endpoint = `http://127.0.0.1:${(await started.status()).details.listen_port}`
+    try {
+      assert.equal((await control(endpoint, 'POST', 'cursor-confirmed')).status, 200)
+    } finally { await started.stop() }
+    assert.ok(new SessionIgnoreSet(stateDir).has('cursor-confirmed'), 'the opt-out reaches the shared store')
+
+    // A restarted cursor recorder still reports it, and its sweep honors a
+    // marker another recorder saved after activation.
+    const second = await activateCursor()
+    const restarted = await second.source.start(/** @type {any} */ ({ config: { listen_port: 0 }, storage: {}, log: silent }))
+    try {
+      const status = await control(`http://127.0.0.1:${(await restarted.status()).details.listen_port}`, 'GET', 'cursor-confirmed')
+      assert.equal(/** @type {any} */ (await status.json()).ignored, true)
+    } finally { await restarted.stop() }
+    new SessionIgnoreSet(stateDir).add(f.session.id)
+    assert.equal((await sweep(second.provider)).length, 0, 'the sweep refreshes saved exclusions before import')
+
+    // An unreadable store is an error, never an empty list.
+    await fs.writeFile(path.join(stateDir, 'session-ignores', 'not-a-marker'), 'x')
+    const broken = await activateCursor()
+    await assert.rejects(sweep(broken.provider))
+    const exchange = readCursorSession(f.session).exchanges[0]
+    const admission = cursorAdmission({ ignoredSessions: new SessionIgnoreSet(stateDir) })
+    assert.equal(admission.session(/** @type {any} */ ({ ...f.session, id: 'other', cwd })), false)
+    assert.equal(await admission.filter({ ...exchange, session_id: 'other' }), undefined)
+    const refused = await broken.source.start(/** @type {any} */ ({ config: { listen_port: 0 }, storage: {}, log: silent }))
+    try {
+      assert.match(String((await refused.status()).lastError), /could not be loaded/)
+    } finally { await refused.stop() }
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 
 test('historical windows select messages inside recently updated sessions and widening invalidates sweep shortcuts', async () => {
