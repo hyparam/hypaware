@@ -61,12 +61,13 @@ async function writeProcessingLog(stateRoot, records) {
 /**
  * @param {string} stateRoot
  * @param {number} agoMs
+ * @param {string} [reason]
  */
-async function writeExpiredRollback(stateRoot, agoMs) {
+async function writeExpiredRollback(stateRoot, agoMs, reason = 'probation_expired') {
   const dir = path.join(stateRoot, 'config-control')
   await fs.mkdir(dir, { recursive: true })
   await fs.writeFile(path.join(dir, 'state.json'), JSON.stringify({
-    last_rollback: { etag: 'W/"rev-7"', reason: 'probation_expired', at: new Date(Date.now() - agoMs).toISOString() },
+    last_rollback: { etag: 'W/"rev-7"', reason, at: new Date(Date.now() - agoMs).toISOString() },
   }))
 }
 
@@ -107,6 +108,20 @@ test('a probation that expired during a boot whose sink failed names the sink an
   assert.match(recent.message, /1 of them sink materialize failure/)
   assert.ok(recent.repair?.[0].startsWith('grep -s sink_materialize_failed '))
   assert.ok(!offersRestart(recent), 'only materialize failures, so no restart')
+})
+
+test('an unconfirmed rollback still names the sink that failed', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  await writeProcessingLog(stateRoot, [
+    { agoMs: 30 * MIN, level: 'info', event: 'daemon.starting' },
+    { agoMs: 29 * MIN, level: 'error', event: 'daemon.sink_materialize_failed', instance: 'central', error_kind: 'sink_plugin_not_active' },
+  ])
+  await writeExpiredRollback(stateRoot, 25 * MIN, 'probation_unconfirmed')
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const rollback = find(report.diagnostics, 'remote_config_rolled_back')
+  assert.match(rollback.message, /\(probation_unconfirmed\): this host could not confirm it because sink 'central'/)
+  assert.ok(!rollback.repair?.includes(CONFIG_HINT), 'the config is not blamed')
 })
 
 test('a probation found expired at boot, before materialize ran, uses the previous boot', async () => {

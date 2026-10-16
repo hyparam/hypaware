@@ -2772,7 +2772,10 @@ export async function collectHypAwareStatus(opts = {}) {
       severity: 'warning',
       kind: 'remote_config_rolled_back',
       message: `remote config ${sanitizeLabel(rolledBack.etag) ?? ''} rolled back at ${sanitizeLabel(rolledBack.at) ?? ''} (${sanitizeLabel(rolledBack.reason) ?? ''})`,
-      repair: ['fix the central config revision; the gateway re-applies when the served etag changes'],
+      // @ref LLP 0517#retry: an unconfirmed revision is retried on its own, so the repair does not ask for a new one
+      repair: [rolledBack.reason === 'probation_unconfirmed'
+        ? 'the gateway retries this revision on its own after a backoff, or at once after a client upgrade'
+        : 'fix the central config revision; the gateway re-applies when the served etag changes'],
     }
     diagnostics.push(rollbackDiagnostic)
   }
@@ -2864,7 +2867,8 @@ export async function collectHypAwareStatus(opts = {}) {
     stateRoot,
     sinksAreConfigured ? sinks : [],
     daemonStatusFile?.sinks,
-    lastRollback?.reason === 'probation_expired' && typeof lastRollback.at === 'string' ? Date.parse(lastRollback.at) : NaN,
+    (lastRollback?.reason === 'probation_expired' || lastRollback?.reason === 'probation_unconfirmed') &&
+      typeof lastRollback.at === 'string' ? Date.parse(lastRollback.at) : NaN,
   )
   const recentErrorCount = recentErrors.total
   diagnostics.push(...recentErrors.sinkDiagnostics)

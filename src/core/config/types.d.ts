@@ -175,6 +175,8 @@ export type ConfigRollbackReason =
   | 'artifact_hash_mismatch'
   | 'bundled_version_mismatch'
   | 'probation_expired'
+  /** Probation expired while a sink could not materialize: the host could not confirm the revision (LLP 0517). */
+  | 'probation_unconfirmed'
 
 /** A/B slot identifier for persisted config documents. */
 export type ConfigSlot = 'a' | 'b'
@@ -193,6 +195,13 @@ export interface ProbationMarker {
   until: string
   slot: ConfigSlot
   previous_slot: ConfigSlot | null
+  /**
+   * Client version a sink failed to materialize under during this
+   * probation. Present only after such a failure; its presence is what
+   * makes an expiry `probation_unconfirmed` (LLP 0517). Absent in older
+   * state files.
+   */
+  client_version?: string
 }
 
 export interface ConfigRollbackRecord {
@@ -206,6 +215,12 @@ export interface RememberedBadEtag {
   etag: string
   reason: ConfigRollbackReason
   recorded_at: string
+  /**
+   * Set only for `probation_unconfirmed`: the client version the
+   * revision could not be confirmed under. A different running version
+   * retries the revision at once (LLP 0517). Absent in older state files.
+   */
+  client_version?: string
 }
 
 /**
@@ -268,6 +283,12 @@ export interface ConfigControl extends ConfigControlFacade {
   armProbationWatchdog(): void
   /** Cancel the watchdog timer (daemon shutdown). */
   disarmProbationWatchdog(): void
+  /**
+   * Report that a sink failed to materialize at this boot. Stamps the
+   * active probation marker, if any, so its expiry is recorded as
+   * `probation_unconfirmed` rather than as a bad revision (LLP 0517).
+   */
+  noteSinkMaterializeFailed(): void
   status(): Promise<ConfigControlStatus>
 }
 
@@ -289,6 +310,12 @@ export interface CreateConfigControlOptions {
    * a plain CLI boot leaves it unset and the edge is a no-op.
    */
   onConfirmed?: (etag: string) => void
+  /**
+   * Running client version. Stamped on an unconfirmed probation and
+   * compared on re-apply, so a client upgrade retries an unconfirmed
+   * revision at once (LLP 0517). Optional: unset reads as `'unknown'`.
+   */
+  clientVersion?: string
   now?: () => number
 }
 

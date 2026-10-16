@@ -343,6 +343,19 @@ export async function runDaemon(opts = {}) {
   writeStatusFile(runtimeStateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
+  // What this process loaded. Read once, at boot: the global root can be
+  // replaced underneath a running daemon, and the updater has to compare
+  // the registry against the code that is actually running, not the code
+  // on disk, or a replaced root reads as "up to date" while the daemon
+  // stays on the old version. Read before the config apply engine is
+  // created, which stamps it on a probation this host could not confirm.
+  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
+  /** @type {string | undefined} */
+  let runningVersion
+  try {
+    runningVersion = readSelfPackageIdentity().version
+  } catch { /* an install mid-replacement; the disk version stands in */ }
+
   // ----- Config apply engine (LLP 0025 / LLP 0031) -----
   // Created before bootKernel so probation expiry is evaluated before
   // any plugin activates: a kernel-killing-but-valid config that
@@ -376,6 +389,7 @@ export async function runDaemon(opts = {}) {
     onConfirmed: () => {
       if (scheduleReconcile) scheduleReconcile('confirm-edge')
     },
+    clientVersion: runningVersion,
   })
   const bootEval = await configControl.evaluateAtBoot()
   if (bootEval.action !== 'none') {
@@ -494,17 +508,6 @@ export async function runDaemon(opts = {}) {
   // config layers.
   // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
   let autoUpdateEnabled = true
-  // What this process loaded. Read once, at boot: the global root can be
-  // replaced underneath a running daemon, and the updater has to compare
-  // the registry against the code that is actually running, not the code
-  // on disk, or a replaced root reads as "up to date" while the daemon
-  // stays on the old version.
-  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
-  /** @type {string | undefined} */
-  let runningVersion
-  try {
-    runningVersion = readSelfPackageIdentity().version
-  } catch { /* an install mid-replacement; the disk version stands in */ }
   const supervised = detectSupervisor(env)
   /**
    * Re-derive the effective flag and re-cache it. Called at boot and
@@ -687,6 +690,13 @@ export async function runDaemon(opts = {}) {
     status.state = 'degraded'
     status.warnings = sinkResult.errors.map((e) =>
       `${SINK_MATERIALIZE_FAILED_WARNING_PREFIX}: sink '${sanitizeLabel(e.instance) ?? 'unknown'}' (${sanitizeLabel(e.errorKind) ?? 'materialize_failed'}): ${sanitizeLabel(e.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`)
+    // The same signal tells the apply engine this host may be unable to run
+    // the poll that confirms a probation, so its expiry is not a verdict on
+    // the revision.
+    // @ref LLP 0517#unconfirmed [implements]: a sink materialize failure during probation marks it unconfirmable
+    try {
+      configControl.noteSinkMaterializeFailed()
+    } catch { /* best-effort: an unwritable state file leaves the plain expiry */ }
   }
 
   // ----- Sink driver -----
