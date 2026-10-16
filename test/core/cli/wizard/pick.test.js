@@ -224,7 +224,7 @@ test('runWizardPick: the defaults omit a detected needs_setup row, and autoAccep
     platform: 'darwin',
   }))
   assert.doesNotMatch(stdout.text(), /Claude Desktop/, 'the narration must not promise a row the user never ticked')
-  assert.deepEqual(result.sourcesPicked, ['codex'])
+  assert.deepEqual(result.sourcesPicked, ['codex', 'codex-cloud'])
 })
 
 // A reconfigure reports which picks it carried from the config on disk, so
@@ -311,8 +311,8 @@ test('runWizardPick: autoAccept takes the default rows and prints what it accept
   // One line, plain names: the locked row is named on the fast path too,
   // and whether it is the team's is said on the sync line, not here. The
   // save confirmation follows it.
-  assert.equal(stdout.text(), '✓ Recording Claude Code and Codex\n✓ Saved settings\n')
-  assert.deepEqual(result.sourcesPicked, ['codex'])
+  assert.equal(stdout.text(), '✓ Recording Claude Code, Codex, and Codex Cloud (experimental)\n✓ Saved settings\n')
+  assert.deepEqual(result.sourcesPicked, ['codex', 'codex-cloud'])
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
 
@@ -1651,7 +1651,7 @@ test('runWizardPick: the forged document and its parser-dropped-key near-twin se
       .filter((/** @type {any} */ o) => o.checked)
       .map((/** @type {any} */ o) => o.value)
       .sort()
-    assert.deepEqual(checked, ['claude', 'codex'], JSON.stringify(doc))
+    assert.deepEqual(checked, ['claude', 'codex', 'codex-cloud'], JSON.stringify(doc))
   }
 })
 

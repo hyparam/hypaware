@@ -71,6 +71,8 @@ export type AsyncConfirmSelectPrompt = (question: ConfirmSelectQuestion) => Prom
 export type PickerSource =
   | 'claude'
   | 'codex'
+  | 'codex-cloud'
+  | 'chatgpt-work'
   | 'opencode'
   | 'cursor'
   | 'pi'

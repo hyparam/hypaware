@@ -3,7 +3,7 @@
 HypAware can discover and import selected categories of hosted chats from a local collector,
 using the existing local ChatGPT login. It does not need a browser extension
 or an agent to export history. **This integration is experimental:** it uses
-an observed hosted interface that may change. Ordinary Codex setup leaves it off.
+an observed hosted interface that may change. Hosted collection is a separate choice from local Codex recording.
 The Codex desktop app is not required; the collector uses the Codex CLI and
 runs while the collector computer and HypAware daemon are running.
 
@@ -22,13 +22,53 @@ third-party contract. Web/mobile collection can include everyday personal
 assistant conversations. Delegated `codex_work_cca`, hidden/unknown origins and
 all unselected categories are excluded, including when you supply explicit IDs.
 
-Requirements: Node 22.12 or newer, the Codex adapter enabled in HypAware, an
+Requirements: Node 22.12 or newer, the `@hypaware/codex-cloud` plugin enabled in HypAware, an
 installed `codex` executable on the collector's PATH, and a file-backed ChatGPT
 login in `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`). The collector
 adds the running Node executable's directory to its helper PATH, so a Codex
 installed beside Node remains discoverable under launchd or systemd.
 The collector checks the effective Codex credential-store setting and rejects `keyring`,
 `auto`, `ephemeral` and API-key authentication. It does not change that setting.
+
+## Choose during setup
+
+`hyp setup` offers two hosted choices:
+
+- **Codex Cloud (experimental)** is a separate row from local **Codex**.
+  On first setup it is checked when Codex is detected and included in
+  **Record everything** (or **Record and sync everything**).
+- **ChatGPT Work (experimental)** bundles Work web and Work mobile. It starts
+  unchecked and is only added through **Customize**.
+
+Choosing either hosted row enables its collector without enabling local Codex
+recording. Both use the existing file-backed Codex ChatGPT login. If that login
+is unavailable or unsupported, setup reports the incomplete step and continues;
+sign in through Codex and rerun setup to select the desired hosted rows.
+
+Reconfigure shows the choices saved by the hosted plugin. Clearing a hosted row stops future
+collection for that category. Keeping a row preserves existing thread IDs,
+history bounds and a narrower web-only or mobile-only CLI grant. Cancel and Back
+do not save changes. Unattended setup does not authenticate or grant hosted access.
+
+## Upgrading an earlier install
+
+Earlier builds ran hosted collection inside the `@hypaware/codex` plugin and
+kept its grant at `~/.hyp/hypaware/plugins/@hypaware/codex/cloud-connection.json`
+(under `$HYP_HOME` when set). The collector now lives in `@hypaware/codex-cloud`,
+which reads only its own grant, so after upgrading hosted collection stops until
+you choose it again. Rerun setup and select **Codex Cloud (experimental)**,
+**ChatGPT Work (experimental)** or both:
+
+```sh
+hyp setup
+```
+
+The old grant is left in place. It is not read, migrated or deleted, and you can
+remove that file once the new selection is saved. A narrow scope saved at the old
+location (specific chats, only Work web or only Work mobile, or a `--from-now`
+bound) is not migrated either: rerunning setup re-selects hosted collection with
+a new account-wide grant. To narrow it again, run `hyp codex-cloud connect` with
+the options you want after setup.
 
 ## Connect and import
 
@@ -65,7 +105,7 @@ export settings, including prompts and tool outputs from any selected Work/dot
 chats. Status shows the active origin selection. No credentials are sent to HypAware servers.
 
 The import supports the normal backfill `--since`, `--until` and retention
-options. Scheduled runs also honor the Codex plugin's `backfill.window_days`
+options. Scheduled runs also honor the hosted plugin's `backfill.window_days`
 when configured. Repeat imports deduplicate against recorded part IDs.
 
 ```sh
@@ -76,8 +116,9 @@ hyp codex-cloud disconnect
 Disconnect prevents future collection; it does not delete recorded data.
 `hyp session ignore <thread-id>` persists a session exclusion that both manual
 imports and scheduled sweeps reload at the start of each run. An import already
-in flight uses its run-start snapshot. `hyp detach codex` also stops collection
-through the existing client recording switch. None of these deletes prior rows.
+in flight uses its run-start snapshot. Local `hyp detach codex` is independent
+of hosted recording. Use setup to clear a hosted row, or `hyp codex-cloud
+disconnect` to stop both. None of these deletes prior rows.
 
 ## Capture and limits
 
@@ -92,7 +133,9 @@ Usage is unknown when the history response lacks it. This collector neither
 subscribes to live usage events nor estimates tokens. Thread-level model
 metadata is retained in attributes, not presented as a per-request model.
 The native originator is retained in `attributes.codex.originator`; all rows
-from this collector use `entrypoint = codex-cloud`.
+from this collector use `entrypoint = codex-cloud`. `client_name` is
+`codex-cloud` for coding chats and `chatgpt-work` for Work chats, so their
+source export policies are independent.
 Cloud filesystem paths are metadata: local `.hypignore` rules cannot classify
 the remote `/workspace` directory.
 

@@ -39,7 +39,7 @@ This reference identifies each plugin-owned family:
 - `query grep`: `@hypaware/grep`.
 - `github ...`: `@hypaware/github`.
 - `ollama ...`: `@hypaware/ollama`.
-- `codex-cloud ...`: `@hypaware/codex` (experimental).
+- `codex-cloud ...`: `@hypaware/codex-cloud` (experimental).
 - `client claude-account ...`: `@hypaware/claude-account`.
 - `client claude-desktop ...`: `@hypaware/claude-desktop`.
 - `graph ...` and `query graph neighbors`: `@hypaware/context-graph`.
@@ -1099,7 +1099,11 @@ hyp client claude-desktop install-helper
 
 ## Experimental Codex Cloud collection
 
-Provided by `@hypaware/codex`; requires the installed Codex CLI and an existing
+In attended setup, Codex Cloud is a separate row included in Record everything
+when Codex is detected on first setup. ChatGPT Work bundles web and mobile and
+requires Customize. Both are independent of local Codex recording.
+
+Provided by `@hypaware/codex-cloud`; requires the installed Codex CLI and an existing
 file-backed ChatGPT login. The desktop app is optional. The default origin is `codex_cloud`. `--origins` independently selects any
 combination of `codex_cloud`, `codex_work_web`, and `codex_work_mobile`.
 Delegated Work and unknown origins are excluded.

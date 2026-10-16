@@ -8,6 +8,7 @@ import { readObservabilityEnv } from '../../observability/env.js'
 import { configRecordsPickAnswer, defaultConfigPath, prepareLocalConfigWrite } from '../../config/schema.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { joinNames } from './express.js'
+import { seedHostedCodexPicks, HOSTED_CODEX_PICKS } from './codex_cloud.js'
 import {
   DEFAULT_RETENTION_DAYS,
   WALKTHROUGH_CANCEL_EXIT_CODE,
@@ -106,7 +107,7 @@ export async function resolvePickSeeding(opts) {
   // Locked ids come from the join phase's central-layer classification. A
   // Set for membership tests; the ordered id array is preserved for the
   // result so the finale/status can report exactly what was locked.
-  const lockedSources = (opts.locked ?? []).filter((id) => descriptors.has(id))
+  const lockedSources = (opts.locked ?? []).filter((id) => descriptors.has(id) && !HOSTED_CODEX_PICKS.includes(id))
   const lockedSet = new Set(lockedSources)
 
   const obsEnv = readObservabilityEnv(env)
@@ -147,6 +148,8 @@ export async function resolvePickSeeding(opts) {
       detected = new Set()
     }
   }
+
+  if (interactive) await seedHostedCodexPicks({ env, descriptors, configured, detected })
 
   // A `needs_setup` row never seeds from detection: its configure phase can
   // perform consequential setup later, and checking

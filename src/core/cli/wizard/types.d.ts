@@ -1,3 +1,4 @@
+import type { configureWizardCloud } from '../../../../src/core/cli/wizard/codex_cloud.js'
 import type { dispatch } from '../../../../src/core/cli/dispatch.js'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
@@ -873,6 +874,7 @@ export interface RunInitWizardOptions {
   syncScope?: (opts: RunWizardSyncScopeOptions) => Promise<WizardSyncScopeResult>
   folderAsk?: (opts: RunWizardFolderAskOptions) => Promise<WizardFolderAskResult>
   express?: (opts: RunWizardExpressGateOptions) => Promise<WizardExpressChoice>
+  configureCloud?: typeof configureWizardCloud
   configure?: (picked: ConfigurePhasePicked, opts: RunConfigurePhaseOptions) => Promise<ConfigurePhaseResult>
   finaleRunner?: (args: Record<string, unknown>) => Promise<FinaleSummary>
   /**

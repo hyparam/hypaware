@@ -2,17 +2,15 @@
   "schema_version": 1,
   "name": "@hypaware/codex",
   "version": "2.0.0",
-  "description": "Codex CLI and Desktop capture from local rollout files. Inference connects directly to the provider by default; gateway capture is an explicit option. Includes query, privacy, and report skills. Experimental Codex Cloud history collection requires an explicit local connection.",
+  "description": "Codex CLI and Desktop capture from local rollout files. Inference connects directly to the provider by default; gateway capture is an explicit option. Includes query, privacy, and report skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
-  "node_engine": ">=22.12",
+  "node_engine": ">=20",
   "entrypoint": "./src/index.js",
   "permissions": [
     "read_home",
     "write_home",
     "read_state",
-    "write_state",
-    "network",
     "write_codex_settings"
   ],
   "requires": {
@@ -22,9 +20,6 @@
   },
   "contributes": {
     "commands": [
-      { "name": "codex-cloud connect", "summary": "Connect cloud chats to the existing local ChatGPT login (experimental)" },
-      { "name": "codex-cloud disconnect", "summary": "Stop collecting connected cloud chats" },
-      { "name": "codex-cloud status", "summary": "Show the local cloud chat selection" },
       { "name": "codex-hook classify-cwd", "summary": "Internal Codex hook: nag to classify an unclassified folder on a machine that forwards", "hidden": true }
     ],
     "client": {

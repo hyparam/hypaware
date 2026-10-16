@@ -51,7 +51,7 @@ export function projectCloudHistory(history, window = {}) {
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
     provider: 'openai', session_id: thread.id, conversation_id: thread.id,
-    conversation_source: 'codex', client_name: 'codex', entrypoint: 'codex-cloud',
+    conversation_source: 'codex', client_name: thread.originator === 'codex_cloud' ? 'codex-cloud' : 'chatgpt-work', entrypoint: 'codex-cloud',
     attributes: { codex: { source: 'codex-cloud-agent', identity_source: 'native', originator: thread.originator,
       ...(typeof thread.model === 'string' ? { thread_model: thread.model } : {}),
       ...(typeof thread.cwd === 'string' ? { workspace: thread.cwd } : {}),
@@ -75,7 +75,7 @@ export function createCodexCloudProvider(opts, deps = {}) {
   /** @type {Map<string, number>} */
   const attempted = new Map()
   return {
-    name: 'codex-cloud', plugin: '@hypaware/codex', datasets: [AI_GATEWAY_MESSAGES_DATASET],
+    name: 'codex-cloud', plugin: '@hypaware/codex-cloud', datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import connected Codex cloud chats using the local ChatGPT login (experimental)',
     sweep: { cron: '*/5 * * * *' },
     async *run(ctx) {
@@ -157,7 +157,7 @@ export function createCodexCloudProvider(opts, deps = {}) {
           }
           if (!projected.exchange.messages.length) continue
           count += projected.exchange.messages.length
-          yield projectedExchangeItem(projected.exchange, { client_name: 'codex', native_id: id })
+          yield projectedExchangeItem(projected.exchange, { client_name: projected.exchange.client_name, native_id: id })
         }
         step = 'completion'
         if (failedChats) throw new CloudError('some_chats_failed')

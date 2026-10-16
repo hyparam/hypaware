@@ -4,10 +4,10 @@ import test from 'node:test'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { acquireCloudAuth, readCloudAuth, CloudError } from '../../hypaware-core/plugins-workspace/codex/src/cloud-auth.js'
-import { openCloudClient, readCloudThread, CLOUD_ENDPOINT, listCloudThreads } from '../../hypaware-core/plugins-workspace/codex/src/cloud-client.js'
-import { createCodexCloudProvider, projectCloudHistory } from '../../hypaware-core/plugins-workspace/codex/src/cloud.js'
-import { cloudConnectionPath, readCloudConnection, validateCloudThreads, registerCloudCommands, validateCloudOrigins } from '../../hypaware-core/plugins-workspace/codex/src/cloud-state.js'
+import { acquireCloudAuth, readCloudAuth, CloudError } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-auth.js'
+import { openCloudClient, readCloudThread, CLOUD_ENDPOINT, listCloudThreads } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-client.js'
+import { createCodexCloudProvider, projectCloudHistory } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud.js'
+import { cloudConnectionPath, readCloudConnection, validateCloudThreads, registerCloudCommands, validateCloudOrigins, configureCloudSelection } from '../../hypaware-core/plugins-workspace/codex-cloud/src/cloud-state.js'
 import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 
@@ -425,4 +425,37 @@ test('each supported origin is independently selectable and discovery cannot wid
   for (const value of [[], ['codex_work_cca'], ['codex_cloud', 'codex_cloud'], ['unknown'], null]) {
     assert.throws(() => validateCloudOrigins(value), /choose_codex/)
   }
+})
+
+test('onboarding groups Work origins and preserves explicit threads, lower bounds and narrow CLI grants', async t => {
+  const stateDir = await temp(t)
+  const opts = { stateDir, codexHome: '/fake', env: {} }
+  let renewals = 0
+  const deps = { acquire: async () => { renewals++; return auth } }
+  await configureCloudSelection({ ...opts, sources: ['codex-cloud'] }, deps)
+  assert.deepEqual((await readCloudConnection(stateDir))?.origins, ['codex_cloud'])
+  await configureCloudSelection({ ...opts, sources: ['codex-cloud', 'chatgpt-work'] }, deps)
+  assert.deepEqual((await readCloudConnection(stateDir))?.origins, ['codex_cloud', 'codex_work_web', 'codex_work_mobile'])
+  await configureCloudSelection({ ...opts, sources: ['chatgpt-work'] }, deps)
+  assert.equal(renewals, 2, 'removing a category never needs authentication')
+  assert.deepEqual((await readCloudConnection(stateDir))?.origins, ['codex_work_web', 'codex_work_mobile'])
+  const narrow = { version: 1, accountHash, threads: [threadId], origins: ['codex_work_web'] }
+  await fs.writeFile(cloudConnectionPath(stateDir), JSON.stringify(narrow))
+  await configureCloudSelection({ ...opts, sources: ['chatgpt-work'] }, deps)
+  assert.deepEqual(await readCloudConnection(stateDir), narrow)
+  const bounded = { version: 2, scope: 'account', accountHash, since: '2026-10-16T00:00:00Z', origins: ['codex_cloud'] }
+  await fs.writeFile(cloudConnectionPath(stateDir), JSON.stringify(bounded))
+  await configureCloudSelection({ ...opts, sources: ['codex-cloud', 'chatgpt-work'] }, deps)
+  assert.equal(/** @type {any} */ (await readCloudConnection(stateDir)).since, bounded.since)
+  await configureCloudSelection({ ...opts, sources: [] }, deps)
+  assert.equal(await readCloudConnection(stateDir), undefined)
+})
+
+test('onboarding revokes deselected origins even if authentication for a replacement fails', async t => {
+  const stateDir = await temp(t)
+  await fs.writeFile(cloudConnectionPath(stateDir), JSON.stringify({ version: 2, scope: 'account', accountHash, origins: ['codex_cloud'] }))
+  await assert.rejects(configureCloudSelection({ stateDir, codexHome: '/fake', env: {}, sources: ['chatgpt-work'] }, {
+    acquire: async () => { throw new CloudError('codex_sign_in_required') },
+  }), /codex_sign_in_required/)
+  assert.equal(await readCloudConnection(stateDir), undefined)
 })
