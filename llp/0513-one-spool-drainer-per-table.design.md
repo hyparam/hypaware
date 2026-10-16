@@ -50,6 +50,15 @@ per chunk, after the file has been read, and released between chunks.
 - A symlinked spool takes no claim, so the lock is never created through it,
   and `listFlushFiles` refuses it as before.
 
+## Scope {#scope}
+
+- The claim coordinates drain against drain. It does not coordinate an
+  append against a rotation: another process's append that opened
+  `active.jsonl` before the rename can write into a file that is already
+  drained and removed, and that row is lost though the append resolved. That
+  is older than this design and is tracked separately
+  ([issue 2654](https://github.com/hyparam/hypaware/issues/2654)).
+
 ## Cost {#cost}
 
 - One directory create, one file create, and their removal per flush, plus a

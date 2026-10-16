@@ -63,42 +63,53 @@ async function committedIds(svc) {
 
 // Real processes: the in-process flush lock already serializes flushes within
 // one process, so only separate processes can take the same rotated file.
-// Each child stands in for the daemon or a `hyp query --refresh always`:
-// it spools its own rows and force-flushes after every append. Issue #2580.
+// Each child stands in for the daemon or a `hyp query --refresh always`
+// force-flushing a spool that already holds rotated files. Issue #2580.
+//
+// Every row is spooled and rotated before any child starts, so this proves
+// drain against drain only. An append that spans another process's rotation
+// can still be lost (issue #2654) and is deliberately outside this test.
 test('concurrent forced flushes in separate processes commit every spooled row exactly once', async () => {
   const cacheRoot = await makeTmpDir()
   try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const tablePath = svc.cacheTablePath('demo', ['all'])
+    const dir = path.join(tablePath, '_hypaware_spool')
+    const batches = 40
+    for (let batch = 0; batch < batches; batch++) {
+      await svc.appendRows(tablePath, COLS, Array.from({ length: 4 }, (_, i) => ({ id: batch * 4 + i, msg: 'b' + batch })))
+      // The name a rotation gives it, so every child lists the same files.
+      if (batch < batches - 1) await fs.rename(path.join(dir, 'active.jsonl'), path.join(dir, `flush-${batch}-0-test.jsonl`))
+    }
+    const go = path.join(cacheRoot, 'go')
     const child = `
+      import fs from 'node:fs'
       import { createQueryStorageService } from ${JSON.stringify(storageUrl)}
-      const [cacheRoot, base] = process.argv.slice(1)
+      const [cacheRoot, go] = process.argv.slice(1)
       const svc = createQueryStorageService({ cacheRoot })
       const tablePath = svc.cacheTablePath('demo', ['all'])
-      const cols = ${JSON.stringify(COLS)}
-      for (let round = 0; round < 25; round++) {
-        const rows = Array.from({ length: 4 }, (_, i) => ({ id: Number(base) + round * 4 + i, msg: 'r' + round }))
-        await svc.appendRows(tablePath, cols, rows)
-        // A busy partition guard is the contention callers already retry.
-        for (let attempt = 0; ; attempt++) {
-          try {
-            await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
-            break
-          } catch (error) {
-            if (error?.error_kind !== 'cache_partition_mutation_busy' || attempt >= 200) throw error
-            await new Promise(resolve => setTimeout(resolve, 10))
-          }
+      while (!fs.existsSync(go)) await new Promise(resolve => setTimeout(resolve, 2))
+      // A busy partition guard is the contention callers already retry.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+          break
+        } catch (error) {
+          if (error?.error_kind !== 'cache_partition_mutation_busy' || attempt >= 200) throw error
+          await new Promise(resolve => setTimeout(resolve, 10))
         }
       }
     `
     const children = 4
-    await Promise.all(Array.from({ length: children }, (_, i) => runChild(child, [cacheRoot, String(i * 1000)])))
+    const runs = Array.from({ length: children }, () => runChild(child, [cacheRoot, go]))
+    await new Promise(resolve => setTimeout(resolve, 300))
+    await fs.writeFile(go, '')
+    await Promise.all(runs)
 
-    const svc = createQueryStorageService({ cacheRoot })
-    const tablePath = svc.cacheTablePath('demo', ['all'])
     const ids = await committedIds(svc)
-    const expected = children * 25 * 4
     assert.equal(new Set(ids).size, ids.length, `${ids.length - new Set(ids).size} rows were committed more than once`)
-    assert.equal(ids.length, expected, 'every spooled row is committed')
-    const spool = await fs.readdir(path.join(tablePath, '_hypaware_spool'))
+    assert.equal(ids.length, batches * 4, 'every spooled row is committed')
+    const spool = await fs.readdir(dir)
     assert.deepEqual(spool.filter((name) => name.startsWith('flush-') || name.endsWith('.mutation-lock')), [], 'no rotated file or claim is left behind')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
