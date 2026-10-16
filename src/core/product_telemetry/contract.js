@@ -120,6 +120,8 @@ export const COMMANDS = Object.freeze([
   'remote login',
   'remote mint',
   'remote remove',
+  'remote tokens',
+  'remote tokens revoke',
   'report',
   'report delete',
   'report fix',

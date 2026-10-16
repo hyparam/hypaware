@@ -6,6 +6,7 @@
 **Author:** HypForge steward
 **Date:** 2026-10-07
 **Related:** LLP 0014, LLP 0017, LLP 0040, LLP 0101, LLP 0349, LLP 0453
+**Extended-by:** LLP 0497 (compression and bounded HTTP retries within the same chunk lifetime)
 **Implementation-plan:** LLP 0472
 
 @ref LLP 0014#forward-sink-backpressure [extends]: bound complete logical chunk work and scheduled instance concurrency

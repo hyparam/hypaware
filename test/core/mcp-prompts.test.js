@@ -31,27 +31,23 @@ const hiddenMarkVerb = {
   name: 'report mark', tool: 'set_recommendation_status', summary: 'mark', exposure: 'cli-only',
   inputSchema: { type: 'object', properties: {} }, operation: async () => ({}), render: () => ({ stdout: '' }),
 }
-// The mark as a tool, for an assembly that shows it.
-const markVerb = {
-  name: 'contract set_recommendation_status', tool: 'set_recommendation_status', summary: 'mark', authClass: 'operator',
-  inputSchema: { type: 'object', properties: {} }, operation: async () => ({}), render: () => ({ stdout: '' }),
-}
 const fakeQuery = { listDatasets: () => [], getDataset: () => undefined, registerDataset() {} }
 
 /**
- * An assembly over a real verb registry holding `list`, plus the two T2
- * read contracts when `reads` is set.
+ * An assembly over a real verb registry holding `list`, plus every remote
+ * contract (the two reads and the mark) when `reads` is set. The mark shows
+ * only when `allowScopes` holds its scope.
  *
- * @param {{ list: object[], reads?: boolean, transport?: 'stdio' | 'http', allowOperator?: boolean }} opts
+ * @param {{ list: object[], reads?: boolean, transport?: 'stdio' | 'http', allowOperator?: boolean, allowScopes?: string[] }} opts
  */
-function assembly({ list, reads = false, transport = 'stdio', allowOperator }) {
+function assembly({ list, reads = false, transport = 'stdio', allowOperator, allowScopes }) {
   const verbs = createVerbRegistry()
   for (const v of list) verbs.register(/** @type {any} */ (v))
   if (reads) {
     for (const c of REMOTE_TOOL_CONTRACTS) {
       verbs.register({
         name: `contract ${c.tool}`, tool: c.tool, title: c.title, summary: c.summary, inputSchema: c.inputSchema,
-        authClass: c.authClass, operation: async () => ({}), render: () => ({ stdout: '' }),
+        authClass: c.authClass, scope: c.scope, operation: async () => ({}), render: () => ({ stdout: '' }),
       })
     }
   }
@@ -61,6 +57,7 @@ function assembly({ list, reads = false, transport = 'stdio', allowOperator }) {
     runTool: async () => ({}),
     transport,
     ...(allowOperator === undefined ? {} : { allowOperator }),
+    ...(allowScopes === undefined ? {} : { allowScopes }),
   })
 }
 
@@ -131,7 +128,7 @@ test('over stdio: prompts capability, all three prompts listed, and the CLI fix'
   assert.doesNotMatch(text, /approv/i)
 })
 
-test('over http with the two read contracts: all three listed, and the fix ends in the hand-off', async () => {
+test('over http with the contracts bound and no report-publish: all three listed, and the fix ends in the hand-off', async () => {
   const s = assembly({ list: [readVerb], reads: true, transport: 'http', allowOperator: false })
   assert.deepEqual(names(await s.handleMessage({ jsonrpc: '2.0', id: 1, method: 'prompts/list' })), ALL_PROMPTS)
 
@@ -164,8 +161,9 @@ test('over http with no recommendation tool: check_team_history alone, and no hy
   assert.ok(text.includes('Use grep_search, query_sql.'))
 })
 
-test('with the mark shown: four steps ending in set_recommendation_status, no approval step, no dismissed', async () => {
-  const s = assembly({ list: [readVerb, markVerb], reads: true, transport: 'http', allowOperator: true })
+test('with report-publish: four steps ending in set_recommendation_status, no approval step, no dismissed', async () => {
+  // The bound write contract, admitted by its scope alone: no operator flag.
+  const s = assembly({ list: [readVerb], reads: true, transport: 'http', allowOperator: false, allowScopes: ['report-publish'] })
   const text = textOf(await get(s, 'fix_recommendation', { id: ID }))
   const steps = text.split('\n').filter((line) => /^\d\. /.test(line))
   assert.deepEqual(steps.map((line) => line.slice(0, 2)), ['1.', '2.', '3.', '4.'])

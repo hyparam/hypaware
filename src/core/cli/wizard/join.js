@@ -12,22 +12,13 @@ import {
   remoteLogin,
   waitForCentralConverge,
 } from '../remote_commands.js'
-import { withSpinner } from '../spinner.js'
 import { classifyClientProvenance } from './provenance.js'
-
-/**
- * The join phase's org-config convergence budget (LLP 0129: "seconds to a
- * minute"). `waitForCentralConverge` polls for the applied org-config slot
- * on disk (LLP 0223); this is the ceiling the wizard is willing to block
- * for a locked picker before falling through to an unlocked one.
- */
-export const ORG_CONFIG_WAIT_MS = 60000
 
 /**
  * The wizard's join phase (LLP 0135 #join). A thin narration wrapper around
  * the existing `hyp remote login` machinery, never a second enrollment
- * mechanism (`@ref LLP 0134#login-lane`): it runs the login lane, waits
- * (bounded) for the daemon to converge on the org config, and computes the
+ * mechanism (`@ref LLP 0134#login-lane`): it runs the login lane, checks
+ * once for an applied org config, and computes the
  * set of picker source ids the central layer owns so the pick phase can
  * lock them (`@ref LLP 0129#join-before-picker`).
  *
@@ -38,9 +29,8 @@ export const ORG_CONFIG_WAIT_MS = 60000
  *   (`@ref LLP 0129#failed-join-returns-to-fork`).
  * - **converged**: resolve the two-layer config from disk and lock every
  *   picker row whose owning plugin is in the central layer.
- * - **timed out / no-org-config 404**: narrate and return `'ok'` with an
- *   empty lock set rather than blocking - nothing is pinned, so the picker
- *   composes freely (LLP 0129).
+ * - **org config not applied yet**: return `'ok'` with an empty lock set
+ *   immediately. The daemon continues pulling config in the background.
  * - **enrolled, daemon incomplete**: the same two converge branches, but
  *   the status says `'daemon_incomplete'` so the wizard can name the one
  *   thing that is missing instead of the sign-in that is not.
@@ -104,21 +94,16 @@ async function runJoinFlow(opts, span) {
   /** @type {'ok' | 'daemon_incomplete'} */
   const status = login.reason === 'daemon_incomplete' ? 'daemon_incomplete' : 'ok'
 
-  // The converge wait can honestly take up to its full minute, and a static
-  // line over a minute of silence reads as a hang: on a TTY the line
-  // animates with elapsed time and clears when the wait settles.
+  // Preserve locks for a config that already landed without delaying the
+  // picker for a slow or absent config. A zero budget probes once, retaining
+  // the helper's unreadable-pointer diagnostic without scheduling a sleep.
+  // @ref LLP 0498#org-config [implements]: no org-config wait or progress step; use only the applied state already on disk
   const waitForConverge = opts.waitForConverge ?? waitForCentralConverge
   const started = Date.now()
-  const converge = await withSpinner(
-    { stdout: opts.stdout, env: opts.env, label: "Applying your org's configuration..." },
-    () => waitForConverge({ env: opts.env }, { timeoutMs: ORG_CONFIG_WAIT_MS })
-  )
+  const converge = await waitForConverge({ env: opts.env }, { timeoutMs: 0 })
   setSpanAttr(span, 'wait_ms', Date.now() - started)
   setSpanAttr(span, 'converged', converge.ok)
   if (!converge.ok) {
-    // Timeout or the no-org-config 404 steady state: nothing landed to lock.
-    // Narrate and continue with an unlocked picker rather than blocking.
-    opts.stdout.write("Didn't hear back from your org's config in time; continuing with an unlocked picker.\n")
     return { status, lockedSources: [] }
   }
 
@@ -205,7 +190,7 @@ export async function defaultRunLogin(opts, login = remoteLogin) {
     throw new Error('runWizardJoin: no login context (opts.ctx) and no runLogin override was provided')
   }
   // The lane prints through the wizard's streams, not the raw ones its
-  // context carries. Its attach wait holds the run for up to half a minute
+  // context carries. Its attach wait holds the run for a few seconds
   // behind a ticking spinner, and off the guard a reader that leaves during
   // that wait is written into for the rest of it, unnoticed.
   // @ref LLP 0341#absorb [implements]: the login lane is a lane too, so its context writes through the guarded streams

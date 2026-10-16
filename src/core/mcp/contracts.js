@@ -38,8 +38,9 @@ function freezeDeep(value) {
 }
 
 /**
- * The read contracts. The write contract (`set_recommendation_status`,
- * scope `report-publish`) joins with the `write` auth class.
+ * The two read contracts and the one write: `set_recommendation_status`,
+ * scope `report-publish`, the scope the REST status PUT already admits
+ * (hypaware-server LLP 0598).
  *
  * @ref LLP 0494#remote-contracts [implements]: shape only, no operation; the server binds by name
  * @type {readonly RemoteToolContract[]}
@@ -85,5 +86,29 @@ export const REMOTE_TOOL_CONTRACTS = freezeDeep(/** @type {RemoteToolContract[]}
     },
     authClass: 'read',
     cli: 'hyp report get <rec-id>',
+  },
+  {
+    tool: 'set_recommendation_status',
+    title: 'Set recommendation status',
+    summary: 'Set one recommendation\'s status. After you have fixed it and checked the fix, mark it applied, '
+      + 'with a reason and a link to the change, such as the pull request. '
+      + 'Dismissing needs a reason. A mark is added to the recommendation\'s history; nothing is removed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The recommendation id (hyprec- and 16 hex characters).' },
+        state: { type: 'string', description: 'The new state.', enum: [...RECOMMENDATION_STATES] },
+        reason: { type: 'string', description: 'Why, in a line (at most 2000 characters). Required for dismissed.' },
+        links: {
+          type: 'array',
+          description: 'Links to the change, such as the pull request or commit (absolute http(s) URLs, at most 8).',
+          items: { type: 'string' },
+        },
+      },
+      required: ['id', 'state'],
+    },
+    authClass: 'write',
+    scope: 'report-publish',
+    cli: 'hyp report mark <id> <state>',
   },
 ]))

@@ -19,7 +19,7 @@ import { readGithubAuth, resolveGithubOAuth } from './auth.js'
  *
  * `fetchImpl` is injectable so tests drive the client without a network.
  *
- * @import { GithubActor, GithubClient, GithubCommit, GithubComment, GithubIssue, GithubPage, GithubPull, GithubReview, HypError, PluginLogger } from './types.js'
+ * @import { GithubActor, GithubClient, GithubCommit, GithubComment, GithubIssue, GithubPage, GithubPull, GithubReview, GithubRequestBudget, HypError, PluginLogger } from './types.js'
  */
 
 const API_BASE = 'https://api.github.com'
@@ -27,6 +27,9 @@ const API_VERSION = '2022-11-28'
 const PER_PAGE = 100
 /** The explicit all-visible inventory is normalized into small strings. */
 const MAX_PAGES = 50
+/** Same-origin redirects followed before a renamed or transferred repo errors. */
+const MAX_REDIRECTS = 3
+const REDIRECT_STATUSES = new Set([301, 302, 307, 308])
 /** GitHub embeds at most this many entries in a single commit's `files`. */
 const COMMIT_FILES_CAP = 300
 
@@ -94,7 +97,8 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
    * response body on a non-OK status.
    *
    * @param {string} pathAndQuery  e.g. `/repos/o/r/commits?since=...`
-   * @param {{ etag?: string }} [opts]
+   * @param {{ etag?: string, budget?: GithubRequestBudget }} [opts]  the caller
+   *   spent `budget` on the first request; every redirect hop spends its own unit
    * @returns {Promise<{ notModified: true } | { notModified: false, data: unknown, next: string | null, etag: string | null }>}
    */
   async function request(pathAndQuery, opts = {}) {
@@ -114,14 +118,28 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     if (opts.etag) headers['If-None-Match'] = opts.etag
 
     let res
+    let target = url
     try {
-      // Never follow a redirect on a credential-bearing request: the token
-      // must not be re-sent to a Location the server chose. `manual` keeps
-      // that refusal while preserving the status, so a renamed or transferred
-      // repository reports `GitHub API 301` below instead of collapsing into
-      // a generic network failure.
-      res = await doFetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+      // Never let fetch follow a redirect on a credential-bearing request: the
+      // token must not be re-sent to a Location the server chose. A renamed or
+      // transferred repository answers 301 to `/repositories/<id>/...` on the
+      // same API origin, so follow a Location only when it passes the same
+      // origin pin as a continuation, for a few hops. Anything else keeps the
+      // status and reports `GitHub API 301` below.
+      for (let hop = 0; ; hop++) {
+        res = await doFetch(target, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+        if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECTS) break
+        const next = sameOriginLocation(baseUrl, res.headers.get('location'))
+        if (next === null) break
+        // The redirect body is never read, and an unread body holds its socket
+        // until the per-hop timeout rather than until the next hop starts.
+        await res.body?.cancel().catch(() => {})
+        // @ref LLP 0361#budget [implements]: a redirect hop is a physical request, charged to the same tick allowance
+        if (opts.budget && !opts.budget.take()) throw budgetExhausted()
+        target = next
+      }
     } catch (cause) {
+      if (/** @type {HypError} */ (cause)?.hypErrorKind === 'github_budget_exhausted') throw cause
       // Carry a diagnosis without echoing anything server-controlled: an
       // errno code or error name is a runtime constant, while messages can
       // embed URLs or upstream text.
@@ -136,7 +154,7 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     if (res.status === 304) return { notModified: true }
     if (!res.ok) {
       // No body, no token, no query string - just status + the path.
-      const safePath = pathOf(url)
+      const safePath = pathOf(target)
       const hint = res.status === 401 ? '; check the configured token or run `hyp github login` again'
         : res.status >= 300 && res.status < 400 ? '; redirects are not followed - the repository may have been renamed or transferred' : ''
       const err = /** @type {HypError} */ (new Error(`GitHub API ${res.status} for GET ${safePath}${hint}`))
@@ -174,10 +192,11 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
    * @param {string} url
    * @param {(row: Record<string, unknown>) => T | null} project
    * @param {string} [etag]
+   * @param {GithubRequestBudget} [budget]
    * @returns {Promise<GithubPage<T>>}
    */
-  async function listingPage(url, project, etag) {
-    const result = await request(url, { etag })
+  async function listingPage(url, project, etag, budget) {
+    const result = await request(url, { etag, budget })
     if (result.notModified) return { items: [], next: null, notModified: true }
     /** @type {T[]} */
     const items = []
@@ -207,36 +226,36 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
       return repos
     },
 
-    async listIssuesPage(owner, repo, since, page) {
+    async listIssuesPage(owner, repo, since, page, budget) {
       const q = sinceQuery(since)
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/issues?state=all&per_page=${PER_PAGE}${q}`
-      return listingPage(url, issueOf)
+      return listingPage(url, issueOf, undefined, budget)
     },
 
-    async listPullRequestsPage(owner, repo, etag, page) {
+    async listPullRequestsPage(owner, repo, etag, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls?state=all&sort=updated&direction=desc&per_page=${PER_PAGE}`
-      return listingPage(url, pullOf, page ? undefined : etag)
+      return listingPage(url, pullOf, page ? undefined : etag, budget)
     },
 
-    async listPullRequestFilesPage(owner, repo, number, page) {
+    async listPullRequestFilesPage(owner, repo, number, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/files?per_page=${PER_PAGE}`
-      return listingPage(url, filename)
+      return listingPage(url, filename, undefined, budget)
     },
 
-    async listPullRequestReviewsPage(owner, repo, number, page) {
+    async listPullRequestReviewsPage(owner, repo, number, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/reviews?per_page=${PER_PAGE}`
-      return listingPage(url, reviewOf)
+      return listingPage(url, reviewOf, undefined, budget)
     },
 
-    async listPullRequestCommitsPage(owner, repo, number, page) {
+    async listPullRequestCommitsPage(owner, repo, number, page, budget) {
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/commits?per_page=${PER_PAGE}`
-      return listingPage(url, commitOf)
+      return listingPage(url, commitOf, undefined, budget)
     },
 
-    async listCommitsPage(owner, repo, since, page) {
+    async listCommitsPage(owner, repo, since, page, budget) {
       const q = sinceQuery(since)
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/commits?per_page=${PER_PAGE}${q}`
-      return listingPage(url, commitOf)
+      return listingPage(url, commitOf, undefined, budget)
     },
 
     // Changed files come from the single-commit resource, which is not a
@@ -245,8 +264,8 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     // touching more files silently loses the remainder. Say so in the log
     // rather than reporting a short list as complete, matching the
     // `github.listing_truncated` signal the all-visible enumeration emits.
-    async listCommitFilesPage(owner, repo, sha, page) {
-      const result = await request(page ?? `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`)
+    async listCommitFilesPage(owner, repo, sha, page, budget) {
+      const result = await request(page ?? `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`, { budget })
       if (result.notModified) return { items: [], next: null, notModified: true }
       const data = /** @type {Record<string, unknown>} */ (result.data)
       const files = Array.isArray(data.files) ? /** @type {Record<string, unknown>[]} */ (data.files) : []
@@ -257,10 +276,10 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
       return { items, next: result.next, etag: result.etag }
     },
 
-    async listIssueCommentsPage(owner, repo, since, page) {
+    async listIssueCommentsPage(owner, repo, since, page, budget) {
       const q = sinceQuery(since)
       const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/issues/comments?per_page=${PER_PAGE}${q}`
-      return listingPage(url, commentOf)
+      return listingPage(url, commentOf, undefined, budget)
     },
   }
 }
@@ -351,6 +370,22 @@ function resolveUrl(baseUrl, pathAndQuery) {
   return url.href
 }
 
+/**
+ * A redirect target on the configured API origin, or null when absent or foreign.
+ *
+ * @param {string} baseUrl
+ * @param {string | null} location
+ * @returns {string | null}
+ */
+function sameOriginLocation(baseUrl, location) {
+  if (!location) return null
+  try {
+    return resolveUrl(baseUrl, location)
+  } catch {
+    return null
+  }
+}
+
 /** @param {URL | null} url @returns {HypError} */
 function foreignOrigin(url) {
   // Origin only. The path and query of an untrusted URL stay out of the error,
@@ -358,6 +393,19 @@ function foreignOrigin(url) {
   // authority reports as `null`, which is what `URL.origin` already calls it.
   const err = /** @type {HypError} */ (new Error(`GitHub continuation URL refused: it does not address the configured API base (origin ${url?.origin ?? 'null'})`))
   err.hypErrorKind = 'github_foreign_origin'
+  return err
+}
+
+/**
+ * The tick's request allowance ran out before a redirect hop could be sent.
+ * Nothing from the page was returned, so the caller's durable work still names
+ * the page it asked for and the next tick requests it again.
+ *
+ * @returns {HypError}
+ */
+function budgetExhausted() {
+  const err = /** @type {HypError} */ (new Error('GitHub request budget exhausted before a redirect was followed'))
+  err.hypErrorKind = 'github_budget_exhausted'
   return err
 }
 

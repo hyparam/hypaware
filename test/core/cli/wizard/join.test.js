@@ -2,6 +2,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { classifyLoginFailure, defaultRunLogin, runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { guardWizardOutput } from '../../../../src/core/cli/wizard/output_guard.js'
@@ -15,7 +18,7 @@ import { withSpinner } from '../../../../src/core/cli/spinner.js'
 // The wizard join phase (LLP 0135 #join, LLP 0134 #login-lane). A thin
 // narration wrapper around `runRemoteLogin`: it classifies a failed login
 // into the fork-returning taxonomy (LLP 0129 #failed-join-returns-to-fork),
-// waits (bounded) for the org config to converge, and locks the picker rows
+// checks once for an applied org config, and locks the picker rows
 // the central layer owns.
 // @ref LLP 0134#login-lane [tests]:
 // @ref LLP 0129#failed-join-returns-to-fork [tests]:
@@ -70,9 +73,8 @@ function layered(centralPlugins, effectivePlugins) {
 
 /**
  * Base options for a join run: a fresh stdout/stderr, an empty env, and the
- * given catalog. Every dependency (`runLogin`, `waitForConverge`,
- * `resolveLayered`) is injected per test so the real login lane and disk are
- * never touched.
+ * given catalog. Tests inject the login lane; config checks use injected
+ * fixtures or an isolated temporary directory.
  *
  * @param {ReturnType<typeof catalog>} cat
  * @param {Partial<import('../../../../src/core/cli/wizard/types.js').RunWizardJoinOptions>} over
@@ -179,7 +181,7 @@ test('runWizardJoin: a transient login failure returns abandoned', async () => {
 // The login lane returns the installer's non-zero code with
 // reason 'daemon_incomplete', and its own note says "enrolled, but the daemon
 // install did not finish". That is a completed sign-in, so the join must not
-// classify it as a failed or abandoned login: it waits for the org config and
+// classify it as a failed or abandoned login: it checks the applied org config and
 // reports 'daemon_incomplete', which the wizard carries on from (#978).
 // @ref LLP 0129#failed-join-returns-to-fork [tests]:
 test('runWizardJoin: an enrolled login whose daemon install failed is not a login failure', async () => {
@@ -198,12 +200,12 @@ test('runWizardJoin: an enrolled login whose daemon install failed is not a logi
   assert.notEqual(out.status, 'failed')
   assert.notEqual(out.status, 'abandoned')
   assert.equal(out.status, 'daemon_incomplete')
-  assert.equal(waited, true, 'an enrolled machine still waits for its org config')
+  assert.equal(waited, true, 'an enrolled machine still checks its org config')
   assert.deepEqual(out.lockedSources, ['claude'])
   assert.equal(out.managed, true)
 })
 
-test('runWizardJoin: an enrolled daemon-incomplete login whose org config times out still reports daemon_incomplete', async () => {
+test('runWizardJoin: an enrolled daemon-incomplete login whose org config has not applied still reports daemon_incomplete', async () => {
   const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
   const opts = joinOpts(cat, {
     runLogin: async () => ({ exitCode: 1, reason: 'daemon_incomplete', stderr: '' }),
@@ -237,7 +239,7 @@ test('runWizardJoin: on convergence, locks exactly the central-layer picker rows
   const out = await runWizardJoin(opts)
   assert.equal(out.status, 'ok')
   assert.deepEqual([...(out.lockedSources ?? [])].sort(), ['claude', 'otel'])
-  assert.match(opts.stdout.text(), /Applying your org's configuration/)
+  assert.doesNotMatch(opts.stdout.text(), /Applying your org's configuration/)
 })
 
 test('runWizardJoin: convergence with no central-owned rows locks nothing', async () => {
@@ -255,33 +257,46 @@ test('runWizardJoin: convergence with no central-owned rows locks nothing', asyn
   assert.deepEqual(out, { status: 'ok', lockedSources: [], managed: true })
 })
 
-// --- runWizardJoin: the timeout / no-org-config branch ---
+// --- runWizardJoin: the no-applied-org-config branch ---
 
-test('runWizardJoin: a convergence timeout narrates and returns an empty lock set', async () => {
+test('runWizardJoin: missing org config returns an empty lock set without a wait message', async () => {
   const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
   let resolved = false
   const opts = joinOpts(cat, {
     runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
     waitForConverge: async () => ({ ok: false }),
-    // resolveLayered must never run on the timeout path (nothing to lock).
+    // resolveLayered must never run when no config has applied (nothing to lock).
     resolveLayered: async () => { resolved = true; return layered([], []) },
   })
   const out = await runWizardJoin(opts)
   assert.deepEqual(out, { status: 'ok', lockedSources: [] })
-  assert.equal(resolved, false, 'must not resolve the layered config after a timeout')
-  assert.match(opts.stdout.text(), /continuing with an unlocked picker/)
+  assert.equal(resolved, false, 'must not resolve the layered config when no config has applied')
+  assert.equal(opts.stdout.text(), 'Joining your team\n')
 })
 
-test('runWizardJoin: passes the org-config wait budget through to the converge helper', async () => {
-  const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
-  /** @type {any} */
-  let sawWaitOpts = null
-  const opts = joinOpts(cat, {
-    runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
-    waitForConverge: async (_o, waitOpts) => { sawWaitOpts = waitOpts; return { ok: false } },
+test('runWizardJoin: real disk check never polls and locks only an applied config', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-join-check-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  // A nonzero budget must fail immediately rather than make this test wait.
+  t.mock.method(globalThis, 'setTimeout', () => {
+    assert.fail('the org-config check must not schedule a polling interval')
   })
-  await runWizardJoin(opts)
-  assert.ok(sawWaitOpts && typeof sawWaitOpts.timeoutMs === 'number' && sawWaitOpts.timeoutMs > 0)
+  const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
+  const opts = joinOpts(cat, {
+    env: { HYP_HOME: hypHome },
+    runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
+  })
+  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [] })
+
+  await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify(cfg(['@hypaware/central'])))
+  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [] })
+
+  await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(cfg(['@hypaware/claude'])))
+  await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: ['claude'], managed: true })
+  assert.doesNotMatch(opts.stdout.text(), /Applying your org's configuration|Didn't hear back/)
 })
 
 // --- defaultRunLogin: the login lane writes through the guarded streams ---
@@ -312,7 +327,7 @@ function sleep(ms) {
   return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
-// The login lane's attach wait holds the run for up to half a minute behind
+// The login lane's attach wait holds the run for a few seconds behind
 // a spinner. A reader that leaves during it must stop the ticking and be
 // recorded, which only happens if the lane's context writes through the
 // wizard's guard rather than straight at the stream.

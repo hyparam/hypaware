@@ -188,19 +188,45 @@ export const CORE_COMMAND_ARGS = {
   'remote mint': {
     // Bare `hyp remote mint` mints against the default target, the same
     // resolution as bare `remote login` (LLP 0062 #bare-remote).
-    usage: 'hyp remote mint [name] [--label <label>] [--expires-days <n>]',
+    usage: 'hyp remote mint [name] [--scope query] [--label <label>] [--expires-days <n>]',
     schema: {
       type: 'object',
       properties: {
         name: { type: 'string' },
+        // `query` is a CLI word, not a server scope: it selects the agent
+        // token mint, whose scope is the session's own.
+        scope: { type: 'string', enum: ['query'] },
         label: { type: 'string' },
-        // The expiry bound and its 365-day default are declared here, not
-        // re-checked in the runner: the schema is the whole surface of the
-        // command, so a bad value fails at the gate with the usage line like
-        // every other argument error.
-        'expires-days': { type: 'integer', minimum: 1, default: 365 },
+        // The expiry bound is declared here, not re-checked in the runner: the
+        // schema is the whole surface of the command, so a bad value fails at
+        // the gate with the usage line like every other argument error.
+        // @ref LLP 0494#cli-mint [implements]: no schema default, so the runner can tell a given --expires-days from none; the enrollment branch applies its own 365 days and the agent mint sends nothing
+        'expires-days': { type: 'integer', minimum: 1 },
       },
       positional: ['name'],
+    },
+  },
+  'remote tokens': {
+    usage: 'hyp remote tokens [name] [--json]',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        json: { type: 'boolean', default: false },
+      },
+      positional: ['name'],
+    },
+  },
+  'remote tokens revoke': {
+    usage: 'hyp remote tokens revoke <jti> [--remote <name>]',
+    schema: {
+      type: 'object',
+      properties: {
+        jti: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['jti'],
+      required: ['jti'],
     },
   },
   'report generate': {

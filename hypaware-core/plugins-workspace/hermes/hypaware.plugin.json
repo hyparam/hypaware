@@ -36,6 +36,16 @@
         "summary": "Hermes adapter config: enabled, state_db (override), poll_interval."
       }
     ],
-    "sources": [{ "name": "hermes" }]
+    "sources": [{ "name": "hermes" }],
+    "client": {
+      "name": "hermes",
+      "skill_dir": ".hermes/skills"
+    },
+    "skills": [
+      { "name": "hypaware-query", "clients": ["hermes"] },
+      { "name": "hypaware-reference", "clients": ["hermes"] },
+      { "name": "hypaware-privacy", "clients": ["hermes"] },
+      { "name": "hypaware-report", "clients": ["hermes"] }
+    ]
   }
 }

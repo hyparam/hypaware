@@ -543,7 +543,7 @@ function createVerbsFacade(pluginName, registry) {
  */
 const VERB_FIELDS = [
   'name', 'tool', 'title', 'summary', 'plugin', 'category', 'audience', 'aliases', 'help',
-  'inputSchema', 'exposure', 'authClass',
+  'inputSchema', 'exposure', 'authClass', 'scope',
 ]
 
 /**

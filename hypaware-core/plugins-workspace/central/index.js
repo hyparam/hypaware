@@ -2,7 +2,7 @@
 
 import path from 'node:path'
 
-import { createInstanceWatermarkStore } from '../../../src/core/sinks/incremental.js'
+import { createInstanceWatermarkStore, instanceWatermarkStateDir } from '../../../src/core/sinks/incremental.js'
 
 import { validateCentralConfig } from './src/config.js'
 import { createConfigPullLoop } from './src/config_client.js'
@@ -87,6 +87,7 @@ export async function activate(ctx) {
         storage,
         watermarks,
         rollouts,
+        receiptsDir: path.join(instanceWatermarkStateDir(sinkCtx.paths.stateDir, sinkCtx.name), 'receipts'),
         log: sinkCtx.log,
       })
 

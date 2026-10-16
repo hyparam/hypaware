@@ -21,7 +21,7 @@ import { NEUTRAL_SKILLS_DIR, NEUTRAL_SKILL_NAMES } from '../../hypaware-core/ski
 
 const workspace = fileURLToPath(new URL('../../hypaware-core/plugins-workspace/', import.meta.url))
 
-const NEUTRAL_CLIENTS = ['pi', 'opencode', 'cursor', 'openclaw']
+const NEUTRAL_CLIENTS = ['pi', 'opencode', 'cursor', 'openclaw', 'hermes']
 
 /** Host-specific mechanics only the claude or codex tree may name. */
 const HOST_ONLY = ['CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', '~/.claude/projects', '~/.codex/sessions', 'hypaware-analyst']

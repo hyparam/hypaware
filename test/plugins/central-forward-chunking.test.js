@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { gunzipSync } from 'node:zlib'
 
 import { createForwardSink, initializeOpenDatasetRollouts } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
@@ -169,6 +170,7 @@ function makeQuery(signal) {
 function makeIdentity() {
   let refreshes = 0
   return {
+    identity: { gateway_id: 'gateway-test' },
     get refreshes() { return refreshes },
     async getCurrentJwt() { return 'jwt-test' },
     async refresh() { refreshes += 1 },
@@ -280,9 +282,11 @@ test('missing-row repair binds the org, preserves its retry batch and never adva
  *   rollout?: { v: 1, partitions: string[], initializedAt: string, updatedAt: string } | null,
  *   nowFn?: () => number,
  *   watermarkFilePath?: string,
+ *   receiptsDir?: string,
+ *   fetchFn?: typeof fetch,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath }) {
+function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath, receiptsDir, fetchFn }) {
   const storage = makeStorage(TABLE, count, rowFactory, dropRow)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
@@ -303,7 +307,8 @@ function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', que
     watermarks: /** @type {any} */ (watermarks),
     rollouts: /** @type {any} */ (rollouts),
     log: /** @type {any} */ (log),
-    fetchFn: fn,
+    fetchFn: fetchFn ?? fn,
+    receiptsDir,
     sleepFn: sleepFn ?? recordingSleep,
     nowFn,
   })
@@ -354,7 +359,7 @@ test('upload progress counts acknowledgements, excluding retries and withheld ro
     dropRow: (i) => i === 0,
     responder: () => {
       requests += 1
-      assert.equal(progress.length, requests <= 2 ? 0 : 1)
+      assert.equal(progress.filter((p) => p.rows > 0).length, requests <= 2 ? 0 : 1)
       return requests === 1 ? { status: 429, retryAfter: 1 } : requests === 3 ? 400 : 202
     },
   })
@@ -363,9 +368,10 @@ test('upload progress counts acknowledgements, excluding retries and withheld ro
     onProgress: (delta) => progress.push(delta),
   })
   assert.equal(result.status, 'failed')
-  assert.equal(progress.length, 1)
-  assert.equal(progress[0].rows, 5000)
-  assert.equal(progress[0].bytes, Buffer.byteLength(calls[1].lines.join('\n') + '\n'))
+  assert.deepEqual(progress[0], { rows: 0, bytes: 0, waitMs: 1000 })
+  assert.equal(progress.length, 2)
+  assert.equal(progress[1].rows, 5000)
+  assert.equal(progress[1].bytes, Buffer.byteLength(calls[1].lines.join('\n') + '\n'))
 })
 
 test('a partition that fits in one chunk makes exactly one POST', async () => {
@@ -1438,7 +1444,9 @@ test('a fresh partition (no watermark) reads from the start and advances', async
   assert.equal(watermarks.record?.continuation.seq, '10')
 })
 
-test('an unordered scan never skips a lower-seq row when a later chunk fails (BLOCKER, LLP 0040 §4 risk #3)', async () => {
+test('an unordered scan never skips a lower-seq row when a later chunk fails (BLOCKER, LLP 0040 §4 risk #3)', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'unordered-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
   // The scan is NOT seq-ordered: a high-seq row leads the partition, so the
   // running-max `after` saturates inside chunk 0 while chunk 1 holds LOWER seqs.
   // Per-chunk advance would jump the watermark past chunk 1's rows on the
@@ -1499,6 +1507,7 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
     rollouts: /** @type {any} */ (makeRollouts()),
     log: /** @type {any} */ (makeLog()),
     fetchFn,
+    receiptsDir,
     sleepFn: async () => {},
   })
 
@@ -1514,7 +1523,8 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
   for (let i = 5000; i < TOTAL; i += 1) {
     assert.ok(acked.includes(i), `low-seq row ${i} from the previously-failed chunk was delivered (no skip)`)
   }
-  assert.equal(new Set(acked).size, TOTAL, 'every row delivered exactly once across the retry')
+  assert.equal(new Set(acked).size, TOTAL, 'every row delivered across the retry')
+  assert.equal(acked.length, TOTAL, 'saved receipts skip the acknowledged high-seq chunk')
   assert.equal(watermarks.record?.continuation.seq, '1000000', 'watermark advances only after the whole partition acks')
 })
 
@@ -1563,4 +1573,116 @@ test('an abort during the upload is not retried as a dropped connection', async 
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
   assert.equal(result.status, 'failed')
   assert.equal(calls.length, 1)
+})
+
+
+const firstSyncBatch = { batchId: 'test', partitions: [{ dataset: 'ai_gateway_messages', tablePath: TABLE, partition: { source: 'claude' } }] }
+
+test('502 and 504 retry the same chunk within a shared three-retry budget', async () => {
+  let attempt = 0
+  const { sink, calls, sleeps, log } = buildSink({ count: 10, responder: () => [502, 504, 202][attempt++] })
+  assert.equal((await sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(new Set(calls.map((c) => c.batchId)).size, 1)
+  assert.deepEqual(sleeps, [2000, 4000])
+  assert.equal(log.rows.filter((r) => r.message === 'central.forward.http_retry').length, 2)
+  const broken = buildSink({ count: 10, responder: () => 502 })
+  assert.equal((await broken.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'failed')
+  assert.equal(broken.calls.length, 4)
+  assert.deepEqual(broken.sleeps, [2000, 4000, 6000])
+})
+
+test('acknowledged chunks survive a new sink instance; completion clears receipts', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'central-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
+  let attempts = 0
+  const first = buildSink({ count: 12_000, receiptsDir, responder: () => ++attempts === 2 ? 400 : 202 })
+  assert.equal((await first.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'failed')
+  assert.equal(first.watermarks.writes.length, 0)
+  await first.sink.close?.()
+  const next = buildSink({ count: 12_000, receiptsDir })
+  const progress = []
+  assert.equal((await next.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *', onProgress: (p) => progress.push(p) })).status, 'exported')
+  assert.deepEqual(next.calls.map((c) => c.rowCount), [5000, 2000])
+  assert.equal(progress[0].resumedRows, 5000)
+  assert.equal(progress[0].wireBytes, 0)
+  assert.equal(next.watermarks.record?.exportedRowCount, 12_000)
+  assert.equal(next.log.rows.filter((r) => r.message === 'central.forward.chunk' && r.fields.resumed).length, 1)
+  assert.deepEqual(await fsp.readdir(receiptsDir), [])
+})
+
+test('changed privacy filtering invalidates a saved chunk receipt', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'central-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
+  let attempts = 0
+  const first = buildSink({ count: 10_001, receiptsDir, responder: () => ++attempts === 2 ? 400 : 202 })
+  await first.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })
+  const next = buildSink({ count: 10_001, receiptsDir, dropRow: (i) => i === 0 })
+  assert.equal((await next.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(next.calls.length, 2)
+  assert.ok(next.calls.every((call) => call.lines.every((line) => JSON.parse(line).message_id !== 'm0')))
+  assert.notEqual(next.calls[0].batchId, first.calls[0].batchId)
+})
+
+test('compression is negotiated, bounded to each chunk, and falls back on 415', async () => {
+  const requests = []
+  const fetchFn = async (_url, init) => {
+    const headers = init.headers
+    const wire = Buffer.from(await new Response(init.body).arrayBuffer())
+    const decoded = headers['content-encoding'] === 'gzip' ? gunzipSync(wire) : wire
+    if (headers['content-encoding']) assert.equal(decoded.length, Number(headers['x-hyp-uncompressed-length']))
+    requests.push({ headers, wire: wire.length, decoded: decoded.length })
+    return new Response('', { status: requests.length === 2 ? 415 : 202, headers: { 'accept-encoding': 'gzip' } })
+  }
+  const { sink } = buildSink({ count: 12_000, fetchFn })
+  assert.equal((await sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(requests.length, 4)
+  assert.equal(requests[0].headers['content-encoding'], undefined)
+  assert.equal(requests[1].headers['content-encoding'], 'gzip')
+  assert.ok(requests[1].wire < requests[1].decoded / 2)
+  assert.equal(requests[2].headers['content-encoding'], undefined)
+  assert.equal(requests[1].headers['x-hyp-batch-id'], requests[2].headers['x-hyp-batch-id'])
+})
+
+test('close() stops a resumed export on its saved-receipt prefix without a watermark', async (t) => {
+  const receiptsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'central-receipts-'))
+  t.after(() => fsp.rm(receiptsDir, { recursive: true, force: true }))
+  let scanned = 0
+  const rowFactory = (/** @type {number} */ i) => { scanned += 1; return { message_id: `m${i}`, content_text: `row ${i}` } }
+  // Every chunk is acknowledged, then the watermark write fails: the journal
+  // keeps all four receipts for the next sink instance.
+  const first = buildSink({ count: 20_000, receiptsDir, rowFactory })
+  first.watermarks.write = async () => { throw new Error('fixture watermark disk failure') }
+  assert.equal((await first.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'failed')
+  assert.equal(first.calls.length, 4)
+  await first.sink.close?.()
+
+  for (const closeAfter of [1, 4]) {
+    const next = buildSink({ count: 20_000, receiptsDir, rowFactory })
+    scanned = 0
+    let progress = 0
+    let closedAt = 0
+    /** @type {Promise<void> | undefined} */
+    let closing
+    const result = await next.sink.exportBatch(firstSyncBatch, {
+      format: 'native', schedule: '* * * * *',
+      onProgress: () => {
+        progress += 1
+        if (progress === closeAfter) { closedAt = scanned; closing = next.sink.close?.() }
+      },
+    })
+    await closing
+    assert.equal(result.status, 'failed', `close after resumed chunk ${closeAfter}`)
+    assert.match(String(result.error), /closed/)
+    assert.equal(progress, closeAfter, 'no resumed chunk is reported after close')
+    assert.ok(scanned - closedAt <= 5000, `scan stops within one chunk of close (scanned ${scanned - closedAt} more)`)
+    assert.equal(next.calls.length, 0)
+    assert.equal(next.watermarks.writes.length, 0, 'a cancelled run does not checkpoint')
+    assert.equal((await fsp.readdir(receiptsDir)).length, 1, 'receipts stay for the next resume')
+  }
+
+  const resumed = buildSink({ count: 20_000, receiptsDir })
+  assert.equal((await resumed.sink.exportBatch(firstSyncBatch, { format: 'native', schedule: '* * * * *' })).status, 'exported')
+  assert.equal(resumed.calls.length, 0)
+  assert.equal(resumed.watermarks.record?.continuation.seq, '20000')
+  assert.deepEqual(await fsp.readdir(receiptsDir), [])
 })
