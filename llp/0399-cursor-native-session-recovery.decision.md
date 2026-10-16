@@ -102,6 +102,9 @@ not response billing. Live usage hooks cannot simply enrich already stored
 assistant rows: shared part-ID dedupe keeps the first write. Reliable token
 capture still needs verified accounting and a replay-safe carrier.
 Provider remains unknown; editor/CLI entrypoint comes from the native store.
+A bounded saved routed-model display label is attributed to assistant rows of
+that turn. It is not inferred from the current selected model or encrypted
+model metadata, and absence remains unknown.
 
 Following LLP 0359, a bounded process-local map skips unchanged roots during
 scheduled runs. The reader checks metadata/root only before that shortcut;
@@ -125,7 +128,11 @@ For Shell, independent sandbox/background/terminal/pid metadata (fields
 spawn error and permission denial are errors. A success payload's signed
 exit code and signal decide whether a completed process failed; background
 success remains unknown. Text that merely resembles an exit code never
-establishes an outcome.
+establishes an outcome. Verified Delete, Edit, Ls, ReadLints, MCP, WebSearch,
+Task and Fetch unions also classify their explicit failures. Read includes
+permission-denied and invalid-file outcomes. MCP success inspects its nested
+is_error flag; approval alone remains unknown. Unknown alternatives never
+inherit the numbering conventions of a different tool.
 The shared projector preserves explicit `is_error: null` without changing its
 existing missing-field convention. A hook's claimed Shell exit code is never
 substituted for the native result.

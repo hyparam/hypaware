@@ -243,6 +243,13 @@ function time(fields, key) {
   return typeof value === 'number' && value > 0 && value < 8640000000000000 ? new Date(value).toISOString() : undefined
 }
 
+// Cursor 3.19.19 agent.v1 result unions. Approval is not completion (MCP 7).
+const TOOL_ERRORS = new Map([
+  [1, [2, 3, 4, 5, 7]], [3, [2, 3, 4, 5, 6, 7]], [4, [2]], [5, [2]],
+  [8, [2, 3, 4, 5, 6]], [12, [2, 3, 4, 6, 7]], [13, [2, 3, 4]],
+  [14, [2]], [15, [2, 3, 4, 5, 6]], [18, [2, 3]], [19, [2]], [24, [2]], [44, [2]],
+])
+
 /**
  * Cursor 3.19.19's ShellResult has a result union plus independent fields
  * 101-104 (sandbox policy, background flag, terminals folder and pid).
@@ -256,10 +263,16 @@ function time(fields, key) {
  */
 function toolError(variant, outcome) {
   const terminal = [...outcome.keys()].filter((key) => variant !== 1 || ![101, 102, 103, 104].includes(key))
-  if (![1, 4, 5, 8, 44].includes(variant) || terminal.length !== 1 || outcome.get(terminal[0])?.length !== 1) return null
+  if (!TOOL_ERRORS.has(variant) || terminal.length !== 1 || outcome.get(terminal[0])?.length !== 1) return null
   const result = terminal[0]
-  if (variant !== 1) return result === 1 ? false : [2, 3, 4].includes(result) ? true : null
-  if ([2, 3, 4, 5, 7].includes(result)) return true
+  if (TOOL_ERRORS.get(variant)?.includes(result)) return true
+  if (result !== 1) return null
+  if (variant === 15) {
+    const flag = cursorFields(bytes(outcome, 1)).get(2)
+    if (!flag) return false
+    return flag.length === 1 && (flag[0] === 0 || flag[0] === 1) ? flag[0] === 1 : null
+  }
+  if (variant !== 1) return false
   if (result !== 1 || outcome.get(102)?.[0] === 1) return null
   const success = cursorFields(bytes(outcome, 1), 3)
   const exitCode = success.get(3)?.[0] ?? 0
@@ -352,6 +365,8 @@ export function readCursorSession(session, previousRoot) {
       const user = cursorFields(blob(bytes(agent, 1)))
       const userId = string(user, 2)
       const generation = string(agent, 3)
+      const routedModel = string(agent, 7).trim()
+      const model = routedModel.length <= 256 && !/[\x00-\x1f\x7f]/.test(routedModel) ? routedModel || undefined : undefined
       if (!userId || userId.length > 256 || !generation || generation.length > 256) throw new CursorReadError('native_identity_missing')
       /** @type {CursorMessage[]} */
       const messages = []
@@ -408,7 +423,12 @@ export function readCursorSession(session, previousRoot) {
               content: typeof result.result === 'string' ? result.result : JSON.stringify(result.result), is_error: isError }] })
         } else throw new CursorReadError('native_step_shape')
       }
-      for (const message of messages) message.previous_message_id = []
+      for (const message of messages) {
+        message.previous_message_id = []
+        // Only the saved turn's routed label describes the response. Current
+        // client settings and encrypted model strings are not model evidence.
+        if (message.role === 'assistant' && model) message.model = model
+      }
       exchanges.push({ provider: 'unknown', client_name: 'cursor', session_id: session.id, conversation_id: session.id,
         conversation_source: 'cursor-native', entrypoint: session.frontend, cwd: session.cwd, messages })
     }

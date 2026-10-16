@@ -91,6 +91,40 @@ test('Shell outcomes ignore known metadata, decode exit status, and keep unrecog
   } finally { await f.cleanup() }
 })
 
+test('verified non-Shell outcomes and routed models survive native projection', async () => {
+  const f = await fixture()
+  try {
+    const variants = new Map([
+      [3, [2, 3, 4, 5, 6, 7]], [4, [2]], [5, [2]], [8, [2, 3, 4, 5, 6]],
+      [12, [2, 3, 4, 6, 7]], [13, [2, 3, 4]], [14, [2]], [15, [2, 3, 4, 5, 6]],
+      [18, [2, 3]], [19, [2]], [24, [2]], [44, [2]],
+    ])
+    for (const [variant, errors] of variants) {
+      const cases = [[wire([1, wire()]), false], ...errors.map((n) => [wire([n, wire()]), true]),
+        [wire([99, wire()]), null], [wire([1, wire()], [2, wire()]), null]]
+      if (variant === 15) cases.push([wire([1, wire([2, 1])]), true], [wire([7, wire()]), null])
+      for (const [outcome, expected] of cases) {
+        const step = f.put(wire([2, wire([57, 'native-call-3'], [variant, wire([2, outcome])])]))
+        const turn = f.put(wire([1, wire([1, f.user], [2, step], [3, 'native-generation'], [7, 'Routed Model'])]))
+        f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turn]))
+        const exchange = readCursorSession(f.session).exchanges[0]
+        const result = exchange.messages.find((m) => m.role === 'tool')
+        assert.ok(result && Array.isArray(result.content))
+        assert.equal(result.content[0].is_error, expected, `variant ${variant}`)
+        const rows = aiGatewayRowsFromProjectedExchange(exchange)
+        assert.equal(rows.find((row) => row.part_type === 'tool_call')?.model, 'Routed Model')
+        assert.equal(rows[0].model, undefined, 'a routed response model is not attributed to the user')
+        assert.equal(exchange.provider, 'unknown')
+      }
+    }
+    for (const model of ['', 'x'.repeat(257), 'bad\nmodel']) {
+      const turn = f.put(wire([1, wire([1, f.user], ...f.steps.map((ref) => [2, ref]), [3, 'native-generation'], [7, model])]))
+      f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turn]))
+      assert.ok(readCursorSession(f.session).exchanges[0].messages.every((m) => !m.model))
+    }
+  } finally { await f.cleanup() }
+})
+
 for (const frontend of /** @type {const} */ (['editor', 'cli'])) {
   test(`${frontend} reads committed WAL, preserves native identities and full outcomes, excludes private metadata`, async () => {
     const f = await fixture(frontend)
