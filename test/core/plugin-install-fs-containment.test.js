@@ -86,6 +86,29 @@ test('removePlugin: a scope symlink out of the root is not followed, the row is 
   }
 }))
 
+test('removePlugin: a recorded install_dir that walks through a link deletes the derived directory, not the link target', () => inTemp(async (tmpRoot) => {
+  const stateDir = path.join(tmpRoot, 'hypaware')
+  const root = path.join(stateDir, 'plugins')
+  const outside = path.join(tmpRoot, 'outside')
+  await fs.mkdir(path.join(outside, 'child'), { recursive: true })
+  await fs.mkdir(path.join(outside, 'victim'), { recursive: true })
+  await fs.writeFile(path.join(outside, 'victim', 'KEEP'), 'precious\n')
+  await fs.mkdir(path.join(root, 'victim'), { recursive: true })
+  await fs.writeFile(path.join(root, 'victim', 'index.js'), '')
+  await fs.symlink(path.join(outside, 'child'), path.join(root, 'jump'))
+  // Lexically `<root>/victim`, but the OS resolves `jump` first and lands in `outside`.
+  const aliased = `${root}${path.sep}jump${path.sep}..${path.sep}victim`
+  await writeLock(stateDir, {
+    schema_version: 1,
+    plugins: /** @type {any} */ ({ victim: { name: 'victim', install_dir: aliased } }),
+  })
+  const result = await removePlugin({ name: 'victim', stateDir })
+  assert.equal(result.ok, true)
+  assert.equal(await fs.readFile(path.join(outside, 'victim', 'KEEP'), 'utf8'), 'precious\n')
+  await assert.rejects(fs.lstat(path.join(root, 'victim')), { code: 'ENOENT' })
+  assert.deepEqual((await loadLock(stateDir)).plugins, {})
+}))
+
 test('removePlugin: a final link is unlinked and its target survives; a normal directory is removed', () => inTemp(async (tmpRoot) => {
   const stateDir = path.join(tmpRoot, 'hypaware')
   const root = path.join(stateDir, 'plugins')

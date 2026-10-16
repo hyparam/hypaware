@@ -404,7 +404,10 @@ export async function removePlugin({ name, stateDir }) {
         //   withholds the delete, the row is still cleared, and the result says so
         const destination = await checkInstallDestination(stateDir, name)
         if (destination.ok) {
-          await fs.rm(installDir, { recursive: true, force: true })
+          // Delete the derived path the check inspected, not the recorded
+          // text: `<root>/jump/../victim` equals it lexically but the OS
+          // walks `jump` first, and a linked `jump` lands outside the root.
+          await fs.rm(pluginInstallDir(stateDir, name), { recursive: true, force: true })
         } else {
           cleanupSkipped = destination.reason
         }
