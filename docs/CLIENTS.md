@@ -22,7 +22,7 @@ choices are locked; local additions remain yours to configure.
 | Client | Capture behavior |
 | --- | --- |
 | Claude Code (`claude`) | OTEL events and transient raw bodies, plus transcript recovery. Requires Claude Code 2.1.193 or newer; 2.1.214 adds full tool-decision detail. |
-| Codex (`codex`) | Scheduled import of the shared local session rollouts, covering CLI and Desktop. Gateway capture is an explicit `capture_mode` opt-in. |
+| Codex (`codex`) | Scheduled import of shared local session rollouts for CLI and Desktop. Gateway capture is opt-in. [Experimental Codex Cloud](CODEX-CLOUD.md) uses a separate explicit connection and the local CLI login. |
 | OpenCode (`opencode`) | Managed global JavaScript plugin and bounded `opencode export` recovery for CLI and Desktop. |
 | Claude Desktop (`claude-desktop`) | macOS-only transcript import every five minutes by default. Also enables the shared Claude integration. |
 | OpenClaw (`openclaw`) | Gateway routing plus scheduled transcript recovery. |
