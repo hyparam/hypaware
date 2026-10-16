@@ -267,7 +267,13 @@ export function createCacheSpool(args) {
     async flushTable(tablePath, opts = {}) {
       return withFlushLock(tablePath, async () => {
         try {
-          const result = await withDrainClaim(tablePath, () => runFlush(tablePath, opts))
+          // No spool means nothing was spooled before this call, so there is
+          // nothing this flush owes. Running the pass anyway would drain,
+          // without a claim, a spool another process creates meanwhile.
+          // @ref LLP 0513#drain-claim [implements]: a missing spool is an idle flush, never an unclaimed drain
+          const result = fsSync.existsSync(spoolDir(tablePath))
+            ? await withDrainClaim(tablePath, () => runFlush(tablePath, opts))
+            : { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: 0, malformedCount: 0, droppedCount: 0, reason: opts.reason ?? 'manual' }
           // Any completed attempt retires the stamp, including one that found
           // nothing to move: the stamp asserts that the last attempt failed,
           // and this one did not.
@@ -574,9 +580,9 @@ function reportPlantedSpoolDir(tablePath, dir) {
  */
 async function withDrainClaim(tablePath, fn) {
   const dir = spoolDir(tablePath)
-  // No spool means nothing to rotate or drain. A planted one is refused by
-  // `listFlushFiles`, and the claim must not create its lock through it.
-  if (!fsSync.existsSync(dir) || isConfirmedSymlink(dir)) return fn()
+  // A planted spool is refused by `listFlushFiles`, and the claim must not
+  // create its lock through it.
+  if (isConfirmedSymlink(dir)) return fn()
   let entered = false
   for (let attempt = 0; ; attempt++) {
     try {

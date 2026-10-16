@@ -43,8 +43,12 @@ per chunk, after the file has been read, and released between chunks.
   malformed claim (a kill between the directory and its owner file) fails
   closed, as LLP 0417 settles for every guard: flushes keep failing busy until
   an operator, with writers stopped, removes `.drain.mutation-lock`.
-- A missing or symlinked spool takes no claim: there is nothing this process
-  would drain.
+- A spool missing when the flush starts is an idle flush: the pass does not
+  run at all. Nothing was spooled before the call, and a spool another process
+  creates meanwhile is that process's to drain under its own claim; running
+  the pass anyway drained it unclaimed and committed its batch twice.
+- A symlinked spool takes no claim, so the lock is never created through it,
+  and `listFlushFiles` refuses it as before.
 
 ## Cost {#cost}
 

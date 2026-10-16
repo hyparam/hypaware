@@ -2,8 +2,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -147,13 +148,54 @@ test('a forced flush waits out a live holder instead of returning before its row
       await new Promise(resolve => setTimeout(resolve, 10))
     }
 
+    // Measured when the flush settles, not after joining the holder, or an
+    // unclaimed flush that returned at once would pass too.
     const started = Date.now()
     const result = await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    const waited = Date.now() - started
     assert.equal(await holder, 'held')
-    assert.ok(Date.now() - started >= 200, 'the flush waited for the holder to let go')
+    assert.ok(waited >= 200, `the flush waited for the holder to let go (settled after ${waited} ms)`)
     assert.equal(result.rowCount, 1)
     assert.deepEqual(await committedIds(svc), [1])
   } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// A spool that is missing when a flush starts holds nothing that flush owes,
+// and one another process creates a moment later is that process's to drain
+// under its own claim. Draining it here, unclaimed, raced the other drainer
+// for the same batch.
+test('a flush that finds no spool does not drain one another process creates meanwhile', async () => {
+  const cacheRoot = await makeTmpDir()
+  const exists = fsSync.existsSync
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const tablePath = svc.cacheTablePath('demo', ['all'])
+    const dir = path.join(tablePath, '_hypaware_spool')
+    const child = `
+      import { createQueryStorageService } from ${JSON.stringify(storageUrl)}
+      const svc = createQueryStorageService({ cacheRoot: process.argv[1] })
+      await svc.appendRows(svc.cacheTablePath('demo', ['all']), ${JSON.stringify(COLS)}, [{ id: 1, msg: 'other process' }])
+    `
+    let crossed = false
+    fsSync.existsSync = (p) => {
+      const result = exists(p)
+      if (!crossed && p === dir && !result) {
+        crossed = true
+        const run = spawnSync(process.execPath, ['--input-type=module', '-e', child, cacheRoot], { stdio: 'inherit' })
+        assert.equal(run.status, 0)
+      }
+      return result
+    }
+    const result = await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    fsSync.existsSync = exists
+    assert.ok(crossed, 'the spool was created after the flush looked for it')
+    assert.equal(result.rowCount, 0)
+    assert.deepEqual(await committedIds(svc), [])
+    assert.ok((await svc.pendingInfo(tablePath)).pending, 'the row waits for a claimed drain')
+  } finally {
+    fsSync.existsSync = exists
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
