@@ -544,6 +544,9 @@ export async function runQueryMaintain(argv, ctx) {
     if (migrationResult.migrated > 0) {
       ctx.stdout.write(`migrate: ${migrationResult.migrated} legacy partition(s), ${migrationResult.rowsMigrated} row(s)\n`)
     }
+    if (migrationResult.deferred > 0) {
+      ctx.stdout.write(`migrate: ${migrationResult.deferred} legacy partition(s) deferred (purge cleanup pending or partition busy)\n`)
+    }
   }
   const maintenanceConfig = ctx.config?.query?.cache?.maintenance
   const report = await maintainCache({
