@@ -7,6 +7,7 @@ import path from 'node:path'
 
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { DurableBinRequiredError } from '../../../../src/core/cli/global_install.js'
 import { PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
@@ -913,6 +914,97 @@ test('runInitWizard: a hidden picked row with no opt-out keeps the sentence that
   assert.match(text, /Capture already set up on this machine still syncs to the cloud/)
   assert.doesNotMatch(text, /Nothing syncs/)
   assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the carried row is still never named')
+})
+
+/**
+ * A catalog whose locked-set resolution throws, the way `computeLockedSafe`
+ * swallows: the resolver is the only wizard reader of `pluginMetadata`, so a
+ * throwing lookup there fails resolution and nothing else (on-disk shapes
+ * all resolve, a corrupt layer reading as absent).
+ *
+ * @param {any} catalog
+ */
+function failingResolution(catalog) {
+  catalog.pluginMetadata = new Proxy(new Map(), {
+    get(target, key) {
+      if (key === 'has' || key === 'get') return () => { throw new Error('resolution failed') }
+      const value = Reflect.get(target, key)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  return catalog
+}
+
+/** The hidden central row plus its stale local-only entry (#970's case). */
+async function staleHiddenCentralRow(/** @type {string} */ home) {
+  await seedCentralLayer(home, ['@hypaware/ai-gateway'])
+  await writeClientSyncEntries({
+    stateDir: path.join(home, '.hyp', 'hypaware'),
+    entries: [{ source: 'raw-anthropic', class: 'local-only' }],
+  })
+  const catalog = emptyCatalog()
+  const rawDescriptor = { plugin: '@hypaware/ai-gateway', id: 'raw-anthropic', label: 'Anthropic API', hidden: true }
+  catalog.pickerDescriptors.set('raw-anthropic', rawDescriptor)
+  return { catalog, rawDescriptor }
+}
+
+const UNCONFIRMED = /Your team's configuration could not be confirmed, so capture your team manages may still sync to the cloud/
+
+// The returning-enrollment path: a managed machine re-entering through the
+// gate resolves its locked set from disk, and here that throws. The central
+// layer owns `raw-anthropic`, so the stale opt-out is inert and the row
+// ships; the store alone would print "Nothing syncs". Then the retry: the
+// same machine, resolution succeeding, gets the ordinary answer.
+// @ref LLP 0509#unknown-is-not-empty [tests]:
+test('runInitWizard: a returning enrollment whose central set fails to resolve never says nothing syncs, and a retry that resolves does', async () => {
+  const home = await tmpHome()
+  const { catalog, rawDescriptor } = await staleHiddenCentralRow(home)
+  const run = async (/** @type {any} */ cat) => {
+    const { opts, stdout } = wizardOpts(home, {
+      gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+      confirm: async () => 'stay',
+      catalog: cat,
+      // The real picker hands back the locked set it was given.
+      pick: async (/** @type {any} */ o) => pickResult({ descriptors: [rawDescriptor], sourcesPicked: ['raw-anthropic'], lockedSources: o.locked ?? [] }),
+      syncScope: runWizardSyncScope,
+    })
+    assert.equal((await runInitWizard(opts)).exitCode, 0)
+    return stdout.text()
+  }
+
+  const failed = await run(failingResolution(catalog))
+  assert.match(failed, UNCONFIRMED)
+  assert.doesNotMatch(failed, /Nothing syncs/)
+  assert.doesNotMatch(failed, /raw-anthropic|Anthropic API/, 'the hidden row is never named')
+
+  catalog.pluginMetadata = new Map()
+  const retried = await run(catalog)
+  assert.match(retried, /Capture your team manages still syncs to the cloud/, 'resolved, the org row is known to ship')
+  assert.doesNotMatch(retried, /could not be confirmed/)
+})
+
+// The new-join path: the sign-in completes but no org config has applied
+// yet, so the join reports the set unresolved rather than empty.
+// @ref LLP 0509#unknown-is-not-empty [tests]:
+test('runInitWizard: a new join whose org config has not applied never says nothing syncs', async () => {
+  const home = await tmpHome()
+  const { catalog, rawDescriptor } = await staleHiddenCentralRow(home)
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    catalog,
+    join: (/** @type {any} */ o) => runWizardJoin({
+      ...o,
+      runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
+      waitForConverge: async () => ({ ok: false }),
+    }),
+    pick: async (/** @type {any} */ o) => pickResult({ descriptors: [rawDescriptor], sourcesPicked: ['raw-anthropic'], lockedSources: o.locked ?? [] }),
+    syncScope: runWizardSyncScope,
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  const text = stdout.text()
+  assert.match(text, UNCONFIRMED)
+  assert.doesNotMatch(text, /Nothing syncs/)
+  assert.doesNotMatch(text, /raw-anthropic|Anthropic API/, 'the hidden row is never named')
 })
 
 test('runInitWizard: a managed machine on the local pathway also runs the sync-scope step', async () => {

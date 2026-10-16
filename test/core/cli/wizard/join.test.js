@@ -212,7 +212,7 @@ test('runWizardJoin: an enrolled daemon-incomplete login whose org config has no
     waitForConverge: async () => ({ ok: false }),
   })
   const out = await runWizardJoin(opts)
-  assert.deepEqual(out, { status: 'daemon_incomplete', lockedSources: [] })
+  assert.deepEqual(out, { status: 'daemon_incomplete', lockedSources: [], lockedResolved: false })
 })
 
 // --- runWizardJoin: the converged branch locks central-owned rows ---
@@ -254,7 +254,7 @@ test('runWizardJoin: convergence with no central-owned rows locks nothing', asyn
   const out = await runWizardJoin(opts)
   // `managed` is still true: the central layer exists even though it owns
   // no picker rows, so the pick phase annotates additions (LLP 0132).
-  assert.deepEqual(out, { status: 'ok', lockedSources: [], managed: true })
+  assert.deepEqual(out, { status: 'ok', lockedSources: [], lockedResolved: true, managed: true })
 })
 
 // --- runWizardJoin: the no-applied-org-config branch ---
@@ -269,7 +269,10 @@ test('runWizardJoin: missing org config returns an empty lock set without a wait
     resolveLayered: async () => { resolved = true; return layered([], []) },
   })
   const out = await runWizardJoin(opts)
-  assert.deepEqual(out, { status: 'ok', lockedSources: [] })
+  // Nothing applied is not "the org locks nothing" (LLP 0509): the result
+  // says the set is unresolved, so the sync lane cannot read it as empty.
+  // @ref LLP 0509#unknown-is-not-empty [tests]:
+  assert.deepEqual(out, { status: 'ok', lockedSources: [], lockedResolved: false })
   assert.equal(resolved, false, 'must not resolve the layered config when no config has applied')
   assert.equal(opts.stdout.text(), 'Joining your team\n')
 })
@@ -288,14 +291,14 @@ test('runWizardJoin: real disk check never polls and locks only an applied confi
     env: { HYP_HOME: hypHome },
     runLogin: async () => ({ exitCode: 0, reason: 'ok', stderr: '' }),
   })
-  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [] })
+  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [], lockedResolved: false })
 
   await fs.writeFile(path.join(controlDir, 'seed.json'), JSON.stringify(cfg(['@hypaware/central'])))
-  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [] })
+  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: [], lockedResolved: false })
 
   await fs.writeFile(path.join(controlDir, 'config.a.json'), JSON.stringify(cfg(['@hypaware/claude'])))
   await fs.symlink('config.a.json', path.join(controlDir, 'active'))
-  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: ['claude'], managed: true })
+  assert.deepEqual(await runWizardJoin(opts), { status: 'ok', lockedSources: ['claude'], lockedResolved: true, managed: true })
   assert.doesNotMatch(opts.stdout.text(), /Applying your org's configuration|Didn't hear back/)
 })
 

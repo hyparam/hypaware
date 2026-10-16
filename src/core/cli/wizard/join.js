@@ -30,7 +30,8 @@ import { classifyClientProvenance } from './provenance.js'
  * - **converged**: resolve the two-layer config from disk and lock every
  *   picker row whose owning plugin is in the central layer.
  * - **org config not applied yet**: return `'ok'` with an empty lock set
- *   immediately. The daemon continues pulling config in the background.
+ *   immediately, marked `lockedResolved: false` because the set is not
+ *   known yet. The daemon continues pulling config in the background.
  * - **enrolled, daemon incomplete**: the same two converge branches, but
  *   the status says `'daemon_incomplete'` so the wizard can name the one
  *   thing that is missing instead of the sign-in that is not.
@@ -104,11 +105,16 @@ async function runJoinFlow(opts, span) {
   setSpanAttr(span, 'wait_ms', Date.now() - started)
   setSpanAttr(span, 'converged', converge.ok)
   if (!converge.ok) {
-    return { status, lockedSources: [] }
+    // Nothing applied to lock yet, which is not "the org locks nothing":
+    // the daemon keeps pulling, and the config may own rows when it lands.
+    // @ref LLP 0509#unknown-is-not-empty [implements]: a converge miss reports the central set as unresolved, not as empty
+    setSpanAttr(span, 'locked_resolved', false)
+    return { status, lockedSources: [], lockedResolved: false }
   }
 
   const lockedSources = await computeCentralLockedSources(opts)
-  return { status, lockedSources, managed: true }
+  setSpanAttr(span, 'locked_resolved', true)
+  return { status, lockedSources, lockedResolved: true, managed: true }
 }
 
 /**

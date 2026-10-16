@@ -121,6 +121,15 @@ export interface RunWizardSyncScopeOptions {
    * its count already decides its sentence.
    */
   candidatesHiddenIds?: string[]
+  /**
+   * False when the wizard could not resolve the central set this run (a
+   * swallowed layered-resolution failure, or a join whose org config has
+   * not converged), so `locked`, `lockedHidden` and the hidden picks rest
+   * on an empty set nobody computed. The lane then says the team's
+   * configuration could not be confirmed instead of what syncs (LLP 0509
+   * #unknown-is-not-empty). Absent means resolved.
+   */
+  lockedResolved?: boolean
 }
 
 export interface WizardSyncScopeResult {
@@ -400,6 +409,13 @@ export interface WizardJoinResult {
    * pinned, so the picker composes freely.
    */
   lockedSources?: string[]
+  /**
+   * Present on a completed join: whether `lockedSources` is an answer.
+   * False when no org config has applied yet, so an empty set means "not
+   * known yet" rather than "the org locks nothing" (LLP 0509
+   * #unknown-is-not-empty).
+   */
+  lockedResolved?: boolean
   /**
    * True when the org config converged, i.e. the machine now carries a
    * central layer. Drives the pick phase's `managed` annotation

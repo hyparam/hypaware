@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { commitWizardSyncScope, runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { TracerProvider } from '../../../../src/core/observability/runtime.js'
 import {
   clientSyncListPath,
   readClientSyncEntries,
@@ -32,6 +33,29 @@ function makeBuf() {
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sync-scope-'))
   return { hypHome, env: { HYP_HOME: hypHome }, stateDir: readObservabilityEnv({ HYP_HOME: hypHome }).stateDir }
+}
+
+/**
+ * Collect the spans exported while `fn` runs, then shut the provider down so
+ * it does not capture the next test's spans.
+ *
+ * @param {() => Promise<unknown>} fn
+ * @returns {Promise<{ spans: any[] }>}
+ */
+async function captureSpans(fn) {
+  /** @type {any[]} */
+  const spans = []
+  const provider = new TracerProvider({
+    resource: { attributes: {} },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { spans.push(...batch) } }],
+  })
+  provider.register()
+  try {
+    await fn()
+  } finally {
+    await provider.shutdown()
+  }
+  return { spans }
 }
 
 /** @param {string} id */
@@ -441,4 +465,81 @@ test('committing a combined selection stays silent when it revokes nothing', asy
   // The hidden row's opt-out is untouched, so nothing was revoked.
   assert.doesNotMatch(stdout.text(), /No longer local-only/)
   assert.deepEqual((await readClientSyncEntries({ stateDir }))?.map((e) => e.source), ['raw-anthropic'])
+})
+
+// An unresolved central set (LLP 0509 #unknown-is-not-empty) is not an org
+// that locks nothing. The original #970 case: a hidden pick that is an org
+// row on this machine, a stale local-only entry for it that the export seam
+// ignores for central sources, and a resolution that failed. The store
+// answer would print "Nothing syncs" while the daemon ships the row; the lane
+// instead says what it could not confirm, without naming the hidden row.
+// @ref LLP 0509#unknown-is-not-empty [tests]:
+test('zero candidates, unresolved central set, stale opt-out on a hidden pick: never says nothing syncs', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
+  const stdout = makeBuf()
+  const { spans } = await captureSpans(() => runWizardSyncScope({
+    stdout, stderr: makeBuf(), env,
+    candidates: [],
+    candidatesHiddenIds: ['raw-anthropic'],
+    lockedResolved: false,
+  }))
+
+  assert.equal(
+    stdout.text(),
+    "! Your team's configuration could not be confirmed, so capture your team manages may still sync to the cloud\n"
+  )
+  const span = spans.find((s) => s.name === 'wizard.sync_scope.finish')
+  assert.ok(span, 'the lane emitted its span')
+  assert.equal(span.attributes.locked_resolved, false, 'the unknown resolution is observable')
+  assert.doesNotMatch(JSON.stringify(span.attributes), /raw-anthropic/, 'the signal carries no source id')
+})
+
+// With visible picks the Syncing line still states them; the qualification
+// rides beside it rather than replacing it.
+// @ref LLP 0509#unknown-is-not-empty [tests]:
+test('candidates with an unresolved central set: names the picks, then qualifies the team part', async () => {
+  const { env } = await makeHome()
+  const stdout = makeBuf()
+  await runWizardSyncScope({
+    stdout, stderr: makeBuf(), env,
+    candidates: [descriptor('claude')],
+    lockedResolved: false,
+  })
+  assert.equal(
+    stdout.text(),
+    "✓ Syncing it to the cloud\n! Your team's configuration could not be confirmed, so capture your team manages may also sync to the cloud\n"
+  )
+})
+
+// The healthy boundary: a resolved, empty org config is a known fact, and
+// the known-empty line is unchanged.
+// @ref LLP 0509#unknown-is-not-empty [tests]:
+test('zero candidates with a resolved empty central set still says nothing syncs', async () => {
+  const { env } = await makeHome()
+  const stdout = makeBuf()
+  const { spans } = await captureSpans(() => runWizardSyncScope({
+    stdout, stderr: makeBuf(), env,
+    candidates: [],
+    lockedResolved: true,
+  }))
+  assert.equal(stdout.text(), '✓ Nothing syncs to the cloud\n')
+  assert.equal(spans.find((s) => s.name === 'wizard.sync_scope.finish')?.attributes.locked_resolved, true)
+})
+
+// A known non-central opt-out on a resolved run keeps the store answer
+// (LLP 0289 #ask-the-store): the entry withholds the row, so nothing ships.
+// @ref LLP 0509#not-changed [tests]:
+test('a known non-central opt-out on a resolved run keeps the store answer', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
+  const stdout = makeBuf()
+  await runWizardSyncScope({
+    stdout, stderr: makeBuf(), env,
+    candidates: [],
+    candidatesHiddenIds: ['raw-anthropic'],
+  })
+  assert.equal(stdout.text(), '✓ Nothing syncs to the cloud\n')
 })
