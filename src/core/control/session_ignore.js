@@ -157,6 +157,22 @@ export function createControlHandler(opts) {
       return
     }
 
+    // A body that is not declared JSON is refused before it is read, so a
+    // browser page cannot reach the mutation as a CORS simple request
+    // (`text/plain`, form, or multipart need no preflight). Media-type
+    // parameters such as `charset` and letter case are accepted.
+    // @ref LLP 0507#json-only [implements]: POST/DELETE require application/json, 415 otherwise
+    const mediaType = (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+    if (mediaType !== 'application/json') {
+      drainRequestBody(req, res)
+      log?.warn?.('session_ignore_unsupported_media_type', {
+        ...logFields, operation: 'ignore_session', method, status: 'refused',
+        error_kind: 'unsupported_media_type', media_type: mediaType.slice(0, 64) || 'none',
+      })
+      sendJson(res, 415, { error: 'content-type must be application/json' })
+      return
+    }
+
     readJsonBody(req, (result) => {
       if (result.status === 'too_large') {
         // The sender is still uploading, so the rest is discarded under the

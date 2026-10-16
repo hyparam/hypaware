@@ -151,6 +151,76 @@ test('413 when the request body exceeds the size bound', async () => {
   })
 })
 
+// A body not declared JSON would make the mutation a CORS simple request, which
+// a browser sends cross-origin with no preflight, so it never reaches the set.
+// @ref LLP 0507#json-only [tests]: POST/DELETE without application/json are 415
+// and leave the set untouched; JSON with parameters or another letter case passes
+for (const contentType of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x']) {
+  test(`415 for ${contentType}: neither verb mutates the set`, async () => {
+    const set = new Set(['sess-kept'])
+    await withControlServer(set, async (base) => {
+      const add = await rawRequest(base, 'POST', '/_hypaware/ignore/session', JSON.stringify({ session_id: 'sess-new' }), contentType)
+      assert.equal(add.status, 415)
+      assert.deepEqual(add.body, { error: 'content-type must be application/json' })
+      const del = await rawRequest(base, 'DELETE', '/_hypaware/ignore/session', JSON.stringify({ session_id: 'sess-kept' }), contentType)
+      assert.equal(del.status, 415)
+      assert.deepEqual([...set], ['sess-kept'], 'a refused request neither adds nor removes')
+    })
+  })
+}
+
+test('415 when the content-type is omitted, and the refusal keeps the connection reusable', async () => {
+  const set = new Set(['sess-kept'])
+  await withControlSockets(set, async (port) => {
+    const body = JSON.stringify({ session_id: 'sess-new' })
+    const [received, followUp] = await rawExchanges(port, [
+      `POST /_hypaware/ignore/session HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+      'GET /_hypaware/ignore/session?session_id=sess-new HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n',
+    ])
+    assert.match(received, /^HTTP\/1\.1 415 /, received.slice(0, 80))
+    assert.match(followUp, /^HTTP\/1\.1 200 /, followUp.slice(0, 80))
+    assert.match(followUp, /"ignored":false/)
+    assert.deepEqual([...set], ['sess-kept'])
+  })
+})
+
+test('JSON with a charset parameter or another letter case is accepted', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    for (const [i, contentType] of ['application/json; charset=utf-8', 'Application/JSON', ' application/json ;charset=UTF-8'].entries()) {
+      const out = await rawRequest(base, 'POST', '/_hypaware/ignore/session', JSON.stringify({ session_id: `s${i}` }), contentType)
+      assert.equal(out.status, 200, `expected 200 for ${contentType}`)
+    }
+    assert.equal(set.size, 3)
+  })
+})
+
+test('a refused media type emits a bounded warn log and no ignore log', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logs = []
+  const log = {
+    debug() {}, error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    info(message, fields) { logs.push({ level: 'info', message, fields: fields ?? {} }) },
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn(message, fields) { logs.push({ level: 'warn', message, fields: fields ?? {} }) },
+  }
+  const handler = createControlHandler({ ignoredSessions: set, log })
+  await withHandler(handler, async (base) => {
+    const out = await rawRequest(base, 'POST', '/_hypaware/ignore/session', JSON.stringify({ session_id: 's' }), `text/${'x'.repeat(500)}`)
+    assert.equal(out.status, 415)
+  })
+  assert.equal(logs.length, 1)
+  const [entry] = logs
+  assert.equal(entry.level, 'warn')
+  assert.equal(entry.message, 'session_ignore_unsupported_media_type')
+  assert.equal(entry.fields.error_kind, 'unsupported_media_type')
+  assert.equal(entry.fields.method, 'POST')
+  assert.equal(String(entry.fields.media_type).length, 64, 'the logged media type is bounded')
+  assert.equal(set.size, 0)
+})
+
 test('a control request emits a structured ignore log carrying the running total', async () => {
   const set = /** @type {Set<string>} */ (new Set())
   /** @type {Array<{ message: string, fields: Record<string, unknown> }>} */
@@ -453,11 +523,12 @@ function deleteSession(base, sessionId) {
  * @param {string} method
  * @param {string} path
  * @param {string} [reqBody]
+ * @param {string} [contentType]
  */
-async function rawRequest(base, method, path, reqBody) {
+async function rawRequest(base, method, path, reqBody, contentType = 'application/json') {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': contentType },
     body: reqBody,
   })
   const text = await res.text()
