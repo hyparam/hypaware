@@ -7,6 +7,7 @@ import { noteProductPending, noteProductPipeline } from '../product_telemetry/cl
 
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { isPartitionMutationBusy, withPartitionMutationLock } from './partition.js'
 import { isConfirmedSymlink } from './paths.js'
 import { readProgress, removeProgress, streamFlushFile, streamSpoolLines, writeProgress } from './streaming-reader.js'
 
@@ -35,6 +36,14 @@ const FLUSH_FAILURE_FILE = 'last-flush-failure.json'
 // The writer's bound and the reader's. The stamp is a file on disk, so a build
 // that reads one it did not write cannot rely on the writer having clamped it.
 const FLUSH_FAILURE_MESSAGE_MAX = 512
+// The cross-process drain claim is keyed inside the spool, so its lock
+// directory (`.drain.mutation-lock`) sits beside the files it guards. Every
+// reader of the spool lists regular files by name, so a directory is
+// invisible to them. A holder keeps the claim for a whole drain, which can
+// take seconds, so the wait is longer than the seq counter's.
+const DRAIN_CLAIM_KEY = 'drain'
+const DRAIN_CLAIM_RETRY_LIMIT = 600
+const DRAIN_CLAIM_RETRY_DELAY_MS = 50
 
 /**
  * @param {{
@@ -258,7 +267,13 @@ export function createCacheSpool(args) {
     async flushTable(tablePath, opts = {}) {
       return withFlushLock(tablePath, async () => {
         try {
-          const result = await runFlush(tablePath, opts)
+          // No spool means nothing was spooled before this call, so there is
+          // nothing this flush owes. Running the pass anyway would drain,
+          // without a claim, a spool another process creates meanwhile.
+          // @ref LLP 0513#drain-claim [implements]: a missing spool is an idle flush, never an unclaimed drain
+          const result = fsSync.existsSync(spoolDir(tablePath))
+            ? await withDrainClaim(tablePath, () => runFlush(tablePath, opts))
+            : { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: 0, malformedCount: 0, droppedCount: 0, reason: opts.reason ?? 'manual' }
           // Any completed attempt retires the stamp, including one that found
           // nothing to move: the stamp asserts that the last attempt failed,
           // and this one did not.
@@ -540,6 +555,48 @@ function reportPlantedSpoolDir(tablePath, dir) {
       spool_dir: dir,
     })
   } catch { /* a flush must not fail on a logger provider that is not installed */ }
+}
+
+/**
+ * Run one flush pass holding the table's cross-process drain claim, so one
+ * process at a time lists, rotates and drains its rotated files. The
+ * in-process flush lock cannot see a second process: a daemon flush and a
+ * `hyp query --refresh always` could each read the same `flush-*.jsonl`
+ * before either removed it, and both committed it (issue #2580).
+ *
+ * A busy claim is waited out, never skipped. A forced flush resolves only
+ * once everything spooled before it is committed, and the holder may be
+ * committing exactly those rows, so returning early would break that
+ * contract. When the wait runs out the busy error surfaces as a failed flush
+ * and the rows stay in the spool for the next attempt. The guard reclaims a
+ * dead holder's claim on the next attempt, so a killed flusher does not
+ * wedge the drain.
+ *
+ * @ref LLP 0513#drain-claim [implements]: one process drains a table's spool at a time, and a busy claim is waited out
+ * @template T
+ * @param {string} tablePath
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withDrainClaim(tablePath, fn) {
+  const dir = spoolDir(tablePath)
+  // A planted spool is refused by `listFlushFiles`, and the claim must not
+  // create its lock through it.
+  if (isConfirmedSymlink(dir)) return fn()
+  let entered = false
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await withPartitionMutationLock(path.join(dir, DRAIN_CLAIM_KEY), () => {
+        entered = true
+        return fn()
+      })
+    } catch (error) {
+      // A busy error from inside the pass (a partition guard or the seq
+      // counter) belongs to that pass, not to the claim, and is not retried.
+      if (entered || !isPartitionMutationBusy(error) || attempt >= DRAIN_CLAIM_RETRY_LIMIT) throw error
+      await new Promise(resolve => setTimeout(resolve, DRAIN_CLAIM_RETRY_DELAY_MS))
+    }
+  }
 }
 
 /**

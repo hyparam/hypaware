@@ -7,6 +7,7 @@
 **Date:** 2026-10-13
 **Extends:** [LLP 0040#seq-allocator](./0040-incremental-sink-reads.design.md#seq-allocator) (the reservation unit and its concurrency boundary)
 **Related:** LLP 0347, [issue 2578](https://github.com/hyparam/hypaware/issues/2578), [PR 2579](https://github.com/hyparam/hypaware/pull/2579)
+**Extended-by:** [LLP 0513](./0513-one-spool-drainer-per-table.design.md) (the drain claim retries the same busy guard, with the same rows-wait outcome)
 
 @ref LLP 0040#seq-allocator [extends]: reserve per commit across processes instead of per block in one process
 @ref LLP 0347#rows-wait [constrained-by]: a multi-partition chunk commits whole or waits in the spool

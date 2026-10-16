@@ -6,6 +6,7 @@
 **Author:** Kenny
 **Date:** 2026-09-18
 **Related:** LLP 0104, LLP 0253, LLP 0403; server LLP 0003, 0005, 0053, 0140
+**Extended-by:** [LLP 0513](./0513-one-spool-drainer-per-table.design.md) (the same guard, keyed on a table spool)
 
 ## Request {#request}
 
