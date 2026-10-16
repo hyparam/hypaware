@@ -195,7 +195,8 @@ test('JSON with a charset parameter or another letter case is accepted', async (
   })
 })
 
-test('a refused media type emits a bounded warn log and no ignore log', async () => {
+test('a refused media type emits a bounded, rate-limited warn log and no ignore log', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
   const set = /** @type {Set<string>} */ (new Set())
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
   const logs = []
@@ -207,17 +208,26 @@ test('a refused media type emits a bounded warn log and no ignore log', async ()
     warn(message, fields) { logs.push({ level: 'warn', message, fields: fields ?? {} }) },
   }
   const handler = createControlHandler({ ignoredSessions: set, log })
+  const body = JSON.stringify({ session_id: 's' })
   await withHandler(handler, async (base) => {
-    const out = await rawRequest(base, 'POST', '/_hypaware/ignore/session', JSON.stringify({ session_id: 's' }), `text/${'x'.repeat(500)}`)
-    assert.equal(out.status, 415)
+    for (let i = 0; i < 20; i++) {
+      const out = await rawRequest(base, 'POST', '/_hypaware/ignore/session', body, `text/${'x'.repeat(500)}`)
+      assert.equal(out.status, 415)
+    }
+    assert.equal(logs.length, 1, 'a burst of refusals logs one line, not one per request')
+    t.mock.timers.tick(60 * 1000)
+    await rawRequest(base, 'DELETE', '/_hypaware/ignore/session', body, 'text/plain')
   })
-  assert.equal(logs.length, 1)
-  const [entry] = logs
-  assert.equal(entry.level, 'warn')
-  assert.equal(entry.message, 'session_ignore_unsupported_media_type')
-  assert.equal(entry.fields.error_kind, 'unsupported_media_type')
-  assert.equal(entry.fields.method, 'POST')
-  assert.equal(String(entry.fields.media_type).length, 64, 'the logged media type is bounded')
+  assert.equal(logs.length, 2, 'the next refusal past the interval logs again')
+  const [first, second] = logs
+  assert.equal(first.level, 'warn')
+  assert.equal(first.message, 'session_ignore_unsupported_media_type')
+  assert.equal(first.fields.error_kind, 'unsupported_media_type')
+  assert.equal(first.fields.method, 'POST')
+  assert.equal(String(first.fields.media_type).length, 64, 'the logged media type is bounded')
+  assert.equal(first.fields.rejected_total, 1)
+  assert.equal(second.fields.method, 'DELETE')
+  assert.equal(second.fields.rejected_total, 21, 'the swallowed burst is still counted')
   assert.equal(set.size, 0)
 })
 

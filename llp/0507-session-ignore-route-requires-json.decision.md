@@ -42,9 +42,13 @@ body is read, and the set is not touched.
 - The refused body is discarded through the same bounded `drainRequestBody`
   as every other refusal, so the request-drain and 64 KiB body bounds are
   unchanged.
-- A refusal is observable: the host logs
-  `session_ignore_unsupported_media_type` at warn with `error_kind:
-  unsupported_media_type` and the media type cut to 64 characters.
+- A refusal is observable but rate-limited: each handler counts every
+  refusal and logs `session_ignore_unsupported_media_type` at warn at most
+  once a minute, with `error_kind: unsupported_media_type`, the media type cut
+  to 64 characters, and `rejected_total` (every refusal so far). The route is
+  reachable by the page the gate refuses, so a line per refusal would swap set
+  growth for unbounded log growth; the opencode snapshot route throttles its
+  415 the same way.
 - `GET` carries no body and acquires no media-type requirement.
 - Methods, response shapes, Host protections, and the absence of permissive
   CORS headers are unchanged.
