@@ -66,7 +66,9 @@ wait.
   reads again from the progress offset before unlinking, so a write that
   finished between the read and the check is committed, not unlinked.
 - A marker that has gone since the listing belongs to an append that
-  finished, so its bytes are on disk and it holds nothing. A marker name this
+  finished, so its bytes are on disk and it holds nothing. Gone means its
+  stat fails with ENOENT; any other stat failure (EACCES, EIO) leaves the
+  marker holding, so a fault never establishes an absence. A marker name this
   design did not write names no inode and holds nothing.
 - A stuck writer holds only the one file it opened. Later appends open the new
   `active.jsonl`, later rotations and drains go through, and the held file

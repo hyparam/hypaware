@@ -504,3 +504,47 @@ test('a writer stalled at its marker holds one rotated file however many flushes
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// A marker the drain cannot stat is not a marker that has gone: only ENOENT
+// says the append finished, so a fault on the lookup keeps the file.
+test('a drain that cannot stat a live writer\'s marker keeps the file it writes into', async () => {
+  const cacheRoot = await makeTmpDir()
+  /** @type {ChildProcess | undefined} */
+  let child
+  const lstatSync = fsSync.lstatSync
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const tablePath = svc.cacheTablePath('demo', ['all'])
+    const dir = path.join(tablePath, '_hypaware_spool')
+    await svc.appendRows(tablePath, COLS, [{ id: 1, msg: 'before' }])
+
+    const { proc, exited } = spawnStalledAppend(cacheRoot, cacheRoot, { id: 2 })
+    child = proc
+    await waitFor(path.join(cacheRoot, 'paused'))
+
+    let failed = 0
+    fsSync.lstatSync = /** @type {typeof lstatSync} */ ((/** @type {fsSync.PathLike} */ p, /** @type {unknown[]} */ ...rest) => {
+      if (String(p).includes(`${path.sep}.append-`)) {
+        failed++
+        throw Object.assign(new Error('injected EACCES'), { code: 'EACCES' })
+      }
+      return /** @type {Function} */ (lstatSync)(p, ...rest)
+    })
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    fsSync.lstatSync = lstatSync
+    assert.ok(failed > 0, 'the marker lookup failed')
+    assert.deepEqual(await committedIds(svc), [1])
+    assert.equal((await spoolNames(dir, 'flush-')).filter((name) => name.endsWith('.jsonl')).length, 1, 'the file is kept')
+
+    await fs.writeFile(path.join(cacheRoot, 'go'), '')
+    assert.deepEqual(await exited, { code: 0, signal: null })
+    await svc.flushTable(tablePath, { force: true, reason: 'query_always' })
+    assert.deepEqual((await committedIds(svc)).sort(), [1, 2], 'the acknowledged row is committed, and nothing twice')
+    assert.deepEqual(await spoolNames(dir, 'flush-'), [])
+    assert.deepEqual(await spoolNames(dir, '.append-'), [])
+  } finally {
+    fsSync.lstatSync = lstatSync
+    child?.kill('SIGKILL')
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

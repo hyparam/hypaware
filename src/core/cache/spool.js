@@ -742,10 +742,26 @@ function appendWritingInto(dir, names, ino) {
   for (const name of names) {
     const [pid, recorded] = name.slice(APPEND_MARKER_PREFIX.length).split('-')
     if (recorded !== wanted) continue
-    if (!fsSync.existsSync(path.join(dir, name))) continue
+    if (markerGone(path.join(dir, name))) continue
     if (processAlive(Number(pid))) return true
   }
   return false
+}
+
+/**
+ * Whether the marker at `file` is gone. Only ENOENT says so: any other
+ * failure to stat it (EACCES, EIO) leaves the marker counted, so a fault
+ * keeps the file rather than unlinking it under a live writer.
+ *
+ * @param {string} file
+ */
+function markerGone(file) {
+  try {
+    fsSync.lstatSync(file)
+    return false
+  } catch (err) {
+    return /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT'
+  }
 }
 
 /**
