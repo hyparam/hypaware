@@ -1,8 +1,9 @@
 {
   "name": "hypaware",
-  "version": "1.42.0",
+  "version": "1.43.0",
   "type": "module",
   "description": "The improvement loop for all your agents.",
+  "mcpName": "ai.hypaware/hypaware",
   "license": "MIT",
   "homepage": "https://hypaware.ai/?utm_source=npm&utm_medium=package",
   "repository": {
