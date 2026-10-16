@@ -308,7 +308,7 @@ async function writeNoLauncher(ctx, descriptors, clients, paste) {
  * @param {string} client
  * @returns {string}
  */
-function friendlyClientLabel(client) {
+export function friendlyClientLabel(client) {
   return FRIENDLY_LAUNCHLESS_LABELS[client] ?? (client.length > 0 ? client.charAt(0).toUpperCase() + client.slice(1) : client)
 }
 

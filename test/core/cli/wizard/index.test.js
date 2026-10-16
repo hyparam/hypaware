@@ -1587,6 +1587,83 @@ test('runInitWizard: the skill offer comes last, after the privacy narration, an
   assert.match(text, /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/)
 })
 
+// The other privacy lines name the review; this one says what it does
+// (issue #417), only on an attended close, and names the skill only where
+// this run installed it.
+
+/** @param {{ name: string, client: string }[]} skills */
+function finaleWithSkills(skills) {
+  return async () => /** @type {any} */ ({
+    daemonInstall: { skipped: true, dryRun: false },
+    globalInstall: { skipped: true, installed: false },
+    attach: [],
+    skillsInstalled: skills.map((skill) => ({ ...skill, dest: `/tmp/${skill.client}/${skill.name}`, dryRun: false })),
+    agentsInstalled: [],
+    daemonRestart: { skipped: true, dryRun: false, ok: false },
+    backfill: [],
+  })
+}
+
+test('runInitWizard: a local close says what the installed privacy review does, with no team claim', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleWithSkills([
+      { name: 'hypaware-query', client: 'claude' },
+      { name: 'hypaware-privacy', client: 'claude' },
+      { name: 'hypaware-privacy', client: 'codex' },
+    ]),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /run the hypaware-privacy skill in Claude or Codex\./)
+  assert.match(text, /with your OK on each one, can stop recording a folder\./)
+  assert.match(text, /Deleting what is already recorded on this machine is a separate step it asks about\./)
+  assert.doesNotMatch(text, /team/)
+  assert.ok(text.indexOf('First look') < text.indexOf('hypaware-privacy skill'))
+})
+
+test('runInitWizard: an enrolled close adds the team clause and keeps the hold narration after it', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const { opts, stdout } = wizardOpts(home, {
+    fork: async () => 'team',
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-privacy', client: 'claude' }]),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /run the hypaware-privacy skill in Claude\./)
+  assert.match(text, /can stop a folder syncing to your team or stop recording it\./)
+  assert.ok(text.indexOf('hypaware-privacy skill in Claude') < text.indexOf('Nothing has been uploaded yet'))
+})
+
+test('runInitWizard: a close with no privacy skill installed points at `hyp privacy` instead', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-query', client: 'claude' }]),
+  })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  assert.match(text, /To choose which folders HypAware records, or to delete what it recorded, see `hyp privacy`\./)
+  assert.doesNotMatch(text, /hypaware-privacy skill/)
+})
+
+test('runInitWizard: a non-interactive or dry run prints no privacy review line', async () => {
+  const scripted = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-privacy', client: 'claude' }]),
+  })
+  await runInitWizard(scripted.opts)
+  assert.doesNotMatch(scripted.stdout.text(), /hypaware-privacy skill|see `hyp privacy`/)
+
+  const dry = wizardOpts(await tmpHome(), {
+    finale: { dryRun: true },
+    finaleRunner: finaleWithSkills([{ name: 'hypaware-privacy', client: 'claude' }]),
+  })
+  await runInitWizard(dry.opts)
+  assert.doesNotMatch(dry.stdout.text(), /hypaware-privacy skill|see `hyp privacy`/)
+})
+
 test('runInitWizard: a yes to the skill offer runs `hyp ask` on this terminal', async () => {
   // @ref LLP 0398#run-directory [tests]: the offer taken is the ask itself, as a child that inherits the terminal
   const { opts, stdout } = wizardOpts(await tmpHome(), {

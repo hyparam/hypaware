@@ -42,6 +42,7 @@ import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
 import { ensureDurableBin } from '../global_install.js'
 import { platformIsSupported } from '../../daemon/platform.js'
+import { friendlyClientLabel } from '../../commands/ask.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { anyClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
@@ -969,6 +970,14 @@ async function runGuardedInitWizard(opts, guard) {
   // @ref LLP 0100#requirements [implements]: R1 - a path that skips the offer keeps the narration's release verb and skill hint
   const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
+  if (offerFollows) {
+    opts.stdout.write(privacyReviewStatement({
+      skillClients: (finaleSummary?.skillsInstalled ?? [])
+        .filter((skill) => skill.name === 'hypaware-privacy' && !skill.dryRun)
+        .map((skill) => skill.client),
+      joined: joined !== undefined,
+    }))
+  }
   const holdDeadline = joined
     ? await narratePrivacyIfTeamPath(opts, { alreadySaid: offerFollows && !nothingRecorded })
     : null
@@ -1251,6 +1260,39 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         ...(clientLabels ? { clientLabels } : {}),
       }),
     { component: 'wizard' }
+  )
+}
+
+/**
+ * What the privacy review lets the person do, said once on an attended
+ * run's close so the skill the other privacy lines name is not a mystery
+ * (issue #417). Each clause is something the installed skill does today:
+ * it lists the recorded folders, marks a folder `local-only` (never
+ * forwarded) or `ignore` (not recorded) only after a yes on that folder,
+ * and offers `hyp privacy purge` as its own confirmed step. The team
+ * clause is said only to a machine that joined, since a local install has
+ * nowhere a folder syncs to. A run that installed no copy of the skill is
+ * pointed at `hyp privacy` instead of a skill it does not have.
+ *
+ * @param {{ skillClients: string[], joined: boolean }} args
+ * @returns {string}
+ */
+export function privacyReviewStatement({ skillClients, joined }) {
+  const labels = [...new Set(skillClients.map(friendlyClientLabel))]
+  if (labels.length === 0) {
+    return joined
+      ? '\nTo choose which folders HypAware records or syncs to your team, or to delete what it recorded, see `hyp privacy`.\n'
+      : '\nTo choose which folders HypAware records, or to delete what it recorded, see `hyp privacy`.\n'
+  }
+  const where = labels.length === 1
+    ? labels[0]
+    : `${labels.slice(0, -1).join(', ')} or ${labels[labels.length - 1]}`
+  return (
+    `\nTo check what HypAware recorded on this machine, run the hypaware-privacy skill in ${where}.\n` +
+    (joined
+      ? 'It lists the folders it recorded and, with your OK on each one, can stop a folder syncing to your team or stop recording it.\n'
+      : 'It lists the folders it recorded and, with your OK on each one, can stop recording a folder.\n') +
+    'Deleting what is already recorded on this machine is a separate step it asks about.\n'
   )
 }
 
