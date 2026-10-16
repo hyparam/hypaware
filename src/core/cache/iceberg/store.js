@@ -365,16 +365,23 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
 /**
  * The same position-delete path for local cache and BlobStore archives.
  * Unreadable metadata or data is a failed purge, never a zero-row success.
+ *
+ * `files`, when given, narrows the scan to those live data files, named by
+ * their canonical manifest `file_path`. Omitted means every live file; an
+ * empty selection deletes nothing. The whole selection is checked against the
+ * current snapshot before the first commit, so a path that is not live there
+ * (unknown, already compacted away, or another table's) throws and nothing is
+ * deleted. Repeats collapse to one scan. The predicate still decides which
+ * rows go: selecting a file never deletes all of it.
+ *
  * @ref LLP 0417#erasure [implements]: logical deletion uses Iceberg positions; physical reclamation is separate
- * @param {{ tableUrl: string, resolver: Resolver, lister: Lister, predicate: (row: Record<string, unknown>) => boolean, columns: string[], beforeDelete?: () => Promise<void> }} args
+ * @param {{ tableUrl: string, resolver: Resolver, lister: Lister, predicate: (row: Record<string, unknown>) => boolean, columns: string[], beforeDelete?: () => Promise<void>, files?: Iterable<string> }} args
  */
-export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns, beforeDelete }) {
+export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns, beforeDelete, files }) {
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
-  if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
-    return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
-  }
-
-  const dataFileMap = await findDataFileEntries(metadata, resolver)
+  const hasSnapshot = metadata['current-snapshot-id'] !== undefined && Boolean(metadata.snapshots?.length)
+  const liveFiles = hasSnapshot ? await findDataFileEntries(metadata, resolver) : new Map()
+  const dataFileMap = files === undefined ? liveFiles : selectLiveFiles(liveFiles, files)
   if (dataFileMap.size === 0) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
 
   // Only project columns that exist in the current schema; a predicate column
@@ -418,6 +425,26 @@ export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister,
   }
 
   return { rowsDeleted, filesAffected, batchCount }
+}
+
+/**
+ * The subset of `liveFiles` that `files` names, deduplicated. Throws before
+ * any delete when a requested path is not live in the current snapshot, so a
+ * stale selection fails whole instead of purging part of it.
+ *
+ * @param {Map<string, { entry: ManifestEntry }>} liveFiles
+ * @param {Iterable<string>} files
+ * @returns {Map<string, { entry: ManifestEntry }>}
+ */
+function selectLiveFiles(liveFiles, files) {
+  /** @type {Map<string, { entry: ManifestEntry }>} */
+  const selected = new Map()
+  for (const filePath of files) {
+    const found = liveFiles.get(filePath)
+    if (!found) throw new Error('cache purge: selected file is not a live data file in the current snapshot')
+    selected.set(filePath, found)
+  }
+  return selected
 }
 
 /**
