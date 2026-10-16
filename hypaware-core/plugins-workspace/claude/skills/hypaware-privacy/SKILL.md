@@ -126,12 +126,15 @@ if not isinstance(r, dict) or r.get("ignored") is not True or isinstance(r.get("
 if r.get("session_id") != expected:
     sys.exit("opt-out NOT confirmed: the reply is about session %s, not %s" % (json.dumps(r.get("session_id")), json.dumps(expected)))
 print("opt-out confirmed for session %s (total ignored: %s)" % (expected, r["total"]))
+# Printed only here, after every check passed, so the bound travels with the
+# success line: nothing above authenticates the responder.
+print("caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped")
 ' "$CLAUDE_CODE_SESSION_ID"
 ```
 
 If the `curl` fails (gateway not running, wrong port) or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session is still being recorded**. Only proceed if they explicitly accept that risk.
 
-**What a confirmed opt-out proves, exactly.** Each recorder holds the id as an opaque token: `ignored: true` means the id is in that recorder's drop set, and nothing more. No recorder inspects traffic, so none can tell you the id is one your exchanges carry - that match happens later, in the client adapter, against the `session_id` it stamps on the row. For Claude the session *is* the conversation and `CLAUDE_CODE_SESSION_ID` is that same id, so sending it is what makes the opt-out real; the reply is a receipt for the write, not a verified drop. Do not report it to the user as more than that, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question. Nor does anything prove the responder on that port is HypAware, so the answer is only as trustworthy as the machine.
+**What a confirmed opt-out proves, exactly.** Each recorder holds the id as an opaque token: `ignored: true` means the id is in that recorder's drop set, and nothing more. No recorder inspects traffic, so none can tell you the id is one your exchanges carry - that match happens later, in the client adapter, against the `session_id` it stamps on the row. For Claude the session *is* the conversation and `CLAUDE_CODE_SESSION_ID` is that same id, so sending it is what makes the opt-out real; the reply is a receipt for the write, not a verified drop. Do not report it to the user as more than that, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question. Nor does anything prove the responder on that port is HypAware, so the answer is only as trustworthy as the machine; the `caveat:` line the script prints under `opt-out confirmed` says so, and belongs in what you report.
 
 The opt-out is saved locally and survives recorder and daemon restarts until explicitly removed with `hyp session unignore`. A fork (`claude --fork-session`, `codex fork`) creates a new session ID that needs its own exclusion; a plain resume reuses the ID. Transcript backfill honors the saved exclusion. Unignoring permits earlier transcript content to be imported again. Use `hyp session status` to check the current answer.
 

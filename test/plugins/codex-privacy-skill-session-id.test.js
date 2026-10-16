@@ -2,7 +2,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -460,4 +462,71 @@ test('Step 1 frames the receipt for both capture modes, and still says what the 
     /\*\*gateway\*\* entry is still the one to read[\s\S]{0,500}session-ignore store[\s\S]{0,300}sweep reloads/,
     'the premise must still say why a confirmed gateway entry is what the readings below rest on'
   )
+})
+
+/**
+ * The cwd count, run rather than read (issue #534). Every assertion above is
+ * about the markdown, so the script's own `continue` could drop a header before
+ * the count and nothing here would notice. It did: a `session_meta` header with
+ * no `payload.id` was skipped before `len(matches) > 1`, so two sessions
+ * recording one cwd resolved as the survivor and the opt-out was POSTed for it.
+ * The CLI's cwd scan already counts such a header (#518); this holds the script
+ * to the same rule by running its embedded Python against synthetic rollouts.
+ * Only the resolver runs, never the `curl`, so no control endpoint is touched.
+ */
+const resolver = (() => {
+  const m = step1.match(/<<'PY'\n([\s\S]*?)\nPY\n/)
+  assert.ok(m, 'Step 1 must still resolve the rollout in an embedded Python heredoc')
+  return m[1]
+})()
+
+const hasPython = spawnSync('python3', ['--version']).status === 0
+
+/**
+ * @param {Record<string, unknown>[]} payloads one rollout per entry, each the
+ *   `payload` of its first `session_meta` record
+ * @param {string} cwd
+ */
+function runResolver(payloads, cwd) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-cwd-count-'))
+  try {
+    const day = path.join(root, '2026', '10', '16')
+    fs.mkdirSync(day, { recursive: true })
+    payloads.forEach((payload, i) => {
+      fs.writeFileSync(path.join(day, `rollout-2026-10-16T00-00-0${i}-${i}.jsonl`), JSON.stringify({ type: 'session_meta', payload }) + '\n')
+    })
+    return spawnSync('python3', ['-', root, cwd], { input: resolver, encoding: 'utf8' })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('Step 1 counts a header with no thread id toward ambiguity, and refuses', { skip: !hasPython && 'python3 is not on PATH' }, () => {
+  const cwd = '/repo/here'
+  const result = runResolver([
+    { cwd, session_id: 'C1' },
+    { cwd, id: 'THREAD-B', session_id: 'C2' },
+  ], cwd)
+  assert.notEqual(result.status, 0, `two sessions record this cwd, so the script must refuse; it printed ${JSON.stringify(result.stdout)}`)
+  assert.equal(result.stdout, '', 'a refusal prints no session id for the shell to POST')
+  assert.match(result.stderr, /2 rollouts record cwd \/repo\/here/)
+  assert.match(result.stderr, /C1 \(rollout-/, 'the id-less header is named in the refusal, by its container')
+})
+
+test('Step 1 refuses a lone header with no thread id rather than vouching for it', { skip: !hasPython && 'python3 is not on PATH' }, () => {
+  const cwd = '/repo/here'
+  const result = runResolver([{ cwd, session_id: 'C1' }], cwd)
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /states no thread id/)
+})
+
+test('Step 1 still resolves one fresh, complete header to its container', { skip: !hasPython && 'python3 is not on PATH' }, () => {
+  const cwd = '/repo/here'
+  const result = runResolver([
+    { cwd, id: 'THREAD-A', session_id: 'C1' },
+    { cwd: '/elsewhere', session_id: 'C9' },
+  ], cwd)
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /^C1 rollout-\S+\.jsonl\n$/, 'the container, never the thread id, is what the shell reads')
 })
