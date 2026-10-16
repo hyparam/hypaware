@@ -201,7 +201,11 @@ export const CORE_COMMAND_ARGS = {
         // schema is the whole surface of the command, so a bad value fails at
         // the gate with the usage line like every other argument error.
         // @ref LLP 0494#cli-mint [implements]: no schema default, so the runner can tell a given --expires-days from none; the enrollment branch applies its own 365 days and the agent mint sends nothing
-        'expires-days': { type: 'integer', minimum: 1 },
+        // The maximum is the enrollment mint's server ceiling (1..3650 days).
+        // It is not the agent mint's per-deployment ceiling, which the server
+        // still enforces below it; it only keeps an exponent like `1e30` from
+        // passing `Number.isInteger` and reaching the wire (issue #972).
+        'expires-days': { type: 'integer', minimum: 1, maximum: 3650 },
       },
       positional: ['name'],
     },

@@ -113,6 +113,11 @@ person pasting it into a secret store knows.
   `minimum`. An agent token reads the org's whole history and can publish
   and delete reports; an enrollment token can only append capture. That is
   why the two defaults differ (hypaware-server LLP 0596#token-ttl).
+- The schema also carries `maximum: 3650`, the enrollment mint's server
+  ceiling, so a value such as `1e30` is refused locally for both mints
+  (issue #972). It still does not copy the agent ceiling: a value above the
+  deployment's ceiling but within 3650 reaches the server, which answers
+  `invalid_ttl`.
 
 ### Output
 

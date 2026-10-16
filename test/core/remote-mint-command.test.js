@@ -139,7 +139,7 @@ test('mint forwards --label and --expires-days', async () => {
 })
 
 test('mint rejects an --expires-days the schema bound refuses', async () => {
-  for (const bad of ['soon', '0', '-5', '1.5']) {
+  for (const bad of ['soon', '0', '-5', '1.5', '3651', '1e30']) {
     const hypHome = await tmpHome()
     const { ctx, err } = await makeCtx({ hypHome })
     const { impl, calls } = fetchStub([{ status: 200, body: { token: 't' } }])
@@ -147,8 +147,20 @@ test('mint rejects an --expires-days the schema bound refuses', async () => {
     assert.equal(code, 2, bad)
     assert.equal(calls.length, 0, bad)
     // The gate owns the bound, so the refusal also prints the usage line.
-    assert.match(err.join(''), /--expires-days expects a positive integer/)
+    assert.match(err.join(''), /--expires-days expects an integer from 1 to 3650/)
     assert.match(err.join(''), /usage: hyp remote mint/)
+  }
+})
+
+test('mint accepts both ends of the server ceiling', async () => {
+  for (const days of [1, 3650]) {
+    const hypHome = await tmpHome()
+    const { ctx } = await makeCtx({ hypHome })
+    await seedSession(hypHome)
+    const { impl, calls } = fetchStub([{ status: 200, body: { token: 't' } }])
+    const code = await runRemoteMint(['prod', '--expires-days', String(days)], ctx, { fetchImpl: impl })
+    assert.equal(code, 0, String(days))
+    assert.deepEqual(JSON.parse(calls[0].init.body), { expires_days: days })
   }
 })
 

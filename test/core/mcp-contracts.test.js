@@ -177,12 +177,13 @@ test('set_recommendation_status input matches hypaware-server LLP 0596#tools-sha
   for (const name of Object.keys(properties)) assert.equal(properties[name].default, undefined, name)
 })
 
-// The codec enforces neither `items.enum` nor `maximum`; the server's bound
-// operation validates `status` and `limit`, so only defaults and `required`
-// are pinned here.
+// The codec does not enforce `items.enum`; the server's bound operation
+// validates `status`. Defaults, `required` and the `limit` maximum are pinned
+// here.
 test('the shared codec applies the defaults and refuses a missing id', () => {
   const list = validateToolArguments(contract('list_recommendations').inputSchema, {})
   assert.deepEqual(list, { ok: true, params: { status: ['open'], limit: 20 } })
+  assert.equal(validateToolArguments(contract('list_recommendations').inputSchema, { limit: 101 }).ok, false)
   const get = validateToolArguments(contract('get_recommendation').inputSchema, { id: 'hyprec-0123456789abcdef' })
   assert.deepEqual(get, { ok: true, params: { id: 'hyprec-0123456789abcdef', include_evidence: false } })
   assert.equal(validateToolArguments(contract('get_recommendation').inputSchema, {}).ok, false)
