@@ -286,14 +286,14 @@ export function createStartCursorSource(deps = {}) {
           // @ref LLP 0399#identity: the native store owns conversation rows.
           // Hook-only response/tool IDs cannot safely join native Shell IDs.
           scheduleRecovery(session, cwd, event)
-          if (hook !== 'beforeReadFile') {
+          const projection = projectCursorHook(raw)
+          if (hook !== 'beforeReadFile' && !projection) {
             counts.lifecycle_events++
             skip('native_recovery_scheduled')
             return
           }
-          // Every lifecycle hook already returned above, so the only way past
-          // the projector here is a beforeReadFile whose own fields are unusable.
-          const projection = projectCursorHook(raw)
+          // Only admitted file observations and complete terminal usage write
+          // hook rows. They retain identities independent of native messages.
           if (!projection) {
             counts.incomplete++
             skip('incomplete_hook')
@@ -345,7 +345,7 @@ export function createStartCursorSource(deps = {}) {
           state: 'ready', rowsWritten: counts.rows_written, lastError: sessionIgnoreLoadError(ignoredSessions) ?? lastError,
           details: { ...counts, ...recoveryCounts, pending_recovery: pending.size, listen_host: bound.host, listen_port: bound.port, control_routes: [SESSION_IGNORE_ROUTE],
             active_requests: active, last_event_at: lastEventAt ?? null,
-            coverage: 'native_sessions_and_file_observations', frontend: 'native_store', usage_supported: false,
+            coverage: 'native_sessions_and_file_observations', frontend: 'native_store', usage_supported: true,
             history_recovery: 'native_store', response_identity: 'native_turn_step',
             assistant_segments: 'native_checkpoint',
           },

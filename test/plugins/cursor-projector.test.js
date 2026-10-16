@@ -35,3 +35,27 @@ test('conversation, tool, lifecycle and thought hooks are recovery triggers only
   assert.equal(cursorCwd({ cwd: 'relative' }), undefined)
   assert.equal(cursorCwd({ cwd: '/work', workspace_roots: ['/work', '/secret'] }), undefined)
 })
+
+test('terminal usage has one generation identity and rejects partial or invalid accounting', () => {
+  const counts = { input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 10 }
+  const body = envelope({ hook_event_name: 'stop', ...counts, text: 'PRIVATE', model: 'auto' })
+  const projection = projectCursorHook(body)
+  assert.ok(projection)
+  assert.deepEqual(projection.messages[0].attributes?.usage, { ...counts, total_tokens: 160 })
+  assert.equal(projection.messages[0].role, 'system')
+  assert.equal(projection.messages[0].request_id, 'turn')
+  assert.equal(projection.model, undefined, 'selected model is not proof of the model billed')
+  assert.equal(JSON.stringify(projection).includes('PRIVATE'), false)
+  assert.equal(projection.messages[0].message_id, projectCursorHook({ ...body, delivery_id: randomUUID() })?.messages[0].message_id)
+  assert.notEqual(projection.messages[0].message_id, projectCursorHook(envelope({ ...counts, hook_event_name: 'stop', generation_id: 'other' }))?.messages[0].message_id)
+  for (const key of Object.keys(counts)) {
+    for (const value of [undefined, null, '1', -1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.equal(projectCursorHook(envelope({ hook_event_name: 'stop', ...counts, [key]: value })), undefined)
+    }
+  }
+  for (const event of [{ generation_id: '' }, { generation_id: 'x'.repeat(257) },
+    { hook_event_name: 'afterAgentResponse' }, { input_tokens: Number.MAX_SAFE_INTEGER }]) {
+    assert.equal(projectCursorHook(envelope({ hook_event_name: 'stop', ...counts, ...event })), undefined)
+  }
+  assert.ok(projectCursorHook(envelope({ hook_event_name: 'stop', input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 })))
+})

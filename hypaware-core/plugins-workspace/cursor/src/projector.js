@@ -20,7 +20,7 @@ export function cursorCwd(event) {
 }
 
 /**
- * Additional file observation; conversation hooks only schedule recovery.
+ * Additional file and terminal usage observations; native records own text.
  * No raw frame is copied: hooks carry unrelated identity and private fields.
  * @param {unknown} raw
  * @returns {AiGatewayProjectedExchange | undefined}
@@ -49,6 +49,20 @@ export function projectCursorHook(raw) {
     message = { role: 'system', message_id: id('file', delivery), content: event.content,
       provider_type: 'hook', hook_event: hook }
   }
+  if (hook === 'stop' && generation) {
+    // Cursor's TurnEnded counters are additive, uncached input plus separate
+    // cache buckets. Require the complete accounting tuple; missing is unknown.
+    const keys = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens']
+    const values = keys.map((key) => event[key])
+    if (!values.every((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)) return undefined
+    const usage = Object.fromEntries(keys.map((key, index) => [key, values[index]]))
+    const total = /** @type {number[]} */ (values).reduce((sum, value) => sum + value, 0)
+    if (!Number.isSafeInteger(total)) return undefined
+    // @ref LLP 0399#live-usage: independent accounting identity survives native-first recovery.
+    message = { role: 'system', message_id: id('usage', generation), request_id: generation,
+      content: [{ type: 'text', text: '' }], provider_type: 'hook', hook_event: hook,
+      attributes: { usage: { ...usage, total_tokens: total } } }
+  }
   if (!message) return undefined
   const duration = event.duration_ms ?? event.duration
   message.message_created_at = observed
@@ -62,11 +76,11 @@ export function projectCursorHook(raw) {
     client_version: stringValue(event.cursor_version),
     entrypoint: 'unknown',
     cwd,
-    model: stringValue(event.model_id) ?? stringValue(event.model),
+    model: hook === 'stop' ? undefined : stringValue(event.model_id) ?? stringValue(event.model),
     attributes: { cursor: {
       hook: hook ?? null,
       generation_id: generation ?? null,
-      identity_source: 'hook_delivery',
+      identity_source: hook === 'stop' ? 'hook_generation' : 'hook_delivery',
       timestamp_source: 'hook_receipt',
       frontend_source: 'unavailable',
       coverage: 'hook_observations',

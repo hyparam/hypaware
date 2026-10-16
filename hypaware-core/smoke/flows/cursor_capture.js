@@ -88,15 +88,16 @@ export async function run({ harness, expect }) {
           { hook_event_name: 'beforeSubmitPrompt', prompt: 'Read notes' },
           { hook_event_name: 'beforeReadFile', file_path: path.join(cwd, 'notes.txt'), content: 'Observed file contents' },
           { hook_event_name: 'afterAgentResponse', text: 'Same text' },
+          { hook_event_name: 'stop', input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 10 },
           { hook_event_name: 'postToolUse', tool_use_id: 'call', tool_name: 'Read', tool_input: { path: 'notes' }, tool_output: 'fixture contents' },
           { hook_event_name: 'afterAgentResponse', text: 'Same text' },
         ]
         for (const event of events) {
           const body = { delivery_id: randomUUID(), observed_at: new Date().toISOString(), event: { ...base, ...event } }
           const result = await post(body)
-          expect.that(`${mode} callback is observed or schedules recovery`, result, (v) => event.hook_event_name === 'beforeReadFile' ? v.status === 200 && v.body.rowsWritten === 1 : v.status === 202)
+          expect.that(`${mode} callback is observed or schedules recovery`, result, (v) => ['beforeReadFile', 'stop'].includes(event.hook_event_name) ? v.status === 200 && v.body.rowsWritten === 1 : v.status === 202)
           const retry = await post(body)
-          expect.that(`${mode} retry writes no duplicate`, retry, (v) => event.hook_event_name === 'beforeReadFile' ? v.status === 200 && v.body.rowsWritten === 0 : v.status === 202)
+          expect.that(`${mode} retry writes no duplicate`, retry, (v) => ['beforeReadFile', 'stop'].includes(event.hook_event_name) ? v.status === 200 && v.body.rowsWritten === 0 : v.status === 202)
           callbacks += 2
         }
       })
@@ -125,11 +126,12 @@ export async function run({ harness, expect }) {
       expect.that('Ignored directory dropped', result, (v) => v.status === 202 && v.body.reason === 'usage_policy')
       const out = buffer()
       const err = buffer()
-      const code = await dispatch(['query', 'sql', 'select client_name, client_version, session_id, entrypoint, part_type, content_text, tool_name, tool_call_id, tool_result_for, tool_args, is_error from ai_gateway_messages', '--refresh', 'always', '--format', 'json'], { kernel, registry, env: process.env, stdout: out, stderr: err })
+      const code = await dispatch(['query', 'sql', 'select client_name, client_version, session_id, entrypoint, part_type, content_text, tool_name, tool_call_id, tool_result_for, tool_args, is_error, JSON_EXTRACT(attributes, \'$.usage.total_tokens\') AS total_tokens from ai_gateway_messages', '--refresh', 'always', '--format', 'json'], { kernel, registry, env: process.env, stdout: out, stderr: err })
       expect.that('Query succeeds', code, (v) => v === 0)
       const rows = JSON.parse(out.text())
-      expect.that('Both modes retain repeated text, tools and file observations', rows, (v) => v.length === 28 && v.filter((r) => r.content_text === 'Same text').length === 4 && v.filter((r) => r.tool_name === 'Read').length === 4 && v.filter((r) => r.content_text === 'Observed file contents').length === 2)
+      expect.that('Both modes retain repeated text, tools and file observations', rows, (v) => v.length === 30 && v.filter((r) => r.content_text === 'Same text').length === 4 && v.filter((r) => r.tool_name === 'Read').length === 4 && v.filter((r) => r.content_text === 'Observed file contents').length === 2)
       expect.that('Native store identifies editor and CLI', rows, (v) => v.every((r) => r.client_name === 'cursor') && v.filter((r) => r.entrypoint === 'editor').length === 13 && v.filter((r) => r.entrypoint === 'cli').length === 13)
+      expect.that('Usage is counted once per generation despite duplicate hooks and native replay', rows.filter((row) => row.total_tokens != null), (v) => v.length === 2 && v.every((row) => Number(row.total_tokens) === 160))
       const calls = rows.filter((row) => row.part_type === 'tool_call')
       expect.that('Tool calls retain arguments and join each native result', calls, (v) => v.length === 10 && v.every((call) => call.tool_args && rows.some((row) => row.part_type === 'tool_result' && row.session_id === call.session_id && row.tool_result_for === call.tool_call_id)))
       expect.that('Shell failures are queryable', rows.filter((row) => row.part_type === 'tool_result' && row.tool_name === 'Shell'), (v) => v.length === 4 && v.every((row) => row.is_error === true))
@@ -137,7 +139,7 @@ export async function run({ harness, expect }) {
     })
     await step('health_and_detach', async () => {
       const status = await kernel.sources.started('cursor')?.status?.()
-      expect.that('Status names measured and unsupported coverage', status?.details, (v) => v.callbacks === callbacks && v.rows_written === 28 && v.policy_drops === 1 && v.history_recovery === 'native_store' && v.usage_supported === false)
+      expect.that('Status names measured and unsupported coverage', status?.details, (v) => v.callbacks === callbacks && v.rows_written === 30 && v.policy_drops === 1 && v.history_recovery === 'native_store' && v.usage_supported === true)
       await kernel.sources.stop('cursor')
       started = false
       const descriptor = buildPluginCatalog(loaded).clientDescriptors.get('cursor')
