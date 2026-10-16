@@ -82,7 +82,7 @@ Codex also states the running thread's id in the environment of the shells it sp
 **Do not pick the newest rollout by mtime.** Newest-by-mtime is precisely the heuristic that resolves a session the user is not in: it answers confidently off a *finished* session, and marking or purging against a wrong id touches another session's rows while this one keeps being recorded. Which rollout is this session's must instead be established by
 
 - matching `payload.cwd` against the invocation directory,
-- **refusing rather than guessing** when zero, or more than one, rollout matches, and
+- **refusing rather than guessing** when zero, or more than one, rollout matches (a header with no `payload.id` still counts toward that), and
 - **refusing on staleness**: a live session appends to its rollout on every turn, so a single match last written more than ~30 minutes ago is a finished session, not this one.
 
 Every id this script can produce is therefore inferred from disk, and the staleness window is a bound, not a proof: a session that ended a minute ago still resolves inside it. So say **"inferred from `<rollout file>`"** when you report the id, and stop for the user's confirmation if they do not recognize the session.
@@ -119,17 +119,26 @@ for dirpath, _dirs, names in os.walk(root):
         payload = record.get('payload')
         if not isinstance(payload, dict):
             continue
-        if payload.get('cwd') != cwd or not payload.get('id'):
+        # A header with no thread id still counts: it is one more session
+        # recording this cwd, so dropping it before the count would let the
+        # other one resolve as unambiguous. Same rule as the CLI's cwd scan.
+        if payload.get('cwd') != cwd:
             continue
-        matches.append((payload.get('session_id'), payload['id'], full,
+        matches.append((payload.get('session_id'), payload.get('id'), full,
                         time.time() - os.stat(full).st_mtime))
 
 if not matches:
     sys.exit('no Codex rollout under %s records cwd %s' % (root, cwd))
 if len(matches) > 1:
     sys.exit('%d rollouts record cwd %s (%s): ambiguous, confirm the session id with the user'
-             % (len(matches), cwd, ', '.join(str(m[0] or m[1]) for m in matches)))
+             % (len(matches), cwd, ', '.join('%s (%s)' % (m[0] or m[1] or 'no thread id',
+                                                          os.path.basename(m[2])) for m in matches)))
 session_id, thread_id, full, age = matches[0]
+# Every session_meta Codex writes carries payload.id, so a header without one
+# cannot be vouched for, and nothing else it states is evidence of this session.
+if not thread_id:
+    sys.exit('the only rollout recording cwd %s (%s) states no thread id (payload.id), so it '
+             'cannot be vouched for; confirm the session id with the user' % (cwd, os.path.basename(full)))
 if age > 30 * 60:
     sys.exit('the only rollout recording cwd %s was last written %dm ago, so it is a FINISHED '
              'session rather than this one' % (cwd, age // 60))
@@ -202,12 +211,15 @@ if not isinstance(r, dict) or r.get("ignored") is not True or isinstance(r.get("
 if r.get("session_id") != expected:
     sys.exit("opt-out NOT confirmed: the reply is about session %s, not %s" % (json.dumps(r.get("session_id")), json.dumps(expected)))
 print("opt-out confirmed for session %s (total ignored: %s)" % (expected, r["total"]))
+# Printed only here, after every check passed, so the bound travels with the
+# success line: nothing above authenticates the responder.
+print("caveat: the responder on that port is not authenticated, and this is a membership receipt, not proof that recording stopped")
 ' "$SESSION_ID"
 ```
 
 If the session id cannot be resolved (the script refuses on ambiguity, staleness, or a missing container by design), the `curl` fails, or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session may still be recorded**. Only proceed if they explicitly accept that risk.
 
-**What `opt-out confirmed` proves, exactly.** `ignored: true` means the id is in the gateway's drop set, and nothing more. The gateway never inspects traffic, so it cannot tell a live session container from a thread id or a finished session's id: it answers `ignored: true` for whatever it was handed. The drop happens later, in the client adapter, against the `session_id` it stamps on the row. Everything that makes this opt-out real therefore happened *before* the POST, in resolving `payload.session_id` above - the reply is a receipt for the write, not a verified drop. Report it to the user that way, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question.
+**What `opt-out confirmed` proves, exactly.** `ignored: true` means the id is in the gateway's drop set, and nothing more. The gateway never inspects traffic, so it cannot tell a live session container from a thread id or a finished session's id: it answers `ignored: true` for whatever it was handed. The drop happens later, in the client adapter, against the `session_id` it stamps on the row. Everything that makes this opt-out real therefore happened *before* the POST, in resolving `payload.session_id` above - the reply is a receipt for the write, not a verified drop. Report it to the user that way, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question. Nor does anything prove the responder on that port is HypAware, so the answer is only as trustworthy as the machine; the `caveat:` line the script prints under `opt-out confirmed` says so, and belongs in what you report.
 
 The opt-out is saved locally and survives recorder and daemon restarts until explicitly removed with `hyp session unignore`. A fork (`claude --fork-session`, `codex fork`) creates a new session ID that needs its own exclusion; a plain resume reuses the ID. Transcript backfill honors the saved exclusion. Unignoring permits earlier transcript content to be imported again. Use `hyp session status` to check the current answer.
 
