@@ -107,7 +107,7 @@ export function withPartitionMutationLocks(partitionDirs, fn) {
  * @param {string} partitionDir
  * @returns {() => void}
  */
-function claimPartitionMutation(partitionDir) {
+export function claimPartitionMutation(partitionDir) {
   // Keep the guard outside a partition that retention may remove.
   const directory = path.join(path.dirname(partitionDir), `.${path.basename(partitionDir)}.mutation-lock`)
   const owner = `${process.pid}-${randomUUID()}`

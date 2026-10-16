@@ -155,23 +155,25 @@ export function readProcessCmdline(pid) {
 }
 
 /**
- * Whether `pid` looks like a hypaware daemon process. `processIsAlive`
- * only proves *some* process holds the pid: after an unclean shutdown
- * the pid file survives and pid numbering can restart, so an unrelated
- * process may hold it (`#2583`). The daemon runs as `hypaware … daemon`,
- * which an unrelated process will not contain in its command line.
+ * Whether `pid` is running a daemon, judged by its command line.
+ * `processIsAlive` only proves *some* process holds the pid: after an unclean
+ * shutdown the pid file survives and pid numbering can restart, so an
+ * unrelated process may hold it (#2583). Every daemon start runs
+ * `daemon run` (the installed service and a foreground `hyp daemon run`
+ * alike), and the program name is not part of the test because a `hyp`
+ * shim's path need not say `hypaware`.
  *
- * Returns `null` when identity cannot be established: callers must keep
- * the old fail-closed behavior (treat as alive).
+ * Returns `null` when the command line cannot be read: callers must keep the
+ * fail-closed behavior and treat the holder as the daemon.
  *
+ * @ref LLP 0515#identity [implements]: the `daemon run` arguments identify a daemon; an unreadable command line counts as one
  * @param {number} pid
  * @returns {boolean | null}
  */
 export function isDaemonProcess(pid) {
   const cmd = readProcessCmdline(pid)
   if (cmd === null) return null
-  const lower = cmd.toLowerCase()
-  return lower.includes('hypaware') && lower.includes('daemon')
+  return /(?:^|\s)daemon\s+run(?:\s|$)/.test(cmd)
 }
 
 /**

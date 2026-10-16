@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url'
 
 import { bootKernel } from '../runtime/boot.js'
 import { cacheTablePath } from '../cache/paths.js'
+import { claimPartitionMutation, isPartitionMutationBusy } from '../cache/partition.js'
 import { installObservability } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { clearPidFile, isDaemonProcess, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
+import { clearPidFile, isDaemonProcess, pidFilePath, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
 import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins, recordUnloadableManifests } from './boot_failure.js'
@@ -19,7 +20,7 @@ import { openDaemonLog } from './logs.js'
  * @import { ChildProcess } from 'node:child_process'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { DaemonStatus, FailedPluginSnapshot, RunDaemonOptions, SourceSnapshot } from '../../../src/core/daemon/types.js'
+ * @import { DaemonStatus, FailedPluginSnapshot, PidFileEntry, RunDaemonOptions, SourceSnapshot } from '../../../src/core/daemon/types.js'
  */
 
 const PROCESSOR_ENTRY = fileURLToPath(new URL('./processor.js', import.meta.url))
@@ -34,6 +35,45 @@ const RESTART_DELAY_MS = 1000
 const STATUS_HEARTBEAT_MS = 30_000
 // Leave time for the CLI's five-second stop wait to observe the exit.
 const STOP_DEADLINE_MS = 4_000
+
+/**
+ * Claim `stateRoot` for this daemon: refuse while another daemon holds it,
+ * otherwise consume stale control requests and write this daemon's pid file.
+ * The check and the write share one guard, so two starts that both find a
+ * stale file cannot both pass. A pid file naming a live process is stale only
+ * when that process's command line shows it is not a daemon (pid reuse after
+ * an unclean shutdown, #2583), or when it names this process, which has not
+ * written one yet. The holder is never signalled.
+ *
+ * @ref LLP 0515#claim [implements]: check and replace the pid file under one guard, so two starts cannot both pass
+ * @param {string} stateRoot
+ * @param {string} processingControlRoot
+ * @param {PidFileEntry} entry
+ */
+export function claimDaemonStart(stateRoot, processingControlRoot, entry) {
+  const pidFile = pidFilePath(stateRoot)
+  /** @type {() => void} */
+  let release
+  try {
+    release = claimPartitionMutation(pidFile)
+  } catch (err) {
+    if (!isPartitionMutationBusy(err)) throw err
+    throw new Error(`daemon start already in progress, or its claim is unverifiable (${path.join(path.dirname(pidFile), `.${path.basename(pidFile)}.mutation-lock`)})`)
+  }
+  try {
+    const previous = readPidFile(stateRoot)
+    // @ref LLP 0515#identity [implements]: a live pid is the daemon unless its command line shows otherwise
+    if (previous && previous.pid !== entry.pid && processIsAlive(previous.pid) && isDaemonProcess(previous.pid) !== false) {
+      throw new Error(`daemon already running (pid=${previous.pid})`)
+    }
+    const stale = clearControlRequests(stateRoot)
+    const staleProcessing = clearControlRequests(processingControlRoot)
+    writePidFile(stateRoot, entry)
+    return { stale, staleProcessing }
+  } finally {
+    release()
+  }
+}
 
 /**
  * The installed service owns the gateway; all kernel background work runs in
@@ -52,18 +92,7 @@ export async function runGatewayDaemon(opts = {}) {
   const startedAt = new Date().toISOString()
   const runId = opts.runId ?? `gateway-${process.pid}-${Date.now()}`
   installObservability()
-  const previous = readPidFile(stateRoot)
-  if (previous && processIsAlive(previous.pid)) {
-    // Liveness alone cannot tell our daemon from a pid reuse after an
-    // unclean shutdown (#2583): only refuse when the holder still looks
-    // like us, and clear the stale file otherwise. Unreadable identity
-    // stays fail-closed (treated as alive, as before).
-    if (isDaemonProcess(previous.pid) === false) {
-      clearPidFile(stateRoot)
-    } else {
-      throw new Error(`daemon already running (pid=${previous.pid})`)
-    }
-  }
+  const { stale, staleProcessing } = claimDaemonStart(stateRoot, processingControlRoot, { pid: process.pid, startedAt, runId, mode: 'foreground' })
   const log = openDaemonLog({ stateRoot, runId, mode: 'foreground' })
   /** @type {ChildProcess | undefined} */
   let child
@@ -112,9 +141,6 @@ export async function runGatewayDaemon(opts = {}) {
     },
   }))
 
-  const stale = clearControlRequests(stateRoot)
-  const staleProcessing = clearControlRequests(processingControlRoot)
-  writePidFile(stateRoot, { pid: process.pid, startedAt, runId, mode: 'foreground' })
   writeStatusFile(stateRoot, status)
   log.info('gateway.starting')
 
