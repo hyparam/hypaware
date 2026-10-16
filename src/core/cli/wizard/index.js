@@ -130,6 +130,14 @@ async function runGuardedInitWizard(opts, guard) {
   let pathway
   /** @type {string[] | undefined} */
   let locked
+  /**
+   * Did `locked` come from a resolution that answered? False when the
+   * central set could not be told (a swallowed resolution failure, or a
+   * join whose org config has not converged), which is not the same fact
+   * as an org that locks nothing, though both leave `locked` empty.
+   * @ref LLP 0509#unknown-is-not-empty [implements]: the run carries "could not tell" beside the locked set instead of folding it into []
+   */
+  let lockedResolved = true
   let managed = false
   let gateShown = false
 
@@ -169,7 +177,9 @@ async function runGuardedInitWizard(opts, guard) {
       // @ref LLP 0182#one-reconfigure [implements]: `managed` decides the locked set, not the pathway
       // @ref LLP 0129#join-before-picker [implements]: the first-run path locks the org rows from the on-disk central layer rather than offering them for composition
       managed = true
-      locked = await computeLockedSafe(catalog, opts)
+      const resolved = await computeLockedSafe(catalog, opts)
+      locked = resolved.lockedSources
+      lockedResolved = resolved.resolved
     }
     return null
   }
@@ -179,7 +189,7 @@ async function runGuardedInitWizard(opts, guard) {
    * a completed transaction (LLP 0063 D3), so stepping back past the
    * join and forward again reuses it instead of re-running the login.
    * Cleared only by the fork's explicit disconnect, which is `hyp leave`.
-   * @type {{ lockedSources: string[], managed: boolean } | undefined}
+   * @type {{ lockedSources: string[], lockedResolved: boolean, managed: boolean } | undefined}
    */
   let joined
   /**
@@ -382,6 +392,7 @@ async function runGuardedInitWizard(opts, guard) {
           opts.stdout.write('Already signed in - continuing.\n')
           pathway = 'team'
           locked = joined.lockedSources
+          lockedResolved = joined.lockedResolved
           managed = joined.managed
           break
         }
@@ -459,6 +470,7 @@ async function runGuardedInitWizard(opts, guard) {
               // run is undone by the leave, so it is forgotten too.
               managed = false
               locked = undefined
+              lockedResolved = true
               joined = undefined
             }
           }
@@ -503,8 +515,9 @@ async function runGuardedInitWizard(opts, guard) {
         }
         pathway = 'team'
         locked = join.lockedSources
+        lockedResolved = join.lockedResolved !== false
         managed = join.managed === true
-        joined = { lockedSources: join.lockedSources ?? [], managed: join.managed === true }
+        joined = { lockedSources: join.lockedSources ?? [], lockedResolved, managed: join.managed === true }
       }
     }
 
@@ -740,6 +753,12 @@ async function runGuardedInitWizard(opts, guard) {
             candidatesHiddenIds: picked.descriptors
               .filter((d) => !visibleCandidateIds.has(d.id))
               .map((d) => d.id),
+            // Whether the empty-or-not locked set above is an answer. When
+            // it is not, every count and id list the lane holds rests on a
+            // central set nobody computed, so the lane says it could not
+            // confirm the team's configuration rather than what syncs.
+            // @ref LLP 0509#unknown-is-not-empty [implements]: the sync lane is told when the central set could not be resolved
+            ...(lockedResolved ? {} : { lockedResolved: false }),
           })
           pendingSyncSources = syncScope.pendingSources
           pendingSyncServer = server
@@ -1484,15 +1503,19 @@ async function loadWizardCatalog() {
  * compose; the export seam, not the picker, enforces the org boundary,
  * LLP 0188 #locked - LLP 0132, which used to state this, is superseded).
  *
+ * A failure still yields an empty set, so the picker composes freely, but
+ * it says so: `resolved: false` keeps "could not tell" apart from "the
+ * org locks nothing" for the sync lane (LLP 0509 #unknown-is-not-empty).
+ *
  * @param {PluginCatalog} catalog
  * @param {Pick<RunInitWizardOptions, 'env'>} opts
- * @returns {Promise<string[]>}
+ * @returns {Promise<{ lockedSources: string[], resolved: boolean }>}
  */
 async function computeLockedSafe(catalog, opts) {
   try {
-    return await computeCentralLockedSources({ env: opts.env, catalog })
+    return { lockedSources: await computeCentralLockedSources({ env: opts.env, catalog }), resolved: true }
   } catch {
-    return []
+    return { lockedSources: [], resolved: false }
   }
 }
 
