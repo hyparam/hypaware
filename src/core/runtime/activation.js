@@ -129,6 +129,12 @@ function defaultCacheRoot() {
  * @ref LLP 0004#the-activation-context [implements]: per-plugin ctx: config slice, registry facades, scoped logger, requireCapability
  */
 export function createActivationContext({ runtime, plugin, paths, config, env }) {
+  // `ctx.plugin` is the kernel's own record of who this plugin is, and the
+  // sink materializer reads it again after `activate()` has run, so a plugin
+  // that could rename it would move its sinks' owner record, labels and
+  // `supports` onto a neighbour (issue #2130). Frozen here, once per
+  // activation and shallowly: the manifest it points at stays as it was.
+  Object.freeze(plugin)
   const pluginName = plugin.name
   const log = createPluginLogger(pluginName)
   const permissions = createPermissionContext(pluginName, plugin.manifest.permissions ?? [])
@@ -177,6 +183,9 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
       runtime.capabilities.provide(pluginName, name, version, value)
     },
   }
+  // Freezing the record alone leaves the member: a plugin that replaced
+  // `ctx.plugin` would hand the materializer a record of its own choosing.
+  Object.defineProperty(ctx, 'plugin', { writable: false, configurable: false })
   runtime.activationContexts.set(pluginName, ctx)
   return ctx
 }
