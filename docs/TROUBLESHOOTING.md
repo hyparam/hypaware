@@ -210,26 +210,36 @@ Folders marked local-only stay withheld. Other datasets, such as traces and
 logs, have no Cloud replay.
 
 <!-- @ref LLP 0040#watermark-contract: one saved position per sink instance and partition; removing it re-reads the partition from the start -->
+<!-- @ref LLP 0040#applying-it-to-both-sinks: a file name carries only its seq range, so a re-export can reuse an earlier name -->
 A local folder or S3 destination has no replay, and it does not drop rows it
-already has. To export one dataset again in full, stop the daemon, remove that
+already has. To export one dataset again in full, stop the daemon, move that
+dataset's earlier export files out of the destination, remove the
 destination's saved position for the dataset, then start the daemon and sync:
 
 ```sh
 hyp daemon stop
+mv <dir>/<dataset> <kept>/<dataset>
 rm -r ~/.hyp/hypaware/plugins/@hypaware/local-fs/sink-instances/<instance>/watermarks/<dataset>
 hyp daemon start
 hyp sync <instance>
 ```
 
-This is the default `HYP_HOME`; use yours if you set another. For S3, the path
-uses `@hypaware/s3` instead of `@hypaware/local-fs`. `<instance>` is the
-destination's name in `hyp sync --dry-run`. The next export
-writes every retained row of that dataset again, in new files, and leaves the
-earlier files in place, so every row it had already sent is now there twice.
-Remove the duplicates where the data is read, for example by `part_id` for
-`ai_gateway_messages`. Don't delete the earlier files to get rid of them:
-they still hold rows that retention has since removed from the local cache.
-Rows held back as local-only stay held back.
+`<instance>` is the destination's name in `hyp sync --dry-run`, `<dir>` is its
+`dir` setting, and `<kept>` is any folder outside `<dir>`. The `~/.hyp` path
+is the default `HYP_HOME`; use yours if you set another. For S3, move the
+objects under `<prefix>/<dataset>/` in the destination's bucket to a prefix
+outside the destination instead, and the saved position is under
+`@hypaware/s3` instead of `@hypaware/local-fs`.
+
+Move the earlier files before the export, don't skip it. A file is named only
+by the range of rows it holds, so the re-export can reuse an earlier file's
+name and replace it, and if retention has since removed some of that file's
+rows from the local cache, they are lost. After the export, the destination
+holds every row the local cache still retains, once. The moved files are the
+only copy of rows that retention has removed, so keep them; a row in both
+places is the same row, and can be dropped where the data is read, for example
+by `part_id` for `ai_gateway_messages`. Rows held back as local-only stay held
+back.
 
 ## A command is missing or rejects an option
 
