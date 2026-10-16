@@ -106,8 +106,8 @@ test('the prompt names its own off switch (LLP 0200 #escape-hatch)', () => {
 //   1. The block names the sync destination exactly one way. Two spellings of
 //      one place ("HypAware Cloud" and "the cloud") still count as two.
 //   2. The forwarding claim carries no connectivity hedge.
-//      `decideClassification` returns prompt only on an enrolled machine, so
-//      the forwarding is unconditionally true wherever this renders and a
+//      `decideClassification` returns prompt only on a machine that forwards,
+//      so the forwarding is unconditionally true wherever this renders and a
 //      hedge understates it.
 //   3. The destination is the one this enrollment actually forwards to, so
 //      every lane is pinned (#2197): a full-block literal for the built-in and
@@ -205,6 +205,25 @@ test('a self-hosted enrollment is told its own server, never the hosted product 
   assert.equal(/cloud/i.test(prompt), false, `a self-hosted block still names a cloud: ${JSON.stringify(prompt)}`)
 })
 
+// #2248: a machine whose only forwarding sink is one the user wrote in their
+// own layer is asked too (LLP 0510), and must not be told it is enrolled: it
+// is not (LLP 0063 D4), and `hyp leave` would not clear that sink. The header
+// line is the whole difference; everything after it is the self-hosted block.
+const EXPECTED_SELF_FORWARDING_HEADER =
+  'This machine is set up to forward, so by default the AI coding sessions you run here'
+
+test('a machine forwarding through its own sink is not told it is enrolled (#2248)', () => {
+  const prompt = buildClassificationPrompt({
+    cwd: CLASSIFICATION_PROMPT_CWD,
+    origins: [SELF_HOSTED_ORIGIN],
+    enrolled: false,
+  })
+  const [header, ...rest] = prompt.split('\n')
+  assert.equal(header, EXPECTED_SELF_FORWARDING_HEADER)
+  assert.deepEqual(rest, EXPECTED_SELF_HOSTED_CLASSIFICATION_PROMPT.split('\n').slice(1))
+  assert.equal(/enrolled/.test(prompt), false)
+})
+
 test('the built-in enrollment is named by its one product name (#2197)', () => {
   const prompt = buildClassificationPrompt({ cwd: CLASSIFICATION_PROMPT_CWD, origins: [BUILTIN_ORIGIN] })
   assert.equal(countOccurrences(prompt, 'HypAware Cloud'), 3)
@@ -277,50 +296,50 @@ test('the sync blurb states the forwarding without a connection-conditional hedg
   )
 })
 
-test('decideClassification: with the ask on, prompt only when enrolled AND interactive AND unclassified', () => {
+test('decideClassification: with the ask on, prompt only when forwarding AND interactive AND unclassified', () => {
   const asking = { askMode: /** @type {const} */ ('ask') }
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: false, ...asking }),
+    decideClassification({ forwards: true, interactive: true, governed: false, ...asking }),
     { prompt: true, reason: 'unclassified' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: false, interactive: true, governed: false, ...asking }),
-    { prompt: false, reason: 'unenrolled' }
+    decideClassification({ forwards: false, interactive: true, governed: false, ...asking }),
+    { prompt: false, reason: 'not-forwarding' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: true, ...asking }),
+    decideClassification({ forwards: true, interactive: true, governed: true, ...asking }),
     { prompt: false, reason: 'classified' }
   )
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: false, governed: false, ...asking }),
+    decideClassification({ forwards: true, interactive: false, governed: false, ...asking }),
     { prompt: false, reason: 'non-interactive' }
   )
-  // Unenrolled dominates even when interactive+unclassified would otherwise ask.
-  assert.equal(decideClassification({ enrolled: false, interactive: false, governed: false, ...asking }).prompt, false)
+  // Not forwarding dominates even when interactive+unclassified would otherwise ask.
+  assert.equal(decideClassification({ forwards: false, interactive: false, governed: false, ...asking }).prompt, false)
   // An omitted askMode is the product default (LLP 0200 #default), which is
   // sync: the per-folder ask is the opt-in half of the pair.
-  assert.equal(decideClassification({ enrolled: true, interactive: true, governed: false }).reason, 'ask-disabled')
+  assert.equal(decideClassification({ forwards: true, interactive: true, governed: false }).reason, 'ask-disabled')
 })
 
 test('decideClassification: the default sync mode means no ask at all (LLP 0200 #default)', () => {
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: false, askMode: 'sync' }),
+    decideClassification({ forwards: true, interactive: true, governed: false, askMode: 'sync' }),
     { prompt: false, reason: 'ask-disabled' }
   )
   // "Stop asking me" is the broadest answer on the screen, so it outranks
-  // every per-folder reason below it - but never enrollment, which is what
+  // every per-folder reason below it - but never forwarding, which is what
   // makes the hook exist at all.
   assert.equal(
-    decideClassification({ enrolled: true, interactive: true, governed: true, askMode: 'sync' }).reason,
+    decideClassification({ forwards: true, interactive: true, governed: true, askMode: 'sync' }).reason,
     'ask-disabled'
   )
   assert.equal(
-    decideClassification({ enrolled: false, interactive: true, governed: false, askMode: 'sync' }).reason,
-    'unenrolled'
+    decideClassification({ forwards: false, interactive: true, governed: false, askMode: 'sync' }).reason,
+    'not-forwarding'
   )
   // The explicit `ask` is exactly today's behavior, not a third state.
   assert.deepEqual(
-    decideClassification({ enrolled: true, interactive: true, governed: false, askMode: 'ask' }),
+    decideClassification({ forwards: true, interactive: true, governed: false, askMode: 'ask' }),
     { prompt: true, reason: 'unclassified' }
   )
 })
@@ -335,7 +354,7 @@ test('evaluateCwdClassification honors a standing sync preference and reports it
       interactive: true,
       env: { HYP_HOME: hypHome },
       deps: {
-        readCentralSinkOrigins: async () => ['https://central.example'],
+        readSinkOrigins: async () => ({ central: ['https://central.example'], effective: ['https://central.example'] }),
         createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       },
     })
@@ -357,7 +376,7 @@ test('a machine that never answered is not asked: the default is sync (LLP 0200 
       interactive: true,
       env: { HYP_HOME: hypHome },
       deps: {
-        readCentralSinkOrigins: async () => ['https://central.example'],
+        readSinkOrigins: async () => ({ central: ['https://central.example'], effective: ['https://central.example'] }),
         createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       },
     })
@@ -379,7 +398,7 @@ test('turning the ask on restores the per-folder question', async () => {
       interactive: true,
       env: { HYP_HOME: hypHome },
       deps: {
-        readCentralSinkOrigins: async () => ['https://central.example'],
+        readSinkOrigins: async () => ({ central: ['https://central.example'], effective: ['https://central.example'] }),
         createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       },
     })
@@ -403,7 +422,7 @@ test('a corrupt preference costs a question, never a silent sync', async () => {
       interactive: true,
       env: { HYP_HOME: hypHome },
       deps: {
-        readCentralSinkOrigins: async () => ['https://central.example'],
+        readSinkOrigins: async () => ({ central: ['https://central.example'], effective: ['https://central.example'] }),
         createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       },
     })
@@ -420,14 +439,11 @@ test('evaluateCwdClassification prompts for an enrolled, interactive, unclassifi
     interactive: true,
     env: { HYP_HOME: '/tmp/does-not-matter' },
     deps: {
-      readCentralSinkOrigins: async () => ['https://central.example'],
-      // Injected too, so this stays a pure-dep test: the prompting path now
-      // reads the effective config from disk, and a fixed `HYP_HOME` path is
-      // not a directory this test owns. Empty, and deliberately not a repeat
-      // of the enrollment origin: the count below is what proves the
-      // enrollment origins survive the trip to the copy (#2197), and a stub
-      // that named them again would let a drop of them pass unnoticed.
-      readForwardSinkOrigins: async () => [],
+      // `effective` is empty, and deliberately not a repeat of the enrollment
+      // origin: the count below is what proves the enrollment origins survive
+      // the trip to the copy (#2197), and a stub that named them again would
+      // let a drop of them pass unnoticed.
+      readSinkOrigins: async () => ({ central: ['https://central.example'], effective: [] }),
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       readFolderAskMode: async () => 'ask',
     },
@@ -444,18 +460,20 @@ test('evaluateCwdClassification prompts for an enrolled, interactive, unclassifi
   assert.equal(/cloud/i.test(result.promptText), false)
 })
 
-test('evaluateCwdClassification is inert on an unenrolled machine', async () => {
+test('evaluateCwdClassification is inert on a machine that forwards nowhere, even with the ask on', async () => {
   const result = await evaluateCwdClassification({
     cwd: '/work/fresh',
     interactive: true,
     env: { HYP_HOME: '/tmp/x' },
     deps: {
-      readCentralSinkOrigins: async () => [],
+      readSinkOrigins: async () => ({ central: [], effective: [] }),
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+      readFolderAskMode: async () => 'ask',
     },
   })
   assert.equal(result.prompt, false)
-  assert.equal(result.reason, 'unenrolled')
+  assert.equal(result.reason, 'not-forwarding')
+  assert.equal(result.enrolled, false)
   assert.equal(result.promptText, undefined)
 })
 
@@ -467,7 +485,7 @@ test('evaluateCwdClassification does not prompt once the folder is classified', 
     interactive: true,
     env: { HYP_HOME: '/tmp/x' },
     deps: {
-      readCentralSinkOrigins: async () => ['https://central.example'],
+      readSinkOrigins: async () => ({ central: ['https://central.example'], effective: ['https://central.example'] }),
       createResolver: (listPath) => makeResolver({ governedBy: listPath, class: 'full' }),
       readFolderAskMode: async () => 'ask',
     },
@@ -483,7 +501,7 @@ test('evaluateCwdClassification passes a non-interactive session through', async
     interactive: false,
     env: { HYP_HOME: '/tmp/x' },
     deps: {
-      readCentralSinkOrigins: async () => ['https://central.example'],
+      readSinkOrigins: async () => ({ central: ['https://central.example'], effective: ['https://central.example'] }),
       createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
       readFolderAskMode: async () => 'ask',
     },
@@ -498,8 +516,8 @@ test('evaluateCwdClassification never fails the session on a corrupt list or a b
     interactive: true,
     env: { HYP_HOME: '/tmp/x' },
     deps: {
-      // Enrollment lookup throws -> treated as not enrolled, never surfaced.
-      readCentralSinkOrigins: async () => { throw new Error('cannot read central layer') },
+      // Config lookup throws -> treated as not forwarding, never surfaced.
+      readSinkOrigins: async () => { throw new Error('cannot resolve the layered config') },
       createResolver: () => ({
         resolve() { throw new LocalOnlyListUnreadableError('/tmp/x/usage-policy/local-only.json') },
         isIgnored() { return false },
@@ -507,7 +525,7 @@ test('evaluateCwdClassification never fails the session on a corrupt list or a b
     },
   })
   assert.equal(result.prompt, false)
-  // Enrollment failed -> unenrolled dominates; the point is it did not throw.
+  // The read failed -> treated as not forwarding; the point is it did not throw.
   assert.equal(result.enrolled, false)
 })
 
@@ -544,9 +562,10 @@ test('the classification answer lands via the real hyp policy set verb (LLP 0106
 // under its own instance name into the effective config the daemon boots, and
 // the plugin honors that block's own `identity.persisted_path`, so a machine
 // enrolled at A with a hand-authored sink to B forwards to both and the copy
-// has to name both. Widening the disclosure is not widening enrollment: the
-// gate still reads the central layer alone (LLP 0063 D4), which the second
-// half of this test pins against exactly the same fixture.
+// has to name both. Widening the disclosure is not widening enrollment:
+// `enrolled` still reads the central layer alone (LLP 0063 D4), while the
+// gate is forwarding (LLP 0510), which the second half of this test pins
+// against exactly the same fixture.
 test('the consent copy names a hand-authored local central sink, not only the enrolled one (#2208)', async () => {
   const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-two-layer-'))
   try {
@@ -587,15 +606,56 @@ test('the consent copy names a hand-authored local central sink, not only the en
     assert.equal(countOccurrences(prompt, 'a.dev'), 3)
     assert.equal(countOccurrences(prompt, 'b.dev'), 3)
 
-    // Same fixture minus the enrollment: the widened disclosure must not stand
-    // in for the gate. A machine whose only `@hypaware/central` sink is its own
-    // local one is not enrolled (LLP 0063 D4) and is never asked.
+    // The same answers came from one resolution: enrollment is still the
+    // central layer alone (LLP 0063 D4), so the local sink did not widen it.
+    assert.equal(both.enrolled, true)
+    assert.match(prompt, /^This machine is enrolled, /)
+
+    // Same fixture minus the enrollment (#2248): the local sink still
+    // forwards, so a user who chose the ask is asked, and told why without
+    // being told the machine is enrolled (LLP 0510).
     rmSync(seedPath)
     const localSinkOnly = await evaluate()
-    assert.equal(localSinkOnly.prompt, false)
-    assert.equal(localSinkOnly.reason, 'unenrolled')
+    assert.equal(localSinkOnly.prompt, true)
+    assert.equal(localSinkOnly.reason, 'unclassified')
     assert.equal(localSinkOnly.enrolled, false)
-    assert.equal(localSinkOnly.promptText, undefined)
+    const localPrompt = localSinkOnly.promptText ?? ''
+    assert.equal(localPrompt.split('\n')[0], EXPECTED_SELF_FORWARDING_HEADER)
+    assert.equal(countOccurrences(localPrompt, 'b.dev'), 3)
+    assert.equal(countOccurrences(localPrompt, 'a.dev'), 0)
+
+    // The ask still decides: on the default `sync` preference the same
+    // machine is never interrupted (LLP 0200).
+    const quiet = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: { createResolver: () => makeResolver({ governedBy: null, class: 'full' }) },
+    })
+    assert.equal(quiet.prompt, false)
+    assert.equal(quiet.reason, 'ask-disabled')
+  } finally {
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('an unreadable config on disk reads as not forwarding and never fails the session (#2248)', async () => {
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-corrupt-config-'))
+  try {
+    writeFileSync(path.join(hypHome, 'hypaware-config.json'), '{ truncated')
+    const result = await evaluateCwdClassification({
+      cwd: '/work/fresh',
+      interactive: true,
+      env: { HYP_HOME: hypHome },
+      deps: {
+        createResolver: () => makeResolver({ governedBy: null, class: 'full' }),
+        readFolderAskMode: async () => 'ask',
+      },
+    })
+    assert.equal(result.prompt, false)
+    assert.equal(result.reason, 'not-forwarding')
+    assert.equal(result.enrolled, false)
+    assert.equal(result.promptText, undefined)
   } finally {
     rmSync(hypHome, { recursive: true, force: true })
   }

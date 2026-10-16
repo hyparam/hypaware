@@ -512,7 +512,7 @@ export async function activate(ctx) {
   // session-context hook.
   ctx.commands.register({
     name: 'claude-hook classify-cwd',
-    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on an enrolled machine',
+    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on a machine that forwards',
     usage: 'hyp claude-hook classify-cwd',
     hidden: true,
     run: runClaudeClassifyHook,
