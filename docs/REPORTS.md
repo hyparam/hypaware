@@ -75,10 +75,23 @@ Publishing uploads the report bundle and requires a write-capable credential. Re
 the report for private content first. See the [report command reference](CLI_REFERENCE.md#generate-and-manage-reports)
 for bundles, downloads, and organization-wide deletion.
 
+To see the recommendations your organization has not acted on yet:
+
+<!-- agent: Use HypAware to list our organization's open recommendations. Over MCP on our team's server, use list_recommendations. -->
+```sh
+hyp report list --status open
+```
+
+Over MCP, on your team's server at `/v1/mcp`, use `list_recommendations`.
+
 To act on a recommendation from inside a repository, run `hyp report fix` with
 the id from `hyp report list`; it starts your agent on the change.
 
-<!-- agent: Read recommendation hyprec-0123456789abcdef with hyp report get and apply it in this repository. When it is landed, mark it applied with the pull request link. -->
+<!-- agent: Read recommendation hyprec-0123456789abcdef with hyp report get and apply it in this repository. When it is landed, mark it applied with the pull request link. Over MCP on our team's server, read it with get_recommendation and mark it with set_recommendation_status. -->
 ```sh
 hyp report fix hyprec-0123456789abcdef
 ```
+
+Over MCP, the `fix_recommendation` prompt does the same: the agent reads the
+recommendation with `get_recommendation` and marks it applied with
+`set_recommendation_status`, the tool for `hyp report mark`.

@@ -241,6 +241,8 @@ hyp query sql "select request_id, message_index, part_index, role, content_text,
   order by message_index, part_index" --refresh never --format json
 ```
 
+Over MCP, run the same SQL with `query_sql`.
+
 <!-- @ref LLP 0476#cohort [constrained-by]: verification uses ordinary full refresh of the shared current gateway spool and retains its existing hooks/backlog cost -->
 
 Verification requests an ordinary full refresh of the shared gateway spool.
