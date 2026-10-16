@@ -25,12 +25,15 @@ function endpoint(server) {
 }
 
 const PLUGIN = '@third-party/sink-independence-fixture'
-async function until(check) {
-  for (let n = 0; n < 100; n += 1) {
+// A time budget, not an iteration count, so a loaded runner gets the same 10 s
+// as a quiet one, and a miss names the step that never settled.
+async function until(check, step = String(check)) {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
     if (await check()) return
     await delay(20)
   }
-  assert.fail('disposable runtime condition did not settle')
+  assert.fail(`disposable runtime condition did not settle within 10 s: ${step}`)
 }
 async function read(dir, name) { return fs.readFile(path.join(dir, name), 'utf8').catch(() => '') }
 async function stage(t, url, { central = false, uncooperative = false, tickIntervalMs = 25, maintenance = false, beforeBoot = async (home) => {} } = {}) {
@@ -74,6 +77,7 @@ export async function activate(ctx) {
           try { await fetch(${JSON.stringify(url)}, { signal: controller.signal }) }
           catch { return { status: 'failed', partitionsExported: 0, error: 'central transport unavailable' } }
         }
+        if (fs.existsSync(home + '/hold-export')) note('held-' + sinkCtx.name)
         while (fs.existsSync(home + '/hold-export')) await new Promise(r => setTimeout(r, 10))
         const status = fs.existsSync(home + '/partial') ? 'partial' : fs.existsSync(home + '/fail') ? 'failed' : 'exported'
         note('settled-' + sinkCtx.name)
@@ -92,6 +96,7 @@ export async function activate(ctx) {
   ctx.sources.register({ name: 'fixture', plugin: '${PLUGIN}', async start() { return {
     async status() {
       note('probe')
+      if (fs.existsSync(home + '/hold-probe')) note('held-probe')
       while (fs.existsSync(home + '/hold-probe')) await new Promise(r => setTimeout(r, 10))
       return { state: 'ready', details: { probes: fs.readFileSync(home + '/probe', 'utf8').length } }
     },
@@ -111,7 +116,8 @@ export async function activate(ctx) {
   } }))
   let daemon
   t.after(async () => {
-    for (const name of ['hold-probe', 'hold-export', 'hold-source-stop', 'hold-central']) await fs.rm(path.join(home, name), { force: true })
+    // hold-next first: while it exists a z-local success re-creates hold-export.
+    for (const name of ['hold-next', 'hold-probe', 'hold-export', 'hold-source-stop', 'hold-central']) await fs.rm(path.join(home, name), { force: true })
     if (daemon) await daemon.stop()
     await fs.rm(home, { recursive: true, force: true, maxRetries: 5 })
   })
@@ -140,9 +146,9 @@ test('blocked destination does not block local work or heartbeat, and stop signa
   const probeBefore = (await read(home, 'probe')).length
   await until(async () => (await read(home, 'probe')).length > probeBefore)
   await fs.writeFile(path.join(home, 'hold-source-stop'), '1')
+  const heldProbes = (await read(home, 'held-probe')).length
   await fs.writeFile(path.join(home, 'hold-probe'), '1')
-  const probes = (await read(home, 'probe')).length
-  await until(async () => (await read(home, 'probe')).length > probes)
+  await until(async () => (await read(home, 'held-probe')).length > heldProbes, 'a source probe is held')
   const stopping = daemon.stop()
   await until(() => closed === 1)
   assert.equal(statusAt(stateRoot).state, 'stopping')
@@ -171,8 +177,9 @@ test('delayed success uses completion time and ordinary logs show failure then f
   const logBefore = await read(path.join(stateRoot, 'logs'), 'daemon.log')
   await delay(100)
   assert.equal((await read(path.join(stateRoot, 'logs'), 'daemon.log')).includes('daemon.sink_export_recovered'), false)
+  const held = (await read(home, 'held-z-local')).length
   await fs.writeFile(path.join(home, 'hold-export'), '1')
-  await delay(50)
+  await until(async () => (await read(home, 'held-z-local')).length > held, 'a z-local export is held before the completion boundary')
   const completionBoundary = new Date().toISOString()
   await fs.writeFile(path.join(home, 'hold-next'), '1')
   await fs.rm(path.join(home, 'partial'))
@@ -225,8 +232,7 @@ test('a held source probe coalesces bookkeeping while exports continue', async t
     server.close() })
   const { home, daemon, stateRoot } = await stage(t, endpoint(server), { tickIntervalMs: 1 })
   await fs.writeFile(path.join(home, 'hold-probe'), '1')
-  const before = (await read(home, 'probe')).length
-  await until(async () => (await read(home, 'probe')).length > before)
+  await until(async () => (await read(home, 'held-probe')).length > 0, 'a source probe is held')
   const held = (await read(home, 'probe')).length
   const exported = (await read(home, 'settled-z-local')).length
   const heartbeat = statusAt(stateRoot).uptimeMs
