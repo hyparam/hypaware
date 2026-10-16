@@ -738,11 +738,210 @@ for (const header of ['x-codex-parent-thread-id', 'x-openai-subagent']) {
   })
 }
 
-// `x-openai-subagent`'s real values are `review`, `compact`, `collab_spawn` and
-// `memory_consolidation`. Three of the four are sub-threads of the ROOT's own
-// workspace, so the root's cwd is the CORRECT answer for them, and the guard
-// refuses anyway because it is value-blind. These two loops pin both halves of
-// that trade, because only the pair of them says how far it reaches.
+// ---------------------------------------------------------------------
+// Regression (#514): `codex-rs` writes `x-openai-subagent` into the body's flat
+// `client_metadata` map as well as sending it as a header, and the API-key
+// route's generic `/v1/responses` may carry the body map alone. The guard read
+// the header only, so a body-carried label let the container fallback borrow
+// the ROOT's cwd for a turn that had declared itself a child. Every case below
+// puts the root in an IGNORED directory, so a borrowed root cwd shows up as a
+// drop and a refusal shows up as a recorded row with no cwd.
+// ---------------------------------------------------------------------
+
+/**
+ * Project one turn against a root/subagent rollout pair whose ROOT is ignored.
+ *
+ * @param {{ path?: string, provider?: string, headers?: Record<string, unknown>, body: string }} turn
+ */
+async function projectAgainstIgnoredRoot(turn) {
+  const sessionsDir = await writeSubagentPair({
+    rootCwd: '/work/ignored/root',
+    subagentCwd: '/work/clean/sub',
+  })
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: createRolloutCwdResolver({ sessionsDir }),
+  })
+  return /** @type {any} */ (projector.project(exchange({
+    path: turn.path ?? '/v1/responses',
+    provider: turn.provider ?? 'openai',
+    request_headers: JSON.stringify(turn.headers ?? {}),
+    request_body: turn.body,
+    response_body: JSON.stringify({ output_text: 'ok' }),
+  }), context()))
+}
+
+/**
+ * @param {any} projection
+ * @param {string} why
+ */
+function assertRefused(projection, why) {
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, `${why}: recorded with an unknown cwd, not judged by the root's`)
+  assert.equal(projection.cwd, undefined, why)
+}
+
+for (const label of ['collab_spawn', 'review', 'a_future_kind', 'x']) {
+  test(`API-key route: body-only x-openai-subagent=${label} refuses the container fallback`, async () => {
+    // The issue's reproduction: no header at all, the label only in the
+    // Codex-owned body map. Before #514 this resolved `/work/ignored/root`.
+    const projection = await projectAgainstIgnoredRoot({
+      body: codexLineageBody({ session_id: ROOT_SESSION_ID, 'x-openai-subagent': label }),
+    })
+    assertRefused(projection, `a body-carried ${label} label is lineage`)
+  })
+
+  test(`API-key route: header-only x-openai-subagent=${label} makes the same refusal`, async () => {
+    // The equivalent header form, so the two carriers are pinned to one outcome.
+    const projection = await projectAgainstIgnoredRoot({
+      headers: { 'x-openai-subagent': label },
+      body: codexLineageBody({ session_id: ROOT_SESSION_ID }),
+    })
+    assertRefused(projection, `a header-carried ${label} label is lineage`)
+  })
+}
+
+test('a body-carried subagent label on the subscription route refuses too', async () => {
+  const projection = await projectAgainstIgnoredRoot({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    body: codexLineageBody({ session_id: ROOT_SESSION_ID, 'x-openai-subagent': 'collab_spawn' }),
+  })
+  assertRefused(projection, 'the carrier, not the route, decides')
+})
+
+test('paired ids take the real thread path before a body-carried subagent label is consulted', async () => {
+  // The released shape: the body map names the subagent's own thread beside the
+  // label. Its own rollout answers (`/work/clean/sub`), not a refusal and not
+  // the root's ignored directory.
+  const projection = await projectAgainstIgnoredRoot({
+    body: codexLineageBody({
+      session_id: ROOT_SESSION_ID,
+      thread_id: SUBAGENT_THREAD_ID,
+      'x-openai-subagent': 'collab_spawn',
+    }),
+  })
+  assert.ok(projection && projection !== USAGE_POLICY_DROP)
+  assert.equal(projection.cwd, '/work/clean/sub')
+
+  // And the root's own paired turn, label or not, is still judged by its rollout.
+  const root = await projectAgainstIgnoredRoot({
+    body: codexLineageBody({
+      session_id: ROOT_SESSION_ID,
+      thread_id: ROOT_THREAD_ID,
+      'x-openai-subagent': 'review',
+    }),
+  })
+  assert.equal(root, USAGE_POLICY_DROP)
+})
+
+for (const [name, value] of /** @type {[string, unknown][]} */ ([
+  ['an empty string', ''],
+  ['a number', 7],
+  ['an array', ['collab_spawn']],
+  ['null', null],
+])) {
+  test(`a malformed body x-openai-subagent (${name}) reads as absent, as every map key does`, async () => {
+    // `readStringKey`'s contract: only a non-empty string is a value. A
+    // malformed label is not upgraded into lineage, and it does not invent a
+    // thread either: with paired ids the turn's own thread still answers.
+    const paired = await projectAgainstIgnoredRoot({
+      body: JSON.stringify({
+        model: 'gpt-5-codex',
+        input: 'hi',
+        client_metadata: {
+          'x-codex-installation-id': 'install-sub',
+          session_id: ROOT_SESSION_ID,
+          thread_id: SUBAGENT_THREAD_ID,
+          'x-openai-subagent': value,
+        },
+      }),
+    })
+    assert.equal(paired.cwd, '/work/clean/sub')
+
+    // Container only: absent lineage is the DOCUMENTED GAP below (the turn is
+    // taken as its root), exactly as if the key were missing. That outcome is
+    // the existing one, not something this value introduced.
+    const containerOnly = await projectAgainstIgnoredRoot({
+      body: JSON.stringify({
+        model: 'gpt-5-codex',
+        input: 'hi',
+        client_metadata: {
+          'x-codex-installation-id': 'install-sub',
+          session_id: ROOT_SESSION_ID,
+          'x-openai-subagent': value,
+        },
+      }),
+    })
+    const missing = await projectAgainstIgnoredRoot({
+      body: codexLineageBody({ session_id: ROOT_SESSION_ID }),
+    })
+    assert.equal(containerOnly, USAGE_POLICY_DROP)
+    assert.equal(missing, USAGE_POLICY_DROP)
+
+    // A malformed body value does not mask a valid header: the header is the
+    // fallback carrier and still refuses.
+    const withHeader = await projectAgainstIgnoredRoot({
+      headers: { 'x-openai-subagent': 'collab_spawn' },
+      body: JSON.stringify({
+        model: 'gpt-5-codex',
+        input: 'hi',
+        client_metadata: {
+          'x-codex-installation-id': 'install-sub',
+          session_id: ROOT_SESSION_ID,
+          'x-openai-subagent': value,
+        },
+      }),
+    })
+    assertRefused(withHeader, 'the header fallback still applies')
+  })
+}
+
+test('body and header labels that disagree still refuse: the guard is value-blind', async () => {
+  const projection = await projectAgainstIgnoredRoot({
+    headers: { 'x-openai-subagent': 'collab_spawn' },
+    body: codexLineageBody({ session_id: ROOT_SESSION_ID, 'x-openai-subagent': 'review' }),
+  })
+  assertRefused(projection, 'either carrier is enough')
+})
+
+test('a subagent label in a body map Codex does not own is not trusted', async () => {
+  // The container comes from the turn-metadata header blob, so the fallback is
+  // reachable without the body map. The map carries the label but no `x-codex-`
+  // key and no flat id pair, so `readCodexClientMetadata` declines it and its
+  // label is not lineage: the turn is the DOCUMENTED GAP, taken as its root.
+  const blob = JSON.stringify({ session_id: ROOT_SESSION_ID })
+  const foreign = await projectAgainstIgnoredRoot({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    headers: { 'x-codex-turn-metadata': blob },
+    body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'hi',
+      client_metadata: { 'x-openai-subagent': 'collab_spawn' },
+    }),
+  })
+  assert.equal(foreign, USAGE_POLICY_DROP, 'a non-Codex map states no lineage')
+
+  // The same label in a map that names itself Codex's is lineage.
+  const owned = await projectAgainstIgnoredRoot({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    headers: { 'x-codex-turn-metadata': blob },
+    body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'hi',
+      client_metadata: { 'x-codex-installation-id': 'install-sub', 'x-openai-subagent': 'collab_spawn' },
+    }),
+  })
+  assertRefused(owned, 'a Codex-owned map is a carrier')
+})
+
+// `x-openai-subagent`'s named values are `review`, `compact`, `collab_spawn` and
+// `memory_consolidation`, and the set is open beyond them (`SubAgentSource::Other`
+// passes any label through). Three of the four named ones are sub-threads of the
+// ROOT's own workspace, so the root's cwd is the CORRECT answer for them, and the
+// guard refuses anyway because it is value-blind. These two loops pin both halves
+// of that trade, because only the pair of them says how far it reaches.
 for (const value of ['review', 'compact', 'memory_consolidation']) {
   test(`DOCUMENTED MIRROR: x-openai-subagent=${value} with no thread id refuses a container the root would have resolved`, async () => {
     // @ref LLP 0083#container-fallback-gap [tests]: the cost of the value-blind
