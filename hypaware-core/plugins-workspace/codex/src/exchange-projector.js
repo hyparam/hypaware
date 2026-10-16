@@ -946,14 +946,16 @@ function resolveCodexContext(input, provider, path, reqBody) {
 /**
  * The transport signals that spell a name out of Codex's own proprietary
  * vocabulary: the ChatGPT upstream, the `/backend-api/codex/` route namespace,
- * or an `x-codex-*` compatibility header. Producing any of them takes knowledge
- * of a route or header name Codex never published as an interface, which is a
- * meaningfully higher bar than copying a product string.
+ * or an `x-codex-*` compatibility header. These are client-supplied too (the
+ * route is in this plugin's own upstream preset), so this is a classification
+ * bar, not authentication: it keeps the identity decision off a borrowed
+ * product string, which generic tooling emits without meaning to be Codex.
  *
  * This, and NOT the looser `hasCodexTransportSignal`, is what corroborates a
  * `client_metadata` map carrying no Codex-owned key of its own.
  * @ref LLP 0165#flat-pair-corroboration [implements]: the strict half of the
  * split, the only half a partition key is allowed to rest on.
+ * @ref LLP 0165#not-authentication: classification, not a security proof.
  *
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider

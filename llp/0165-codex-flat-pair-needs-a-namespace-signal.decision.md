@@ -31,8 +31,8 @@ non-blocking:
    only the flat pair satisfied the predicate, and the pair then dictated
    `conversation_id` and `session_id`, the latter being the partition key
    ([LLP 0030](./0030-session-id-partition-key.decision.md)). The other three
-   signals need Codex's proprietary route or header vocabulary; the user-agent
-   needs only a product string any process on the machine can copy. This is
+   signals are spelled in Codex's own route or header vocabulary; the
+   user-agent is a product string generic tooling routinely copies. This is
    residual rather than introduced: the pre-LLP-0151 projector let the same
    user-agent reach a header fallback with no body gate at all, so LLP 0151 was
    already a net tightening. It is worth closing anyway because the value it
@@ -56,6 +56,21 @@ An identity is not revisable: it clusters rows on disk (LLP 0030 §Breaking) and
 scopes the fallback `message_id`, so it may rest only on a name the client had
 to learn from Codex rather than one it could guess from a release note.
 
+<a id="not-authentication"></a>**This is capture classification, not
+authentication of the sending process.** Every signal on both sides of the split
+is client-supplied. The `/backend-api/codex/` route is published in this
+plugin's own `chatgpt` upstream preset and in Codex's public source, and the
+`x-codex-*` headers and body keys are equally copyable, so a local process that
+sets out to impersonate Codex can still seat a flat pair by posting to the
+namespaced route. The split does not claim to stop that, and nothing here should
+be read as a security proof. What it does is keep the identity decision off the
+one signal ordinary non-Codex tooling emits by accident, a borrowed user-agent,
+so a generic Responses client does not land rows on a partition key it never
+stated. The maintainer accepted this framing on issue #473 (2026-07-30 "A:
+tighten", restated 2026-10-06): the route, upstream and compatibility-header
+corroborators are preserved as they are, and credential or response validation
+is out of scope.
+
 Real Codex loses nothing today. Its map carries `x-codex-installation-id` and
 `x-codex-window-id` on every request (LLP 0151
 [#context](./0151-codex-lineage-from-body-client-metadata.decision.md#context)),
@@ -75,7 +90,9 @@ real capture to buy nothing, since labelling was never the exposure.
 
 <a id="header-audit-correction"></a>**Correction to LLP 0151's header audit:
 `session-id` and `thread-id` are real Codex header names on two paths.**
-`codex-rs/codex-api/src/requests/headers.rs::build_session_headers` inserts
+The upstream statements in this section were checked against `openai/codex` at
+release tag `rust-v0.146.0` and describe that revision, not every Codex build.
+At that tag, `codex-rs/codex-api/src/requests/headers.rs::build_session_headers` inserts
 headers literally named `session-id` and `thread-id`. It has two call sites in
 `codex-rs/core/src/client.rs`: `compact_conversation_history` (the
 `/responses/compact` endpoint, which HypAware's `isOpenAiResponsesPath` matches)
@@ -87,12 +104,16 @@ turn-streaming path (`build_responses_request` / `stream_responses_api`), which
 is the path essentially all ordinary Codex traffic uses.
 
 **The projector still does not read them, and that stays right.** The
-correction is to the justification, not to the decision. The compaction requests
-that carry the two headers are `CodexResponsesRequestKind::Compaction`, which
-Codex marks `has_turn_identity = true`, so their `x-codex-turn-metadata` blob
-independently states the same `session_id` and `thread_id` that
-`readCodexTurnMetadata` already reads. `Memory` requests (`summarize_memories`)
-state identity on no surface at all by Codex's own design, so there is nothing
+correction is to the justification, not to the decision. At `rust-v0.146.0`, the
+compaction request that carries the two headers also sends the compatibility
+headers (`compact_conversation_history` extends them from
+`CodexResponsesMetadata::compatibility_headers` in
+`codex-rs/core/src/responses_metadata.rs`), and
+`CodexResponsesRequestKind::has_turn_identity` is true for every kind but
+`Memory`, so its `x-codex-turn-metadata` blob independently states the same
+`session_id` and `thread_id` that `readCodexTurnMetadata` already reads.
+`Memory` requests (`summarize_memories`) state identity on no surface at all by
+Codex's design at that tag, so there is nothing
 for any reader to find. Reading the two bare names would therefore add no id
 HypAware does not already have, while reopening exactly what LLP 0151 closed:
 they are unnamespaced names any proxy hop or hand-rolled client may set, and a
@@ -116,6 +137,8 @@ projector path reads its headers either way.
   content-hash fallback identity and no `lineage_source`, and is still stamped
   `client_name: 'codex'`. That asymmetry is the decision, so it is asserted as
   one test with both halves rather than two tests.
+- Content capture does not depend on lineage. A row that loses corroborated
+  lineage keeps its messages; only its identity falls back.
 - LLP 0151 gains `Extended-by` forward-refs at the two affected sections. Its
   text is otherwise untouched.
 
