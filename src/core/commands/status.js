@@ -965,7 +965,11 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 
   section('sinks')
   if (report.sinks.length === 0) {
-    stdout.write('    (none - keeping captured data local only)\n')
+    // No sink rows on a host whose central layer cannot be read is not a
+    // known absence: that layer may name destinations this report cannot see.
+    stdout.write(centralSharingUnknown(report)
+      ? '    (none visible - organization config could not be read)\n'
+      : '    (none - keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
       // A row recovered from the status file and backed by no live handle

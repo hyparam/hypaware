@@ -33,13 +33,15 @@ policy shows `Unknown`; it must not infer permission from configuration
 provenance. A host whose central config layer status cannot read (the
 collector's `config_central_unreadable` diagnostic, whichever way the layer is
 unreadable) is the same case: compact `Sharing` reads `Unknown`, each client
-reads `Unknown`, and verbose prints the split as unknown, never
-`No organization sync` or `Local only`. Unknown says what the report cannot
-see; it does not claim a running daemon stopped forwarding. `--json` keeps its
-null `client_sync` and carries the evidence in that diagnostic, so all three
-views rest on one collection. Sync is policy, not delivery confirmation. Unconfigured clients
-are omitted unless attached or carrying a probe error. Sources without attach
-probes, including Hermes and raw gateway sources, remain visible in the split.
+reads `Unknown`, and verbose prints the split as unknown and an empty sink
+list as none visible rather than keeping data local, never `No organization
+sync` or `Local only`. Unknown says what the report cannot see; it does not
+claim a running daemon stopped forwarding. `--json` keeps its null
+`client_sync` and carries the evidence in that diagnostic, so all three views
+rest on one collection. Sync is policy, not delivery confirmation.
+Unconfigured clients are omitted unless attached or carrying a probe error.
+Sources without attach probes, including Hermes and raw gateway sources,
+remain visible in the split.
 
 First-sync holds, directory withholding, and the new-folder policy remain
 visible in both views. Product telemetry remains visible when enabled.

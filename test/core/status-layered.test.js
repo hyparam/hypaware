@@ -437,6 +437,8 @@ for (const [label, arrange] of UNREADABLE_CENTRAL_STATES) {
       assert.match(compact, /codex\s+Recording\s+Unknown/)
       assert.doesNotMatch(compact, /No organization sync|Local only/)
       assert.match(verbose, /syncing: unknown - local-only: unknown \(organization config could not be read\)/)
+      assert.match(verbose, /\(none visible - organization config could not be read\)/)
+      assert.doesNotMatch(verbose, /keeping captured data local only/)
       // The diagnostic says what the report cannot see, not that a running
       // daemon stopped forwarding.
       assert.doesNotMatch(compact + verbose, /stopped forwarding|no longer forward/)
@@ -456,7 +458,8 @@ test('an absent central layer still renders a solo host as no organization sync'
   const { compact, verbose } = renderBothViews(report)
   assert.match(compact, /Sharing\s+No organization sync/)
   assert.match(compact, /codex\s+Recording\s+Local only/)
-  assert.doesNotMatch(compact + verbose, /Unknown|unknown/)
+  assert.match(verbose, /\(none - keeping captured data local only\)/)
+  assert.doesNotMatch(compact + verbose, /Unknown|unknown|could not be read/)
 })
 
 test('a readable central layer renders organization sync, not unknown', async () => {
