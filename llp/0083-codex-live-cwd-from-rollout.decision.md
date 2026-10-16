@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0066, LLP 0067, LLP 0150, LLP 0151, LLP 0160, LLP 0350
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0066, LLP 0067, LLP 0150, LLP 0151, LLP 0160, LLP 0350, LLP 0506
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -320,6 +320,14 @@ document also records what is now stale in the "an unusable in-band `cwd` is a
 miss" bullet's closing #476 sentence
 ([§corrections](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#corrections-0083)),
 and leaves the enrichment question open under #492.
+
+**Extended-by:
+[LLP 0506](./0506-codex-enrichment-needs-a-covering-unignored-workspace.decision.md#decision)** -
+the key's enrichment role now holds only for a key that covers the resolved
+`cwd` and does not itself resolve `ignore`, closing #492 and #1189. That
+document also records that this bullet's `pathsEqual` parenthetical names a
+deleted helper
+([§corrections](./0506-codex-enrichment-needs-a-covering-unignored-workspace.decision.md#corrections-0083)).
 
 ## Why not the alternatives
 

@@ -1413,10 +1413,12 @@ test('a refused workspace substitution is logged with hashed paths, not silently
   )
 })
 
-test('a refused workspace substitution still enriches the row from the workspace key (#476)', () => {
-  // The substitution keeps its ENRICHMENT role: only the gate/stamp cwd is
-  // taken back from it. Losing `workspace` / git identity would be a separate
-  // regression (LLP 0032#capture).
+test('a refused workspace substitution no longer enriches the row from the workspace key (#1189)', () => {
+  // Reversed on purpose. #476 took the gate/stamp cwd back from a key that does
+  // not cover the cwd and left it the enrichment role; under a session_repos
+  // inventory that remote is capture evidence, so a key the session never ran
+  // in now supplies none of it. The conversation itself is untouched.
+  // @ref LLP 0506#decision [tests]: no covering key, no repository identity
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
   })
@@ -1438,9 +1440,10 @@ test('a refused workspace substitution still enriches the row from the workspace
     response_body: JSON.stringify({ output_text: 'done' }),
   }), context()))
   assert.equal(projection.cwd, '/work/clean/elsewhere')
-  assert.equal(projection.attributes.codex.workspace, '/work/clean/proj')
-  assert.equal(projection.git_remote, 'git@github.com:acme/clean.git')
-  assert.equal(projection.head_sha, 'deadbeef')
+  assert.equal(projection.conversation_id, 'thread-476d')
+  assert.equal(projection.attributes.codex.workspace, undefined)
+  assert.equal(projection.git_remote, undefined)
+  assert.equal(projection.head_sha, undefined)
 })
 
 test('the workspace key still supplies the gate cwd when the request states none (#476)', () => {
@@ -1793,6 +1796,176 @@ test('an ancestor key that resolves MORE restrictively than the cwd is silent (d
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------
+// Repository enrichment needs a covering, non-ignored workspace (#1189)
+//
+// Phil's 2026-10-05 decision on LLP 0350 (B)+(C): a row carries a workspace's
+// git_remote/head_sha and its attributes.codex mirrors only when the key covers
+// the RESOLVED cwd and the shared matcher does not classify the key `ignore`.
+// Otherwise the row is still recorded, without that identity.
+//
+// @ref LLP 0506#decision [tests]
+// ---------------------------------------------------------------------
+
+const REPO_MIRRORS = ['workspace', 'git_origin_url', 'git_commit', 'has_changes']
+
+/**
+ * @param {any} projection
+ * @param {string} label
+ */
+function assertNoRepoEnrichment(projection, label) {
+  assert.equal(projection.git_remote, undefined, `${label}: git_remote`)
+  assert.equal(projection.head_sha, undefined, `${label}: head_sha`)
+  for (const key of REPO_MIRRORS) {
+    assert.equal(projection.attributes.codex[key], undefined, `${label}: attributes.codex.${key}`)
+  }
+}
+
+function capturingLog() {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const infos = []
+  return {
+    infos,
+    log: {
+      debug() {},
+      warn() {},
+      error() {},
+      /** @param {string} message @param {Record<string, unknown>=} fields */
+      info: (message, fields) => { infos.push({ message, fields }) },
+    },
+  }
+}
+
+/**
+ * An API-key route turn (`/v1/responses`, cwd in `metadata`) carrying the
+ * given `workspaces` map and a subagent lineage, so a test can assert identity
+ * and lineage survive a withheld enrichment.
+ *
+ * @param {string} cwd
+ * @param {Record<string, unknown>} workspaces
+ */
+function apiKeyTurn(cwd, workspaces) {
+  return exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-1189',
+        thread_id: 'thread-1189-api',
+        parent_thread_id: 'thread-1189-parent',
+        workspaces,
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', metadata: { cwd }, input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  })
+}
+
+test('API-key route: no covering key withholds every repository field and keeps the conversation (#1189)', () => {
+  const { infos, log } = capturingLog()
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(apiKeyTurn('/work/clean/sub', {
+    '/work/other': {
+      associated_remote_urls: { origin: 'https://github.com/acme/other.git' },
+      latest_git_commit_hash: 'cafe0001',
+      has_changes: true,
+    },
+  }), { log }))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'a clean conversation is not dropped')
+  assertNoRepoEnrichment(projection, 'no covering key')
+  assert.equal(projection.cwd, '/work/clean/sub')
+  assert.equal(projection.session_id, 'session-1189')
+  assert.equal(projection.conversation_id, 'thread-1189-api')
+  assert.equal(projection.parent_thread_id, 'thread-1189-parent')
+  assert.equal(projection.attributes.codex.thread_id, 'thread-1189-api')
+  assert.equal(projection.attributes.codex.parent_thread_id, 'thread-1189-parent')
+  assert.equal(projection.attributes.codex.identity_source, 'gateway_fallback')
+  const withheld = infos.find((e) => e.message === 'plugin.codex.workspace_enrichment_withheld')
+  assert.equal(withheld?.fields?.reason, 'not_covering')
+  assert.ok(!JSON.stringify(withheld?.fields).includes('/work'), 'the diagnostic carries no path')
+})
+
+test('a clean covering key enriches in either map order, beside an ignored unrelated key (#1189)', () => {
+  const clean = {
+    associated_remote_urls: { origin: 'https://user:tok@github.com/acme/clean.git' },
+    latest_git_commit_hash: 'feedface',
+    has_changes: false,
+  }
+  const secret = {
+    associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+    latest_git_commit_hash: 'deadbeef',
+  }
+  for (const order of ['secret-first', 'clean-first']) {
+    const workspaces = order === 'secret-first'
+      ? { '/work/ignored/secret-proj': secret, '/work/clean': clean }
+      : { '/work/clean': clean, '/work/ignored/secret-proj': secret }
+    const projector = createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') })
+    const projection = /** @type {any} */ (projector.project(apiKeyTurn('/work/clean/sub', workspaces), context()))
+    assert.equal(projection.git_remote, 'https://github.com/acme/clean.git', `${order}: redacted covering remote`)
+    assert.equal(projection.head_sha, 'feedface', order)
+    assert.equal(projection.attributes.codex.workspace, '/work/clean', order)
+    assert.equal(projection.attributes.codex.git_origin_url, 'https://github.com/acme/clean.git', order)
+    assert.equal(projection.attributes.codex.git_commit, 'feedface', order)
+    assert.equal(projection.attributes.codex.has_changes, false, order)
+    assert.ok(!JSON.stringify(projection).includes('SECRET'), `${order}: nothing of the ignored tree`)
+  }
+})
+
+test('an ignored unrelated key alone enriches nothing and drops nothing (#1189, #492)', () => {
+  const projector = createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') })
+  const projection = /** @type {any} */ (projector.project(apiKeyTurn('/work/clean/real', {
+    '/work/ignored/proj': {
+      associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+      latest_git_commit_hash: 'deadbeef',
+    },
+  }), context()))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'no .hypignore covers this session')
+  assertNoRepoEnrichment(projection, 'ignored unrelated key')
+  assert.ok(!JSON.stringify(projection).includes('SECRET'))
+})
+
+test('an ignored covering ancestor does not enrich a turn its nested loosening admits (#1189)', () => {
+  // LLP 0350 (C): `ignore` at the ancestor, `local-only` beneath, cwd under
+  // both. The turn records (the user's own carve-out), but the ancestor is
+  // itself ignored, so its identity stays off the row in BOTH map orders,
+  // including the one where a non-covering clean key sorts first.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-1189-'))
+  const outer = path.join(root, 'outer')
+  const proj = path.join(outer, 'proj')
+  const cwd = path.join(proj, 'sub')
+  fs.mkdirSync(cwd, { recursive: true })
+  fs.writeFileSync(path.join(outer, '.hypignore'), 'ignore\n')
+  fs.writeFileSync(path.join(proj, '.hypignore'), 'local-only\n')
+  const secret = { associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' } }
+  const clean = { associated_remote_urls: { origin: 'https://github.com/acme/clean.git' } }
+  const elsewhere = path.join(root, 'clean')
+  try {
+    for (const order of ['clean-first', 'secret-first']) {
+      const workspaces = order === 'clean-first'
+        ? { [elsewhere]: clean, [outer]: secret }
+        : { [outer]: secret, [elsewhere]: clean }
+      const { infos, log } = capturingLog()
+      const projection = /** @type {any} */ (createCodexExchangeProjector().project(apiKeyTurn(cwd, workspaces), { log }))
+      assert.ok(projection && projection !== USAGE_POLICY_DROP, `${order}: the carve-out records`)
+      assertNoRepoEnrichment(projection, order)
+      assert.ok(!JSON.stringify(projection).includes('SECRET'), `${order}: no ignored identity`)
+      const withheld = infos.find((e) => e.message === 'plugin.codex.workspace_enrichment_withheld')
+      assert.equal(withheld?.fields?.reason, 'workspace_ignored', order)
+      assert.ok(!JSON.stringify(withheld?.fields).includes(root), `${order}: no path in the diagnostic`)
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a cwd-scoped ignore still drops the turn outright (#1189 keeps the gate)', () => {
+  const projector = createCodexExchangeProjector({ resolver: ignoringResolver('/work/ignored') })
+  const projection = projector.project(apiKeyTurn('/work/ignored/real', {
+    '/work/ignored': { associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' } },
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP)
 })
 
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {
