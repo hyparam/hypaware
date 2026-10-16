@@ -306,8 +306,10 @@ test('native recovery retries failed writes, survives restart, and serializes wi
     await waitFor(async () => Number((await f.source.status?.())?.details?.native_failures) >= 1)
     assert.equal((await f.source.status?.())?.details?.native_reads, 0)
     await iterator.return?.()
-    assert.equal(activeRecoveries.size, 0)
+    // The backfill releases its claim before closing its decoder, so the live
+    // retry can already hold it here. Check for a leaked claim once it is done.
     await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
+    assert.equal(activeRecoveries.size, 0)
     assert.equal(f.rows.length, 13)
   } finally { native.close(); await f.cleanup() }
 })
