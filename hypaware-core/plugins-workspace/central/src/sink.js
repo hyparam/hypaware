@@ -1,6 +1,6 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime, discardBody, readErrorDetail } from './backoff.js'
 
@@ -9,6 +9,7 @@ import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep, centralLifetime
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from '../../../../hypaware-core/plugins-workspace/central/src/identity_client.js'
  * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from '../../../../hypaware-core/plugins-workspace/central/src/types.js'
+ * @import { MissingSyncRequest, MissingSyncResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
@@ -96,7 +97,7 @@ export function createForwardSink(args) {
   // Signal every owned central request/body/wait on close. Actual operation
   // settlement, including history replay, is awaited before releasing the sink.
   const abortController = new AbortController()
-  /** @type {Set<Promise<number>>} */
+  /** @type {Set<Promise<unknown>>} */
   const activeForwards = new Set()
   /** @param {Parameters<typeof forwardPartition>[0]} args */
   function forwardOwned(args) {
@@ -108,6 +109,32 @@ export function createForwardSink(args) {
   }
 
   return {
+    /**
+     * @ref LLP 0501#missing [implements]: one bounded explicit repair leaves normal watermarks untouched
+     * @param {MissingSyncRequest} request
+     */
+    async restoreMissingRows(request) {
+      if (!request.rows.length || request.rows.length > 1000 || !/^[a-f0-9]{64}$/.test(request.revision)) throw new Error('invalid missing-row selection')
+      const target = forwardingTarget(query, { dataset: 'ai_gateway_messages', partition: {} })
+      if ('withheld' in target) throw new Error(`missing-row repair withheld: ${target.withheld}`)
+      const lines = []
+      let bytes = 0
+      for (const row of request.rows) {
+        const line = JSON.stringify(serializeRow(row)) + '\n'
+        bytes += Buffer.byteLength(line)
+        if (bytes > MAX_CHUNK_BYTES) throw new Error('missing-row selection exceeds 4 MiB; narrow --from/--to')
+        lines.push(line)
+      }
+      const pending = postNdjson({ centralUrl: config.url, signal: 'ai_gateway_messages', body: lines.join(''),
+        batchId: randomUUID(), identityClient, fetchFn, log, abortSignal: abortController.signal, sleepFn,
+        hyp_dataset: 'ai_gateway_messages', chunkIndex: 0, missing: request })
+      activeForwards.add(pending)
+      try {
+        const result = await pending
+        if (!result) throw new Error('server did not acknowledge missing-row repair')
+        return result
+      } finally { activeForwards.delete(pending) }
+    },
     /**
      * @param {ExportBatch} batch
      * @param {ExportOptions} [opts]
@@ -1077,6 +1104,7 @@ function serializeValue(value) {
  *   sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   hyp_dataset: string,
  *   chunkIndex: number,
+ *   missing?: MissingSyncRequest,
  * }} args
  */
 async function postNdjson(args) {
@@ -1087,7 +1115,7 @@ async function postNdjson(args) {
   // to name different resources, and `joinUrl`'s `new URL()` would normalize a
   // `..` segment out of the ingest path. The four legacy signals are
   // encode-invariant, so their URLs are byte-identical to before.
-  const url = joinUrl(centralUrl, `/v1/ingest/${encodeURIComponent(signal)}`)
+  const url = joinUrl(centralUrl, `/v1/${args.missing ? 'ingest-missing' : 'ingest'}/${encodeURIComponent(signal)}`)
 
   // The chunk goes out as a stream, not one string. Node 26's fetch speaks
   // HTTP/2, and its HTTP/2 client keeps a request body's unsent remainder
@@ -1120,11 +1148,13 @@ async function postNdjson(args) {
     const send = (jwt) => fetchFn(url, {
       method: 'POST',
       signal: abortSignal,
+      ...(args.missing ? { redirect: /** @type {const} */ ('error') } : {}),
       headers: {
         authorization: `Bearer ${jwt}`,
         'content-type': 'application/x-ndjson',
         'content-length': String(bytes.byteLength),
         'x-hyp-batch-id': batchId,
+        ...(args.missing ? { 'x-hyp-sync-revision': args.missing.revision, 'x-hyp-sync-org': args.missing.org } : {}),
       },
       body: streamBody(),
       duplex: 'half',
@@ -1136,6 +1166,14 @@ async function postNdjson(args) {
     let transportRetries = 0
     for (;;) {
       const jwt = await identityClient.getCurrentJwt(abortSignal)
+      if (args.missing) {
+        // This decode can only refuse. The server verifies the signature and
+        // independently binds the repair to the gateway's authenticated org.
+        const claims = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString('utf8'))
+        if ((claims.org ?? '') !== args.missing.org) throw new Error('read remote and sink belong to different organizations')
+        await args.missing.validate()
+        abortSignal.throwIfAborted()
+      }
       /** @type {Response} */
       let response
       try {
@@ -1163,6 +1201,27 @@ async function postNdjson(args) {
 
       abortSignal.throwIfAborted()
       if (response.status === 202 || response.ok) {
+        if (args.missing) {
+          const reader = response.body?.getReader()
+          if (!reader) throw new Error('empty repair acknowledgement')
+          const chunks = []
+          let size = 0
+          try {
+            for (;;) {
+              const { value, done } = await reader.read()
+              if (done) break
+              size += value.byteLength
+              if (size > 4096) throw new Error('repair acknowledgement exceeds byte budget')
+              chunks.push(value)
+            }
+          } finally { await reader.cancel() }
+          const result = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          if (response.status !== 202 || result.syncRestore !== 1 || !['accepted', 'already_accepted'].includes(result.status)) throw new Error('unsupported repair acknowledgement')
+          if (result.status === 'accepted' && (![result.restored, result.present, result.purged].every(n => Number.isSafeInteger(n) && n >= 0) ||
+            result.restored + result.present + result.purged !== args.missing.rows.length)) throw new Error('incomplete repair acknowledgement')
+          abortSignal.throwIfAborted()
+          return /** @type {MissingSyncResult} */ (result)
+        }
         await discardBody(response)
         abortSignal.throwIfAborted()
         return
