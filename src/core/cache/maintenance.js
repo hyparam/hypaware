@@ -473,7 +473,16 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   // something to reclaim. Everything else this function does needs a
   // table that reads; the sweep's staging pass does not.
   // @ref LLP 0316#staged-writes-are-reclaimed [implements]: the leak's only reclaimer must not be gated on a published metadata version.
-  if (!tableExists(liveDir)) return await sweepLiveGeneration(r, cursor, opts)
+  if (!tableExists(liveDir)) {
+    const swept = await sweepLiveGeneration(r, cursor, opts)
+    // A forced rewrite of a generation the cursor says holds rows, whose
+    // metadata is gone or cannot be listed, is the same refusal as the
+    // locked check below, said out loud rather than skipped (#1023).
+    if (opts.force && !opts.dryRun && layout.kind === 'source-table' && cursor.rowCount > 0) {
+      throw compactionMetadataRefusal(layout.liveDir, 'its table metadata is missing or cannot be listed')
+    }
+    return swept
+  }
 
   // Live counts from the current snapshot's summary where the table keeps
   // one, not from the directory. In-place compaction (LLP 0310) leaves
@@ -727,7 +736,8 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // generation rewrite every tick, forever, and with no schema in
             // hand the replacement generation is written with no partition
             // spec at all. Defer instead, and let a tick that can read the
-            // metadata do it; `--force` still rewrites.
+            // metadata do it. `--force` skips the deferral but not the
+            // refusal below, so a forced tick fails the partition instead.
             if (!opts.force && lockedRepartitionDue && declaration && !targetLayout) {
               repartitionDeferred = true
               // Deferring the migration must not also stop the partition
@@ -746,6 +756,22 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
               }
               return null
             }
+            // A published source table's replacement must keep the schema,
+            // partition spec and sort order its metadata records. Without
+            // all three `compactGeneration` would infer columns from the
+            // rows, or drop the spec or sort, and publish a generation the
+            // next declaration-carrying append rejects (#1023). `--force`
+            // overrides the dueness heuristics, not this. Nothing has been
+            // reserved or written yet, so the live generation and its cursor
+            // stay as they were and a tick that can read the metadata
+            // rewrites it. The legacy epoch layout is exempt: its lack of a
+            // spec is established by the layout, not inferred from a failed
+            // read.
+            // @ref LLP 0220#walk-survives-a-partition [constrained-by]: the refusal fails this partition, and the walk moves on.
+            if (lockedLayout.kind === 'source-table') {
+              const missing = missingCompactionMetadata(lockedTableInfo)
+              if (missing) throw compactionMetadataRefusal(lockedLayout.liveDir, missing)
+            }
             repartitionApplied = targetLayout !== undefined
             return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo, targetLayout)
           })
@@ -763,7 +789,11 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
           // `tryReadCursorSync`, because this write is destructive and a
           // cursor that cannot be read back must not be replaced by the
           // epoch-0 default `readCursorSync` would synthesize.
-          if (verdictStale) {
+          // A metadata refusal is the exception: it ran before anything was
+          // reserved, and the partition's cursor stays byte-identical so the
+          // tick after the metadata recovers rewrites it (#1023). Retrying it
+          // each tick costs one metadata read, and the walk survives it.
+          if (verdictStale && errorKindOf(err) !== 'compaction_metadata_unavailable') {
             // Best-effort: a cursor write that fails must not displace the
             // rewrite failure that is the actual diagnosis (a decode error
             // masked by an ENOSPC on the stamp sends the operator after the
@@ -1087,8 +1117,9 @@ async function liveTableStats(tableDir) {
  * rewrite share: the current schema and partition spec (carried into the
  * replacement generation), the declared default sort order, and the raw
  * metadata for snapshot inspection. Loaded once per compaction-due
- * partition; null when the metadata is unreadable, in which case the
- * rewrite falls back to inferring the schema from scanned rows.
+ * partition; null when the metadata is unreadable, in which case a
+ * source-table rewrite is refused and only the legacy epoch layout falls
+ * back to inferring the schema from scanned rows.
  *
  * @param {string} tableDir
  * @returns {Promise<{
@@ -1112,6 +1143,45 @@ async function loadCompactionTableInfo(tableDir) {
   } catch {
     return null
   }
+}
+
+/**
+ * Why `tableInfo` cannot carry the table's schema, partition spec and sort
+ * order into a replacement generation, or null when it can. The ids must
+ * resolve exactly: the readers' fallback to the last entry would publish a
+ * layout the table never recorded as current.
+ *
+ * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} tableInfo
+ * @returns {string | null}
+ */
+function missingCompactionMetadata(tableInfo) {
+  if (!tableInfo) return 'its table metadata is unreadable'
+  const { metadata } = tableInfo
+  if (!tableInfo.schemaColumns || !metadata.schemas?.some((s) => s['schema-id'] === metadata['current-schema-id'])) {
+    return 'its table metadata records no current schema'
+  }
+  if (!metadata['partition-specs']?.some((s) => s['spec-id'] === metadata['default-spec-id'])) {
+    return 'its table metadata records no current partition spec'
+  }
+  const sortOrderId = metadata['default-sort-order-id']
+  if (sortOrderId !== undefined) {
+    const order = metadata['sort-orders']?.find((o) => o['order-id'] === sortOrderId)
+    if (!order) return 'its table metadata records no current sort order'
+    if (order.fields.length > 0 && !tableInfo.sortColumns) return 'its table metadata records a sort order the rewrite cannot carry'
+  }
+  return null
+}
+
+/**
+ * @param {string} liveDir
+ * @param {string} reason
+ * @returns {Error}
+ */
+function compactionMetadataRefusal(liveDir, reason) {
+  return Object.assign(
+    new Error(`refusing to rewrite ${liveDir}: ${reason}, so the replacement could not keep the recorded schema, partition spec and sort order`),
+    { errorKind: 'compaction_metadata_unavailable' }
+  )
 }
 
 /**
