@@ -200,7 +200,7 @@ export async function anyClientLaunchable(env, deps = {}) {
  * `hypaware-report` skill is on disk. The last two are the command's own
  * check (`reportSkillLaunchers`), so setup names the command only where
  * it would start something. A client with a subagent directory must also
- * hold the `hypaware-analyst` worker the report skill delegates to: there
+ * hold the `hypaware-analyst` worker file the report skill delegates to: there
  * the skill stops to ask about a substitute when it is missing, so setup
  * does not call that client ready. A client with no subagent directory
  * (Codex) has its skill name a generic worker instead.
@@ -238,8 +238,8 @@ export async function recordedReportClientLaunchable(summary, env, deps = {}) {
       const agentDir = descriptors.get(launcher.client)?.agentDir
       if (!agentDir) return true
       try {
-        await fsp.access(path.join(homeDir, agentDir, 'hypaware-analyst.md'))
-        return true
+        // A file, not just a path: a directory there is a copy that failed.
+        if ((await fsp.stat(path.join(homeDir, agentDir, 'hypaware-analyst.md'))).isFile()) return true
       } catch { // This client's report workflow is missing its worker.
       }
     }

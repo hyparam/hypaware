@@ -207,8 +207,16 @@ test('recordedReportClientLaunchable: a Claude install whose analyst copy failed
   assert.deepEqual(mixed.installed.map((/** @type {any} */ a) => `${a.kind}:${a.name}`), ['skill:hypaware-report'])
   assert.equal(await recordedReportClientLaunchable(attached, env, deps), false)
 
-  // The same install once the analyst lands.
+  // A directory where the analyst file belongs fails its copy the same way.
   await fs.rm(agentsDir)
+  const analyst = path.join(agentsDir, 'hypaware-analyst.md')
+  await fs.mkdir(analyst, { recursive: true })
+  const blocked = await materializeClientAssets(options)
+  assert.ok(!blocked.installed.some((/** @type {any} */ a) => a.kind === 'agent'))
+  assert.equal(await recordedReportClientLaunchable(attached, env, deps), false)
+
+  // The same install once the analyst lands.
+  await fs.rm(analyst, { recursive: true })
   await materializeClientAssets(options)
   assert.equal(await recordedReportClientLaunchable(attached, env, deps), true)
 })
