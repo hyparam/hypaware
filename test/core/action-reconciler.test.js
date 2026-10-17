@@ -516,7 +516,7 @@ test('clearClientActionMarker is a no-op (returns false, writes nothing) when th
   try {
     // (a) Missing store file: nothing to retract, and none is created.
     assert.equal(
-      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       false,
       'missing marker file returns false'
     )
@@ -533,7 +533,7 @@ test('clearClientActionMarker is a no-op (returns false, writes nothing) when th
     })
     const beforeBucket = fs.readFileSync(markerPath(stateRoot), 'utf8')
     assert.equal(
-      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       false,
       'missing bucket returns false'
     )
@@ -549,7 +549,7 @@ test('clearClientActionMarker is a no-op (returns false, writes nothing) when th
     })
     const beforeKey = fs.readFileSync(markerPath(stateRoot), 'utf8')
     assert.equal(
-      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       false,
       'missing key returns false'
     )
@@ -576,7 +576,7 @@ test('clearClientActionMarker drops an emptied bucket but preserves sibling buck
     })
 
     assert.equal(
-      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       true,
       'retracting the last attach key returns true'
     )
@@ -607,7 +607,7 @@ test('rearmRefusedActionMarker only touches a refused marker, and drops it only 
   try {
     // (a) Missing store file: nothing to re-arm, and none is created.
     assert.equal(
-      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       false,
       'missing marker file returns false'
     )
@@ -622,7 +622,7 @@ test('rearmRefusedActionMarker only touches a refused marker, and drops it only 
     })
     const beforeDone = fs.readFileSync(markerPath(stateRoot), 'utf8')
     assert.equal(
-      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       false,
       'a done marker is not re-armed'
     )
@@ -634,7 +634,7 @@ test('rearmRefusedActionMarker only touches a refused marker, and drops it only 
     })
     const beforeFailed = fs.readFileSync(markerPath(stateRoot), 'utf8')
     assert.equal(
-      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       false,
       'a failed marker is not re-armed'
     )
@@ -647,7 +647,7 @@ test('rearmRefusedActionMarker only touches a refused marker, and drops it only 
       backfill: { '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude' } },
     })
     assert.equal(
-      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       true,
       'an assetless refused marker is re-armed'
     )
@@ -671,7 +671,7 @@ test('rearmRefusedActionMarker only touches a refused marker, and drops it only 
       },
     })
     assert.equal(
-      rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      await rearmRefusedActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
       true,
       'an asset-bearing refused marker is re-armed'
     )

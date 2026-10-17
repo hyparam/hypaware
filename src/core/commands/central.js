@@ -18,7 +18,7 @@ import {
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { sameServer, serverDisplayName } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
-import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
+import { buildClientDescriptorMap, detachClientViaCore, withAttachKeyLock } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
 import { isTty, readAllStdin } from '../cli/stdio.js'
@@ -542,9 +542,18 @@ export async function runLeave(argv, ctx) {
               ctx.stdout.write(`  it had installed ${installedAssets.length} file(s), left in place - remove them by hand if you want them gone:\n`)
               for (const dest of installedAssets) ctx.stdout.write(`    ${dest}\n`)
             }
+            // Under the key lock, like every other marker writer, so a reconcile
+            // pass cannot re-commit the marker this drops (#224). A marker that
+            // survives is the #217 block this drop exists to clear, so it
+            // counts as a failure rather than a blemish.
+            // @ref LLP 0523#two-locks [implements]: leave drops a descriptor-less marker under the key lock
             try {
-              clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
-            } catch { /* best-effort: a stale marker is a status blemish */ }
+              await withAttachKeyLock({ name, ctx }, () => clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name }))
+            } catch (err) {
+              failures += 1
+              const message = err instanceof Error ? err.message : String(err)
+              ctx.stderr.write(`hyp leave: could not drop the attach marker for '${name}': ${message}\n`)
+            }
             continue
           }
           // The one core undo removes the marker's `installed_assets` before it
