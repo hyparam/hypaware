@@ -53,10 +53,12 @@ one it was before.
 ### Setup asks once the pick is settled {#boundary}
 
 The wizard asks right after the pick lane returns, before the recap, the
-legacy-proxy preflight, the folder answer, the config commit, configure, and the
-finale. That is the earliest point the picked set is known on every entry path
-(interactive, `--yes` and explicit picks, `--dry-run`), and nothing has been
-written yet. Only a run that goes on to attach asks. The check is not a lane: it
+legacy-proxy preflight, the write of the folder answer, the config commit,
+configure, and the finale. The interactive pick lane asks its folder question
+itself, so that answer is given before the check runs, but it is not written
+until later. That is the earliest point the picked set is known on every entry
+path (interactive, `--yes` and explicit picks, `--dry-run`), and nothing has
+been written yet. Only a run that goes on to attach asks. The check is not a lane: it
 asks the user nothing, so it is absent from every itinerary and the step
 denominator is unchanged (LLP 0135 #progress).
 
@@ -88,10 +90,12 @@ A warning changes nothing but the output: Claude attaches.
 
 - A user with an old Claude Code hears about it before the config is written,
   once, with the command that fixes it, and the rest of setup still happens.
-- Probing runs `claude --version` at most once per setup, only when Claude is
-  picked. It exits before any network work: run with every proxy variable
-  pointed at a logging listener it made no connection and opened no socket,
-  and returned in about 10 ms.
+- Setup runs one more `claude --version` than before, and only when Claude is
+  picked. Attach keeps its own probe, so a setup that goes on to attach Claude
+  probes twice, each bounded by the resolver's 3 s timeout; a refused Claude
+  is probed once, and a setup without Claude not at all. The probe makes no
+  network call: run with every proxy variable pointed at a logging listener it
+  made no connection, opened no socket, and returned in about 10 ms.
 - The attach-time refusal is unchanged. Setup never reaches it for a Claude Code
   it already refused, so the user sees the refusal once per setup; running
   `hyp client attach claude` before updating shows it again, as it always did.
