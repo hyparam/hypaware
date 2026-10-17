@@ -314,7 +314,7 @@ async function* runOpenclawBackfill(args) {
     // Resolution before windowing: partitionByBackend sees the full record
     // list so a window cut can never sever a record from its own turn's
     // anchor; the window only bounds what projects and counts.
-    const { projectable, excludedByProvider, toolInputs } = partitionByBackend(records, window)
+    const { projectable, excludedByProvider } = partitionByBackend(records, window)
     for (const [provider, count] of excludedByProvider) {
       recordsExcluded += count
       const coveredBy = siblingCoverageFor(provider)
@@ -347,7 +347,7 @@ async function* runOpenclawBackfill(args) {
       }
     }
 
-    const exchange = projectedExchangeFromSession({ agentId, sessionId, header, projectable, toolInputs, clientName })
+    const exchange = projectedExchangeFromSession({ agentId, sessionId, header, projectable, clientName })
     if (!exchange) continue
 
     sessionsProjected += 1
@@ -428,33 +428,33 @@ async function* runOpenclawBackfill(args) {
  * whole file, so a `--since`/`--until` cut can never sever a record from its
  * own turn's anchor and change its attribution.
  *
+ * Tool-call arguments are bound the same way: each kept `toolResult` carries
+ * the arguments of the latest call with its id that precedes it in the file,
+ * window or not. A result inside the window keeps its call's arguments when
+ * the call itself fell just outside it (#2001); a later call reusing the id,
+ * or a CLI-backend turn's call, never rebinds it.
+ *
  * @ref LLP 0193#decision [implements]: two-rung CLI-backend denylist over the
  * turn-scoped `(provider, api)` pair; unknown still fails closed
  * @ref LLP 0147 [constrained-by]: CLI-backend turns are the sibling adapters'
  * territory, so backfill excludes them from projection
  * @param {OpenclawSessionMessage[]} records
  * @param {{ sinceMs?: number, untilMs?: number }} [window]
- *
- * `toolInputs` maps each tool call id to its arguments across every record of
- * a non-excluded backend, window or not: a result inside the window keeps its
- * call's arguments when the call itself fell just outside it (#2001), while a
- * CLI-backend turn's calls stay out of it like the rest of that turn.
- *
- * @returns {{ projectable: Array<{ record: OpenclawSessionMessage, provider: string }>, excludedByProvider: Map<string, number>, toolInputs: Map<string, unknown> }}
+ * @returns {{ projectable: Array<{ record: OpenclawSessionMessage, provider: string, toolInput?: unknown }>, excludedByProvider: Map<string, number> }}
  */
 function partitionByBackend(records, window = {}) {
-  /** @type {Array<{ record: OpenclawSessionMessage, provider: string }>} */
+  /** @type {Array<{ record: OpenclawSessionMessage, provider: string, toolInput?: unknown }>} */
   const projectable = []
   /** @type {Map<string, number>} */
   const excludedByProvider = new Map()
   /** @type {Map<string, unknown>} */
-  const toolInputs = new Map()
+  const callInputs = new Map()
   const effective = effectiveBackends(records)
 
   for (let i = 0; i < records.length; i++) {
     const backend = effective[i]
     const kept = backend?.provider !== undefined && !isCliBackend(backend)
-    if (kept) seedToolInputs(records[i], toolInputs)
+    if (kept) seedToolInputs(records[i], callInputs)
     // Same keep-if-unstamped rule as scan_util's `filterByWindow`: a record
     // with no parseable timestamp is kept rather than silently dropped.
     const ts = records[i].timestampMs
@@ -463,7 +463,12 @@ function partitionByBackend(records, window = {}) {
       if (window.untilMs !== undefined && ts > window.untilMs) continue
     }
     if (kept) {
-      projectable.push({ record: records[i], provider: /** @type {string} */ (backend?.provider) })
+      const toolInput = toolResultInput(records[i], callInputs)
+      projectable.push({
+        record: records[i],
+        provider: /** @type {string} */ (backend?.provider),
+        ...(toolInput !== undefined ? { toolInput } : {}),
+      })
       continue
     }
     // `unknown` keeps a record with no attributable backend at all countable
@@ -471,7 +476,21 @@ function partitionByBackend(records, window = {}) {
     const key = backend?.provider ?? 'unknown'
     excludedByProvider.set(key, (excludedByProvider.get(key) ?? 0) + 1)
   }
-  return { projectable, excludedByProvider, toolInputs }
+  return { projectable, excludedByProvider }
+}
+
+/**
+ * The arguments of the call a `toolResult` record answers, as bound so far in
+ * file order, or `undefined` for any other record.
+ *
+ * @param {OpenclawSessionMessage} record
+ * @param {Map<string, unknown>} callInputs
+ * @returns {unknown}
+ */
+function toolResultInput(record, callInputs) {
+  if (record.role !== 'toolResult') return undefined
+  const id = stringValue(openclawMessageEnvelope(record.record).toolCallId)
+  return id ? callInputs.get(id) : undefined
 }
 
 /**
@@ -479,16 +498,16 @@ function partitionByBackend(records, window = {}) {
  * session file may use (`toolCall`/`arguments` or canonical `tool_use`/`input`).
  *
  * @param {OpenclawSessionMessage} record
- * @param {Map<string, unknown>} toolInputs
+ * @param {Map<string, unknown>} callInputs
  */
-function seedToolInputs(record, toolInputs) {
+function seedToolInputs(record, callInputs) {
   if (!Array.isArray(record.content)) return
   for (const block of record.content) {
     if (!isPlainObject(block) || typeof block.type !== 'string') continue
     if (normalizeBlockKind(block.type) !== 'tool_use') continue
     const id = stringValue(block.id)
     const input = block.arguments ?? block.input
-    if (id && input !== undefined) toolInputs.set(id, input)
+    if (id && input !== undefined) callInputs.set(id, input)
   }
 }
 
@@ -611,20 +630,19 @@ function siblingCoverageFor(provider) {
  *   agentId: string,
  *   sessionId: string,
  *   header: OpenclawSessionHeader | undefined,
- *   projectable: Array<{ record: OpenclawSessionMessage, provider: string }>,
- *   toolInputs: Map<string, unknown>,
+ *   projectable: Array<{ record: OpenclawSessionMessage, provider: string, toolInput?: unknown }>,
  *   clientName: string,
  * }} args
  * @returns {AiGatewayProjectedExchange | undefined}
  */
 function projectedExchangeFromSession(args) {
-  const { agentId, sessionId, header, projectable, toolInputs, clientName } = args
+  const { agentId, sessionId, header, projectable, clientName } = args
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
   /** @type {string | undefined} */
   let provider
-  for (const { record, provider: recordProvider } of projectable) {
-    const message = projectedMessageFromRecord(record, toolInputs)
+  for (const { record, provider: recordProvider, toolInput } of projectable) {
+    const message = projectedMessageFromRecord(record, toolInput)
     if (!message) continue
     // Every row carries its own turn's provider: `recordProvider` is the
     // smeared effective backend (partitionByBackend), so the user prompt and
@@ -675,7 +693,7 @@ function projectedExchangeFromSession(args) {
  * `tool_use`) becomes `{ type: "tool_use", id, name, input }`, and a
  * `toolResult` record, whose `toolCallId`/`toolName`/`isError` live on the
  * message rather than on a block, becomes one `tool_result` block carrying
- * them, plus the paired call's `input` from `toolInputs`. Left verbatim, both
+ * them, plus the paired call's arguments as `input`. Left verbatim, both
  * landed with a literal `toolCall` part type and null tool columns. Call
  * blocks keep their count and order, and a result record becomes exactly the
  * one block the live lane writes for it (several output blocks fold into it,
@@ -691,11 +709,11 @@ function projectedExchangeFromSession(args) {
  * too; supplying a second copy here could only differ from it.
  *
  * @param {OpenclawSessionMessage} message
- * @param {Map<string, unknown>} toolInputs call arguments by tool call id,
- *   seeded from the whole session by `partitionByBackend`
+ * @param {unknown} toolInput a `toolResult`'s paired call arguments, as
+ *   `partitionByBackend` bound them
  * @returns {AiGatewayProjectedMessage | undefined}
  */
-function projectedMessageFromRecord(message, toolInputs) {
+function projectedMessageFromRecord(message, toolInput) {
   // Through the LLP 0158 reader's normalized fields, never `message.record`:
   // OpenClaw nests `role`/`content` under the record line's `message`
   // envelope, so the top-level read this used to do found neither and dropped
@@ -716,7 +734,7 @@ function projectedMessageFromRecord(message, toolInputs) {
   const projected = {
     role: normalizeRole(rawRole),
     content: /** @type {any} */ (rawRole === 'toolResult'
-      ? [toolResultBlock(message, content, toolInputs)]
+      ? [toolResultBlock(message, content, toolInput)]
       : Array.isArray(content) ? content.map(toolUseBlock) : content),
   }
   // Native identity, verbatim. This single line is what R11 rests on: the row
@@ -760,10 +778,10 @@ function toolUseBlock(block) {
  *
  * @param {OpenclawSessionMessage} message
  * @param {unknown} content
- * @param {Map<string, unknown>} toolInputs
+ * @param {unknown} toolInput
  * @returns {Record<string, unknown>}
  */
-function toolResultBlock(message, content, toolInputs) {
+function toolResultBlock(message, content, toolInput) {
   const envelope = openclawMessageEnvelope(message.record)
   const id = stringValue(envelope.toolCallId)
   /** @type {Record<string, unknown>} */
@@ -773,8 +791,7 @@ function toolResultBlock(message, content, toolInputs) {
   if (name) out.name = name
   out.content = content
   if (typeof envelope.isError === 'boolean') out.is_error = envelope.isError
-  const input = id ? toolInputs.get(id) : undefined
-  if (input !== undefined) out.input = input
+  if (toolInput !== undefined) out.input = toolInput
   return out
 }
 

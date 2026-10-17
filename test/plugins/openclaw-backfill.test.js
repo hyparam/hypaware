@@ -677,6 +677,57 @@ test('an identified tool result with empty output still lands, on the part the l
   }
 })
 
+/**
+ * Append a second call and result that reuse the captured turn's call id
+ * `call_probe` with a different path, the way a session that repeats a call id
+ * across turns writes them.
+ *
+ * @param {any[]} records
+ */
+function appendReusedCallId(records) {
+  const call = structuredClone(records[2])
+  call.id = 'second-call'
+  call.parentId = records[4].id
+  call.timestamp = '2026-09-28T18:12:34.580Z'
+  call.message.timestamp = Date.parse(call.timestamp)
+  call.message.content[0].arguments = { path: '/openclaw-test/workspace/second.txt' }
+  const result = structuredClone(records[3])
+  result.id = 'second-result'
+  result.parentId = call.id
+  result.timestamp = '2026-09-28T18:12:34.590Z'
+  result.message.timestamp = Date.parse(result.timestamp)
+  records.push(call, result)
+}
+
+test('a call id reused later in the session pairs each result with the call before it', async () => {
+  const env = await stageEnv()
+  try {
+    await writeRealToolTranscript(env, appendReusedCallId)
+    const { items } = await collect(provider(env).run(runContext().ctx))
+    const rows = await materialize(items[0])
+    const results = rows.filter((r) => r.part_type === 'tool_result')
+    assert.deepEqual(results.map((r) => r.tool_args), [
+      { path: '/openclaw-test/workspace/probe.txt' },
+      { path: '/openclaw-test/workspace/second.txt' },
+    ])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a reused call id past the window end does not rebind an in-window result', async () => {
+  const env = await stageEnv()
+  try {
+    await writeRealToolTranscript(env, appendReusedCallId)
+    const { items } = await collect(provider(env).run(runContext({ until: '2026-09-28T18:12:34.575Z' }).ctx))
+    const rows = await materialize(items[0])
+    const results = rows.filter((r) => r.part_type === 'tool_result')
+    assert.deepEqual(results.map((r) => r.tool_args), [{ path: '/openclaw-test/workspace/probe.txt' }])
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // ---------------------------------------------------------------------------
 // R10: the per-session usage-policy gate
 // ---------------------------------------------------------------------------
