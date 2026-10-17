@@ -218,10 +218,12 @@ export interface PluginClientManifest {
    *
    * An mtime alone only nominates: when it would report a gap, core reads
    * the tail of the newest files to confirm a real turn is behind the
-   * write, and that read understands Claude Code's JSONL records
-   * (`type`, `isMeta`). A client whose trail is shaped differently gets
-   * the mtime pass and a confirmation read that will not recognise its
-   * turns, so declare one here only alongside that record shape.
+   * write. That read understands Claude Code's JSONL records (`type`,
+   * `isMeta`) and runs only for the built-in claude client (plugin
+   * `@hypaware/claude`, client name `claude`). Any other client that
+   * declares this probe gets the mtime pass and no confirmation read: a
+   * suspected gap is reported as unconfirmed (`unknown`), never as a
+   * confirmed gap and never as healthy, whatever its files contain.
    */
   activity_probe?: PluginActivityProbeManifest
   /**

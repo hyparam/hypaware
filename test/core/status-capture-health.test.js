@@ -18,6 +18,7 @@ import {
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
+import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
@@ -1125,6 +1126,92 @@ test('an unconfirmable suspicion reports unknown: no gap claimed, no health clai
 
     const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache') })
     assert.equal(json.capture_health[0].state, 'unknown')
+  } finally {
+    await cleanup(hypHome, home)
+  }
+})
+
+test('a non-claude client with a probe and real post-baseline turns reports unknown, never ok', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const now = Date.now()
+  const lastEventAt = new Date(now - 5 * HOUR)
+  const turnAt = new Date(now - 2 * MIN)
+  const name = '@acme/rollout'
+  // An installed adapter declaring the same generic `activity_probe` key the
+  // claude manifest does, with a Codex-shaped trail behind it.
+  const installDir = path.join(stateRoot, 'plugins', '@acme', 'rollout')
+  await fs.mkdir(installDir, { recursive: true })
+  await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
+    schema_version: 1,
+    name,
+    version: '1.0.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+    contributes: {
+      client: {
+        name: 'rollout',
+        skill_dir: '.rollout/skills',
+        attach_probe: { format: 'json', settings_file: '.rollout/settings.json', marker_key: '_hypaware' },
+        activity_probe: { dir: '.rollout/sessions', file_suffix: '.jsonl' },
+      },
+    },
+  }))
+  await fs.writeFile(path.join(installDir, 'index.js'), 'export async function activate() {}\n')
+  await writeLock(stateRoot, {
+    schema_version: 1,
+    plugins: {
+      [name]: {
+        name,
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: installDir, path: installDir },
+        install_dir: installDir,
+        content_hash: 'a'.repeat(64),
+        manifest_hash: 'b'.repeat(64),
+        installed_at: '2026-10-17T00:00:00.000Z',
+      },
+    },
+  })
+  const configPath = defaultConfigPath(hypHome)
+  const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  config.plugins.push({ name })
+  await fs.writeFile(configPath, JSON.stringify(config) + '\n')
+
+  const home = await makeClientHome()
+  await fs.mkdir(path.join(home, '.rollout'), { recursive: true })
+  await fs.writeFile(path.join(home, '.rollout', 'settings.json'), JSON.stringify({
+    _hypaware: { attached_at: new Date(now - 24 * HOUR).toISOString(), version: '1.0.0', port: 8787, mode: 'otel' },
+  }) + '\n')
+  const sessions = path.join(home, '.rollout', 'sessions')
+  await fs.mkdir(sessions, { recursive: true })
+  // Real model turns in Codex's record shape, and a Claude-shaped one beside
+  // them: recognition must come from the descriptor, not coincidental bytes.
+  const rollout = path.join(sessions, 'rollout-a.jsonl')
+  await fs.writeFile(rollout, [
+    { timestamp: turnAt.toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'hi' } },
+    { timestamp: turnAt.toISOString(), type: 'response_item', payload: { type: 'message', role: 'assistant' } },
+    assistantRecord(turnAt),
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n')
+  await fs.utimes(rollout, new Date(now - 1 * MIN), new Date(now - 1 * MIN))
+  try {
+    writeStatusFile(stateRoot, /** @type {any} */ ({
+      state: 'healthy',
+      sources: [
+        { name: 'rollout-telemetry', plugin: name, state: 'started', details: { last_event_at: lastEventAt.toISOString() } },
+      ],
+      sinks: [],
+    }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome, home))
+    const entry = report.captureHealth.find((h) => h.client === 'rollout')
+    assert.equal(entry?.state, 'unknown')
+    // No confirmed activity invented from the trail, and no gap claimed.
+    assert.equal(entry?.lastTranscriptActivityAt?.slice(0, 19), new Date(now - 1 * MIN).toISOString().slice(0, 19))
+    assert.ok((entry?.gapMs ?? 0) > 4 * HOUR)
+    assert.equal(report.diagnostics.some((d) => d.kind === 'capture_gap'), false)
+
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot: path.join(stateRoot, 'cache'), stdout })
+    assert.match(stdout.text(), /\[capture unconfirmed\]/)
   } finally {
     await cleanup(hypHome, home)
   }
