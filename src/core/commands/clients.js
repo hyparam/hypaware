@@ -531,14 +531,30 @@ async function runClientLifecycle(action, argv, ctx) {
             // @ref LLP 0086#already-attached-validates-the-live-port [implements]: the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
             // @ref LLP 0262#migration [implements]: a proxy-attached Claude is stale even when its gateway port is current
             const livePort = portFromEndpoint(liveEndpoint)
-            const modeCurrent = name !== 'claude' || liveEndpoint === undefined || probe.mode === 'otel'
-            const markerFormatCurrent = liveEndpoint === undefined || probe.markerFormatStale !== true
-            const alreadyCurrent =
-              probe.attached === true &&
-              modeCurrent &&
-              markerFormatCurrent &&
+            /** @param {typeof probe} p */
+            const isCurrent = (p) =>
+              p.attached === true &&
+              (name !== 'claude' || liveEndpoint === undefined || p.mode === 'otel') &&
+              (liveEndpoint === undefined || p.markerFormatStale !== true) &&
               (liveEndpoint === undefined ||
-                (probe.port !== undefined && probe.port === livePort))
+                (p.port !== undefined && p.port === livePort))
+            let alreadyCurrent = isCurrent(probe)
+            // The probe above ran without the key lock, so a detach or a
+            // reconcile reverse may have undone the settings while this
+            // process waited for it. Re-probe under the lock, and re-arm only
+            // if the client is still current; otherwise fall through to a real
+            // attach (or the no-endpoint give-up) instead of reporting an
+            // attach that is no longer on disk (#224).
+            // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
+            // @ref LLP 0523#two-locks [implements]: the already-current exit decides and re-arms under the key lock
+            if (alreadyCurrent && descriptor) {
+              alreadyCurrent = await withAttachKeyLock({ name, ctx }, async () => {
+                const recheck = await probeClientAttachFromDescriptor({ descriptor, homeDir, env: ctx.env })
+                if (!isCurrent(recheck)) return false
+                await rearmRefusedAttachMarker({ name, ctx, dryRun: false })
+                return true
+              })
+            }
             if (alreadyCurrent) {
               getLogger('cmd-attach').info('client.attach.daemon_managed', {
                 [Attr.COMPONENT]: 'cmd-attach',
@@ -599,8 +615,8 @@ async function runClientLifecycle(action, argv, ctx) {
               // 0364). The re-arm cannot fail the other way round, since it
               // logs and swallows its own marker error (only a key lock it
               // cannot get within the bounded wait fails it, before any write).
-              // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
-              await withAttachKeyLock({ name, ctx }, () => rearmRefusedAttachMarker({ name, ctx, dryRun: false }))
+              // (The re-arm itself ran above, under the key lock that decided
+              // this exit.)
               if (await resumeRecording({ name, ctx, parsed }) === 'central_managed') exitCode = 1
               // The settings are already wired, but attach means settings *and*
               // assets, and this branch is the one an operator on a

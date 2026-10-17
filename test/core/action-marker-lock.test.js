@@ -29,6 +29,8 @@ import { withFileLock } from '../../src/core/util/file_lock.js'
 
 const RECONCILER_URL = new URL('../../src/core/config/action_reconciler.js', import.meta.url).href
 const FILE_LOCK_URL = new URL('../../src/core/util/file_lock.js', import.meta.url).href
+const CLIENTS_URL = new URL('../../src/core/commands/clients.js', import.meta.url).href
+const DETACH_DISK_URL = new URL('../../src/core/config/client_detach_disk.js', import.meta.url).href
 
 const NOOP_LOG = { debug() {}, info() {}, warn() {}, error() {} }
 
@@ -260,6 +262,76 @@ finish('cleared')
     assert.ok(detach.lines.includes('saw:done'), 'the detach acted on the marker the attach committed')
     assert.equal(fs.existsSync(storePath(stateRoot)) ? readStore(stateRoot).attach : undefined, undefined)
     assert.deepEqual(fs.readdirSync(path.dirname(keyLockPath(stateRoot, 'attach', 'claude'))), [], 'both holders released')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+// `hyp attach` on a client that already looks attached takes a fast exit that
+// re-arms and reports success. That look is taken before the key lock, so a
+// reverse holding the lock can undo the settings while the attach waits; the
+// exit must re-check under the lock rather than report an attach that is no
+// longer on disk (review of #224).
+// @ref LLP 0523#two-locks [tests]: the already-current attach exit decides under the key lock
+test('an already-attached hyp attach that waited out a reverse does not report the undone attach', async () => {
+  const { tmp } = await makeFixture()
+  const home = path.join(tmp, 'home')
+  const stateRoot = path.join(home, '.hyp', 'hypaware')
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ _hypaware: { version: '2.0.0', port: 60680 } }))
+    seedStore(stateRoot, { attach: { claude: { status: 'done', request_key: 'claude', at: '2026-10-17T00:00:00.000Z' } } })
+
+    const reverse = worker(`
+const { detachClientFromDisk } = await import(${JSON.stringify(DETACH_DISK_URL)})
+await R.withClientActionLock({ stateRoot: args.stateRoot, kind: 'attach', requestKey: 'claude' }, async () => {
+  say('held')
+  await waitFor('go')
+  await detachClientFromDisk({
+    descriptor: { plugin: '@hypaware/claude', name: 'claude', attachProbe: { format: 'json', settings_file: '.claude/settings.json', marker_key: '_hypaware' } },
+    homeDir: args.home,
+    env: { HOME: args.home },
+  })
+  await R.clearClientActionMarker({ stateRoot: args.stateRoot, kind: 'attach', requestKey: 'claude' })
+})
+finish('reversed')
+`, { stateRoot, home })
+    await reverse.heard('held')
+
+    const attach = worker(`
+const { runAttach } = await import(${JSON.stringify(CLIENTS_URL)})
+let out = ''
+let calls = 0
+const gateway = {
+  localEndpoint() { throw new Error('unbound') },
+  getClient(name) { return { name, async attach() { calls++ } } },
+  listClients() { return [{ name: 'claude' }] },
+}
+const code = await runAttach(['claude', '--json'], {
+  cwd: args.home,
+  env: { HOME: args.home, HYP_HOME: args.hypHome },
+  config: { version: 2 },
+  capabilities: { has: () => true, require: () => gateway },
+  stdout: { write(s) { out += s; return true } },
+  stderr: { write(s) { if (String(s).includes('waiting for another')) say('waiting'); return true } },
+})
+say('result:' + JSON.stringify({ code, out, calls }))
+finish('done')
+`, { home, hypHome: path.join(home, '.hyp') })
+    await attach.heard('waiting')
+
+    reverse.send('go')
+    await reverse.ok()
+    await attach.ok()
+    const line = attach.lines.find((l) => l.startsWith('result:'))
+    assert.ok(line, attach.stderr())
+    const { code, out } = JSON.parse(line.slice('result:'.length))
+    const reported = JSON.parse(out.trim().split('\n').pop() ?? '{}')
+    assert.notEqual(reported.attached, true, 'attach must not report the settings the reverse removed')
+    assert.equal(code, 1, 'with no endpoint to attach at, the re-run fails instead of claiming success')
+    assert.equal(reported.error_kind, 'no_endpoint')
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')), {})
+    assert.equal(readStore(stateRoot).attach, undefined)
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }
