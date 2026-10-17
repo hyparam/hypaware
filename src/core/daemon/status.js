@@ -4750,6 +4750,13 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
  * nothing either when it is already installed and the central layer is what
  * withholds it, so that sub-case names the central enable as well.
  *
+ * A central edit is named only where it changes something, and always as a
+ * change to the published fleet configuration through whoever owns it, never
+ * as an edit to the downloaded central file: the next pull replaces that copy,
+ * so an edit there is as inert as a local one. An already-enabled dependency
+ * has nothing to enable, so when the central layer owns both names the only
+ * step left for it is installing the dependency here (issue #1836).
+ *
  * `dependency` is `undefined` for every reason that names no missing plugin
  * (a version mismatch, a capability require), and those keep the original
  * wording: the reason still names what is missing and the local file is still
@@ -4774,15 +4781,20 @@ function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginName
   }
   // The dependency is central-owned, so a local entry adding it is dropped at
   // merge. What still changes something: installing it here (the central layer
-  // already asks for it), or the fleet edit that stops asking.
-  return pluginIsCentral
-    ? `install '${dependency}' on this host, or enable it in the central config`
+  // already asks for it), plus the fleet enable when the central layer is what
+  // withholds it.
+  if (pluginIsCentral) {
+    const step = centralDisabledPluginNames.has(dependency)
+      ? `enable '${dependency}' in the published fleet configuration and install it on this host`
+      : `install '${dependency}' on this host`
+    return step
       + ` - the central config names both '${plugin}' and '${dependency}', so no edit to ${configPath} survives the merge`
-    : centralDisabledPluginNames.has(dependency)
-      ? `remove '${plugin}' from ${configPath}, or enable '${dependency}' in the central config and install it on this host`
-        + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
-      : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
-        + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
+  }
+  return centralDisabledPluginNames.has(dependency)
+    ? `remove '${plugin}' from ${configPath}, or enable '${dependency}' in the central config and install it on this host`
+      + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
+    : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
+      + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
 }
 
 /**
