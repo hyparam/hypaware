@@ -21,7 +21,7 @@ import { escapeForDisplay } from '../util/json_util.js'
 import { AUTO_REFRESH_FAILURE_MESSAGE, REFRESH_FAILURE_REASON_PREFIX, executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
 // @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
-import { ANSI, paint } from '../cli/style.js'
+import { ANSI, codePointWidth, displayWidth, paint } from '../cli/style.js'
 
 /** The dataset both overview queries read. Absent, there is nothing to show. */
 export const OVERVIEW_DATASET = 'ai_gateway_messages'
@@ -271,11 +271,33 @@ const MAX_REPO_ROWS = 8
  */
 const MAX_DAY_ROWS = 14
 
-/** Bar column width, in cells. */
+/** Bar column width, in cells, when the terminal has room for it. */
 const BAR_WIDTH = 18
 
 /** Model names longer than this are ellipsized so the columns stay aligned. */
 const MAX_MODEL_WIDTH = 30
+
+/**
+ * The width the block is laid out for when the stream reports none: a pipe,
+ * a file, a test buffer. Fixed rather than guessed, so piped output is the
+ * same on every machine, and wide enough that the full layout fits.
+ */
+export const OVERVIEW_DEFAULT_COLUMNS = 100
+
+/**
+ * The first floors a narrow terminal reaches: the bar gives up cells before
+ * any label does, then labels are ellipsized to this, then the bar shrinks
+ * to its header. Counts never give ground (#410).
+ */
+const NARROW_BAR_WIDTH = 6
+const NARROW_LABEL_WIDTH = 16
+
+/** The last floor for a label before the table is stacked instead. */
+const MIN_LABEL_WIDTH = 8
+
+/** Each table row's leading indent, and the gap between its columns. */
+const TABLE_INDENT = 2
+const COLUMN_GAP = 2
 
 /**
  * Build the query runner from a command context. Runs the same executor,
@@ -610,6 +632,7 @@ export async function collectOverview(runner, opts = {}) {
  *   showSql?: boolean,
  *   footer?: boolean,
  *   withheld?: boolean,
+ *   columns?: number | undefined,
  * }} args
  * @returns {string}
  */
@@ -625,11 +648,15 @@ export function renderOverview({
   showSql = false,
   footer = true,
   withheld = false,
+  columns,
 }) {
+  // Whatever the caller read off its stream: a pipe has no width, and a
+  // width that is not a positive number is no width either.
+  const width = typeof columns === 'number' && columns > 0 ? Math.floor(columns) : OVERVIEW_DEFAULT_COLUMNS
   const statements = sql ?? buildOverviewSql(win?.since ?? '')
-  let out = `\n${paint(title, ANSI.bold, color)}\n`
-  if (win) out += paint(describeWindow(win), ANSI.dim, color) + '\n'
-  out += `${paint('─'.repeat(40), ANSI.dim, color)}\n`
+  let out = '\n' + wrapText(title, width).map((line) => paint(line, ANSI.bold, color) + '\n').join('')
+  if (win) out += wrapText(describeWindow(win), width).map((line) => paint(line, ANSI.dim, color) + '\n').join('')
+  out += `${paint('─'.repeat(Math.min(40, width)), ANSI.dim, color)}\n`
 
   if (providerRows.length === 0) {
     // "Nothing recorded yet" is a claim about the cache; when the LLP 0105
@@ -637,21 +664,29 @@ export function renderOverview({
     // on stderr would be the only sign. Two different situations, two
     // different sentences.
     out += withheld
-      ? '\nEvery recorded session in this window is marked local-only and not visible\n' +
-        'from here. Re-run inside one of those directories, or with --include-local-only.\n'
+      ? '\n' + wrapLines(
+        'Every recorded session in this window is marked local-only and not visible\n' +
+        'from here. Re-run inside one of those directories, or with --include-local-only.',
+        width
+      ).join('\n') + '\n'
       : '\nNothing recorded yet.\n'
     return out
   }
 
   // Painted per line: one SGR pair spanning a newline leaves the dim
   // attribute set across the break on some terminals.
-  out += UNIT_LEGEND.split('\n').map((line) => paint(line, ANSI.dim, color)).join('\n') + '\n'
-  out += barKeyLine(color) + '\n'
-  out += '\n' + renderProviderMix(providerRows, color, showSql, statements.models)
-  if (dailyRows.length > 0) out += '\n' + renderDailyActivity(dailyRows, color, showSql, statements.daily)
-  if (repoRows.length > 0) out += '\n' + renderRepoMix(repoRows, color, showSql, statements.repos)
-  if (toolRows.length > 0) out += '\n' + renderToolMix(toolRows, color, showSql, statements.tools)
-  if (!showSql && footer) out += paint('\nThe SQL behind these: hyp query overview --sql\n', ANSI.dim, color)
+  out += wrapLines(UNIT_LEGEND, width).map((line) => paint(line, ANSI.dim, color)).join('\n') + '\n'
+  out += barKeyLine(color, width) + '\n'
+  out += '\n' + renderProviderMix(providerRows, color, showSql, statements.models, width)
+  if (dailyRows.length > 0) out += '\n' + renderDailyActivity(dailyRows, color, showSql, statements.daily, width)
+  if (repoRows.length > 0) out += '\n' + renderRepoMix(repoRows, color, showSql, statements.repos, width)
+  if (toolRows.length > 0) out += '\n' + renderToolMix(toolRows, color, showSql, statements.tools, width)
+  if (!showSql && footer) {
+    // Broken only between the label and the command, so the command pastes whole.
+    const pointer = ['The SQL behind these:', 'hyp query overview --sql']
+    const lines = displayWidth(pointer.join(' ')) <= width ? [pointer.join(' ')] : pointer
+    out += '\n' + lines.map((line) => paint(line, ANSI.dim, color)).join('\n') + '\n'
+  }
   return out
 }
 
@@ -689,9 +724,10 @@ export function describeWindow(win) {
  * @param {boolean} color
  * @param {boolean} [showSql]
  * @param {string} [sql] the statement this section ran, for `--sql`
+ * @param {number} [columns] the width to lay the table out in
  * @returns {string}
  */
-export function renderProviderMix(rows, color, showSql = false, sql = '') {
+export function renderProviderMix(rows, color, showSql = false, sql = '', columns = OVERVIEW_DEFAULT_COLUMNS) {
   // A zero-token row would render as "0  0  0", which reads like a bug, so
   // the table shows only measured rows. What the omitted ones are decides
   // whether their absence is worth a word:
@@ -713,35 +749,39 @@ export function renderProviderMix(rows, color, showSql = false, sql = '') {
     cell(r.provider),
     // An unlabelled row only reaches the table if it carried tokens, which
     // today it never does. If that changes, name it for what it is rather
-    // than dropping measured tokens on the floor.
-    escapeForDisplay(truncate(hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)', MAX_MODEL_WIDTH)),
+    // than dropping measured tokens on the floor. Raw here: the table
+    // clips it to the width it settles on, then escapes it.
+    hasModelLabel(r) ? String(r.model).trim() : '(model not recorded)',
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
     formatCount(r.output_tokens),
-    tokenBar(toNumber(r.input_tokens), toNumber(r.output_tokens), max, color),
+    '',
   ])
 
-  let out = renderHeading('Which providers and models you use, by volume', sql, color, showSql)
+  let out = renderHeading('Which providers and models you use, by volume', sql, color, showSql, columns)
   if (shown.length === 0) {
     // Traffic exists but no provider reported usage: say that, rather than
     // printing an empty table under a "by volume" heading.
     if (untokened === 0) return out + '  No token counts were recorded.\n'
     return out + `  ${untokened} model${untokened === 1 ? ' was' : 's were'} recorded, none with token counts.\n`
   }
-  out += renderTable(
-    ['provider', 'model', 'input', 'cached', 'output', 'by input+output'],
+  out += renderTable({
+    headers: ['provider', 'model', 'input', 'cached', 'output', SHARE_HEADER],
+    aligns: ['left', 'left', 'right', 'right', 'right', 'left'],
     body,
-    ['left', 'left', 'right', 'right', 'right', 'left'],
+    label: 1,
+    labelMax: MAX_MODEL_WIDTH,
+    bar: (i, w) => tokenBar(toNumber(shown[i].input_tokens), toNumber(shown[i].output_tokens), max, color, w),
     color,
-    tokenBarCaption(color)
-  )
+    columns,
+  })
   const hidden = counted.length - shown.length
-  if (hidden > 0) out += paint(`  + ${hidden} more model${hidden === 1 ? '' : 's'}\n`, ANSI.dim, color)
+  if (hidden > 0) out += note(`+ ${hidden} more model${hidden === 1 ? '' : 's'}`, color, columns)
   if (untokened > 0) {
-    out += paint(
-      `  + ${untokened} model${untokened === 1 ? '' : 's'} whose traffic was recorded without token counts\n`,
-      ANSI.dim,
-      color
+    out += note(
+      `+ ${untokened} model${untokened === 1 ? '' : 's'} whose traffic was recorded without token counts`,
+      color,
+      columns
     )
   }
   return out
@@ -753,9 +793,11 @@ export function renderProviderMix(rows, color, showSql = false, sql = '') {
  * @param {Record<string, unknown>[]} rows
  * @param {boolean} color
  * @param {boolean} [showSql]
+ * @param {string} [sql]
+ * @param {number} [columns]
  * @returns {string}
  */
-export function renderDailyActivity(rows, color, showSql = false, sql = '') {
+export function renderDailyActivity(rows, color, showSql = false, sql = '', columns = OVERVIEW_DEFAULT_COLUMNS) {
   const shown = rows.slice(0, MAX_DAY_ROWS)
   const max = Math.max(...shown.map((r) => toNumber(r.input_tokens) + toNumber(r.output_tokens)))
   const body = shown.map((r) => [
@@ -764,23 +806,24 @@ export function renderDailyActivity(rows, color, showSql = false, sql = '') {
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
     formatCount(r.output_tokens),
-    tokenBar(toNumber(r.input_tokens), toNumber(r.output_tokens), max, color),
+    '',
   ])
 
-  let out = renderHeading('Sessions and tokens per day', sql, color, showSql)
-  out += renderTable(
-    ['day', 'sessions', 'input', 'cached', 'output', 'by input+output'],
+  let out = renderHeading('Sessions and tokens per day', sql, color, showSql, columns)
+  out += renderTable({
+    headers: ['day', 'sessions', 'input', 'cached', 'output', SHARE_HEADER],
+    aligns: ['left', 'right', 'right', 'right', 'right', 'left'],
     body,
-    ['left', 'right', 'right', 'right', 'right', 'left'],
+    bar: (i, w) => tokenBar(toNumber(shown[i].input_tokens), toNumber(shown[i].output_tokens), max, color, w),
     color,
-    tokenBarCaption(color)
-  )
+    columns,
+  })
   // The header states the window; this table may be shorter than it. Say
   // so, or someone summing the column gets a fraction of the period they
   // were just told they were looking at.
   const older = rows.length - shown.length
   if (older > 0) {
-    out += paint(`  + ${older} earlier day${older === 1 ? '' : 's'} in this window\n`, ANSI.dim, color)
+    out += note(`+ ${older} earlier day${older === 1 ? '' : 's'} in this window`, color, columns)
   }
   return out
 }
@@ -802,14 +845,16 @@ export function renderDailyActivity(rows, color, showSql = false, sql = '') {
  * @param {Record<string, unknown>[]} rows
  * @param {boolean} color
  * @param {boolean} [showSql]
+ * @param {string} [sql]
+ * @param {number} [columns]
  * @returns {string}
  */
-export function renderRepoMix(rows, color, showSql = false, sql = '') {
+export function renderRepoMix(rows, color, showSql = false, sql = '', columns = OVERVIEW_DEFAULT_COLUMNS) {
   const named = rows.filter((r) => typeof r.repo_root === 'string' && r.repo_root.trim().length > 0)
   const loose = rows.filter((r) => !named.includes(r)).reduce((n, r) => n + toNumber(r.sessions), 0)
   const shown = named.slice(0, MAX_REPO_ROWS)
 
-  let out = renderHeading('Which repos the work happens in', sql, color, showSql)
+  let out = renderHeading('Which repos the work happens in', sql, color, showSql, columns)
   if (shown.length === 0) {
     return out + `  No repo was recorded on any session (${formatCount(loose)} of them).\n`
   }
@@ -818,25 +863,27 @@ export function renderRepoMix(rows, color, showSql = false, sql = '') {
   // same thing here as in the models and daily tables.
   const max = Math.max(...shown.map((r) => toNumber(r.input_tokens) + toNumber(r.output_tokens)))
   const body = shown.map((r) => [
-    escapeForDisplay(shortRepo(String(r.repo_root))),
+    shortRepo(String(r.repo_root)),
     formatCount(r.sessions),
     formatCount(r.input_tokens),
     formatCount(r.cached_tokens),
     formatCount(r.output_tokens),
-    tokenBar(toNumber(r.input_tokens), toNumber(r.output_tokens), max, color),
+    '',
   ])
-  out += renderTable(
-    ['repo', 'sessions', 'input', 'cached', 'output', 'by input+output'],
+  out += renderTable({
+    headers: ['repo', 'sessions', 'input', 'cached', 'output', SHARE_HEADER],
+    aligns: ['left', 'right', 'right', 'right', 'right', 'left'],
     body,
-    ['left', 'right', 'right', 'right', 'right', 'left'],
+    label: 0,
+    bar: (i, w) => tokenBar(toNumber(shown[i].input_tokens), toNumber(shown[i].output_tokens), max, color, w),
     color,
-    tokenBarCaption(color)
-  )
+    columns,
+  })
 
   const hidden = named.length - shown.length
-  if (hidden > 0) out += paint(`  + ${hidden} more repo${hidden === 1 ? '' : 's'}\n`, ANSI.dim, color)
+  if (hidden > 0) out += note(`+ ${hidden} more repo${hidden === 1 ? '' : 's'}`, color, columns)
   if (loose > 0) {
-    out += paint(`  + ${formatCount(loose)} session${loose === 1 ? '' : 's'} with no repo recorded\n`, ANSI.dim, color)
+    out += note(`+ ${formatCount(loose)} session${loose === 1 ? '' : 's'} with no repo recorded`, color, columns)
   }
   return out
 }
@@ -847,54 +894,115 @@ export function renderRepoMix(rows, color, showSql = false, sql = '') {
  * @param {Record<string, unknown>[]} rows
  * @param {boolean} color
  * @param {boolean} [showSql]
+ * @param {string} [sql]
+ * @param {number} [columns]
  * @returns {string}
  */
-export function renderToolMix(rows, color, showSql = false, sql = '') {
+export function renderToolMix(rows, color, showSql = false, sql = '', columns = OVERVIEW_DEFAULT_COLUMNS) {
   const max = Math.max(...rows.map((r) => toNumber(r.calls)))
   const body = rows.map((r) => [
-    cell(r.tool_name, MAX_MODEL_WIDTH),
+    labelText(r.tool_name),
     formatCount(r.calls),
     formatCount(r.sessions),
-    paint(bar(toNumber(r.calls), max), ANSI.cyan, color),
+    '',
   ])
 
-  const out = renderHeading('Which tools get called', sql, color, showSql)
-  return out + renderTable(['tool', 'calls', 'sessions', 'by calls'], body, ['left', 'right', 'right', 'left'], color)
+  const out = renderHeading('Which tools get called', sql, color, showSql, columns)
+  return out + renderTable({
+    headers: ['tool', 'calls', 'sessions', 'by calls'],
+    aligns: ['left', 'right', 'right', 'left'],
+    body,
+    label: 0,
+    labelMax: MAX_MODEL_WIDTH,
+    bar: (i, w) => paint(bar(toNumber(rows[i].calls), max, w), ANSI.cyan, color),
+    color,
+    columns,
+  })
 }
 
 /**
- * The bar key: each glyph and its word share a colour, so the mapping is
- * legible without reading the sentence. Assembled per segment rather than
- * dimmed as one run - a colour sequence inside a dim run ends it early.
+ * The token tables' bar header. It was `by input+output`, and a column is
+ * never narrower than its header, so those 15 characters were a floor no
+ * bar width could get under. The key line above the tables says what the
+ * share charts, so the header no longer has to (#410).
+ */
+const SHARE_HEADER = 'share'
+
+/**
+ * The bar key, and the caption for the `share` column: each glyph and its
+ * word share a colour, so the mapping is legible without reading the
+ * sentence. Assembled per segment rather than dimmed as one run - a colour
+ * sequence inside a dim run ends it early. Broken before its last clause
+ * when the line would not fit.
  *
  * @param {boolean} color
+ * @param {number} columns
  * @returns {string}
  */
-function barKeyLine(color) {
+function barKeyLine(color, columns) {
   const dim = (/** @type {string} */ t) => paint(t, ANSI.dim, color)
-  return (
-    dim('Token bars split ') +
+  const key =
+    dim('Share bars split ') +
     paint(`${BAR_INPUT_CELL} input`, ANSI.magenta, color) +
     dim(' from ') +
     paint(`${BAR_OUTPUT_CELL} output`, ANSI.cyan, color) +
-    dim('; cache is excluded.')
-  )
+    dim(';')
+  const rest = 'cache is excluded.'
+  return displayWidth(key) + 1 + rest.length <= columns ? key + dim(` ${rest}`) : `${key}\n${dim(rest)}`
 }
 
 /**
- * "by input+output" with each word in its bar shade, so the header itself
- * is the key: no legend lookup to learn which half of a bar is which.
+ * A dim note under a table, wrapped to the width with its continuation
+ * lines indented under the text.
  *
+ * @param {string} text
  * @param {boolean} color
+ * @param {number} columns
  * @returns {string}
  */
-function tokenBarCaption(color) {
-  return (
-    paint('by ', ANSI.dim, color) +
-    paint('input', ANSI.magenta, color) +
-    paint('+', ANSI.dim, color) +
-    paint('output', ANSI.cyan, color)
-  )
+function note(text, color, columns) {
+  return wrapText(text, columns - TABLE_INDENT)
+    .map((line, i) => paint(`${i === 0 ? '  ' : '    '}${line}`, ANSI.dim, color) + '\n')
+    .join('')
+}
+
+/**
+ * Each line of `text` word-wrapped to `width`. A line that already fits is
+ * returned as it is, so text written to fit 80 columns is unchanged there.
+ *
+ * @param {string} text
+ * @param {number} width
+ * @returns {string[]}
+ */
+function wrapLines(text, width) {
+  return text.split('\n').flatMap((line) => wrapText(line, width))
+}
+
+/**
+ * One line word-wrapped to `width` at spaces. A word wider than the width
+ * keeps its own line rather than being cut: it is a path or a flag, and a
+ * split one would not paste.
+ *
+ * @param {string} line
+ * @param {number} width
+ * @returns {string[]}
+ */
+function wrapText(line, width) {
+  if (displayWidth(line) <= width) return [line]
+  /** @type {string[]} */
+  const out = []
+  let current = ''
+  for (const word of line.split(' ')) {
+    const next = current === '' ? word : `${current} ${word}`
+    if (current !== '' && displayWidth(next) > width) {
+      out.push(current)
+      current = word
+    } else {
+      current = next
+    }
+  }
+  out.push(current)
+  return out
 }
 
 /**
@@ -921,49 +1029,139 @@ function shortRepo(repoRoot) {
  * @param {string} sql
  * @param {boolean} color
  * @param {boolean} showSql
+ * @param {number} columns the title wraps to it; the statement does not,
+ *   since a line broken inside it would no longer paste and run
  * @returns {string}
  */
-function renderHeading(title, sql, color, showSql) {
-  if (!showSql) return `${title}\n\n`
+function renderHeading(title, sql, color, showSql, columns) {
+  const heading = wrapText(title, columns).join('\n')
+  if (!showSql) return `${heading}\n\n`
   const indented = sql.split('\n').map((line, i) => (i === 0 ? line : `  ${line}`)).join('\n')
-  return `${title}\n${paint(`  hyp query sql "${indented}"`, ANSI.dim, color)}\n\n`
+  return `${heading}\n${paint(`  hyp query sql "${indented}"`, ANSI.dim, color)}\n\n`
 }
 
 /**
- * Pad `body` into aligned columns under a dim header row. The last column
- * is never padded, so a trailing bar column adds no trailing spaces.
- *
- * `caption` replaces the last header cell with a pre-painted string, so a
- * token table can colour the words "input" and "output" to match the shades
- * in the bars underneath. Header cells are painted one at a time rather
+ * Pad `body` into aligned columns under a dim header row, in at most
+ * `columns` terminal columns. The last column is the bar, never padded, so
+ * it adds no trailing spaces. Header cells are painted one at a time rather
  * than as one dim run: a colour sequence inside a dim run ends it early,
  * leaving the rest of the row undimmed.
  *
- * @param {string[]} headers
- * @param {string[][]} body
- * @param {('left'|'right')[]} aligns
- * @param {boolean} color
- * @param {string} [caption] pre-painted replacement for the last header
+ * The layout is settled once per table, from the cells' displayed widths
+ * (style escapes ignored, wide characters counted twice). Only two columns
+ * give ground: the bar, then the one `label` column, a captured name whose
+ * clip is display-only. Every count keeps its full width. When even the
+ * floors do not fit, the rows are stacked one field per line instead of
+ * overflowing (#410).
+ *
+ * `body` holds every cell but the bar, already formatted, except the label
+ * column, which arrives raw so it can be clipped before it is escaped; the
+ * bar is drawn by `bar` at the width the layout chose.
+ *
+ * @param {{
+ *   headers: string[],
+ *   aligns: ('left'|'right')[],
+ *   body: string[][],
+ *   bar: (row: number, width: number) => string,
+ *   label?: number,
+ *   labelMax?: number,
+ *   color: boolean,
+ *   columns: number,
+ * }} table
  * @returns {string}
  */
-function renderTable(headers, body, aligns, color, caption) {
-  const widths = headers.map((h, i) => Math.max(h.length, ...body.map((r) => (r[i] ?? '').length)))
+function renderTable({ headers, aligns, body, bar, label = -1, labelMax = Infinity, color, columns }) {
   const last = headers.length - 1
+  const widths = headers.map((h, i) => (i === last || i === label
+    ? 0
+    : Math.max(displayWidth(h), ...body.map((r) => displayWidth(r[i])))))
+  const fixed = TABLE_INDENT + COLUMN_GAP * last + widths.reduce((sum, w) => sum + w, 0)
+  const labelHeader = label < 0 ? 0 : displayWidth(headers[label])
+  const labelNatural = label < 0
+    ? 0
+    : Math.max(labelHeader, Math.min(labelMax, Math.max(...body.map((r) => displayWidth(escapeForDisplay(r[label]))))))
+  const fit = fitTable(columns - fixed, labelNatural, Math.max(labelHeader, MIN_LABEL_WIDTH), displayWidth(headers[last]))
+  if (!fit) return renderStacked({ headers, aligns, body, bar, label, labelMax, columns })
+
+  const cells = body.map((r, n) => r.map((c, i) => (i === last ? bar(n, fit.bar) : i === label ? cell(c, fit.label) : c)))
+  if (label >= 0) widths[label] = Math.max(labelHeader, ...cells.map((r) => displayWidth(r[label])))
   const headerLine = headers
-    .map((h, i) => (i === last
-      ? caption ?? paint(h, ANSI.dim, color)
-      : paint(pad(h, widths[i], aligns[i]), ANSI.dim, color)))
+    .map((h, i) => paint(i === last ? h : pad(h, widths[i], aligns[i]), ANSI.dim, color))
     .join('  ')
   let out = `  ${headerLine}\n`
   // Bars arrive already painted: a token bar carries two colours, so the
   // table cannot assume one.
-  for (const row of body) {
+  for (const row of cells) {
     const padded = row
-      .map((c, i) => (i === row.length - 1 ? c : pad(c ?? '', widths[i], aligns[i])))
+      .map((c, i) => (i === last ? c : pad(c, widths[i], aligns[i])))
       .join('  ')
       .trimEnd()
     out += `  ${padded}\n`
   }
+  return out
+}
+
+/**
+ * The label and bar widths that fit `room`, the columns left once the
+ * fixed columns are placed, or null when the floors do not fit. The bar
+ * gives ground first, down to a short bar; then the label, down to a
+ * readable clip; then the bar to its header, which sets the column's width
+ * whatever the bar does; then the label to its last floor.
+ *
+ * @param {number} room
+ * @param {number} labelNatural 0 for a table with no label column
+ * @param {number} labelFloor
+ * @param {number} barHeader
+ * @returns {{ label: number, bar: number } | null}
+ */
+function fitTable(room, labelNatural, labelFloor, barHeader) {
+  let label = labelNatural
+  let barCells = BAR_WIDTH
+  const over = () => label + Math.max(barCells, barHeader) - room
+  if (over() > 0) barCells = Math.max(NARROW_BAR_WIDTH, barCells - over())
+  if (over() > 0) label = Math.max(Math.min(label, Math.max(labelFloor, NARROW_LABEL_WIDTH)), label - over())
+  if (over() > 0) barCells = Math.max(Math.min(barCells, barHeader), barCells - over())
+  if (over() > 0) label = Math.max(Math.min(label, labelFloor), label - over())
+  return over() > 0 ? null : { label, bar: barCells }
+}
+
+/**
+ * The fallback for a terminal too narrow for the table: each row as a
+ * block, its names on one line and then one field per line, every count
+ * still exact. Nothing is dropped; a field that cannot fit even this way
+ * overflows rather than being cut.
+ *
+ * @param {{
+ *   headers: string[],
+ *   aligns: ('left'|'right')[],
+ *   body: string[][],
+ *   bar: (row: number, width: number) => string,
+ *   label: number,
+ *   labelMax: number,
+ *   columns: number,
+ * }} table
+ * @returns {string}
+ */
+function renderStacked({ headers, aligns, body, bar, label, labelMax, columns }) {
+  const last = headers.length - 1
+  const fields = headers.map((_, i) => i).filter((i) => i === last || aligns[i] === 'right')
+  const names = headers.map((_, i) => i).filter((i) => !fields.includes(i))
+  const nameWidth = Math.max(...fields.map((i) => displayWidth(headers[i])))
+  const valueWidth = Math.max(0, ...fields.filter((i) => i !== last).flatMap((i) => body.map((r) => displayWidth(r[i]))))
+  const barCells = Math.max(1, Math.min(BAR_WIDTH, columns - 2 * TABLE_INDENT - nameWidth - COLUMN_GAP))
+  let out = ''
+  body.forEach((r, n) => {
+    if (n > 0) out += '\n'
+    // The fixed names print whole; the label takes what is left of the line.
+    const fixedNames = names.filter((i) => i !== label)
+    const used = fixedNames.reduce((sum, i) => sum + displayWidth(r[i]) + COLUMN_GAP, TABLE_INDENT)
+    const labelWidth = Math.max(MIN_LABEL_WIDTH, Math.min(labelMax, columns - used))
+    out += `  ${names.map((i) => (i === label ? cell(r[i], labelWidth) : r[i])).join('  ')}\n`
+    for (const i of fields) {
+      const value = i === last ? bar(n, barCells) : pad(r[i], valueWidth, 'right')
+      out += `    ${pad(headers[i], nameWidth, 'left')}  ${value}`.trimEnd() + '\n'
+    }
+  })
   return out
 }
 
@@ -973,7 +1171,7 @@ function renderTable(headers, body, aligns, color, caption) {
  * @param {'left'|'right'} align
  */
 function pad(text, width, align) {
-  const fill = ' '.repeat(Math.max(0, width - text.length))
+  const fill = ' '.repeat(Math.max(0, width - displayWidth(text)))
   return align === 'right' ? fill + text : text + fill
 }
 
@@ -995,12 +1193,13 @@ function pad(text, width, align) {
  * @param {number} output
  * @param {number} max largest `input + output` in the same table
  * @param {boolean} color
+ * @param {number} [cells] the bar's full width, from the table's layout
  * @returns {string}
  */
-function tokenBar(input, output, max, color) {
+function tokenBar(input, output, max, color, cells = BAR_WIDTH) {
   const total = Math.max(0, input) + Math.max(0, output)
   if (!(total > 0) || !(max > 0)) return ''
-  const width = Math.min(BAR_WIDTH, Math.max(1, Math.round((total / max) * BAR_WIDTH)))
+  const width = Math.min(cells, Math.max(1, Math.round((total / max) * cells)))
   let inputCells = Math.round((input / total) * width)
   // Never let a present component vanish, and never let it eat the whole
   // bar: a row that is 99% output should still show that it had input.
@@ -1015,11 +1214,12 @@ function tokenBar(input, output, max, color) {
 /**
  * @param {number} value
  * @param {number} max
+ * @param {number} [cells]
  * @returns {string}
  */
-function bar(value, max) {
+function bar(value, max, cells = BAR_WIDTH) {
   if (!(value > 0) || !(max > 0)) return ''
-  return '█'.repeat(Math.min(BAR_WIDTH, Math.max(1, Math.round((value / max) * BAR_WIDTH))))
+  return '█'.repeat(Math.min(cells, Math.max(1, Math.round((value / max) * cells))))
 }
 
 /**
@@ -1033,9 +1233,10 @@ function bar(value, max) {
  * bars and headings are painted, so a sweep over the finished table would
  * erase the colour along with the attack.
  *
- * `width`, when given, clips the raw trimmed value before escaping rather
- * than after: escaping first can cut a `\uXXXX` escape in half at the
- * boundary, so the clip always runs on the raw text.
+ * `width`, when given, is the displayed width the escaped cell may take.
+ * The clip still runs on the raw trimmed value, never on the escaped one:
+ * escaping first can cut a `\uXXXX` escape in half at the boundary. Each
+ * raw character is charged the width its escape will print at.
  *
  * @ref LLP 0225#decision [implements]: the same rule on `hyp query overview`, per captured cell
  *
@@ -1056,7 +1257,33 @@ function cell(value, width) {
  * @param {number} width
  */
 function truncate(text, width) {
-  return text.length <= width ? text : `${text.slice(0, width - 1)}…`
+  if (displayWidth(escapeForDisplay(text)) <= width) return text
+  let out = ''
+  let used = 0
+  let joined = false
+  for (const ch of text) {
+    const escaped = escapeForDisplay(ch)
+    const w = joined ? 0 : escaped === ch ? codePointWidth(/** @type {number} */ (ch.codePointAt(0))) : escaped.length
+    // One column stays free for the ellipsis.
+    if (used + w > width - 1) break
+    out += ch
+    used += w
+    joined = ch === '\u200d'
+  }
+  return `${out}…`
+}
+
+/**
+ * A captured name as the label column takes it: trimmed, raw, with an
+ * absent or blank value named rather than left as a blank cell.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function labelText(value) {
+  if (value === null || value === undefined) return '(none)'
+  const trimmed = String(value).trim()
+  return trimmed.length === 0 ? '(none)' : trimmed
 }
 
 /**

@@ -55,14 +55,14 @@ What HypAware has recorded
 ────────────────────────────────────────
 Input is prompt sent fresh; cached is prompt served from (or written to) the cache.
 Output is what the model generated. Input + cached is the whole prompt.
-Token bars split ▒ input from █ output; cache is excluded.
+Share bars split ▒ input from █ output; cache is excluded.
 
 Which providers and models you use, by volume
 
-  provider   model                       input      cached   output  by input+output
-  anthropic  claude-opus-5-5            25,252  64,078,478  263,270  ▒▒████████████████
-  openai     gpt-6.1-sol                61,926     612,992    1,284  ▒▒▒█
-  anthropic  claude-haiku-5-5           20,423           0    1,273  █
+  provider   model              input      cached   output  share
+  anthropic  claude-opus-5-5   25,252  64,078,478  263,270  ▒▒████████████████
+  openai     gpt-6.1-sol       61,926     612,992    1,284  ▒▒▒█
+  anthropic  claude-haiku-5-5  20,423           0    1,273  █
 ```
 
 Over MCP, read the same datasets with `query_sql`.

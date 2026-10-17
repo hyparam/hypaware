@@ -273,3 +273,20 @@ test('runWizardFirstLook: no runner (no query registry) skips', async () => {
   assert.deepEqual(result, { shown: false, reason: 'no-dataset', wrote: false })
   assert.equal(stdout.text(), '')
 })
+
+test('runWizardFirstLook: lays the block out for the width of the stream it writes to', async () => {
+  const runner = {
+    hasDataset: () => true,
+    /** @param {string} sql */
+    async run(sql) { return { columns: [], rows: ROWS_BY_SQL[sql] ?? [] } },
+  }
+  const wide = makeBuf()
+  await runWizardFirstLook({ stdout: wide, runner })
+  const narrow = Object.assign(makeBuf(), { columns: 40 })
+  await runWizardFirstLook({ stdout: narrow, runner })
+  // The counting wrapper the step writes through has no width of its own,
+  // so a width honoured here was read off the real stream.
+  assert.notEqual(narrow.text(), wide.text())
+  assert.ok(narrow.text().split('\n').every((line) => line.length <= 40), narrow.text())
+  assert.match(narrow.text(), /4,000/)
+})

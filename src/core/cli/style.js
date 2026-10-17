@@ -69,6 +69,87 @@ export function visibleWidth(line) {
   return stripSgr(line).length
 }
 
+// East Asian Wide (W) and Fullwidth (F) blocks, as [first, last] code
+// points: the characters a terminal draws two columns wide. Block-level
+// rather than the full per-character table, which is the trade a no-
+// dependency rule makes; emoji are matched by property below instead.
+const WIDE_RANGES = [
+  [0x1100, 0x115f], // Hangul Jamo initials
+  [0x2e80, 0x303e], // CJK radicals, Kangxi, CJK symbols and punctuation
+  [0x3041, 0x33ff], // Hiragana, Katakana, Bopomofo, Hangul compatibility, CJK compatibility
+  [0x3400, 0x4dbf], // CJK Extension A
+  [0x4e00, 0x9fff], // CJK Unified Ideographs
+  [0xa000, 0xa4cf], // Yi
+  [0xa960, 0xa97f], // Hangul Jamo Extended-A
+  [0xac00, 0xd7a3], // Hangul syllables
+  [0xf900, 0xfaff], // CJK Compatibility Ideographs
+  [0xfe10, 0xfe19], // vertical forms
+  [0xfe30, 0xfe6f], // CJK compatibility forms, small form variants
+  [0xff00, 0xff60], // fullwidth ASCII variants
+  [0xffe0, 0xffe6], // fullwidth signs
+  [0x20000, 0x3fffd], // CJK Extensions B onward (planes 2 and 3)
+]
+
+// Emoji drawn as emoji by default occupy two columns.
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u
+
+// Combining and enclosing marks (accents, variation selectors) and the
+// zero-width format characters draw on the cell before them.
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200b-\u200f\u2060-\u2064\ufeff]/u
+
+const ZWJ = 0x200d
+
+// Printable ASCII only: the common case, measured without a code-point walk.
+const PLAIN_ASCII = /^[\x20-\x7e]*$/
+
+/**
+ * Columns one code point occupies: 0, 1 or 2. See {@link displayWidth}.
+ *
+ * @param {number} cp
+ * @returns {number}
+ */
+export function codePointWidth(cp) {
+  if (cp < 0x7f) return cp < 0x20 ? 0 : 1
+  const ch = String.fromCodePoint(cp)
+  if (ZERO_WIDTH.test(ch)) return 0
+  if (EMOJI_PRESENTATION.test(ch)) return 2
+  for (const [lo, hi] of WIDE_RANGES) {
+    if (cp < lo) break
+    if (cp <= hi) return 2
+  }
+  return 1
+}
+
+/**
+ * Terminal columns a line occupies, ignoring style escapes, for text that
+ * may hold CJK, emoji or combining marks. {@link visibleWidth} counts code
+ * units, which is right for the CLI's own Latin chrome but not for captured
+ * labels: a model, repo or tool name can carry any of these.
+ *
+ * The rule, in order: printable ASCII is one column; combining and
+ * enclosing marks, variation selectors and the zero-width format
+ * characters are zero; a code point after a zero-width joiner is zero, so
+ * a joined emoji sequence counts as its first emoji; East Asian Wide and
+ * Fullwidth blocks ({@link WIDE_RANGES}) and default-emoji-presentation
+ * characters are two; everything else is one. Not handled: a regional-
+ * indicator pair (a flag) measures four where most terminals draw two.
+ *
+ * @param {string} text
+ * @returns {number}
+ */
+export function displayWidth(text) {
+  const plain = stripSgr(text)
+  if (PLAIN_ASCII.test(plain)) return plain.length
+  let width = 0
+  let joined = false
+  for (const ch of plain) {
+    const cp = /** @type {number} */ (ch.codePointAt(0))
+    if (!joined) width += codePointWidth(cp)
+    joined = cp === ZWJ
+  }
+  return width
+}
+
 /**
  * How many *physical* terminal rows one logical line occupies. A line
  * wider than the terminal soft-wraps onto further rows, and an empty line
