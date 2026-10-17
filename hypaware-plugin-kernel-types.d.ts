@@ -2373,6 +2373,20 @@ export interface ClientRegistration {
   requiresEndpoint?: boolean
   attach(ctx: ClientAttachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
+  /**
+   * Read-only check setup runs once the client is picked, before any write
+   * (LLP 0532). Never throws; an adapter that cannot tell returns `{}`. The
+   * attach-time checks stay in `attach`, which still enforces them.
+   */
+  preflight?(): Promise<ClientPreflight>
+}
+
+/** A client's setup preflight verdict: at most one of the two is set. */
+export interface ClientPreflight {
+  /** Attach is known to refuse: the reason and the action that clears it. Setup skips this client's attach. */
+  refuse?: string
+  /** Attach will work with reduced capture: said once, and setup proceeds. */
+  warn?: string
 }
 
 export interface ClientRegistry {
