@@ -179,6 +179,9 @@ ceiling stays out of the schema on purpose: above it the flag clamps rather
 than refuses, because the help text promises a capped answer and "raise
 --limit" is advice a caller already at the ceiling cannot follow.
 
+**Extended-by:** [LLP 0528 #refuse](./0528-grep-limit-above-the-ceiling-is-refused.decision.md#refuse).
+The ceiling is in the schema now and a limit above it is refused, not clamped.
+
 ## What this does not settle {#residuals}
 
 > Superseded in part by

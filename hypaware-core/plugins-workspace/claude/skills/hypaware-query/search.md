@@ -2,7 +2,7 @@
 
 `hyp query grep "<text>"` searches recorded messages for a case-insensitive substring. Use `--regex` to interpret the text as a regular expression.
 
-Narrow the search with `--session-id <id>`, `--chain-id <id>`, or `--from`/`--to` dates in YYYY-MM-DD format. `--limit <n>` defaults to 50 and returns at most 1000 hits; larger values are currently reduced to 1000.
+Narrow the search with `--session-id <id>`, `--chain-id <id>`, or `--from`/`--to` dates in YYYY-MM-DD format. `--limit <n>` defaults to 50 and accepts 1 to 1000; a larger value is refused.
 
 Results are newest first, with one row per matched column. Each hit includes `session_id`, `message_id`, and `part_id` for follow-up queries.
 

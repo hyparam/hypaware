@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
 
 import { verbToCommand } from '../../src/core/cli/verb_command.js'
-import { argvToParams } from '../../src/core/cli/verb_codec.js'
+import { argvToParams, toJsonSchema, validateToolArguments } from '../../src/core/cli/verb_codec.js'
 import { CORE_VERBS } from '../../src/core/cli/core_verbs.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
@@ -172,19 +172,109 @@ test('the limit produces the truncation notice on stderr', async () => {
   assert.match(err.join(''), /more matches exist beyond the limit/)
 })
 
-test('a limit above the ceiling clamps to it instead of dropping below the default', async () => {
-  // 60 rows: more than the default 50, so a fallback-to-default and a clamp
-  // to the ceiling are distinguishable. Falling back would answer a request
-  // for more rows with fewer, then advise raising a limit already at 9999.
+/**
+ * Count every touch of the local cache service, so a test can prove a
+ * refused limit never started a search.
+ *
+ * @param {any} ctx
+ */
+function countStorage(ctx) {
+  const counter = { touches: 0 }
+  const real = ctx.storage
+  ctx.storage = new Proxy(real, {
+    get(target, key, receiver) {
+      counter.touches += 1
+      const v = Reflect.get(target, key, receiver)
+      return typeof v === 'function' ? v.bind(target) : v
+    },
+  })
+  return counter
+}
+
+test('a limit of 1000, the ceiling, is accepted and searches', async () => {
+  // 60 rows: more than the default 50, so a fallback to the default would
+  // show here as a truncated answer.
   const batch = []
   for (let i = 0; i < 60; i += 1) batch.push(mkRow({ content_text: `needle ${i}` }))
   const { ctx, out, err } = await makeCtx([batch])
-  const code = await cmd.run(['needle', '--limit', '9999'], ctx)
+  const counter = countStorage(ctx)
+  const code = await cmd.run(['needle', '--limit', '1000'], ctx)
   assert.equal(code, 0)
   const rendered = out.join('')
   assert.match(rendered, /needle 0\b/)
   assert.equal(rendered.split('\n').filter((line) => /content_text/.test(line)).length, 60)
-  assert.equal(err.join(''), '', 'a clamped limit still covered every match, so nothing is truncated')
+  assert.equal(err.join(''), '', 'a limit of 1000 covered every match, so nothing is truncated')
+  assert.ok(counter.touches > 0, 'the counter sees a real search')
+})
+
+test('a limit above the ceiling is refused before any search runs', async () => {
+  // It used to be clamped to 1000 with exit 0, so `--limit 5000` answered as
+  // if 1000 had been asked for (issue #2520).
+  for (const over of ['1001', '5000', '1e30']) {
+    const batch = []
+    for (let i = 0; i < 60; i += 1) batch.push(mkRow({ content_text: `needle ${i}` }))
+    const { ctx, out, err } = await makeCtx([batch])
+    const counter = countStorage(ctx)
+    const code = await cmd.run(['needle', '--limit', over], ctx)
+    assert.equal(code, 2, `--limit ${over} is a usage error`)
+    assert.match(err.join(''), new RegExp(`--limit expects an integer from 1 to 1000 \\(got ${over.replace('+', '\\+')}\\)`))
+    assert.equal(out.join(''), '')
+    assert.equal(counter.touches, 0, `--limit ${over} never reached the cache service`)
+  }
+})
+
+test('a limit above the ceiling is refused before --remote sends anything', async (t) => {
+  let calls = 0
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  globalThis.fetch = /** @type {any} */ (async () => { calls += 1; throw new Error('no request should be sent') })
+  /** @type {string[]} */ const out = []
+  /** @type {string[]} */ const err = []
+  const ctx = /** @type {any} */ ({
+    env: { HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_PROD: 'tok' },
+    config: { version: 2, query: { remotes: { prod: { url: 'https://hyp.internal/mcp' } } } },
+    query: {}, storage: {},
+    stdout: { write: (/** @type {string} */ s) => out.push(s) },
+    stderr: { write: (/** @type {string} */ s) => err.push(s) },
+  })
+  const code = await cmd.run(['needle', '--limit', '1001', '--remote', 'prod'], ctx)
+  assert.equal(code, 2)
+  assert.match(err.join(''), /--limit expects an integer from 1 to 1000 \(got 1001\)/)
+  assert.equal(calls, 0, 'no MCP request for a refused limit')
+})
+
+test('the MCP schema states the ceiling and the MCP validator refuses above it', () => {
+  const projected = /** @type {any} */ (toJsonSchema(queryGrepVerb.inputSchema))
+  assert.equal(projected.properties.limit.minimum, 1)
+  assert.equal(projected.properties.limit.maximum, 1000)
+  assert.equal(projected.properties.limit.default, 50)
+  const atCeiling = validateToolArguments(queryGrepVerb.inputSchema, { query: 'needle', limit: 1000 })
+  assert.ok(atCeiling.ok)
+  assert.equal(atCeiling.params.limit, 1000)
+  const over = validateToolArguments(queryGrepVerb.inputSchema, { query: 'needle', limit: 1001 })
+  assert.equal(over.ok, false)
+  assert.match(over.ok ? '' : over.error, /limit expects an integer from 1 to 1000 \(got 1001\)/)
+  // A numeric property with no maximum is unchanged: only the bound it
+  // declares applies.
+  const unbounded = { type: 'object', properties: { n: { type: 'integer', minimum: 1 } } }
+  const big = validateToolArguments(/** @type {any} */ (unbounded), { n: 5000 })
+  assert.ok(big.ok)
+  assert.equal(big.params.n, 5000)
+  const cli = argvToParams(/** @type {any} */ (unbounded), ['--n', '5000'])
+  assert.ok(cli.ok)
+  assert.equal(cli.params.n, 5000)
+})
+
+test('the bundled query skills describe the ceiling as a refusal', async () => {
+  for (const file of [
+    'hypaware-core/skills/hypaware-query/search.md',
+    'hypaware-core/plugins-workspace/claude/skills/hypaware-query/search.md',
+    'hypaware-core/plugins-workspace/codex/skills/hypaware-query/search.md',
+  ]) {
+    const text = await fs.readFile(path.join(import.meta.dirname, '..', '..', file), 'utf8')
+    assert.match(text, /accepts 1 to 1000; a larger value is refused/, file)
+    assert.doesNotMatch(text, /reduced to 1000/, file)
+  }
 })
 
 test('a limit the flag cannot use is refused, not quietly replaced', async () => {
@@ -196,7 +286,7 @@ test('a limit the flag cannot use is refused, not quietly replaced', async () =>
     const { ctx, out, err } = await makeCtx([[mkRow({ content_text: 'needle a' })]])
     const code = await cmd.run(['needle', '--limit', bad], ctx)
     assert.equal(code, 2, `--limit ${bad} is a usage error`)
-    assert.match(err.join(''), /--limit expects a positive integer/)
+    assert.match(err.join(''), /--limit expects an integer from 1 to 1000/)
     assert.equal(out.join(''), '')
   }
 })
@@ -209,9 +299,8 @@ test('an absent limit still takes the default', async () => {
 })
 
 test('at the ceiling the truncation notice stops advising a flag that cannot move', () => {
-  // The clamp exists so a caller is never told to raise a limit it already
-  // pinned; the notice has to keep that promise or the clamp only moves the
-  // unfollowable advice one flag along.
+  // A caller at the ceiling has no larger limit to ask for, so the notice
+  // must not tell it to raise one.
   const atCeiling = queryGrepVerb.render(
     { hits: [], truncated: true, exhausted: true, limitCeilingReached: true },
     /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 })
@@ -466,7 +555,7 @@ test('an injected backend receives exactly the seam shape, and never the host wi
     chain_id: 'a2',
     from: '2026-08-01',
     to: '2026-08-31',
-    limit: 9999,
+    limit: 1000,
     'include-local-only': true,
   }, ctx)
   // Exactly these keys: `storage`, `refresh` and `callerCwd` are this
@@ -482,7 +571,7 @@ test('an injected backend receives exactly the seam shape, and never the host wi
     chainId: 'a2',
     from: '2026-08-01',
     to: '2026-08-31',
-    // Clamped by the verb, before the seam: a backend never has to
+    // Validated by the verb, before the seam: a backend never has to
     // re-default or re-cap, and both planes page identically.
     limit: 1000,
     includeLocalOnly: true,
@@ -514,7 +603,13 @@ test('the argument refusals run before the seam, so a typo never reaches the bac
     async () => { await queryGrepVerb.operation({ query: 'needle', from: '2026-08-20', to: '2026-08-01' }, ctx) },
     VerbUsageError,
   )
-  assert.equal(calls, 0, 'a cross-field or shape refusal is true for any data plane')
+  // A host that calls `operation` directly skips the codec; the ceiling is
+  // still a refusal there, never a clamp handed to the backend.
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle', limit: 1001 }, ctx) },
+    (/** @type {any} */ e) => e instanceof VerbUsageError && /from 1 to 1000 \(got 1001\)/.test(e.message),
+  )
+  assert.equal(calls, 0, 'a cross-field, shape or range refusal is true for any data plane')
 })
 
 test('with a backend supplied the local plane is never consulted', async () => {
@@ -537,7 +632,7 @@ test('with a backend supplied the local plane is never consulted', async () => {
   assert.match(rendered.stdout ?? '', /injected needle/)
 })
 
-test('a bare result gets the clamp fact appended and does not forge "nothing is recorded"', async () => {
+test('a bare result gets the ceiling fact appended and does not forge "nothing is recorded"', async () => {
   // The file counters are the local service's own; an injected backend
   // leaves them `undefined`, and the render's guard is a strict `=== 0`,
   // so the "nothing is recorded on this machine yet" line correctly stays
