@@ -28,7 +28,10 @@ publish command for this report.
 - `hyp report list --local` lists saved report folders. Read their Markdown at
   the listed paths to view local content.
 - `hyp report list --remote <target> --json` lists published reports. Use
-  `hyp remote list --json` to discover configured targets when needed.
+  `hyp remote list --json` to discover configured targets when needed. A
+  record whose `coverage.covered` is below `coverage.slices`, whose
+  `coverage.unenumerated` is positive, or whose `truncated` is `true` is an
+  incomplete report; say so when you cite it.
 - `hyp report get <kind> <period> <id> [path] --remote <target>` retrieves a
   published report page; take identifiers from a listing or publish receipt.
 - `hyp report get <hyprec-id> --remote <target>` retrieves one recommendation,

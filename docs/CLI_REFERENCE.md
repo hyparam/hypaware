@@ -512,7 +512,12 @@ saved reports (/Users/me/.hyp/reports):
 ```
 
 An empty remote list
-succeeds. Each report's recommendations follow its line, one per line, as the
+succeeds. A report the server recorded as incomplete ends its line with a
+notice: `incomplete:` and then `N of M slices analyzed` when the survey
+analyzed fewer slices than it found, `N days not inventoried` for days it
+could not list, and `generation cut short` when generation stopped early,
+joined by `;`. A complete report, or one the server recorded nothing about,
+has no notice. Each report's recommendations follow its line, one per line, as the
 minted id, its state in brackets, the `recommendation-<slug>` page the id
 names, and the page's title, with its thesis on the line below. The state is
 the one the remote supplies, such as `open`, `in_progress`, `applied`, or
@@ -526,7 +531,7 @@ publish, or a report published before it did, lists the id and page alone.
 `--json` prints the records whole, `recommendations` included.
 
 ```text
-  2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review
+  2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review	incomplete: 3 of 5 slices analyzed
       hyprec-0123456789abcdef	[applied]	recommendation-batch-the-retries	Batch the retries
           Every retry is its own call, 506 times a month. One queue fixes it.
       hyprec-fedcba9876543210	recommendation-tenant-check
@@ -537,7 +542,9 @@ reports and newest report first, from the remote's recommendation index: id,
 state in brackets (under the same rule, so a row without a supplied state has
 no label), the parent report's publish time, the parent report as
 `kind/period/id` (or `standalone` for one published with `hyp report
-recommend`), and the title, with the thesis below. `--status <state,...>`
+recommend`), and the title, with the thesis below. It has no coverage
+notice, because the recommendation index does not carry the report's
+coverage; the report listing shows it. `--status <state,...>`
 filters by state and implies `--recommendations`; an unknown state is refused
 before any request, and an empty value (an unset shell variable) still selects
 the flat form rather than falling back to the report listing. A remote that
