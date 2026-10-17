@@ -10,7 +10,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
-import { materializeClientAssets } from '../runtime/client_assets.js'
+import { CLAUDE_SKILL_RELOAD_HINT, copiedClaudeSkills, materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
@@ -2612,6 +2612,7 @@ export async function runSkillsInstall(argv, ctx) {
   const skillCount = installed.filter((a) => a.kind === 'skill').length
   const agentCount = installed.length - skillCount
   ctx.stdout.write(`installed ${skillCount} skill copy(ies), ${agentCount} agent copy(ies)\n`)
+  if (copiedClaudeSkills(installed)) ctx.stdout.write(`${CLAUDE_SKILL_RELOAD_HINT}\n`)
   return 0
 }
 

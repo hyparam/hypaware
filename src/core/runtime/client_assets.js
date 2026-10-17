@@ -82,6 +82,27 @@ function outsideConsent(record) {
 }
 
 /**
+ * The recovery line after a run that copied Claude Code skills. Claude Code
+ * picks up edits to a skill it already knows during a session, but a skills
+ * directory it did not have at session start needs `/reload-skills`, so the
+ * line is conditional advice rather than a mandatory restart (#394). Codex
+ * and subagents get no line: their reload behavior is not established.
+ */
+export const CLAUDE_SKILL_RELOAD_HINT = 'If the skills are not visible, run /reload-skills in Claude Code, or start a new session.'
+
+/**
+ * Whether a materialization actually copied a Claude Code skill: a planned
+ * dry-run copy, an agent, another client's copy, and a failed or withheld copy
+ * (never in `installed`) all earn no {@link CLAUDE_SKILL_RELOAD_HINT}.
+ *
+ * @param {ClientAssetInstall[]} installed
+ * @returns {boolean}
+ */
+export function copiedClaudeSkills(installed) {
+  return installed.some((a) => a.kind === 'skill' && a.client === 'claude' && !a.dryRun)
+}
+
+/**
  * Copy every registered skill and agent that targets one of `clients` into that
  * client's asset directories, replacing any existing copy (idempotent). A
  * client under a consent (`CONSENTED_SKILLS`) replaces only a copy the ledger

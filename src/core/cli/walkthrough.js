@@ -17,7 +17,7 @@ import { ServiceOpError } from '../daemon/service_ops.js'
 import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
-import { materializeClientAssets } from '../runtime/client_assets.js'
+import { CLAUDE_SKILL_RELOAD_HINT, copiedClaudeSkills, materializeClientAssets } from '../runtime/client_assets.js'
 import { loaderActivationKind } from '../runtime/loader.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
@@ -1659,6 +1659,9 @@ export async function runPickerFinale(args) {
           stderr,
         })
         for (const line of clientAssetLines(installed, pruned, dryRun, label)) stdout.write(`${line}\n`)
+        // Said here and not again in the scripted run summary, so one setup
+        // prints it once.
+        if (copiedClaudeSkills(installed)) stdout.write(`${CLAUDE_SKILL_RELOAD_HINT}\n`)
         for (const item of installed) {
           const entry = {
             name: item.name,
