@@ -2,6 +2,7 @@
 
 **Type:** Spec
 **Status:** Draft
+**Extended-by:** LLP 0527 (the read-to-commit guard spans a budgeted batch commit)
 **Systems:** Sources, Cache, Plugins
 **Author:** Phil / Codex
 **Date:** 2026-09-29

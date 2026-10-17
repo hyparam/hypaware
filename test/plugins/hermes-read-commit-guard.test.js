@@ -65,16 +65,20 @@ const events = []
 const log = { debug() {}, info(name, attrs) { events.push({ name, ...attrs }) },
   warn(name, attrs) { events.push({ name, ...attrs }) }, error(name, attrs) { events.push({ name, ...attrs }) } }
 const storage = createQueryStorageService({ cacheRoot: args.cacheRoot })
-const reconcile = storage.reconcileRows
 let paused = false
-storage.reconcileRows = async (...call) => {
+const pauseOnce = async () => {
   if (args.pauseFile && !paused) {
     paused = true
     fs.writeFileSync(args.pauseFile, '')
     while (!fs.existsSync(args.resumeFile)) await sleep(5)
   }
-  return reconcile(...call)
 }
+// The poll commits through the batch call, the backfill through the single
+// one: pause whichever this process reaches first, between read and commit.
+const reconcile = storage.reconcileRows
+storage.reconcileRows = async (...call) => { await pauseOnce(); return reconcile(...call) }
+const reconcileBatch = storage.reconcileRowsBatch
+storage.reconcileRowsBatch = async (...call) => { await pauseOnce(); return reconcileBatch(...call) }
 const claim = storage.claimReconcileScope
 let busy = 0
 storage.claimReconcileScope = (...call) => {
@@ -294,18 +298,20 @@ test('a held session does not serialize writers on other sessions; measured over
   // Sorts first, so it is the session the paused poll reconciles and holds.
   insertSession(db, 'a-held', '2026-07-20T10:00:00Z')
   insertMessage(db, 1, 'a-held', 'user', 'held question')
+
+  // A poll holds the `a-held` session's guard for the whole backfill. A poll
+  // holds every session of its batch until the batch commits (LLP 0527), so
+  // the other sessions arrive after its listing and are not in that batch.
+  const poll = runWriter({ ...pollArgs, pauseFile: barrier('poll.paused'), resumeFile: barrier('poll.resume') })
+  await waitForFile(barrier('poll.paused'), poll.done)
   const others = 12
   for (let i = 0; i < others; i++) {
     insertSession(db, `free-${i}`, '2026-07-21T10:00:00Z')
     insertMessage(db, 100 + i * 2, `free-${i}`, 'user', `question ${i}`)
     insertMessage(db, 101 + i * 2, `free-${i}`, 'assistant', `answer ${i}`)
   }
-
-  // A poll holds the `a-held` session's guard for the whole backfill.
   const solo = await runWriter({ ...backfillArgs, cacheRoot: path.join(common.cacheRoot, '..', 'solo'), since: '2026-07-21T00:00:00Z' }).done
   assert.equal(solo.error, null)
-  const poll = runWriter({ ...pollArgs, pauseFile: barrier('poll.paused'), resumeFile: barrier('poll.resume') })
-  await waitForFile(barrier('poll.paused'), poll.done)
   const concurrent = await runWriter({ ...backfillArgs, since: '2026-07-21T00:00:00Z' }).done
   fs.writeFileSync(barrier('poll.resume'), '')
   assert.equal((await poll.done).lastError, null)
