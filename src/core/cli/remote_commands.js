@@ -30,7 +30,7 @@ import { DURABLE_HINT } from '../commands/local_only.js'
 import { withSpinner } from './spinner.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
 import { readAllStdin } from './stdio.js'
-import { hasDisplayUnsafeChars, isPlainObject } from '../util/json_util.js'
+import { escapeForDisplay, hasDisplayUnsafeChars, isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
@@ -829,11 +829,13 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return { exitCode: 1, reason: 'store_failed' }
   }
   // The compact lane is the wizard's, whose lines name the server the way the
-  // recap does; the wide lane keeps the target name `hyp remote list` maps.
+  // recap does; the wide lane keeps the target name `hyp remote list` maps,
+  // escaped so a hand-edited name cannot leave the terminal in a state that
+  // carries into the notice below (#414).
   // @ref LLP 0437#server-name [implements]: the wizard's sign-in line reads as HypAware Cloud or the host, never the target key
   ctx.stdout.write(compact
     ? `✓ Signed in to ${serverDisplayName(entry.url)} as org '${session.org}'\n`
-    : `logged in to '${name}' as org '${session.org}'\n`)
+    : `logged in to '${escapeForDisplay(name)}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it

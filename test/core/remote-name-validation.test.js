@@ -123,6 +123,20 @@ test('a hand-configured legacy bad name still logs in, and the forwarding line d
   assert.doesNotMatch(text, /forwarding logs to the 'https:/)
 })
 
+test('a legacy name holding a terminal control reaches no terminal on the login path', async () => {
+  const legacy = 'a\u001b[8m'
+  const { ctx, out, err } = await makeCtx({ remotes: { [legacy]: { url: 'https://hyp.internal/mcp' } } })
+  const login = /** @type {any} */ (async () => ({
+    refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme',
+    gateway: { jwt: 'gw-jwt', expiresAt: 1_920_000_000, gatewayId: 'gw-1' },
+  }))
+  assert.equal(await runRemoteLogin([`--name=${legacy}`, '--no-daemon'], ctx, { login }), 0, err.join(''))
+  const text = out.join('')
+  assert.ok(!text.includes('\u001b'), 'no ESC on stdout')
+  assert.match(text, /logged in to 'a\\u001b\[8m' as org 'acme'/)
+  assert.match(text, /forwarding logs to your configured server\n/)
+})
+
 test('a hand-configured legacy bad name can still be removed', async () => {
   const legacy = 'prod\nforged'
   const { ctx, configPath } = await makeCtx({ remotes: { [legacy]: { url: 'https://hyp.internal/mcp' } } })
