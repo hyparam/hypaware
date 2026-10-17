@@ -94,14 +94,18 @@ export async function resolveRepos(config, client, log, observedRepos) {
  * @param {string[]} [args.only]  restrict to these repos (e.g. `hyp github backfill owner/repo`)
  * @param {string[]} [args.observedRepos] repositories evidenced by export-eligible local agent activity
  * @param {number} [args.requestLimit] test seam; production uses CAPTURE_REQUEST_LIMIT
- * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>} `repos` is the inventory this tick selected (after
+ * @param {AbortSignal} [args.signal] the invocation's stop. It ends the run,
+ *   not one repository: the result comes back `cancelled`, with the cursors
+ *   holding only progress whose rows landed and `next_repo` still naming the
+ *   repository it stopped in
+ * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, cancelled?: boolean, errors: Array<{ repo: string, error: string }> }>} `repos` is the inventory this tick selected (after
  *   `ignore[]` and any `only` narrowing); `visited` is how many of them the request
  *   budget let it reach. It is fewer only when the budget ran out before a repository
  *   the tick had not started: a budget spent inside the last one still reaches them
  *   all, so `pending` - not the gap between the two - is what reports bounded work
  *   remaining (LLP 0361#budget).
  */
-export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
+export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT, signal }) {
   if (mode === 'backfill' && only?.length) authorizeBackfill(cursors, only, config)
   const ignored = new Set(config.ignore.map((repo) => repo.toLowerCase()))
   // @ref LLP 0409#one-time-imports [implements]: unfinished explicit imports join this tick only; exclusions cancel eligibility
@@ -113,7 +117,13 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       delete cursor.work
     } else imports.push(repo)
   }
-  const inventory = mode === 'backfill' && only?.length ? [] : await resolveRepos(config, client, log, observedRepos)
+  let inventory
+  try {
+    inventory = mode === 'backfill' && only?.length ? [] : await resolveRepos(config, client, log, observedRepos)
+  } catch (err) {
+    if (!cancellation(err)) throw err
+    return { repos: 0, visited: 0, events: 0, requests: 0, pending: false, cancelled: true, errors: [] }
+  }
   let repos = [...new Set([...inventory, ...imports])].sort()
   // A positional `hyp github backfill owner/repo` narrows this one invocation.
   // The round-robin continuation is a property of the WHOLE inventory, so a
@@ -132,11 +142,16 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
   /** @type {Array<{ repo: string, error: string }>} */
   const errors = []
   let pending = false
+  let cancelled = false
   let visited = 0
 
   repos = rotateTo(repos, cursors.next_repo)
 
   for (let i = 0; i < repos.length; i++) {
+    if (signal?.aborted) {
+      cancelled = true
+      break
+    }
     if (budget.remaining === 0) {
       pending = true
       break
@@ -169,6 +184,15 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       if (!complete) pending = true
       else delete cursor.one_time_import
     } catch (err) {
+      // A stop is not this repository's failure: recording it and moving on
+      // would spend one more request and one more error per remaining
+      // repository. The rows already appended stay counted, and `next_repo` is
+      // left on this repository so the next run resumes its saved work first.
+      if (cancellation(err)) {
+        events += repoEvents
+        cancelled = true
+        break
+      }
       // A failed repo leaves durable work behind, but a failure is NOT bounded
       // backlog: `pending` drives the source's cadence, and treating an error
       // as pending pins a daily source at the 15-minute backlog cadence for as
@@ -220,14 +244,14 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
   }
 
   if (visited < repos.length) pending = true
-  if (budget.remaining === 0 && pending) {
+  if (budget.remaining === 0 && pending && !cancelled) {
     log.info('github.capture_budget_exhausted', {
       request_limit: budget.limit,
       requests: budget.used,
       pending_repos: repos.filter((repo) => cursors.repos[repo]?.work).length,
     })
   }
-  return { repos: repos.length, visited, events, requests: budget.used, pending, errors }
+  return { repos: repos.length, visited, events, requests: budget.used, pending, ...(cancelled ? { cancelled } : {}), errors }
 }
 
 /**
@@ -1005,6 +1029,11 @@ function rotateTo(repos, nextRepo) {
   if (!nextRepo) return repos
   const at = repos.indexOf(nextRepo)
   return at > 0 ? [...repos.slice(at), ...repos.slice(0, at)] : repos
+}
+
+/** @param {unknown} err */
+function cancellation(err) {
+  return /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind === 'github_capture_cancelled'
 }
 
 /**

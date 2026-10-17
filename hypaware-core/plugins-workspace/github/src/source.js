@@ -25,6 +25,9 @@ export async function startGithubSource() {
   let handle = null
   /** @type {Promise<unknown> | null} */
   let inFlight = null
+  /** The running tick's own stop; each tick gets a fresh one. */
+  /** @type {AbortController | null} */
+  let cancel = null
   /** @type {string | null} */
   let lastTickAt = null
   /** @type {string | null} */
@@ -44,10 +47,26 @@ export async function startGithubSource() {
   async function tick() {
     lastTickAt = new Date().toISOString()
     const started = Date.now()
+    const own = new AbortController()
+    cancel = own
     runtime.log.info('github.poll_tick_started', { operation: 'poll' })
     try {
-      const result = await runCaptureTick(runtime, { mode: 'poll' })
+      const result = await runCaptureTick(runtime, { mode: 'poll', signal: own.signal })
       rowsWritten += result.events
+      if (result.cancelled) {
+        // Stopped, not finished and not failed: no success, no error, and the
+        // backlog verdict is whatever durable state now says.
+        backlogPending = durablePending()
+        runtime.log.info('github.poll_tick_cancelled', {
+          operation: 'poll',
+          repos: result.repos,
+          repos_visited: result.visited,
+          events: result.events,
+          requests: result.requests,
+          duration_ms: Date.now() - started,
+        })
+        return
+      }
       // A tick's own `pending` is blind to work another process staged while
       // it ran, so the sidecar gets the first word.
       backlogPending = stagedImportPending() || result.pending
@@ -91,6 +110,8 @@ export async function startGithubSource() {
         error_kind: /** @type {any} */ (err)?.hypErrorKind ?? 'github_poll_failed',
         duration_ms: Date.now() - started,
       })
+    } finally {
+      if (cancel === own) cancel = null
     }
   }
 
@@ -216,8 +237,13 @@ export async function startGithubSource() {
       stopTimer()
       startTimer()
     },
+    // Bounded by the GitHub work in flight, not the tick: the abort ends the
+    // current request or body read at once and no further request is sent,
+    // while an append or projection already running is awaited, because
+    // teardown closes the storage it is writing.
     async stop() {
       stopTimer()
+      cancel?.abort()
       if (inFlight) await inFlight.catch(() => {})
     },
   }
