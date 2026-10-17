@@ -226,6 +226,11 @@ export interface ProxyOptions {
   upstreamProxy?: UpstreamProxy
   /** Agent that routes the intercepted upstream leg through {@link upstreamProxy}. */
   chainedAgent?: import('node:https').Agent
+  /**
+   * How long stop() lets an in-flight response finish before cutting it.
+   * A test seam, not a config key; defaults to `STOP_GRACE_MS`.
+   */
+  stopGraceMs?: number
   log?: {
     warn?(message: string, fields?: Record<string, unknown>): void
     info?(message: string, fields?: Record<string, unknown>): void

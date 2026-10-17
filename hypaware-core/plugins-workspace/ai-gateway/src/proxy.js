@@ -43,6 +43,15 @@ const HOP_BY_HOP_HEADERS = new Set([
 /** @type {WeakMap<CompiledUpstream[], CompiledUpstream[]>} */
 const aliasesByRoutingTable = new WeakMap()
 
+// How long stop() lets an in-flight response finish before it cuts every
+// connection. An SSE stream never ends on its own, so without a bound a
+// graceful stop waits for the client and the service manager SIGKILLs the
+// daemon instead (#610). Kept under the gateway's own 4 s forced-exit
+// deadline (src/core/daemon/gateway.js STOP_DEADLINE_MS) so the cut streams
+// still have time to finalize before the process goes.
+// @ref LLP 0038#lifecycle-and-operator-behavior [implements]: an indefinitely open stream cannot strand service restart
+export const STOP_GRACE_MS = 2_000
+
 /**
  * Start the HTTP proxy listener. Returns the bound host/port and a
  * `stop()` to close it. The proxy is purely a pass-through; observation
@@ -76,10 +85,22 @@ export async function startProxy(opts) {
   }
   /** @type {Set<Promise<void>>} */
   const pendingFinalizers = new Set()
+  // `stopping` is set when stop() begins, `cut` when its grace runs out and
+  // it closes every connection, so a stream ended by either is recorded as
+  // the gateway stopping rather than as the client walking away.
+  const lifecycle = { stopping: false, cut: false }
 
   const server = http.createServer((req, res) => {
-    handleRequest(upstreams, opts, pendingFinalizers, req, res)
+    res.once('finish', closeIdleIfStopping)
+    handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res)
   })
+  // A kept-alive socket whose response finishes while stop() drains goes idle
+  // and nothing closes it, so the stop would wait out the whole grace for a
+  // turn that already completed. Deferred a turn so Node has released the
+  // socket from the response first.
+  function closeIdleIfStopping() {
+    if (lifecycle.stopping) setImmediate(() => server.closeIdleConnections())
+  }
 
   // The second front door. Installed when proxy mode is serving, and also when
   // it merely *might* have a client pointed at it (`tunnelOnly`).
@@ -134,6 +155,9 @@ export async function startProxy(opts) {
 
   const address = server.address()
   const boundPort = address && typeof address === 'object' ? address.port : requestedPort
+  const graceMs = opts.stopGraceMs ?? STOP_GRACE_MS
+  /** @type {Promise<void> | undefined} */
+  let stopping
   return {
     host,
     port: boundPort,
@@ -142,16 +166,32 @@ export async function startProxy(opts) {
     // past `host`/`port`/`stop`.
     server,
     stopped,
-    async stop() {
-      // Destroy hijacked tunnel sockets first: `server.close()` stops
-      // accepting but waits on connections it knows about, and a CONNECT
-      // socket is no longer one of them. Without this, stop() blocks until
-      // every peer gives up.
-      frontDoor?.close()
-      await new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve(undefined)))
-      })
-      await Promise.allSettled(Array.from(pendingFinalizers))
+    stop() {
+      // One drain per proxy: a second or concurrent stop() waits on the first.
+      stopping ??= (async () => {
+        lifecycle.stopping = true
+        // Destroy hijacked tunnel sockets first: `server.close()` stops
+        // accepting but waits on connections it knows about, and a CONNECT
+        // socket is no longer one of them. Without this, stop() blocks until
+        // every peer gives up.
+        frontDoor?.close()
+        /** @type {ReturnType<typeof setTimeout> | undefined} */
+        let grace
+        await new Promise((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve(undefined)))
+          // Idle keep-alive sockets go now; a response still streaming gets
+          // the grace, then is cut so the close above can complete.
+          server.closeIdleConnections()
+          grace = setTimeout(() => {
+            lifecycle.cut = true
+            server.closeAllConnections()
+          }, graceMs)
+        }).finally(() => clearTimeout(grace))
+        // Every recorded exchange registered its settle promise when it was
+        // forwarded, so the streams cut above are in this snapshot too.
+        await Promise.allSettled(Array.from(pendingFinalizers))
+      })()
+      return stopping
     },
   }
 }
@@ -343,10 +383,11 @@ export function createChainedAgent(upstreamProxy) {
  * @param {CompiledUpstream[]} upstreams
  * @param {ProxyOptions} opts
  * @param {Set<Promise<void>>} pendingFinalizers
+ * @param {{ stopping: boolean, cut: boolean }} lifecycle
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
-function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
+function handleRequest(upstreams, opts, pendingFinalizers, lifecycle, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
 
@@ -548,21 +589,23 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   let upstreamEnded = false
   let failed = false
   let finalized = false
+  /** @type {() => void} */
+  let settle = () => {}
   function finalizeOnce() {
     if (finalized) return
     finalized = true
     // A pass-through exchange produced no row and was never handed to the
     // recorder, so there is nothing to settle.
-    if (!recording || ('recording' in exchange && exchange.recording === false)) return
+    if (!recording || ('recording' in exchange && exchange.recording === false)) {
+      settle()
+      return
+    }
     // The guard above is the narrowing: only a real recorder exchange reaches
     // here, so the null stand-in is never handed to the settle path.
     const recorded = /** @type {Exchange} */ (exchange)
-    const pending = Promise.resolve(opts.onExchangeFinished(recorded))
+    Promise.resolve(opts.onExchangeFinished(recorded))
       .catch(() => undefined)
-      .finally(() => {
-        pendingFinalizers.delete(pending)
-      })
-    pendingFinalizers.add(pending)
+      .finally(settle)
   }
 
   const upstreamReq = lib.request({
@@ -596,6 +639,17 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     })
     upstreamRes.pipe(res)
   })
+  // Registered as soon as the exchange is forwarded, not when it finalizes,
+  // so a stop() that snapshots the set while a cut stream is still closing
+  // waits for that stream's row too.
+  if (recording) {
+    const pending = new Promise((resolve) => {
+      settle = () => resolve(undefined)
+    }).then(() => {
+      pendingFinalizers.delete(pending)
+    })
+    pendingFinalizers.add(pending)
+  }
 
   upstreamReq.on('error', (err) => {
     failed = true
@@ -622,7 +676,10 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   res.on('close', () => {
     if (!failed && !upstreamReq.destroyed) upstreamReq.destroy()
     if (!finalized && !upstreamEnded) {
-      exchange.setError('client_aborted')
+      // A tunnel socket is destroyed the moment stop() begins; any other
+      // connection only when the stop grace ran out.
+      const byStop = lifecycle.cut || (proxyMode && lifecycle.stopping)
+      exchange.setError(byStop ? 'gateway_stopped' : 'client_aborted')
       finalizeOnce()
     }
   })
