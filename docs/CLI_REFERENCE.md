@@ -251,9 +251,9 @@ Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
 case-insensitive substring by default, or a regular expression with `--regex`.
 Hits arrive newest first, one row per matched column, each carrying
 `session_id`, `message_id`, and `part_id` locators you can pivot into
-`hyp query sql`. The default limit is `50` and the ceiling is `1000`: a larger
-value clamps to the ceiling, and a value the flag cannot use at all (`0`,
-negative, fractional) is a usage error rather than a quiet 50.
+`hyp query sql`. The default limit is `50` and the ceiling is `1000`. A larger
+value is a usage error naming the maximum, not a quiet 1000, and so is a value
+the flag cannot use at all (`0`, negative, fractional) rather than a quiet 50.
 
 Only these columns are searched: `content_text`, `tool_name`, `session_id`,
 `conversation_id`, `agent_id`, `model`, `cwd`, `git_branch`, `git_remote`. Zero
