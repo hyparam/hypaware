@@ -1,3 +1,5 @@
+import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+
 /**
  * Row and watermark shapes for the `@hypaware/hermes` adapter's reader
  * (`src/state_db.js`). Column sets mirror hermes's own `state.db` schema as
@@ -130,6 +132,15 @@ export interface HermesSessionSnapshot {
   messages: HermesMessageRow[]
   /** The mark of exactly this view; the watermark advances to it only after its reconcile commits. */
   mark: HermesChangedSession
+}
+
+/** One session the poll tick admitted to its batch (LLP 0527#tick-budget). */
+export interface HermesBatchEntry {
+  session_id: string | number
+  /** The mark of the view read; set in the watermark only once the batch committed it. */
+  mark: HermesChangedSession
+  /** The scoped snapshot still to reconcile; absent when the session needs no cache commit. */
+  snapshot?: { rows: Record<string, unknown>[]; scope: { where: Record<string, string>; key: string }; columns: ColumnSpec[] }
 }
 
 /** Options accepted by `state_db.js`'s bounded SQLITE_BUSY retry. */

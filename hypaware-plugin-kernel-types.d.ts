@@ -1840,6 +1840,14 @@ export interface QueryStorageService {
   /** Reconcile a complete scoped snapshot, including removals, in the local cache. */
   reconcileRows?(dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[], scope: { where: Record<string, string>; key: string }): Promise<number>
   /**
+   * Reconcile a batch of complete scoped snapshots of one dataset in one pass:
+   * partitions are discovered, guarded and committed once for the batch, and
+   * each scope settles exactly as a lone `reconcileRows` would. Every scope
+   * names the same `where` columns and key; no two are equal. Returns the rows
+   * written across the batch.
+   */
+  reconcileRowsBatch?(dataset: string, columns: ColumnSpec[], snapshots: { rows: Record<string, unknown>[]; scope: { where: Record<string, string>; key: string } }[]): Promise<number>
+  /**
    * Claim the cross-process guard for one reconcile scope (`client_name` and
    * `session_id` required). Hold it from the authoritative source read
    * through `reconcileRows`, then call the returned release. Throws an error

@@ -11,9 +11,9 @@ import {
   createHermesPollRunner,
   runHermesPollTick,
   startHermesSource,
-  WATERMARK_FLUSH_SESSIONS,
+  HERMES_SESSIONS_PER_TICK,
 } from '../../hypaware-core/plugins-workspace/hermes/src/source.js'
-import { readHermesWatermark } from '../../hypaware-core/plugins-workspace/hermes/src/watermark.js'
+import { readHermesWatermark, writeHermesWatermark } from '../../hypaware-core/plugins-workspace/hermes/src/watermark.js'
 import { mintHermesSessionEndId } from '../../hypaware-core/plugins-workspace/hermes/src/projector.js'
 import { AI_GATEWAY_MESSAGES_DATASET, PROJECTED_EXCHANGE_KIND } from '../../src/core/backfill/scan_util.js'
 import { AI_GATEWAY_MESSAGE_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
@@ -136,12 +136,19 @@ function endSession(db, opts) {
 // materializer's dedupe scan sees them on a later tick.
 // ---------------------------------------------------------------------------
 
-/** @param {((sessionId: unknown) => void) | undefined} [beforeReconcile] @returns {{ storage: any, appended: Array<{ rows: Record<string, unknown>[] }> } } */
-function createFakeStorage(beforeReconcile) {
+/**
+ * @param {((sessionId: unknown) => void) | undefined} [beforeReconcile]
+ * @param {((sessionIds: unknown[]) => void) | undefined} [beforeBatch] given, the storage also offers `reconcileRowsBatch` and the scope guard
+ * @returns {{ storage: any, appended: Array<{ rows: Record<string, unknown>[] }>, held: Set<string> }}
+ */
+function createFakeStorage(beforeReconcile, beforeBatch) {
   /** @type {Record<string, unknown>[]} */
   const committedRows = []
   /** @type {Array<{ rows: Record<string, unknown>[] }>} */
   const appended = []
+  /** @type {Set<string>} */
+  const held = new Set()
+  /** @type {any} */
   const storage = {
     async reconcileRows(_dataset, _columns, rows, scope) {
       beforeReconcile?.(scope.where.session_id)
@@ -165,11 +172,27 @@ function createFakeStorage(beforeReconcile) {
       for (const row of committedRows) yield row
     },
   }
-  return { storage, appended }
+  if (beforeBatch) {
+    storage.claimReconcileScope = (_dataset, where) => {
+      if (held.has(where.session_id)) {
+        throw Object.assign(new Error('scope busy'), { error_kind: 'cache_partition_mutation_busy' })
+      }
+      held.add(where.session_id)
+      return () => { held.delete(where.session_id) }
+    }
+    storage.reconcileRowsBatch = async (dataset, columns, snapshots) => {
+      beforeBatch(snapshots.map(snapshot => snapshot.scope.where.session_id))
+      let written = 0
+      for (const { rows, scope } of snapshots) written += await storage.reconcileRows(dataset, columns, rows, scope)
+      return written
+    }
+  }
+  return { storage, appended, held }
 }
 
 /**
- * @param {{ stateDbPath: string, stateDir: string, pollInterval?: string, beforeReconcile?: (sessionId: unknown) => void }} opts
+ * @param {{ stateDbPath: string, stateDir: string, pollInterval?: string, beforeReconcile?: (sessionId: unknown) => void,
+ *   beforeBatch?: (sessionIds: unknown[]) => void }} opts
  */
 function makeCtx(opts) {
   /** @type {Array<{ level: string, message: string, fields?: Record<string, unknown> }>} */
@@ -180,7 +203,7 @@ function makeCtx(opts) {
     warn(message, fields) { logs.push({ level: 'warn', message, fields }) },
     error(message, fields) { logs.push({ level: 'error', message, fields }) },
   }
-  const { storage, appended } = createFakeStorage(opts.beforeReconcile)
+  const { storage, appended, held } = createFakeStorage(opts.beforeReconcile, opts.beforeBatch)
   const materializer = aiGatewayBackfillMaterializer()
   const materializers = new Map([[PROJECTED_EXCHANGE_KIND, materializer]])
 
@@ -200,7 +223,7 @@ function makeCtx(opts) {
       get(kind) { return materializers.get(kind) },
     },
   })
-  return { ctx, logs, appended }
+  return { ctx, logs, appended, held }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,11 +446,11 @@ test('a session that fails mid-tick persists the sessions reconciled before it, 
   assert.deepEqual(Object.keys(readHermesWatermark(dir)).sort(), ['1', '2', '3'])
 })
 
-test('the watermark is flushed inside the loop, not only when the loop ends', async () => {
+test('a tick persists its watermark once its batch commits, so a restart repeats nothing it finished', async () => {
   const dir = await tmpDir()
   const stateDbPath = path.join(dir, 'state.db')
   const db = createFixtureSchema(stateDbPath)
-  const total = WATERMARK_FLUSH_SESSIONS + 2
+  const total = HERMES_SESSIONS_PER_TICK + 2
   for (let id = 1; id <= total; id++) {
     insertSession(db, { id, cwd: `/home/dev/p${id}` })
     insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
@@ -436,22 +459,28 @@ test('the watermark is flushed inside the loop, not only when the loop ends', as
 
   /** @type {number | null} */
   let onDiskAtLastSession = null
-  const { ctx } = makeCtx({
+  const { ctx, logs } = makeCtx({
     stateDbPath,
     stateDir: dir,
     beforeReconcile(sessionId) {
-      // While the loop is still running its final session, a full batch is
-      // already durable: a hard crash here would not repeat those sessions.
+      // The second tick is reconciling the last session: the first tick's
+      // whole batch is already durable, so a hard crash here repeats none of it.
       if (sessionId === `hermes-${total}`) onDiskAtLastSession = Object.keys(readHermesWatermark(dir)).length
     },
   })
 
   const runner = createHermesPollRunner(ctx)
   await runHermesPollTick(runner, ctx)
-
   assert.equal(runner.lastError, undefined)
-  assert.equal(onDiskAtLastSession, WATERMARK_FLUSH_SESSIONS, 'one flush per completed batch, mid-loop')
-  assert.equal(Object.keys(readHermesWatermark(dir)).length, total, 'the trailing partial batch is flushed once the loop ends')
+  assert.equal(Object.keys(readHermesWatermark(dir)).length, HERMES_SESSIONS_PER_TICK, 'the first batch is flushed when its tick ends')
+  assert.equal(runner.sessionsPending, 2, 'the sessions past the budget wait for the next tick')
+  const first = logs.find((entry) => entry.message === 'hermes.poll_tick')
+  assert.equal(first?.fields?.sessions_pending, 2)
+
+  await runHermesPollTick(runner, ctx)
+  assert.equal(onDiskAtLastSession, HERMES_SESSIONS_PER_TICK, 'one flush per committed batch')
+  assert.equal(Object.keys(readHermesWatermark(dir)).length, total, 'the second batch is flushed once it commits')
+  assert.equal(runner.sessionsPending, 0)
 })
 
 test('a sidecar write that fails while degrading does not replace the error that caused the degrade', async () => {
@@ -500,14 +529,14 @@ test('a sidecar write that fails while degrading does not replace the error that
 })
 
 // ---------------------------------------------------------------------------
-// The batch-boundary flush is a write step, not a reconcile (issue #2304)
+// The per-batch flush is a write step, not a reconcile (issue #2304)
 // ---------------------------------------------------------------------------
 
 test('an in-loop flush failure names the write, never a session whose reconcile completed', async () => {
   const dir = await tmpDir()
   const stateDbPath = path.join(dir, 'state.db')
   const db = createFixtureSchema(stateDbPath)
-  const total = WATERMARK_FLUSH_SESSIONS + 6
+  const total = HERMES_SESSIONS_PER_TICK + 6
   for (let id = 1; id <= total; id++) {
     insertSession(db, { id, cwd: `/home/dev/p${id}` })
     insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
@@ -516,15 +545,15 @@ test('an in-loop flush failure names the write, never a session whose reconcile 
 
   // A state dir under a regular file makes every watermark write throw
   // ENOTDIR. No reconcile is rigged to fail, so the only thing that can throw
-  // inside the loop is the batch-boundary flush after session
-  // WATERMARK_FLUSH_SESSIONS, whose own reconcile has already committed.
+  // is the flush after the tick's batch of HERMES_SESSIONS_PER_TICK sessions,
+  // whose reconciles have already committed.
   const unwritable = path.join(stateDbPath, 'unwritable')
   const { ctx, logs, appended } = makeCtx({ stateDbPath, stateDir: unwritable })
 
   const runner = createHermesPollRunner(ctx)
   await runHermesPollTick(runner, ctx)
 
-  assert.equal(appended.length, WATERMARK_FLUSH_SESSIONS, 'every session the loop reached reconciled, the boundary one included')
+  assert.equal(appended.length, HERMES_SESSIONS_PER_TICK, 'every session the batch admitted reconciled')
   assert.match(String(runner.lastError), /ENOTDIR/, 'the write error is what degrades the runner')
 
   assert.equal(
@@ -543,11 +572,11 @@ test('an in-loop flush failure names the write, never a session whose reconcile 
   assert.ok(pollFailed, 'the tick degrades')
   assert.match(String(pollFailed.fields?.error), /ENOTDIR/, 'the original error survives to the tick record')
 
-  // Suppression is scoped to the flush, not to the record: the sessions the
-  // aborted loop never reached are still changed, and a real failure among
+  // Suppression is scoped to the flush, not to the record: the sessions past
+  // the budget are still changed, and a real failure among
   // them on the next tick still names its session.
   const boom = new Error('reconcile exploded')
-  const failingId = WATERMARK_FLUSH_SESSIONS + 2
+  const failingId = HERMES_SESSIONS_PER_TICK + 2
   const { ctx: nextCtx, logs: nextLogs } = makeCtx({
     stateDbPath,
     stateDir: unwritable,
@@ -562,7 +591,7 @@ test('an in-loop flush failure names the write, never a session whose reconcile 
   assert.ok(partial, 'a genuine reconcile failure still reports on a later tick')
   assert.equal(partial.fields?.session_id, String(failingId))
   assert.equal(partial.fields?.status, 'partial')
-  assert.equal(partial.fields?.sessions_examined, total - WATERMARK_FLUSH_SESSIONS)
+  assert.equal(partial.fields?.sessions_examined, total - HERMES_SESSIONS_PER_TICK)
 })
 
 test('a trailing flush failure after a healthy loop reports the write, not a reconcile', async () => {
@@ -575,7 +604,7 @@ test('a trailing flush failure after a healthy loop reports the write, not a rec
   }
   db.close()
 
-  // Under WATERMARK_FLUSH_SESSIONS changed sessions, so the loop completes and
+  // Under HERMES_SESSIONS_PER_TICK changed sessions, so the batch commits and
   // only the flush after it throws.
   const { ctx, logs, appended } = makeCtx({ stateDbPath, stateDir: path.join(stateDbPath, 'unwritable') })
 
@@ -592,4 +621,166 @@ test('a trailing flush failure after a healthy loop reports the write, not a rec
   const pollFailed = logs.find((entry) => entry.message === 'hermes.poll_failed')
   assert.ok(pollFailed, 'the write failure reaches the tick record')
   assert.match(String(pollFailed.fields?.error), /ENOTDIR/)
+})
+
+// ---------------------------------------------------------------------------
+// Budgeted batches (issue #2279)
+// ---------------------------------------------------------------------------
+
+/**
+ * A store of `count` one-message sessions whose persisted marks predate
+ * fingerprints, so the LLP 0449 upgrade flags every one of them at once.
+ * @param {string} dir
+ * @param {number} count
+ */
+async function seedLegacyFlaggedStore(dir, count) {
+  const stateDbPath = path.join(dir, 'state.db')
+  const db = createFixtureSchema(stateDbPath)
+  /** @type {Record<string, { max_message_id: number, ended_at: null }>} */
+  const legacy = {}
+  for (let id = 1; id <= count; id++) {
+    insertSession(db, { id, cwd: `/home/dev/p${id}` })
+    insertMessage(db, { id: id * 10, sessionId: id, role: 'user', content: `hello ${id}` })
+    legacy[String(id)] = { max_message_id: id * 10, ended_at: null }
+  }
+  db.close()
+  writeHermesWatermark(dir, legacy)
+  return stateDbPath
+}
+
+/** @param {string} dir */
+function fingerprinted(dir) {
+  return Object.values(readHermesWatermark(dir)).filter((mark) => mark.fingerprint).length
+}
+
+/**
+ * @ref LLP 0527#tick-budget [tests]: start returns after one budgeted batch
+ *   and catch-up ticks reconcile the rest.
+ */
+test('with many legacy-flagged sessions, start returns after one budgeted batch and catch-up ticks finish the rest', async () => {
+  const dir = await tmpDir()
+  const total = HERMES_SESSIONS_PER_TICK * 2 + 5
+  const stateDbPath = await seedLegacyFlaggedStore(dir, total)
+
+  /** @type {number[]} */
+  const batchSizes = []
+  /** @type {number[]} */
+  const persistedBeforeBatch = []
+  const { ctx } = makeCtx({
+    stateDbPath,
+    stateDir: dir,
+    // Long enough that only catch-up ticks can run inside this test.
+    pollInterval: '5m',
+    beforeBatch(sessionIds) {
+      batchSizes.push(sessionIds.length)
+      persistedBeforeBatch.push(fingerprinted(dir))
+    },
+  })
+
+  const source = await startHermesSource(ctx)
+  try {
+    assert.deepEqual(batchSizes, [HERMES_SESSIONS_PER_TICK], 'start waits for one batch, not the whole history')
+    assert.equal(fingerprinted(dir), HERMES_SESSIONS_PER_TICK, 'the first batch is durable when start returns')
+
+    const deadline = Date.now() + 10_000
+    while (fingerprinted(dir) < total && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(fingerprinted(dir), total, 'catch-up ticks reconcile every remaining session')
+    assert.deepEqual(batchSizes, [HERMES_SESSIONS_PER_TICK, HERMES_SESSIONS_PER_TICK, 5])
+    assert.deepEqual(persistedBeforeBatch, [0, HERMES_SESSIONS_PER_TICK, HERMES_SESSIONS_PER_TICK * 2],
+      'each batch persists its watermark before the next batch begins')
+    assert.equal((await source.status?.())?.state, 'ready')
+  } finally {
+    await source.stop()
+  }
+})
+
+test('a kill between batches resumes from the persisted watermark with no session skipped or reconciled twice', async () => {
+  const dir = await tmpDir()
+  const total = HERMES_SESSIONS_PER_TICK * 2 + 5
+  const stateDbPath = await seedLegacyFlaggedStore(dir, total)
+
+  /** @type {unknown[]} */
+  const reconciled = []
+  const opts = { stateDbPath, stateDir: dir, beforeBatch: (/** @type {unknown[]} */ ids) => { reconciled.push(...ids) } }
+
+  // Each runner below is a fresh process: it knows only what reached disk.
+  for (let tick = 1; tick <= 3; tick++) {
+    const { ctx } = makeCtx(opts)
+    const runner = createHermesPollRunner(ctx)
+    await runHermesPollTick(runner, ctx)
+    assert.equal(runner.lastError, undefined)
+    runner.db?.close()
+  }
+
+  const expected = Array.from({ length: total }, (_, index) => `hermes-${index + 1}`)
+  assert.deepEqual(reconciled, expected, 'every session exactly once, in order, across three restarts')
+  assert.equal(fingerprinted(dir), total)
+})
+
+/**
+ * @ref LLP 0449#read-commit-guard [tests]: every claim in a batch is held
+ *   from its read through the batch commit.
+ */
+test('every session in a batch keeps its scope claim through the batch commit, and a busy scope is deferred outside the budget', async () => {
+  const dir = await tmpDir()
+  const total = HERMES_SESSIONS_PER_TICK + 3
+  const stateDbPath = await seedLegacyFlaggedStore(dir, total)
+
+  /** @type {unknown[][]} */
+  const batches = []
+  /** @type {Set<string>} */
+  let held = new Set()
+  const made = makeCtx({
+    stateDbPath,
+    stateDir: dir,
+    beforeBatch(sessionIds) {
+      batches.push(sessionIds)
+      for (const id of sessionIds) assert.ok(held.has(String(id)), `${id} is still claimed at commit`)
+    },
+  })
+  held = made.held
+  const { ctx, logs } = made
+
+  // Another writer holds session 2's scope for the whole first tick.
+  const release = ctx.storage.claimReconcileScope(AI_GATEWAY_MESSAGES_DATASET, { client_name: 'hermes', session_id: 'hermes-2' })
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+  release()
+
+  assert.equal(runner.lastError, undefined)
+  assert.equal(batches[0].length, HERMES_SESSIONS_PER_TICK, 'the deferred session does not use up a budget slot')
+  assert.ok(!batches[0].includes('hermes-2'))
+  assert.equal(held.size, 0, 'every claim is released once the batch commits')
+  assert.equal(readHermesWatermark(dir)['2'].fingerprint, undefined, 'the deferred session keeps its old mark')
+  const tick = logs.find((entry) => entry.message === 'hermes.poll_tick')
+  assert.equal(tick?.fields?.sessions_deferred, 1)
+  assert.equal(tick?.fields?.sessions_pending, 2)
+
+  await runHermesPollTick(runner, ctx)
+  assert.deepEqual(batches[1], ['hermes-2', `hermes-${total - 1}`, `hermes-${total}`])
+  assert.equal(fingerprinted(dir), total)
+})
+
+test('a batch commit that fails is retried a session at a time, so the session that broke is named and only it and later ones wait', async () => {
+  const dir = await tmpDir()
+  const stateDbPath = await seedLegacyFlaggedStore(dir, 4)
+
+  const { ctx, logs } = makeCtx({
+    stateDbPath,
+    stateDir: dir,
+    beforeBatch() { throw new Error('batch exploded') },
+    beforeReconcile(sessionId) {
+      if (sessionId === 'hermes-3') throw new Error('session 3 exploded')
+    },
+  })
+  const runner = createHermesPollRunner(ctx)
+  await runHermesPollTick(runner, ctx)
+
+  assert.equal(runner.lastError, 'session 3 exploded')
+  assert.ok(logs.find((entry) => entry.message === 'hermes.batch_reconcile_failed'), 'the failed batch is recorded')
+  const partial = logs.find((entry) => entry.message === 'hermes.session_reconcile_failed')
+  assert.equal(partial?.fields?.session_id, '3')
+  assert.equal(partial?.fields?.sessions_persisted, 2)
+  const marks = readHermesWatermark(dir)
+  assert.deepEqual([1, 2, 3, 4].map((id) => Boolean(marks[String(id)].fingerprint)), [true, true, false, false])
 })

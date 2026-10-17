@@ -22,7 +22,7 @@ import {
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createIngestSeqAllocator } from './ingest-seq.js'
-import { claimReconcileScope as claimReconcileScopeImpl, reconcileCacheRows } from './reconcile.js'
+import { claimReconcileScope as claimReconcileScopeImpl, reconcileCacheRows, reconcileCacheSnapshots } from './reconcile.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
@@ -328,6 +328,17 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         entrypointColumn === undefined ? undefined : row[entrypointColumn]
       ) === true
     return withholdRow ? 'source' : undefined
+  }
+
+  /**
+   * Drain legacy captured rows before reconciling them, so they cannot
+   * reappear on the next flush. New snapshot writes bypass the spool.
+   * @param {string} dataset
+   */
+  async function drainSpoolForReconcile(dataset) {
+    for (const table of await discoverSpoolTables(cacheRoot)) {
+      if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
+    }
   }
 
   /** @type {ExtendedQueryStorageService} */
@@ -693,12 +704,15 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     },
 
     async reconcileRows(dataset, columns, rows, scope) {
-      // Drain legacy captured rows before reconciling them, so they cannot
-      // reappear on the next flush. New snapshot writes bypass the spool.
-      for (const table of await discoverSpoolTables(cacheRoot)) {
-        if (datasetForTablePath(cacheRoot, table) === dataset) await service.flushTable(table, { force: true })
-      }
+      await drainSpoolForReconcile(dataset)
       return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
+        declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
+    },
+
+    async reconcileRowsBatch(dataset, columns, snapshots) {
+      if (!snapshots.length) return 0
+      await drainSpoolForReconcile(dataset)
+      return reconcileCacheSnapshots({ cacheRoot, dataset, columns, snapshots,
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
     },
 
