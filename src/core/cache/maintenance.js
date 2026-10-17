@@ -727,7 +727,8 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // generation rewrite every tick, forever, and with no schema in
             // hand the replacement generation is written with no partition
             // spec at all. Defer instead, and let a tick that can read the
-            // metadata do it; `--force` still rewrites.
+            // metadata do it. `--force` skips the deferral but not the
+            // refusal below, so a forced tick fails the partition instead.
             if (!opts.force && lockedRepartitionDue && declaration && !targetLayout) {
               repartitionDeferred = true
               // Deferring the migration must not also stop the partition
@@ -745,6 +746,24 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
                 if (inPlace !== 'settle-required') return inPlace
               }
               return null
+            }
+            // A published source table's replacement must keep the schema,
+            // partition spec and sort order its metadata records. Without
+            // that metadata `compactGeneration` would infer columns from the
+            // rows and publish a generation with no partition spec, which
+            // the next declaration-carrying append rejects (#1023). `--force`
+            // overrides the dueness heuristics, not this. Nothing has been
+            // reserved or written yet, so the live generation and its cursor
+            // stay as they were and a tick that can read the metadata
+            // rewrites it. The legacy epoch layout is exempt: its lack of a
+            // spec is established by the layout, not inferred from a failed
+            // read.
+            // @ref LLP 0220#walk-survives-a-partition [constrained-by]: the refusal fails this partition, and the walk moves on.
+            if (lockedLayout.kind === 'source-table' && !lockedTableInfo?.schemaColumns && tableExists(lockedLiveDir)) {
+              throw Object.assign(
+                new Error(`refusing to rewrite ${lockedLayout.liveDir}: its table metadata is unreadable, so the replacement could not keep the recorded schema, partition spec and sort order`),
+                { errorKind: 'compaction_metadata_unavailable' }
+              )
             }
             repartitionApplied = targetLayout !== undefined
             return compactGeneration(r.path, lockedLayout, cfg, settle, lockedTableInfo, targetLayout)
@@ -1087,8 +1106,9 @@ async function liveTableStats(tableDir) {
  * rewrite share: the current schema and partition spec (carried into the
  * replacement generation), the declared default sort order, and the raw
  * metadata for snapshot inspection. Loaded once per compaction-due
- * partition; null when the metadata is unreadable, in which case the
- * rewrite falls back to inferring the schema from scanned rows.
+ * partition; null when the metadata is unreadable, in which case a
+ * source-table rewrite is refused and only the legacy epoch layout falls
+ * back to inferring the schema from scanned rows.
  *
  * @param {string} tableDir
  * @returns {Promise<{
