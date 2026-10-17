@@ -43,10 +43,11 @@ import { createActivationContext, createKernelRuntime } from './activation.js'
  * @param {KernelRuntime} [args.runtime]          Override the kernel runtime (tests).
  * @param {string} [args.tmpRoot]                 Override the OS temp root (tests).
  * @param {NodeJS.ProcessEnv} [args.env]          Environment each activation context sees; defaults to `process.env`.
+ * @param {boolean} [args.preview]                A preview boot: durable plugin dirs are not created and each context says so.
  * @returns {Promise<{ runtime: KernelRuntime, results: ActivationResult[] }>}
  * @ref LLP 0008#consequences [implements]: loads each plugin only through its single manifest entrypoint, never a deep import
  */
-export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpRoot, env }) {
+export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpRoot, env, preview }) {
   if (!Array.isArray(plugins)) throw new Error('activatePlugins: plugins must be an array')
   if (!stateRoot) throw new Error('activatePlugins: stateRoot is required')
   if (!runId) throw new Error('activatePlugins: runId is required')
@@ -75,6 +76,7 @@ export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpR
         stateRoot,
         runId,
         tmpRoot,
+        preview,
       })
       const ctx = createActivationContext({
         runtime: kernel,
@@ -82,6 +84,7 @@ export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpR
         paths,
         config,
         env,
+        preview,
       })
 
       await withSpan(

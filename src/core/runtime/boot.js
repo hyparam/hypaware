@@ -348,6 +348,7 @@ export async function bootKernel(opts = {}) {
         runtime,
         tmpRoot: opts.tmpRoot,
         env: { ...env, HYP_HOME: hypHome },
+        preview: opts.preview,
       })
 
       const activePlugins = result.results

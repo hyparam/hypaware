@@ -40,10 +40,11 @@ import path from 'node:path'
  * @param {string}     args.stateRoot   Kernel state root (e.g. `<HYP_HOME>/hypaware`).
  * @param {string}     args.runId       Kernel boot identifier (DEV_RUN_ID or similar).
  * @param {string}     [args.tmpRoot]   Override the OS temp root (tests).
+ * @param {boolean}    [args.preview]   Resolve `stateDir`/`cacheDir` without creating them.
  * @returns {Promise<PluginPaths>}
  * @ref LLP 0004#state-directories [implements]: kernel-owned scoped per-plugin dirs; plugins never reach into each other's
  */
-export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId, tmpRoot }) {
+export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId, tmpRoot, preview }) {
   if (!pluginName) throw new Error('createPluginPaths: pluginName is required')
   if (!rootDir) throw new Error('createPluginPaths: rootDir is required')
   if (!stateRoot) throw new Error('createPluginPaths: stateRoot is required')
@@ -60,9 +61,16 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   // var into an arbitrary recursive delete.
   const intendedTempDir = path.join(tempBase, `${sanitizeTempSegment(pluginName)}-${sanitizeTempSegment(runId)}`)
 
+  // A preview boot (`hyp setup --dry-run`) must leave the user's state root
+  // as it found it, so the two durable dirs are named but not created. The
+  // temp dir below is still made: it is outside the state root and the boot
+  // that owns it reclaims it at teardown.
+  // @ref LLP 0525#preview-boot [implements]: a preview boot resolves the durable plugin dirs without creating them
   await Promise.all([
-    fs.mkdir(stateDir, { recursive: true }),
-    fs.mkdir(cacheDir, { recursive: true }),
+    ...(preview ? [] : [
+      fs.mkdir(stateDir, { recursive: true }),
+      fs.mkdir(cacheDir, { recursive: true }),
+    ]),
     fs.mkdir(tempBase, { recursive: true }),
   ])
 
@@ -117,12 +125,13 @@ export async function reclaimPluginTempDirs(tempDirs) {
  * The durable per-plugin state directory, `<stateRoot>/plugins/<name>`, without
  * creating it.
  *
- * `createPluginPaths` is the activation-time path: it mkdirs all four dirs and
- * hands the bag to the plugin. The kernel sometimes needs to *read* a plugin's
- * durable state outside activation (the `hyp sync` consent preview reads a sink
- * instance's watermarks to say how much is queued), and creating directories as
- * a side effect of a read is the wrong shape for a `--dry-run`. Same join, one
- * source of truth, no mkdir.
+ * `createPluginPaths` is the activation-time path: it mkdirs the dirs (all but
+ * the durable two on a preview boot) and hands the bag to the plugin. The
+ * kernel sometimes needs to *read* a plugin's durable state outside
+ * activation (the `hyp sync` consent preview reads a sink instance's
+ * watermarks to say how much is queued), and creating directories as a side
+ * effect of a read is the wrong shape for a `--dry-run`. Same join, one source
+ * of truth, no mkdir.
  *
  * @ref LLP 0004#state-directories [constrained-by]: the kernel owns the layout, so a kernel-side reader derives the path here instead of re-guessing it
  * @param {string} stateRoot Kernel state root (e.g. `<HYP_HOME>/hypaware`).

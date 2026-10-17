@@ -694,6 +694,14 @@ export interface PluginActivationContext {
    * and rollback.
    */
   configControl?: ConfigControlFacade
+  /**
+   * Present, and `true`, only when the boot serves a preview
+   * (`hyp setup --dry-run`). The kernel has resolved `paths.stateDir` and
+   * `paths.cacheDir` without creating them, and `activate` must not create
+   * or change persistent state either: register and provide as usual, but
+   * leave directories and files on disk for a real boot to make (LLP 0525).
+   */
+  preview?: true
   requireCapability<T = unknown>(name: CapabilityName, range?: SemverRange): T
   provideCapability<T = unknown>(name: CapabilityName, version: SemverVersion, value: T): void
 }
