@@ -697,21 +697,25 @@ export async function runPluginUpdate(argv, ctx) {
   // No target: keep the "refresh update-check state for all" behavior so
   // users still have a way to recompute `outdated` without re-installing.
   const { checkForPluginUpdate } = await import('../plugin_install/update_check.js')
-  const { writeLock } = await import('../plugin_install/lock.js')
+  const { readLockKeyLines, writeLock } = await import('../plugin_install/lock.js')
   const lock = await loadLock(stateDir)
   // Best effort over a hand-editable file (issue #2120): refresh the rows the
   // probe can read, keep every other row exactly as found, and keep the map
   // key as the row's identity, so a row with no `name`, or a `name` that
   // disagrees with its key, can never be written back under a second key.
-  // Skipped rows are named by position, not by their untrusted key.
+  // Skipped rows are named by their line in the file, not by their untrusted
+  // key, read from the raw text only once a row is skipped (as #2115 does).
   let refreshed = 0
-  const keys = Object.keys(lock.plugins)
-  for (let i = 0; i < keys.length; i++) {
-    const key = keys[i]
+  /** @type {Map<string, number> | undefined} */
+  let keyLines
+  for (const key of Object.keys(lock.plugins)) {
     const entry = /** @type {unknown} */ (lock.plugins[key])
     const skip = updateRefreshSkipReason(key, entry)
     if (skip) {
-      ctx.stderr.write(`hyp plugin update: skipped entry ${i + 1} in ${pluginLockPath(stateDir)}: ${skip}\n`)
+      keyLines ??= await readLockKeyLines(stateDir)
+      const line = keyLines.get(key)
+      const row = line === undefined ? 'an entry' : `the entry on line ${line}`
+      ctx.stderr.write(`hyp plugin update: skipped ${row} of ${pluginLockPath(stateDir)}: ${skip}\n`)
       continue
     }
     const row = /** @type {PluginLockEntry} */ (entry)
