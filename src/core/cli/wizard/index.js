@@ -98,13 +98,6 @@ import { offerWizardGithub, connectWizardGithub } from './github.js'
  * @returns {Promise<InitWizardResult>}
  */
 export async function runInitWizard(opts) {
-  // Dispatch refuses an unsupported platform before the boot (#975); this
-  // covers a direct call, before any lane can sign in, enroll or write.
-  const unsupported = setupUnsupportedNote(/** @type {NodeJS.Platform} */ (opts.platform ?? process.platform))
-  if (unsupported !== undefined) {
-    opts.stderr.write(unsupported)
-    return { exitCode: 1 }
-  }
   // The stream guard (LLP 0341): wrapped once, before any lane runs, so
   // no narration or warning can crash the run - a dying stream is
   // recorded here and acted on at the boundaries below, never thrown.
@@ -131,6 +124,16 @@ export async function runInitWizard(opts) {
  * @returns {Promise<InitWizardResult>}
  */
 async function runGuardedInitWizard(opts, guard) {
+  // Dispatch refuses an unsupported platform before the boot (#975); this
+  // covers a direct call, before any lane can sign in, enroll or write. The
+  // refusal is the run's only write, so it settles before the guard detaches.
+  // @ref LLP 0341#absorb [constrained-by]: a stream error never surfaces uncaught, including one reported after the write returned
+  const unsupported = setupUnsupportedNote(/** @type {NodeJS.Platform} */ (opts.platform ?? process.platform))
+  if (unsupported !== undefined) {
+    opts.stderr.write(unsupported)
+    await guard.settle()
+    return { exitCode: 1 }
+  }
   const log = getLogger('wizard')
   const interactive = !opts.picks
   const catalog = opts.catalog ?? (await loadWizardCatalog())

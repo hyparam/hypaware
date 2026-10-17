@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Writable } from 'node:stream'
 
 import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
@@ -147,6 +147,26 @@ test('a direct runInitWizard call refuses an unsupported platform before any lan
     assert.deepEqual(await snapshot(home), before, `${label}: no file written under HOME`)
     assert.equal(stdout.text(), '', `${label}: no output`)
   }
+})
+
+test('the direct refusal absorbs a failed stderr, synchronous or reported later', async () => {
+  const epipe = () => Object.assign(new Error('closed diagnostic pipe'), { code: 'EPIPE' })
+  const syncSink = { write() { throw epipe() } }
+  const asyncSink = new Writable({ write(_chunk, _encoding, cb) { cb(epipe()) } })
+  for (const [label, stderr] of /** @type {Array<[string, any]>} */ ([['sync throw', syncSink], ['async EPIPE', asyncSink]])) {
+    /** @type {string[]} */
+    const calls = []
+    const result = await runInitWizard(/** @type {any} */ ({
+      stdout: makeBuf(), stderr, env: {}, platform: 'win32',
+      gate: async () => { calls.push('gate'); throw new Error('gate ran') },
+    }))
+    // An `error` the guard missed would be emitted on a later tick and fail
+    // the run as uncaught, so let any pending one land before asserting.
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(result, { exitCode: 1 }, `${label}: result`)
+    assert.deepEqual(calls, [], `${label}: no lane ran`)
+  }
+  assert.equal(asyncSink.listenerCount('error'), 0, 'no listener left behind')
 })
 
 test('help, status and query still run on an unsupported platform', async () => {
