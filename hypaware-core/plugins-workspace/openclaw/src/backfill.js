@@ -13,9 +13,11 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 import {
   defaultOpenclawAgentsDir,
   listOpenclawSessions,
+  openclawMessageEnvelope,
   readOpenclawSession,
   SESSION_FILE_NAME,
 } from './session_file.js'
+import { normalizeBlockKind } from './match_key.js'
 import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
@@ -592,8 +594,10 @@ function projectedExchangeFromSession(args) {
   const messages = []
   /** @type {string | undefined} */
   let provider
+  /** @type {Map<string, unknown>} */
+  const toolInputs = new Map()
   for (const { record, provider: recordProvider } of projectable) {
-    const message = projectedMessageFromRecord(record)
+    const message = projectedMessageFromRecord(record, toolInputs)
     if (!message) continue
     // Every row carries its own turn's provider: `recordProvider` is the
     // smeared effective backend (partitionByBackend), so the user prompt and
@@ -638,13 +642,18 @@ function projectedExchangeFromSession(args) {
  * Project one session-file message record into a normalized gateway message,
  * or `undefined` when it carries no projectable content.
  *
- * `content` passes through as the session file wrote it. It is not rewritten
- * into Anthropic wire block shapes: the session file is the authoritative
- * record here, and the two properties R11 actually depends on (the native
- * `message_id`, and the block count and order that fix each part's
- * `part_index`) pass through unchanged either way. A rewrite would be a second
- * copy of the block-kind knowledge `match_key.js` already owns, which is the
- * drift LLP 0150 documented shipping twice.
+ * `content` passes through as the session file wrote it, with two exceptions,
+ * both for tool traffic the gateway projector only recognizes in wire shape
+ * (#2001): an assistant `toolCall` block (or a synonym `match_key.js` folds to
+ * `tool_use`) becomes `{ type: "tool_use", id, name, input }`, and a
+ * `toolResult` record, whose `toolCallId`/`toolName`/`isError` live on the
+ * message rather than on a block, becomes one `tool_result` block carrying
+ * them, plus the paired call's `input` from `toolInputs`. Left verbatim, both
+ * landed with a literal `toolCall` part type and null tool columns. Block
+ * count and order are kept, so each part's `part_index`, and therefore the
+ * `part_id` R11 rests on, is the one a settled live row carries; the
+ * block-kind table stays `match_key.js`'s, not a second copy here (the drift
+ * LLP 0150 documented shipping twice).
  *
  * `previous_message_id` is deliberately NOT set. The gateway chains each
  * message to its immediate predecessor in the same thread when a projector
@@ -652,9 +661,11 @@ function projectedExchangeFromSession(args) {
  * too; supplying a second copy here could only differ from it.
  *
  * @param {OpenclawSessionMessage} message
+ * @param {Map<string, unknown>} toolInputs call arguments by tool call id,
+ *   filled from assistant calls and read by the results that follow them
  * @returns {AiGatewayProjectedMessage | undefined}
  */
-function projectedMessageFromRecord(message) {
+function projectedMessageFromRecord(message, toolInputs) {
   // Through the LLP 0158 reader's normalized fields, never `message.record`:
   // OpenClaw nests `role`/`content` under the record line's `message`
   // envelope, so the top-level read this used to do found neither and dropped
@@ -671,7 +682,9 @@ function projectedMessageFromRecord(message) {
   /** @type {AiGatewayProjectedMessage} */
   const projected = {
     role: normalizeRole(rawRole),
-    content: /** @type {any} */ (content),
+    content: /** @type {any} */ (rawRole === 'toolResult'
+      ? [toolResultBlock(message, content, toolInputs)]
+      : Array.isArray(content) ? content.map(block => toolUseBlock(block, toolInputs)) : content),
   }
   // Native identity, verbatim. This single line is what R11 rests on: the row
   // never reaches `computeMessageId`'s fallback hash, so it lands on the same
@@ -687,6 +700,53 @@ function projectedMessageFromRecord(message) {
   const attributes = messageAttributes(message)
   if (attributes) projected.attributes = attributes
   return projected
+}
+
+/**
+ * A session-file tool-call block in the wire `tool_use` shape the gateway
+ * projector reads tool columns from; any other block passes through as-is.
+ * Records the call's arguments so the paired result can carry them.
+ *
+ * @param {unknown} block
+ * @param {Map<string, unknown>} toolInputs
+ * @returns {unknown}
+ */
+function toolUseBlock(block, toolInputs) {
+  if (!isPlainObject(block) || typeof block.type !== 'string' || block.type === 'tool_use') return block
+  if (normalizeBlockKind(block.type) !== 'tool_use') return block
+  const input = block.arguments ?? block.input
+  const id = stringValue(block.id)
+  if (id && input !== undefined) toolInputs.set(id, input)
+  /** @type {Record<string, unknown>} */
+  const out = { type: 'tool_use' }
+  if (block.id !== undefined) out.id = block.id
+  if (block.name !== undefined) out.name = block.name
+  if (input !== undefined) out.input = input
+  return out
+}
+
+/**
+ * A `toolResult` record folded into the one `tool_result` block the live
+ * lane writes for the same turn, carrying the message-level fields.
+ *
+ * @param {OpenclawSessionMessage} message
+ * @param {unknown} content
+ * @param {Map<string, unknown>} toolInputs
+ * @returns {Record<string, unknown>}
+ */
+function toolResultBlock(message, content, toolInputs) {
+  const envelope = openclawMessageEnvelope(message.record)
+  const id = stringValue(envelope.toolCallId)
+  /** @type {Record<string, unknown>} */
+  const out = { type: 'tool_result' }
+  if (id) out.tool_use_id = id
+  const name = stringValue(envelope.toolName)
+  if (name) out.name = name
+  out.content = content
+  if (typeof envelope.isError === 'boolean') out.is_error = envelope.isError
+  const input = id ? toolInputs.get(id) : undefined
+  if (input !== undefined) out.input = input
+  return out
 }
 
 /**
