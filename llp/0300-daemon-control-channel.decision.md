@@ -147,15 +147,20 @@ proven by the existing smokes, and service managers (`launchctl bootout`,
 > failed to load. [LLP 0383](./0383-status-reads-the-daemons-last-state-to-tell-a-crash-from-a-stop.decision.md#the-signal-is-the-daemons-last-state)
 > settled that signal for the *loaded* shape; applying it to the unloaded one
 > is this doc's extension of it, and is why a macOS stop reports a warning
-> rather than an outage. **It is not free, and the cost is recorded here rather
-> than hidden:** the snapshot's terminal `stopped` is unbounded in age and a
-> clean shutdown writes it, a reboot included, so a LaunchAgent that then fails
-> to load at next login is reported `warning` / `healthy` instead of `error` /
-> `degraded`. Closing that needs a fact the snapshot does not carry (an age
-> bound, as [LLP 0384](./0384-a-stopping-snapshot-that-stopped-ageing-is-a-stop-that-never-completed.decision.md#stopping-is-a-claim-with-an-expiry)
-> puts on `stopping`, or corroboration against the plist), and settling which
-> is a decision this amendment does not make. Promoting this doc out of Draft
-> should resolve it and add the `Extended-by:` forward-ref to LLP 0383.
+> rather than an outage. **The stop is bounded by the current boot.** The
+> snapshot's terminal `stopped` is otherwise unbounded in age, and a clean
+> shutdown writes it, a reboot included, so read alone it would report a
+> LaunchAgent that fails to load at the next login as `warning` / `healthy`
+> (issue #2267). The bound is the age bound
+> [LLP 0384](./0384-a-stopping-snapshot-that-stopped-ageing-is-a-stop-that-never-completed.decision.md#stopping-is-a-claim-with-an-expiry)
+> puts on `stopping`, with the boot as the limit: only a `stoppedAt` later
+> than the platform's boot time (`kern.boottime` on macOS, read through
+> `os.uptime()`) is the operator's stop. One from before this boot, a missing
+> `stoppedAt`, or a boot time the platform will not give reads as the failed
+> load, `error` / `degraded`, because a wrong outage costs a reinstall and a
+> wrong `healthy` costs every capture until someone looks. A logout and login
+> without a reboot is not bounded this way and keeps the warning. Promoting
+> this doc out of Draft should add the `Extended-by:` forward-ref to LLP 0383.
 
 <a id="home-resolution"></a>**Home resolution: `env.HOME` wins when set,
 `os.homedir()` is the fallback, `''` is never a home.** For `HYP_HOME`

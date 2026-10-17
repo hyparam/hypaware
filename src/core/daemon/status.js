@@ -1064,6 +1064,52 @@ export function daemonHeartbeatAgeMs(status, nowMs) {
   return nowMs - (healthyAtMs + uptimeMs)
 }
 
+/**
+ * When this machine last booted, as epoch ms, or `undefined` when the
+ * platform will not say. `os.uptime()` is the platform's own boot clock:
+ * libuv reads `kern.boottime` on macOS and `/proc/uptime` (the clock
+ * `/proc/stat`'s `btime` is derived from) on Linux, both counting sleep, so
+ * a laptop that slept since boot still dates its boot correctly. Never
+ * throws: a sandbox without `/proc` answers `undefined`, which the caller
+ * reads as "cannot tell", never as "no reboot".
+ *
+ * @param {number} [nowMs]
+ * @returns {number | undefined}
+ */
+export function systemBootTimeMs(nowMs = Date.now()) {
+  try {
+    const uptimeSeconds = os.uptime()
+    if (!Number.isFinite(uptimeSeconds) || uptimeSeconds <= 0) return undefined
+    return nowMs - uptimeSeconds * 1000
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether a daemon's recorded stop happened during this boot, before it, or
+ * cannot be placed (no `stoppedAt`, or no boot time). Only `'this_boot'` can
+ * stand for a stop the operator asked for: every clean shutdown writes
+ * `stopped`, a reboot's included, so a stop from before this boot says
+ * nothing about why launchd holds nothing now.
+ *
+ * @param {string | undefined} stoppedAt
+ * @param {() => number | undefined} bootTimeMs
+ * @returns {'this_boot' | 'before_boot' | 'unknown'}
+ */
+export function placeStopAgainstBoot(stoppedAt, bootTimeMs) {
+  const stoppedAtMs = parseIsoMs(stoppedAt)
+  if (stoppedAtMs === undefined) return 'unknown'
+  let bootMs
+  try {
+    bootMs = bootTimeMs()
+  } catch {
+    return 'unknown'
+  }
+  if (typeof bootMs !== 'number' || !Number.isFinite(bootMs)) return 'unknown'
+  return stoppedAtMs > bootMs ? 'this_boot' : 'before_boot'
+}
+
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
@@ -1611,19 +1657,32 @@ export async function collectHypAwareStatus(opts = {}) {
     // 0383 settled that signal for the shape where the probe reports the unit
     // *loaded*, which is the block below. Reusing it here, where the probe
     // reports the opposite, is an extension of it rather than an application:
-    // it is the borrowed signal, but a wider claim, and it carries a cost 0383
-    // never had to weigh (a `stopped` snapshot is unbounded in age, and a clean
-    // shutdown writes one, so a LaunchAgent that fails to load after a reboot
-    // is warned about rather than raised). That trade is recorded in the 0300
-    // amendment, which is where this PR's stop design lives and is still Draft.
+    // it is the borrowed signal, but a wider claim: every clean shutdown writes
+    // `stopped`, a reboot's included, so a LaunchAgent that fails to load at
+    // the next login sits on a `stopped` snapshot too (#2267). The stop is
+    // therefore only read as the operator's when it happened during this
+    // boot; one from before it, or one that cannot be placed against it, is
+    // the failed load this block exists to raise.
     // @ref LLP 0383#the-signal-is-the-daemons-last-state [constrained-by]: the crash-versus-stopped signal this borrows, settled there for the loaded shape
-    // @ref LLP 0300#posix-keeps-signals [implements]: the stop that creates this shape on macOS, and the accepted cost of reading it this way
+    // @ref LLP 0300#posix-keeps-signals [implements]: the stop that creates this shape on macOS, bounded by the current boot
     // Platform-gated, because the shape is only ambiguous on one of them.
     // On Linux a stop never lands here at all, so a snapshot that ends in a
     // stop is no evidence about *this* pair of facts and reading it as such
     // would mask the failed load (#1387) the block exists for.
-    const stoppedOnPurpose = platform === 'darwin' && daemon.state === 'stopped'
+    const stopPlacement = platform === 'darwin' && daemon.state === 'stopped'
+      ? placeStopAgainstBoot(daemonStatusFile?.stoppedAt, opts.bootTimeMs ?? systemBootTimeMs)
+      : undefined
+    const stoppedOnPurpose = stopPlacement === 'this_boot'
     const capturingNothing = daemon.error === undefined && !daemon.running && !stoppedOnPurpose
+    // Why a recorded stop was not read as the operator's, in plain words,
+    // with the repair: the generic message alone would leave a reader who
+    // remembers stopping the daemon wondering why it now says outage.
+    const staleStop = !capturingNothing ? ''
+      : stopPlacement === 'before_boot'
+        ? `. The daemon's last stop came before this boot, so the ${artifact} did not load at login; reinstall it so ${manager} loads it again`
+        : stopPlacement === 'unknown'
+          ? `. The daemon's last stop could not be dated against this boot, so it is not read as a stop you asked for; reinstall the ${artifact} so ${manager} loads it again`
+          : ''
     diagnostics.push({
       severity: capturingNothing ? 'error' : 'warning',
       kind: 'daemon_loaded_no_pid',
@@ -1633,7 +1692,7 @@ export async function collectHypAwareStatus(opts = {}) {
       // those is a wrong diagnosis rather than an unknown one.
       message: capturingNothing
         ? `${manager} is not loading the ${artifact} and no daemon process is running`
-          + ' - nothing is being captured'
+          + ' - nothing is being captured' + staleStop
         : `${manager} is not currently loading the ${artifact}`,
       // `hyp daemon restart` cannot repair a unit the service manager never
       // loaded: it sees the file on disk, calls straight through to
