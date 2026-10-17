@@ -34,6 +34,7 @@ import {
   defaultConfirmSelectPromptFactory,
   defaultPickerDetect,
   preflightLegacyProxyAttach,
+  preflightPickedClients,
   runPickerFinale,
   visiblePickerDescriptors,
   writeAttachedNotConfiguredReminder,
@@ -821,6 +822,21 @@ async function runGuardedInitWizard(opts, guard) {
   // lanes above, other than returning, assigns `picked` first.
   if (!picked) throw new Error('hyp setup: internal error: the pick lane did not run')
 
+  // The selection is final and nothing is written yet, so a client whose
+  // attach is known to refuse is said here, not after the config lands. Only
+  // a run that attaches asks, and only the picked clients that define a
+  // preflight are asked.
+  // @ref LLP 0532#boundary [implements]: the earliest point the picked set is settled, ahead of the recap and every write
+  const preflightRefused = opts.finale
+    ? await preflightPickedClients({
+      clientsPicked: picked.clientsPicked,
+      config: picked.config,
+      capabilities: opts.capabilities,
+      ...(opts.ctx.clients ? { clients: opts.ctx.clients } : {}),
+      ...(opts.ctx.activations ? { activations: opts.ctx.activations } : {}),
+      stderr: opts.stderr,
+    })
+    : undefined
 
   // Every question lane has run; commit the composed config to disk before
   // the acting phases (configure and the finale both read/edit the file).
@@ -914,6 +930,7 @@ async function runGuardedInitWizard(opts, guard) {
       joinedAlready: joined !== undefined,
       daemonIncomplete,
       daemonBin,
+      ...(preflightRefused?.size ? { preflightRefused } : {}),
       // The finale is one step made of several acts, and the backfill
       // consent question sits behind three of them (install, attach,
       // asset copy), each narrating first. The boundary above cannot
@@ -1246,13 +1263,14 @@ async function resolveWizardDaemonBin(opts, interactive) {
  *   joinedAlready: boolean,
  *   daemonIncomplete: boolean,
  *   daemonBin?: string,
+ *   preflightRefused?: Set<string>,
  *   checkBoundary: () => Promise<boolean>,
  *   autoAccept?: boolean,
  *   clientLabels?: Map<string, string>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, autoAccept, clientLabels }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, preflightRefused, checkBoundary, autoAccept, clientLabels }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
@@ -1321,6 +1339,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         checkBoundary,
         ...(autoAccept ? { autoAccept } : {}),
         ...(skipAttachClients ? { skipAttachClients } : {}),
+        ...(preflightRefused ? { preflightRefused } : {}),
         ...(clientLabels ? { clientLabels } : {}),
       }),
     { component: 'wizard' }

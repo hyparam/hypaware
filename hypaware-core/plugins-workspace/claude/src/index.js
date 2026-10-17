@@ -17,7 +17,7 @@ import { booleanFlagValue } from '../../../../src/core/cli/verb_codec.js'
 import { presetUnhonoredArgError } from '../../../../src/core/cli/command_args.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
-import { resolveClaudeCodeVersion } from './claude_version.js'
+import { claudeVersionPreflight, resolveClaudeCodeVersion } from './claude_version.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
@@ -174,6 +174,12 @@ export async function activate(ctx) {
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
+    // The same resolver attach uses, so the probe is `claude --version` with
+    // no shell and a 3 s timeout, or the HYP_CLAUDE_CODE_VERSION override.
+    // @ref LLP 0532#boundary [implements]: setup asks once the client is picked; attach keeps its own check
+    async preflight() {
+      return claudeVersionPreflight(await resolveClaudeCodeVersion(ctx.env))
+    },
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
       const homeDir = ctx.env.HOME ?? os.homedir()

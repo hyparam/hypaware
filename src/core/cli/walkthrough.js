@@ -39,7 +39,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, CommandActivationOutcome, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, ClientPreflight, ClientRegistration, ClientRegistry, CommandActivationOutcome, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { restartServiceDaemon as restartServiceDaemonFn, serviceDaemonStatus as serviceDaemonStatusFn } from '../../../src/core/daemon/install.js'
@@ -959,6 +959,57 @@ function preserveOllamaUpstreams(composed, existing, descriptors) {
 }
 
 /**
+ * Setup's client preflight (LLP 0532): ask each picked client's adapter, once
+ * and before anything is written, whether its attach is known to refuse or
+ * to capture less. Each verdict is said once on stderr. The refused clients
+ * are returned so the finale skips their attach; every other client is
+ * untouched. Only an adapter that defines `preflight` is asked, so a run
+ * that picked no such client runs no check at all. A detached client, one
+ * whose owner failed to activate, and a preflight that throws give no verdict.
+ *
+ * @param {{
+ *   clientsPicked: string[],
+ *   config: HypAwareV2Config,
+ *   capabilities: CapabilityRegistry,
+ *   clients?: ClientRegistry,
+ *   activations?: CommandActivationOutcome[],
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<Set<string>>}
+ */
+export async function preflightPickedClients({ clientsPicked, config, capabilities, clients, activations, stderr }) {
+  /** @type {Set<string>} */
+  const refused = new Set()
+  /** @type {AiGatewayCapability | undefined} */
+  const gateway = clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')
+    ? capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
+    : undefined
+  const asked = clientsPicked
+    .map((client) => ({ client, adapter: clients?.getClient(client) ?? gateway?.getClient(client) }))
+    .filter((entry) => typeof entry.adapter?.preflight === 'function')
+  if (asked.length === 0) return refused
+  const notRecording = await detachedClients(asked.map((entry) => entry.client), config)
+  const failedOwners = failedClientOwners(asked.map((entry) => entry.client), activations)
+  for (const { client, adapter } of asked) {
+    if (notRecording.has(client) || failedOwners.has(client)) continue
+    /** @type {ClientPreflight} */
+    let verdict
+    try {
+      verdict = (await adapter?.preflight?.()) ?? {}
+    } catch {
+      continue
+    }
+    if (verdict.refuse) {
+      stderr.write(`${verdict.refuse}\n`)
+      refused.add(client)
+    } else if (verdict.warn) {
+      stderr.write(`note: ${verdict.warn}\n`)
+    }
+  }
+  return refused
+}
+
+/**
  * The picked clients whose plugin entry says `recording: false` (LLP 0466).
  *
  * @param {string[]} clients
@@ -1315,6 +1366,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   checkBoundary?: () => Promise<boolean>,
  *   autoAccept?: boolean,
  *   skipAttachClients?: Set<string>,
+ *   preflightRefused?: Set<string>,
  *   clientLabels?: Map<string, string>,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
  *   daemonService?: {
@@ -1542,6 +1594,13 @@ export async function runPickerFinale(args) {
       // @ref LLP 0522#decision [implements]: a client whose owner threw is a failed attach, not an adapterless skip
       if (failedOwner) {
         reportFailedOwnerAttach({ client, owner: failedOwner, dryRun, stderr, summary })
+        continue
+      }
+      // The preflight already said why and how to retry; attaching would
+      // only repeat the refusal it predicted.
+      // @ref LLP 0532#refusal [implements]: a refused client is not attached, and the rest of the run goes on
+      if (args.preflightRefused?.has(client)) {
+        summary.attach.push({ client, dryRun, ok: false })
         continue
       }
       const adapter = resolveAdapter(client)

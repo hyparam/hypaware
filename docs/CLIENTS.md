@@ -21,7 +21,7 @@ choices are locked; local additions remain yours to configure.
 
 | Client | Capture behavior |
 | --- | --- |
-| Claude Code (`claude`) | OTEL events and transient raw bodies, plus transcript recovery. Requires Claude Code 2.1.193 or newer; 2.1.214 adds full tool-decision detail. |
+| Claude Code (`claude`) | OTEL events and transient raw bodies, plus transcript recovery. Requires Claude Code 2.1.193 or newer; 2.1.214 adds full tool-decision detail. Setup reads `claude --version` when Claude is picked: below 2.1.193 it skips only Claude and says to run `claude update`, then `hyp client attach claude`; between the two it notes the missing detail and attaches; a version it cannot read proceeds. Both floors are `CLAUDE_OTEL_MIN_VERSION` and `CLAUDE_TOOL_SOURCE_MIN_VERSION` in the Claude plugin's `claude_version.js` (LLP 0258, LLP 0532). |
 | Codex (`codex`) | Scheduled import of shared local session rollouts for CLI and Desktop. Gateway capture is opt-in. |
 | Codex Cloud (`codex-cloud`) | [Experimental hosted coding chats](CODEX-CLOUD.md) through the existing local Codex login. Separate setup choice, included in Record everything when Codex is detected on first setup. |
 | ChatGPT Work (`chatgpt-work`) | [Experimental Work web and mobile chats](CODEX-CLOUD.md), bundled in one Customize-only choice. |
