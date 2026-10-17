@@ -2393,6 +2393,44 @@ test('save refuses a folder that is already in the store', async (t) => {
   assert.deepEqual(await fs.readdir(store), [name])
 })
 
+// @ref LLP 0518#refusals [tests]: a link is refused, so its target's pages are never unlinked
+test('save refuses a symlinked folder and leaves the link, its target, and the store untouched', async (t) => {
+  const { ctx, err, draft, cwd, hypHome } = await storeFixture(t)
+  const link = path.join(cwd, 'hypaware-report-linked')
+  await fs.symlink(draft, link)
+  for (const argv of [[link], [link, '--keep']]) {
+    err.length = 0
+    assert.equal(await runReportSave(argv, ctx), 2)
+    assert.match(err.join(''), /is a symbolic link; a move would empty its target and leave the link/)
+  }
+  assert.ok((await fs.lstat(link)).isSymbolicLink())
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['report.md', 'usage.md'])
+  await assert.rejects(fs.stat(path.join(hypHome, 'reports')), { code: 'ENOENT' })
+})
+
+// @ref LLP 0518#refusals [tests]: a source holding the cwd is refused, so the shell is never left in a deleted directory
+test('save refuses . and any folder holding the cwd, and leaves the draft and store untouched', async (t) => {
+  const { ctx, err, draft, name, hypHome } = await storeFixture(t)
+  const inner = path.join(draft, 'notes')
+  await fs.mkdir(inner)
+  for (const [where, source] of [[draft, '.'], [draft, draft], [inner, '..']]) {
+    ctx.cwd = where
+    err.length = 0
+    assert.equal(await runReportSave([source], ctx), 2)
+    assert.match(err.join(''), new RegExp(`holds the current directory; .*Run it from the folder's parent: hyp report save ${name.replaceAll('.', '\\.')}\n`))
+  }
+  assert.deepEqual((await fs.readdir(draft)).sort(), ['notes', 'report.md', 'usage.md'])
+  await assert.rejects(fs.stat(path.join(hypHome, 'reports')), { code: 'ENOENT' })
+})
+
+// @ref LLP 0518#refusals [tests]: the refusals do not reach a plain folder saved from its parent
+test('a plain folder named from its parent still saves after the link and cwd checks', async (t) => {
+  const { ctx, draft, name, store } = await storeFixture(t)
+  assert.equal(await runReportSave([name], ctx), 0)
+  assert.deepEqual((await fs.readdir(path.join(store, name))).sort(), ['report.md', 'usage.md'])
+  await assert.rejects(fs.stat(draft), { code: 'ENOENT' })
+})
+
 test('save leaves a draft folder in place when a file appeared during the move, and names it', async (t) => {
   const { ctx, out, draft, name, store } = await storeFixture(t)
   // Validation ran against a clean folder; the stray file lands after. The
