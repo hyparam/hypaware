@@ -121,6 +121,12 @@ hyp query sql "select message_index, part_index, role, part_type, content_text, 
   limit 100" --format json
 ```
 
+A `session_id` filter alone can read every day of the cache, because the cache
+is partitioned by `date`. If you know the days the session ran, add
+`and date >= 'FIRST_DAY' and date <= 'LAST_DAY'` so only those days are read.
+Cover every day: a session can cross midnight, and rows outside the range are
+silently left out.
+
 To inspect that session's tool calls:
 
 <!-- agent: Use HypAware to list every tool call in session SESSION_ID with its arguments. Over MCP, run the same SQL with query_sql. -->
