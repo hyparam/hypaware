@@ -683,11 +683,81 @@ test('the repair names the central layer when it owns both the plugin and its mi
   })
   assert.ok(diag, 'the elimination is still reported on an enrolled host')
   const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  // Issue #1836: the dependency is already centrally enabled, so a central
+  // enable would change nothing and is not offered.
   assert.deepEqual(diag.repair, [
-    `install '${MISSING_DEPENDENCY}' on this host, or enable it in the central config`
+    `install '${MISSING_DEPENDENCY}' on this host`
       + ` - the central config names both '@acme/needy' and '${MISSING_DEPENDENCY}', so no edit to ${localConfigPath} survives the merge`,
     'hyp daemon restart  # requires are resolved at boot',
   ])
+  assert.ok(
+    !diag.repair.join('\n').includes('enable'),
+    `no enable is offered for an enabled dependency: ${JSON.stringify(diag.repair)}`
+  )
+})
+
+// Issue #1836, the four cells under a central-owned dependency: the eliminated
+// plugin central-owned or local, crossed with the dependency centrally enabled
+// or disabled. Each pins its exact repair line, and none may write either
+// config layer: a repair that edited the downloaded central copy would be
+// replaced by the next pull, so status only names the change.
+test('each owner of the plugin and state of its central dependency gets its own repair, and no config file is written', async (t) => {
+  const cells = [
+    {
+      pluginIsCentral: false,
+      dependencyEnabled: true,
+      line: (/** @type {string} */ local) => `remove '@acme/needy' from ${local}, or install '${MISSING_DEPENDENCY}' on this host`
+        + ` - '${MISSING_DEPENDENCY}' is named by the central config, so enabling it in the local file changes nothing`,
+    },
+    {
+      pluginIsCentral: false,
+      dependencyEnabled: false,
+      line: (/** @type {string} */ local) => `remove '@acme/needy' from ${local}, or enable '${MISSING_DEPENDENCY}' in the central config and install it on this host`
+        + ` - '${MISSING_DEPENDENCY}' is named by the central config but disabled there, so enabling it in the local file changes nothing`,
+    },
+    {
+      pluginIsCentral: true,
+      dependencyEnabled: true,
+      line: (/** @type {string} */ local) => `install '${MISSING_DEPENDENCY}' on this host`
+        + ` - the central config names both '@acme/needy' and '${MISSING_DEPENDENCY}', so no edit to ${local} survives the merge`,
+    },
+    {
+      pluginIsCentral: true,
+      dependencyEnabled: false,
+      line: (/** @type {string} */ local) => `enable '${MISSING_DEPENDENCY}' in the published fleet configuration and install it on this host`
+        + ` - the central config names both '@acme/needy' and '${MISSING_DEPENDENCY}', so no edit to ${local} survives the merge`,
+    },
+  ]
+  for (const cell of cells) {
+    const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-cell-'))
+    t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+    const label = `plugin ${cell.pluginIsCentral ? 'central' : 'local'}, dependency ${cell.dependencyEnabled ? 'enabled' : 'disabled'}`
+    /** @type {(string | { name: string, enabled?: boolean })[]} */
+    const centralPlugins = [cell.dependencyEnabled ? MISSING_DEPENDENCY : { name: MISSING_DEPENDENCY, enabled: false }]
+    if (cell.pluginIsCentral) centralPlugins.unshift('@acme/needy')
+    const diag = await collectOverLayers({
+      hypHome,
+      eliminated: '@acme/needy',
+      localPlugins: ['@acme/needy'],
+      centralPlugins,
+    })
+    assert.ok(diag, `the elimination is reported (${label})`)
+    const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+    assert.deepEqual(diag.repair, [
+      cell.line(localConfigPath),
+      'hyp daemon restart  # requires are resolved at boot',
+    ], label)
+    // The bytes `collectOverLayers` wrote, unchanged by collecting status.
+    const seedPath = centralSeedPath(path.join(hypHome, 'hypaware'))
+    assert.equal(readFileSync(seedPath, 'utf8'), JSON.stringify({
+      version: 2,
+      plugins: centralPlugins.map((entry) => (typeof entry === 'string' ? { name: entry } : entry)),
+    }) + '\n', `the cached central config is not written (${label})`)
+    assert.equal(readFileSync(localConfigPath, 'utf8'), JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@acme/needy' }],
+    }) + '\n', `the local config is not written (${label})`)
+  }
 })
 
 // Issue #1833. One rung further down: the central layer can name the missing
