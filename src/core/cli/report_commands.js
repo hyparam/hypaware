@@ -70,19 +70,56 @@ const esc = (value) => escapeForDisplay(String(value))
  * @returns {Promise<{ client: string | number } | { cancelled: true } | { timedOut: true }>}
  */
 async function pickClient(ask, ctx, spec, deadlineMs) {
+  try {
+    const outcome = await askBounded(ask, ctx, spec, deadlineMs)
+    return 'timedOut' in outcome ? outcome : { client: outcome.value }
+  } catch (err) {
+    if (isPromptCancelledError(err) || isPromptBackError(err)) return { cancelled: true }
+    throw err
+  }
+}
+
+/**
+ * One prompt under its own deadline: a fresh controller per display, so a
+ * keypress on one picker never lifts the next one's, and a picker shown
+ * again starts its clock over. Every other way the prompt settles (a pick,
+ * a cancel, a back) is the caller's to read.
+ *
+ * @param {typeof select} ask
+ * @param {CommandRunContext} ctx
+ * @param {Parameters<typeof select>[0]} spec
+ * @param {number} [deadlineMs]
+ * @returns {Promise<{ value: string | number } | { timedOut: true }>}
+ */
+async function askBounded(ask, ctx, spec, deadlineMs) {
   const controller = new AbortController()
   const disarm = armPickDeadline(ctx.stdin, controller, deadlineMs)
   try {
-    return { client: await ask({ ...spec, signal: controller.signal }) }
+    return { value: await ask({ ...spec, signal: controller.signal }) }
   } catch (err) {
     // The abort settles the prompt as an escape does, so which one happened
     // is the controller's to answer, not the error's.
     if (controller.signal.aborted) return { timedOut: true }
-    if (isPromptCancelledError(err) || isPromptBackError(err)) return { cancelled: true }
     throw err
   } finally {
     disarm()
   }
+}
+
+/**
+ * A report or recommendation picker nobody answered. Unlike the client
+ * picker there is nothing to fall through to: the command starts an agent
+ * that edits the repository, so a pick nobody made would begin work on a
+ * target nobody chose. The run ends as one that cannot prompt does, told
+ * how to name the recommendation, and nothing is started.
+ *
+ * @ref LLP 0459#decision [implements]: an unanswered listing picker is a usage error, exit 2, never a pick
+ * @param {CommandRunContext} ctx
+ * @returns {number}
+ */
+function unansweredListing(ctx) {
+  ctx.stderr.write("hyp report fix: no answer at the picker - nothing started.\nusage: hyp report fix <id> [--org <org>] [--remote <target>]\n  the id comes from 'hyp report list'\n")
+  return 2
 }
 
 /**
@@ -1069,7 +1106,9 @@ export async function runReportFix(argv, ctx, deps = {}) {
       /** @type {string | number} */
       let pickedReport
       try {
-        pickedReport = await ask({ box: true, title: 'Which report?', options: reportOptions, default: reportCursor, ...io })
+        const outcome = await askBounded(ask, ctx, { box: true, title: 'Which report?', options: reportOptions, default: reportCursor, ...io }, deps.pickDeadlineMs)
+        if ('timedOut' in outcome) return unansweredListing(ctx)
+        pickedReport = outcome.value
       } catch (err) {
         if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
           ctx.stdout.write('Nothing started.\n')
@@ -1083,7 +1122,9 @@ export async function runReportFix(argv, ctx, deps = {}) {
       /** @type {string | number} */
       let picked
       try {
-        picked = await ask({ box: true, title: 'Which recommendation should be fixed?', options: group.rows, allowBack: true, ...io })
+        const outcome = await askBounded(ask, ctx, { box: true, title: 'Which recommendation should be fixed?', options: group.rows, allowBack: true, ...io }, deps.pickDeadlineMs)
+        if ('timedOut' in outcome) return unansweredListing(ctx)
+        picked = outcome.value
       } catch (err) {
         if (isPromptBackError(err)) continue
         if (err instanceof PromptCancelledError || (err instanceof Error && err.name === 'PromptCancelledError')) {
