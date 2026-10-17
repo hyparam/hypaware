@@ -6,8 +6,10 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
+import { execFileSync } from 'node:child_process'
 
 import { compareStrings } from '../../src/core/util/compare_strings.js'
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { collect, executeSql } from 'squirreling'
@@ -403,7 +405,7 @@ test('a queryable S3 source with no declared schema is not described as having z
   assert.equal(described.stdout, [
     'dataset: events',
     'columns: none declared (the source schema is not inspected here; SQL resolves its columns when a query runs)',
-    "  to see them: hyp query sql 'select * from events limit 1' (this reads the source)",
+    "  to see them: hyp query sql 'select * from \"events\" limit 1' (this reads the source)",
     '',
   ].join('\n'))
   assert.equal(described.description, 'Column schema for the events dataset: none declared (the source schema is not inspected here; SQL resolves its columns when a query runs)')
@@ -430,4 +432,24 @@ test('a declared S3 schema still renders its columns, on an empty source too', a
   assert.equal(described.description, 'Column schema for the events dataset')
   assert.deepEqual(described.body, { dataset: 'events', columns: COLUMNS })
   assert.deepEqual(counts, { list: 0, get: 0 })
+})
+
+test('the suggested query runs as printed for names that are not bare SQL identifiers', async () => {
+  // A stand-in `hyp` that prints the SQL argument it was handed, so the shell
+  // parses the printed line exactly as a user's would.
+  const bin = temporaryDirectory('hyp-schema-hint-')
+  await fs.writeFile(path.join(bin, 'hyp'), '#!/bin/sh\nprintf %s "$3"\n', { mode: 0o755 })
+  for (const name of ['sales-events', 'select', 'with space', "o'brien", 'a"b']) {
+    const dataset = buildS3QueryDataset({
+      source: { name, format: 'parquet', prefix: 'exports/events' },
+      blobStore: fakeBlobStore(new Map([['exports/events/part-0.parquet', parquetBytes([{ id: 7, name: 'x' }])]])),
+      plugin: '@hypaware/s3',
+    })
+    const { stdout } = await describe(dataset)
+    const line = /** @type {string} */ (stdout.split('\n').find((l) => l.startsWith('  to see them: ')))
+    const command = line.slice('  to see them: '.length, line.lastIndexOf(' (this reads the source)'))
+    const sql = execFileSync('sh', ['-c', command], { env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` }, encoding: 'utf8' })
+    const rows = await runQuery(dataset, sql)
+    assert.deepEqual(rows.map((r) => Number(r.id)), [7], `${name}: ${sql}`)
+  }
 })

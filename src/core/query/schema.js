@@ -46,8 +46,11 @@ export function renderSchema(name, schema) {
   if (schema.columns.length === 0) {
     lines.push(`columns: ${UNDECLARED_SCHEMA_NOTE}`)
     // Not offered as a cheap probe: an S3 parquet source reads whole objects
-    // to set up any query, LIMIT or not.
-    lines.push(`  to see them: hyp query sql 'select * from ${name} limit 1' (this reads the source)`)
+    // to set up any query, LIMIT or not. A dataset name need not be a bare
+    // SQL identifier (`sales-events`, `select`), so it is double-quoted, and
+    // the statement is single-quoted for the shell it will be pasted into.
+    const sql = `select * from "${name.replaceAll('"', '""')}" limit 1`
+    lines.push(`  to see them: hyp query sql '${sql.replaceAll("'", "'\\''")}' (this reads the source)`)
     return lines.join('\n') + '\n'
   }
   lines.push(`columns: ${schema.columns.length}`)
