@@ -49,7 +49,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, SINK_MATERIALIZE_FAILED_WARNING_PREFIX, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -902,6 +902,12 @@ function liveStatusSources(stateRoot) {
  */
 const MAX_SOURCE_HEALTH_CHARS = 200
 
+/**
+ * How much of a recorded boot failure `daemon_boot_failed` quotes. Room for a
+ * bind error and the port-owner clause the gateway appends to it (#137).
+ */
+const MAX_BOOT_FAILURE_CHARS = 300
+
 /** The health words `SourceStatus.state` is allowed to carry. */
 const SOURCE_HEALTH_STATES = new Set(['starting', 'ready', 'degraded', 'stopped', 'error'])
 
@@ -1716,6 +1722,26 @@ export async function collectHypAwareStatus(opts = {}) {
         + ' and nothing is being captured',
       // Unlike the unloaded case above, the service manager is holding the
       // unit, so the restart path reaches it.
+      repair: ['hyp daemon restart'],
+    })
+  }
+
+  // The live half of the same record: a supervised daemon whose boot found its
+  // port taken holds its failed process for a retry interval before exiting
+  // into the relaunch (#137), so the probe reports a running pid while the
+  // snapshot, its own, still says the boot failed. Nothing is listening and
+  // nothing ticks, so it must not read as a serving daemon.
+  // @ref LLP 0521#status [implements]: a live process whose own snapshot records a failed boot is named, with the reason
+  if (snapshotIsLive && bootFailed) {
+    const recorded = (daemonStatusFile?.warnings ?? [])
+      .find(w => typeof w === 'string' && w.startsWith(`${BOOT_FAILED_WARNING_PREFIX}:`))
+    const reason = sanitizeLabel(recorded?.slice(BOOT_FAILED_WARNING_PREFIX.length + 1).trim(), MAX_BOOT_FAILURE_CHARS)
+    diagnostics.push({
+      severity: 'error',
+      kind: 'daemon_boot_failed',
+      message: `the daemon process is running but its last boot failed, and nothing is being captured`
+        + (reason ? `: ${reason}` : '')
+        + (reason && /EADDRINUSE/.test(reason) ? ' - it retries about once a minute while the port stays taken' : ''),
       repair: ['hyp daemon restart'],
     })
   }

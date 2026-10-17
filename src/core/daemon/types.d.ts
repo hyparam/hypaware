@@ -270,6 +270,7 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'daemon_heartbeat_stale'
   | 'daemon_exited_abnormally'
+  | 'daemon_boot_failed'
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
@@ -1044,6 +1045,15 @@ export interface RunDaemonOptions {
    * `hyp backfill` subprocess.
    */
   actionReconciler?: ActionReconciler
+}
+
+/**
+ * The process holding a port the daemon could not bind (issue #137): a pid
+ * and an executable name, never a command line.
+ */
+export interface PortOwner {
+  pid: number
+  executable?: string
 }
 
 export interface DaemonLogger {
