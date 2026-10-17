@@ -30,7 +30,7 @@ import { DURABLE_HINT } from '../commands/local_only.js'
 import { withSpinner } from './spinner.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
 import { readAllStdin } from './stdio.js'
-import { isPlainObject } from '../util/json_util.js'
+import { escapeForDisplay, hasDisplayUnsafeChars, isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
@@ -336,7 +336,7 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
     `${FIRST_SYNC_RULE}\n` +
     '  PRIVACY - review before first sync\n' +
     '\n' +
-    `  first sync to the '${serverName}' server is no later than\n` +
+    `  first sync to ${trustNoticeServer(serverName)} is no later than\n` +
     `  ${formatFirstSyncDeadline(deadlineMs)}\n` +
     '  and includes your backfilled history\n' +
     "  (run 'hyp remote list' to see that server's URL)\n" +
@@ -348,6 +348,41 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
     `${FIRST_SYNC_RULE}\n` +
     '\n'
   )
+}
+
+// A `scheme://` prefix: a URL passed where the name goes, which the
+// enrollment notice would then print as an autolinked dead URL (#412, #414).
+const URL_SHAPED_NAME = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//
+
+/**
+ * Why `name` cannot be a new remote target name, or `undefined` when it can.
+ * The name is printed inside the fixed-format enrollment notice, so it may
+ * not hide a line break, terminal control or bidi reordering, whitespace, or
+ * a URL. Anything else stays a name, non-ASCII included (`prodüktion-日本`).
+ *
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+export function remoteNameProblem(name) {
+  if (name.length === 0) return 'must not be empty'
+  if (hasDisplayUnsafeChars(name)) return 'must not contain control or bidirectional formatting characters'
+  if (/\s/.test(name)) return 'must not contain whitespace'
+  if (URL_SHAPED_NAME.test(name)) return 'must be a name, not a URL (the URL is the second argument)'
+  return undefined
+}
+
+/**
+ * How the enrollment notice names its server. A name `remote add` would now
+ * refuse can still arrive from a hand-edited or layered config, and stays
+ * usable for lookup, login and removal; the notice just does not print it,
+ * and the `hyp remote list` pointer beside it still recovers the target.
+ *
+ * @ref LLP 0100#requirements [constrained-by]: R1a - name the server, never its URL
+ * @param {string} name
+ * @returns {string}
+ */
+function trustNoticeServer(name) {
+  return remoteNameProblem(name) === undefined ? `the '${name}' server` : 'your configured server'
 }
 
 /**
@@ -372,6 +407,12 @@ export async function runRemoteAdd(argv, ctx) {
   if (!parsed.ok) return parsed.code
   const name = String(parsed.params.name)
   const url = String(parsed.params.url)
+  // The refusal does not echo the name: it is the hostile value being refused.
+  const nameProblem = remoteNameProblem(name)
+  if (nameProblem !== undefined) {
+    ctx.stderr.write(`hyp remote add: the remote name ${nameProblem}\n`)
+    return 2
+  }
   if (!/^https?:\/\//.test(url)) {
     ctx.stderr.write(`hyp remote add: url must be an http(s) URL (got ${url})\n`)
     return 2
@@ -788,11 +829,13 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return { exitCode: 1, reason: 'store_failed' }
   }
   // The compact lane is the wizard's, whose lines name the server the way the
-  // recap does; the wide lane keeps the target name `hyp remote list` maps.
+  // recap does; the wide lane keeps the target name `hyp remote list` maps,
+  // escaped so a hand-edited name cannot leave the terminal in a state that
+  // carries into the notice below (#414).
   // @ref LLP 0437#server-name [implements]: the wizard's sign-in line reads as HypAware Cloud or the host, never the target key
   ctx.stdout.write(compact
     ? `✓ Signed in to ${serverDisplayName(entry.url)} as org '${session.org}'\n`
-    : `logged in to '${name}' as org '${session.org}'\n`)
+    : `logged in to '${escapeForDisplay(name)}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it
@@ -882,7 +925,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // Revisit if the server root ever becomes a real landing page.
     // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL
     if (!compact) {
-      ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
+      ctx.stdout.write(`forwarding logs to ${trustNoticeServer(name)}\n`)
       ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
     }
     // Print the deadline once, ahead of every exit branch below (--no-daemon,
