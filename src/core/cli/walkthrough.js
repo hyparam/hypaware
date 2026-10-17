@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 
-import { Attr, withSpan } from '../observability/index.js'
+import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { loadConfigFile } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { isEntryRecording } from '../config/client_recording.js'
@@ -24,6 +24,7 @@ import { queuedLineAsker } from './line_asker.js'
 import { withSpinner } from './spinner.js'
 import { joinNames } from './wizard/express.js'
 import { groupThousands } from '../util/format_number.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -37,7 +38,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, CommandActivationOutcome, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { restartServiceDaemon as restartServiceDaemonFn, serviceDaemonStatus as serviceDaemonStatusFn } from '../../../src/core/daemon/install.js'
@@ -1298,6 +1299,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
  *   failedPlugins?: string[],
+ *   activations?: CommandActivationOutcome[],
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -1498,8 +1500,15 @@ export async function runPickerFinale(args) {
   /** @param {string} name @returns {ClientRegistration | undefined} */
   const resolveAdapter = (name) => args.clients?.getClient(name) ?? gateway?.getClient(name)
   const anyAdapterPicked = clientsPicked.some((client) => resolveAdapter(client) !== undefined)
+  // A plugin whose `activate()` threw is left in the registry with whatever
+  // it registered before the throw, or with nothing. Neither is "this client
+  // has no adapter by design", so the owner's outcome is read first. A caller
+  // that passed no activations has said nothing about owners: that is
+  // unknown, so the lane neither invents a failure nor records a success
+  // beyond the reading it always had.
+  const failedOwners = failedClientOwners(clientsPicked, args.activations)
 
-  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway)) {
+  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway || failedOwners.size > 0)) {
     // Skipped when no daemon was installed (the join lane restarts only
     // after attach, so no CA can appear before it) and on dry runs; the
     // wait-or-skip decision itself lives in the helper. Also skipped when no
@@ -1526,12 +1535,22 @@ export async function runPickerFinale(args) {
         summary.attach.push({ client, dryRun, ok: true, skipped: true })
         continue
       }
+      const failedOwner = failedOwners.get(client)
+      // Checked before the adapter lookup: a plugin that registered its
+      // adapter and then threw is never attached through.
+      // @ref LLP 0522#decision [implements]: a client whose owner threw is a failed attach, not an adapterless skip
+      if (failedOwner) {
+        reportFailedOwnerAttach({ client, owner: failedOwner, dryRun, stderr, summary })
+        continue
+      }
       const adapter = resolveAdapter(client)
       if (!adapter) {
         // Not attachable, not failed: `contributes.client` also covers plugins
         // that own skill/agent dirs but deliberately register no runtime
         // adapter (Claude Desktop, LLP 0115#no-attach-on-join). Desktop's
         // scheduled transcript lane needs no attach or configure phase.
+        // That reading holds only for an owner that activated: one that threw
+        // was taken out above.
         // @ref LLP 0180#decision [implements]: an adapterless client contribution skips the attach lane as not applicable
         summary.attach.push({ client, dryRun, ok: true, noAdapter: true })
         continue
@@ -2284,6 +2303,80 @@ export function orderPickerDescriptors(descriptors) {
   return new Map(ordered.map((d) => [d.id, d]))
 }
 
+
+/**
+ * Map each picked client to the owning plugin whose `activate()` threw, read
+ * from the boot's own activation results: the owner is the plugin whose
+ * manifest contributes that client name. Built once per finale, and only over
+ * the picked names, so the cost is one pass over the activated plugins.
+ *
+ * A client no failed owner claims is absent from the map. That covers a
+ * healthy owner, a caller that passed no activations, and an owner that never
+ * reached activation (dep-graph elimination, profile withholding): none of
+ * those is a thrown `activate()`, and the attach lane keeps its existing
+ * reading for them.
+ *
+ * @param {string[]} clientsPicked
+ * @param {CommandActivationOutcome[] | undefined} activations
+ * @returns {Map<string, { plugin: string, errorKind: string }>}
+ */
+function failedClientOwners(clientsPicked, activations) {
+  /** @type {Map<string, { plugin: string, errorKind: string }>} */
+  const failed = new Map()
+  if (!activations || clientsPicked.length === 0) return failed
+  const picked = new Set(clientsPicked)
+  for (const outcome of activations) {
+    if (outcome.ok) continue
+    const client = outcome.plugin.manifest.contributes?.client?.name
+    if (typeof client !== 'string' || !picked.has(client) || failed.has(client)) continue
+    failed.set(client, {
+      plugin: outcome.plugin.manifest.name,
+      // The kind is whatever a thrown value's `hypErrorKind` said, so it is
+      // cleaned like any other plugin-supplied label before it is printed.
+      errorKind: sanitizeLabel(outcome.errorKind) ?? 'activate_failed',
+    })
+  }
+  return failed
+}
+
+/**
+ * Record and say that a picked client was not attached because its owning
+ * plugin did not activate. The line names the client, the plugin, and the
+ * error kind, then the repair: `hyp status` shows why the plugin failed, and
+ * `hyp client attach` attaches the client once it loads. The thrown message
+ * itself is never printed or logged: it is plugin text and may carry anything.
+ *
+ * @param {{
+ *   client: string,
+ *   owner: { plugin: string, errorKind: string },
+ *   dryRun: boolean,
+ *   stderr: { write(chunk: string): unknown },
+ *   summary: FinaleSummary,
+ * }} args
+ */
+function reportFailedOwnerAttach({ client, owner, dryRun, stderr, summary }) {
+  summary.attach.push({
+    client,
+    dryRun,
+    ok: false,
+    activationFailed: true,
+    plugin: owner.plugin,
+    errorKind: owner.errorKind,
+  })
+  getLogger('walkthrough').warn('walkthrough.attach_owner_not_active', {
+    [Attr.COMPONENT]: 'walkthrough',
+    [Attr.OPERATION]: 'client.attach',
+    [Attr.PLUGIN]: owner.plugin,
+    [Attr.ERROR_KIND]: owner.errorKind,
+    [Attr.STATUS]: 'failed',
+    hyp_client: client,
+    dry_run: dryRun,
+  })
+  stderr.write(
+    `${dryRun ? '(dry-run) ' : ''}attach ${client} failed: plugin ${owner.plugin} did not activate (${owner.errorKind}). ` +
+      `Run 'hyp status' to see why, then 'hyp client attach ${client}' once it loads.\n`
+  )
+}
 /**
  * Derive the finale's client list from the picked rows: a picked source
  * is a client pick iff its row's owning plugin contributes a client, and

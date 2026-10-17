@@ -263,9 +263,24 @@ export interface FinaleSummary {
    * already reported it attached (team pathway). `noAdapter` marks a client
    * contribution with no registered runtime adapter (Claude Desktop's
    * deliberate no-attach-on-join posture): not applicable to the attach
-   * lane, so `ok: true` and the run summary prints nothing for it.
+   * lane, so `ok: true` and the run summary prints nothing for it. That
+   * reading holds only when the owning plugin activated: `activationFailed`
+   * marks a client whose owner's `activate()` threw, recorded `ok: false`
+   * with the owner's `plugin` name and its safe `errorKind` label, and never
+   * attached even when the owner registered an adapter before throwing
+   * (issue #596).
    */
-  attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean; notRecording?: boolean }[]
+  attach: {
+    client: string
+    dryRun: boolean
+    ok: boolean
+    skipped?: boolean
+    noAdapter?: boolean
+    notRecording?: boolean
+    activationFailed?: boolean
+    plugin?: string
+    errorKind?: string
+  }[]
   skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   /**

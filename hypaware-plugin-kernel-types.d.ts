@@ -1072,6 +1072,17 @@ export interface CommandRegistration {
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
 
+/**
+ * One plugin's activation outcome as a command body sees it: the loader's
+ * `ActivationResult` without the raw thrown message.
+ */
+export interface CommandActivationOutcome {
+  ok: boolean
+  plugin: ActivePlugin
+  /** Present only when `ok` is false: the loader's safe error-kind label. */
+  errorKind?: string
+}
+
 export interface CommandRunContext {
   stdout: WriteStream
   stderr: WriteStream
@@ -1102,6 +1113,20 @@ export interface CommandRunContext {
    * (LLP 0219 #incomplete-activation-prunes-nothing).
    */
   failedPlugins?: string[]
+  /**
+   * How each plugin that reached `activate()` on this boot came out
+   * (kernel-owned, populated by the dispatcher from `bootKernel`'s
+   * `activations`). Only the first of the four `failedPlugins` routes lands
+   * here, but it is the one that names its owner and its error kind, and the
+   * one whose partial registrations stay behind: a plugin that registered a
+   * client adapter and then threw still shows that adapter in `clients`. The
+   * loader's raw thrown message is withheld; `errorKind` is the safe label.
+   * Absent on a caller that pre-built the kernel, which a reader treats as
+   * "unknown", never as "every plugin activated". Read by the setup finale's
+   * attach lane so a picked client whose owner failed is reported as not
+   * attached rather than skipped as adapterless (issue #596).
+   */
+  activations?: CommandActivationOutcome[]
   /**
    * Capability registry. Per-plugin for a plugin-contributed command, raw
    * for a core one: see `sinks` below for the rule and why it exists.
