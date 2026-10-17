@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { reconcileRowsInTable } from './iceberg/store.js'
 import { appendRefusalReason, discoverCachePartitions, readCursorSync, resolveSourceSegments,
@@ -7,11 +8,40 @@ import { appendRefusalReason, discoverCachePartitions, readCursorSync, resolveSo
 import { cacheTablePath } from './paths.js'
 import { resolveIcebergDir } from './storage.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { compareStrings } from '../util/compare_strings.js'
+import { claimPartitionMutation } from '../util/mutation_guard.js'
 
 /**
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../../src/core/cache/types.js'
  */
+
+/**
+ * Claim the cross-process guard for one reconcile scope of `dataset`, keyed on
+ * the cache root, the dataset and the scope's exact `where`. A writer holds it
+ * from its authoritative read through its reconcile commit, so a snapshot read
+ * before a rewind cannot commit after one. Fail-fast like the partition guard
+ * it reuses: a busy scope throws `cache_partition_mutation_busy` and the
+ * caller decides whether to defer or retry. Distinct scopes never contend.
+ *
+ * Holders of a partition guard never take a scope guard, so taking this one
+ * first and the partition guards inside `reconcileCacheRows` cannot deadlock.
+ * The lock is a transient `.session-<hash>.mutation-lock` directory beside the
+ * dataset's partitions, removed on release; partition discovery finds no
+ * table in it.
+ * @ref LLP 0449#read-commit-guard [implements]: one guard spans read, fingerprint and commit.
+ * @param {string} cacheRoot
+ * @param {string} dataset
+ * @param {Record<string, string>} where
+ * @returns {() => void} sync release
+ */
+export function claimReconcileScope(cacheRoot, dataset, where) {
+  if (!where.client_name || !where.session_id ||
+      Object.values(where).some(value => typeof value !== 'string' || !value)) throw new Error('Invalid snapshot scope')
+  const key = createHash('sha256').update(JSON.stringify(Object.entries(where).sort(([a], [b]) => compareStrings(a, b))))
+    .digest('hex').slice(0, 32)
+  return claimPartitionMutation(cacheTablePath(cacheRoot, dataset, [`session-${key}`]))
+}
 
 /**
  * @ref LLP 0449#reconciliation [implements]: one canonical source partition;

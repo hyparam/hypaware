@@ -22,7 +22,7 @@ import {
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createIngestSeqAllocator } from './ingest-seq.js'
-import { reconcileCacheRows } from './reconcile.js'
+import { claimReconcileScope as claimReconcileScopeImpl, reconcileCacheRows } from './reconcile.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
@@ -700,6 +700,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       }
       return reconcileCacheRows({ cacheRoot, dataset, columns, rows, scope,
         declaration: getDeclaration?.(dataset), filterRows: survivingRows, reserveSeq: seqAllocator.reserve })
+    },
+
+    claimReconcileScope(dataset, where) {
+      return claimReconcileScopeImpl(cacheRoot, dataset, where)
     },
 
     discoverCachePartitions(scope) {

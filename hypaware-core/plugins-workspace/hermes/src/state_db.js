@@ -14,7 +14,7 @@
  *   rather than throwing raw into the daemon.
  * @ref LLP 0449#detection [implements]: per-session payload digests replace the append-only watermark.
  *
- * @import { HermesSessionRow, HermesMessageRow, HermesWatermarkState, HermesChangedSession, HermesBusyRetryOptions, HermesStateDbOptions } from './types.js'
+ * @import { HermesSessionRow, HermesMessageRow, HermesWatermarkState, HermesChangedSession, HermesBusyRetryOptions, HermesStateDbOptions, HermesSessionSnapshot } from './types.js'
  * @import { DatabaseSync } from 'node:sqlite'
  */
 
@@ -210,14 +210,8 @@ export class HermesStateDb {
           // them resident for the length of the full-history hash.
           const marks = []
           for (const session of this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions ORDER BY id ASC`).iterate()) {
-            const hash = createHash('sha256').update(JSON.stringify(session))
-            let maxMessageId = 0
-            for (const message of statement.iterate(session.id)) {
-              hash.update(JSON.stringify(message))
-              maxMessageId = Math.max(maxMessageId, Number(message.id))
-            }
-            marks.push({ session_id: session.id, reason: 'changed', max_message_id: maxMessageId,
-              ended_at: session.ended_at ?? null, fingerprint: hash.digest('hex') })
+            marks.push(sessionMark(/** @type {HermesSessionRow} */ (/** @type {unknown} */ (session)),
+              /** @type {Iterable<HermesMessageRow>} */ (/** @type {unknown} */ (statement.iterate(session.id)))))
           }
           this.db.exec('COMMIT')
           return /** @type {HermesChangedSession[]} */ (/** @type {unknown} */ (marks))
@@ -238,10 +232,55 @@ export class HermesStateDb {
     return changed
   }
 
+  /**
+   * One session's row, visible messages and mark, read in a single read
+   * transaction so all three describe the same committed state of the store.
+   * Null when the session no longer exists.
+   * @ref LLP 0449#read-commit-guard [implements]: the fingerprint names exactly the view projected.
+   * @param {string | number} sessionId
+   * @returns {Promise<HermesSessionSnapshot | null>}
+   */
+  async readSessionSnapshot(sessionId) {
+    return withBusyRetry(() => {
+      this.db.exec('BEGIN')
+      try {
+        const session = /** @type {HermesSessionRow | undefined} */ (/** @type {unknown} */ (
+          this.db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions WHERE id = ?`).get(sessionId)))
+        const messages = session ? /** @type {HermesMessageRow[]} */ (/** @type {unknown} */ (
+          this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE session_id = ? AND ${this.visibleClause()} ORDER BY id ASC`)
+            .all(sessionId))) : []
+        this.db.exec('COMMIT')
+        return session ? { session, messages, mark: sessionMark(session, messages) } : null
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    }, this.retryOpts)
+  }
+
   /** Close the underlying connection. Safe to call once; a second call throws per `node:sqlite`. */
   close() {
     this.db.close()
   }
+}
+
+/**
+ * The change mark for one session: a digest over its row and visible messages
+ * in id order. Shared by the change scan and the guarded snapshot read, so a
+ * watermark written from either compares equal for the same content.
+ * @param {HermesSessionRow} session
+ * @param {Iterable<HermesMessageRow>} messages
+ * @returns {HermesChangedSession}
+ */
+function sessionMark(session, messages) {
+  const hash = createHash('sha256').update(JSON.stringify(session))
+  let maxMessageId = 0
+  for (const message of messages) {
+    hash.update(JSON.stringify(message))
+    maxMessageId = Math.max(maxMessageId, Number(message.id))
+  }
+  return { session_id: session.id, reason: 'changed', max_message_id: maxMessageId,
+    ended_at: session.ended_at ?? null, fingerprint: hash.digest('hex') }
 }
 
 /**

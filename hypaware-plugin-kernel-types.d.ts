@@ -1806,6 +1806,14 @@ export interface ReadRowsOptions {
 export interface QueryStorageService {
   /** Reconcile a complete scoped snapshot, including removals, in the local cache. */
   reconcileRows?(dataset: string, columns: ColumnSpec[], rows: Record<string, unknown>[], scope: { where: Record<string, string>; key: string }): Promise<number>
+  /**
+   * Claim the cross-process guard for one reconcile scope (`client_name` and
+   * `session_id` required). Hold it from the authoritative source read
+   * through `reconcileRows`, then call the returned release. Throws an error
+   * with `error_kind: 'cache_partition_mutation_busy'` when another writer
+   * holds the scope; it never waits.
+   */
+  claimReconcileScope?(dataset: string, where: Record<string, string>): () => void
 
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string

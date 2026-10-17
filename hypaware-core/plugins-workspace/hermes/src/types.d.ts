@@ -123,6 +123,15 @@ export interface HermesChangedSession {
   ended_at: string | number | null
 }
 
+/** One session read in a single transaction by `readSessionSnapshot` (LLP 0449#read-commit-guard). */
+export interface HermesSessionSnapshot {
+  session: HermesSessionRow
+  /** Visible messages, oldest first, from the same transaction as `session`. */
+  messages: HermesMessageRow[]
+  /** The mark of exactly this view; the watermark advances to it only after its reconcile commits. */
+  mark: HermesChangedSession
+}
+
 /** Options accepted by `state_db.js`'s bounded SQLITE_BUSY retry. */
 export interface HermesBusyRetryOptions {
   /** Maximum attempts (including the first) before giving up; defaults to `DEFAULT_BUSY_RETRY_ATTEMPTS`. */

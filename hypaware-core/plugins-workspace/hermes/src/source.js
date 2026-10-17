@@ -31,12 +31,13 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { isPartitionMutationBusy } from '../../../../src/core/util/mutation_guard.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { AI_GATEWAY_MESSAGES_DATASET, PROJECTED_EXCHANGE_KIND } from '../../../../src/core/backfill/scan_util.js'
 import { resolveHermesEnabled } from './config.js'
 import { HermesStateDbError } from './errors.js'
-import { HERMES_CLIENT_NAME, projectHermesSession } from './projector.js'
+import { HERMES_CLIENT_NAME, hermesReconcileScope, projectHermesSession } from './projector.js'
 import { openHermesStateDb } from './state_db.js'
 import { readHermesWatermark, writeHermesWatermark } from './watermark.js'
 
@@ -282,14 +283,14 @@ export async function runHermesPollTick(runner, ctx) {
 
         const db = runner.db
         if (!db) return // unreachable, narrows the type for TS below
-        const sessions = await db.listSessions()
         const changed = await db.listChangedSessions(runner.watermark)
-        runner.sessionsTracked = sessions.length
+        // The change scan already walked every session; its marks count them.
+        runner.sessionsTracked = db.snapshot?.length ?? 0
         span.setAttribute('sessions_examined', changed.length)
 
         let rowsAppended = 0
+        let sessionsDeferred = 0
         if (changed.length > 0) {
-          const sessionsById = new Map(sessions.map((s) => [s.id, s]))
           // @ref LLP 0449#detection [constrained-by]: a fingerprint is persisted
           // only after its session reconciled, so a flush inside the loop can
           // never make a restart skip work that did not finish.
@@ -307,33 +308,63 @@ export async function runHermesPollTick(runner, ctx) {
           }
           try {
             for (const change of changed) {
-              const session = sessionsById.get(change.session_id)
-              if (!session) continue
-              reconcilingSessionId = change.session_id
-              const messages = await db.listMessagesForSession(change.session_id)
-              // @ref LLP 0449#reconciliation [implements]: replace shifted parts
-              // and removed suffixes from a complete visible transcript.
-              const item = await projectHermesSession({
-                session,
-                messages,
-                sourcePath: runner.stateDbPath,
-                clientName: HERMES_CLIENT_NAME,
-                homeDir: runner.homeDir,
-                resolver: runner.resolver,
-                log: ctx.log,
-              })
-              if (item) {
-                rowsAppended += await writeProjectedItem(runner, ctx, item)
+              // @ref LLP 0449#read-commit-guard [implements]: claim before the
+              // authoritative read, hold through the commit. A scope another
+              // writer holds is deferred with its watermark untouched, so the
+              // next tick re-lists it and reads whatever that writer left.
+              /** @type {() => void} */
+              let release
+              try {
+                release = ctx.storage.claimReconcileScope?.(AI_GATEWAY_MESSAGES_DATASET,
+                  hermesReconcileScope(HERMES_CLIENT_NAME, change.session_id)) ?? (() => {})
+              } catch (claimErr) {
+                if (!isPartitionMutationBusy(claimErr)) throw claimErr
+                sessionsDeferred += 1
+                ctx.log.info('hermes.session_deferred', {
+                  component: 'hermes',
+                  operation: 'hermes.poll',
+                  status: 'deferred',
+                  error_kind: 'cache_partition_mutation_busy',
+                  session_id: String(change.session_id),
+                })
+                continue
               }
-              // Watermark advances whether or not the item produced rows
-              // (usage-policy drop, or nothing new to write): the session
-              // was still examined through to its current state, and not
-              // advancing would re-examine (and, for a drop, re-log) it
-              // every tick forever.
-              runner.watermark[String(change.session_id)] = {
-                max_message_id: change.max_message_id,
-                ended_at: change.ended_at,
-                fingerprint: change.fingerprint,
+              reconcilingSessionId = change.session_id
+              try {
+                const snapshot = await db.readSessionSnapshot(change.session_id)
+                if (!snapshot) {
+                  // Deleted since the change scan; nothing to project or mark.
+                  reconcilingSessionId = null
+                  continue
+                }
+                // @ref LLP 0449#reconciliation [implements]: replace shifted parts
+                // and removed suffixes from a complete visible transcript.
+                const item = await projectHermesSession({
+                  session: snapshot.session,
+                  messages: snapshot.messages,
+                  sourcePath: runner.stateDbPath,
+                  clientName: HERMES_CLIENT_NAME,
+                  homeDir: runner.homeDir,
+                  resolver: runner.resolver,
+                  log: ctx.log,
+                })
+                if (item) {
+                  rowsAppended += await writeProjectedItem(runner, ctx, item)
+                }
+                // Watermark advances whether or not the item produced rows
+                // (usage-policy drop, or nothing new to write): the session
+                // was still examined through to its current state, and not
+                // advancing would re-examine (and, for a drop, re-log) it
+                // every tick forever. It names the view just committed, not
+                // the earlier change scan, so a rewind between the two is
+                // seen again on the next tick.
+                runner.watermark[String(change.session_id)] = {
+                  max_message_id: snapshot.mark.max_message_id,
+                  ended_at: snapshot.mark.ended_at,
+                  fingerprint: snapshot.mark.fingerprint,
+                }
+              } finally {
+                release()
               }
               reconcilingSessionId = null
               if (++pendingMarks >= WATERMARK_FLUSH_SESSIONS) flushMarks()
@@ -392,11 +423,13 @@ export async function runHermesPollTick(runner, ctx) {
 
         runner.rowsWritten += rowsAppended
         span.setAttribute('rows_appended', rowsAppended)
+        span.setAttribute('sessions_deferred', sessionsDeferred)
         ctx.log.info('hermes.poll_tick', {
           component: 'hermes',
           operation: 'hermes.poll',
           state_db: runner.stateDbPath,
           sessions_examined: changed.length,
+          sessions_deferred: sessionsDeferred,
           rows_appended: rowsAppended,
         })
       },
