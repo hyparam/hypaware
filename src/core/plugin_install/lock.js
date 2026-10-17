@@ -169,6 +169,74 @@ export function partitionEntries(lock) {
   return { entries, unusable }
 }
 
+/**
+ * The 1-based line each key of the lock's `plugins` object sits on in the
+ * file, so a message can point an operator at a row without repeating its
+ * key, which is hand-edited text (issue #2115). Read from the raw text
+ * because no parsed form keeps the file's order: `Object.keys` lists
+ * integer-like keys first, so a position taken from it can name a healthy
+ * row. A key the file repeats maps to its last occurrence, the one
+ * `JSON.parse` keeps. Best effort: an unreadable file yields an empty map.
+ *
+ * @param {string} stateDir
+ * @returns {Promise<Map<string, number>>}
+ */
+export async function readLockKeyLines(stateDir) {
+  try {
+    return lockKeyLines(await fs.readFile(pluginLockPath(stateDir), 'utf8'))
+  } catch {
+    return new Map()
+  }
+}
+
+/**
+ * One pass over JSON `text` that records the line of each key directly
+ * inside the top-level `plugins` object. Assumes `text` already parsed.
+ *
+ * @param {string} text
+ * @returns {Map<string, number>}
+ */
+export function lockKeyLines(text) {
+  /** @type {Map<string, number>} */
+  const lines = new Map()
+  /** @type {string[]} */
+  const open = []
+  let line = 1
+  let expectKey = false
+  let topKey = ''
+  let inPlugins = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (c === '\n') {
+      line++
+    } else if (c === '"') {
+      const start = i
+      for (i++; i < text.length && text[i] !== '"'; i++) {
+        if (text[i] === '\\') i++
+      }
+      if (!expectKey) continue
+      expectKey = false
+      const key = JSON.parse(text.slice(start, i + 1))
+      if (open.length === 1) topKey = key
+      else if (open.length === 2 && inPlugins) lines.set(key, line)
+    } else if (c === '{' || c === '[') {
+      open.push(c)
+      expectKey = c === '{'
+      if (open.length === 2) {
+        inPlugins = c === '{' && topKey === 'plugins'
+        // A repeated top-level "plugins" key: JSON.parse keeps the last one.
+        if (inPlugins) lines.clear()
+      }
+    } else if (c === '}' || c === ']') {
+      open.pop()
+      if (open.length < 2) inPlugins = false
+    } else if (c === ',') {
+      expectKey = open[open.length - 1] === '{'
+    }
+  }
+  return lines
+}
+
 /** @param {PluginLockFile} lock */
 function normalizeLock(lock) {
   // `Object.fromEntries`, not `sorted[name] = ...` into a `{}`: a bracket

@@ -1418,13 +1418,21 @@ export async function collectHypAwareStatus(opts = {}) {
   // plugin remove` reads as not installed; for the reported shape (an object
   // missing `install_dir`) `removePlugin` falls back to the conventional
   // install directory and clears the row.
-  for (const name of manifests.installed.malformed) {
+  // The repair names the row by line, never by key: the key is
+  // hand-edited text, and a repair line is one an operator may paste, so no
+  // byte of it belongs there. The sanitized label stays in the message, where
+  // it identifies the row but is not offered as a command (issue #2115).
+  const { malformed, malformedLines } = manifests.installed
+  for (const name of malformed) {
     const label = sanitizeLabel(name, MAX_ACTIVATION_MESSAGE_CHARS) ?? '<unnamed>'
+    const lockPath = pluginLockPath(stateRoot)
+    const line = malformedLines.get(name)
+    const row = line === undefined ? 'that entry' : `the entry on line ${line}`
     diagnostics.push({
       severity: 'error',
       kind: 'plugin_lock_entry_invalid',
-      message: `plugin-lock.json entry '${label}' has no usable install_dir, so nothing it installed is running: ${pluginLockPath(stateRoot)}`,
-      repair: [`hyp plugin remove ${label}`],
+      message: `plugin-lock.json entry '${label}' has no usable install_dir, so nothing it installed is running: ${lockPath}`,
+      repair: [`open ${lockPath} and remove ${row}, or pass its exact key as one quoted argument to hyp plugin remove`],
     })
   }
 
@@ -4164,7 +4172,7 @@ async function discoverStatusManifests({ stateDir }) {
   /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
   let bundled = { loaded: [], excluded: [] }
   /** @type {DiscoverInstalledResult} */
-  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [] }
+  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [], malformedLines: new Map() }
   try {
     bundled = await discoverBundledPlugins()
   } catch { /* bundled discovery failure is non-fatal */ }

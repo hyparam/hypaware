@@ -184,6 +184,12 @@ export interface DiscoverInstalledResult {
    * no directory.
    */
   malformed: PluginName[]
+  /**
+   * 1-based line of each `malformed` key in plugin-lock.json, so a repair
+   * can point at the row without repeating its untrusted key. A key whose
+   * line could not be read is absent.
+   */
+  malformedLines: Map<PluginName, number>
 }
 
 // --- activation ---
