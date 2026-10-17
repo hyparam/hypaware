@@ -32,6 +32,7 @@ import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { enableClientAdapter } from '../config/client_enable.js'
 import { enableGatewayProxyMode } from '../config/gateway_proxy_enable.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { loaderActivationKind } from '../runtime/loader.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeAttachedClients, probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { askYesNo } from '../cli/confirm.js'
@@ -56,6 +57,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { AiGatewayCapability, ClientRegistry, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { classifyInactiveState } from '../../../src/core/cli/dispatch.js'
  * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
  * @import { ClientEnableResult, ClientRecordingWriteResult, DetachFromDiskResult } from '../../../src/core/config/types.js'
@@ -829,6 +831,11 @@ export async function withAttachKeyLock({ name, ctx }, fn) {
  * entry with that name, so telling the user to edit their config would be a
  * lie).
  *
+ * The message names one blocking plugin from the adapter's dependency closure
+ * (LLP 0531): a disabled, unresolved, or absent dependency, a plugin that
+ * failed to activate, or a config that could not be read, each with its own
+ * repair. The codes stay the two above.
+ *
  * Reads the static bundled+installed catalog, never the live gateway registry:
  * this runs precisely when the registry cannot answer, either because the
  * `hypaware.ai-gateway` capability is absent or because the adapter that would
@@ -862,40 +869,177 @@ async function resolveAttachEnablementState({ name, ctx }) {
   const configPath = ctx.env.HYP_CONFIG
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(obsEnv.hypHome)
-  /** @type {'absent' | 'disabled-local' | 'disabled-central'} */
-  let inactive = 'absent'
+  const rerun = `then re-run 'hyp client attach ${name}'`
+  /** @type {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> | undefined} */
+  let layered
+  /** @type {typeof classifyInactiveState | undefined} */
+  let classify
   try {
-    const { classifyInactiveState } = await import('../cli/dispatch.js')
-    const layered = await resolveLayeredConfigFromDisk({
+    classify = (await import('../cli/dispatch.js')).classifyInactiveState
+    layered = await resolveLayeredConfigFromDisk({
       stateRoot: obsEnv.stateDir,
       configPath,
       knownPlugins: catalog.pluginMetadata,
       knownDatasets: catalog.knownDatasets,
     })
-    inactive = classifyInactiveState(layered, descriptor.plugin)
-  } catch {
-    // An unreadable/invalid config layer cannot prove the central layer
-    // disabled anything, and the adapter is demonstrably not live: report the
-    // fixable state, whose remedy ('hyp init') repairs a broken config too.
+  } catch { /* classified as unreadable below */ }
+  // A missing file is a real state (nothing enabled there); a layer that
+  // exists but cannot be read cannot prove what it enables or disables.
+  const unreadable = [layered?.localLoaded, layered?.centralLoaded]
+    .find((loaded) => loaded && !loaded.ok && loaded.errorKind !== 'config_missing')
+  if (!layered || !classify || unreadable) {
+    // @ref LLP 0531#unreadable [implements]: no owner is invented for a
+    // config that could not be read
+    const unreadablePath = unreadable && !unreadable.ok ? unreadable.configPath : configPath
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `the ${name} adapter is not active, and its enablement cannot be classified because ` +
+        `${unreadablePath} could not be read; run 'hyp config validate' for why, ${rerun}`,
+    }
   }
 
-  if (inactive === 'disabled-central') {
+  const picker = catalog.pickerDescriptors.get(name)
+  const seeds = [descriptor.plugin, ...(picker ? resolveSingleSourceEnablement(picker).pluginNames : [])]
+  const effectivePlugins = layered.effective?.plugins ?? []
+  const enabled = new Set(effectivePlugins.filter((p) => p.enabled !== false).map((p) => p.name))
+  const { closure, unresolved } = attachDependencyClosure({ seeds, catalog, enabled })
+  const classifyState = classify
+  const layeredConfig = layered
+  /** @param {string} plugin */
+  const stateOf = (plugin) =>
+    enabled.has(plugin) ? 'enabled' : classifyState(layeredConfig, plugin)
+
+  // @ref LLP 0531#one-blocker [implements]: exactly one blocking plugin,
+  // the most binding state first, then closure order (the adapter leads)
+  const central = closure.find((plugin) => stateOf(plugin) === 'disabled-central')
+  if (central) {
     return {
       state: 'disabled_central',
       errorKind: 'adapter_disabled_central',
-      message:
-        `the ${name} adapter is disabled by your central config; ` +
-        `a local config cannot override the central-managed setting`,
+      message: central === descriptor.plugin
+        ? `the ${name} adapter is disabled by your central config; ` +
+          `a local config cannot override the central-managed setting`
+        : `the ${name} adapter needs ${central}, which is disabled by your central config; ` +
+          `a local config cannot override the central-managed setting`,
     }
   }
+  const local = closure.find((plugin) => stateOf(plugin) === 'disabled-local')
+  if (local) {
+    const subject = local === descriptor.plugin
+      ? `the ${name} adapter's plugin ${local} is disabled`
+      : `the ${name} adapter needs ${local}, which is disabled`
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `${subject} in ${configPath}; set "enabled": true on its plugins[] entry ` +
+        `and run 'hyp daemon restart', ${rerun}`,
+    }
+  }
+  const missing = unresolved[0]
+  if (missing) {
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message: missing.kind === 'plugin'
+        ? `the ${name} adapter needs ${missing.name}, which is not installed on this machine; ` +
+          `install it with 'hyp plugin install ${missing.name}', ${rerun}`
+        : `the ${name} adapter needs the ${missing.name} capability, which no installed plugin ` +
+          `provides; install a plugin that provides it (see 'hyp plugin list'), ${rerun}`,
+    }
+  }
+  const absent = closure.find((plugin) => stateOf(plugin) === 'absent')
+  if (absent) {
+    const subject = absent === descriptor.plugin
+      ? `the ${name} adapter is not enabled on this install`
+      : `the ${name} adapter needs ${absent}, which is not enabled on this install`
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `${subject}; enable it with 'hyp setup', ` +
+        `or add ${absent} to ${configPath} and run 'hyp daemon restart', ${rerun}`,
+    }
+  }
+
+  // Every plugin the adapter needs is configured and enabled, so the config
+  // is not the problem: this run could not activate one of them.
+  // @ref LLP 0531#not-live [implements]: name the plugin that failed and the
+  // loader's safe kind, never its thrown message
+  const failed = (ctx.activations ?? []).find((outcome) => !outcome.ok && closure.includes(outcome.plugin.name))
+  if (failed) {
+    return {
+      state: 'not_enabled',
+      errorKind: 'adapter_not_enabled',
+      message:
+        `the ${name} adapter is enabled, but ${failed.plugin.name} failed to activate this run ` +
+        `(${loaderActivationKind(failed.errorKind)}); run 'hyp status' for why, ${rerun}`,
+    }
+  }
+  const live = new Set((ctx.plugins ?? []).map((plugin) => plugin.name))
+  const inactive = closure.find((plugin) => ctx.failedPlugins?.includes(plugin)) ??
+    closure.find((plugin) => !live.has(plugin)) ??
+    descriptor.plugin
   return {
     state: 'not_enabled',
     errorKind: 'adapter_not_enabled',
     message:
-      `the ${name} adapter is not enabled on this install; enable it with 'hyp setup', ` +
-      `or add ${descriptor.plugin} to ${configPath} and run 'hyp daemon restart', ` +
-      `then re-run 'hyp client attach ${name}'`,
+      `the ${name} adapter is enabled, but ${inactive} is not active this run; ` +
+      `run 'hyp status' for why, ${rerun}`,
   }
+}
+
+/**
+ * The plugins `seeds` need, in breadth-first order from the seeds:
+ * `requires` capabilities resolve to a catalog provider, preferring one the
+ * effective config already enables. The catalog is finite and every name is
+ * visited once, so a dependency cycle terminates; a name the catalog does not
+ * know, or a capability nothing provides, is returned in `unresolved` instead
+ * of being walked.
+ *
+ * @param {{ seeds: string[], catalog: PluginCatalog, enabled: Set<string> }} args
+ * @returns {{ closure: string[], unresolved: { kind: 'plugin' | 'capability', name: string }[] }}
+ */
+function attachDependencyClosure({ seeds, catalog, enabled }) {
+  /** @type {Map<string, string[]>} */
+  const providers = new Map()
+  for (const [plugin, meta] of catalog.pluginMetadata) {
+    for (const cap of Object.keys(meta.provides ?? {})) {
+      const list = providers.get(cap)
+      if (list) list.push(plugin)
+      else providers.set(cap, [plugin])
+    }
+  }
+  /** @type {string[]} */
+  const closure = []
+  /** @type {{ kind: 'plugin' | 'capability', name: string }[]} */
+  const unresolved = []
+  const seen = new Set()
+  const missingCaps = new Set()
+  const queue = [...seeds]
+  for (let i = 0; i < queue.length; i++) {
+    const current = queue[i]
+    if (seen.has(current)) continue
+    seen.add(current)
+    const meta = catalog.pluginMetadata.get(current)
+    if (!meta) {
+      unresolved.push({ kind: 'plugin', name: current })
+      continue
+    }
+    closure.push(current)
+    for (const cap of Object.keys(meta.requires ?? {})) {
+      const candidates = providers.get(cap)
+      if (candidates) {
+        queue.push(candidates.find((plugin) => enabled.has(plugin)) ?? candidates[0])
+      } else if (!missingCaps.has(cap)) {
+        missingCaps.add(cap)
+        unresolved.push({ kind: 'capability', name: cap })
+      }
+    }
+  }
+  return { closure, unresolved }
 }
 
 /**

@@ -277,7 +277,11 @@ test('an entry already present but disabled skips the prompt: the additive write
     assert.doesNotMatch(stderr.text(), /Enable @hypaware/)
     // Never claims an enable that did not happen.
     assert.doesNotMatch(stderr.text(), /enabled the claude adapter/)
-    assert.match(stderr.text(), /the claude adapter is not enabled on this install/)
+    // Names the disabled entry and the flag that fixes it, not the add path
+    // that cannot (LLP 0531 #one-blocker).
+    assert.match(stderr.text(), /the claude adapter's plugin @hypaware\/claude is disabled in /)
+    assert.match(stderr.text(), /set "enabled": true on its plugins\[\] entry/)
+    assert.doesNotMatch(stderr.text(), /not enabled on this install/)
     // Zero side effects: byte-identical config, no backup.
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
     assert.deepEqual(backupsIn(path.dirname(localConfigPath(home))), [])
@@ -330,7 +334,10 @@ test('every requested plugin already present and enabled skips the prompt: the w
     assert.equal(code, 1)
     assert.doesNotMatch(stderr.text(), /\[Y\/n\]/)
     assert.doesNotMatch(stderr.text(), /enabled the claude adapter/)
-    assert.match(stderr.text(), /the claude adapter is not enabled on this install/)
+    // The config is not the problem, so the refusal points at status
+    // instead of an enable the config already has (LLP 0531 #not-live).
+    assert.match(stderr.text(), /the claude adapter is enabled, but @hypaware\/claude is not active this run; run 'hyp status'/)
+    assert.doesNotMatch(stderr.text(), /not enabled on this install/)
     assert.equal(readFileSync(localConfigPath(home), 'utf8'), before)
     assert.deepEqual(backupsIn(path.dirname(localConfigPath(home))), [])
   })
