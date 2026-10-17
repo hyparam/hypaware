@@ -1,5 +1,6 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
@@ -1839,6 +1840,86 @@ export async function findAttachedNotConfiguredClients({ clientsPicked, config, 
     if (probe.attached) stranded.push(clientName)
   }
   return stranded
+}
+
+/**
+ * Refuse a setup write that would leave a client attached through a proxy
+ * the new config turns off.
+ *
+ * A machine set up before LLP 0262 can still have Claude attached by proxy
+ * (its marker says `mode: "proxy"`), and no setup path composes `proxy_mode`
+ * any more, so a from-scratch re-init under `--force` would quietly turn the
+ * proxy off and capture would stop. The evidence is the client's own attach
+ * marker, read through the probe `hyp status` uses; the config's
+ * `proxy_mode` key proves nothing about what is attached. A refusal writes
+ * nothing, names the client and the commands that fix it, and runs neither.
+ *
+ * Bounded: one settings-file read per client whose probe is a JSON marker
+ * (the only marker that records a mode), and none at all for a fresh install,
+ * a config that keeps the proxy on, or a centrally governed gateway.
+ *
+ * @ref LLP 0524#check [implements]: refuse only when a config exists, the new one turns the proxy off, central does not own the gateway, and a marker says proxy
+ * @ref LLP 0524#unreadable [implements]: a settings file that cannot be read where it matters refuses rather than guesses, without quoting its contents
+ * @param {{
+ *   config: HypAwareV2Config,
+ *   configPath: string,
+ *   env: NodeJS.ProcessEnv,
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<boolean>} true when the write may proceed
+ */
+export async function preflightLegacyProxyAttach({ config, configPath, env, stderr }) {
+  try {
+    await fs.access(configPath)
+  } catch {
+    return true
+  }
+  const gateway = (config.plugins ?? []).find((entry) => entry.name === GATEWAY_PLUGIN)
+  if (gateway && gateway.enabled !== false && gateway.config?.proxy_mode === true) return true
+  // @ref LLP 0524#central [implements]: a centrally named gateway is not the local write's to change, so there is nothing to refuse
+  if ((await readCentralPluginNames(env)).has(GATEWAY_PLUGIN)) return true
+  const homeDir = env.HOME ?? ''
+  if (!homeDir) return true
+
+  for (const [client, descriptor] of await buildWalkthroughClientDescriptorMap()) {
+    if (descriptor.attachProbe?.format !== 'json' || !descriptor.attachProbe.marker_key) continue
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
+    /** @type {string | undefined} */
+    let reason
+    /** @type {string} */
+    let message = ''
+    if (probe.error) {
+      reason = 'attach_state_unreadable'
+      message =
+        `cannot read ${client}'s settings${probe.settingsPath ? ` (${probe.settingsPath})` : ''} to check ` +
+        `whether ${client} is still attached through the HypAware proxy, which this config turns off. ` +
+        `Nothing was changed. Fix that file, or run 'hyp client detach ${client}', then run setup again.`
+    } else if (probe.mode === 'proxy') {
+      reason = 'legacy_proxy_attachment'
+      message =
+        `${client} is still attached through the HypAware proxy, and this config turns the proxy off, ` +
+        `so ${client} would stop being captured. Nothing was changed. Move ${client} off the proxy ` +
+        `with 'hyp client attach ${client}', or remove the attach with 'hyp client detach ${client}', ` +
+        `then run setup again.`
+    }
+    if (!reason) continue
+    stderr.write(`hyp setup: ${message}\n`)
+    await withSpan(
+      'wizard.pick.write_config',
+      {
+        [Attr.COMPONENT]: 'wizard',
+        [Attr.OPERATION]: 'wizard.pick.write_config',
+        config_path: configPath,
+        status: 'aborted',
+        hyp_reason: reason,
+        hyp_client: client,
+      },
+      async () => {},
+      { component: 'wizard' }
+    )
+    return false
+  }
+  return true
 }
 
 /**

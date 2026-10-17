@@ -33,6 +33,7 @@ import {
   LOCAL_INSTALL_RETENTION_DAYS,
   defaultConfirmSelectPromptFactory,
   defaultPickerDetect,
+  preflightLegacyProxyAttach,
   runPickerFinale,
   visiblePickerDescriptors,
   writeAttachedNotConfiguredReminder,
@@ -829,6 +830,18 @@ async function runGuardedInitWizard(opts, guard) {
   // saying it cancels the run before anything is written.
   recap.print(opts.stdout)
   if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
+  // Ahead of the folder-ask write as well as the config, so a refused run
+  // leaves nothing behind; a dry run refuses the same way the real run would.
+  // @ref LLP 0524#refusal [implements]: one refusal and exit 1 in every wizard mode, before any write
+  if (picked.configPending && !(await preflightLegacyProxyAttach({
+    config: picked.config,
+    configPath: picked.configPath,
+    env: opts.env,
+    stderr: opts.stderr,
+  }))) {
+    if (joined) await narrateEnrolledAbort(opts)
+    return { exitCode: 1, ...(pathway ? { pathway } : {}) }
+  }
   if (folderAskPending && folderAsk) {
     await commitWizardFolderAsk({ env: opts.env, stderr: opts.stderr, mode: folderAsk })
   }
