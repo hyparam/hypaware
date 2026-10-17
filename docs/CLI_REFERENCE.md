@@ -1728,9 +1728,31 @@ one dataset or all datasets. `--dry-run` writes nothing. `--compact-only` and
 `--expire-only` limit the operation. Maintenance continues past partition
 failures and returns `1` if any partition failed.
 
+`--force` rewrites partitions that aren't due yet. It never rewrites one whose
+table metadata can't supply the schema, partition spec, and sort order the
+replacement must keep. That partition is left as it was, and its line ends:
+
+```text
+FAILED: refusing to rewrite <generation>: <reason>, so the replacement could not keep the recorded schema, partition spec and sort order (compaction_metadata_unavailable); the walk continued
+```
+
+The next run after the metadata is readable again rewrites it.
+
 ```sh
 hyp cache maintain ai_gateway_messages --dry-run
 ```
+
+Downgrade warning: v1.28.0 and newer migrate `ai_gateway_messages` to a
+date-partitioned layout. Maintenance reports it on that partition's line as
+`re-partitioned to the declared layout`. Once a cache has been migrated, a
+build older than v1.28.0 can't append to it and fails each append with:
+
+```text
+cache-iceberg: partition field "session_id" is new - adding a partition field is spec evolution and requires an explicit migration
+```
+
+To recover, go back to v1.28.0 or newer. Don't delete or rebuild the cache:
+that discards captured history the newer build still reads.
 
 ## Maintain exports
 

@@ -768,6 +768,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // spec is established by the layout, not inferred from a failed
             // read.
             // @ref LLP 0220#walk-survives-a-partition [constrained-by]: the refusal fails this partition, and the walk moves on.
+            // @ref LLP 0530#forced-rewrite [implements]: --force overrides dueness, never the metadata the replacement must keep.
             if (lockedLayout.kind === 'source-table') {
               const missing = missingCompactionMetadata(lockedTableInfo)
               if (missing) throw compactionMetadataRefusal(lockedLayout.liveDir, missing)
