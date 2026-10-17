@@ -57,14 +57,16 @@ export const HERMES_PARTITION_SEGMENT = 'hermes'
  * which keeps a pass that flags every session (a first tick, a lost sidecar,
  * the LLP 0449 fingerprint upgrade) from holding daemon start for the whole
  * history. A session another writer holds is deferred and does not count.
- * @ref LLP 0527#tick-budget [implements]: start does a bounded amount of work whatever the history size.
+ * @ref LLP 0527#tick-budget [implements]: start commits at most one batch whatever the history size.
  */
 export const HERMES_SESSIONS_PER_TICK = 64
 
 /**
  * The batch also stops admitting sessions once it holds this many projected
- * rows, so its memory stays bounded when sessions are long. The first session
- * is always admitted, so one oversized session still makes progress.
+ * rows. The check runs before each session and a session is projected whole,
+ * so the last one admitted can carry the batch past this by its own size. The
+ * first session is always admitted, so one oversized session still makes
+ * progress.
  */
 export const HERMES_ROWS_PER_TICK = 4096
 

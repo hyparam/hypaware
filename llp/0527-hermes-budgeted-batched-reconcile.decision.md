@@ -38,8 +38,11 @@ its read, as before, and is held until the batch commit returns. The
 read-to-commit guarantee is unchanged: no snapshot of a session can commit
 between another writer's read and commit of it. The cost is that a backfill
 reaching a session in a poll's in-flight batch waits for the batch, not for one
-session; its bounded per-session wait still covers one batch commit. The lock
-order is unchanged: scope guards, then partition guards.
+session. Its per-session wait (about five seconds) covers a typical batch
+commit, but a batch of large sessions or a large cache can take longer; the
+backfill then refuses that session with its existing explicit, retryable busy
+error rather than waiting without bound. The lock order is unchanged: scope
+guards, then partition guards.
 
 If the batch commit fails, the tick retries its snapshots one at a time in
 session order. Reconciling a snapshot twice is idempotent, so a partly
@@ -49,10 +52,12 @@ before batching. Storage without the batch call takes the per-session path.
 
 ### Tick budget {#tick-budget}
 
-A tick admits at most 64 changed sessions, and stops early once the batch holds
-4096 projected rows; the first session is always admitted, so one long session
-still makes progress. A session another writer holds is deferred and does not
-count. The watermark is flushed once per tick, after the commit, so a restart
+A tick admits at most 64 changed sessions, and stops admitting once the batch
+holds 4096 projected rows. The check runs before each session and a session is
+projected whole, so the last session admitted can carry the batch past 4096 by
+up to its own projection; the first session is always admitted, so one long
+session still makes progress. A session another writer holds is deferred and
+does not count. The watermark is flushed once per tick, after the commit, so a restart
 repeats at most the one batch that had not committed, and a session is never
 marked before its commit.
 
@@ -68,10 +73,21 @@ less often.
 
 ## Consequences
 
-- Daemon start does a bounded amount of reconcile work, whatever the history
-  size; the rest lands on the following ticks.
+- Daemon start commits at most one batch, whatever the history size; the rest
+  lands on the following ticks. Change detection is unchanged: when the
+  database changed, the first tick still makes the streaming full-history
+  fingerprint pass LLP 0449 `#cost-and-verification` describes, before any
+  batch is admitted. What this bounds is the reconcile and commit work, not
+  that pass.
 - Metadata loads per tick are one per partition, not one per session per
-  partition. Memory per tick is bounded by the row budget plus one partition's
-  metadata, rather than by one session.
-- A concurrent backfill can wait up to one batch commit for a session the poll
-  holds, instead of one session's commit.
+  partition.
+- The budget bounds sessions and projected rows, not bytes or peak memory. A
+  batch holds up to 64 scope guards and projections until it commits, and its
+  projected rows are bounded by 4096 plus the last admitted session's
+  projection. The reconcile visits one partition at a time and holds what
+  LLP 0449 `#cost-and-verification` names for it: the batch's delete positions,
+  a parquet row group, and the table's manifest metadata and live deletion
+  masks, which scale with cache size and compaction backlog.
+- A concurrent backfill can wait for a whole batch commit for a session the
+  poll holds, instead of one session's commit, and is refused as busy if the
+  commit outlasts its wait.
