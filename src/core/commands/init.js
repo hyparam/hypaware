@@ -106,7 +106,7 @@ export async function runInit(argv, ctx) {
     // through that same interception rather than letting a preset speak for the
     // command with help of its own.
     // @ref LLP 0009#central-help-interception [implements]: the preset form renders core's registry-backed help for `setup`
-    if (presetArgv.some(isHelpFlag)) return ctx.commands.run('setup', ['--help'])
+    if (presetArgv.some(isHelpFlag)) return renderSetupHelp(ctx)
     // A preset reads its own argv for the handful of flags it honors, so
     // anything else here would be ignored on a path that writes user config.
     // Refuse it as the no-preset form below does.
@@ -134,7 +134,7 @@ export async function runInit(argv, ctx) {
     // intercepts help only when it leads the command's argv, so a help flag
     // behind an init flag arrives here instead.
     // @ref LLP 0293#one-contract [implements]: a --help further along argv prints the usage line on stdout and exits 0
-    if (parsed.help) return ctx.commands.run('setup', ['--help'])
+    if (parsed.help) return renderSetupHelp(ctx)
     if (parsed.error) {
       ctx.stderr.write(`hyp setup: ${parsed.error}\n`)
       return 2
@@ -175,6 +175,18 @@ export async function runInit(argv, ctx) {
   // interactive path.
   writeUnknownFlag(ctx, argv[0])
   return 2
+}
+
+/**
+ * Render `setup`'s help through the dispatcher's central interception, for a
+ * help flag that does not lead argv. The outer invocation is a help render,
+ * not a setup run, so it is classified as one here, where that is decided: it
+ * records what a leading `hyp setup --help` records (issue #2470).
+ * @param {CommandRunContext} ctx
+ */
+function renderSetupHelp(ctx) {
+  noteInvocation({ kind: 'help' })
+  return ctx.commands.run('setup', ['--help'])
 }
 
 /**
