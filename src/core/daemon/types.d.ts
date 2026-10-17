@@ -785,6 +785,8 @@ export interface CollectStatusOptions {
   isCaTrusted?: (args: { certPath: string }) => Promise<boolean>
   /** Launchd user-environment probe (tests, and any caller that must not shell out). */
   isLaunchdEnvSet?: () => Promise<boolean>
+  /** Boot-time probe as epoch ms, `undefined` when unknown (tests). Defaults to the platform's boot clock. */
+  bootTimeMs?: () => number | undefined
 }
 
 export interface SystemctlResult {
