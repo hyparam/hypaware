@@ -389,6 +389,57 @@ test('s3 BlobStore accepts a ranged response that omits ContentLength', async ()
   assert.equal(got.contentLength, undefined)
 })
 
+test('s3 BlobStore surfaces a 416 as blob_range_unsatisfiable, not a put failure', async () => {
+  // A range the object cannot satisfy is the one read failure a ranged
+  // consumer can act on, by refetching the object whole. Every shape S3
+  // raises it in has to land on the same kind local-fs raises, and none of
+  // them may keep the 's3_put_failed' default, which names a write.
+  for (const fault of /** @type {Array<Record<string, unknown>>} */ ([
+    { name: 'InvalidRange', Code: 'InvalidRange', $metadata: { httpStatusCode: 416 } },
+    // status only: a handle that surfaces the HTTP status and no error code
+    { name: 'S3ServiceException', $metadata: { httpStatusCode: 416 } },
+    // code only: the SDK shape that mirrors the code onto .Code alone
+    { Code: 'InvalidRange' },
+  ])) {
+    const client = {
+      ...makeFakeS3Client(),
+      async getObject() {
+        throw Object.assign(new Error('The requested range is not satisfiable'), fault)
+      },
+    }
+    const store = createS3BlobStore({ bucket: 'bucket', client })
+    await assert.rejects(
+      store.getObject({ key: 'data.parquet', range: 'bytes=200-299' }),
+      err => {
+        assert.equal(/** @type {{ errorKind?: string }} */ (err).errorKind, 'blob_range_unsatisfiable')
+        assert.match(/** @type {Error} */ (err).message, /byte range 'bytes=200-299' is unsatisfiable/)
+        return true
+      },
+      `416 shape ${JSON.stringify(fault)} must be named as an unsatisfiable range`,
+    )
+  }
+})
+
+test('s3 BlobStore leaves an unranged failure to the AWS classifier', async () => {
+  // The 416 branch is reachable only from a ranged read: a whole-object read
+  // cannot draw one, so a store that raised it anyway is failing, not
+  // answering, and must keep the classifier's kind.
+  const client = {
+    ...makeFakeS3Client(),
+    async getObject() {
+      throw Object.assign(new Error('confused store'), {
+        name: 'InvalidRange',
+        $metadata: { httpStatusCode: 416 },
+      })
+    },
+  }
+  const store = createS3BlobStore({ bucket: 'bucket', client })
+  await assert.rejects(
+    store.getObject({ key: 'whole.bin' }),
+    err => /** @type {{ errorKind?: string }} */ (err).errorKind === 's3_put_failed',
+  )
+})
+
 test('s3 BlobStore leaves whole-object reads without a contentRange key', async () => {
   const client = makeFakeS3Client()
   const store = createS3BlobStore({ bucket: 'bucket', client })

@@ -169,6 +169,17 @@ export function createS3BlobStore({ bucket, prefix, client }) {
         result = await client.getObject({ Bucket: bucket, Key, ...(input.range !== undefined ? { Range: input.range } : {}) })
       } catch (err) {
         if (isNotFound(err)) return null
+        // A 416 is the store saying "this object has no such bytes", the one
+        // read failure a ranged consumer can act on, by refetching whole.
+        // Unnamed it takes classifyAwsError's default, 's3_put_failed': a put
+        // label on a read, and a kind local-fs cannot agree with. Only a ranged
+        // read can draw a 416, so whole-object reads never reach the check.
+        // @ref LLP 0452#range-contract [implements]: an unsatisfiable range is an error, under one kind both providers raise
+        if (input.range !== undefined && isRangeUnsatisfiable(err)) {
+          throw tagS3Error(err, 'blob_range_unsatisfiable',
+            `s3 blob-store: byte range '${input.range}' is unsatisfiable for '${input.key}'`,
+            input.key)
+        }
         throw tagS3Error(err, classifyAwsError(err),
           `s3 blob-store: getObject failed for '${input.key}'`, input.key)
       }
@@ -564,6 +575,21 @@ function isPreconditionFailed(err) {
   const obj = /** @type {{ name?: unknown, Code?: unknown, $metadata?: { httpStatusCode?: number } }} */ (err)
   if (obj.name === 'PreconditionFailed' || obj.Code === 'PreconditionFailed') return true
   if (obj.$metadata && obj.$metadata.httpStatusCode === 412) return true
+  return false
+}
+
+/**
+ * A range the object cannot satisfy: S3 answers 416 with the `InvalidRange`
+ * code. Read off the same shapes `isNotFound` reads, since the same injectable
+ * seam produces them.
+ *
+ * @param {unknown} err
+ */
+function isRangeUnsatisfiable(err) {
+  if (!err || typeof err !== 'object') return false
+  const obj = /** @type {{ name?: unknown, Code?: unknown, $metadata?: { httpStatusCode?: number } }} */ (err)
+  if (obj.name === 'InvalidRange' || obj.Code === 'InvalidRange') return true
+  if (obj.$metadata && obj.$metadata.httpStatusCode === 416) return true
   return false
 }
 
