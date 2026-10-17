@@ -1756,6 +1756,111 @@ test('runInitWizard: a non-interactive or dry run prints no privacy review line'
   assert.doesNotMatch(dry.stdout.text(), /hypaware-privacy skill|see `hyp privacy`/)
 })
 
+const REPORT_POINTER = 'To draft a report from your recorded sessions, run `hyp report generate`.'
+
+/**
+ * A finale that attached Claude Code, for the report pointer's real probe.
+ * @param {boolean} [dryRun]
+ */
+function finaleAttachedClaude(dryRun = false) {
+  return async () => /** @type {any} */ ({
+    daemonInstall: { skipped: true, dryRun },
+    globalInstall: { skipped: true, installed: false },
+    attach: [{ client: 'claude', dryRun, ok: true }],
+    skillsInstalled: [],
+    agentsInstalled: [],
+    daemonRestart: { skipped: true, dryRun, ok: false },
+    backfill: [],
+  })
+}
+
+/**
+ * A home with the report skill installed for Claude Code (when `skill`),
+ * its `hypaware-analyst` worker (when `agent`, which defaults to `skill`),
+ * and a PATH holding an executable `claude`.
+ * @param {{ skill: boolean, agent?: boolean }} opts
+ */
+async function reportReadyHome({ skill, agent = skill }) {
+  const home = await tmpHome()
+  if (skill) {
+    const file = path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md')
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '# report\n')
+  }
+  if (agent) {
+    const file = path.join(home, '.claude', 'agents', 'hypaware-analyst.md')
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '# analyst\n')
+  }
+  const bin = path.join(home, 'bin')
+  await fs.mkdir(bin, { recursive: true })
+  await fs.writeFile(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  return { home, env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', PATH: bin } }
+}
+
+test('runInitWizard: names `hyp report generate` only when an attached client can start it, ahead of the privacy close', async () => {
+  // Verified: attached, its CLI on PATH, the report skill on disk.
+  const ready = await reportReadyHome({ skill: true })
+  const verified = wizardOpts(ready.home, {
+    env: ready.env,
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleAttachedClaude(),
+    suggestSkill: { confirm: async () => 'no' },
+  })
+  await runInitWizard(verified.opts)
+  const text = verified.stdout.text()
+  assert.equal(text.split(REPORT_POINTER).length - 1, 1)
+  // Before the privacy close and the closing offer, so nothing follows a child.
+  assert.ok(text.indexOf(REPORT_POINTER) < text.indexOf('hyp privacy'), text)
+  assert.ok(text.indexOf(REPORT_POINTER) < text.indexOf('Run `hyp ask` any time'), text)
+
+  // Recorded but unverified: the same attach and CLI, no report skill.
+  const bare = await reportReadyHome({ skill: false })
+  const unverified = wizardOpts(bare.home, {
+    env: bare.env,
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleAttachedClaude(),
+  })
+  await runInitWizard(unverified.opts)
+  assert.ok(!unverified.stdout.text().includes(REPORT_POINTER))
+
+  // Recorded but unverified: the skill is there, its analyst worker is not.
+  const noWorker = await reportReadyHome({ skill: true, agent: false })
+  const workerless = wizardOpts(noWorker.home, {
+    env: noWorker.env,
+    firstLook: firstLookWithRows(),
+    finaleRunner: finaleAttachedClaude(),
+  })
+  await runInitWizard(workerless.opts)
+  assert.ok(!workerless.stdout.text().includes(REPORT_POINTER))
+
+  // None recorded: the skill and CLI are there, but this run attached nothing.
+  const none = wizardOpts(ready.home, { env: ready.env, firstLook: firstLookWithRows() })
+  await runInitWizard(none.opts)
+  assert.ok(!none.stdout.text().includes(REPORT_POINTER))
+})
+
+test('runInitWizard: a dry run or a scripted run never names `hyp report generate`', async () => {
+  const ready = await reportReadyHome({ skill: true })
+  const dry = wizardOpts(ready.home, {
+    env: ready.env,
+    finale: { dryRun: true },
+    finaleRunner: finaleAttachedClaude(true),
+    reportGenerateAvailable: true,
+  })
+  await runInitWizard(dry.opts)
+  assert.ok(!dry.stdout.text().includes(REPORT_POINTER))
+
+  const scripted = wizardOpts(ready.home, {
+    env: ready.env,
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    finaleRunner: finaleAttachedClaude(),
+    reportGenerateAvailable: true,
+  })
+  await runInitWizard(scripted.opts)
+  assert.ok(!scripted.stdout.text().includes(REPORT_POINTER))
+})
+
 test('runInitWizard: a yes to the skill offer runs `hyp ask` on this terminal', async () => {
   // @ref LLP 0398#run-directory [tests]: the offer taken is the ask itself, as a child that inherits the terminal
   const { opts, stdout } = wizardOpts(await tmpHome(), {

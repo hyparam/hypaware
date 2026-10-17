@@ -16,10 +16,14 @@
  * @ref LLP 0398#run-directory [constrained-by]: the client starts in the evidence folder, so setup may start it
  *
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
+ * @import { FinaleSummary } from '../../../../src/core/cli/types.js'
  * @import { RunWizardSuggestSkillOptions, WizardSuggestSkillResult } from '../../../../src/core/cli/wizard/types.js'
  */
 
 import { spawn } from 'node:child_process'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -27,7 +31,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
 import { buildWalkthroughClientDescriptorMap, defaultConfirmSelectPromptFactory } from '../walkthrough.js'
-import { resolveLaunchers } from './first_ask.js'
+import { reportSkillLaunchers, resolveLaunchers } from './first_ask.js'
 
 /**
  * Ask, and on a yes run the real `hyp ask` as a child on this terminal.
@@ -186,6 +190,62 @@ export async function anyClientLaunchable(env, deps = {}) {
     return launchers.length > 0
   } catch {
     return undefined
+  }
+}
+
+/**
+ * Whether a client this setup run left recorded can start
+ * `hyp report generate`: its attach succeeded (or was already in place),
+ * nothing was a dry run, its CLI resolves on `$PATH`, and its
+ * `hypaware-report` skill is on disk. The last two are the command's own
+ * check (`reportSkillLaunchers`), so setup names the command only where
+ * it would start something. A client with a subagent directory must also
+ * hold the `hypaware-analyst` worker file the report skill delegates to: there
+ * the skill stops to ask about a substitute when it is missing, so setup
+ * does not call that client ready. A client with no subagent directory
+ * (Codex) has its skill name a generic worker instead.
+ *
+ * Reads the finale's own results rather than probing attach state: this
+ * boot cannot see it (see `runAskChild`), and the finale's record is the
+ * install that just ran. A failed daemon install or any doubt reads as
+ * `false`, which only withholds a pointer.
+ *
+ * @param {FinaleSummary | undefined} summary
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{
+ *   descriptors?: Map<string, ClientDescriptor>,
+ *   resolve?: (bin: string, env: NodeJS.ProcessEnv, platform?: string) => Promise<string | undefined>,
+ * }} [deps]
+ * @returns {Promise<boolean>}
+ */
+export async function recordedReportClientLaunchable(summary, env, deps = {}) {
+  try {
+    if (!summary || summary.daemonInstall.failed === true) return false
+    const clients = summary.attach
+      .filter((a) => a.ok && !a.dryRun && a.notRecording !== true)
+      .map((a) => a.client)
+    if (clients.length === 0) return false
+    const descriptors = deps.descriptors ?? await buildWalkthroughClientDescriptorMap()
+    const launchers = await resolveLaunchers({
+      clients,
+      descriptors,
+      env,
+      ...(deps.resolve ? { resolve: deps.resolve } : {}),
+    })
+    if (launchers.length === 0) return false
+    const homeDir = env.HOME || os.homedir()
+    for (const { launcher } of await reportSkillLaunchers({ launchers, descriptors, homeDir })) {
+      const agentDir = descriptors.get(launcher.client)?.agentDir
+      if (!agentDir) return true
+      try {
+        // A file, not just a path: a directory there is a copy that failed.
+        if ((await fsp.stat(path.join(homeDir, agentDir, 'hypaware-analyst.md'))).isFile()) return true
+      } catch { // This client's report workflow is missing its worker.
+      }
+    }
+    return false
+  } catch {
+    return false
   }
 }
 

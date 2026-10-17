@@ -27,7 +27,7 @@ import { isTty } from './stdio.js'
 import { PromptCancelledError, select } from './tui/index.js'
 import { isPromptBackError, isPromptCancelledError } from './tui/runtime.js'
 import { buildWalkthroughClientDescriptorMap, resolveHypHome } from './walkthrough.js'
-import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
+import { launchClient, reportSkillLaunchers, resolveLaunchers } from './wizard/first_ask.js'
 import { PICK_DEADLINE_NOTICE, armPickDeadline, askableClients, attachHint } from '../commands/ask.js'
 import { escapeForDisplay } from '../util/json_util.js'
 
@@ -162,18 +162,7 @@ export async function runReportGenerate(argv, ctx, deps = {}) {
     const clients = await askableClients(ctx, deps.collectStatus ? { collectStatus: deps.collectStatus } : {})
     const descriptors = await buildWalkthroughClientDescriptorMap()
     const candidates = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
-    const launchers = []
-    for (const launcher of candidates) {
-      const descriptor = descriptors.get(launcher.client)
-      if (!descriptor) continue
-      const skill = path.join(home, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
-      try {
-        await fs.access(skill)
-        launchers.push({ launcher, skill })
-      } catch {
-        // Only offer clients that can read the report workflow.
-      }
-    }
+    const launchers = await reportSkillLaunchers({ launchers: candidates, descriptors, homeDir: home })
     span.setAttribute('launcher_count', launchers.length)
     if (launchers.length === 0) {
       span.setAttribute('error_kind', 'no-launcher')

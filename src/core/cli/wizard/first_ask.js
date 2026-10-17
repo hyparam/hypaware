@@ -163,6 +163,36 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
 }
 
 /**
+ * The launchers `hyp report generate` may start: a resolved launcher whose
+ * client has the `hypaware-report` skill on disk, paired with that skill's
+ * path. Setup asks the same question before it names the command, so the
+ * pointer and the command can never disagree about who qualifies.
+ *
+ * @ref LLP 0450#launch [implements]: only a recorded, launchable client with its installed report skill
+ * @param {{
+ *   launchers: FirstAskLauncher[],
+ *   descriptors: Map<string, ClientDescriptor>,
+ *   homeDir: string,
+ * }} args
+ * @returns {Promise<{ launcher: FirstAskLauncher, skill: string }[]>}
+ */
+export async function reportSkillLaunchers({ launchers, descriptors, homeDir }) {
+  const out = []
+  for (const launcher of launchers) {
+    const descriptor = descriptors.get(launcher.client)
+    if (!descriptor) continue
+    const skill = path.join(homeDir, descriptor.skillDir, 'hypaware-report', 'SKILL.md')
+    try {
+      await fsp.access(skill)
+      out.push({ launcher, skill })
+    } catch {
+      // Only offer clients that can read the report workflow.
+    }
+  }
+  return out
+}
+
+/**
  * The question, in every framing that prints it.
  *
  * One renderer rather than one per caller: the question, the
