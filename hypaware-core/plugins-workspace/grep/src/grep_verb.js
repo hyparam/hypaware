@@ -84,10 +84,12 @@ export const queryGrepVerb = {
       // also the schema an MCP caller validates against. A bare `number`
       // let `--limit 0`, `--limit -5` and `--limit 2.5` fall through to a
       // silent rewrite to 50, so a caller asking for fewer rows got more
-      // and exit 0. The ceiling stays out of the schema: it clamps rather
-      // than refuses (see `operation`).
+      // and exit 0. The ceiling is in the schema too, so `--limit 5000` is
+      // refused before any search or remote request instead of quietly
+      // answering as if it were 1000.
       // @ref LLP 0302#usage-exit [constrained-by]: a value the flag cannot use is refused, not quietly replaced with a different answer
-      limit: { type: 'integer', minimum: 1, default: DEFAULT_LIMIT, description: `Max hits (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
+      // @ref LLP 0528#refuse [implements]: above the ceiling is refused by the schema, not clamped
+      limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT, description: `Max hits (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
       // @ref LLP 0105#override [implements]: the informed-consent override; the help text names the transcript-capture consequence and bundled skills never pass it
       'include-local-only': {
         type: 'boolean',
@@ -102,16 +104,18 @@ export const queryGrepVerb = {
   },
   async operation(params, ctx) {
     const rawLimit = params.limit
-    // Only the ceiling is applied here; the schema above already refused
-    // every value the flag cannot use, so nothing unusable reaches this
-    // line and the fallback is just the absent case. Above the ceiling
-    // clamps rather than refuses, because refusing would answer a request
-    // for MORE rows with an error where a capped answer is what the help
-    // text promises, and "raise --limit" is advice a caller at the ceiling
-    // cannot follow.
+    // The schema above already refused every value the flag cannot use on
+    // both the CLI and MCP paths, so the fallback is just the absent case.
+    // A host that calls `operation` directly skips that check, so a value
+    // above the ceiling is refused here as well rather than handed to the
+    // backend uncapped.
+    // @ref LLP 0528#refuse [implements]: no clamp on any path; the ceiling is a refusal
+    if (typeof rawLimit === 'number' && rawLimit > MAX_LIMIT) {
+      throw new VerbUsageError(`--limit expects an integer from 1 to ${MAX_LIMIT} (got ${rawLimit})`)
+    }
     const limit =
       typeof rawLimit === 'number' && Number.isInteger(rawLimit) && rawLimit >= 1
-        ? Math.min(rawLimit, MAX_LIMIT)
+        ? rawLimit
         : DEFAULT_LIMIT
     const from = dayBound(params.from, 'from')
     const to = dayBound(params.to, 'to')
@@ -125,7 +129,7 @@ export const queryGrepVerb = {
     if (from !== undefined && to !== undefined && from > to) {
       throw new VerbUsageError(`--from ${from} is after --to ${to}, so the window selects no days`)
     }
-    // The verb owns the argument rules above and the clamp fact below; the
+    // The verb owns the argument rules above and the ceiling fact below; the
     // data plane is whatever the host handed it. Nothing past this line
     // knows which backend answered, which is what lets the process hold one
     // `grep_search` registration instead of a second verb displacing this
@@ -190,12 +194,12 @@ export const queryGrepVerb = {
     if (typeof result.truncated !== 'boolean' || typeof result.exhausted !== 'boolean') {
       throw new Error('the grep_search backend returned no truncated/exhausted booleans')
     }
-    // The clamp's own promise, carried through to the render: at the
+    // The ceiling's own promise, carried through to the render: at the
     // ceiling there is no larger `--limit` left to ask for, so the
     // truncation notice must not send the caller back to a flag that
-    // cannot move. It is the verb's fact about its own clamp, so it rides
+    // cannot move. It is the verb's fact about its own ceiling, so it rides
     // whichever backend answered: a backend never sees an absent or
-    // unclamped limit, so it has nothing to say about the ceiling. Like the
+    // out-of-range limit, so it has nothing to say about the ceiling. Like the
     // freshness and visibility fields, a server-shaped result carries none
     // of the local extras and the render falls back field by field.
     return { ...result, limitCeilingReached: limit >= MAX_LIMIT }
