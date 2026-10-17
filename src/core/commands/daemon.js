@@ -40,6 +40,17 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
   const runDaemon = deps.runDaemon ?? gateway.runGatewayDaemon
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
+  // A staged restart (config apply, rollback, reload) needs a fresh process
+  // (LLP 0017). A service manager provides one; a foreground run nobody
+  // relaunches (a container) used to exit 75 and take the gateway down with it
+  // (#2513), so it relaunches itself instead. Supervised runs and runs a Node
+  // parent launched keep exiting 75 to whoever relaunches them. Decided before
+  // the boot, because the gateway's stop deadline must not exit a run that
+  // relaunches itself.
+  // @ref LLP 0529#who-relaunches [implements]: detectSupervisor decides, and a Node parent with an IPC channel owns the relaunch
+  const { SELF_UPDATE_RESTART_EXIT_CODE, detectSupervisor } = await import('../update/self_update.js')
+  const relaunchModule = detectSupervisor(ctx.env) ? undefined : await import('../daemon/relaunch.js')
+  const relaunches = relaunchModule !== undefined && !(deps.hasLauncher ?? relaunchModule.hasLauncher)()
   try {
     const handle = await runDaemon({
       hypHome,
@@ -47,27 +58,19 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
       env: ctx.env,
       runId: ctx.env.DEV_RUN_ID,
       foreground: true,
+      ...(relaunches ? { relaunchesOnRestart: true } : {}),
     })
     ctx.stdout.write(`daemon: running (pid=${process.pid})\n`)
     const exitCode = await handle.done
     ctx.stdout.write('daemon: stopped\n')
-    // A staged restart (config apply, rollback, reload) needs a fresh process
-    // (LLP 0017). A service manager provides one; a foreground run nobody
-    // relaunches (a container) used to exit here and take the gateway down
-    // with it (#2513), so it relaunches itself instead. Supervised runs and
-    // runs a Node parent launched keep exiting 75 to whoever relaunches them.
-    // @ref LLP 0529#who-relaunches [implements]: detectSupervisor decides, and a Node parent with an IPC channel owns the relaunch
-    const { SELF_UPDATE_RESTART_EXIT_CODE, detectSupervisor } = await import('../update/self_update.js')
-    if (exitCode !== SELF_UPDATE_RESTART_EXIT_CODE || detectSupervisor(ctx.env)) return exitCode
-    const relaunchModule = await import('../daemon/relaunch.js')
-    if ((deps.hasLauncher ?? relaunchModule.hasLauncher)()) return exitCode
+    if (exitCode !== SELF_UPDATE_RESTART_EXIT_CODE || !relaunches || !relaunchModule) return exitCode
     const { resolveCentralLayerPath } = await import('../config/apply.js')
-    const { defaultConfigPath } = await import('../config/schema.js')
+    const { resolveConfigPath } = await import('../runtime/boot.js')
     return await (deps.relaunch ?? relaunchModule.relaunchForeground)({
       env: ctx.env,
       stdout: ctx.stdout,
       stderr: ctx.stderr,
-      stagedConfigPath: () => resolveCentralLayerPath({ stateRoot: path.join(hypHome, 'hypaware') }) ?? parsed.configPath ?? defaultConfigPath(hypHome),
+      stagedConfigPath: () => resolveCentralLayerPath({ stateRoot: path.join(hypHome, 'hypaware') }) ?? resolveConfigPath({ explicit: parsed.configPath, env: ctx.env, hypHome }),
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

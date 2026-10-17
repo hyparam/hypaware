@@ -32,8 +32,10 @@ central config change lands.
   ends with 75, the foreground run spawns the same command again as a child,
   with the same argv, env, cwd and stdio, and waits for it. Container logs stay
   attached because the child writes to the same descriptors. A child that ends
-  with 75 again returns to the same parent to be relaunched, so at most two
-  processes exist at once.
+  with 75 again returns to the same parent to be relaunched, so the launch
+  chain is never deeper than the parent and one gateway child. Counting the
+  processing child the gateway forks (LLP 0038), a relaunched daemon is three
+  processes, one more than a first boot.
 - **Only when nobody else relaunches it.** {#who-relaunches} `detectSupervisor`
   is the single source of the supervised decision, as in LLP 0521. A
   supervised run exits 75 exactly as before. So does a run whose parent is a
@@ -47,6 +49,13 @@ central config change lands.
   itself, so a config that fails every apply cannot hot-loop and an outer loop
   or operator still sees the restart code. The first relaunch has no wait, so
   an ordinary apply costs no extra downtime.
+- **The stop deadline finishes the stop.** {#deadline} The gateway's stop
+  deadline SIGKILLs a processing child that will not stop, and on a service it
+  then exits the process with the stop's code. A run that relaunches itself
+  says so when it boots, and for it the deadline kills the child and lets the
+  stop finish, so the run reaches its relaunch instead of exiting 75 past it.
+  An exit stays one more deadline later, for a stop that is also stuck in the
+  gateway process itself.
 - **Signals reach the child.** {#signals} SIGTERM and SIGINT are forwarded and
   end the loop: the run exits with the child's code, or 0 when the stop arrives
   during a wait. SIGHUP is forwarded as the reload it is, and the child's
@@ -56,8 +65,10 @@ central config change lands.
 
 - The 0017 shell loop on 75 still works and is still right for a supervised
   wrapper; it now only runs when the bound is hit.
-- The parent keeps the modules its first boot loaded. That is a constant cost,
-  not one that grows per relaunch: the parent holds nothing across relaunches
-  but the window's start time and count.
+- The parent keeps the modules its first boot loaded, so after a relaunch it
+  is a whole extra process: about 108 MiB RSS beside the gateway and processing
+  children in the review's small fixture. That is a constant cost, not one that
+  grows per relaunch: the parent holds nothing across relaunches but the
+  window's start time and count.
 - Product telemetry counts each relaunch as its own `daemon run` invocation,
   because each is one.

@@ -48,9 +48,9 @@ export function hasLauncher() {
  * its own config applies ask for. The run that asked has already stopped
  * cleanly; this relaunches the same command as a child with the same argv,
  * env, cwd and stdio, so container logs stay attached, and waits for it. A
- * child that exits 75 again comes back here to be relaunched, so at most two
- * processes exist at once and nothing accumulates across relaunches but the
- * window's count.
+ * child that exits 75 again comes back here to be relaunched, so the chain is
+ * never deeper than this process and one gateway child, and nothing
+ * accumulates across relaunches but the window's count.
  *
  * Bounded: after RELAUNCH_LIMIT relaunches inside RELAUNCH_WINDOW_MS, with a
  * growing wait between them, the run stops relaunching and exits 75 itself,

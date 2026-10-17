@@ -189,19 +189,21 @@ test('a relaunch that cannot start exits 75 without retrying', async () => {
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {number} exitCode
- * @param {{ hasLauncher?: () => boolean }} [extra]
+ * @param {{ hasLauncher?: () => boolean, argv?: string[] }} [extra]
  */
 async function runWithStub(env, exitCode, extra = {}) {
   const stdout = buf()
   const stderr = buf()
   /** @type {any[]} */
   const relaunches = []
-  const code = await runDaemonRun([], /** @type {any} */ ({ env, stdout, stderr }), {
-    runDaemon: async () => ({ done: Promise.resolve(exitCode) }),
+  /** @type {any[]} */
+  const boots = []
+  const code = await runDaemonRun(extra.argv ?? [], /** @type {any} */ ({ env, stdout, stderr }), {
+    runDaemon: async opts => { boots.push(opts); return { done: Promise.resolve(exitCode) } },
     hasLauncher: extra.hasLauncher ?? (() => false),
     relaunch: async opts => { relaunches.push(opts); return 0 },
   })
-  return { code, stdout: stdout.text().replace(/pid=\d+/, 'pid=N'), stderr: stderr.text(), relaunches }
+  return { code, stdout: stdout.text().replace(/pid=\d+/, 'pid=N'), stderr: stderr.text(), relaunches, relaunchesOnRestart: boots[0].relaunchesOnRestart }
 }
 
 test('a supervised run exits 75 exactly as before; only an unsupervised one relaunches', async () => {
@@ -211,15 +213,17 @@ test('a supervised run exits 75 exactly as before; only an unsupervised one rela
     const plain = 'daemon: running (pid=N)\ndaemon: stopped\n'
     for (const env of [{ ...base, INVOCATION_ID: 'systemd-unit' }, { ...base, XPC_SERVICE_NAME: LAUNCH_LABEL }]) {
       const result = await runWithStub(env, 75)
-      assert.deepEqual(result, { code: 75, stdout: plain, stderr: '', relaunches: [] }, JSON.stringify(env))
+      // No `relaunchesOnRestart` reaches the gateway, so its stop deadline still exits.
+      assert.deepEqual(result, { code: 75, stdout: plain, stderr: '', relaunches: [], relaunchesOnRestart: undefined }, JSON.stringify(env))
     }
     // A Node parent with an IPC channel (an earlier run, pm2) owns the relaunch.
-    assert.deepEqual(await runWithStub(base, 75, { hasLauncher: () => true }), { code: 75, stdout: plain, stderr: '', relaunches: [] })
+    assert.deepEqual(await runWithStub(base, 75, { hasLauncher: () => true }), { code: 75, stdout: plain, stderr: '', relaunches: [], relaunchesOnRestart: undefined })
     // Any other exit is never relaunched.
-    assert.deepEqual(await runWithStub(base, 0), { code: 0, stdout: plain, stderr: '', relaunches: [] })
+    assert.deepEqual(await runWithStub(base, 0), { code: 0, stdout: plain, stderr: '', relaunches: [], relaunchesOnRestart: true })
 
     const unsupervised = await runWithStub({ ...base, INVOCATION_ID: '', XPC_SERVICE_NAME: 'application.com.apple.Terminal' }, 75)
     assert.equal(unsupervised.code, 0, 'the relaunch decides the exit')
+    assert.equal(unsupervised.relaunchesOnRestart, true, 'the gateway is told its stop deadline must not exit the run')
     assert.equal(unsupervised.relaunches.length, 1)
     // Before any apply the staged config is the local file; once joined, the central layer.
     assert.equal(unsupervised.relaunches[0].stagedConfigPath(), defaultConfigPath(hypHome))
@@ -227,6 +231,13 @@ test('a supervised run exits 75 exactly as before; only an unsupervised one rela
     await fs.mkdir(path.dirname(seed), { recursive: true })
     await fs.writeFile(seed, '{}')
     assert.equal(unsupervised.relaunches[0].stagedConfigPath(), seed)
+
+    // With no central layer, the config the boot actually read: HYP_CONFIG before the default.
+    const pointed = await runWithStub({ ...base, HYP_CONFIG: path.join(hypHome, 'elsewhere.json') }, 75)
+    await fs.rm(seed)
+    assert.equal(pointed.relaunches[0].stagedConfigPath(), path.join(hypHome, 'elsewhere.json'))
+    const explicit = await runWithStub({ ...base, HYP_CONFIG: path.join(hypHome, 'elsewhere.json') }, 75, { argv: ['--config', path.join(hypHome, 'given.json')] })
+    assert.equal(explicit.relaunches[0].stagedConfigPath(), path.join(hypHome, 'given.json'), '--config before HYP_CONFIG')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
@@ -366,3 +377,88 @@ test('an unsupervised daemon run applies a staged central config and keeps the g
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test('a reload whose processing child will not stop still relaunches once the stop deadline kills it', { timeout: 90_000 }, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-relaunch-stalled-'))
+  const hypHome = path.join(root, '.hyp')
+  const upstream = await listen((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"upstream":"relaunch-stalled"}')
+    })
+  })
+  /** @type {ChildProcess | undefined} */
+  let daemon
+  /** @type {number | undefined} */
+  let stalled
+  try {
+    const port = await freePort()
+    await fs.mkdir(hypHome, { recursive: true })
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+      version: 2,
+      auto_update: false,
+      plugins: [{
+        name: '@hypaware/ai-gateway',
+        config: { listen: `127.0.0.1:${port}`, upstreams: [{ name: 'anthropic', base_url: upstream.url, path_prefix: '/v1/messages' }] },
+      }],
+    }))
+    /** @type {NodeJS.ProcessEnv} */
+    const env = { ...process.env, HOME: root, HYP_HOME: hypHome, HYP_DEV_TELEMETRY: '1' }
+    delete env.INVOCATION_ID
+    delete env.XPC_SERVICE_NAME
+    const proc = spawn(process.execPath, [path.join(REPO_ROOT, 'bin', 'hypaware.js'), 'daemon', 'run'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    daemon = proc
+    let stdout = ''
+    let stderr = ''
+    proc.stdout?.on('data', chunk => { stdout += chunk })
+    proc.stderr?.on('data', chunk => { stderr += chunk })
+    const exited = new Promise(resolve => proc.once('exit', (code, signal) => resolve({ code, signal })))
+    const describe = () => `stdout:\n${stdout}\nstderr:\n${stderr}`
+    const gateway = `http://127.0.0.1:${port}/v1/messages`
+    const statusFile = path.join(hypHome, 'hypaware', 'run', 'status.json')
+    /** @returns {Promise<any>} */
+    const readStatus = async () => JSON.parse(await fs.readFile(statusFile, 'utf8'))
+
+    await waitFor(async () => (await readStatus()).state === 'healthy' && (await ask(gateway)).status === 200, 30_000, describe)
+    const first = await readStatus()
+    stalled = first.processes.processing.pid
+    assert.equal(first.processes.gateway.pid, proc.pid)
+    // A processing child that cannot answer the stop: only the deadline's SIGKILL ends it.
+    process.kill(/** @type {number} */ (stalled), 'SIGSTOP')
+    proc.kill('SIGHUP')
+
+    await waitFor(() => /daemon: relaunching to apply the staged config/.test(stdout), 20_000, describe)
+    await waitFor(async () => {
+      const next = await readStatus()
+      return next.state === 'healthy' && next.processes.gateway.pid !== proc.pid && (await ask(gateway)).status === 200
+    }, 30_000, describe)
+    const relaunched = await readStatus()
+    assert.equal(proc.exitCode, null, 'the deadline did not exit the run past its relaunch')
+    assert.equal(alive(/** @type {number} */ (stalled)), false, 'the stalled child was killed, not orphaned')
+    assert.notEqual(relaunched.processes.processing.pid, stalled)
+    assert.equal([...stdout.matchAll(/daemon: relaunching/g)].length, 1)
+    assert.deepEqual(await ask(gateway), { status: 200, body: '{"upstream":"relaunch-stalled"}' })
+
+    proc.kill('SIGTERM')
+    assert.deepEqual(await exited, { code: 0, signal: null }, describe())
+    await assert.rejects(ask(gateway), 'nothing still serves after the run stopped')
+  } finally {
+    if (stalled !== undefined && alive(stalled)) {
+      try { process.kill(stalled, 'SIGKILL') } catch { /* gone */ }
+    }
+    if (daemon && daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGKILL')
+    await new Promise(resolve => upstream.server.close(resolve))
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+/** @param {number} pid @returns {boolean} */
+function alive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
