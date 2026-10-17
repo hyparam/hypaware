@@ -289,7 +289,10 @@ hyp query schema <dataset>
 ```
 
 Prints the registered columns for one local dataset. It doesn't activate a
-remote target.
+remote target, and it doesn't open the dataset's source. A dataset that
+declares no columns (an S3 query source with no `schema`, for example) prints
+`columns: none declared` rather than a count: SQL still resolves the source's
+columns when a query runs, and the output names a query that shows them.
 
 ```sh
 hyp query schema ai_gateway_messages
