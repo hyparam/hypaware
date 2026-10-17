@@ -874,6 +874,66 @@ test('an unreadable tree and a missing probe both answer uncertain, never health
   }
 })
 
+// The record shape the confirmation reads is Claude Code's, so any other
+// descriptor that declares a probe must answer uncertain without scanning:
+// its transcripts would never match, and an empty match reads as healthy.
+test('only the built-in claude descriptor is confirmed from transcripts; any other answers uncertain unscanned', async () => {
+  const home = await makeProbeHome()
+  const names = ['readdir', 'opendir', 'open', 'stat', 'lstat', 'realpath', 'readFile']
+  const spied = /** @type {Record<string, any>} */ (fsp)
+  /** @type {Record<string, any>} */
+  const real = {}
+  /** @type {string[]} */
+  const calls = []
+  try {
+    // A Codex rollout tree whose mtime would nominate it, holding records a
+    // Claude-shaped reader cannot recognize.
+    const dir = path.join(home, '.codex', 'sessions', '2026', '09', '29')
+    await fs.mkdir(dir, { recursive: true })
+    const rollout = path.join(dir, 'rollout-2026-09-29T18-30-00-x.jsonl')
+    await fs.writeFile(rollout, [
+      { timestamp: '2026-09-29T18:30:00.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant' } },
+      { timestamp: '2026-09-29T18:30:01.000Z', type: 'event_msg', payload: { type: 'token_count' } },
+    ].map((l) => JSON.stringify(l)).join('\n') + '\n')
+    await fs.utimes(rollout, new Date('2026-09-29T18:31:00.000Z'), new Date('2026-09-29T18:31:00.000Z'))
+    // And a Claude-shaped turn, so a scan that slipped through would find one.
+    await writeTranscript(home, [assistantRecord('2026-09-29T18:30:00.000Z')], '2026-09-29T18:31:00.000Z')
+
+    const descriptors = [
+      { plugin: '@hypaware/codex', name: 'codex', skillDir: '.codex/skills', activityProbe: { dir: '.codex/sessions', file_suffix: '.jsonl' } },
+      // The identity is both halves: a third-party plugin naming its client
+      // claude, or the claude plugin under another client name, is not it.
+      { plugin: '@acme/claude', name: 'claude', skillDir: '.claude/skills', activityProbe: { dir: '.claude/projects', file_suffix: '.jsonl' } },
+      { plugin: '@hypaware/claude', name: 'claude-desktop', skillDir: '.claude/skills', activityProbe: { dir: '.claude/projects', file_suffix: '.jsonl' } },
+    ]
+    for (const name of names) {
+      real[name] = spied[name]
+      spied[name] = (/** @type {any[]} */ ...args) => {
+        calls.push(`${name} ${String(args[0])}`)
+        return real[name](...args)
+      }
+    }
+    for (const descriptor of descriptors) {
+      const confirmed = await confirmClientActivityFromDescriptor({
+        descriptor: /** @type {any} */ (descriptor),
+        homeDir: home,
+        env: {},
+        sinceMs: Date.parse('2026-09-29T18:00:00.000Z'),
+      })
+      assert.deepEqual(confirmed, { certain: false }, `${descriptor.plugin} ${descriptor.name}`)
+    }
+    assert.equal(calls.length, 0, `no filesystem call expected, got: ${calls.join(', ')}`)
+
+    // The claude descriptor still runs the parser over the same home.
+    const confirmed = await confirmIn(home, '2026-09-29T18:00:00.000Z')
+    assert.deepEqual(confirmed, { activityAt: '2026-09-29T18:30:00.000Z', certain: true })
+    assert.ok(calls.some((c) => c.startsWith('open ')), 'the claude descriptor opens its transcript')
+  } finally {
+    for (const name of Object.keys(real)) spied[name] = real[name]
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('a corner of the tree the walk could not read answers uncertain, never healthy', { skip: process.getuid?.() === 0 ? 'runs as root, where a mode-000 directory is still readable' : false }, async () => {
   const home = await makeProbeHome()
   const hidden = path.join(home, '.claude', 'projects', '-Users-t-hidden')

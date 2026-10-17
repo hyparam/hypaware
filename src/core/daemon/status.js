@@ -3970,6 +3970,12 @@ const MAX_CONFIRM_TAIL_BYTES = 128 * 1024
  * and the caller must turn that into neither a gap nor a clean bill of
  * health.
  *
+ * The record shape read here is Claude Code's, so only the built-in claude
+ * descriptor is confirmed this way. Any other descriptor that declares an
+ * `activity_probe` answers `certain: false` before the filesystem is touched:
+ * its transcripts would never match, and "no conversation found" would read
+ * as a clean bill of health and hide a real gap.
+ *
  * @ref LLP 0257#status-and-health [implements]: "last transcript activity" is a conversation record, not a filesystem timestamp
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv, sinceMs: number }} args
  * @returns {Promise<{ activityAt?: string, certain: boolean }>}
@@ -3977,6 +3983,7 @@ const MAX_CONFIRM_TAIL_BYTES = 128 * 1024
 export async function confirmClientActivityFromDescriptor({ descriptor, homeDir, env, sinceMs }) {
   const probe = descriptor.activityProbe
   if (!probe || !homeDir) return { certain: false }
+  if (descriptor.plugin !== '@hypaware/claude' || descriptor.name !== 'claude') return { certain: false }
   /** @type {string} */
   let dirPath
   try {
