@@ -2934,3 +2934,26 @@ test('generate tells the client to finish with hyp report save', async (t) => {
   assert.equal(await runReportGenerate([], ctx, deps), 0)
   assert.match(launches[0].prompt, /'hyp report save <that directory>'/)
 })
+
+test('report generate help names the shipped skill\'s draft folder and says publishing is explicit', async () => {
+  const { createCommandRegistry } = await import('../../src/core/registry/commands.js')
+  const { registerCoreCommands } = await import('../../src/core/cli/core_commands.js')
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  const help = String(registry.get('report generate')?.help ?? '').replace(/\s+/g, ' ')
+  assert.match(help, /drafts \.\/hypaware-report-<from>-to-<to>\/ here, appending -2, -3, etc\. if it exists/)
+  assert.match(help, /Publishing requires an explicit request\./)
+  assert.match(help, /'hyp report save', which moves the folder into \$HYP_HOME\/reports\./)
+  // The help and the reference say what every shipped copy of the skill does.
+  const root = path.resolve(import.meta.dirname, '../..')
+  for (const copy of [
+    'hypaware-core/skills/hypaware-report/SKILL.md',
+    'hypaware-core/plugins-workspace/claude/skills/hypaware-report/SKILL.md',
+    'hypaware-core/plugins-workspace/codex/skills/hypaware-report/SKILL.md',
+  ]) {
+    const skill = (await fs.readFile(path.join(root, copy), 'utf8')).replace(/\s+/g, ' ')
+    assert.match(skill, /Draft in `\.\/hypaware-report-<from>-to-<to>\/` or the requested destination\. Append `-2`, `-3`, etc\. if it exists/, copy)
+  }
+  const reference = (await fs.readFile(path.join(root, 'docs/CLI_REFERENCE.md'), 'utf8')).replace(/\s+/g, ' ')
+  assert.match(reference, /The skill drafts `\.\/hypaware-report-<from>-to-<to>\/report\.md` and linked pages, using `-2`, `-3`, etc\. if the folder already exists/)
+})

@@ -871,6 +871,11 @@ export interface RunInitWizardOptions {
    * the spawn seam. Production callers pass none.
    */
   suggestSkill?: Partial<RunWizardSuggestSkillOptions>
+  /**
+   * Whether a recorded client can start `hyp report generate` (tests).
+   * Production callers pass none, and the finale's results decide.
+   */
+  reportGenerateAvailable?: boolean
   /** GitHub offer seam for tests. Login uses ctx.commands.run. */
   github?: Pick<RunWizardGithubOptions, 'confirm'>
   /** Phase overrides (tests). */

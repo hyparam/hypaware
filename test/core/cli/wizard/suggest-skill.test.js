@@ -2,9 +2,16 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import path from 'node:path'
 import process from 'node:process'
 
-import { anyClientLaunchable, runWizardSuggestSkill } from '../../../../src/core/cli/wizard/suggest_skill.js'
+import { temporaryDirectory } from '../../../helpers/temp_dir.js'
+import {
+  anyClientLaunchable,
+  recordedReportClientLaunchable,
+  runWizardSuggestSkill,
+} from '../../../../src/core/cli/wizard/suggest_skill.js'
 
 const VERB = /Run `hyp ask` any time: HypAware suggests a skill based on your recent sessions/
 
@@ -89,6 +96,67 @@ test('anyClientLaunchable: true when a launch binary resolves, false when none d
   assert.equal(await anyClientLaunchable({}, { descriptors, resolve: async (bin) => `/bin/${bin}` }), true)
   assert.equal(await anyClientLaunchable({}, { descriptors, resolve: async () => undefined }), false)
   assert.equal(await anyClientLaunchable({}, { descriptors: new Map() }), undefined)
+})
+
+/**
+ * A finale summary with the given attach rows and nothing else run.
+ * @param {any[]} attach
+ * @param {Record<string, any>} [over]
+ */
+function finaleSummary(attach, over = {}) {
+  return /** @type {any} */ ({
+    daemonInstall: { skipped: true, dryRun: false },
+    globalInstall: { skipped: true, installed: false },
+    attach,
+    skillsInstalled: [],
+    agentsInstalled: [],
+    daemonRestart: { skipped: true, dryRun: false, ok: false },
+    backfill: [],
+    ...over,
+  })
+}
+
+test('recordedReportClientLaunchable: none recorded, recorded but unverified, and verified', async () => {
+  const home = await temporaryDirectory('hyp-report-pointer-')
+  const env = { HOME: home }
+  const descriptors = /** @type {any} */ (new Map([
+    ['claude', { name: 'claude', skillDir: '.claude/skills', launch: { bin: 'claude', args: ['{prompt}'] } }],
+    ['claude-desktop', { name: 'claude-desktop', skillDir: '.claude/skills' }],
+  ]))
+  const onPath = { descriptors, resolve: async (/** @type {string} */ bin) => `/bin/${bin}` }
+  const attached = finaleSummary([{ client: 'claude', dryRun: false, ok: true }])
+
+  // None recorded: no attach row, a failed or dry-run attach, a client the
+  // run left not recording, and a client with nothing to start.
+  assert.equal(await recordedReportClientLaunchable(undefined, env, onPath), false)
+  assert.equal(await recordedReportClientLaunchable(finaleSummary([]), env, onPath), false)
+  for (const row of [
+    { client: 'claude', dryRun: false, ok: false },
+    { client: 'claude', dryRun: false, ok: false, activationFailed: true },
+    { client: 'claude', dryRun: true, ok: true },
+    { client: 'claude', dryRun: false, ok: true, skipped: true, notRecording: true },
+    { client: 'claude-desktop', dryRun: false, ok: true, noAdapter: true },
+  ]) {
+    assert.equal(await recordedReportClientLaunchable(finaleSummary([row]), env, onPath), false, JSON.stringify(row))
+  }
+
+  // Recorded but unverified: attached, yet the report skill is not on disk,
+  // or it is and the CLI does not resolve.
+  assert.equal(await recordedReportClientLaunchable(attached, env, onPath), false)
+  const skill = path.join(home, '.claude', 'skills', 'hypaware-report', 'SKILL.md')
+  await fs.mkdir(path.dirname(skill), { recursive: true })
+  await fs.writeFile(skill, '# report\n')
+  assert.equal(await recordedReportClientLaunchable(attached, env, { descriptors, resolve: async () => undefined }), false)
+
+  // Verified: attached (or already attached on the team pathway), the CLI
+  // resolves, and the skill is installed.
+  assert.equal(await recordedReportClientLaunchable(attached, env, onPath), true)
+  const alreadyAttached = finaleSummary([{ client: 'claude', dryRun: false, ok: true, skipped: true }])
+  assert.equal(await recordedReportClientLaunchable(alreadyAttached, env, onPath), true)
+
+  // A failed daemon install withholds the pointer even then.
+  const failedInstall = finaleSummary(attached.attach, { daemonInstall: { skipped: false, dryRun: false, failed: true } })
+  assert.equal(await recordedReportClientLaunchable(failedInstall, env, onPath), false)
 })
 
 test('runWizardSuggestSkill: a run that cannot prompt names the verb and starts nothing', async () => {

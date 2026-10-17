@@ -45,7 +45,7 @@ import { ensureDurableBin } from '../global_install.js'
 import { platformIsSupported, setupUnsupportedNote } from '../../daemon/platform.js'
 import { friendlyClientLabel } from '../../commands/ask.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { anyClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
+import { anyClientLaunchable, recordedReportClientLaunchable, runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -1018,6 +1018,14 @@ async function runGuardedInitWizard(opts, guard) {
   // @ref LLP 0100#requirements [implements]: R1 - a path that skips the offer keeps the narration's release verb and skill hint
   const nothingRecorded = firstLookResult?.shown === false && firstLookResult.reason === 'empty'
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
+  // One pointer to the report workflow, only where a client this run left
+  // recorded can actually start it. It goes ahead of the privacy close and
+  // the closing offers, whose yes can hand the terminal to a child, because
+  // nothing of setup's should follow that.
+  if (offerFollows && (opts.reportGenerateAvailable
+    ?? await recordedReportClientLaunchable(finaleSummary, opts.env))) {
+    opts.stdout.write('\nTo draft a report from your recorded sessions, run `hyp report generate`.\n')
+  }
   if (offerFollows) {
     opts.stdout.write(privacyReviewStatement({
       skillClients: (finaleSummary?.skillsInstalled ?? [])
