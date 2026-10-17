@@ -124,12 +124,28 @@ run-to-run noise (6 to 9 collections, 1.7s to 1.9s of CPU, either way).
 
 - Concurrent queries no longer multiply forced collections; the count tracks
   heap growth, not the number of guards.
-- A query retaining memory beside busy siblings may refuse up to about a
-  second later, holding under twice its budget, than it would have alone. In
-  the quarter-scale harness that was 197ms, settled at 19.9MB against a 16MB
-  budget, where the per-query guard refused at 16.2MB. A query that crosses in
-  its last stride can now refuse at the `terminal` site where the per-query
-  guard reached `watchdog` first; it still refuses.
+- A query retaining memory beside a recent passing collection may refuse
+  later than it would have alone: within about a second, once the stand-in
+  interval or its byte bound lapses and the next inline check or watchdog
+  tick runs. That second is when a check must force again, not a wall-clock
+  deadline; an event loop starved of ticks delays the watchdog as it did
+  before. Its retained growth is under twice its budget at each check a
+  stand-in passes, so with the default 1GiB budget a stand-in may pass at
+  almost 2GiB of growth. That is a bound at those checks, not a peak bound
+  between them: one large stride can overshoot, as it could before, and the
+  synchronous-allocation gap (#727) is unchanged. In the quarter-scale
+  harness the delay was 197ms in one run and 262ms in another, settled at
+  19.9MB and 20.6MB against a 16MB budget, where the per-query guard refused
+  at about 16MB. A query that crosses in its last stride can now refuse at
+  the `terminal` site where the per-query guard reached `watchdog` first; it
+  still refuses.
+- No refusal is lost. In the harness every shape that refuses under the
+  per-query guard also refuses here (a lone retaining query, a retaining
+  query beside staggered scans, tail retention, a no-row phase), and the lone
+  retaining query refuses at the same check. The GC-unavailable fallback is
+  untouched and its existing tests pass unchanged. This relaxes the stricter same-refusal-point term the #2526
+  admission first set; the issue itself allows a bounded interval, and the
+  admitting orchestrator accepted it on 2026-10-17.
 - The shared record is overwritten in place and never cleared. An aborted
   query cannot leave it in a state that lets another query pass: any check
   whose baseline postdates the record forces, and an old record ages out of

@@ -239,13 +239,18 @@ test('a retaining query among staggered scans still refuses, within the stand-in
 
 test('a stand-in never passes a terminal check: tail retention under one budget of growth is still refused', async () => {
   resetHeap()
-  // The first stride retains 10MB among 32MB of garbage, so its check forces
-  // a passing GC that shows 10MB of growth. The next 4000 rows retain 8MB
-  // more: 18MB settled, over budget, but under one budget of heap growth since
-  // that collection, and inside the interval because this source does not
-  // advance the clock. A mid-run check may let that collection stand in; the
-  // terminal check forces its own and refuses.
+  // The first stride's last row lands 10MB retained and 32MB of garbage in one
+  // lump, so the heap is flat until then and the collection that check (or a
+  // watchdog tick just before it) forces is the one that passes, showing 10MB
+  // of growth. The next 4000 rows retain 8MB more: 18MB settled, over budget,
+  // but under one budget of heap growth since that collection, and inside the
+  // interval because this source does not advance the clock. Two real waits
+  // longer than the watchdog interval pin its ticks instead of leaving them to
+  // the scheduler: one while the heap is flat, one on the last row with the
+  // 18MB held, where the tick must let that collection stand in. The terminal
+  // check forces its own and refuses.
   const rows = STRIDE + 4000
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 125))
   /** @type {AsyncDataSource} */
   const source = {
     columns: ['v'],
@@ -257,12 +262,13 @@ test('a stand-in never passes a terminal check: tail retention under one budget 
         async *rows() {
           for (let i = 0; i < rows; i++) {
             sim.rows++
-            if (i < STRIDE) {
-              sim.garbage += 8 * 1024
-              if (i === STRIDE - 1) sim.live += 10 * MB
-            } else {
+            if (i === STRIDE - 1) {
+              sim.live += 10 * MB
+              sim.garbage += 32 * MB
+            } else if (i >= STRIDE) {
               sim.live += 2 * 1024
             }
+            if (i === STRIDE - 600 || i === rows - 1) await tick()
             yield { columns: ['v'], cells: { v: () => Promise.resolve(i) }, resolved: { v: i } }
           }
         },
