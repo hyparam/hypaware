@@ -57,10 +57,14 @@ export async function runDaemonRun(argv, ctx, deps = {}) {
     // survives into the next. A foreground run nobody relaunches fails fast.
     // @ref LLP 0521#pacing [implements]: supervised port conflicts wait one interval before exiting into the relaunch
     if (detectSupervisor(ctx.env) && addressInUse(err)) {
-      ctx.stderr.write(`hyp daemon run: retrying in ${Math.round(BIND_RETRY_INTERVAL_MS / 1000)}s; 'hyp daemon restart' retries now\n`)
       // A stop or restart the operator asked for ends the wait as the
-      // gateway's own SIGTERM handler would have ended a serving run.
-      if (await (deps.waitBeforeBindRetry ?? waitBeforeBindRetry)() === 'signalled') return 0
+      // gateway's own SIGTERM handler would have ended a serving run. The
+      // wait's signal handlers go in before the line is written: whoever reads
+      // the line may signal at once, and the process can be descheduled
+      // between the write and a handler installed after it.
+      const waiting = (deps.waitBeforeBindRetry ?? waitBeforeBindRetry)()
+      ctx.stderr.write(`hyp daemon run: retrying in ${Math.round(BIND_RETRY_INTERVAL_MS / 1000)}s; 'hyp daemon restart' retries now\n`)
+      if (await waiting === 'signalled') return 0
     }
     return 1
   }
