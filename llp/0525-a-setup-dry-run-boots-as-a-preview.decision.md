@@ -50,13 +50,24 @@ On a preview boot:
 Plugin selection, config reading and every decision the command prints are
 the same as a real run, so the preview still describes the real target.
 
+A malformed `--dry-run` value makes the argv a preview whatever follows it:
+the codec refuses the first bad value, so the command never runs, and a
+refused preview must not have created anything on the way either.
+
+The preview covers the boot and the setup command, not the invocation's
+consented product telemetry. When the user has opted in, the outer invocation
+summary LLP 0393 requires is still recorded for a preview as for any other
+command; that opt-in is the consent for it, and a fresh or unenrolled install
+records nothing.
+
 A real boot is unchanged: LLP 0004's promise that a plugin's scoped dirs exist
 when `activate` runs still holds for every boot that is not a preview.
 
 ## Consequences
 
 - A preview in a fresh HOME, or over an existing install, leaves the file and
-  directory tree byte-for-byte as it found it.
+  directory tree byte-for-byte as it found it, apart from the consented
+  product-telemetry record above when the user has opted in.
 - A plugin that creates directories in `activate` has to honor
   `ctx.preview`. The bundled plugins that did so (local-fs) now do.
 - The setup guards that run before or during the command (the

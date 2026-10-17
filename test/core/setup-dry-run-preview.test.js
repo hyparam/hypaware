@@ -75,12 +75,15 @@ test('a setup preview in a fresh HOME leaves it empty, in every form', { timeout
     // (runInitWizard with picks), without the --yes default.
     ['answers given, no --yes', ['setup', '--dry-run', '--source', 'codex']],
     ['--dry-run=true', ['setup', '--dry-run=true', '--yes']],
+    // The codec refuses the first malformed value, so a later =false does
+    // not turn the refused run back into a real boot.
+    ['malformed value, then =false', ['setup', '--yes', '--dry-run=TRUE', '--dry-run=false']],
     ['preset', ['setup', 'claude-and-otel-local', '--dry-run']],
   ]
   for (const [label, argv] of forms) {
     const home = temporaryDirectory('hyp-setup-preview-')
     const run = await runCli(home, argv)
-    assert.equal(run.code, 0, `${label}: ${show(run)}`)
+    assert.equal(run.code, argv.includes('--dry-run=TRUE') ? 2 : 0, `${label}: ${show(run)}`)
     assert.deepEqual([...(await snapshot(home)).keys()], [], `${label}: HOME is still empty`)
   }
 })

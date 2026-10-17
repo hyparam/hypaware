@@ -765,8 +765,9 @@ function isInteractiveStream(stream) {
  * Whether this argv is a setup preview (`hyp setup --dry-run`, any form,
  * preset included), read the way the codec reads a boolean so
  * `--dry-run=true` counts and `--dry-run=false` does not. A malformed value
- * counts too: the command refuses it, and a refused preview should have
- * created nothing on the way.
+ * makes it a preview whatever follows: the codec refuses the first bad value,
+ * so the command never runs, and a refused preview should have created
+ * nothing on the way.
  *
  * @param {ReturnType<ReturnType<typeof createCommandRegistry>['match']>} matched
  * @returns {boolean}
@@ -778,7 +779,8 @@ function isSetupPreview(matched) {
   for (const token of matched.rest) {
     if (token !== '--dry-run' && !token.startsWith('--dry-run=')) continue
     const read = booleanFlagValue('dry-run', token === '--dry-run' ? undefined : token.slice('--dry-run='.length))
-    preview = read.ok ? read.value : true
+    if (!read.ok) return true
+    preview = read.value
   }
   return preview
 }
