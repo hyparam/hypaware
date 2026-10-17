@@ -34,7 +34,7 @@ export function defaultSleep(ms) {
  * Named rather than inline because the telemetry close inside that window has
  * a derived ceiling of its own (`SHUTDOWN_BUDGET_MS`), and the two used to be
  * only coincidentally compatible: three serial channel closes hung at once
- * spent about 3.75s of this 5s (hyparam/hypaware#1153 item 1). The closes are
+ * spent about 3.75s of what was then a 5s window (hyparam/hypaware#1153 item 1). The closes are
  * concurrent now, so the telemetry ceiling is one budget, and a test pins the
  * relationship so it stays a checked fact rather than a coincidence.
  *
@@ -46,9 +46,14 @@ export function defaultSleep(ms) {
  * from there, and the platform modules can reach it without importing the
  * kernel to do it.
  *
+ * Ten seconds since the gateway's stop grace became five (LLP 0520): the
+ * gateway's own forced exit and the telemetry ceiling after it both have to
+ * fit, and a test pins that sum against this number.
+ *
  * @ref LLP 0343#stop-window [implements]: the stop window is a named constant the telemetry ceiling is checked against
+ * @ref LLP 0520#window [implements]: the gateway's forced exit and the telemetry close both fit inside it
  */
-export const DAEMON_STOP_TIMEOUT_MS = 5_000
+export const DAEMON_STOP_TIMEOUT_MS = 10_000
 
 /**
  * Error raised when a service-manager operation (launchctl, systemctl)

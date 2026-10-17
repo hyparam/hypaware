@@ -33,8 +33,10 @@ const RESTART_DELAY_MS = 1000
 // five-minute staleness window, so the status file has to keep being re-dated
 // even when nothing changed - but only on this cadence, not on every recompute.
 const STATUS_HEARTBEAT_MS = 30_000
-// Leave time for the CLI's five-second stop wait to observe the exit.
-const STOP_DEADLINE_MS = 4_000
+// The proxy's stop grace plus time for the turns it cut to settle, and still
+// inside the CLI's stop wait with the telemetry close after it.
+// @ref LLP 0520#window [implements]: grace, settlement, then the forced exit, all inside the stop window
+export const STOP_DEADLINE_MS = 8_000
 
 /**
  * Claim `stateRoot` for this daemon: refuse while another daemon holds it,
@@ -270,7 +272,6 @@ export async function runGatewayDaemon(opts = {}) {
   async function stop(code = 0, bootFailure) {
     if (stopping) return done
     stopping = true
-    sender.reset()
     clearTimeout(restartTimer)
     clearTimeout(processingStopTimer)
     clearInterval(heartbeat)
@@ -295,12 +296,14 @@ export async function runGatewayDaemon(opts = {}) {
       if (opts.installSignalHandlers !== false) process.exit(code)
     }, STOP_DEADLINE_MS)
     deadline.unref()
-    if (child?.connected) child.send({ type: 'processing.stop' }, () => {})
     const stoppedChild = child
       ? new Promise(resolve => child?.once('exit', resolve))
       : Promise.resolve()
     try {
       try {
+        // The listener stops while the child is still receiving, so the turns
+        // it cuts reach the child as finished captures. Resetting the sender
+        // or stopping the child first discards every one of them (#610).
         await boot?.runtime.sources.stop('ai-gateway')
       } catch (error) {
         // Onto the gateway's own log, so a stop that failed is counted by
@@ -314,6 +317,8 @@ export async function runGatewayDaemon(opts = {}) {
         // stop that rejects past this wait leaves an unsupervised
         // `processor.js` on the same `HYP_HOME`, behind a snapshot that reads
         // `stopped` (#1531).
+        sender.reset()
+        if (child?.connected) child.send({ type: 'processing.stop' }, () => {})
         await stoppedChild
       }
     } finally {
